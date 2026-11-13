@@ -1,0 +1,164 @@
+--- v005.md
++++ v006.md
+@@ -1,92 +1,107 @@
+ # Lambertian Lighting in SDF
+ 
+-Also called: Diffuse Lighting Model, Dot Product Lighting, Lambert Shading, Lambertian Diffuse, Lambertian Lighting
++Also called: Diffuse Light, Diffuse Lighting Model, Dot Product Lighting, Lambert Shading, Lambertian Diffuse, Lambertian Lighting
+ 
+ ## Overview
+-Lambertian Lighting in SDF computes the diffuse illumination of a surface by evaluating the dot product between the surface normal and the light direction [S1, S2, S3, unofficial]. It calculates diffuse lighting with an ambient component [S1, unofficial], clamping negative dot products to zero to prevent back-face illumination [S2, unofficial].
++Lambertian Lighting in SDF calculates the diffuse illumination of a surface defined by a Signed Distance Field (SDF) by computing the dot product between the surface normal and the light direction, clamping negative values to zero [S2, unofficial][S3, unofficial][S4, unofficial]. It solves the problem of shading implicit geometry without explicit mesh topology by deriving normals via finite differences and applying a standard diffuse reflectance model [S1, unofficial]. Unlike [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md) or [Blinn-Phong Shading in Volume Rendering](2809-blinn-phong-shading-in-volume-rendering.md), which include specular highlights, this method focuses solely on the diffuse component, often combined with an ambient term for base visibility [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Surface position $\mathbf{p}$ in world space [G].
+-- Surface normal $\mathbf{n}$, normalized [S1, unofficial].
+-- Light direction $\mathbf{l}$, normalized (pointing from surface to light) [S1, unofficial].
+-- Light color $\mathbf{c}_{light}$ [G].
+-- Base material color $\mathbf{c}_{base}$ [G].
+-- Ambient intensity $k_a$ [G].
+-- Light intensity $I$ [G].
+-
+-**Outputs:**
+-- Final pixel color $\mathbf{c}_{final}$ [G].
++**Inputs and Outputs:**
++*   **Inputs:** Surface position $\mathbf{p}$ (in world or object space), light direction $\mathbf{l}$ (normalized vector from $\mathbf{p}$ to light source), surface normal $\mathbf{n}$ (normalized gradient of the SDF at $\mathbf{p}$), base material color $\mathbf{c}_{base}$, light intensity $I_{light}$, and light color $\mathbf{c}_{light}$ [S1, unofficial][S4, unofficial].
++*   **Outputs:** Final pixel color $\mathbf{c}_{final}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-No complex data structures are required beyond standard vector types (float3/vec3) for positions, normals, and colors [G].
++No complex data structures are required beyond standard 3D vectors ($\mathbb{R}^3$) for positions, normals, and light directions, and scalars for intensity and color components [S2, unofficial][S4, unofficial].
+ 
+ **Steps:**
+-1. **Normal Normalization:** Ensure the surface normal $\mathbf{n}$ is normalized. If retrieved from a texture, apply `N = normalize(Ntex)` [S1, unofficial].
+-2. **Light Direction Normalization:** Ensure the light direction vector $\mathbf{l}$ is normalized upon construction: `direction = direction.Normalize()` [S2, unofficial].
+-3. **Diffuse Term Calculation:** Compute the dot product between the normal and light direction, clamping negative values to zero:
+-   $$ d = \max(0.0, \mathbf{n} \cdot \mathbf{l}) $$
+-   [S1, S2, S3, unofficial].
+-4. **Color Accumulation:** Combine the ambient term and the diffuse term, scaled by light intensity and color, then modulate by the base material color:
+-   $$ \mathbf{c}_{final} = \mathbf{c}_{base} \times (k_a + d \times I) \times \mathbf{c}_{light} $$
+-   [S1, S3, unofficial].
++1.  **Coordinate Transformation (Optional):** If the light position is given in object space (e.g., $[-0.5, 0.5]$), convert it to the coordinate system used for shading (e.g., texture space $[0, 1]$ or world space) [S1, unofficial].
++    $$ \mathbf{L}_{pos}^{tex} = \frac{\mathbf{L}_{pos}^{obj} - \mathbf{min}}{\mathbf{max} - \mathbf{min}} $$
++    where $\mathbf{min} = (-0.5, -0.5, -0.5)$ and $\mathbf{max} = (0.5, 0.5, 0.5)$ [S1, unofficial].
++2.  **Light Direction Calculation:** Compute the vector from the surface point to the light source and normalize it [S1, unofficial][S2, unofficial].
++    $$ \mathbf{l} = \text{normalize}(\mathbf{L}_{pos} - \mathbf{p}) $$
++3.  **Normal Normalization:** Ensure the surface normal $\mathbf{n}$ is normalized [S1, unofficial].
++    $$ \mathbf{n} = \text{normalize}(\mathbf{n}) $$
++4.  **Diffuse Term Calculation:** Compute the dot product of the normal and light direction, clamping the result to a minimum of 0.0 to prevent back-face illumination [S2, unofficial][S3, unofficial][S4, unofficial].
++    $$ d = \max(0.0, \mathbf{n} \cdot \mathbf{l}) $$
++    Alternatively, using a saturation function:
++    $$ d = \text{saturate}(\mathbf{n} \cdot \mathbf{l}) $$
++    where $\text{saturate}(x) = \max(0.0, \min(1.0, x))$ [S4, unofficial].
++5.  **Color Accumulation:** Combine the base color with the diffuse contribution and an optional ambient term [S1, unofficial][S4, unofficial].
++    $$ \mathbf{c}_{final} = \mathbf{c}_{base} \times (\mathbf{c}_{ambient} + d \times I_{light} \times \mathbf{c}_{light}) $$
++    If only the direct diffuse contribution is used:
++    $$ \mathbf{c}_{final} = \mathbf{c}_{base} \times d \times \mathbf{c}_{light} $$
+ 
+ **Pseudocode:**
+ ```python
+-def lambertian_lighting_sdf(p, n, p_light, c_base, c_light, k_a=0.2, I=1.0):
+-    # Step 1: Normalize normal
+-    n = n / length(n)
++def lambertian_lighting_sdf(p, light_pos, normal, base_color, light_color, ambient_color=vec3(0.2)):
++    """
++    Computes Lambertian diffuse lighting for an SDF surface point.
+     
+-    # Step 2: Calculate and normalize light direction
+-    l = p_light - p
+-    l = l / length(l)
++    Args:
++        p (vec3): Surface position.
++        light_pos (vec3): Light position (assumed to be in the same space as p).
++        normal (vec3): Surface normal (assumed to be normalized).
++        base_color (vec3): Material base color.
++        light_color (vec3): Light color/intensity.
++        ambient_color (vec3): Ambient lighting color.
++        
++    Returns:
++        vec3: Final shaded color.
++    """
++    # Step 1 & 2: Calculate and normalize light direction
++    # Note: In some implementations, light_pos might need transformation 
++    # from object to world space first [S1, unofficial].
++    light_dir = normalize(light_pos - p)
+     
+-    # Step 3: Calculate diffuse term (clamped dot product)
+-    diff = max(dot(n, l), 0.0)
++    # Step 3: Ensure normal is normalized (if not guaranteed by caller)
++    n = normalize(normal)
+     
+-    # Step 4: Accumulate color
+-    # Ambient contribution
+-    ambient = k_a
+-    # Diffuse contribution
+-    diffuse = diff * I
+-    # Total illumination factor
+-    illumination = ambient + diffuse
++    # Step 4: Compute diffuse term with clamping
++    # Using max(0.0, dot(...)) as per [S2, unofficial][S3, unofficial]
++    # or saturate(dot(...)) as per [S4, unofficial]
++    diffuse_term = max(dot(n, light_dir), 0.0)
+     
+-    # Final color
+-    c_final = c_base * illumination * c_light
++    # Step 5: Accumulate color
++    # Combining ambient and diffuse contributions [S1, unofficial]
++    final_color = base_color * (ambient_color + diffuse_term * light_color)
+     
+-    return c_final
++    return final_color
+ ```
+ 
++**Parameters:**
++*   **Ambient Color:** Typically a low-intensity gray or white to prevent black shadows [S1, unofficial].
++*   **Light Intensity:** Often embedded in `light_color` or applied as a scalar multiplier [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-- **Zero-Length Light Vector:** If the light position coincides with the surface position, the light direction vector becomes zero-length. A guard must check for this and handle it (e.g., default to a uniform light direction or skip lighting) [G].
+-- **Negative Dot Product:** The $\max(0.0, \dots)$ clamp is essential to prevent back-face illumination [G].
+-- **Precision:** When using finite differences for normals, small perturbations can lead to noisy normals. Using a sufficiently small epsilon for finite differences is critical [G].
++*   **Degenerate Normals:** If the SDF gradient is zero (e.g., at singularities or flat regions with insufficient precision), normalization may fail. Guard against division by zero [G].
++*   **Back-Facing Surfaces:** Standard Lambertian shading ignores back-facing surfaces ($\mathbf{n} \cdot \mathbf{l} < 0$). For visualization-oriented applications, two-sided shading may be required [S5].
++*   **Coordinate Space Mismatch:** Light position, surface position, and normal must be in the same coordinate space before dot product calculation [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Sphere Tracing with Shading](3812-sphere-tracing-with-shading.md)
+-This method extends sphere tracing by computing diffuse lighting on surfaces defined by Signed Distance Fields (SDFs). It solves the problem of rendering shaded geometry without explicit mesh topology by deriving surface normals via finite differences and applying a Lambertian lighting model in world space. Unlike [Sphere Tracing Basics](52-sphere-tracing-basics.md), which returns a flat base color on hit, this method integrates a light direction and color to produce a shaded result.
++This method extends sphere tracing by computing diffuse lighting on surfaces defined by SDFs. It solves the problem of rendering shaded geometry without explicit mesh topology by deriving surface normals via finite differences and applying a Lambertian lighting model in world space. Unlike [Sphere Tracing Basics](52-sphere-tracing-basics.md), which returns a flat base color on hit, this method integrates a light direction and color to produce a shaded result.
+ 
+ ### [Phong Shading with Shadows](4356-phong-shading-with-shadows.md)
+-Phong Shading with Shadows calculates the final color of a surface point in a Signed Distance Field (SDF) by combining ambient, diffuse, and specular lighting components defined by the Phong reflection model, modulated by shadow factors. It extends basic Lambertian shading by adding specular highlights and occlusion, allowing for the relighting of volume-rendered surfaces under directional lights. Unlike [Sphere Tracing with Shading](3812-sphere-tracing-with-shading.md), which may use simpler shading approximations, this method explicitly computes the reflection vector for specular highlights and integrates shadow rays to determine visibility.
++Phong Shading with Shadows calculates the final color of a surface point in an SDF by combining ambient, diffuse, and specular lighting components defined by the Phong reflection model, modulated by shadow factors. It extends basic Lambertian shading by adding specular highlights and occlusion, allowing for the relighting of volume-rendered surfaces under directional lights. Unlike [Sphere Tracing with Shading](3812-sphere-tracing-with-shading.md), which may use simpler shading approximations, this method explicitly computes the reflection vector for specular highlights and integrates shadow rays to determine visibility.
+ 
+ ### Visualization-Oriented Shading
+-A shading configuration using camera-aligned two-sided diffuse shading and optional Screen-Space Ambient Occlusion (SSAO) to improve surface readability, contrast, and perception of local depth in scientific visualization [S4]. For two-sided rendering, the surface normal is reversed for back-facing fragments before evaluating the diffuse term [S4]. Camera-aligned lighting places the light direction near the viewing direction to provide consistent illumination over view-facing structures [S4].
++A shading configuration using camera-aligned two-sided diffuse shading and optional Screen-Space Ambient Occlusion (SSAO) to improve surface readability, contrast, and perception of local depth in scientific visualization [S5]. For two-sided rendering, the surface normal is reversed for back-facing fragments before evaluating the diffuse term [S5]. Camera-aligned lighting places the light direction near the viewing direction to provide consistent illumination over view-facing structures [S5].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(1)$ per pixel for the shading calculation itself, assuming the surface position and normal are already known from the ray marching step. The overall complexity is dominated by the ray marching step, which is $O(N)$ where $N$ is the number of steps to reach the surface [G].
+-**Memory Complexity:** $O(1)$ additional memory per pixel for lighting calculations [G].
+-**Strengths:** Computationally inexpensive; provides physically plausible diffuse shading for implicit surfaces; easy to implement [G].
+-**Limitations:** Does not account for inter-reflections (global illumination); specular highlights are absent; sensitive to normal estimation errors from finite differences [G].
+-**When to Use:** When real-time performance is critical and only diffuse lighting is required; for simple implicit object rendering [G].
+-**When Not to Use:** When realistic global illumination or specular effects are needed; when high-precision normals are critical and finite difference noise is unacceptable [G].
++*   **Time Complexity:** $O(1)$ per surface point evaluation, assuming the normal is already computed. The cost is dominated by the dot product and vector normalization [S2, unofficial][S4, unofficial].
++*   **Memory Complexity:** $O(1)$, requiring only temporary storage for vectors and scalars [S2, unofficial].
++*   **Strengths:** Computationally inexpensive; provides physically plausible diffuse shading for implicit surfaces; easy to implement [S3, unofficial][S4, unofficial].
++*   **Limitations:** Does not account for inter-reflections (global illumination); flat appearance without ambient or SSAO; sensitive to normal estimation errors in SDFs [S5].
++*   **When to Use:** Real-time rendering of SDF objects where performance is critical; base layer for more complex shading models [S1, unofficial][S4, unofficial].
++*   **When Not to Use:** When specular highlights are required (use [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md)); when high-fidelity global illumination is needed [S5].
+ 
+ ## Background
+-Lambertian reflectance is a fundamental model in computer graphics, describing a perfectly diffuse surface that scatters light equally in all directions [G]. Its application to SDFs leverages the ability of SDFs to provide continuous surface representations, allowing for shading without explicit mesh data [G].
++Lambertian lighting is a fundamental model in computer graphics, originally derived from Lambert's Cosine Law [S3, unofficial]. In the context of SDFs, it has been widely adopted in ray marching tutorials and implementations to provide basic shading for implicit surfaces [S1, unofficial][S3, unofficial][S4, unofficial]. It is commonly used in educational resources and real-time visualization tools to enhance the perception of shape and depth [S5].
+ 
+ ## Sources
+ [S1] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+ [S2] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
+-[S3] Sphere Tracing and Ray Marching, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5-sphere-tracing-and-ray-marching, fetched 2026-10-27 (unofficial)
+-[S4] Visual tools for 3D plasma simulation: GPU-based isosurface extraction ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC13674866/, fetched 2026-10-30+[S3] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)
++[S4] Sphere Tracing and Ray Marching, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5-sphere-tracing-and-ray-marching, fetched 2026-10-27 (unofficial)
++[S5] Visual tools for 3D plasma simulation: GPU-based isosurface extraction ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC13674866/, fetched 2026-10-30

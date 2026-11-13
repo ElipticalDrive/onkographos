@@ -1,39 +1,35 @@
 # SDF Intersection
-Also called: SDF Boolean Intersection, Max Combination
+Also called: CSG Intersection, Constructive SDF Modeling, Intersection of SDFs, Min/Max Combination, SDF Boolean Operations, SDF Composition, SDF Intersection via Max, SDF Max
 
 ## Overview
-SDF Intersection is a Constructive Solid Geometry (CSG) operation that computes the signed distance field for the geometric intersection of two shapes. It solves the problem of combining SDF primitives into complex volumes by returning the region common to both input shapes. It is distinguished from its sibling [Union](4451-union.md) (which uses `min`) and [Subtraction](4453-subtraction.md) (which uses `max(a, -b)`) by its use of the maximum operator to enforce the constraint that a point must be inside both shapes.
+SDF Intersection is a boolean operation that computes the region common to two or more Signed Distance Field (SDF) primitives by returning the maximum distance value at any sampling point [S1, S3, unofficial]. It effectively requires the ray to be inside both shapes simultaneously, allowing for the construction of complex geometries akin to Constructive Solid Geometry (CSG) [S1, unofficial]. Unlike the union operation (min), which blends shapes into a single watertight surface, intersection creates sharp, non-smooth corners where the surfaces meet [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Two signed distance functions, $S_A(p)$ and $S_B(p)$, and a query point $p$.
-- Output: A scalar value $S_{intersect}(p)$ representing the distance to the nearest surface of the intersected volume.
+- Input: Two SDF functions, $S_1(p)$ and $S_2(p)$, and a query point $p$ in 3D space.
+- Output: A single scalar value representing the signed distance to the intersection of the two shapes.
 
 **Data Structures:**
 No specific data structures are required beyond the scalar values returned by the primitive SDF evaluations. The operation is point-wise and stateless.
 
 **Steps:**
-1. Evaluate the signed distance of point $p$ against the first shape $A$: $d_A = S_A(p)$.
-2. Evaluate the signed distance of point $p$ against the second shape $B$: $d_B = S_B(p)$.
-3. Compute the intersection distance by taking the maximum of the two distances:
-   $$ S_{intersect}(p) = \max(d_A, d_B) $$
+1. Evaluate the signed distance of the first shape at point $p$: $d_1 = S_1(p)$.
+2. Evaluate the signed distance of the second shape at point $p$: $d_2 = S_2(p)$.
+3. Return the maximum of the two distances: $d_{intersect} = \max(d_1, d_2)$.
 
 **Formulas:**
-The core formula is:
+The intersection of two SDFs $A$ and $B$ at point $p$ is defined as:
 $$ S_{intersect}(p) = \max(S_A(p), S_B(p)) $$
 
-Where:
-- $S_A(p)$ is the signed distance from $p$ to shape $A$.
-- $S_B(p)$ is the signed distance from $p$ to shape $B$.
-- $\max(a, b)$ returns the larger of $a$ and $b$.
+For a point to be inside the resulting intersection volume, it must satisfy $S_A(p) \le 0$ AND $S_B(p) \le 0$. The distance to the surface is determined by the shape that is "closest" to the boundary of the intersection region, which corresponds to the larger (less negative or more positive) distance value [S3, unofficial].
 
 **Parameters:**
-None. The operation is exact and deterministic.
+- None. The operation is deterministic based on the input SDFs.
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Standard floating-point precision is sufficient for most applications. However, if $S_A(p)$ and $S_B(p)$ are very close to zero (near the surface), the resulting distance may exhibit minor jitter if the normals are not computed carefully, though the distance value itself remains continuous.
-- **Boundaries:** The resulting SDF is continuous and watertight. The zero-level set (surface) is the union of the portions of $S_A=0$ and $S_B=0$ that lie inside the other shape.
-- **Degenerate Input:** If one shape is entirely contained within the other, the result is the SDF of the inner shape. If the shapes do not intersect, the resulting SDF will be positive everywhere in the region of interest (empty space), but the function remains valid.
+- **Non-smooth derivatives:** Standard `max` produces non-smooth intersections with discontinuous derivatives at the boundary where $S_A(p) = S_B(p)$ [S1, unofficial]. This results in visible artifacts or incorrect normals if not handled, particularly in lighting calculations [S1, unofficial].
+- **Precision:** Near the intersection boundary, floating-point precision errors can cause jitter if the step size in ray marching is not sufficiently small [G].
+- **Degenerate input:** If one SDF is always greater than the other in the region of interest, the result is simply the boundary of the "inner" shape.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -41,36 +37,42 @@ None. The operation is exact and deterministic.
 ```python
 def sdf_intersection(p, sdf_a, sdf_b):
     """
-    Computes the SDF for the intersection of two shapes.
+    Computes the intersection of two SDFs at point p.
     
     Args:
-        p: Point in 3D space (vector).
-        sdf_a: Function returning distance to shape A.
-        sdf_b: Function returning distance to shape B.
+        p: vec3, the query point in 3D space.
+        sdf_a: function, returns signed distance for shape A.
+        sdf_b: function, returns signed distance for shape B.
         
     Returns:
-        Signed distance to the intersection of A and B.
+        float, the signed distance to the intersection of A and B.
     """
-    dist_a = sdf_a(p)
-    dist_b = sdf_b(p)
-    return max(dist_a, dist_b)
+    d_a = sdf_a(p)
+    d_b = sdf_b(p)
+    return max(d_a, d_b)
 ```
 
-**Subtopics:**
-- [Smooth SDF Composition](4450-smooth-sdf-composition.md): Uses smooth min/max approximations for blended intersections.
-- [Scene SDF Evaluation](4452-scene-sdf-evaluation.md): The parent method that aggregates these operations into a full scene.
+## Subtopics
+
+### Smooth SDF Composition
+Uses smooth minimum/maximum functions (e.g., `smin`) to approximate intersections with continuous derivatives, avoiding the sharp corners of standard `max`. Choose when visual smoothness is prioritized over exact geometric intersection. [Smooth SDF Composition](4453-smooth-sdf-composition.md)
+
+### Scene SDF Evaluation
+The parent method that combines primitives using `min` (union). Intersection is a sibling operation used within scene evaluation to carve out holes or combine shapes. [Scene SDF Evaluation](4452-scene-sdf-evaluation.md)
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per query point, requiring two primitive SDF evaluations and one comparison.
-- **Memory Complexity:** $O(1)$, no additional storage.
-- **Strengths:** Exact, continuous, and produces watertight surfaces without the robustness problems that plague mesh-based CSG [S1, unofficial]. No acceleration structures are needed.
-- **Limitations:** Like all ray marching methods, it suffers from high per-ray evaluation counts. Each ray requires tens to hundreds of scene evaluations [S1, unofficial]. No hardware acceleration exists for this specific shader code [S1, unofficial].
-- **When to use:** When constructing complex boolean shapes from primitives in a ray-marched renderer.
-- **When not to use:** When performance is critical and the scene is static, as mesh-based CSG or BSP trees may offer faster traversal.
+- **Time Complexity:** $O(1)$ per evaluation, requiring two primitive SDF evaluations and one `max` operation.
+- **Memory Complexity:** $O(1)$, no additional memory required.
+- **Performance:** Extremely fast per-ray cost. However, the resulting geometry may have sharp features that require smaller ray-marching steps to resolve accurately, potentially increasing the total number of steps per ray compared to smooth unions [S2, unofficial].
+- **Strengths:** Exact watertight surfaces; no mesh topology errors; trivial to implement; supports arbitrary combinations of primitives [S2, unofficial].
+- **Limitations:** Discontinuous derivatives lead to non-smooth normals and potential lighting artifacts; does not support smooth blending by default [S1, unofficial].
+- **When to use:** When exact boolean intersection is required and sharp edges are acceptable or desired.
+- **When not to use:** When smooth transitions between shapes are needed (use Smooth SDF Composition) or when performance is critical and the sharp features cause excessive ray-marching steps [S2, unofficial].
 
 ## Background
-Signed Distance Functions (SDFs) allow for continuous morphing of scenes with no additional overhead [S1, unofficial]. The boolean operations (Union, Intersection, Subtraction) are trivial to implement by modifying the SDF formula [S1, unofficial]. This approach was popularized in the context of ray marching for real-time rendering, notably by Alan Zucconi [S2, unofficial] and others in the demoscene and shader programming communities.
+The concept of using `min` and `max` operators for SDF boolean operations was popularized by Inigo Quilez in his writings on raymarching and procedural geometry [S1, unofficial]. The technique allows for the creation of complex CSG-like models using simple mathematical functions, avoiding the need for mesh-based boolean operations which suffer from robustness issues [S2, unofficial]. It is a fundamental building block in procedural raymarching scenes, enabling the creation of intricate patterns and fractals [S1, unofficial].
 
 ## Sources
-[S1] ray marching vs ray tracing, https://tutorials.tektite.studio/ray-marching/ray-marching-vs-ray-tracing/, fetched 2026-10-27 (unofficial)
-[S2] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)
+[S1] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)
+[S2] ray marching vs ray tracing, https://tutorials.tektite.studio/ray-marching/ray-marching-vs-ray-tracing/, fetched 2026-10-27 (unofficial)
+[S3] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)

@@ -2,25 +2,23 @@
 Also called: Distributed Cell Projection, Distributed server-side rendering, Ma and Crockett Distributed Cell Projection, Ma and Crockett distributed rendering
 
 ## Overview
-A distributed rendering method for load balancing where adjacent tetrahedra are scattered across nodes rather than clustered, using a global kd-tree to restore ordering during rendering [S1, unofficial]. Unlike Kd-partitioning which clusters adjacent tetrahedra, this method scatters them to maintain load balance for close views, at the cost of requiring a global kd-tree [S1, unofficial].
+A distributed rendering method for load balancing where adjacent tetrahedra are scattered across nodes rather than clustered, using a global kd-tree to restore ordering during rendering [S1, unofficial]. Unlike Kd-partitioning which clusters adjacent tetrahedra, this method scatters them to maintain load balance for close views, at the cost of requiring a global kd-tree [S1, unofficial]. It builds on [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md) [S1, unofficial].
 
 ## How it works
-**Inputs:** Volumetric dataset (tetrahedral mesh), camera parameters, number of rendering nodes.
-**Outputs:** Rendered image.
+**Inputs:** Volumetric tetrahedral dataset, camera parameters, number of rendering nodes [S1, unofficial].
+**Outputs:** Rendered image [S1, unofficial].
 **Data Structures:**
 *   **Global Kd-Tree:** A spatial acceleration structure built over the entire tetrahedral dataset, accessible by all nodes [S1, unofficial].
 *   **Local Cell List:** Per-node list of cells traversed by assigned rays [S1, unofficial].
 
 **Steps:**
-1.  **Data Distribution:** Distribute volumetric data such that adjacent tetrahedra are scattered over all available nodes to ensure load balancing for close views [S1, unofficial]. This is achieved using MPI (Message Passing Interface) for distributed rendering communication [S1, unofficial].
+1.  **Data Distribution:** Distribute volumetric data using MPI so that adjacent tetrahedra are scattered over all available nodes rather than clustered [S1, unofficial].
 2.  **Ray Assignment:** Interleave scan-lines among the rendering nodes to improve load balancing [S1, unofficial].
-3.  **Traversal and Clustering:** For each assigned ray, traverse the global kd-tree to identify intersected tetrahedra. Each node clusters all cells traversed by its assigned rays [S1, unofficial].
-4.  **Rendering and Aggregation:** Render the clustered cells locally. Send the results back to the render nodes [S1, unofficial].
-5.  **Ordering Restoration:** Use the global kd-tree to restore the spatial ordering during the rendering process, ensuring correct visibility and compositing [S1, unofficial].
+3.  **Traversal & Clustering:** Each node clusters all cells traversed by the assigned rays before sending the results back to the render nodes [S1, unofficial].
+4.  **Ordering Restoration:** Use the global kd-tree to restore spatial ordering during the rendering process [S1, unofficial].
 
 **Parameters:**
 *   **MPI:** Used for distributed rendering communication [S1, unofficial].
-*   **Typical Values:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Close Views:** The scattering strategy is specifically designed to handle load balancing issues that arise in close views, where clustering might lead to uneven workloads [S1, unofficial].
@@ -29,13 +27,10 @@ A distributed rendering method for load balancing where adjacent tetrahedra are 
 ## Subtopics
 
 ### KD-Tree and Dynamic Programming for Clusters
-A technique using a kd-tree and dynamic programming to optimize non-empty space tracking and data distribution balance on a volume-rendering cluster [S3]. It uses a kd-tree and dynamic programming to optimize non-empty space tracking and optimize data distribution balance on a volume-rendering cluster [S3].
+A technique using a kd-tree and dynamic programming to optimize non-empty space tracking and data distribution balance on a volume-rendering cluster [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Designed for scalability where rendering time remains constant as data size and node count increase, building on [Scalable Distributed Volume Rendering (SDVR)](863-scalable-distributed-volume-rendering-sdvr.md) [S1, unofficial].
+*   **Scaling:** Designed to maintain load balance for close views by scattering adjacent tetrahedra across nodes [S1, unofficial].
 *   **Strengths:** Good load balancing for close views due to scattering of adjacent tetrahedra [S1, unofficial].
 *   **Limitations:** Requires a global kd-tree, which may introduce overhead [S1, unofficial].
 *   **When to use:** When load balancing for close views is critical and a global kd-tree can be maintained [S1, unofficial].

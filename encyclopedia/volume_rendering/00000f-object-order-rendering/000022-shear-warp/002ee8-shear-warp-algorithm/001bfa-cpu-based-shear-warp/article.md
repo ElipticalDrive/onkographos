@@ -3,26 +3,26 @@
 Also called: CPU Shear-Warp
 
 ## Overview
-CPU-based Shear-Warp is a volume rendering method that implements the Shear-Warp algorithm on a central processing unit, utilizing Run-Length Encoding (RLE) to skip empty voxels and accelerate rendering [S1, S2, S3, unofficial]. It solves the performance bottleneck of standard Shear-Warp by avoiding complex 3D acceleration structures like octrees, relying instead on the spatial coherence of medical volume data [S1, S2, S3, unofficial]. Unlike its GPU-based sibling [GPU-based Shear-Warp](7425-gpu-based-shear-warp.md), it is significantly slower and limited to lower sampling rates, but serves as a baseline for comparison and avoids the overhead of GPU data transfer and shader compilation [S2, unofficial].
+CPU-based Shear-Warp is a volume rendering method that implements the Shear-Warp algorithm on a central processing unit, utilizing Run-Length Encoding (RLE) to skip empty voxels and accelerate rendering [S1, S2, S3, unofficial]. It solves the performance bottleneck of standard Shear-Warp by avoiding complex 3D acceleration structures like octrees, relying instead on the spatial coherence of medical volume data [S1, S2, S3, unofficial]. Unlike its GPU-based sibling [GPU-based Shear-Warp](7425-gpu-based-shear-warp.md), it is significantly slower and limited to lower sampling rates, but serves as a baseline for comparison [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A 3D volume dataset (e.g., DICOM medical images), a viewing direction defined by a vector $\mathbf{v}_0$, and a transfer function.
-*   **Output:** A 2D rendered image.
+*   **Input:** A 3D volume dataset (e.g., DICOM medical images), a viewing direction defined by a vector $\mathbf{v}_0$, and a transfer function [S1, S2, S3, unofficial].
+*   **Output:** A 2D rendered image [S2, unofficial].
 
 **Data Structures**
 The method constructs three separate data structures, one for each principal coordinate axis (X, Y, Z) corresponding to the three principal view directions [S1, S2, S3, unofficial]. Each data structure consists of a set of lists of runs [S1, S2, S3, unofficial].
-*   **Run:** A contiguous sequence of voxels along a scan line.
+*   **Run:** A contiguous sequence of voxels along a scan line [S1, S2, S3, unofficial].
 *   **Run Types:**
-    1.  **Completely Transparent:** Corresponds to empty voxels or voxels with zero opacity.
-    2.  **Not Completely Transparent:** Voxels with non-zero opacity.
+    1.  **Completely Transparent:** Corresponds to empty voxels or voxels with zero opacity [S1, S2, S3, unofficial].
+    2.  **Not Completely Transparent:** Voxels with non-zero opacity [S1, S2, S3, unofficial].
 *   **Layout:** Each list in the set corresponds to one scan line of one slice [S1, S2, S3, unofficial].
 
 **Algorithm Steps**
 
 1.  **Preprocessing: Classification and Compression**
     For each coordinate axis (X, Y, Z):
-    1.  Iterate through each slice and each scan line within that slice.
+    1.  Iterate through each slice and each scan line within that slice [S1, S2, S3, unofficial].
     2.  Classify each voxel in the scan line using the Hounsfield scale and a linear transfer function with lower and upper bounds to determine opacity [S1, S2, S3, unofficial].
         *   Let $H$ be the Hounsfield value of a voxel.
         *   Let $H_{min}$ and $H_{max}$ be the lower and upper bounds of the transfer function.
@@ -53,7 +53,7 @@ The method constructs three separate data structures, one for each principal coo
     2.  **Warp:** Project the sheared volume onto the 2D image plane.
     3.  **Accumulate:** Traverse the precomputed RLE data structures slice by slice and line by line [S1, S2, S3, unofficial].
         *   For each pixel in the image, accumulate the color and opacity contributions from the voxels along the ray.
-        *   **Optimization:** Skip "completely transparent" runs entirely [S1, S2, S3, unofficial]. This effectively skips empty voxels, drastically speeding up rendering.
+        *   **Optimization:** Skip "completely transparent" runs entirely [S1, S2, S3, unofficial]. This effectively skips empty voxels, drastically speeding up rendering [S2, unofficial].
         *   **Lighting:** Apply a Phong shading model for direct lighting during the accumulation step [S2, unofficial].
 
 **Pseudocode**
@@ -71,21 +71,11 @@ def cpu_shear_warp(volume_data, view_direction, image_width, image_height, h_min
     vx, vy, vz = view_direction
     
     # 1. Preprocessing: Build RLE structures for each axis
-    # We need 3 structures: one for X-projection, one for Y, one for Z
-    # However, standard Shear-Warp typically uses one view direction.
-    # The sources mention "3 data structures, one for each coordinate axis"
-    # likely referring to the storage of the volume scanlines in all 3 orientations
-    # to support arbitrary rotation or simply the storage format.
-    # For a single view, we primarily use the structure aligned with the view.
-    # Assuming the view is along Z for simplicity of explanation, 
-    # but the algorithm generalizes.
-    
-    # Let's assume we are rendering a view where the shear is applied.
-    # The sources describe building RLE for ALL axes.
-    
+    # The sources specify 3 data structures, one for each coordinate axis.
+    # Each structure maps a slice/line coordinate to a list of runs.
     rle_structures = {}
     for axis in ['X', 'Y', 'Z']:
-        rle_structures[axis] = build_rle(volume_data, axis)
+        rle_structures[axis] = build_rle(volume_data, axis, h_min, h_max)
         
     # 2. Rendering
     # Calculate shear factors
@@ -96,33 +86,18 @@ def cpu_shear_warp(volume_data, view_direction, image_width, image_height, h_min
     sy = -vy / vz
     
     # Initialize image buffer
-    image = zeros((image_height, image_width, 4)) # RGBA
+    image = [[(0.0, 0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
     
     # Traverse slices and lines
-    # The specific traversal order depends on the chosen principal view direction.
-    # Let's assume we are using the Z-axis aligned structure for a view along Z.
-    # If the view is arbitrary, the shear aligns it.
-    
-    # For each pixel in the image
+    # Assuming the primary view direction aligns with the Z-axis after shear.
+    # We iterate over the image pixels, which map to (x, y) in the sheared space.
     for y in range(image_height):
         for x in range(image_width):
-            # Determine the ray in the sheared space
-            # The warp step maps (x, y) to the corresponding voxel coordinates
-            # In Shear-Warp, the warp is a 2D transformation.
-            # The ray passes through the volume.
-            
-            # We traverse the RLE list for the current slice/line
-            # The exact mapping from image pixel to RLE index is part of the Warp step.
-            # Assuming standard Shear-Warp warp:
-            # x_shear = x - sx * z
-            # y_shear = y - sy * z
-            # But since we pre-computed RLEs, we just iterate the runs.
-            
-            # Get the list of runs for the current slice and line
-            # This requires knowing which slice/line corresponds to pixel (x,y)
-            # In the sheared space, the ray is orthogonal to the slice plane.
-            
-            runs = get_runs_for_pixel(rle_structures, x, y, sx, sy)
+            # Map image pixel to volume coordinates in the sheared space.
+            # In Shear-Warp, the warp step transforms image coordinates to volume coordinates.
+            # For a standard setup, the ray passes through volume at (x, y, z).
+            # We retrieve the precomputed runs for this (x, y) line along Z.
+            runs = rle_structures['Z'].get((x, y), [])
             
             accumulated_alpha = 0.0
             accumulated_color = (0.0, 0.0, 0.0)
@@ -133,9 +108,9 @@ def cpu_shear_warp(volume_data, view_direction, image_width, image_height, h_min
                 
                 # Process the run
                 # A run covers a range of z (depth)
-                for z in run.start_z to run.end_z:
+                for z in range(run.start, run.end + 1):
                     # Get voxel value
-                    h_val = volume_data[run.x, run.y, z]
+                    h_val = volume_data[x, y, z]
                     
                     # Transfer function
                     if h_val < h_min:
@@ -147,54 +122,55 @@ def cpu_shear_warp(volume_data, view_direction, image_width, image_height, h_min
                         
                     # Color (simplified, assuming grayscale or pre-computed color)
                     # Phong lighting would be applied here based on normal at (x,y,z)
-                    # For simplicity, we assume color is derived from Hounsfield or pre-computed
-                    color = get_color_from_hounsfield(h_val)
+                    # Color mapping not specified in sources [G]
+                    color = (h_val / 3000.0, h_val / 3000.0, h_val / 3000.0)
                     
                     # Blending
-                    # C_out = C_in + C_v * alpha_v * (1 - alpha_in)
-                    # A_out = A_in + alpha_v * (1 - A_in)
-                    
                     weight = alpha * (1.0 - accumulated_alpha)
-                    accumulated_color = accumulated_color + color * weight
-                    accumulated_alpha = accumulated_alpha + weight
+                    accumulated_color = (
+                        accumulated_color[0] + color[0] * weight,
+                        accumulated_color[1] + color[1] * weight,
+                        accumulated_color[2] + color[2] * weight
+                    )
+                    accumulated_alpha += weight
                     
                     # Early termination if fully opaque
                     if accumulated_alpha >= 1.0:
                         break
                         
-            image[y, x] = (accumulated_color[0], accumulated_color[1], accumulated_color[2], accumulated_alpha)
+            image[y][x] = (accumulated_color[0], accumulated_color[1], accumulated_color[2], accumulated_alpha)
             
     return image
 
-def build_rle(volume_data, axis):
+def build_rle(volume_data, axis, h_min, h_max):
     """
     Builds RLE structures for a specific axis.
     Returns a dictionary mapping slice/line indices to lists of runs.
     """
     rle = {}
-    # Iterate over slices and lines perpendicular to the axis
-    # Example for Z-axis: iterate over x, y slices
+    shape = volume_data.shape
+    
     if axis == 'Z':
-        for x in range(volume_data.shape[0]):
-            for y in range(volume_data.shape[1]):
+        for x in range(shape[0]):
+            for y in range(shape[1]):
                 line = volume_data[x, y, :]
-                runs = compress_line(line)
+                runs = compress_line(line, h_min, h_max)
                 rle[(x, y)] = runs
     elif axis == 'Y':
-        for x in range(volume_data.shape[0]):
-            for z in range(volume_data.shape[2]):
+        for x in range(shape[0]):
+            for z in range(shape[2]):
                 line = volume_data[x, :, z]
-                runs = compress_line(line)
+                runs = compress_line(line, h_min, h_max)
                 rle[(x, z)] = runs
     elif axis == 'X':
-        for y in range(volume_data.shape[1]):
-            for z in range(volume_data.shape[2]):
+        for y in range(shape[1]):
+            for z in range(shape[2]):
                 line = volume_data[:, y, z]
-                runs = compress_line(line)
+                runs = compress_line(line, h_min, h_max)
                 rle[(y, z)] = runs
     return rle
 
-def compress_line(line):
+def compress_line(line, h_min, h_max):
     """
     Compresses a 1D line of Hounsfield values into runs.
     """
@@ -202,11 +178,11 @@ def compress_line(line):
     if not line:
         return runs
         
-    current_type = is_transparent(line[0])
+    current_type = is_transparent(line[0], h_min, h_max)
     current_start = 0
     
     for i in range(1, len(line)):
-        is_trans = is_transparent(line[i])
+        is_trans = is_transparent(line[i], h_min, h_max)
         if is_trans != current_type:
             runs.append(Run(current_type, current_start, i - 1))
             current_type = is_trans
@@ -215,17 +191,11 @@ def compress_line(line):
     runs.append(Run(current_type, current_start, len(line) - 1))
     return runs
 
-def is_transparent(h_val):
-    # Placeholder for transfer function logic
-    # In the main loop, we check opacity. 
-    # Here we assume a binary classification for RLE: 0 vs >0
-    # The transfer function is applied during rendering or pre-computed.
-    # The sources say "compress... once having classified... into opacities"
-    # So we can pre-compute opacity or just check Hounsfield bounds.
-    # Let's assume we check if opacity > 0.
-    # Since we don't have h_min/h_max here, we return a placeholder.
-    # In practice, this function would take h_min, h_max.
-    return False 
+def is_transparent(h_val, h_min, h_max):
+    """Returns True if opacity is 0."""
+    if h_val < h_min:
+        return True
+    return False
 
 class Run:
     def __init__(self, is_transparent, start, end):
@@ -243,17 +213,17 @@ The Simple Shear-Warp Algorithm is a CPU-based volume rendering method that trav
 Fast Shear-Warp with Runlength Encoding is a scanline-based volume rendering algorithm optimized for parallel projections that uses run-length encoding (RLE) of voxel scanlines and intermediate image pixels to skip transparent voxels and occluded pixels, assuming a fixed opacity transfer function. It builds on [CPU-based Shear-Warp](1161-cpu-based-shear-warp.md) by explicitly leveraging the coherence of both the volume data and the resulting image to achieve high performance, rivaling raycasting and splatting at unity magnification while maintaining sub-second rendering times for moderately-sized datasets. Unlike general ray-casting, it achieves early ray termination via opaque pixel links with low overhead, as offsets are updated only when a pixel first becomes opaque.
 
 ## Operating characteristics
-*   **Time Complexity:** The preprocessing step is $O(N)$ where $N$ is the number of voxels, as each voxel is visited once to build the RLE structures. The rendering step is proportional to the number of non-transparent voxels along the rays, which is significantly less than $N$ due to the skipping of transparent runs.
+*   **Time Complexity:** The preprocessing step is $O(N)$ where $N$ is the number of voxels, as each voxel is visited once to build the RLE structures. The rendering step is proportional to the number of non-transparent voxels along the rays, which is significantly less than $N$ due to the skipping of transparent runs [S1, S2, S3, unofficial].
 *   **Memory Complexity:** The RLE structures require memory proportional to the number of runs. In the worst case (checkerboard pattern), this is $O(N)$, but for typical medical volumes with large empty spaces, it is much smaller. The sources do not specify the exact memory overhead of the RLE lists.
 *   **Measured Performance:** On a 3.8GHz Pentium 4 with 2GB RAM, rendering times for the Skull model (320x320x46) were 22s, 43s, 64s, 86s, and 107s for sampling rates $s=1$ to $5$ respectively [S2, unofficial]. For the Knee model (512x512x73), times were 110s, 155s, 226s, 300s, and 370s for $s=1$ to $5$ [S2, unofficial].
 *   **Scaling:** Performance degrades linearly with increasing sampling rate. The method is limited to a maximum sampling rate of 5 due to speed constraints [S2, unofficial].
-*   **Strengths:** Low memory footprint compared to octree-based methods; efficient skipping of empty voxels; simple implementation on CPU.
-*   **Limitations:** Significantly slower than GPU-based methods; limited to low sampling rates for interactive frame rates; requires preprocessing time to build RLE structures.
-*   **When to use:** When GPU hardware is unavailable or when a CPU-based baseline is needed for comparison.
-*   **When not to use:** When high frame rates or high sampling rates are required.
+*   **Strengths:** Low memory footprint compared to octree-based methods; efficient skipping of empty voxels; simple implementation on CPU [S1, S2, S3, unofficial].
+*   **Limitations:** Significantly slower than GPU-based methods; limited to low sampling rates for interactive frame rates; requires preprocessing time to build RLE structures [S2, unofficial].
+*   **When to use:** When GPU hardware is unavailable or when a CPU-based baseline is needed for comparison [S2, unofficial].
+*   **When not to use:** When high frame rates or high sampling rates are required [S2, unofficial].
 
 ## Background
-The CPU-based Shear-Warp algorithm was implemented as part of a study comparing CPU and GPU volume rendering techniques [S1, S2, S3, unofficial]. It is based on the original Shear-Warp algorithm proposed by Lacroute and Levoy [S1, S2, S3, unofficial]. The implementation specifically avoids the octree structures suggested in the original paper, opting for RLE compression instead [S1, S2, S3, unofficial]. The method uses the Hounsfield scale for classifying voxels, which is standard in medical imaging [S1, S2, S3, unofficial].
+The CPU-based Shear-Warp algorithm was implemented as part of a study comparing CPU and GPU volume rendering techniques [S1, S2, S3, unofficial]. The implementation specifically avoids the octree structures suggested in the original paper, opting for RLE compression instead [S1, S2, S3, unofficial]. The method uses the Hounsfield scale for classifying voxels, which is standard in medical imaging [S1, S2, S3, unofficial].
 
 ## Sources
 [S1] GPU-Based Volume Rendering for Medical Imagery, https://inria.hal.science/inria-00461484v1, fetched 2026-10-26 (unofficial)

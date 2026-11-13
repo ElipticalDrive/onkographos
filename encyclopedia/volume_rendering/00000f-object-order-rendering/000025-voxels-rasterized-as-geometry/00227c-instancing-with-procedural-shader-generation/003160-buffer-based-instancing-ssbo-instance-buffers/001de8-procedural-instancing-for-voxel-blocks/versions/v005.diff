@@ -1,0 +1,245 @@
+--- v004.md
++++ v005.md
+@@ -1,80 +1,55 @@
+ # Procedural Instancing for Voxel Blocks
+ 
+-Also called: Voxel Block Procedural Instancing, Procedural Instancing Voxel Rendering, Cubic Grid Voxel Rendering with Instance Buffers
++Also called: Cubic Grid Voxel Rendering with Instance Buffers, Procedural Instancing Voxel Rendering, Voxel Block Procedural Instancing
+ 
+ ## Overview
+-Procedural Instancing for Voxel Blocks is a rendering technique that replaces pre-baked mesh geometry with compact instance records, resolving position, color, and occlusion in the vertex shader using a shared cube template [S1, S4, unofficial]. It differs from standard hardware instancing by computing instance transforms and visibility flags procedurally in the vertex stage, avoiding CPU-side mesh generation and allowing custom setup logic for each instance's transformation and parameters [S2, S3, unofficial]. This method significantly reduces memory usage and increases cache capacity compared to baked meshes, though it increases vertex work for zero-gap layouts by submitting whole cubes and discarding hidden faces in the shader [S1, unofficial].
++Procedural instancing for voxel blocks replaces baked mesh geometry with a compact instance record per voxel, resolving position, color, and occlusion in the vertex shader using a shared cube template [S1, S2, S3, S4, unofficial]. It differs from standard hardware instancing by computing visibility flags and clip distances procedurally in the vertex stage, allowing for custom setup logic such as face culling without CPU-side mesh generation [S1, S3, S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of occupied voxel positions, material/texture indices, and visibility flags (face masks).
+-*   **Output:** Rasterized fragments representing the voxel blocks, with correct occlusion and coloring.
++*   **Input:** A structured buffer (SSBO/StructuredBuffer) containing per-voxel instance data (position, solidity/visibility, texture index, rotation). A shared vertex buffer containing a base geometry (typically a 24-vertex unit cube or a set of shape vertices).
++*   **Output:** Rasterized voxels. Non-solid voxels are clipped. Hidden faces of solid voxels are pushed outside the clip volume.
+ 
+ **Data Structures:**
+-The method relies on two primary buffers and a shared geometry template.
++The instance data layout varies by implementation but generally follows these patterns:
+ 
+-1.  **Instance Buffer (SSBO):** Stores per-voxel data. Layouts vary by implementation but generally include position and transformation/visibility data.
+-    *   *Implementation A (Compact):* 6 bytes per voxel: flat grid index (integer), six-bit surviving-face mask (uint8), orbit byte (uint8) [S1, unofficial].
+-    *   *Implementation B (Unity StructuredBuffer):* `float4` per instance. Components: `(x, y, z)` for position, `w` for clip parameter [S2, unofficial].
+-    *   *Implementation C (GLSL std430):* 32 bytes per instance. Fields: `posX` (float, 4B), `posY` (float, 4B), `posZ` (float, 4B), `textureIndex` (int, 4B), `shapeRotation` (uint, 4B), `tintR` (float, 4B), `tintG` (float, 4B), `tintB` (float, 4B) [S4, unofficial]. The `shapeRotation` uint is packed: lower 16 bits are `shape` index, upper 16 bits are `rotation` index [S4, unofficial].
+-    *   *Implementation D (C# FieldOffset):* 32 bytes. Offset 0: `Vector3` position (12B); Offset 12: `int` texture (4B); Offset 16: `ushort` shape (2B); Offset 18: `ushort` rotation (2B); Offset 20: `Vector3` tint (12B) [S4, unofficial].
+-
+-2.  **Vertex Buffer:** A shared template geometry. Typically a 24-vertex cube (6 faces × 4 vertices) or a single unit cube [S1, S4, unofficial].
+-    *   *Layout (GLSL std430):* 32 bytes per vertex. Fields: `position` (vec3, 12B), `_pad0` (float, 4B), `uv` (vec2, 8B), `_pad2` (float, 4B), `_pad1` (float, 4B) [S4, unofficial].
+-
+-3.  **Uniforms:** View and projection matrices, chunk position offset, and vertex count per shape [S4, unofficial].
++1.  **Compact Record (6 bytes):** Used in high-performance scenarios [S1, unofficial].
++    *   Flat grid index (integer, size not specified, likely 32-bit).
++    *   Six-bit surviving-face mask (`uint8`).
++    *   Orbit byte (`uint8`).
++    *   *Note:* This layout is significantly smaller than the 32-byte or 64-byte structures used in other variants.
++2.  **Standard Struct (32 bytes):** Used in Unity and OpenGL implementations [S3, S4, S5, unofficial].
++    *   **C# / GLSL `std430` layout [S5, unofficial]:**
++        *   `posX`, `posY`, `posZ`: `float` (4 bytes each, offset 0, 4, 8).
++        *   `textureIndex`: `int` (4 bytes, offset 12).
++        *   `shapeRotation`: `uint` (4 bytes, offset 16). Packed: lower 16 bits = shape index, upper 16 bits = rotation index.
++        *   `tintR`, `tintG`, `tintB`: `float` (4 bytes each, offset 20, 24, 28).
++    *   **Unity `StructuredBuffer<Voxel>` [S4, unofficial]:**
++        *   `position`: `float3`.
++        *   `isSolid`: `float`.
++    *   **Unity `StructuredBuffer<float4>` [S3, unofficial]:**
++        *   `x, y, z`: Position components.
++        *   `w`: Clip parameter.
+ 
+ **Numbered Steps:**
+ 
+-1.  **Instance Data Preparation:** The CPU or compute shader generates an instance record for each occupied voxel. This record contains the voxel's world position and visibility/texture data [S1, S4, unofficial]. For example, in the compact layout, a 6-byte record is generated per voxel [S1, unofficial]. In the Unity implementation, a `float4` position and clip value are stored in a `StructuredBuffer` [S2, unofficial].
+-
+-2.  **Draw Call:** A single instanced draw call (e.g., `glDrawArraysInstanced` or Unity's procedural instancing pragma) is issued with an instance count equal to the number of occupied voxels [S1, S2, S4, unofficial].
+-
+-3.  **Vertex Shader Execution (Per Instance):**
+-    a.  **Fetch Instance Data:** The vertex shader uses `gl_InstanceID` (or `SV_InstanceID`) to index into the instance buffer [S1, S2, S4, unofficial].
+-        *   *Unity:* `float4 position = _Positions[unity_InstanceID];` [S2, unofficial].
+-        *   *GLSL:* `ShapeInstance instance = ShapeInstances[instanceID];` [S4, unofficial].
+-    b.  **Compute Transform/Visibility:**
+-        *   *Position:* Construct a translation matrix or vector from the instance position [S2, S3, unofficial]. In GLSL, the local vertex position is adjusted: `vec3 localPos = ShapeVertices[vertexID].position - vec3(0.5);` [S4, unofficial].
+-        *   *Rotation/Shape:* If using precomputed rotation matrices, retrieve the base rotation matrix from a precomputed array (e.g., `_87`) using the upper 16 bits of the `shapeRotation` field [S4, unofficial]. The rotation matrix represents one of 24 possible orientations [S4, unofficial].
+-        *   *Transformation:* Apply rotation to the local vertex: `localPos = rotationMatrix * localPos;` [S4, unofficial]. Then translate: `localPos += vec3(instance.posX, instance.posY, instance.posZ);` [S4, unofficial]. Add chunk position if applicable: `localPos += Uniforms.chunkPos;` [S4, unofficial].
+-        *   *Clip Distance:* Determine visibility. In Unity, `_Clip = -1.0 + isSolid;` where `isSolid` is 1.0 for solid voxels and 0.0 for empty [S3, unofficial]. In other implementations, hidden faces are culled by moving their corners outside the clip volume in the vertex shader [S1, unofficial].
+-    c.  **Output:**
+-        *   Transform the final position to clip space: `gl_Position = mul(mul(float4(localPos, 1.0), view), projection);` [S4, unofficial].
+-        *   Output UV coordinates from the vertex buffer [S4, unofficial].
+-        *   Output texture index and tint color from the instance buffer [S4, unofficial].
+-
+-4.  **Fragment Shader Execution:**
+-    a.  **Clipping:** Discard fragments based on the clip value. In Unity, `clip(_Clip)` is used; if `_Clip < 0`, the fragment is discarded [S3, unofficial]. Since `_Clip` is 0.0 for solid voxels and -1.0 for empty, solid voxels are rendered [S3, unofficial].
+-    b.  **Texturing:** Sample the texture array using the texture index and UV coordinates [S4, unofficial].
+-    c.  **Coloring:** Apply tint color and albedo [S2, S4, unofficial].
++1.  **Instance Buffer Population:** The application builds an instance record for each occupied voxel. This replaces the generation of baked mesh geometry [S1, unofficial]. The record contains position, visibility, and rendering attributes [S5, unofficial].
++2.  **Draw Call:** A single instanced draw call (e.g., `glDrawArraysInstanced`, `glDrawElementsInstanced`, or Unity's procedural instancing pragma) is issued with the instance count equal to the number of valid voxels [S1, S2, S4, unofficial].
++3.  **Vertex Shader - Instance Fetch:** The vertex shader uses the instance ID (`gl_InstanceID`, `SV_InstanceID`, or `unity_InstanceID`) to fetch the instance record from the SSBO [S1, S2, S3, S4, S5, unofficial].
++4.  **Vertex Shader - Transformation:**
++    *   Calculate the local vertex position. If using a shared shape buffer, the vertex index is offset by the shape ID: `vertexIndex = gl_VertexID + (shapeRotation & 0xFFFF) * verticesPerShape` [S5, unofficial].
++    *   Apply rotation if applicable. In some implementations, a precomputed rotation matrix is selected from a lookup table based on the upper 16 bits of `shapeRotation` [S5, unofficial].
++    *   Translate the vertex to the voxel's world position. The transformation matrix is typically constructed as an identity matrix with translation components set to the instance's position [S2, S3, S4, unofficial].
++    *   Add any chunk or world offset if the voxels are part of a larger chunked system [S5, unofficial].
++5.  **Vertex Shader - Culling/Occlusion:**
++    *   **Solidity Check:** Determine if the voxel is solid. In Unity implementations, this is often done by setting a clip value: `_Clip = -1.0 + isSolid`. If `isSolid` is 1.0, `_Clip` is 0.0; if 0.0, `_Clip` is -1.0 [S2, S4, unofficial].
++    *   **Face Culling:** For solid voxels, hidden faces are culled by moving their vertices outside the clip volume (e.g., setting their position to a large negative value or using `clip()` with a negative threshold) rather than omitting them from the draw call [S1, S2, S4, unofficial]. This ensures correct rendering during translucent fade-ins [S1, unofficial].
++6.  **Vertex Shader - Output:** Transform the final position to clip space and output UV coordinates and texture indices [S5, unofficial].
++7.  **Fragment Shader:** Apply clipping based on the `_Clip` value. Fragments are discarded if `_Clip < 0` (non-solid voxels) [S2, S3, S4, unofficial]. Apply texture sampling and tinting [S5, unofficial].
+ 
+ **Pseudocode (GLSL-style):**
+ 
+ ```glsl
+-// Vertex Shader
+-#version 450
+-layout(location = 0) in vec3 aPos;
+-layout(location = 1) in vec2 aUV;
+-
+-layout(std430, binding = 0) buffer InstanceBuffer {
+-    struct {
+-        float posX, posY, posZ;
+-        int textureIndex;
+-        uint shapeRotation;
+-        float tintR, tintG, tintB;
+-    } instances[];
+-};
+-
+-layout(std430, binding = 1) buffer VertexBuffer {
+-    struct {
+-        vec3 position;
+-        float _pad0;
+-        vec2 uv;
+-        float _pad2;
+-        float _pad1;
+-    } vertices[];
+-};
+-
++// Uniforms
+ uniform mat4 view;
+ uniform mat4 projection;
+@@ -82,68 +57,85 @@
+ uniform int verticesPerShape;
+ 
+-out vec2 vUV;
+-out int vTextureIndex;
+-out vec3 vTint;
++// SSBOs
++layout(std430) buffer ShapeInstances {
++    ShapeInstance instances[];
++};
++struct ShapeInstance {
++    float posX, posY, posZ;
++    int textureIndex;
++    uint shapeRotation; // Lower 16: shape, Upper 16: rotation
++    float tintR, tintG, tintB;
++};
+ 
++layout(std430) buffer ShapeVertices {
++    ShapeVertex vertices[];
++};
++struct ShapeVertex {
++    vec3 position;
++    vec2 uv;
++    // Padding fields omitted for brevity
++};
++
++// Vertex Shader
+ void main() {
+     uint instanceID = gl_InstanceID;
+     uint vertexID = gl_VertexID;
+     
+-    // Fetch instance data
+-    InstanceBuffer.Instance inst = instances[instanceID];
++    // 1. Fetch instance data
++    ShapeInstance instance = instances[instanceID];
+     
+-    // Fetch vertex data
+-    // Calculate index based on shape and rotation
+-    uint shapeIndex = inst.shapeRotation & 0xFFFFu;
+-    uint rotationIndex = inst.shapeRotation >> 16u;
++    // 2. Determine shape and rotation
++    uint shapeIndex = instance.shapeRotation & 0xFFFFu;
++    uint rotationIndex = instance.shapeRotation >> 16u;
+     
+-    // Note: verticesPerShape is the number of vertices per shape instance
+-    uint vertexIndex = vertexID + shapeIndex * verticesPerShape;
+-    VertexBuffer.Vertex vert = vertices[vertexIndex];
++    // 3. Fetch vertex
++    uint vertexOffset = shapeIndex * verticesPerShape;
++    ShapeVertex vert = vertices[vertexID + vertexOffset];
+     
+-    // Transform vertex
+-    vec3 localPos = vert.position - vec3(0.5);
++    // 4. Transform position
++    vec3 localPos = vert.position;
+     
+-    // Apply rotation (simplified, assuming rotation matrix lookup)
+-    // In practice, retrieve rotation matrix from precomputed array using rotationIndex
+-    // localPos = rotationMatrix * localPos;
++    // Apply rotation (simplified: assume rotation matrix lookup or identity for basic cubes)
++    // In full implementation, rotate localPos by rotation matrix from lookup table
+     
+-    localPos += vec3(inst.posX, inst.posY, inst.posZ);
+-    localPos += chunkPos;
++    // Center and translate
++    vec3 worldPos = localPos - vec3(0.5) + vec3(instance.posX, instance.posY, instance.posZ) + chunkPos;
+     
+-    // Output
+-    gl_Position = projection * view * vec4(localPos, 1.0);
+-    vUV = vert.uv;
+-    vTextureIndex = inst.textureIndex;
+-    vTint = vec3(inst.tintR, inst.tintG, inst.tintB);
++    // 5. Culling logic (example: clip non-solid)
++    // In this model, solidity is often handled by the instance count or a separate clip value
++    // If using the 6-byte mask, face culling moves vertices outside clip volume
++    
++    gl_Position = projection * view * vec4(worldPos, 1.0);
++    
++    // 6. Output varyings
++    // Pass texture index and tint to fragment shader
+ }
+ ```
+ 
+ **Parameters:**
+-*   `verticesPerShape`: Uniform integer specifying the number of vertices per shape instance [S4, unofficial].
+-*   `chunkPos`: Uniform vec3 for chunk offset [S4, unofficial].
+-*   `_Color`: Albedo color property (default 1,1,1,1) [S3, unofficial].
++*   `verticesPerShape`: Uniform integer specifying the number of vertices per shape instance [S5, unofficial].
++*   `_Color`: Albedo color property, often applied in the fragment shader [S2, S4, unofficial].
++*   `UNITY_PROCEDURAL_INSTANCING_ENABLED`: Preprocessor define enabling procedural instancing in Unity [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Vertex Work Increase:** Instancing submits whole cubes and discards hidden faces in the vertex shader. For zero-gap layouts, this causes a 2.0× to 3.3× increase in vertex work compared to culling faces on the CPU [S1, unofficial]. This is acceptable as it is vertex work only and no fragments are processed for hidden faces [S1, unofficial].
+-*   **Precision Drift:** GPU f32 arithmetic drift is bounded to under 1e-7 of the unit box, which is less than half a step of an 8-bit channel, ensuring visual correctness [S1, unofficial].
+-*   **Matrix Multiplication Order:** Row-major vs column-major matrix multiplication must be handled correctly. A workaround (e.g., `spvWorkaroundRowMajor`) may be needed to ensure correct transformation [S4, unofficial].
+-*   **Hidden Face Culling:** Hidden faces must be sent outside the clip volume rather than simply not drawn, so culling survives translucent fade-ins [S1, unofficial].
++*   **Vertex Work Increase:** Because whole cubes are submitted and hidden faces are culled in the shader, vertex work increases by 2.0× to 3.3× for zero-gap layouts (e.g., a 4×4×4 block with a 0 in the center) compared to a mesh that only generates visible faces [S1, unofficial]. This is acceptable as it is vertex-only work and avoids the cost of per-frame buffer rebuilds or multiple draw calls [S1, unofficial].
++*   **Precision Drift:** GPU `f32` arithmetic drift is bounded to under $10^{-7}$ of the unit box, which is less than half a step of an 8-bit channel, ensuring visual correctness [S1, unofficial].
++*   **Matrix Multiplication Order:** Row-major vs. column-major matrix multiplication must be handled correctly, especially when using uniforms that may be stored in row-major order [S5, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Geometry build speed is 1.9–4.6× faster than pre-branch core methods [S1, unofficial]. Whole build speed is 1.3–1.8× faster [S1, unofficial].
+-*   **Memory Complexity:** Memory per voxel is 6 bytes (vs. over 1 kilobyte for six baked quads) [S1, unofficial]. Specimen memory at R=64 is reduced from 42.0 MB to 649 KB [S1, unofficial]. Worker message size at R=64 is reduced from 42.3 MB to 457 KB (92× reduction) [S1, unofficial]. Resident memory for 294 on-screen specimens is reduced from 27.8 MB to 0.66 MB [S1, unofficial].
+-*   **Performance:** Maintains interactive frame rates of approximately 60 FPS at high voxel densities [S2, unofficial]. Cache capacity at R=64 increases from 6 specimens to about 394 specimens before exhausting `CACHE_BYTES` [S1, unofficial].
+-*   **Strengths:** Significant memory reduction, increased cache capacity, single draw call, no CPU-side mesh generation.
+-*   **Limitations:** Increased vertex work for zero-gap layouts (2.0× to 3.3×), requires careful handling of matrix multiplication order and precision.
+-*   **When to Use:** When memory bandwidth and cache efficiency are critical, and vertex shader performance is sufficient to handle the increased vertex count. Suitable for large voxel scenes with high density.
+-*   **When Not to Use:** When vertex shader performance is a bottleneck, or when the scene has many zero-gap layouts where face culling is essential.
++*   **Memory Complexity:** Memory usage is significantly reduced. At resolution R=64, specimen memory drops from 42.0 MB to 649 KB (19–65× smaller) [S1, unofficial]. Worker message size reduces from 42.3 MB to 457 KB (92× reduction) [S1, unofficial].
++*   **Cache Efficiency:** Cache capacity increases from 6 specimens to about 394 specimens before exhausting `CACHE_BYTES` at R=64 [S1, unofficial].
++*   **Performance:** Maintains interactive frame rates of approximately 60 FPS at high voxel densities [S3, unofficial].
++*   **Strengths:** Low memory footprint, fast build times, single draw call, flexible visibility logic.
++*   **Limitations:** Increased vertex throughput for dense, gap-free volumes due to full cube submission.
+ 
+ ## Background
+-This technique is used in projects like the block-showroom by lardratboy [S1, unofficial], and is implemented in Unity using procedural instancing [S2, S3, unofficial]. It is also used in cubic grid voxel renderers [S4, unofficial]. The method evolved from baked mesh rendering to reduce memory overhead and improve performance.
++This method is used in projects such as the block-showroom by lardratboy [S1, unofficial], and is implemented in Unity via procedural instancing shaders [S2, S3, S4, unofficial] and OpenGL via SSBOs [S5, unofficial]. It evolved from baked mesh approaches to reduce memory overhead and improve build times [S1, unofficial].
+ 
+ ## Sources
+ [S1] Feature/center instancing, https://github.com/lardratboy/block-showroom/pull/7, fetched 2026-10-26 (unofficial)
+-[S2] NotABottle/Voxel-Shader, https://github.com/NotABottle/Voxel-Shader, fetched 2026-10-26 (unofficial)
+-[S3] bzgeb/UnityGPUMeshVoxelizerPart4, https://github.com/bzgeb/UnityGPUMeshVoxelizerPart4, fetched 2026-10-26 (unofficial)
+-[S4] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)+[S2] bzgeb/UnityGPUMeshVoxelizerPart5, https://github.com/bzgeb/UnityGPUMeshVoxelizerPart5, fetched 2026-10-26 (unofficial)
++[S3] NotABottle/Voxel-Shader, https://github.com/NotABottle/Voxel-Shader, fetched 2026-10-26 (unofficial)
++[S4] bzgeb/UnityGPUMeshVoxelizerPart4, https://github.com/bzgeb/UnityGPUMeshVoxelizerPart4, fetched 2026-10-26 (unofficial)
++[S5] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)

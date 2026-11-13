@@ -3,31 +3,22 @@
 Also called: Contract(p)
 
 ## Overview
-The Scene Contraction Function maps an unbounded 3D scene into a bounded unit cube to facilitate efficient multiresolution grid storage and Level of Detail (LoD) computation. It differs from standard distance-based LOD by using an L-infinity norm to bound positions to a cube rather than a sphere, which aligns with the axis-aligned structure of grid-based representations [S1]. This method ensures that high-resolution grids are utilized effectively for both near-field and far-field regions, optimizing parameter usage compared to non-contracted approaches [S1].
+The Scene Contraction Function bounds an unbounded 3D scene into a cube of size 2, which is then reduced to a cube of size 1 for coding implementation reasons [S1]. It uses the L-infinity norm rather than the L2 norm to bound positions to a cube rather than a sphere, which is convenient with grid-based representations [S1]. This method ensures that high-resolution grids are utilized effectively for both near-field and far-field regions, optimizing parameter usage compared to non-contracted approaches [S1].
 
 ## How it works
 **Inputs and Outputs**
 *   **Input:** A 3D position vector $p \in \mathbb{R}^3$.
-*   **Output:** A contracted position vector $p' \in \mathbb{R}^3$ bounded within a cube of size 1 (centered at origin).
+*   **Output:** A contracted position vector $p' \in \mathbb{R}^3$ bounded within a cube of size 1 (centered at the origin).
 *   **Norm:** The L-infinity norm $\|p\|_\infty = \max(|p_x|, |p_y|, |p_z|)$ is used [S1].
 
-**Data Structures**
-No specific data structure is required for the function itself; it operates on scalar/vector types. The implementation must support the L-infinity norm calculation.
-
 **Algorithm**
-The function applies a piecewise transformation based on the magnitude of the input position relative to the unit cube boundary (1.0).
-
-1.  Compute the L-infinity norm of the input position: $n = \|p\|_\infty$.
-2.  If $n \leq 1$:
-    *   Return $p$ unchanged.
-3.  If $n > 1$:
-    *   Compute the scaling factor: $s = 2 - \frac{1}{n}$.
-    *   Compute the normalized direction: $u = \frac{p}{n}$.
-    *   Return $p' = s \cdot u$.
+The function applies a piecewise transformation based on the magnitude of the input position relative to the unit boundary (1.0) [S1].
+1. Compute the L-infinity norm of the input position: $n = \|p\|_\infty$.
+2. If $n \leq 1$: return $p$ unchanged.
+3. If $n > 1$: compute the scaling factor $s = 2 - \frac{1}{n}$, compute the normalized direction $u = \frac{p}{n}$, and return $p' = s \cdot u$ [S1].
 
 **Formulas**
 The contraction function is defined as [S1]:
-
 $$
 \text{contract}(p) = 
 \begin{cases} 
@@ -35,6 +26,7 @@ p & \text{if } \|p\|_\infty \leq 1 \\
 \left(2 - \frac{1}{\|p\|_\infty}\right) \frac{p}{\|p\|_\infty} & \text{if } \|p\|_\infty > 1
 \end{cases}
 $$
+Here $\|p\|_\infty$ denotes the L-infinity norm of position $p$ [S1].
 
 **Parameters**
 *   **Norm Type:** L-infinity ($\|\cdot\|_\infty$) [S1].
@@ -42,14 +34,12 @@ $$
 
 **Edge Cases and Pitfalls**
 *   **LOD Factor:** The reduction from a size-2 cube to a size-1 cube introduces a factor of 2 in the LOD computation formula. This factor is frequently overlooked in literature for clarity but is critical for correct implementation [S1].
-*   **LOD Behavior in Contracted Space:** In the region where $\|p\|_\infty > 1$, the computed LOD $L$ may increase with distance due to the $\log(\|p\|_\infty^4)$ term in the numerator. This occurs because the fixed volume of a grid cell in the contracted space represents an increasingly larger volume of the original scene as distance from the center increases. While counter-intuitive (as one might expect lower LOD for further samples), the contraction term eventually dominates the distance term, ensuring that resolute grids are used for far areas as well [S1].
+*   **LOD Behavior in Contracted Space:** In the region where $\|p\|_\infty > 1$, the computed LOD $L$ may increase with distance due to the $\log(\|p\|_\infty^4)$ term in the numerator [S1]. This occurs because the fixed volume of a grid cell in the contracted space represents an increasingly larger volume of the original scene as distance from the center increases [S1]. While counter-intuitive (as one might expect lower LOD for further samples), the contraction term eventually dominates the distance term, ensuring that resolute grids are used for far areas as well [S1].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
 def contract(p):
     """
     Contracts a 3D position p into a unit cube using L-infinity norm.
@@ -71,24 +61,18 @@ def contract(p):
         # Scaling factor: 2 - 1/norm
         scale = 2.0 - (1.0 / norm_inf)
         
-        # Normalize direction
+        # Normalize direction and scale
         inv_norm = 1.0 / norm_inf
-        nx = x * inv_norm
-        ny = y * inv_norm
-        nz = z * inv_norm
-        
-        # Scale and return
-        return (scale * nx, scale * ny, scale * nz)
+        return (scale * x * inv_norm, scale * y * inv_norm, scale * z * inv_norm)
 ```
 
 ## Subtopics
 
 ### LOD Computation in Contracted Space
-This variant defines the specific Level of Detail (LoD) formula derived from the contraction function. It determines the appropriate grid resolution $L$ based on sample distance $d$, contraction factor $c$, base resolution $b$, and growth factor $f$ [S1].
+This variant defines the specific Level of Detail (LoD) formula derived from the contraction function [S1]. It determines the appropriate grid resolution $L$ based on sample distance $d$, contraction factor $c$, base resolution $b$, and growth factor $f$ [S1].
 
 **Formula**
 The LOD $L$ is computed as [S1]:
-
 $$
 L = 
 \begin{cases} 
@@ -96,19 +80,18 @@ L =
 -\frac{\log(d \cdot c \cdot b) + 2\log\left(2 - \frac{1}{\|p\|_\infty}\right) - 4\log(\|p\|_\infty)}{\log(f)} & \text{if } \|p\|_\infty > 1
 \end{cases}
 $$
-
 Where:
 *   $d$: Distance from the camera to the sample point.
 *   $c$: Contraction factor.
 *   $b$: Base resolution.
 *   $f$: Growth factor.
-*   $\|p\|_\infty$: L-infinity norm of the position.
+*   $\|p\|_\infty$: L-infinity norm of the position [S1].
 
 **Pitfalls**
-*   **Increasing LOD with Distance:** As noted in the main method, the term $-4\log(\|p\|_\infty)$ in the numerator can cause $L$ to increase as $\|p\|_\infty$ grows (for $\|p\|_\infty > 1$). This reflects the geometric property that contracted grid cells cover larger scene volumes at greater distances. Implementers must ensure their grid hierarchy supports this behavior, as it differs from standard Euclidean distance-based LOD [S1].
+*   **Increasing LOD with Distance:** As noted in the main method, the term $-4\log(\|p\|_\infty)$ in the numerator can cause $L$ to increase as $\|p\|_\infty$ grows (for $\|p\|_\infty > 1$) [S1]. This reflects the geometric property that contracted grid cells cover larger scene volumes at greater distances [S1]. Implementers must ensure their grid hierarchy supports this behavior, as it differs from standard Euclidean distance-based LOD [S1].
 
 **Comparison**
-Without contraction, high-resolution grids are typically only beneficial for near-field objects. With contraction, high-resolution grids are utilized for both near and far regions, providing a more optimal use of the grid hierarchy and reducing unused parameters [S1].
+Without contraction, high-resolution grids are typically only beneficial for near-field objects [S1]. With contraction, high-resolution grids are utilized for both near and far regions, providing a more optimal use of the grid hierarchy and reducing unused parameters [S1].
 
 ## Operating characteristics
 **Time and Memory Complexity**

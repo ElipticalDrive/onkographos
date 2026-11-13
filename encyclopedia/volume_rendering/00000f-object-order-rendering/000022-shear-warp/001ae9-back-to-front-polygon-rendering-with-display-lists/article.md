@@ -3,34 +3,34 @@
 Also called: Back-to-Front Sorting, Display list based back-to-front rendering, Polygon Sorting for Transparency, Six-display-list back-to-front rendering
 
 ## Overview
-This method solves the transparency ordering problem in volume rendering by ensuring polygons are composited in correct depth order using linear alpha blending [S2, book]. It differs from standard hardware rasterization by enforcing a strict back-to-front rendering sequence via software sorting and pre-cached display lists [S1, unofficial]. Unlike [Perspective Shear-Warp](6047-perspective-shear-warp.md) which handles perspective via warping, this approach relies on the principal axis alignment to minimize sorting overhead and avoid edge-on views [S1, unofficial].
+This method solves the transparency ordering problem in volume rendering by ensuring parallel polygons are composited in correct depth order to satisfy linear alpha blending requirements [S1, unofficial][S2, book]. It differs from standard hardware rasterization by enforcing a strict back-to-front rendering sequence via software sorting and pre-cached display lists [S1, unofficial][S2, book]. The approach relies on principal axis alignment to select a pre-computed display list, which minimizes sorting overhead and avoids edge-on views [S1, unofficial].
 
 ## How it works
-**Inputs:** A set of polygons representing volume slices or isosurfaces; a view direction vector $v_o$.
-**Outputs:** A correctly composited image buffer.
+**Inputs:** A set of polygons representing volume slices or isosurfaces; a view direction vector $v_o$ [S1, unofficial][S2, book].
+**Outputs:** A correctly composited image buffer [S2, book].
 
 **Data Structures:**
-*   **Display Lists:** Six distinct lists are pre-computed and cached. Each list contains the geometry and rendering commands for a specific viewing direction along one of the three principal axes (X, Y, Z) with positive or negative orientation [S1, unofficial].
-*   **Polygon List:** A temporary list of all polygons from all actors to be sorted [S2, book].
+*   **Display Lists:** Six distinct lists are pre-computed and cached, two for each principal axis (±X, ±Y, ±Z) [S1, unofficial].
+*   **Polygon List:** A temporary list containing all polygons from all actors in the scene [S2, book].
 
 **Steps:**
-1.  **Pre-computation:** Generate six display lists. Two lists correspond to each axis (e.g., +X, -X, +Y, -Y, +Z, -Z). These lists cache the geometry data to avoid repeated transmission to the graphics engine [S1, unofficial].
-2.  **View Analysis:** Determine the principal viewing axis by finding the component of the view vector $v_o$ with the largest absolute value. Let $axis = \arg\max(|v_{o,x}|, |v_{o,y}|, |v_{o,z}|)$ [S1, unofficial].
-3.  **List Selection:** Select the display list corresponding to the identified axis and the sign of that component (e.g., if $v_{o,x}$ is largest and positive, select the +X list) [S1, unofficial].
+1.  **Pre-computation:** Generate six display lists, each caching geometry and rendering commands for a specific viewing direction along one of the three principal axes [S1, unofficial].
+2.  **View Analysis:** Determine the principal viewing axis by finding the component of the view vector $v_o$ with the largest absolute value, and record its sign [S1, unofficial].
+3.  **List Selection:** Select the corresponding pre-computed display list based on the identified axis and sign [S1, unofficial].
 4.  **Collection:** Collect all polygons from all actors involved in the scene [S2, book].
 5.  **Sorting:** Sort the collected polygons from back to front based on their depth ($z$-value) relative to the current view [S2, book].
-6.  **Rendering:** Render the sorted polygons in order. During this pass, ensure that actor-specific properties (such as specular power) are correctly set for each individual polygon, as the sorting mixes polygons from different actors [S2, book].
+6.  **Rendering:** Render the sorted polygons in order, ensuring actor-specific properties (e.g., specular power) are correctly set for each individual polygon during the mixed-actor render pass [S2, book].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_with_display_lists(polygon_list, view_direction):
+def render_with_display_lists(polygons, view_direction, display_lists):
     # 1. Determine principal axis and sign
     abs_x = abs(view_direction.x)
     abs_y = abs(view_direction.y)
     abs_z = abs(view_direction.z)
-    
+
     if abs_x >= abs_y and abs_x >= abs_z:
         axis = 'x'
         sign = 1 if view_direction.x > 0 else -1
@@ -40,28 +40,40 @@ def render_with_display_lists(polygon_list, view_direction):
     else:
         axis = 'z'
         sign = 1 if view_direction.z > 0 else -1
-        
+
     # 2. Retrieve pre-cached display list
-    # Assumes display_lists is a map: {(axis, sign) -> list_of_commands}
     dl_key = (axis, sign)
     if dl_key not in display_lists:
         raise ValueError("Display list not pre-computed for this orientation")
-        
-    commands = display_lists[dl_key]
-    
-    # 3. Sort polygons back-to-front
-    # Depth is calculated relative to the view direction
-    sorted_polys = sort_back_to_front(polygon_list, view_direction)
-    
+
+    # 3. Sort polygons back-to-front based on depth relative to view
+    # Depth is computed as the dot product of polygon centroid and view direction
+    def polygon_depth(poly):
+        return (poly.centroid.x * view_direction.x +
+                poly.centroid.y * view_direction.y +
+                poly.centroid.z * view_direction.z)
+
+    sorted_polys = sorted(polygons, key=polygon_depth, reverse=True)
+
     # 4. Render with correct properties
     for poly in sorted_polys:
-        # Set actor-specific properties for this polygon
-        set_actor_properties(poly.actor_id)
-        
-        # Execute rendering commands for this polygon
-        # This typically involves uploading geometry if not fully cached
-        # or executing the cached list if the geometry is identical
-        execute_polygon_render(poly)
+        # Bind actor-specific material and lighting state
+        current_material = get_actor_material(poly.actor_id)
+        set_render_state(current_material)
+        # Issue draw calls for the polygon geometry
+        upload_and_draw(poly.vertices, poly.indices)
+
+def get_actor_material(actor_id):
+    # Standard graphics operation: retrieve material properties, lighting parameters, and blend mode
+    pass
+
+def set_render_state(material):
+    # Standard graphics operation: bind material and state to the rendering pipeline
+    pass
+
+def upload_and_draw(vertices, indices):
+    # Standard graphics operation: upload vertex data and issue a draw call
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -70,12 +82,12 @@ def render_with_display_lists(polygon_list, view_direction):
 
 ## Operating characteristics
 *   **Time Complexity:** Requires additional computational overhead due to software-based sorting of polygons [S2, book].
-*   **Memory Complexity:** High memory usage due to the storage of six pre-computed display lists and the frame buffer [S2, book].
+*   **Memory Complexity:** Not given in the sources.
 *   **Strengths:** Ensures correct linear alpha blending for transparency; display lists reduce geometry transmission overhead for repeated views [S1, unofficial].
 *   **Limitations:** Limited to specific viewing angles to avoid edge-on rendering; software sorting can be slow for large polygon counts [S2, book].
 
 ## Background
-This method was developed as a software-based solution to handle transparency in volume visualization systems, particularly within the context of the SIV (Scientific Image Visualization) system and VTK (Visualization Toolkit) [S1, unofficial][S2, book]. It addresses the limitations of hardware rasterization which typically renders front-to-back, causing incorrect compositing for transparent surfaces [S2, book].
+This method was developed as a software-based solution to handle transparency in volume visualization systems, notably within the SIV (Scientific Image Visualization) system [S1, unofficial]. It addresses the limitations of standard hardware rasterization pipelines, which typically render front-to-back and cause incorrect compositing for transparent surfaces [S2, book].
 
 ## Sources
 [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)

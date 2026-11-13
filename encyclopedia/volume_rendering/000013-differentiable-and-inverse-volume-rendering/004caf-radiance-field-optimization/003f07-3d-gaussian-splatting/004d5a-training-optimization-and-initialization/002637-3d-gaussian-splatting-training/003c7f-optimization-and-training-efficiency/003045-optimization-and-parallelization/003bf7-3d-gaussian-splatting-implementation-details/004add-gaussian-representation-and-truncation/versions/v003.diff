@@ -1,0 +1,232 @@
+--- v002.md
++++ v003.md
+@@ -1,206 +1,45 @@
+ # Gaussian Representation and Truncation
+ 
+-Also called: Vertex Pruning, Mixed-Primitive Truncation, Atomized Proliferation, Hard Gaussian Splatting (POG variant)
++Also called: Gaussian Splatting Optimization, Gaussian Truncation, Gaussian Densification
+ 
+ ## Overview
+-Gaussian Representation and Truncation refers to a set of optimization and initialization strategies in 3D Gaussian Splatting (3DGS) that refine the spatial representation of Gaussians during training. It addresses the problem of redundant or poorly shaped primitives (e.g., overly large, collinear, or noisy Gaussians) that degrade rendering quality, geometric accuracy, and storage efficiency. Unlike standard 3DGS which only performs primitive-level opacity pruning, this method introduces vertex-level pruning for mixed primitives, atomized proliferation for geometric precision, and hard Gaussian growth for challenging areas. It sets itself apart by actively modifying the topology and size distribution of Gaussians beyond simple opacity culling, often integrating geometric constraints or specific growth heuristics.
++This family of techniques modifies the core Gaussian representation, culling thresholds, and densification strategies of 3D Gaussian Splatting to improve rendering fidelity, geometric accuracy, and training stability. It solves the problems of aggressive opacity falloff, inefficient truncation of low-opacity primitives, and uncontrolled Gaussian proliferation that leads to redundant or poorly shaped primitives. It differs from its siblings by focusing on the mathematical definition of the Gaussian kernel, the conditions under which Gaussians are culled or split, and the structural constraints applied to Gaussian shapes during optimization.
+ 
+-## How it works
+-The method encompasses several distinct strategies depending on the specific variant (Mixed-Primitive, AtomGS, or HGS/POG). Below are the implementations for the primary approaches cited in the sources.
++## Shared principles
++The methods in this family operate on the standard 3D Gaussian Splatting representation, where each primitive is defined by a mean position $\mu$, a covariance matrix $\Sigma$, an opacity $\alpha$, and color coefficients. The rendering process involves projecting these 3D Gaussians into 2D screen-space ellipses, computing their contribution to each pixel via alpha blending, and backpropagating gradients to update the parameters.
+ 
+-### Mixed-Primitive Vertex Pruning
+-This strategy, used in frameworks like MP-GS [S1, unofficial], operates on primitives with varying numbers of vertices (Gaussian triangles, lines, and ellipses). It triggers vertex-level pruning whenever primitive-level pruning is performed.
+-
+-**Inputs:**
+-- A set of Gaussian primitives, each defined by vertices $\mu_i$ and associated covariance matrices.
+-- Thresholds: $\omega_{dist}$ (default 0.5) and $\omega_{pear}$ (default 0.9) [S1, unofficial].
+-
+-**Steps:**
+-1. **Trigger:** Perform vertex-level pruning concurrently with standard primitive-level opacity pruning.
+-2. **Gaussian Triangle Pruning:**
+-   - Calculate the maximum pairwise L2 distance between the three vertices $\mu_1, \mu_2, \mu_3$.
+-   - If $\max(\|\mu_i - \mu_j\|_2) < \omega_{dist}$, the vertices are considered "close."
+-   - Prune vertices $\mu_2$ and $\mu_3$.
+-   - Convert the primitive into a Gaussian ellipse centered at $\mu_1$.
+-3. **Gaussian Triangle to Line Conversion:**
+-   - If vertices are not close, compute the Pearson correlation coefficient $r$ from the coordinates of the three vertices.
+-   - If $|r| > \omega_{pear}$, the vertices are considered "nearly collinear."
+-   - Convert the Gaussian triangle into a Gaussian line.
+-4. **Gaussian Line Pruning:**
+-   - For a Gaussian line primitive with vertices $\mu_1, \mu_2$, calculate the L2 distance $\|\mu_1 - \mu_2\|_2$.
+-   - If $\|\mu_1 - \mu_2\|_2 < \omega_{dist}$, the vertices are "close."
+-   - Prune vertex $\mu_2$.
+-   - Reduce the primitive to a Gaussian ellipse centered at $\mu_1$.
+-
+-**Pseudocode:**
+-```python
+-def vertex_pruning(primitive, omega_dist=0.5, omega_pear=0.9):
+-    """
+-    Applies vertex-level pruning to a mixed-primitive Gaussian.
+-    primitive: object with type ('triangle', 'line', 'ellipse') and vertices (list of vectors).
+-    """
+-    if primitive.type == 'triangle':
+-        vertices = primitive.vertices # [mu1, mu2, mu3]
+-        
+-        # Check if vertices are close
+-        max_dist = 0
+-        for i in range(3):
+-            for j in range(i + 1, 3):
+-                dist = l2_distance(vertices[i], vertices[j])
+-                if dist > max_dist:
+-                    max_dist = dist
+-        
+-        if max_dist < omega_dist:
+-            # Prune mu2 and mu3, convert to ellipse at mu1
+-            primitive.type = 'ellipse'
+-            primitive.vertices = [vertices[0]]
+-            return
+-
+-        # Check if vertices are collinear
+-        # Compute Pearson correlation coefficient from vertex coordinates
+-        # Flatten vertices to 1D array for correlation calculation
+-        coords = flatten_vertices(vertices)
+-        pearson_r = compute_pearson_correlation(coords)
+-        
+-        if abs(pearson_r) > omega_pear:
+-            # Convert triangle to line
+-            primitive.type = 'line'
+-            # Keep all vertices for the line, but change type
+-            return
+-
+-    elif primitive.type == 'line':
+-        vertices = primitive.vertices # [mu1, mu2]
+-        dist = l2_distance(vertices[0], vertices[1])
+-        
+-        if dist < omega_dist:
+-            # Prune mu2, reduce to ellipse at mu1
+-            primitive.type = 'ellipse'
+-            primitive.vertices = [vertices[0]]
+-            return
+-```
+-
+-### Atomized Proliferation (AtomGS)
+-This strategy enhances geometric precision by constraining Gaussian sizes and guiding optimization with edge-aware losses [S3, unofficial].
+-
+-**Inputs:**
+-- Current set of Gaussian ellipsoids.
+-- 2D edge detector weights.
+-- Curvature map.
+-
+-**Steps:**
+-1. **Atomized Proliferation:**
+-   - Identify smaller anisotropic Gaussians.
+-   - Constrain them into uniformly-sized "Atom Gaussians."
+-   - Apply a progressive split schedule to densify these atoms, emphasizing coverage of fine scene details.
+-   - Retain larger anisotropic Gaussians to represent background or geometric areas with few features.
+-2. **Geometry-Guided Optimization:**
+-   - Compute an Edge-Aware Normal Loss.
+-   - Integrate weights from a 2D edge detector into the curvature map.
+-   - Apply stricter constraints on Gaussian positioning for flat surfaces (aligned with normals) while allowing flexibility for irregular shapes.
+-3. **Pruning and Merging:**
+-   - During the pruning phase, merge Gaussians covering large, less detailed surfaces.
+-   - This results in a similar or reduced number of Gaussians compared to original 3DGS while retaining quality.
+-
+-**Pseudocode:**
+-```python
+-def atomized_proliferation_step(gaussians, edge_weights, curvature_map):
+-    """
+-    Implements AtomGS proliferation and optimization.
+-    """
+-    # 1. Constrain small Gaussians to Atom Gaussians
+-    for g in gaussians:
+-        if is_small_anisotropic(g):
+-            g.size = atom_size # Uniform size
+-            g.type = 'atom'
+-            
+-    # 2. Progressive Split for Atoms
+-    for g in gaussians:
+-        if g.type == 'atom':
+-            if needs_densification(g, curvature_map):
+-                split_gaussian_into_atoms(g)
+-
+-    # 3. Geometry-Guided Optimization
+-    for g in gaussians:
+-        # Compute Edge-Aware Normal Loss
+-        # Integrate edge detector weights into curvature map
+-        loss = compute_edge_aware_normal_loss(g, edge_weights, curvature_map)
+-        apply_gradient(g, loss)
+-
+-    # 4. Pruning/Merging
+-    for g in gaussians:
+-        if covers_large_flat_surface(g):
+-            merge_with_neighbors(g)
+-```
+-
+-### Potentially Over-large Gaussians (POG) / Hard Gaussians
+-This strategy addresses blurring and needle-like artifacts by identifying and growing "hard" Gaussians [S2].
+-
+-**Inputs:**
+-- Multi-view significant positional gradients.
+-- Rendering errors.
+-- Thresholds for identifying "potentially over-large" vs "hard" Gaussians.
+-
+-**Steps:**
+-1. **Identification:**
+-   - Locate "hard Gaussians" from "potentially over-large Gaussians" based on multi-view gradients and rendering errors.
+-   - POG (Eq. 8 in source) identifies potentially over-large Gaussians.
+-   - HG (Eq. 9 in source) identifies hard Gaussians.
+-2. **Growth:**
+-   - Grow and optimize these identified Gaussians to resolve artifacts in challenging areas.
+-   - Note: POG can overgrow already learned areas, leading to redundant Gaussians and PSNR degradation, whereas HG avoids this [S2].
+-
+-**Pseudocode:**
+-```python
+-def hard_gaussian_growth(gaussians, gradients, errors):
+-    """
+-    Implements Hard Gaussian Splatting growth.
+-    """
+-    hard_gaussians = []
+-    for g in gaussians:
+-        # Check if Gaussian is a 'hard' Gaussian based on gradients and errors
+-        if is_hard_gaussian(g, gradients, errors):
+-            hard_gaussians.append(g)
+-            
+-    # Grow and optimize hard Gaussians
+-    for g in hard_gaussians:
+-        grow_gaussian(g)
+-        optimize_gaussian(g)
+-```
++The shared principles include:
++1.  **2D Projection:** The 3D covariance $\Sigma$ is projected to 2D using the camera Jacobian $J$, resulting in $\Sigma' = J \Sigma J^T$. The 2D covariance is often represented by its inverse, the conic matrix $C = (\Sigma'_{2 \times 2})^{-1}$, stored as symmetric elements $(a, b, c)$ and opacity $w$.
++2.  **Truncation/Culling:** To optimize performance, Gaussians are only processed if they contribute significantly to a pixel. This is typically determined by a threshold on the Gaussian response or the resulting alpha value.
++3.  **Densification:** During training, Gaussians are cloned, split, or pruned based on gradient norms, opacity values, and geometric properties to adapt the representation density to scene complexity.
+ 
+ ## Subtopics
+ 
+ ### [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md)
+-Replaces the standard Gaussian radial basis function with an inverse multiquadric function ($1/(ellipse + 1)$) to model long-tailed distributions. Distinguished by its specific algebraic form and a fixed correction factor applied to the covariance matrix. Choose when standard Gaussians fail to capture heavy-tailed radiance field features.
++Replaces the standard Gaussian radial basis function with an inverse multiquadric function to provide a heavier tail, allowing for smoother blending and better representation of large-scale structures. It differs from siblings by using a specific algebraic decay form rather than exponential decay, requiring a correction factor of $1.38$ for the covariance matrix. Choose this when standard Gaussian falloff is too aggressive for the scene's scale.
+ 
+ ### [Opacity-Independent Gaussian Truncation](10266-opacity-independent-gaussian-truncation.md)
+-Decouples spatial truncation threshold from opacity. By checking spatial response before multiplying by opacity, it allows aggressive truncation (e.g., 1σ or 2σ) and enables gradient flow for low-opacity Gaussians that would otherwise be culled. Choose when low-opacity Gaussians are not receiving gradients or contributing to geometry.
++Decouples the visibility threshold from the Gaussian's opacity parameter, solving the problem where low-opacity Gaussians are discarded before receiving gradients and high-opacity Gaussians are truncated too late. It sets itself apart by retaining the Gaussian basis functions but altering the early-out condition during rasterization to check the unnormalized response $r$ against a transparency threshold $\tau_\alpha = 1/255$. Choose this to enable consistent truncation at fewer than ~3.03 standard deviations.
+ 
+ ### [Atomized Proliferation](12924-atomized-proliferation.md)
+-A training optimization that constrains fine-detail Gaussians into isotropic "Atom Gaussians" and prioritizes their proliferation. Uses a warm-up phase for aggressive splitting followed by merging of large surfaces. Choose when superior mesh quality and geometric precision are required over raw rendering speed.
++Enhances geometric precision by constraining Gaussians representing fine details into "Atom Gaussians" (isotropic spheroids with uniform size) and prioritizing their proliferation to align with scene geometry, followed by pruning to merge large smooth surfaces. Unlike standard 3DGS which struggles to stabilize densification, AtomGS uses a warm-up strategy that aggressively densifies initially, then merges, leading to a declining and stabilizing trend in Gaussian count. Choose this for high-fidelity geometry reconstruction.
+ 
+-### [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md)
+-*Note: This is a minor variant described in the notes, not a separate article.*
+-POG identifies potentially over-large Gaussians to grow them. However, it can overgrow learned areas, causing redundant Gaussians and PSNR degradation (Tanks&Temples: PSNR 26.26, SSIM 0.879, LPIPS 0.121) compared to Hard Gaussians (HG) which avoid this issue (PSNR 26.36, SSIM 0.880, LPIPS 0.126).
++### [Vertex-level Pruning in Mixed-Primitive Gaussian Splatting](13983-vertex-level-pruning-in-mixed-primitive-gaussian-splatting.md)
++Removes redundant vertices from Gaussian triangles and lines during training, complementing standard primitive-level opacity pruning. It distinguishes itself by operating on the vertex geometry of mixed primitives (triangles, lines, ellipses) rather than just global primitive existence, allowing the representation to dynamically simplify from triangles to lines or ellipses based on local geometric coherence. Choose this when using mixed-primitive representations to reduce redundancy.
+ 
+-### [Atomized Proliferation](12924-atomized-proliferation.md)
+-*Note: This is a minor variant described in the notes, not a separate article.*
+-AtomGS uses Atomized Proliferation and Geometry-Guided Optimization. It constrains small anisotropic Gaussians into uniform Atom Gaussians and retains large ones for backgrounds. It integrates Edge-Aware Normal Loss using 2D edge detector weights into the curvature map. Unlike standard 3DGS, it provides precise guidance for 3D geometry optimization, balancing visual and geometric accuracy.
++### POG (Potentially Over-large Gaussians)
++POG is a variant of Gaussian growing that identifies potentially over-large Gaussians to address blurring and needle-like artifacts. In ablation studies on Tanks&Temples, POG yields PSNR 26.26, SSIM 0.879, LPIPS 0.121, whereas Hard Gaussians (HG) yield PSNR 26.36, SSIM 0.880, LPIPS 0.126 [S1]. POG improves LPIPS slightly but degrades PSNR significantly because it overgrows already learned areas, making them susceptible to redundant Gaussians [S1].
+ 
+-## Operating characteristics
+-- **Storage Efficiency:** Vertex pruning in mixed-primitive frameworks reduces average storage size for vertex coordinates by 24% compared to variants without pruning [S1, unofficial].
+-- **Rendering Quality:**
+-  - AtomGS achieves state-of-the-art rendering quality and competitive geometry reconstruction accuracy with improved training speed [S3, unofficial].
+-  - POG degrades PSNR significantly compared to HG due to redundant Gaussians in learned areas [S2].
+-  - HG (Hard Gaussians) improves LPIPS and PSNR over POG by avoiding overgrowth [S2].
+-- **Geometric Accuracy:** AtomGS provides better 3D geometry optimization than standard 3DGS by constraining Gaussian placement [S3, unofficial]. Mixed-primitive methods with vertex pruning show better Chamfer distance (0.46 with initialization vs 0.56 without) [S1, unofficial].
+-- **Limitations:** POG is susceptible to redundant Gaussians and PSNR degradation [S2]. AtomGS requires additional computational steps for edge detection and curvature map integration [S3, unofficial].
++### AtomGS
++AtomGS introduces Atomized Proliferation and Geometry-Guided Optimization. Atomized Proliferation constrains ellipsoid Gaussians of various sizes into uniformly-sized Atom Gaussians, emphasizing densification in accordance with scene details. Larger anisotropic Gaussians are retained for background or low-feature areas. Geometry-Guided Optimization integrates weights from a 2D edge detector into a curvature map to compute an Edge-Aware Normal Loss, imposing stricter constraints on Gaussian positioning for flat surfaces while allowing flexibility for irregular shapes. During pruning, Gaussians covering large, less detailed surfaces are merged, resulting in a similar or reduced number of Gaussians compared to original 3DGS while retaining competitive quality [S2, unofficial]. Unlike standard 3DGS which freely drifts and splits, AtomGS provides precise guidance on where to focus Gaussians for better 3D geometry optimization [S2, unofficial].
++
++### Vertex Pruning
++Vertex pruning is a mechanism designed to support mixed-primitive-based learning, as standard pruning is incompatible with mixed primitives. It prunes vertices of the mixed primitives to optimize the representation [S3, unofficial].
+ 
+ ## Background
+-- **Mixed-Primitive Vertex Pruning:** Introduced in "A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction" [S1, unofficial]. It extends standard 3DGS by allowing primitives with varying numbers of vertices (triangles, lines) and introduces vertex-level pruning to refine the representation.
+-- **AtomGS:** Introduced in "AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field" [S3, unofficial]. It aims to enhance rendering quality and geometric precision by atomizing Gaussians and guiding optimization with edge-aware losses.
+-- **Hard Gaussian Splatting (HGS/POG):** Introduced in "Pushing Rendering Boundaries: Hard Gaussian Splatting" [S2]. It addresses blurring and needle-like artifacts by growing hard Gaussians identified from multi-view gradients and rendering errors.
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1]. Subsequent works have explored various optimizations to its representation and training. Hard Gaussian Splatting (HGS) introduced the concept of Potentially Over-large Gaussians and Hard Gaussians to handle challenging areas [S1]. AtomGS, proposed by Liu et al., introduced Atomized Proliferation for high-fidelity radiance fields [S2, unofficial]. Mixed-Primitive Gaussian Splatting introduced vertex-level pruning to support different types of primitives [S3, unofficial]. These methods address specific limitations of the original 3DGS implementation regarding geometric accuracy, training stability, and representation efficiency.
+ 
+ ## Sources
+-[S1] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)
+-[S2] Pushing Rendering Boundaries: Hard Gaussian Splatting, https://arxiv.org/abs/2412.04826v1, fetched 2026-10-26
+-[S3] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)+[S1] Pushing Rendering Boundaries: Hard Gaussian Splatting, https://arxiv.org/abs/2412.04826v1, fetched 2026-10-26
++[S2] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)
++[S3] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)

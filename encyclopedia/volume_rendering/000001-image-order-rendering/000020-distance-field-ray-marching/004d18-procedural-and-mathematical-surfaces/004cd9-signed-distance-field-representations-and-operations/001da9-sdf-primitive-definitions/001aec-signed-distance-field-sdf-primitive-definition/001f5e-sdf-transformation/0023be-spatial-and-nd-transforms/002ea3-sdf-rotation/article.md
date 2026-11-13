@@ -1,69 +1,90 @@
 # SDF Rotation
 
-Also called: SDF Rotate
+Also called: Rotating SDFs, SDF Rotate
+
 ## Overview
-SDF Rotation transforms a query point by applying the inverse of a stored quaternion before querying the base SDF [S1, unofficial]. It differs from [SDF Translation](3106-spatial-and-nd-transforms.md) by using a quaternion-based rotation rather than a vector offset [S1, unofficial].
+SDF Rotation applies a rotational transformation to a signed distance field primitive by rotating the query point inversely before evaluating the base distance function. Unlike [SDF Translation](5820-sdf-translation.md), which uses vector subtraction to position a primitive, rotation applies an inverse rotation matrix or quaternion to the sampling point, allowing the primitive to be oriented arbitrarily in world space without modifying its internal geometric definition.
+
 ## How it works
 **Inputs and Outputs:**
-- Input: a query point $P$ in world space and a stored rotation quaternion $Q$ [S1, unofficial].
-- Output: the distance value returned by the base SDF evaluated at the rotated point [S1, unofficial].
+- Input: Query point $p$ in world space, rotation representation (quaternion $q$ or axis-angle).
+- Output: Signed distance value $d$ from the base primitive at the rotated location.
 
 **Data Structures:**
-The rotation is stored as the second field of a `Rotation` struct [S1, unofficial].
+- Rotation struct: Contains a quaternion field (typically 4 floats: $w, x, y, z$) representing the object's orientation [S1, unofficial].
+- Query point: 3D vector $p = (x, y, z)$ [S2, unofficial].
 
 **Steps:**
-1. Let $Q$ be the stored rotation quaternion [S1, unofficial].
-2. Compute the inverse quaternion $Q^{-1}$ [S1, unofficial].
-3. For a unit quaternion, $Q^{-1} = Q^*$ (the conjugate) [G].
-4. Rotate the query point $P$ by $Q^{-1}$ to obtain the local point $P_{local}$ [S1, unofficial].
-5. The rotation is applied as $P_{local} = Q^{-1} \otimes P \otimes Q$, where $\otimes$ denotes quaternion multiplication and $P$ is treated as a pure quaternion $(0, P_x, P_y, P_z)$ [G].
-6. Pass $P_{local}$ to the base SDF function to retrieve the distance [S1, unofficial].
+1. Retrieve the stored rotation representation (quaternion $q$) for the primitive [S1, unofficial].
+2. Compute the inverse rotation of $q$. For a unit quaternion, the inverse is the conjugate: $q^{-1} = (w, -x, -y, -z)$ [S1, unofficial].
+3. Apply the inverse rotation to the query point $p$ to obtain the rotated point $p'$ [S1, S2, unofficial].
+   - If using a quaternion $q^{-1}$: $p' = q^{-1} \otimes (0, p) \otimes q$ (where $\otimes$ is quaternion multiplication) [S1, unofficial].
+   - If using axis-angle: Rotate $p$ around the specified axis by the negative of the stored angle [S2, unofficial].
+4. Evaluate the base SDF function using the rotated point $p'$: $d = \text{BaseSDF}(p')$ [S1, S2, unofficial].
+5. Return $d$ [S2, unofficial].
 
 **Parameters:**
-- $Q$ (Quaternion): The rotation to apply [S1, unofficial].
-- It is stored as the second field of the `Rotation` struct and inverted at query time [S1, unofficial].
+- Quaternion $q$: The rotation to apply. Stored as the second field of the Rotation struct. It is inverted at query time [S1, unofficial].
+- Axis and angle: Alternative representation where the axis is a normalized 3D vector and the angle is in radians [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Non-unit quaternions require normalization before inversion or division by the squared norm [G].
+- Non-unit quaternions: If the stored quaternion is not normalized, the inverse rotation will scale the point incorrectly. Normalization is required [G].
+- Precision errors: Repeated rotations can accumulate floating-point errors. Renormalizing the quaternion periodically is recommended [G].
+- Degenerate input: An axis of zero length in axis-angle representation is undefined [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def rotate_and_query(query_point, stored_quaternion, base_sdf):
-    # 1. Compute inverse quaternion
-    w, x, y, z = stored_quaternion
-    # For unit quaternions, inverse is conjugate. Non-unit handling not given in sources. [G]
-    inv_w, inv_x, inv_y, inv_z = w, -x, -y, -z
-    norm_sq = inv_w**2 + inv_x**2 + inv_y**2 + inv_z**2
-    inv_w /= norm_sq; inv_x /= norm_sq; inv_y /= norm_sq; inv_z /= norm_sq
+def rotate_sdf(p: Vec3, q: Quaternion, base_sdf: Callable[[Vec3], float]) -> float:
+    """
+    Rotate the query point p by the inverse of quaternion q, then evaluate base_sdf.
+    q is assumed to be a unit quaternion (w, x, y, z).
+    """
+    # Step 2: Compute inverse quaternion (conjugate for unit quaternion)
+    q_inv = Quaternion(q.w, -q.x, -q.y, -q.z)
     
-    # 2. Rotate query point by inverse quaternion
-    # P_local = Q_inv * P * Q
-    px, py, pz = query_point
-    def qmul(a, b):
-        return (a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
-                a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
-                a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
-                a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0])
+    # Step 3: Apply inverse rotation to p
+    # Convert point to quaternion (w=0)
+    p_q = Quaternion(0.0, p.x, p.y, p.z)
     
-    p_quat = (0.0, px, py, pz)
-    rotated = qmul((inv_w, inv_x, inv_y, inv_z), p_quat)
-    rotated = qmul(rotated, (w, x, y, z))
+    # Quaternion multiplication: q_inv * p_q * q
+    # First: temp = q_inv * p_q
+    temp = quaternion_multiply(q_inv, p_q)
+    # Second: p_rotated_q = temp * q
+    p_rotated_q = quaternion_multiply(temp, q)
     
-    local_point = (rotated[1], rotated[2], rotated[3])
+    # Extract rotated point
+    p_rotated = Vec3(p_rotated_q.x, p_rotated_q.y, p_rotated_q.z)
     
-    # 3. Query base SDF
-    return base_sdf.distance_from(local_point)
+    # Step 4: Evaluate base SDF
+    distance = base_sdf(p_rotated)
+    
+    # Step 5: Return distance
+    return distance
+
+def quaternion_multiply(a: Quaternion, b: Quaternion) -> Quaternion:
+    """Standard quaternion multiplication."""
+    w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y
+    y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x
+    z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
+    return Quaternion(w, x, y, z)
 ```
+
 ## Subtopics
 
-### SDF Translation
-Translates the query point by a 3D vector before querying the base SDF [S1, unofficial]. It subtracts the stored translation vector from the query point and passes the result to the base SDF's distance_from function [S1, unofficial]. The parameter is a `Vec3` representing the 3D offset, stored as the second field of the `Translation` struct [S1, unofficial].
-
 ## Operating characteristics
-Time and memory complexity are Not given in the sources.
+- Time complexity: $O(1)$ per query, dominated by quaternion multiplication (constant number of arithmetic operations).
+- Memory complexity: $O(1)$ additional memory for the inverse quaternion calculation.
+- Strengths: Efficient orientation of primitives without modifying the base SDF code; supports arbitrary rotations via quaternions.
+- Limitations: Requires careful handling of quaternion normalization; slightly more expensive than translation due to quaternion multiplication overhead.
+- When to use: When primitives need to be oriented at arbitrary angles in the scene.
+- When not to use: When performance is critical and only axis-aligned rotations are needed (matrix multiplication might be faster on some hardware).
+
 ## Background
-The method is implemented in the `unfinishedprogram/ray-marcher` repository using a quaternion stored in a struct and inverted at query time [S1, unofficial].
+SDF rotation is a fundamental technique in ray marching and procedural geometry, enabling the creation of complex scenes from simple primitives. It builds on the concept of transforming the query point rather than the geometry itself, a principle shared with [SDF Translation](5820-sdf-translation.md) and [SDF Scaling](5818-sdf-scaling.md). The method is widely used in real-time graphics for its efficiency and simplicity.
+
 ## Sources
 [S1] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)
+[S2] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)

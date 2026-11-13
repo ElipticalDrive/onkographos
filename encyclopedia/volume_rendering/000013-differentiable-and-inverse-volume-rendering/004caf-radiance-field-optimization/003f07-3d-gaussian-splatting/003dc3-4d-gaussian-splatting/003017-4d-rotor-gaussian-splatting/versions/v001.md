@@ -1,0 +1,57 @@
+# 4D-Rotor Gaussian Splatting
+Also called: Clifford Algebra 4DGS
+## Overview
+4D-Rotor Gaussian Splatting is a method for modeling dynamic scenes using 4D rotor-based primitives defined via Clifford algebra [S1, unofficial]. It sets itself apart from siblings like Spacetime Gaussians (STG) by explicitly modeling temporal evolution as a rotation component in spacetime, allowing for rigid body motion representation, whereas STG relies on polynomial trajectories and temporal opacity envelopes [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sequence of images or a video representing a dynamic scene.
+*   **Output:** A set of 4D Gaussian primitives parameterized by position, covariance, opacity, and color, capable of rendering arbitrary time slices.
+
+**Data Structures:**
+The core primitive is a 4D Gaussian defined in spacetime. Unlike standard 3D Gaussians which have a 3x3 covariance matrix, 4D Gaussians utilize a 4x4 covariance matrix or equivalent rotor representation to capture correlations between spatial dimensions and time [S1, unofficial]. The specific construction of the rotation component is detailed in [4D Gaussian Rotation Construction](13926-4d-gaussian-rotation-construction.md).
+
+**Method Steps:**
+1.  **Initialization:** Initialize a set of 4D Gaussian primitives in spacetime. Each primitive is defined by a mean position $\mu \in \mathbb{R}^4$ (3 spatial, 1 temporal) and a covariance structure.
+2.  **Rotation Construction:** Construct the 4D rotation matrix using two quaternion-like vectors $l$ and $r$, representing temporal and spatial rotations respectively, as defined in [4D Gaussian Rotation Construction](13926-4d-gaussian-rotation-construction.md) [S1, unofficial].
+3.  **Optimization:** Optimize the parameters of the 4D Gaussians (position, covariance, opacity, color) by minimizing the rendering loss between the synthesized images and the input video frames across time. The Clifford algebra formulation ensures that the temporal evolution is treated as a rigid rotation in 4D space [S1, unofficial].
+4.  **Rendering:** To render a frame at time $t$, project the 4D Gaussians onto the 2D image plane at that specific temporal slice. The 4D covariance is transformed according to the camera projection and the specific time $t$ [S1, unofficial].
+
+**Formulas:**
+The specific mathematical formulation of the 4D rotor and the Clifford algebra operations are not provided in the source notes. The construction of the 4x4 rotation matrix from vectors $l$ and $r$ is described in [4D Gaussian Rotation Construction](13926-4d-gaussian-rotation-construction.md).
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [4D Gaussian Rotation Construction](13926-4d-gaussian-rotation-construction.md)
+Constructs a 4x4 rotation matrix for 4D Gaussians from two quaternion-like vectors `l` and `r` representing temporal and spatial rotations respectively. It sets itself apart from standard 3D rotation by explicitly modeling the temporal dimension as a rotation component, allowing for rigid body motion in spacetime.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+The primary strength is the explicit modeling of temporal dimension as a rotation, which may offer more physically plausible rigid body motion representation compared to polynomial trajectories [S1, unofficial]. Limitations are not specified in the sources.
+
+**When to Use:**
+Suitable for dynamic scene rendering where rigid body motion in spacetime is a key characteristic [S1, unofficial].
+
+## Background
+**Origin:**
+The method is listed among variants of Gaussian Splatting in a 2026 SOTA update cheat sheet [S1, unofficial]. It is distinguished from other dynamic methods like Spacetime Gaussians (STG) and GaussianFlow by its use of Clifford algebra and 4D rotors [S1, unofficial].
+
+**History and Development:**
+As of the source date (2026-10-27), it is considered a state-of-the-art variant for dynamic Gaussian Splatting [S1, unofficial].
+
+**Where it is used:**
+Used for dynamic scene rendering, particularly in contexts where rigid body motion in spacetime is relevant [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

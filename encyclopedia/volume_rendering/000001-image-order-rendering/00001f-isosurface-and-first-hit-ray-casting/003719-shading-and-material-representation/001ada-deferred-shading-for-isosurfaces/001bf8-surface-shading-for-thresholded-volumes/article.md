@@ -3,31 +3,31 @@
 Also called: Boundary normal estimation, Z-buffer shading
 
 ## Overview
-Surface shading for thresholded volumes is a post-processing technique that applies illumination models to isosurfaces extracted from scalar volume data by thresholding [S1, unofficial]. It solves the problem of visualizing the 3D shape and orientation of opaque boundaries within a volume without the computational cost of full ray-marching integration [S1, unofficial]. It distinguishes itself from direct volume rendering by applying shading only after the opaque volume is determined, and from deferred shading methods by often relying on immediate geometric estimates (z-buffer slopes or voxel gradients) rather than storing full surface attributes in intermediate buffers [S1, unofficial].
+Surface shading for thresholded volumes is a post-processing technique that applies illumination models to isosurfaces extracted from scalar volume data by thresholding [S1, unofficial]. It solves the problem of visualizing the 3D shape and orientation of opaque boundaries within a volume without the computational cost of full ray-marching integration [S1, unofficial]. It distinguishes itself from direct volume rendering by applying shading only after the opaque volume is determined [S1, unofficial].
 
 ## How it works
-The method operates on a volume dataset $V$ and a threshold value $T$. The output is a shaded 2D image where pixel intensity reflects the local surface orientation relative to a light source.
+The method operates on a volume dataset $V$ and a threshold value $T$ [S1, unofficial]. The output is a shaded 2D image where pixel intensity reflects the local surface orientation relative to a light source [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** Scalar volume $V(x,y,z)$, threshold $T$, light direction $\vec{l}$, ambient intensity $I_a$, diffuse intensity $I_d$.
-*   **Output:** Shaded image buffer.
+*   **Input:** Scalar volume $V(x,y,z)$, threshold $T$, light direction $\vec{l}$, ambient intensity $I_a$, diffuse intensity $I_d$ [S3][S4, unofficial].
+*   **Output:** Shaded image buffer [S1, unofficial].
 
 ### Data Structures
-1.  **Thresholded Volume:** A binary mask or boundary representation where $V(x,y,z) > T$ is considered opaque/surface.
-2.  **Gradient Field:** Optional, computed from $V$ for normal estimation.
-3.  **Z-Buffer:** Depth buffer containing the distance to the first hit surface for each pixel.
+1.  **Thresholded Volume:** A binary mask or boundary representation where $V(x,y,z) > T$ is considered opaque/surface [S1, unofficial].
+2.  **Gradient Field:** Optional, computed from $V$ for normal estimation [S1, unofficial].
+3.  **Z-Buffer:** Depth buffer containing the distance to the first hit surface for each pixel [S1, unofficial].
 
 ### Steps
 
 #### 1. Thresholding and Projection
-Determine the opaque volume boundary by comparing voxel values to $T$. Project the boundary onto the image plane. The z-buffer stores the depth $z$ of the first surface intersection for each pixel [S1, unofficial].
+Determine the opaque volume boundary by comparing voxel values to $T$ [S1, unofficial]. Project the boundary onto the image plane [S1, unofficial]. The z-buffer stores the depth $z$ of the first surface intersection for each pixel [S1, unofficial].
 
 #### 2. Normal Estimation
-Surface normals $\vec{n}$ are required for shading. Three methods are cited:
+Surface normals $\vec{n}$ are required for shading [S1, unofficial]. Three methods are cited:
 
 **Method A: Z-Buffer Slope Estimation**
 Estimate the normal from the projected surface geometry using neighboring z-buffer values [S1, unofficial].
-1.  Let $z_{i,j}$ be the depth at pixel $(i,j)$.
+1.  Let $z_{i,j}$ be the depth at pixel $(i,j)$ [S1, unofficial].
 2.  Compute partial derivatives:
     $$ \frac{\partial z}{\partial x} \approx z_{i+1,j} - z_{i-1,j} $$
     $$ \frac{\partial z}{\partial y} \approx z_{i,j+1} - z_{i,j-1} $$
@@ -36,7 +36,7 @@ Estimate the normal from the projected surface geometry using neighboring z-buff
 4.  Normalize $\vec{n}$ [S1, unofficial].
 
 **Method B: Boundary Geometry**
-Estimate normals based on the orientation of the cube face and its neighbors in the boundary of the opaque volume [S1, unofficial]. This requires traversing the voxel grid to identify surface voxels and their exposed faces.
+Estimate normals based on the orientation of the cube face and its neighbors in the boundary of the opaque volume [S1, unofficial]. This requires traversing the voxel grid to identify surface voxels and their exposed faces [S1, unofficial].
 
 **Method C: Volume Gradient**
 Compute the gradient of the scalar field $f(X)$ using finite differences at neighboring voxels [S1, unofficial].
@@ -50,68 +50,60 @@ $$ I = I_a + I_d (\vec{n} \cdot \vec{l}) $$
 where $\vec{l}$ is the normalized light direction vector [S3].
 
 **Depth-Based Shading (Simpler Variant)**
-If normals are not computed, shade pixels darker based on their z-buffer depth value $z$ [S1, unofficial]. This is less realistic but computationally cheaper.
+If normals are not computed, shade pixels darker based on their z-buffer depth value $z$ [S1, unofficial]. This is less realistic but computationally cheaper [S1, unofficial].
 
 ### Pseudocode (Gradient-Based Lambertian Shading)
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def surface_shading_thresholded_volume(volume: Array3D, threshold: float, light_dir: Vec3, ambient: float, diffuse: float) -> Array2D:
+def surface_shading_thresholded_volume(volume: list, threshold: float, light_dir: list, ambient: float, diffuse: float) -> list:
     """
     Renders a shaded isosurface from a thresholded volume using gradient-based normals.
+    volume: 3D list of scalars, shape (H, W, D)
+    light_dir: list of 3 floats [lx, ly, lz]
     """
-    height, width, depth = volume.shape
-    # Assume camera looks down -Z or similar; light_dir is in world/camera space
-    # For simplicity, assume we project the surface and compute normals in view space
+    H, W, D = len(volume), len(volume[0]), len(volume[0][0])
+    image = [[0.0, 0.0, 0.0] for _ in range(H * W)]
     
-    # 1. Identify surface voxels and their positions
-    # In a full implementation, this involves ray casting or marching to find the first hit
-    # For the purpose of this article's "How it works" based on S4, we assume we have
-    # the intersection point and can sample the gradient.
+    def clamp(val, max_val): return max(0, min(val, max_val))
+    def vec3_norm(v):
+        mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+        return [v[0]/mag, v[1]/mag, v[2]/mag] if mag > 0 else [0, 0, 0]
+    def vec3_dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
     
-    # Simplified: Iterate over pixels, find hit, compute normal, shade
-    image = zeros((height, width, 3))
-    
-    for y in range(height):
-        for x in range(width):
-            # Ray casting step to find intersection with thresholded surface
-            # This is implicit in the "thresholded opaque volume determination" [S1, unofficial]
-            hit_point, hit_normal = cast_ray_and_get_normal(volume, threshold, x, y)
+    for y in range(W):
+        for x in range(H):
+            # Simple ray march along Z to find first surface hit
+            hit = None
+            for z in range(D):
+                if volume[x][y][z] > threshold:
+                    hit = (x, y, z)
+                    break
+            if hit is None: continue
             
-            if hit_point is None:
-                continue # Background
+            px, py, pz = hit
+            h = 1.0
+            # Central difference gradient [S4, unofficial]
+            grad = [
+                (volume[clamp(px+1, H-1)][py][pz] - volume[clamp(px-1, H-1)][py][pz]) / (2.0*h),
+                (volume[px][clamp(py+1, W-1)][pz] - volume[px][clamp(py-1, W-1)][pz]) / (2.0*h),
+                (volume[px][py][clamp(pz+1, D-1)] - volume[px][py][clamp(pz-1, D-1)]) / (2.0*h)
+            ]
+            normal = vec3_norm(grad)
             
-            # 2. Compute Normal (if not already provided by ray caster)
-            # Using central differences as per S4
-            h = 1.0 # voxel step size
-            grad_x = (volume[clamp(hit_point.x + h), hit_point.y, hit_point.z] - 
-                      volume[clamp(hit_point.x - h), hit_point.y, hit_point.z])
-            grad_y = (volume[hit_point.x, clamp(hit_point.y + h), hit_point.z] - 
-                      volume[hit_point.x, clamp(hit_point.y - h), hit_point.z])
-            grad_z = (volume[hit_point.x, hit_point.y, clamp(hit_point.z + h)] - 
-                      volume[hit_point.x, hit_point.y, clamp(hit_point.z - h)])
-            
-            normal = normalize(Vec3(grad_x, grad_y, grad_z))
-            
-            # 3. Shading
-            # Lambertian diffuse
-            dot_product = max(dot(normal, light_dir), 0.0)
-            intensity = ambient + diffuse * dot_product
-            
-            # 4. Color mapping (simplified to monochrome or volume color)
-            # S3 mentions monochrome; S4 samples volume color
-            color = volume[hit_point.x, hit_point.y, hit_point.z] # Scalar to color mapping implied
-            
-            image[y, x] = color * intensity
+            # Lambertian shading [S3][S4, unofficial]
+            intensity = ambient + diffuse * max(vec3_dot(normal, light_dir), 0.0)
+            color_val = volume[px][py][pz]
+            image[pz * W + py] = [color_val * intensity, color_val * intensity, color_val * intensity]
             
     return image
 ```
 
 ### Parameters
-*   **Threshold:** Determines the isosurface.
-*   **Light Direction:** Vector $\vec{l}$.
-*   **Ambient/Diffuse Intensities:** $I_a, I_d$.
+*   **Threshold:** Determines the isosurface [S1, unofficial].
+*   **Light Direction:** Vector $\vec{l}$ [S3][S4, unofficial].
+*   **Ambient/Diffuse Intensities:** $I_a, I_d$ [S3][S4, unofficial].
 *   **Gradient Step $h$:** Typically 1 voxel for central differences [S4, unofficial].
 
 ### Edge Cases and Pitfalls
@@ -137,9 +129,9 @@ The IsosurfaceClassifier Lighting Model is a surface-shading technique for thres
 ### Proximity Shading
 A visualization technique that renders a surface proximity map by normalizing the logarithmic distance to the surface [S2, unofficial]. It visualizes precomputed surface distances using log normalization and gamma correction, identical in formula to Distance Shading but operating on a distance scalar field [S2, unofficial].
 **Steps:**
-1. Calculate the SDF value $f(p_i)$ at the intersection point.
-2. Compute $\log(f(p_i))$.
-3. Normalize this value to the range $[0, 1]$. Brighter pixels indicate rays that terminated further away from the surface [S2, unofficial].
+1. Calculate the SDF value $f(p_i)$ at the intersection point [S2, unofficial].
+2. Compute $\log(f(p_i))$ [S2, unofficial].
+3. Normalize this value to the range $[0, 1]$ [S2, unofficial]. Brighter pixels indicate rays that terminated further away from the surface [S2, unofficial].
 **Formula:**
 $$ P = \left( \frac{\log(d) - \min(\log)}{\max(\log) - \min(\log)} \right)^{1/2.33} $$
 where $d$ is surface distance, clamped to $[10^{-2}, \infty)$ before logging [S2, unofficial].
@@ -147,28 +139,29 @@ where $d$ is surface distance, clamped to $[10^{-2}, \infty)$ before logging [S2
 ### Shading for Isosurfaces (Single-Pass Multi-Stage)
 A single-pass rendering technique for shaded isosurfaces using multi-stage rasterization, eliminating the need for frame buffer copying and allowing colored ambient and diffuse light sources [S3].
 **Steps:**
-1. Map the interpolated gradient to the first constant color register (variable A in the final combiner's primary color context). Variable A is assigned to primary color ($I_d$) and multiplied with variable B mapped to the dot product [S3].
+1. Map the interpolated gradient to the first constant color register (variable A in the final combiner's primary color context) [S3]. Variable A is assigned to primary color ($I_d$) and multiplied with variable B mapped to the dot product [S3].
 2. Compute the dot product of the light vector and the gradient in the RGB-portion of the second general combiner [S3].
 3. Set variable C to zero and map variable D to secondary color ($I_a$) for the final combiner to compute the equation: $I_d \times (L \cdot N) + I_a$ [S3].
 **Pitfall:** It is not possible to write initial values to the two spare registers displayed in Fig. 2, limiting the ability to add a second diffuse light source without sacrificing trilinear interpolation or separate ambient/diffuse colors [S3].
 
-### Fast Shaded Isosurfaces
-An efficient algorithm to display shaded isosurfaces by exploiting rasterization hardware, evaluating local illumination equation. Restricted to single light source and monochrome display [S3].
+### [Fast Shaded Isosurfaces](2105-fast-shaded-isosurfaces.md)
+An efficient algorithm to display shaded isosurfaces by exploiting rasterization hardware, evaluating local illumination equation.
 **Steps:**
-1. Store voxel gradient vector components in RGB components of a 3D-texture. Store intensity values in the alpha-component. Render into frame buffer using OpenGL alpha-test to display specified isovalues [S3].
-2. Reinsert the frame buffer (containing voxel gradient in RGB) into the rasterization pipeline. Use OpenGL color matrix to compute dot-product with light vector. This is a two-pass technique [S3].
+1. Store voxel gradient vector components in RGB components of a 3D-texture. Store intensity values in the alpha-component. Render into frame buffer using OpenGL alpha-test to display specified isovalues.
+2. Reinsert the frame buffer (containing voxel gradient in RGB) into the rasterization pipeline. Use OpenGL color matrix to compute dot-product with light vector. This is a two-pass technique.
 **Formula:**
-Local illumination: $I = I_a + I_d \times (\tilde{n} \cdot \tilde{l})$, where $\tilde{l}$ is light direction, $\tilde{n}$ is isosurface normal (volume gradient), $I_a$ is ambient intensity, $I_d$ is diffuse intensity [S3].
+Local illumination: $I = I_a + I_d \times (\tilde{n} \cdot \tilde{l})$, where $\tilde{l}$ is light direction, $\tilde{n}$ is isosurface normal (volume gradient), $I_a$ is ambient intensity, $I_d$ is diffuse intensity.
+**Capabilities:** The technique supports colored ambient and diffuse light sources and can compute illumination for a second diffuse light source in parallel using the general combiner's second dot product capability. It also extends to semi-transparent volume rendering via alpha-blending.
 
 ### Isosurface Shading (VPT)
 A shading pass that computes lighting for the isosurface found in the previous pass, using gradient-based normals and Lambertian shading [S4, unofficial].
 **Steps:**
-1. Sample the closest position buffer: `vec4 closest = texture(uClosest, vPosition);`
+1. Sample the closest position buffer: `vec4 closest = texture(uClosest, vPosition);` [S4, unofficial].
 2. Compute gradient using central differences: `positive` samples at `pos + vec3(h,0,0)`, etc., `negative` samples at `pos - vec3(h,0,0)`, etc. Gradient is `(positive - negative) / (2.0 * h)` [S4, unofficial].
-3. Normalize gradient to get normal: `vec3 normal = normalize(gradient(pos, uGradientStep));`
-4. Compute Lambertian diffuse factor: `float lambert = max(dot(normal, uLight), 0.0);`
-5. Sample material color from transfer function using volume position: `vec3 material = sampleVolumeColor(pos).rgb;`
-6. Output final color: `oColor = vec4(material * lambert, 1);`
+3. Normalize gradient to get normal: `vec3 normal = normalize(gradient(pos, uGradientStep));` [S4, unofficial].
+4. Compute Lambertian diffuse factor: `float lambert = max(dot(normal, uLight), 0.0);` [S4, unofficial].
+5. Sample material color from transfer function using volume position: `vec3 material = sampleVolumeColor(pos).rgb;` [S4, unofficial].
+6. Output final color: `oColor = vec4(material * lambert, 1);` [S4, unofficial].
 **Parameters:**
 *   `uGradientStep`: The step size `h` used for finite difference gradient calculation [S4, unofficial].
 *   `uLight`: The light direction vector [S4, unofficial].
@@ -178,7 +171,7 @@ A shading pass that computes lighting for the isosurface found in the previous p
 *   **Time Complexity:** Depends on the normal estimation method. Z-buffer slope is $O(1)$ per pixel. Gradient estimation requires sampling neighbors, $O(1)$ but with higher constant factor. Ray casting to find the hit is $O(N)$ where $N$ is steps along the ray, but often optimized with acceleration structures.
 *   **Memory Complexity:** Low for Z-buffer shading (only depth buffer). Higher for gradient-based methods if gradients are precomputed and stored. Deferred shading variants require additional buffers for normals/positions.
 *   **Strengths:** Fast, interactive frame rates possible, especially with hardware acceleration (e.g., OpenGL color matrix for dot products) [S3]. Simple to implement.
-*   **Limitations:** Limited to opaque surfaces (thresholded). Cannot handle semi-transparent volumes directly without modification [S3]. Z-buffer normals are approximations and may be inaccurate for steep surfaces. Gradient normals can be noisy. Restricted to single light source in some hardware implementations [S3].
+*   **Limitations:** Limited to opaque surfaces (thresholded). Z-buffer normals are approximations and may be inaccurate for steep surfaces. Gradient normals can be noisy. Restricted to single light source in some hardware implementations [S3].
 *   **When to use:** When visualizing the shape of internal structures in medical or scientific data where performance is critical and semi-transparency is not required.
 *   **When not to use:** For semi-transparent volumes, or when high-fidelity lighting (specular highlights, shadows) is required beyond Lambertian diffuse.
 

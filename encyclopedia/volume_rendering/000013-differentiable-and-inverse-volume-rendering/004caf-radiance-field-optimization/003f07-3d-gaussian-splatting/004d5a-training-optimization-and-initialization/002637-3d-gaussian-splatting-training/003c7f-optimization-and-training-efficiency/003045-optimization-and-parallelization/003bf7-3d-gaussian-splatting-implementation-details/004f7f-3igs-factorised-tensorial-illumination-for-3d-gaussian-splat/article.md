@@ -1,0 +1,134 @@
+# 3iGS (Factorised Tensorial Illumination for 3D Gaussian Splatting)
+
+## Overview
+3iGS enhances 3D Gaussian Splatting by decoupling scene illumination from material properties, enabling realistic view-dependent specular effects without decomposing into intrinsic material properties [S1]. Unlike sibling methods that rely on global environment maps or independent spherical harmonics for shading, 3iGS represents incident illumination locally using a learnable factorised tensor grid and optimizes Gaussian BRDF features relative to this field [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D Gaussian primitives (positions, covariances, opacity), camera parameters, and training images.
+*   **Outputs:** Rendered images and optimized scene representation (Gaussians + Illumination Grid).
+
+**Data Structures:**
+1.  **3D Gaussians:** Each Gaussian $i$ stores:
+    *   Mean position $\mathbf{x}_i$.
+    *   Opacity $\alpha_i$.
+    *   Anisotropic covariance (3x3 matrix or quaternion/scale).
+    *   **BRDF Features $\rho_i$:** Repurposed from standard 3DGS SH coefficients. Specifically, the 16x3 SH coefficients are used as BRDF feature channels [S1]. Additionally, 4 parameters are added for base colour and roughness to support Integrated Directional Encoding (IDE) [S1].
+2.  **Illumination Grid $\mathcal{G}_l$:** A continuous grid representation of incoming illumination $L_i$ at any coordinate $\mathbf{x}_i$. It uses vector-matrix spatial factorisation [S1].
+    *   **Resolution:** Coarse resolution of $150^3$ voxels [S1].
+    *   **Structure:** Defined by feature channels $R_L$, feature tensors $\mathbf{A}_{L,r}^X, \mathbf{A}_{L,r}^Y, \mathbf{A}_{L,r}^Z$, and feature vectors $\mathbf{b}_{3r-2}, \mathbf{b}_{3r-1}, \mathbf{b}_{3r}$ for $r=1 \dots R_L$ [S1].
+    *   **Boundary:** Initially encapsulates the scene bounding box. Midway through training, the boundary is shrunk to fit the Gaussians, and the grid is resampled with the same number of voxels [S1].
+
+**Formulas:**
+The outgoing radiance $\mathbf{c}(\omega_o)$ for a viewing direction $\omega_o$ is the sum of diffuse color $\mathbf{c_d}$ and specular color $\mathbf{c_s}(\omega_o)$ [S1]:
+$$ \mathbf{c}(\omega_o) = \mathbf{c_d} + \mathbf{c_s}(\omega_o) $$
+
+The specular color is computed by a neural network $\mathcal{F}$ [S1]:
+$$ \mathcal{F} : \{ \rho_i, L_i, \omega_o \} \mapsto \mathbf{c_s} $$
+Where:
+*   $\rho_i$ are the Gaussian BRDF features.
+*   $L_i$ is the incoming illumination interpolated from the grid $\mathcal{G}_l$ at $\mathbf{x}_i$.
+*   $\omega_o$ is the viewing direction, encoded using Integrated Directional Encoding (IDE) [S1].
+
+The illumination grid $\mathcal{G}_l$ is formulated as [S1]:
+$$ \mathcal{G}_l = \sum_{r=1}^{R_L} \mathbf{A}_{L,r}^X \circ \mathbf{b}_{3r-2} + \mathbf{A}_{L,r}^Y \circ \mathbf{b}_{3r-1} + \mathbf{A}_{L,r}^Z \circ \mathbf{b}_{3r} $$
+Where $\circ$ denotes the outer product or appropriate tensor contraction as defined in TensoRF [S1].
+
+**Parameters:**
+*   Loss weight $\lambda$: 0.2 [S1].
+*   Training iterations: 30,000 steps [S1].
+*   Illumination grid resolution: $150^3$ voxels [S1].
+
+**Numbered Steps:**
+1.  **Initialize:** Set up 3D Gaussians and the illumination grid $\mathcal{G}_l$ with a boundary enclosing the scene bounding box.
+2.  **Query Illumination:** For each Gaussian $i$ at mean $\mathbf{x}_i$, query the incoming illumination $L_i$ by interpolating from the factorised tensor grid $\mathcal{G}_l$ [S1].
+3.  **Compute Specular:** Map the Gaussian BRDF features $\rho_i$, the queried illumination $L_i$, and the viewing direction $\omega_o$ (encoded via IDE) through the neural network $\mathcal{F}$ to obtain the specular color $\mathbf{c_s}$ [S1].
+4.  **Compute Radiance:** Add the diffuse color $\mathbf{c_d}$ to the specular color $\mathbf{c_s}$ to get the final outgoing radiance $\mathbf{c}(\omega_o)$ [S1].
+5.  **Render:** Rasterize the scene using the standard 3DGS rasterisation pipeline [S1].
+6.  **Optimize:**
+    *   **Phase 1 (Iterations 0–3,000):** Train the model using only the diffuse colour $\mathbf{c_d}$ [S1].
+    *   **Phase 2 (Iterations 3,001–30,000):** Add specular colours $\mathbf{c_s}$ to the Gaussians [S1].
+    *   **Mid-Training Adjustment:** Midway through training, shrink the illumination grid boundary to fit the Gaussians and resample the grid with the same number of voxels [S1].
+    *   **Loss:** Minimize $\mathcal{L} = (1 - \lambda)\mathcal{L}_1 + \lambda \mathcal{L}_{\text{D-SSIM}}$ with $\lambda = 0.2$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_radiance(gaussian, camera, illumination_grid):
+    """
+    Computes the outgoing radiance for a single Gaussian.
+    gaussian: object with attributes .x (mean pos), .rho (BRDF features), .cd (diffuse color)
+    camera: object with attribute .view_dir (viewing direction)
+    illumination_grid: object with method .query(x) returning L_i
+    """
+    # 1. Query incoming illumination from the factorised tensor grid
+    L_i = illumination_grid.query(gaussian.x)
+    
+    # 2. Encode viewing direction using Integrated Directional Encoding (IDE)
+    # Note: IDE encoding details are assumed to be implemented in the IDE module
+    omega_o_encoded = ide_encode(camera.view_dir)
+    
+    # 3. Compute specular color using the neural network F
+    # F takes BRDF features, illumination, and encoded view direction
+    c_s = neural_network_F(gaussian.rho, L_i, omega_o_encoded)
+    
+    # 4. Combine diffuse and specular
+    c_out = gaussian.cd + c_s
+    
+    return c_out
+
+def train_3igs(gaussians, images, illumination_grid, num_iterations=30000):
+    """
+    Training loop for 3iGS.
+    """
+    # Initial boundary setup
+    scene_bbox = get_scene_bbox(gaussians)
+    illumination_grid.set_boundary(scene_bbox)
+    
+    for step in range(num_iterations):
+        # Mid-training grid adjustment
+        if step == num_iterations // 2:
+            # Shrink boundary to fit Gaussians and resample
+            gaussian_extent = get_gaussian_extent(gaussians)
+            illumination_grid.shrink_boundary(gaussian_extent)
+            illumination_grid.resample_same_voxel_count()
+            
+        # Phase 1: Diffuse only for first 3000 iterations
+        if step < 3000:
+            # Render using only diffuse color
+            rendered_image = render_diffuse_only(gaussians, camera)
+        else:
+            # Phase 2: Full shading with specular
+            rendered_image = render_full_shading(gaussians, camera, illumination_grid)
+            
+        # Compute loss
+        # L = (1 - lambda) * L1 + lambda * L_D-SSIM
+        loss = compute_loss(rendered_image, ground_truth_image, lambda_param=0.2)
+        
+        # Backpropagate and update
+        loss.backward()
+        optimizer.step()
+        
+        # Update Gaussians using adaptive control (as in 3DGS)
+        update_gaussians_adaptive(gaussians)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Grid Boundary:** If the grid boundary is not shrunk midway through training, it may cover empty space, wasting memory and potentially reducing accuracy if the resolution is fixed [S1].
+*   **Training Stability:** Training specular effects from the start can be unstable; the two-phase approach (diffuse first, then specular) is critical for stability [S1].
+*   **Memory:** While the grid is coarse ($150^3$), the number of Gaussians is often an order of magnitude higher, so the grid memory is relatively low (87.5% less voxels than TensoRF on synthetic datasets) [S1].
+
+## Operating characteristics
+*   **Memory Efficiency:** The illumination field uses 87.5% less voxels compared to TensoRF on synthetic datasets [S1].
+*   **Performance:** On the Shiny Blender dataset, 3iGS achieves an average PSNR of 27.51, SSIM of 0.930, and LPIPS of 0.045 [S1].
+*   **Strengths:** Produces clearer view-dependent effects than standard 3DGS; maintains fast rendering speed due to the coarse, factorised tensor grid [S1].
+*   **Limitations:** Relies on a neural network for shading, which adds some computational overhead compared to pure analytical shading, though it is still faster than ray tracing [S1].
+*   **When to use:** When realistic specular highlights and view-dependent effects are required in 3D Gaussian Splatting, especially for scenes with complex lighting interactions [S1].
+*   **When not to use:** If memory is extremely constrained and specular effects are not needed, standard 3DGS may be sufficient.
+
+## Background
+3iGS was introduced to address the limitation of standard 3D Gaussian Splatting, which models outgoing radiance directly without considering the interdependencies of shared scene illumination [S1]. It differs from GaussianShader, which uses global differentiable environment lights stored in cube maps and independent Gaussians with spherical harmonic-based color [S1]. 3iGS represents incident illumination locally with grid-based tensors and optimizes Gaussian BRDF features relative to this field [S1]. The method is inspired by conventional computer graphics engines that use baking techniques for fast rendering [S1].
+
+## Sources
+[S1] 3iGS: Factorised Tensorial Illumination for 3D Gaussian Splatting, https://core.ac.uk/works/391741134, fetched 2026-10-29

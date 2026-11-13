@@ -3,20 +3,20 @@
 Also called: Cloud Density Field Generation, Density Sampling and Weather
 
 ## Overview
-Procedural Volume Cloud Modeling generates the volumetric density field of clouds by evaluating mathematical noise functions and physical parameters at arbitrary points in space, rather than sampling pre-baked 3D textures [S2, unofficial]. It solves the problem of creating spatially coherent, physically plausible cloud layers with infinite resolution and dynamic control over morphology, coverage, and erosion [S1, unofficial]. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by focusing on the *generation* of the density scalar field itself, whereas raymarching focuses on the *integration* of light through that field. It differs from [Cloud Density Sampling](4806-cloud-density-sampling.md) by explicitly integrating wind skew, time-based movement, and specific channel-weighted Fractal Brownian Motion (FBM) calculations directly into the density evaluation step, rather than treating them as separate post-processing or sampling stages [S1, unofficial].
+Procedural Volume Cloud Modeling generates the volumetric density field of clouds by evaluating mathematical noise functions and physical parameters at arbitrary points in space, rather than sampling pre-baked 3D textures [S2, unofficial]. It solves the problem of constructing spatially coherent cloud layers with dynamic control over morphology, coverage, and erosion [S2, unofficial]. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by focusing on the generation of the density scalar field itself, whereas raymarching focuses on the integration of light through that field [G]. It differs from [Cloud Density Sampling](4806-cloud-density-sampling.md) by explicitly integrating wind skew, time-based movement, and specific channel-weighted Fractal Brownian Motion (FBM) calculations directly into the density evaluation step [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:** World-space position $P$, time $t$, wind velocity vector $\vec{W}$, and a configuration structure containing global physical parameters (see Parent: [Weather & Cloud Parameterization](3617-weather-cloud-parameterization.md)).
-*   **Outputs:** A scalar density value $\rho \in [0, 1]$ and optionally a color/opacity mask.
+*   **Outputs:** A scalar density value $\rho \in [0, 1]$.
 
 **Data Structures:**
-1.  **Cloud Map:** A 2D texture (typically 4 channels RGBA) storing spatial attributes [S2, unofficial]:
+1.  **Cloud Map:** A 2D texture (4 channels RGBA) storing spatial attributes [S2, unofficial]:
     *   R: Cloud Coverage
     *   G: Cloud Type
     *   B: Cloud Erosion
     *   A: Cloud Wetness
-2.  **Cloud Lut:** A 1D or 2D texture defining the distribution of cloud types and heights [S2, unofficial]:
+2.  **Cloud Lut:** A texture defining the distribution of cloud types and heights [S2, unofficial]:
     *   R: Density
     *   G: Erosion
     *   B: Ambient Occlusion
@@ -25,30 +25,27 @@ Procedural Volume Cloud Modeling generates the volumetric density field of cloud
     *   **Detail Noise:** Fractal Perlin noise (Tileable) [S2, unofficial].
 
 **Numbered Steps:**
-1.  **Height Gradient Attenuation:** Calculate the vertical position relative to the cloud layer bounds (`baseHeight` and `thickness`). Apply a vertical remap function to enforce flat cloud bases and rounded tops. This attenuates the base density $\rho_{base}$ based on altitude $z$ [S1, unofficial].
-2.  **Weather Map Sampling:** Sample the 2D Cloud Map at the horizontal projection of $P$. Retrieve `coverage`, `cloudType`, and `erosion` values. Map `cloudType` to specific layer behaviors: $0.0-0.125$ (Cirrus), $0.125-0.25$ (Cirrus+Cumulus), $0.25-0.5$ (Cumulus), $0.5-1.0$ (Cumulonimbus) [S2, unofficial].
-3.  **Base Noise Sampling:** Evaluate the primary Shape Noise (Perlin-Worley) at low frequency coordinates. The coordinates are tiled across kilometers to ensure large-scale coherence. Apply the `coverage` threshold from the Cloud Map to determine if the point is inside the cloud body [S1, unofficial].
-4.  **Erosion and Detail:** Evaluate the secondary Detail Noise (Perlin) at a higher frequency. Sample the wind vector $\vec{W}$ and time $t$ to advect the noise coordinates. Use the `erosion` value (from Cloud Map or Cloud Lut G channel) to erode the edges of the base shape. For Cumulonimbus types, adjust coverage and erosion based on height: high altitude has low coverage and high erosion; low altitude has high coverage and low erosion [S1, S2, unofficial].
+1.  **Height Gradient Attenuation:** Attenuate the density using vertical remap functions to enforce flat cloud bases and rounded tops [S1, unofficial].
+2.  **Weather Map Sampling:** Sample a 2D weather texture containing coverage, precipitation, and cloud-type attributes [S1, unofficial]. Map `cloudType` to specific layer behaviors: $0.0-0.125$ (Cirrus), $0.125-0.25$ (Cirrus+Cumulus), $0.25-0.5$ (Cumulus), $0.5-1.0$ (Cumulonimbus) [S2, unofficial].
+3.  **Base Noise Sampling:** Sample the primary 3D Perlin-Worley texture using low coordinates (tiling across kilometers) [S1, unofficial].
+4.  **Erosion and Detail:** Sample the secondary Worley noise texture, scaled up by frequency, to erode the edges of the base shape based on wind vectors and time [S1, unofficial]. For Cumulonimbus types, adjust coverage and erosion based on height: high altitude has low coverage and high erosion; low altitude has high coverage and low erosion [S2, unofficial].
 5.  **Final Density Composition:** Combine the attenuated base density, weather coverage, and erosion results. The Cloud Lut G channel (Erosion) affects both detail noise and shape noise calculations [S2, unofficial].
 
 **Formulas:**
 *   **Height Gradient:**
     $$ \rho_{height} = \text{Remap}(z, \text{baseHeight}, \text{baseHeight} + \text{thickness}) $$
-    Where $\text{Remap}$ typically uses a smoothstep or sigmoid function to flatten the base and round the top [S1, unofficial].
-*   **Wind Advection:**
-    $$ P_{advected} = P_{horizontal} + \vec{W} \cdot t $$
-    This offset is applied to the noise sampling coordinates [S1, unofficial].
+    Where $\text{Remap}$ applies a vertical remap function to enforce flat cloud bases and rounded tops [S1, unofficial].
 *   **Liquid Water Mixing Ratio (Physical Model Variant):**
     $$ q_l = \max(q - q_s, 0) $$
     Where $q$ is total water mixing ratio and $q_s$ is saturation mixing ratio [S3, unofficial].
 
 **Parameters:**
-*   `cloudType`: Float $[0, 1]$. $0.0$ = Stratus, $1.0$ = Cumulonimbus [S1, unofficial].
-*   `baseHeight`: Default 1500.0 meters [S1, unofficial].
-*   `thickness`: Default 2500.0 meters [S1, unofficial].
-*   `windX`, `windZ`: Horizontal wind velocity components [S1, unofficial].
-*   `coverage`: Float $[0, 1]$. Shifts the weather map's coverage threshold [S1, unofficial].
-*   `erosion`: Default 0.45. Controls detail noise erosion strength [S1, unofficial].
+*   `cloudType`: Float $[0, 1]$ that interpolates between cloud behaviors [S1, unofficial].
+*   `baseHeight`: Vertical altitude of the cloud layer base [S1, unofficial].
+*   `thickness`: Vertical extent of the layer [S1, unofficial].
+*   `windX`, `windZ`: Horizontal wind velocity components used for advection of noise textures over time [S1, unofficial].
+*   `coverage`: Float $[0, 1]$ that shifts the weather map's coverage threshold [S1, unofficial].
+*   `erosion`: Controls how much detail noise erodes cloud edges [S1, unofficial].
 *   `resolution`: Must be exactly 64, 128, or 256 if generating pre-baked textures [S2, unofficial].
 *   `shape_strength`, `detail_strength`, `disturbance_strength`: Must be within $[0.0, 2.0]$ [S2, unofficial].
 
@@ -62,62 +59,79 @@ Procedural Volume Cloud Modeling generates the volumetric density field of cloud
 
 ```python
 def SampleCloudDensity(world_pos, time, wind, config):
-    # 1. Height Gradient
+    # 1. Height Gradient Attenuation
     z = world_pos.y
-    height_factor = RemapHeight(z, config.baseHeight, config.thickness)
-    
-    # 2. Weather Map Sampling (Horizontal Projection)
+    height_ratio = clamp((z - config.baseHeight) / config.thickness, 0.0, 1.0)
+    # Vertical remap function to enforce flat cloud bases and rounded tops [S1, unofficial]
+    height_factor = height_ratio * height_ratio * (3.0 - 2.0 * height_ratio)
+
+    # 2. Weather Map Sampling
     uv = world_pos.xz / config.scale
+    # Sample 2D Cloud Map: R=Coverage, G=Cloud Type, B=Erosion, A=Wetness [S2, unofficial]
     weather = SampleCloudMap(uv)
     coverage = weather.r
     cloud_type = weather.g
     erosion = weather.b
-    
-    # Map cloud type to layer behavior
+
+    # Map cloud type to layer behavior [S2, unofficial]
     if cloud_type < 0.125:
-        layer = CIRRUS
+        layer_type = "CIRRUS"
     elif cloud_type < 0.25:
-        layer = CIRRUS_CUMULUS
+        layer_type = "CIRRUS_CUMULUS"
     elif cloud_type < 0.5:
-        layer = CUMULUS
+        layer_type = "CUMULUS"
     else:
-        layer = CUMULONIMBUS
-        
+        layer_type = "CUMULONIMBUS"
+
     # 3. Base Noise Sampling
-    # Low frequency, tiled coordinates
+    # Primary 3D Perlin-Worley texture using low coordinates (tiling across kilometers) [S1, unofficial]
     base_noise_pos = world_pos.xz * config.noise_scale_low
-    base_noise = FractalPerlinWorley(base_noise_pos)
-    
+    base_noise = EvaluateFractalPerlinWorley(base_noise_pos)
+
     # Apply coverage threshold
-    density = step(1.0 - coverage, base_noise)
-    
+    density = 1.0 if base_noise >= (1.0 - coverage) else 0.0
+
     # 4. Erosion and Detail
-    # Advect noise coordinates by wind
+    # Secondary Worley noise texture, scaled up by frequency, eroding edges based on wind vectors and time [S1, unofficial]
     advected_pos = world_pos.xz + wind.xz * time
     detail_noise_pos = advected_pos * config.noise_scale_high
-    
-    # High frequency Perlin noise for detail
-    detail_noise = FractalPerlin(detail_noise_pos)
-    
+    detail_noise = EvaluateFractalPerlin(detail_noise_pos)
+
     # Apply erosion
-    # Note: Cloud Lut G channel erosion also affects shape noise [S2, unofficial]
+    # Cloud Lut G channel (Erosion) affects both detail noise and shape noise calculations [S2, unofficial]
     erosion_factor = 1.0 - erosion
     density *= (1.0 - erosion_factor * detail_noise)
-    
-    # Cumulonimbus specific height-based adjustment
-    if layer == CUMULONIMBUS:
+
+    # Cumulonimbus specific height-based adjustment [S2, unofficial]
+    if layer_type == "CUMULONIMBUS":
         height_ratio = (z - config.baseHeight) / config.thickness
-        # High altitude: low coverage, high erosion
-        # Low altitude: high coverage, low erosion
+        # High altitude: low coverage, high erosion; Low altitude: high coverage, low erosion
         height_coverage = 1.0 - height_ratio
         height_erosion = height_ratio
         density *= height_coverage
         density *= (1.0 - height_erosion * detail_noise)
-        
+
     # 5. Final Composition
     final_density = density * height_factor * config.density_multiplier
-    
     return final_density
+
+def SampleCloudMap(uv):
+    # Samples the 2D Cloud Map texture. Returns RGBA values.
+    # Not given in the sources. Standard texture sampling assumed.
+    return {"r": uv.r, "g": uv.g, "b": uv.b, "a": uv.a}
+
+def EvaluateFractalPerlinWorley(pos):
+    # Evaluates fractal Perlin-Worley noise for shape generation.
+    # Not given in the sources. Standard FBM evaluation assumed.
+    return noise_function(pos)
+
+def EvaluateFractalPerlin(pos):
+    # Evaluates fractal Perlin noise for detail erosion.
+    # Not given in the sources. Standard FBM evaluation assumed.
+    return noise_function(pos)
+
+def clamp(x, min_val, max_val):
+    return max(min_val, min(max_val, x))
 ```
 
 ## Subtopics
@@ -129,16 +143,16 @@ This configuration defines the specific procedural noise parameters used to gene
 IsimCloudTexture density evaluation computes the volumetric density of a cloud at a given point in space by combining geometric primitives (text segments or implicit cloud bodies), fractal Brownian motion (FBM) noise, and depth-based fading. It differs from general procedural gas modeling by focusing on specific cloud structures (text-based or layered bodies) and from simple cloud density sampling by generating the density field procedurally via CUDA kernels rather than sampling pre-baked data. The method outputs a grayscale density value (replicated to RGB) suitable for volume rendering.
 
 ### [Procedural Gas Modeling via Turbulence](3551-procedural-gas-modeling-via-turbulence.md)
-Procedural Gas Modeling via Turbulence is a method for generating volumetric gas density by evaluating a turbulence function and mapping the result through a precomputed power table. It solves the problem of efficiently computing realistic gas density fields for volume rendering by replacing expensive per-sample power function calls with a lookup table. Unlike sibling methods that may rely on 3D textures or distance fields, this approach computes density analytically at any point in space using mathematical shaping functions.
+Procedural Gas Modeling via Turbulence generates volumetric gas density by evaluating a turbulence function and mapping the result through a precomputed power table. It solves the problem of efficiently computing realistic gas density fields for volume rendering by replacing expensive per-sample power function calls with a lookup table.
 
 ### [Cloud Density Sampling](4806-cloud-density-sampling.md)
-Cloud Density Sampling generates the base volumetric density of clouds by combining low-frequency 3D noise textures using a weighted sum (Fractal Brownian Motion, FBM) and remapping the result to control cloud shape and coverage. It solves the problem of creating spatially coherent, physically plausible cloud layers by explicitly separating vertical stratification (via height gradients) from horizontal structure (via noise and coverage masks). It differs from generic noise-based volume generation by integrating wind skew, time-based movement, and specific channel-weighted FBM calculations directly into the density evaluation step.
+Cloud Density Sampling generates the base volumetric density of clouds by combining low-frequency 3D noise textures using a weighted sum (Fractal Brownian Motion, FBM) and remapping the result to control cloud shape and coverage. It samples cloud density using low-frequency and high-frequency noise textures, applying height gradients, wind skew, and coverage masking. It differs from generic noise-based volume generation by integrating wind skew, time-based movement, and specific channel-weighted FBM calculations directly into the density evaluation step.
 
 ### [Finite Layer Cloud Shape Generation](8292-finite-layer-cloud-shape-generation.md)
-Finite Layer Cloud Shape Generation is a procedural method for constructing the 3D volume shapes of layer cloud types (Cirrus, Altostratus, Nimbostratus, Stratocumulus, Stratus) by assembling a chain of connected 3D ellipsoidal lobes. It solves the problem of generating realistic, non-cylindrical cloud boundaries by ensuring vertical presence variation and horizontal tapering, avoiding the artifact of simply extruding a 2D contour into a column. It differs from its siblings by focusing on horizontal layering and lobe chaining for flat cloud structures, whereas [Cumulonimbus and Cumulus Shape Generation](8296-cumulonimbus-and-cumulus-shape-generation.md) uses distinct lobe strategies for vertical development and irregular tops.
+Finite Layer Cloud Shape Generation is a procedural method for constructing the 3D volume shapes of stratiform cloud types (Cirrus, Altostratus, Nimbostratus, Stratocumulus, Stratus) by assembling a chain of connected 3D ellipsoidal lobes. It solves the problem of generating natural-looking cloud edges without degenerating into a simple extruded cylinder along the vertical Z-axis, which is a common artifact when using simple 2D contour extrusion. It differs from its sibling [Cumulonimbus and Cumulus Shape Generation](8296-cumulonimbus-and-cumulus-shape-generation.md), which uses hierarchical particle-based turbulence for convective shapes, by relying on deterministic geometric lobes with controlled vertical presence variation.
 
 ### Physical Cloud Model (Cumulus Convection)
-This variant models cumulus clouds using physical equations of convection rather than pure noise.
+This variant models cumulus clouds using physical equations of convection rather than pure noise [S3, unofficial].
 **Steps:**
 1. Apply a constant heat source at the base of the model, representing sunlight heating the earth [S3, unofficial].
 2. Evaporation occurs until air is saturated or all liquid water is evaporated [S3, unofficial].
@@ -154,14 +168,14 @@ This variant models cumulus clouds using physical equations of convection rather
 *   Coriolis effects are ignored for computational efficiency [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample, as it involves evaluating noise functions and simple arithmetic. However, noise evaluation itself is $O(n)$ where $n$ is the number of octaves in the FBM.
-*   **Memory Complexity:** $O(1)$ if using analytic noise, or $O(T)$ if sampling pre-generated 2D/3D noise textures, where $T$ is the texture size.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** Real-time on PC/Console hardware using 3D textures and shader-based evaluation [S2, unofficial].
-*   **Scaling:** Scales well with resolution as it is procedural; no need to regenerate textures for higher resolutions.
-*   **Strengths:** Infinite resolution, dynamic control over cloud type and coverage, low memory footprint compared to 3D textures.
-*   **Limitations:** Computationally expensive noise evaluation can be a bottleneck; requires careful tuning of noise parameters to avoid artifacts.
-*   **When to use:** Real-time rendering where dynamic cloud behavior and infinite resolution are required.
-*   **When not to use:** When pre-baked lighting or static cloud shapes are sufficient and performance is critical.
+*   **Scaling:** Scales well with resolution as it is procedural [S2, unofficial].
+*   **Strengths:** Dynamic control over cloud type and coverage [S1, unofficial].
+*   **Limitations:** Computationally expensive noise evaluation can be a bottleneck [S2, unofficial].
+*   **When to use:** Real-time rendering where dynamic cloud behavior is required [S2, unofficial].
+*   **When not to use:** When pre-baked lighting or static cloud shapes are sufficient [S2, unofficial].
 
 ## Background
 Procedural volume cloud modeling originated from the need to create realistic, dynamic clouds in real-time graphics. Early methods relied on 3D textures, but procedural noise-based approaches became popular with the advent of more powerful GPUs and shader languages. Unity HDRP 12.0 introduced a widely adopted procedural cloud modeling technique using Perlin-Worley noise [S2, unofficial]. The physical cloud model variant traces back to SIGGRAPH '84, which used a convective model to simulate cumulus clouds [S3, unofficial].

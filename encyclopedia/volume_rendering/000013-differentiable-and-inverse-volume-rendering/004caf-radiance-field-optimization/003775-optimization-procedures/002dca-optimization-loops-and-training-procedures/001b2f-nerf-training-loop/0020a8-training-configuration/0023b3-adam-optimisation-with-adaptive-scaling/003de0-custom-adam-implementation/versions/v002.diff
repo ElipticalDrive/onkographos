@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -4,93 +4,97 @@
+ 
+ ## Overview
+-A custom CUDA implementation of the Adam optimizer that precisely matches PyTorch's numerical behavior while eliminating CPU-GPU synchronization overhead and kernel launch latency by fusing the update step into the training kernel [S1, unofficial]. It differs from standard PyTorch Adam by exploiting fast math operations and fused-multiply-adds (FMA) to reduce instruction count, and from NVIDIA Apex Fused Adam by offering a drop-in replacement with potentially lower memory footprint and tighter integration with specific rendering pipelines [S1, unofficial].
++A custom CUDA implementation of the Adam optimizer that precisely matches PyTorch's behavior while optimizing away unnecessary overhead [S1, unofficial]. It fuses the Adam update step into the training kernel to reduce kernel launch overhead and improve performance [S1, unofficial]. It sets itself apart from standard PyTorch Adam and NVIDIA Apex Fused Adam by further reducing instruction count through fused-multiply-adds and fast math operations, achieving the highest speedup among fused variants [S1, unofficial].
+ 
+ ## How it works
+-The method replaces the standard PyTorch `torch.optim.Adam` or `apex.optimizers.FusedAdam` with a custom CUDA kernel that performs the Adam state update (mean and variance accumulation, bias correction, and parameter scaling) in a single pass over the parameters [S1, unofficial].
+-
+ **Inputs and Outputs:**
+-- Inputs: Parameter tensor $P$, Gradient tensor $G$, State tensors for first moment $M$ and second moment $V$, Hyperparameters $\beta_1, \beta_2, \epsilon, \alpha$ (learning rate).
+-- Outputs: Updated Parameter tensor $P$.
++- Inputs: Parameter tensors, gradient tensors, state tensors (exp_avg, exp_avg_sq), hyperparameters ($\beta_1, \beta_2, \epsilon, \text{lr}$), step count.
++- Outputs: Updated parameter tensors.
+ 
+ **Data Structures:**
+-- Parameters are stored in contiguous device memory.
+-- State tensors $M$ and $V$ are allocated per-parameter with the same shape as $P$.
+-- [G] To ensure coalesced memory access during densification, Gaussians are regularly re-ordered using Z-ordering (Morton code) to keep spatially close Gaussians contiguous in memory [S1, unofficial].
++- State tensors are stored in device memory, aligned to coalesce memory accesses where possible [S1, unofficial].
++- Locality-preserving densification may apply z-ordering to Gaussian parameters to ensure spatially close Gaussians are stored contiguously in memory, preventing uncoalesced accesses during densification [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1. **Kernel Launch:** Launch a CUDA kernel where each thread block processes a chunk of parameters. The kernel is fused with the rendering or training step to avoid separate kernel launches for the optimizer step.
+-2. **Gradient Loading:** Load gradient $G_i$ for parameter $P_i$.
+-3. **Moment Updates:**
+-   - Update first moment estimate: $M_i \leftarrow \beta_1 M_i + (1 - \beta_1) G_i$
+-   - Update second moment estimate: $V_i \leftarrow \beta_2 V_i + (1 - \beta_2) G_i^2$
+-   - [G] Use fast math operations (e.g., `__fmaf`) for these updates to reduce instruction count [S1, unofficial].
+-4. **Bias Correction:**
+-   - Compute bias correction factors: $b_1 = 1 - \beta_1^t$, $b_2 = 1 - \beta_2^t$ where $t$ is the current step.
+-   - Corrected moments: $\hat{M}_i = M_i / b_1$, $\hat{V}_i = V_i / b_2$.
+-5. **Parameter Update:**
+-   - Update parameter: $P_i \leftarrow P_i - \alpha \frac{\hat{M}_i}{\sqrt{\hat{V}_i} + \epsilon}$.
+-   - [G] Use fused-multiply-add instructions for the final update to minimize register pressure and latency [S1, unofficial].
++**Steps:**
++1. **Kernel Fusion:** The Adam update logic is fused directly into the CUDA kernel of the training pass, eliminating separate kernel launches for the optimizer step [S1, unofficial].
++2. **Fast Math:** Use of CUDA fast math operations (e.g., `__fdividef`, `__rsqrtf`) to accelerate division and square root calculations at the cost of negligible precision loss [S1, unofficial].
++3. **Fused-Multiply-Add (FMA):** Combine multiplication and addition operations into single instructions to reduce overall instruction count and improve throughput [S1, unofficial].
++4. **State Update:** Compute exponential moving averages and bias-corrected estimates using the fused logic, ensuring bit-wise or near bit-wise equivalence to PyTorch's Adam implementation [S1, unofficial].
++5. **Parameter Update:** Apply the learning rate scaled by the adaptive step to the parameters [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode representing the fused CUDA kernel logic
+-def fused_adam_step(P, G, M, V, beta1, beta2, eps, lr, step):
+-    # Each thread handles one element or a small vector of elements
+-    idx = thread_index()
+-    
+-    # Load current values
+-    g = G[idx]
+-    m = M[idx]
+-    v = V[idx]
+-    p = P[idx]
+-    
+-    # Update moments using fast math
+-    m = beta1 * m + (1 - beta1) * g
+-    v = beta2 * v + (1 - beta2) * g * g
+-    
+-    # Bias correction
+-    bias_correction1 = 1 - beta1 ** step
+-    bias_correction2 = 1 - beta2 ** step
+-    
+-    m_hat = m / bias_correction1
+-    v_hat = v / bias_correction2
+-    
+-    # Parameter update using fused multiply-add
+-    # p = p - lr * (m_hat / (sqrt(v_hat) + eps))
+-    # [G] In CUDA, this is often done with __fmaf for precision/speed trade-off
+-    denom = rsqrt(v_hat) + eps # rsqrt is fast inverse square root
+-    update = lr * m_hat * denom
+-    p = p - update
+-    
+-    # Store back
+-    P[idx] = p
+-    M[idx] = m
+-    V[idx] = v
++# Pseudocode for the fused Adam kernel logic
++# Note: This is a conceptual representation of the fused operation within a CUDA kernel
++# where 'params', 'grads', 'exp_avg', 'exp_avg_sq' are pointers to device memory
++
++def fused_adam_step(params, grads, exp_avg, exp_avg_sq, beta1, beta2, lr, eps, step):
++    # Each thread handles one or more elements
++    for i in range(num_elements):
++        g = grads[i]
++        
++        # Update biased first moment estimate
++        exp_avg[i] = beta1 * exp_avg[i] + (1 - beta1) * g
++        
++        # Update biased second raw moment estimate
++        exp_avg_sq[i] = beta2 * exp_avg_sq[i] + (1 - beta2) * (g * g)
++        
++        # Compute bias-corrected first moment estimate
++        # Using fast math approximations for division
++        bias_correction1 = 1.0 - beta1 ** step
++        m_hat = exp_avg[i] / bias_correction1
++        
++        # Compute bias-corrected second raw moment estimate
++        bias_correction2 = 1.0 - beta2 ** step
++        v_hat = exp_avg_sq[i] / bias_correction2
++        
++        # Update parameters
++        # Using fused multiply-add if possible: param = param - lr * m_hat / (sqrt(v_hat) + eps)
++        # In CUDA, this might be: param[i] -= lr * m_hat * rsqrt(v_hat + eps)
++        params[i] = params[i] - lr * m_hat * rsqrt(v_hat + eps)
+ ```
+ 
+ **Parameters:**
+-- $\beta_1$: 0.9 (typical)
+-- $\beta_2$: 0.999 (typical)
+-- $\epsilon$: $10^{-8}$ (typical)
+-- $\alpha$: Learning rate (scene-dependent)
++- $\beta_1$: Typically 0.9.
++- $\beta_2$: Typically 0.999.
++- $\epsilon$: Typically $10^{-8}$.
++- $\text{lr}$: Learning rate, varies by scene and configuration.
+ 
+-**Edge Cases:**
+-- **Densification Memory Layout:** Adding new Gaussians at the end of buffers causes uncoalesced memory accesses. Z-ordering is required to maintain performance [S1, unofficial].
+-- **Precision:** Fast math operations may introduce minor numerical differences compared to standard PyTorch, but the implementation aims to "precisely match" behavior [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Precision:** Fast math operations may introduce minor precision differences compared to standard PyTorch Adam, though behavior is intended to be precisely matched [S1, unofficial].
++- **Memory Locality:** Without z-ordering during densification, memory accesses can become uncoalesced, throttling performance [S1, unofficial].
++- **State Consistency:** Ensure that state tensors are updated atomically or in a thread-safe manner if multiple threads access the same state (though typically each thread handles distinct elements) [G].
+ 
+ ## Subtopics
+ 
++### [Adam Optimizer with Torch Compatibility and Tile-Level Sparsity](13981-adam-optimizer-with-torch-compatibility-and-tile-level-spars.md)
++A CUDA implementation of the Adam optimizer designed for differentiable volume rendering that maintains strict behavioral compatibility with PyTorch's Adam while optimizing for tile-level sparsity. It solves the problem of inconsistent state updates in sparse rendering pipelines where some tiles receive zero gradients, by replaying optimization steps for skipped tiles to ensure exponential moving averages decay correctly. It sets itself apart from standard Adam implementations by explicitly handling the temporal gap between optimization steps for untiled regions, ensuring that the state evolution matches what would occur if every parameter were updated at every step, even with zero gradients.
++
+ ### CUDA-side Adam Optimizer for SH Coefficients
+-A variant where a separate CUDA thread is launched for every spherical harmonic (SH) coefficient rather than per Gaussian [S2]. This differs from EPBRR by not fusing the forward and backward passes, which allows for SSIM loss and custom losses, and by using per-coefficient threads instead of per-Gaussian threads [S2].
++A CUDA implementation of the Adam optimizer that launches a separate thread for every spherical harmonic coefficient, rather than one thread per Gaussian [S2]. It differs from EPBRR by not fusing the forward and backward pass, allowing for SSIM loss and custom losses, and by using per-coefficient threads instead of per-Gaussian threads [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduced compared to standard PyTorch Adam due to kernel fusion and fewer instructions. On Mip-NeRF360 outdoor scenes with an RTX 4090, it achieves a 1.33x speedup over the baseline [S1, unofficial].
+-- **Memory Complexity:** VRAM usage is comparable to standard PyTorch Adam (6.40 GiB on Mip-NeRF360) [S1, unofficial].
+-- **Performance:** Outperforms PyTorch Fused Adam (1.22x speedup) and Apex Fused Adam (1.30x speedup) on Mip-NeRF360 outdoor scenes [S1, unofficial].
+-- **Strengths:** High performance, low VRAM overhead, compatibility with custom loss functions (in SH variant).
+-- **Limitations:** Requires custom CUDA implementation; potential numerical drift if fast math is not carefully managed [S1, unofficial].
++**Time and Memory Complexity:**
++- Time complexity is reduced compared to standard PyTorch Adam due to kernel fusion and reduced overhead [S1, unofficial].
++- Memory complexity is similar to standard Adam, but locality-preserving techniques can improve effective memory bandwidth utilization [S1, unofficial].
++
++**Measured Performance:**
++- On Mip-NeRF360 outdoor scenes with an RTX 4090, custom fused Adam reduces training time to 12m50s, achieving a 1.33x speedup compared to the baseline, with 6.40GiB VRAM usage [S1, unofficial].
++- Custom fused Adam achieves a 1.33x speedup, compared to PyTorch fused Adam (1.22x) and Apex Fused Adam (1.30x) [S1, unofficial].
++- VRAM usage remains at 6.40GiB for the custom fused Adam, comparable to PyTorch (6.42GiB) and Apex (6.40GiB) [S1, unofficial].
++
++**Strengths and Limitations:**
++- **Strengths:** Highest speedup among fused Adam variants, precise behavior matching, efficient memory access patterns with z-ordering [S1, unofficial].
++- **Limitations:** Requires custom CUDA implementation, potential minor precision differences due to fast math [S1, unofficial].
++
++**When to Use:**
++- Use when maximum training speed is critical and hardware supports CUDA [S1, unofficial].
++- Use when precise Adam behavior is required but standard PyTorch Adam is too slow [S1, unofficial].
++
++**When Not to Use:**
++- Use standard PyTorch Adam if portability or ease of debugging is prioritized over speed [S1, unofficial].
++- Use Apex Fused Adam if NVIDIA Apex is already integrated and the speedup difference is negligible for the use case [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of optimizing Gaussian Splatting training pipelines, specifically in "Faster-GS" [S1, unofficial]. It addresses the bottleneck of CPU-GPU synchronization and kernel launch overhead in standard PyTorch optimizers when training large-scale radiance fields.
++Originated in the context of optimizing Gaussian Splatting training, specifically in the Faster-GS project [S1, unofficial]. It was developed to address the performance bottlenecks of standard Adam implementations in large-scale differentiable volume rendering [S1, unofficial]. The method builds on the concept of kernel fusion introduced in PyTorch and NVIDIA Apex, but further optimizes the implementation for specific rendering workloads [S1, unofficial].
+ 
+ ## Sources

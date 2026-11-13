@@ -3,137 +3,162 @@
 Also called: Grid Resolution and Object Partitioning, PBRT Uniform Grid Construction
 
 ## Overview
-Uniform Grid Construction creates a spatial acceleration structure by partitioning scene objects into a regular 3D grid, allowing objects to overlap multiple cells if necessary [S1, unofficial]. It builds on [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) to determine cell dimensions, then assigns objects to cells based on their bounding boxes [G]. It is distinguished from hierarchical methods like [Hierarchical Grid Organization with Macrocells](5025-hierarchical-grid-organization-with-macrocells.md) by its flat structure and from sparse approaches like [Coarse Grid for Large Models](5481-coarse-grid-for-large-models.md) by its dense, regular allocation [G].
+Uniform Grid Construction is a two-step voxelization method that creates a uniform acceleration structure for ray tracing by determining grid resolution based on an average object density and partitioning geometric primitives into all intersecting cells [S1, unofficial]. It solves the problem of efficiently organizing scene geometry for ray traversal by providing a simple, robust, and parallelizable data layout [S1, unofficial]. It is distinguished from its siblings, such as [Hierarchical Grid Organization with Macrocells](5025-hierarchical-grid-organization-with-macrocells.md), by its flat, non-hierarchical structure and uniform cell sizing, which trades memory efficiency for implementation simplicity and predictable access patterns [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `N`: Total number of objects in the scene [S1, unofficial].
-- `boxMin`: The minimum corner of the global axis-aligned bounding box (AABB) containing all objects, with coordinates $(x_{min}, y_{min}, z_{min})$ [G].
-- `boxSize`: The dimensions of the global AABB, with values $(x_{size}, y_{size}, z_{size})$ [S1, unofficial].
-- `objects`: A list of objects, each with an AABB defined by `minBound` and `maxBound` [G].
-- `n`: Target average number of objects per cell [S1, unofficial].
-- `MaxResolution`: User-specified maximum resolution per axis [S1, unofficial].
+- A set of $N$ geometric primitives (e.g., triangles or objects).
+- The axis-aligned bounding box (AABB) of the entire scene, defined by minimum corner $(x_{min}, y_{min}, z_{min})$ and dimensions $(x_{size}, y_{size}, z_{size})$.
+- Target average number of objects per cell $n$ [S1, unofficial].
+- Maximum resolution limit $MaxResolution$ [S1, unofficial].
 
 **Outputs:**
-- `xResolution`, `yResolution`, `zResolution`: The number of cells along each axis [S1, unofficial].
-- `grid`: A 3D array of lists of size `xResolution` $\times$ `yResolution` $\times$ `zResolution`, where each cell contains a list of object references [G].
+- A 3D uniform grid with resolutions $(x_{res}, y_{res}, z_{res})$.
+- A list of objects stored in each grid cell. Objects are duplicated if they intersect multiple cells [S1, unofficial].
 
 **Data Structures:**
-- The grid is stored as a contiguous 3D array or flattened 1D array [G].
-- Indices $(i, j, k)$ map to memory address $base + (i \cdot y_{res} \cdot z_{res} + j \cdot z_{res} + k) \cdot sizeof(list\_header)$ [G].
-- Each cell holds a dynamic list of object pointers [G].
+- **Grid:** A 3D array of lists (or linked lists) with dimensions $x_{res} \times y_{res} \times z_{res}$. Each cell stores a list of object indices or pointers.
+- **Object Bounds:** Each object $i$ has a precomputed AABB with minimum $(o_{i,min}^x, o_{i,min}^y, o_{i,min}^z)$ and maximum $(o_{i,max}^x, o_{i,max}^y, o_{i,max}^z)$ coordinates [S1, unofficial].
 
 **Parameters:**
-- `n`: Typical value is $3^3 = 27$ [S1, unofficial].
-- `MaxResolution`: Typical value is 64 [S1, unofficial].
-
-**Formulas:**
-1. **Cell Size ($a$):**
-   $$ a = \sqrt[3]{\frac{n \cdot x_{size} \cdot y_{size} \cdot z_{size}}{N}} $$
-   Alternatively, following PBRT assumptions (cube of max dimension, $n=27$):
-   $$ a = \frac{3 \cdot \max(x_{size}, y_{size}, z_{size})}{\sqrt[3]{N}} $$
-   [S1, unofficial]
-
-2. **Resolution:**
-   $$ x_{res} = \text{clamp}\left(\text{round}\left(\frac{x_{size}}{a}\right), 1, \text{MaxResolution}\right) $$
-   $$ y_{res} = \text{clamp}\left(\text{round}\left(\frac{y_{size}}{a}\right), 1, \text{MaxResolution}\right) $$
-   $$ z_{res} = \text{clamp}\left(\text{round}\left(\frac{z_{size}}{a}\right), 1, \text{MaxResolution}\right) $$
-   [S1, unofficial]
-   *Note: The source text explicitly writes `ySize` for the z-resolution calculation, but context implies `zSize` [S1, unofficial].*
-
-3. **Grid Index for a Point $P(x_p, y_p, z_p)$:**
-   $$ i = \frac{x_p - x_{min}}{x_{size}} \cdot x_{res} $$
-   $$ j = \frac{y_p - y_{min}}{y_{size}} \cdot y_{res} $$
-   $$ k = \frac{z_p - z_{min}}{z_{size}} \cdot z_{res} $$
-   [S1, unofficial]
+- $n$: Target average objects per cell. PBRT suggests $n=3^3=27$ [S1, unofficial].
+- $MaxResolution$: User-specified cap on resolution per axis. PBRT suggests 64 [S1, unofficial].
 
 **Steps:**
-1. Calculate $a$ using the chosen formula [S1, unofficial].
-2. Compute $x_{res}, y_{res}, z_{res}$ using the resolution formula and clamp to $[1, \text{MaxResolution}]$ [S1, unofficial].
-3. Initialize the grid array of size $x_{res} \times y_{res} \times z_{res}$ with empty lists [G].
-4. For each object in `objects`:
-   a. Determine the object's AABB min $(x_{obj\_min}, y_{obj\_min}, z_{obj\_min})$ and max $(x_{obj\_max}, y_{obj\_max}, z_{obj\_max})$ [G].
-   b. Compute grid indices for the min corner: $(i_{min}, j_{min}, k_{min}) = \text{gridIndex}(\text{minBound})$ [S1, unofficial].
-   c. Compute grid indices for the max corner: $(i_{max}, j_{max}, k_{max}) = \text{gridIndex}(\text{maxBound})$ [S1, unofficial].
-   d. Clamp all indices to valid ranges:
-      - If index $< 0$, set to 0.
-      - If index $\ge$ resolution, set to resolution $- 1$ [S1, unofficial].
-   e. Iterate $i$ from $i_{min}$ to $i_{max}$, $j$ from $j_{min}$ to $j_{max}$, and $k$ from $k_{min}$ to $k_{max}$ [S1, unofficial].
-   f. Add the object reference to the list at `grid[i][j][k]` [S1, unofficial].
+
+1. **Calculate Cell Size ($a$):**
+   Compute the side length of a cubic cell. Two common formulas exist:
+   - General: $a = \sqrt[3]{\frac{n \cdot V_{box}}{N}}$, where $V_{box} = x_{size} \cdot y_{size} \cdot z_{size}$ [S1, unofficial].
+   - PBRT Simplified: $a = \frac{3 \cdot \max(x_{size}, y_{size}, z_{size})}{\sqrt[3]{N}}$ [S1, unofficial].
+
+2. **Calculate Grid Resolution:**
+   Determine the number of cells along each axis, clamped to $[1, MaxResolution]$:
+   $$
+   x_{res} = \text{clamp}(\text{round}(\frac{x_{size}}{a}), 1, MaxResolution)
+   $$
+   $$
+   y_{res} = \text{clamp}(\text{round}(\frac{y_{size}}{a}), 1, MaxResolution)
+   $$
+   $$
+   z_{res} = \text{clamp}(\text{round}(\frac{z_{size}}{a}), 1, MaxResolution)
+   $$
+   *Note: The source text contains a typo in the $z_{res}$ formula, using $y_{size}$ instead of $z_{size}$, but the logical intent is to use the corresponding axis dimension [S1, unofficial].*
+
+3. **Map Objects to Grid Cells:**
+   For each object $i$:
+   a. Compute the grid indices of its bounding box corners:
+      $$
+      (i_{min}, j_{min}, k_{min}) = \text{gridIndex}(o_{i,min})
+      $$
+      $$
+      (i_{max}, j_{max}, k_{max}) = \text{gridIndex}(o_{i,max})
+      $$
+      where $\text{gridIndex}(P)$ for point $P=(x_p, y_p, z_p)$ is:
+      $$
+      \text{gridIndex}(P) = \left( \frac{x_p - x_{min}}{x_{size}}, \frac{y_p - y_{min}}{y_{size}}, \frac{z_p - z_{min}}{z_{size}} \right) \cdot (x_{res}, y_{res}, z_{res})
+      $$
+      *Note: The source defines `gridIndex` as a normalized coordinate relative to the scene AABB, which must be scaled by the resolution to get the integer index [S1, unofficial].*
+   b. Clamp indices to valid range $[0, x_{res}-1]$, $[0, y_{res}-1]$, $[0, z_{res}-1]$ [S1, unofficial].
+   c. Iterate through all cells $(i, j, k)$ such that $i \in [i_{min}, i_{max}]$, $j \in [j_{min}, j_{max}]$, $k \in [k_{min}, k_{max}]$.
+   d. Add object $i$ to the list of each visited cell [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def uniform_grid_construction(objects, box_min, box_size, n=27, max_resolution=64):
-    x_size, y_size, z_size = box_size
+def uniform_grid_construction(objects, scene_min, scene_size, n=27, max_resolution=64):
+    """
+    Construct a uniform grid for ray tracing acceleration.
+    
+    Args:
+        objects: List of objects, each with a bounding box (min, max) as tuples.
+        scene_min: Tuple (x_min, y_min, z_min) of the scene AABB.
+        scene_size: Tuple (x_size, y_size, z_size) of the scene AABB.
+        n: Target average objects per cell.
+        max_resolution: Maximum resolution per axis.
+        
+    Returns:
+        grid: 3D list of lists of object indices.
+        resolution: Tuple (x_res, y_res, z_res).
+    """
     N = len(objects)
+    x_size, y_size, z_size = scene_size
     
-    # Calculate cell size 'a'
-    box_volume = x_size * y_size * z_size
-    a = (n * box_volume / N) ** (1/3)
+    # Step 1: Calculate cell size 'a'
+    # Using PBRT simplified formula for consistency with common practice
+    max_dim = max(x_size, y_size, z_size)
+    a = 3.0 * max_dim / (N ** (1/3))
     
-    # Calculate resolutions
+    # Step 2: Calculate resolution
     x_res = clamp(round(x_size / a), 1, max_resolution)
     y_res = clamp(round(y_size / a), 1, max_resolution)
-    z_res = clamp(round(z_size / a), 1, max_resolution)
+    z_res = clamp(round(z_size / a), 1, max_resolution) # Corrected from source typo
     
-    # Initialize grid as 3D list of lists
-    grid = [[[[] for _ in range(z_res)] for _ in range(y_res)] for _ in range(x_res)]
+    # Initialize grid
+    grid = [[[[] for k in range(z_res)] for j in range(y_res)] for i in range(x_res)]
     
-    # Helper for grid index
-    def get_grid_index(point):
-        x, y, z = point
-        ix = int((x - box_min[0]) / x_size * x_res)
-        iy = int((y - box_min[1]) / y_size * y_res)
-        iz = int((z - box_min[2]) / z_size * z_res)
+    # Step 3: Partition objects
+    for obj_idx, obj in enumerate(objects):
+        obj_min = obj.min
+        obj_max = obj.max
         
-        # Clamp indices to [0, resolution-1]
-        ix = max(0, min(ix, x_res - 1))
-        iy = max(0, min(iy, y_res - 1))
-        iz = max(0, min(iz, z_res - 1))
-        return (ix, iy, iz)
-
-    # Partition objects
-    for obj in objects:
-        min_bound = obj.min_bound
-        max_bound = obj.max_bound
+        # Compute grid indices for min and max bounds
+        # gridIndex(P) = ((P - scene_min) / scene_size) * resolution
+        i_min = int(((obj_min[0] - scene_min[0]) / x_size) * x_res)
+        j_min = int(((obj_min[1] - scene_min[1]) / y_size) * y_res)
+        k_min = int(((obj_min[2] - scene_min[2]) / z_size) * z_res)
         
-        i_min, j_min, k_min = get_grid_index(min_bound)
-        i_max, j_max, k_max = get_grid_index(max_bound)
+        i_max = int(((obj_max[0] - scene_min[0]) / x_size) * x_res)
+        j_max = int(((obj_max[1] - scene_min[1]) / y_size) * y_res)
+        k_max = int(((obj_max[2] - scene_min[2]) / z_size) * z_res)
         
+        # Clamp indices
+        i_min = clamp(i_min, 0, x_res - 1)
+        i_max = clamp(i_max, 0, x_res - 1)
+        j_min = clamp(j_min, 0, y_res - 1)
+        j_max = clamp(j_max, 0, y_res - 1)
+        k_min = clamp(k_min, 0, z_res - 1)
+        k_max = clamp(k_max, 0, z_res - 1)
+        
+        # Add object to all intersecting cells
         for i in range(i_min, i_max + 1):
             for j in range(j_min, j_max + 1):
                 for k in range(k_min, k_max + 1):
-                    grid[i][j][k].append(obj)
+                    grid[i][j][k].append(obj_idx)
                     
-    return grid, x_res, y_res, z_res
+    return grid, (x_res, y_res, z_res)
 
 def clamp(value, min_val, max_val):
-    return max(min_val, min(value, max_val))
+    if value < min_val:
+        return min_val
+    elif value > max_val:
+        return max_val
+    else:
+        return value
 ```
 
 **Edge Cases and Pitfalls:**
-- **Boundary Precision:** Rays entering from the maximum end may produce an index equal to the resolution (e.g., $x_{res}$), which is out of bounds. Rays entering from the minimum end may produce $-1$ due to floating-point errors. Clamping is mandatory [S1, unofficial].
-- **Object Duplication:** Objects overlapping multiple cells are duplicated in each cell's list. This increases memory usage but simplifies traversal [S1, unofficial].
+- **Boundary Indices:** Rays entering the bounding box at the maximum end may produce an index equal to the resolution (e.g., $x_{res}$), which is out of bounds $[0, x_{res}-1]$ [S1, unofficial].
+- **Floating-Point Precision:** Precision errors may cause an index of $-1$ even when entering from the minimum end [S1, unofficial].
+- **Clamping:** Indices must be clamped to $[0, \text{resolution}-1]$ to handle both boundary and precision issues [S1, unofficial].
 
 ## Subtopics
 
-### [Hierarchical Grid Organization with Macrocells](5025-hierarchical-grid-organization-with-macrocells.md)
-Uses a hierarchy of grids to reduce memory overhead for large scenes. Choose when memory is constrained or scene density varies significantly [G].
-
-### [Coarse Grid for Large Models](5481-coarse-grid-for-large-models.md)
-Uses a lower-resolution grid to handle very large models efficiently. Choose when the scene is too large for a fine uniform grid [G].
+### [Sort-last Grid Construction](12788-sort-last-grid-construction.md)
+Sort-last Grid Construction is a voxelization method that assigns geometric primitives to grid cells by iterating over primitives and determining which cells they intersect. It solves the problem of building an acceleration structure for ray tracing by creating a uniform grid where objects are stored in all cells they overlap. It is distinguished from its sibling, Sort-first Grid Construction, by its iteration order: sort-last processes primitives to find cells, whereas sort-first processes cells to find primitives.
 
 ## Operating characteristics
-- **Time Complexity:** Construction is $O(N \cdot k)$, where $N$ is the number of objects and $k$ is the average number of cells an object overlaps [G]. Traversal is $O(C + I)$, where $C$ is the number of cells intersected by the ray and $I$ is the number of objects in those cells [G].
-- **Memory Complexity:** $O(x_{res} \cdot y_{res} \cdot z_{res} + N \cdot k)$ [G].
-- **Performance:** Higher resolution reduces the number of objects per cell (faster intersection tests) but increases memory overhead and the number of cells to traverse along a ray, which can counterbalance speed-ups [S1, unofficial].
-- **Strengths:** Simple to implement, robust, and effective for scenes with uniform object distribution [G].
-- **Limitations:** Inefficient for scenes with large empty spaces or highly clustered objects due to memory waste or excessive duplication [G].
+- **Time Complexity:** $O(N \cdot V_{cell})$, where $N$ is the number of objects and $V_{cell}$ is the average number of cells an object intersects. In the worst case (large objects), this approaches $O(N \cdot x_{res} \cdot y_{res} \cdot z_{res})$.
+- **Memory Complexity:** $O(x_{res} \cdot y_{res} \cdot z_{res} + \text{total object references})$. Memory overhead increases with resolution [S1, unofficial].
+- **Performance:** Higher resolution reduces the number of objects per cell, speeding up ray-object intersection tests. However, it increases memory overhead and the number of cells a ray must traverse, which can counterbalance the speed-up [S1, unofficial].
+- **Strengths:** Simple implementation, robust handling of object boundaries, easy parallelization during construction.
+- **Limitations:** High memory usage for large scenes or high resolutions; inefficient for sparse scenes; object duplication can be significant.
+- **When to Use:** Small to medium scenes, or when implementation simplicity is prioritized over memory efficiency.
+- **When Not to Use:** Very large or sparse scenes where hierarchical structures (e.g., [Hierarchical Grid Organization with Macrocells](5025-hierarchical-grid-organization-with-macrocells.md)) would be more memory-efficient.
 
 ## Background
-The method originates from standard ray tracing acceleration techniques, popularized by the PBRT textbook [S1, unofficial]. It is a foundational technique in volume rendering and ray tracing for accelerating ray-object intersection tests [G].
+Uniform Grid Construction is a foundational technique in ray tracing acceleration structures, popularized by the PBRT (Physically Based Rendering) textbook [S1, unofficial]. It is based on the principle of dividing the scene space into a regular grid, where each cell maintains a list of intersecting primitives. The method was described by Sumant Pattanaik in an Observable notebook, which references PBRT's approach [S1, unofficial]. The PBRT textbook suggests using a maximum resolution of 64 per axis and an average of 27 objects per cell as default parameters [S1, unofficial].
 
 ## Sources
 [S1] Uniform Grid Acceleration | Sumant Pattanaik | Observable, https://observablehq.com/@spattana/ray-uniformgrid-traversal, fetched 2026-10-25 (unofficial)

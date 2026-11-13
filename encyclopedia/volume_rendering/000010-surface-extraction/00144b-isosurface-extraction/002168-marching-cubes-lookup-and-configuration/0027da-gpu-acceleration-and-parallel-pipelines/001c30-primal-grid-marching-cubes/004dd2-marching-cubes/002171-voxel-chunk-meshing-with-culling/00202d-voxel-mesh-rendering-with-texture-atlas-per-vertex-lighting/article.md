@@ -53,41 +53,42 @@ def generate_mesh_and_render(chunk, atlas_tiles):
     # 1. Build texture atlas
     atlas_width = len(atlas_tiles) * 16
     atlas_height = 16
-    atlas = Buffer2d(width=atlas_width, height=atlas_height)
+    atlas = [[0.0] * atlas_width for _ in range(atlas_height)]
     for i, tile in enumerate(atlas_tiles):
-        atlas.copy_tile(tile, u_offset=i * 16)
+        # Copy tile data to atlas at u_offset=i*16
+        pass # [G] standard texture atlas construction
 
     # 2. Map block types to atlas offsets
     atlas_offsets = {}
     for block_type in chunk.block_types:
         for face in block_type.faces:
-            atlas_offsets[(block_type, face)] = calculate_u_offset(block_type, face)
+            # Sources do not specify the exact offset calculation; typically a lookup table [G]
+            atlas_offsets[(block_type, face)] = 0.0
 
     # 3. Generate mesh geometry
     vertices = []
     for quad in chunk.exposed_quads:
         block = quad.block
         shape = quad.shape
-        two_sided = quad.is_diagonal() or shape == Shape.Facade
+        two_sided = quad.is_diagonal() or shape == "Facade"
         atlas_off = atlas_offsets[(block, quad.face)]
         normal = quad.slope_normal if two_sided else quad.face_normal
 
         for i in range(4):
-            vertices.append(Vertex(
-                pos=quad.positions[i],
-                uv=quad.uvs[i],
-                normal=normal,
-                ao=quad.ao[i] / 3.0,
-                smooth_light=quad.light[i] / 15.0,
-                block=block,
-                atlas_offset=atlas_off,
-                two_sided=two_sided
-            ))
+            vertices.append({
+                "pos": quad.positions[i],
+                "uv": quad.uvs[i],
+                "normal": normal,
+                "ao": quad.ao[i] / 3.0,
+                "smooth_light": quad.light[i] / 15.0,
+                "block": block,
+                "atlas_offset": atlas_off,
+                "two_sided": two_sided
+            })
 
     # 4. Render pipeline
-    render_opaque(vertices, cull_mode=BACKFACE)
-    render_two_sided(vertices, cull_mode=NONE)
-    render_transparent(vertices, cull_mode=NONE)
+    # Sources do not specify the exact rendering API calls; typically a draw call with cull mode set [G]
+    return vertices
 ```
 
 ### Formulas

@@ -1,9 +1,8 @@
 # Optimization and Parallelization
 
-Also called: Distributed Training, Per-Splat Backprop, Mask Gradient Computation
 
 ## Overview
-This family encompasses the computational strategies required to efficiently train 3D Gaussian Splatting (3DGS) models, addressing the high memory bandwidth and parallelization bottlenecks inherent in differentiable volume rendering. It solves the problem of scaling optimization to large scenes with billions of primitives by distributing computation across multiple GPUs, restructuring the backward pass to reduce atomic contention, and optimizing specific gradient paths such as those for probabilistic masks. It differs from standard differentiable rendering by explicitly managing the dynamic population of Gaussians (densification/pruning) and leveraging hardware-specific optimizations like half-precision rasterization and per-splat gradient accumulation [S1, S2, S3, S4, S5, S9].
+This family encompasses the computational strategies required to efficiently train 3D Gaussian Splatting (3DGS) models, focusing on gradient computation, parallel execution, and distributed memory management. It addresses the bottleneck of differentiable rasterization on large-scale scenes by optimizing the backward pass granularity, distributing Gaussian primitives across multiple GPUs, and refining implementation details for numerical stability. It differs from standard differentiable rendering by explicitly managing the dynamic population of Gaussians (densification/pruning) and leveraging specific hardware-aware optimizations like half-precision fetches and per-splat gradient accumulation.
 
 ## Shared principles
 The training process relies on a differentiable rasterizer that renders images from a set of 3D Gaussians. The core optimization mechanism involves computing the gradient of a loss function $\mathcal{L}$ (e.g., L1, SSIM) with respect to the Gaussian parameters (position, covariance, opacity, color, SH coefficients) and any auxiliary parameters (e.g., masks).
@@ -19,27 +18,31 @@ Key shared mathematical components include:
 ## Subtopics
 
 ### [MaskGaussian Gradient Computation](4254-maskgaussian-gradient-computation.md)
-Computes the gradient of a loss function $\mathcal{L}$ with respect to per-Gaussian probabilistic masks $\mathcal{M}_i$ during 3D Gaussian Splatting training. It optimizes mask parameters that modulate Gaussian opacity, enabling adaptive representation and pruning. It differs from standard backpropagation by explicitly accounting for the interaction between the mask-modulated Gaussian contribution and the background color contribution, which is modulated by the final transmittance.
+Computes gradients for per-Gaussian probabilistic masks $\mathcal{M}_i$ that modulate opacity. It explicitly accounts for the interaction between mask-modulated Gaussian contributions and background color, enabling adaptive representation and pruning.
 
 ### [Training Pipeline](5325-training-pipeline.md)
-The iterative optimization loop that reconstructs a 3D scene from multi-view images by optimizing a set of 3D Gaussians. It solves the inverse problem of determining Gaussian parameters (position, covariance, opacity, color, SH coefficients) that minimize the difference between rendered images and ground truth views. It differs from standard differentiable rendering by explicitly managing the Gaussian population through densification, pruning, and splitting operations during the optimization process, rather than optimizing a fixed set of primitives.
+The iterative loop managing view sampling, rasterization, loss computation, and population management (densification/pruning). It differs by explicitly modifying the Gaussian set during optimization rather than optimizing a fixed set.
 
 ### [Parallelization for Backpropagation](5989-parallelization-for-backpropagation.md)
-A strategy for computing gradients in 3D Gaussian Splatting that shifts the computational granularity from per-pixel to per-splat (per-Gaussian). It solves the high atomic contention and false sharing inherent in standard per-pixel backpropagation, where thousands of threads simultaneously attempt to update the same Gaussian parameters. By restructuring the backward pass, it significantly accelerates training time while maintaining numerical equivalence to the standard approach.
+Shifts gradient computation granularity from per-pixel to per-splat (per-Gaussian) to accelerate training. It provides a numerically equivalent but faster formulation for gradient updates.
 
 ### [Grendel-GS](7349-grendel-gs.md)
-A distributed optimization framework for 3D Gaussian Splatting that partitions the global set of Gaussian primitives across multiple GPUs to overcome single-device memory limits. It enables the training of scenes with billions of Gaussians by allowing each GPU to render its local subset and combining results via inter-GPU communication at partition boundaries. Unlike [TideGS](7350-tidegs.md), which streams data from disk on a single GPU, Grendel-GS distributes the parameter store across a multi-GPU cluster.
+A distributed framework partitioning Gaussians across multiple GPUs to overcome single-device memory limits. It combines local rendering results via inter-GPU communication, unlike single-GPU streaming methods.
 
 ### [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md)
-Details the specific implementation strategies, hyperparameters, and optimization techniques required to train and render 3D Gaussian Splatting (3DGS) scenes efficiently. It addresses the gap between the theoretical formulation of differentiable volume rendering and practical software engineering, focusing on memory management, precision handling, and convergence stability. Key distinctions from standard implementations include the use of half-precision rasterization kernels, specific background color tuning, and corrected scene extent calculations to prevent bias in adaptive density control.
+Provides concrete hyperparameters, CUDA-level optimizations (e.g., half-precision fetches), and stability guards. It bridges the gap between theoretical pipelines and practical execution.
 
 ## Background
-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1, S2, S3]. The initial implementation utilized a per-pixel parallel backward pass with atomic operations for gradient accumulation. Subsequent research identified bottlenecks in memory bandwidth and atomic contention, leading to the development of per-splat backpropagation [S1] and distributed training frameworks like Grendel-GS [S1, unofficial]. Optimizations such as half-precision rasterization [S1] and specific hyperparameter tuning (e.g., background color, SH degree) have been documented to improve training speed and stability [S5, unofficial].
+3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S8]. The optimization techniques described herein evolved to address the computational cost of training on large scenes and the memory constraints of single GPUs. Distributed approaches like Grendel-GS and efficiency improvements like per-splat backpropagation were developed to scale the method to city-scale environments and real-time training speeds.
 
 ## Sources
-[S1] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, Kerbl et al., 2023
-[S2] Official 3DGS GitHub Repository, https://github.com/graphdeco-inria/gaussian-splatting
-[S3] 3D Gaussian Splatting: Adaptive Control and Scene Extent, Official Documentation
-[S4] 3DGS Loss Function Variants, Community Implementation Notes
-[S5] 3DGS Training Optimization Tips, Community Benchmarks
-[S9] 3DGS SH Degree Analysis, Community Benchmarks
+[S1] MaskGaussian Gradient Computation notes
+[S2] 3D Gaussian Splatting Implementation Details notes
+[S3] Training Pipeline notes
+[S4] 3D Gaussian Splatting Implementation Details notes
+[S8] 3D Gaussian Splatting Implementation Details notes
+[S11] 3D Gaussian Splatting Implementation notes
+[S2] Training Pipeline notes (unofficial)
+[S3] Training Pipeline notes (unofficial)
+[S1] Grendel-GS notes (unofficial)
+[S1] 3D Gaussian Splatting Implementation Details notes (unofficial)

@@ -1,0 +1,174 @@
+--- v005.md
++++ v006.md
+@@ -4,109 +4,92 @@
+ 
+ ## Overview
+-Weighted Blended Order-Independent Transparency (WBOIT) is a transparency rendering technique that bypasses explicit depth sorting to achieve order-independent blending, primarily intended for resource-constrained CPUs and weaker GPUs [S1, unofficial]. It distinguishes itself from siblings like [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md) by using a single-pass weight-based approximation rather than isolating foreground elements or using complex data structures [S2]. The method modifies the standard blending equation by assigning weights to fragments based on depth and opacity, allowing commutative hardware blending to approximate the correct physical accumulation [S2].
++Weighted Blended Order-Independent Transparency (WBOIT) is a transparency rendering technique that bypasses explicit depth sorting to achieve order-independent blending, primarily intended for resource-constrained CPUs and weaker GPUs (e.g., integrated graphics) [S1, unofficial]. It addresses the non-commutative nature of translucent compositing by modifying fragment weights to implicitly encode depth information, allowing standard alpha blending to approximate sorted results [S2]. Unlike siblings such as [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md) or [Hardware-Z Cull Depth Peeling](13947-hardware-z-cull-depth-peeling.md), WBOIT performs sorting in a single pass without depth-based sorting, trading visual accuracy for computational efficiency [S2].
+ 
+ ## How it works
+-WBOIT operates by modifying the fragment shader's output to include a weight that encodes depth information implicitly. This allows the GPU's standard alpha blending unit to accumulate fragments in any order while approximating the correct depth ordering [S2].
+-
+ **Inputs and Outputs:**
+-*   **Input:** Fragment color $C$, fragment opacity $\alpha$, and fragment depth $z$ (or view-space depth).
+-*   **Output:** Modified color $C'$ and modified alpha $\alpha'$ passed to the blending stage.
++*   **Input:** A stream of splats or fragments, each with position, color, opacity ($\alpha$), and potentially depth.
++*   **Output:** A final color buffer where fragments are blended in a manner that approximates correct depth ordering without explicit sorting.
+ 
+ **Data Structures:**
+-The method does not require complex auxiliary buffers (like linked lists or depth peeling buffers). It relies on the standard color and depth/alpha render targets. In implementations such as `gsplat_rviz_plugin`, the input splat data is structured as follows [S1, unofficial]:
+-
+-```cpp
+-struct alignas(4) SplatGPU {
+-  float center[3];      // XYZ position
+-  float alpha;          // Opacity
+-  float covA[3];        // Covariance upper-triangle {v11, v12, v13}
+-  float _pad0;          // Padding
+-  float covB[3];        // Covariance upper-triangle {v22, v23, v33}
+-  float _pad1;          // Padding
+-  float sh[16][4];      // Spherical Harmonics coefficients (RGB per coeff, w=0)
+-};
+-```
+-*Note: The `sh` array stores 16 coefficients, each with 4 floats, though only the first 3 are used for RGB. Total size is 304 bytes [S1, unofficial].*
++The method relies on standard framebuffer attachments (color, depth, stencil) and does not require complex auxiliary structures like linked lists or multiple render targets for accumulation, distinguishing it from Per-Pixel Linked Lists [S2]. Configuration is managed via specific properties:
++*   `wboit_weight_scale_property_`: Controls the weight scale factor [S1, unofficial].
++*   `wboit_weight_exponent_property_`: Controls the weight exponent [S1, unofficial].
++*   `wboit_alpha_discard_property_`: Threshold for discarding fragments based on alpha [S1, unofficial].
+ 
+ **Parameters:**
+-The behavior is controlled by three key parameters [S1, unofficial]:
+-1.  **Weight Scale ($s$):** Controls the sensitivity of the weight to depth differences. Set via `setWboitWeightScale`.
+-2.  **Weight Exponent ($e$):** Determines the falloff rate of the weight with depth. Set via `setWboitWeightExponent`.
+-3.  **Alpha Discard Threshold ($\alpha_{thresh}$):** Fragments with opacity below this value are discarded to reduce noise and processing load. Set via `setWboitAlphaDiscard`.
++*   **Weight Scale ($w_{scale}$):** A multiplier applied to the depth-based weight [S1, unofficial].
++*   **Weight Exponent ($w_{exp}$):** An exponent applied to the depth term to sharpen the falloff [S1, unofficial].
++*   **Alpha Discard Threshold ($\alpha_{thresh}$):** Fragments with opacity below this value are discarded to reduce overdraw [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** If WBOIT is enabled (e.g., `transparency_mode_property` is 1), ensure the compositor is defined, enable the viewport, set `compositor_viewport_`, and set `wboit_compositor_active_ = true` [S1, unofficial].
+-2.  **Fragment Processing:** For each fragment generated by a splat or geometry:
+-    a.  Calculate the fragment's depth $z$ in view space.
+-    b.  Compute the weight $w$ using the depth and the configured parameters. The weight estimates the occlusion for each depth as a function of the transparency of the rest of the objects [S2]. A common formulation for the weight is:
+-        $$ w = \exp(-s \cdot (z - z_{ref})^e) $$
+-        Where $z_{ref}$ is a reference depth (often the fragment's own depth or a scene average, depending on implementation specifics not fully detailed in sources, but typically relative to the camera or previous fragments in a single-pass approximation) [G]. *Note: The exact formula for $w$ is not explicitly provided in the sources, but the parameters $s$ and $e$ are used to scale and exponentiate the depth difference.*
+-    c.  Apply the alpha discard threshold: if $\alpha < \alpha_{thresh}$, discard the fragment [S1, unofficial].
+-    d.  Modify the color and alpha to be passed to the blending stage. The standard approach in WBOIT is to blend the color weighted by the weight and the alpha weighted by the weight, or to use the weight to adjust the effective opacity. A typical implementation modifies the alpha to $\alpha' = \alpha \cdot w$ and color to $C' = C \cdot w$ (or similar normalization) so that the commutative blend $C_{out} = C_{src} \alpha_{src} + C_{dst} (1 - \alpha_{src})$ approximates the sorted result [S2, G].
+-3.  **Blending:** The GPU performs standard alpha blending on the modified fragments. Because the weights encode depth, fragments closer to the camera generally have higher weights, dominating the blend regardless of arrival order [S2].
+-4.  **Cleanup:** If WBOIT is disabled, call `disable(compositor_viewport_)` and set `wboit_compositor_active_ = false` [S1, unofficial].
++1.  **Initialization:** If the transparency mode is set to WBOIT, enable the compositor viewport. This involves calling `ensureDefined()`, `enable(vp)`, setting `compositor_viewport_ = vp`, and setting `wboit_compositor_active_ = true` [S1, unofficial].
++2.  **Weight Calculation:** For each fragment, calculate a weight $w$ based on its depth $z$ relative to the camera and the scene's transparency distribution. The weight is designed to estimate occlusion as a function of the transparency of the rest of the objects considered [S2]. The specific formula is not provided in the sources, but it typically takes the form $w = \exp(-w_{scale} \cdot (z - z_{ref})^{w_{exp}})$ or similar, where $z_{ref}$ is a reference depth [G].
++3.  **Blending:** Perform standard alpha blending using the calculated weight $w$ and the fragment's opacity $\alpha$. The effective opacity used for blending is often modified by the weight to simulate depth sorting [S2].
++4.  **Termination:** If WBOIT is disabled and was previously active, call `disable(compositor_viewport_)` and set `wboit_compositor_active_ = false` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def wboit_fragment_shader(center, alpha, covA, covB, sh, view_depth, weight_scale, weight_exponent, alpha_discard):
+-    # 1. Discard low-opacity fragments
+-    if alpha < alpha_discard:
+-        discard_fragment()
+-        return
++# Configuration parameters
++wboit_weight_scale = get_property("wboit_weight_scale_property_")
++wboit_weight_exponent = get_property("wboit_weight_exponent_property_")
++wboit_alpha_discard = get_property("wboit_alpha_discard_property_")
+ 
+-    # 2. Calculate weight based on depth
+-    # Note: The exact reference depth (z_ref) for the weight calculation 
+-    # is implementation-specific. In single-pass WBOIT, it often relies on 
+-    # the fragment's own depth relative to a global scale or previous 
+-    # accumulated state if supported, but standard hardware blending 
+-    # is commutative, so z_ref is typically just the fragment's depth 
+-    # scaled to influence the blend factor.
+-    # A common heuristic for WBOIT weight w is:
+-    # w = exp(-weight_scale * (view_depth - min_depth) ** weight_exponent)
+-    # However, without a global min_depth, implementations often use 
+-    # a fixed scale or relative depth. Here we assume a generic depth-based weight.
++def enable_wboit(vp):
++    ensure_defined()
++    enable(vp)
++    compositor_viewport = vp
++    wboit_compositor_active = True
++
++def disable_wboit(vp):
++    disable(vp)
++    wboit_compositor_active = False
++
++def fragment_shader(position, depth, color, alpha):
++    # Discard low-alpha fragments
++    if alpha < wboit_alpha_discard:
++        discard()
+     
+-    # [G] Since the exact formula for w is not in sources, we use a 
+-    # representative form that uses the provided parameters.
+-    # In many WBOIT implementations, the weight is applied to the alpha 
+-    # to simulate depth sorting.
++    # Calculate weight based on depth
++    # Note: Exact formula not provided in sources; [G] indicates assumed standard WBOIT weight calculation
++    # w = exp(-wboit_weight_scale * (depth - reference_depth) ** wboit_weight_exponent)
++    # For implementation, reference_depth is often the near plane or a scene-specific value
++    weight = calculate_wboit_weight(depth, wboit_weight_scale, wboit_weight_exponent)
+     
+-    depth_factor = view_depth # Simplified; actual implementation may use 
+-                              # distance from camera or normalized depth.
++    # Blend using weight and alpha
++    # Standard alpha blend: result = src * src_alpha + dst * (1 - src_alpha)
++    # Here, src_alpha is effectively modulated by weight
++    effective_alpha = alpha * weight
++    blended_color = color * effective_alpha + current_pixel_color * (1 - effective_alpha)
+     
+-    # Calculate weight. The sources mention "weights in the translucency 
+-    # equation... to estimate occlusion".
+-    weight = exp(-weight_scale * (depth_factor ** weight_exponent))
+-    
+-    # 3. Modify color and alpha for blending
+-    # The goal is to make the blend commutative but depth-aware.
+-    # Common WBOIT approach: blend color weighted by weight, alpha weighted by weight.
+-    # Or: use weight to adjust the effective alpha.
+-    
+-    # Let's assume the standard WBOIT modification where the fragment's 
+-    # contribution is scaled by its weight.
+-    modified_alpha = alpha * weight
+-    modified_color = sh[0][:3] * weight # Using first SH coefficient for color
+-    
+-    # 4. Return modified values for hardware blending
+-    return modified_color, modified_alpha
++    return blended_color
++
++def calculate_wboit_weight(depth, scale, exponent):
++    # Placeholder for the specific weight function
++    # The sources state weights are used to estimate occlusion [S2]
++    # A common implementation uses exponential falloff from the camera
++    return exp(-scale * (depth ** exponent))
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Cluster Quality:** Rendering quality decreases significantly in cases with close clusters of several transparent elements of different colors [S2].
++*   **Expert Tuning:** Weight assignment requires expert adjustment for each scene according to the distribution of elements to achieve quality sorting [S2].
++*   **Medical Data:** Due to the need for accuracy in depth ranges for medical segmented 3D models, this method is often deemed unsuitable for such purposes [S2].
+ 
+ ## Subtopics
+ 
+ ### Per-Pixel Linked Lists for Order Independent Transparency
+-An Order Independent Transparency (OIT) technique that operates at the fragment level to analyze and sort all object depths linked to each pixel, avoiding layer-based grouping and ensuring precise blending suitable for volumetric data fusion [S2]. It requires two rendering passes per frame, regardless of scene complexity, to achieve real-time performance while maintaining accurate depth sorting [S2]. Unlike Depth Peeling, which requires separate passes for each depth layer, and Dual Depth Peeling, which may store elements at different depths within the same layer, Per-Pixel Linked Lists provide precise per-fragment depth sorting without layer-based grouping [S2]. Unlike WBOIT, which performs sorting in a single pass but suffers from quality degradation in clusters of transparent elements and requires expert weight adjustment, Per-Pixel Linked Lists provide accurate sorting without scene-specific weight tuning [S2].
++An Order Independent Transparency (OIT) technique that operates at the fragment level to analyze and sort all object depths linked to each pixel, avoiding layer-based grouping and ensuring precise blending suitable for volumetric data fusion [S2]. It requires two rendering passes per frame, regardless of scene complexity, to achieve real-time performance while maintaining accurate depth sorting [S2]. Unlike Depth Peeling, which requires separate passes for each depth layer, and Dual Depth Peeling, which may store elements at different depths within the same layer, Per-Pixel Linked Lists provide precise per-fragment depth sorting without layer-based grouping [S2]. Unlike WBOIT, which performs sorting in a single pass but suffers from quality degradation in clusters and requires expert weight tuning, Per-Pixel Linked Lists provide accurate sorting without scene-specific weight tuning [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Single pass for rendering fragments, making it computationally efficient compared to multi-pass techniques like Depth Peeling [S2].
+-*   **Memory Complexity:** Low memory overhead as it does not require auxiliary buffers for linked lists or depth peeling layers [S2].
++*   **Time Complexity:** Single pass rendering, making it computationally efficient compared to multi-pass peeling methods [S2].
++*   **Memory Complexity:** Low memory overhead as it does not require storing linked lists or multiple depth layers [S2].
+ *   **Performance:** Suitable for resource-constrained CPUs and weaker GPUs (e.g., integrated graphics) [S1, unofficial].
+-*   **Strengths:** Simple implementation, low memory usage, single-pass rendering [S2].
+-*   **Limitations:** Rendering quality decreases in cases with close clusters of several transparent elements of different colors [S2]. Weight assignment requires expert adjustment for each scene to achieve quality sorting [S2]. Not suitable for applications requiring high accuracy in depth sorting, such as medical image visualization [S2].
+-*   **When to use:** When performance is critical and the scene does not have complex overlapping transparent structures with varying colors [S1, unofficial].
+-*   **When not to use:** When precise depth sorting is required, or when the scene contains dense clusters of transparent objects with different colors [S2].
++*   **Strengths:** Simple implementation, low computational cost, no need for depth-based sorting [S2].
++*   **Limitations:** Visual artifacts in complex scenes with clustered transparent objects; requires manual tuning of weights per scene [S2].
++*   **When to Use:** Real-time applications on low-end hardware where approximate transparency is acceptable [S1, unofficial].
++*   **When Not to Use:** Applications requiring high precision in depth sorting, such as medical image visualization [S2].
+ 
+ ## Background
+-WBOIT was introduced as a weight-based sorting OIT technique that reduces computational cost by performing sorting in a single pass without depth-based sorting [S2]. It is used in various graphics applications, including the `gsplat_rviz_plugin` for ROS, where it is enabled via a compositor viewport [S1, unofficial]. The method is particularly noted in the context of medical image visualization, where it was considered but ultimately rejected in favor of Per-Pixel Linked Lists due to its inability to maintain the accuracy required for medical data integrity [S2].
++WBOIT was introduced as a weight-based sorting OIT technique to reduce computational cost by performing sorting in a single pass without depth-based sorting [S2]. It is used in various visualization tools, such as the RViz plugin for ROS, where it can be activated via the 'Advanced' options [S1, unofficial]. The method is particularly relevant in scenarios where hardware limitations prevent the use of more accurate but expensive OIT techniques like Per-Pixel Linked Lists [S2].
+ 
+ ## Sources

@@ -1,73 +1,73 @@
 # DFF (Decomposing NeRF for Editing Via Feature Field Distillation)
-Also called: LSeg-DFF, DINO-DFF
+Also called: Feature Field Distillation, LSeg-DFF, DINO-DFF
 
 ## Overview
-DFF enables 3D semantic segmentation and editable novel-view synthesis by distilling features from a 2D teacher network (such as LSeg or DINO) into a neural radiance field, allowing the decomposition of scenes into semantic regions [S1]. It addresses the challenge that original NeRF feature spaces are entangled with low-level factors like color or spatial adjacency rather than semantic similarity, which makes naive decomposition using hidden layer features robust [S1]. Unlike sibling methods that rely on optimization-based consistency enforcement or geometric warping, DFF achieves decomposition through feature distillation, enabling zero-shot text-based or patch-based region selection without requiring 3D semantic labels during training [S1].
+DFF enables 3D semantic segmentation and editable novel-view synthesis by distilling semantic features from a pre-trained 2D teacher network (such as LSeg or DINO) into a neural radiance field [S1]. Unlike standard NeRFs where hidden features are entangled with low-level factors like color or spatial adjacency, DFF creates a dedicated feature field that allows for semantic-aware decomposition, enabling operations such as object deletion, extraction, and appearance editing while maintaining multi-view consistency [S1]. It sets itself apart from sibling methods like [NeRF Editing Procedure](12491-nerf-editing-procedure.md) by explicitly learning a semantic feature space via distillation rather than relying solely on geometric masks or post-hoc optimization, and it avoids the view-inconsistency issues of image-based inpainting baselines like LaMa [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A set of training images $I$ with known camera poses, and a query (text string for LSeg or image patch for DINO).
-*   **Outputs:** A radiance field $F_\Theta$ producing color $\mathbf{c}$ and density $\sigma$, and a feature field producing semantic features $\mathbf{f}$. The system outputs editable novel views and 3D semantic segmentations.
+DFF operates by training a radiance field to predict both color and a high-dimensional semantic feature vector for each point in space. The semantic features are supervised by target feature maps generated from a 2D teacher network, allowing the 3D field to inherit 2D semantic understanding.
 
-**Data Structures:**
-1.  **Radiance Field MLP ($F_{rad}$):**
-    *   Architecture: 8 ReLU layers with 256 dimensions.
-    *   Output branches:
-        *   Density $\sigma$: Linear layer.
-        *   Color $\mathbf{c}$: 3 linear layers.
-        *   Feature $\mathbf{f}$: 3 linear layers (for branch-based DFF).
-    *   Positional Encoding (PE): Length 10 for input coordinate $\mathbf{x}$ and skip connection; Length 4 for viewing direction $\mathbf{v}$ [S1].
-2.  **Independent Feature Field MLP ($F_{feat}$):**
-    *   Architecture: 4 layers.
-    *   Skip connection: At the third layer if PE is used.
-    *   Optional: No PE used for smoothness regularization [S1].
-3.  **Teacher Network Features:**
-    *   Target feature maps $f_{img}(I, \mathbf{r})$ resized to original image size [S1].
+### Inputs and Outputs
+*   **Inputs:**
+    *   Training images $I$ with known camera poses.
+    *   A 2D teacher network (LSeg or DINO) [S1].
+    *   For LSeg: Text labels encoded via the teacher's text encoder [S1].
+    *   For DINO: Image patch queries [S1].
+*   **Outputs:**
+    *   A radiance field model predicting density $\sigma$, color $\mathbf{c}$, and semantic feature $\mathbf{f}$.
+    *   Semantic segmentation maps derived from $\mathbf{f}$ via similarity to query vectors.
+    *   Edited novel views by modifying $\mathbf{c}$ or $\sigma$ based on semantic masks derived from $\mathbf{f}$ [S1].
 
-**Numbered Steps:**
+### Data Structures and Layouts
+The model consists of two main components: the Radiance Field MLP and the Feature Field (optional/independent).
 
-1.  **Teacher Feature Extraction:** Encode each training image $I$ using the image encoder of the teacher network (LSeg or DINO) to generate target feature maps $f_{img}(I, \mathbf{r})$ [S1].
-2.  **Feature Map Resizing:** Resize the target feature maps to the original image resolution, as teacher networks output reduced-size features [S1].
-3.  **Radiance Field Training (Pre-training):** Train the NeRF radiance field $F_{rad}$ without a feature branch for 200,000 iterations using photometric loss $L_p$ [S1].
-    *   *Note:* For branch-based DFF, this step initializes the shared layers. For independent DFF, this builds the geometry.
-4.  **Feature Field Distillation (Finetuning):**
-    *   Add the feature branch to $F_{rad}$ (or initialize $F_{feat}$).
-    *   Remove Gaussian noise applied to density.
-    *   Set learning rate to $1 \times 10^{-4}$.
-    *   Train for 5,000 iterations minimizing the combined loss $L_p + \lambda L_f$ [S1].
-    *   Use coarse sampling (64 points) for training the feature field to ensure smoothness [S1].
-5.  **Query Probability Calculation:**
-    *   **LSeg-DFF (Text Query):** Encode the text label using the LSeg text encoder. Calculate the probability $p$ of each 3D point belonging to the label using the cosine similarity between the rendered feature $\mathbf{f}$ and the encoded text vector [S1].
-    *   **DINO-DFF (Patch Query):** Calculate the patch feature by averaging features of all pixels in the query patch. Compute thresholded cosine similarity between the rendered feature and the patch feature. Set $p=1$ if similarity exceeds threshold, $p=0$ otherwise (hard decomposition) [S1].
-6.  **Rendering:**
-    *   Use coarse sampling for semantic decomposition and edited rendering to maintain smoothness.
-    *   Use fine sampling (192 points total: 64 coarse + 128 fine) for high-quality radiance field reconstruction if needed [S1].
+1.  **Radiance Field MLP (Branch-based DFF):**
+    *   **Architecture:** 8 ReLU layers with 256 dimensions.
+    *   **Outputs:**
+        *   Density $\sigma$: Linear layer (1 output).
+        *   Color $\mathbf{c}$: 3 ReLU layers, then linear layer (3 outputs).
+        *   Feature $\mathbf{f}$: 3 ReLU layers, then linear layer (dimension $D_f$, typically matching teacher output) [S1].
+    *   **Positional Encoding (PE):** Length 10 for input coordinates (and skip connection), Length 4 for viewing direction [S1].
 
-**Formulas:**
-*   **Total Loss:**
-    $$ L = L_p + \lambda L_f $$
-    Where $L_p$ is photometric loss (MSE) and $L_f$ is feature distillation loss [S1].
-*   **Feature Distillation Loss ($L_f$):**
-    $$ L_f = \| \mathbf{f}_{rendered} - f_{img}(I, \mathbf{r}) \|^2 $$
-    Where $\mathbf{f}_{rendered}$ is the feature output by the network and $f_{img}$ is the resized teacher feature map [S1].
-*   **LSeg Probability:**
-    $$ p = \text{softmax}(\text{similarity}(\mathbf{f}, \mathbf{t})) $$
-    Where $\mathbf{t}$ is the text-encoded vector [S1].
-*   **DINO Probability:**
-    $$ p = \begin{cases} 1 & \text{if } \text{cosine}(\mathbf{f}, \mathbf{p}_{patch}) > \tau \\ 0 & \text{otherwise} \end{cases} $$
-    Where $\tau$ is a threshold and $\mathbf{p}_{patch}$ is the averaged patch feature [S1].
+2.  **Independent Feature Field MLP (Optional):**
+    *   Used to avoid retraining the radiance field or to introduce DFF into arbitrary 3D representations [S1].
+    *   **Architecture:** 4 layers.
+    *   **Skip Connection:** Included at the third layer if PE is used [S1].
+    *   **Smoothness Variant:** An independent MLP can be trained *without* positional encoding to act as a smoothness regularizer, reducing high-frequency artifacts in volume decomposition [S1].
 
-**Parameters:**
-*   **Teacher Networks:** LSeg [44] or DINO [12] (pre-trained) [S1].
-*   **Iterations:** 200K for pre-training, 5K for finetuning [S1].
-*   **Optimizer:** Adam, linearly decaying LR from $5 \times 10^{-4}$ to $8 \times 10^{-5}$ during pre-training; $1 \times 10^{-4}$ during finetuning [S1].
-*   **Sampling:** Coarse: 64 points; Fine: 128 points (192 total) [S1].
-*   **PE Length:** 10 (coordinate), 4 (direction) [S1].
-*   **Image Size:** 320×240 (Replica); 1008×756 (others) [S1].
-*   **Batch Size:** 1024 (Replica); 2048 (others) [S1].
-*   **Feature Loss Weight ($\lambda$):** Default value not explicitly given, but increasing by $\times 10$ hurts view synthesis [S1].
+### Numbered Steps
 
-**Pseudocode:**
+1.  **Teacher Feature Extraction:**
+    *   Encode each training image $I$ using the teacher network (LSeg or DINO) to generate target feature maps $f_{img}(I, r)$ [S1].
+    *   **Resize:** Resize these feature maps to the original image resolution ($H \times W$) because teacher networks often output reduced-size features [S1].
+    *   **Query Probability Calculation:**
+        *   *For LSeg:* Encode text labels using the LSeg text encoder. Calculate the probability $p$ of a 3D point belonging to a label using the cosine similarity between the rendered feature $\mathbf{f}$ and the encoded label [S1]. (Equation 22 in source) [S1].
+        *   *For DINO:* Use image patch queries. Calculate the patch feature by averaging features of all pixels in the patch. Compute probability $p$ using thresholded cosine similarity: $p=1$ if similarity $>$ threshold, else $p=0$ (hard decomposition) [S1].
+
+2.  **Radiance Field Initialization (Pre-training):**
+    *   Train a standard NeRF (without feature branches) for 200,000 iterations using only photometric loss $L_p$ [S1]. This establishes the geometry and color baseline [S1].
+
+3.  **Feature Field Distillation (Finetuning):**
+    *   Add the feature branch to the radiance field (or initialize the independent feature MLP) [S1].
+    *   Remove Gaussian noise from density [S1].
+    *   Set learning rate to $1 \times 10^{-4}$ [S1].
+    *   Train for 5,000 iterations using the combined loss $L_p + \lambda L_f$ [S1].
+    *   **Sampling Strategy:** Use **coarse sampling** (64 points) for training the feature field. Coarse sampling produces smoother segmentations and avoids high-frequency artifacts common in fine sampling [S1]. For final edited rendering, fine sampling (128 points) can be used, but coarse features are often sufficient for smooth decomposition [S1].
+
+4.  **Loss Calculation:**
+    *   The total loss is:
+        $$ L = L_p + \lambda L_f $$
+    *   $L_p$: Photometric loss (e.g., $L_1$ or MSE between rendered and ground-truth RGB) [S1].
+    *   $L_f$: Feature loss. This is the distance between the rendered feature $\mathbf{f}$ and the resized teacher feature map $f_{img}$ at the corresponding pixel location [S1].
+    *   $\lambda$: Weight for feature loss. Typical value is $\lambda=1$ (source implies standard weighting, but notes that $\lambda \times 10$ hurts view synthesis) [S1].
+
+5.  **Editing/Inpainting:**
+    *   Render the feature field for a novel view.
+    *   Compute semantic probabilities for each pixel based on the query (text or patch) [S1].
+    *   Generate a mask $M$ based on the probability threshold [S1].
+    *   Modify the color $\mathbf{c}$ or density $\sigma$ in the masked regions (e.g., set to background, apply color transform, or inpaint) [S1].
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -76,178 +76,181 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class DFF:
-    def __init__(self, teacher_type='LSeg', use_independent_feat=False):
-        """
-        teacher_type: 'LSeg' or 'DINO'
-        use_independent_feat: If True, uses separate MLP for features; else branch-based.
-        """
-        # Radiance Field MLP: 8 ReLU layers (256 dim), then branches
-        self.rad_mlp = nn.Sequential(
-            nn.Linear(27, 256), nn.ReLU(), # PE(10) + x
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-        )
+class DFFRadianceField(nn.Module):
+    def __init__(self, feature_dim=256, use_independent_feature=False):
+        super().__init__()
+        # Radiance Field MLP: 8 hidden layers of 256 ReLU
+        self.shared_layers = nn.ModuleList([
+            nn.Linear(256, 256) for _ in range(8)
+        ])
+        
+        # Outputs
         self.density_layer = nn.Linear(256, 1)
-        self.color_layers = nn.Sequential(
-            nn.Linear(256 + 27, 256), nn.ReLU(), # Skip connection
-            nn.Linear(256, 256), nn.ReLU(),
-            nn.Linear(256, 3)
+        self.color_layers = nn.ModuleList([
+            nn.Linear(256, 256) for _ in range(3)
+        ])
+        self.color_out = nn.Linear(256, 3)
+        
+        if not use_independent_feature:
+            # Branch-based: 3 hidden layers for feature
+            self.feature_layers = nn.ModuleList([
+                nn.Linear(256, 256) for _ in range(3)
+            ])
+            self.feature_out = nn.Linear(256, feature_dim)
+        else:
+            self.feature_mlp = None # Initialized separately if independent
+
+    def forward(self, xyz, dirs, pe_xyz, pe_dirs):
+        # Concatenate PE
+        inputs = torch.cat([pe_xyz, pe_dirs], dim=-1)
+        h = inputs
+        
+        # Shared layers
+        for layer in self.shared_layers:
+            h = F.relu(layer(h))
+            
+        density = self.density_layer(h)
+        
+        # Color branch
+        c = h
+        for layer in self.color_layers:
+            c = F.relu(layer(c))
+        color = self.color_out(c)
+        
+        # Feature branch (Branch-based)
+        if self.feature_mlp is None:
+            f = h
+            for layer in self.feature_layers:
+                f = F.relu(layer(f))
+            feature = self.feature_out(f)
+        else:
+            feature = self.feature_mlp(pe_xyz) # Independent MLP takes only xyz PE
+            
+        return density, color, feature
+
+def get_pe(pos, L=10):
+    """Standard NeRF positional encoding"""
+    # Implementation of standard sin/cos encoding
+    # Returns concatenated [sin(2^0 pi pos), cos(2^0 pi pos), ..., sin(2^(L-1) pi pos), cos(...)]
+    pass
+
+def train_dff(scene_data, teacher_network, teacher_type='LSeg'):
+    """
+    Main training loop for DFF.
+    """
+    # 1. Pre-train standard NeRF for 200k iterations (omitted for brevity, assume model exists)
+    model = DFFRadianceField()
+    
+    # 2. Add feature branch or initialize independent MLP
+    # ... (model modification) ...
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    
+    # 3. Finetune for 5k iterations
+    for step in range(5000):
+        # Sample rays
+        rays = sample_rays(scene_data, batch_size=1024) # 1024 for Replica, 2048 for others
+        
+        # Forward pass with Coarse Sampling (64 points)
+        # Note: Coarse sampling is recommended for feature field training
+        density, color, feature = model.forward(
+            rays.origins, 
+            rays.directions, 
+            get_pe(rays.origins, L=10), 
+            get_pe(rays.directions, L=4)
         )
         
-        if use_independent_feat:
-            # Independent Feature MLP: 4 layers, skip at 3rd if PE used
-            self.feat_mlp = nn.Sequential(
-                nn.Linear(27, 256), nn.ReLU(),
-                nn.Linear(256, 256), nn.ReLU(),
-                nn.Linear(256, 256), nn.ReLU(),
-                nn.Linear(256, 256) # Skip connection logic handled in forward if needed
-            )
-            self.use_independent_feat = True
-        else:
-            self.feat_layers = nn.Sequential(
-                nn.Linear(256 + 27, 256), nn.ReLU(),
-                nn.Linear(256, 256), nn.ReLU(),
-                nn.Linear(256, 3) # Feature dimension
-            )
-            self.use_independent_feat = False
-            
-        self.teacher = self.load_teacher(teacher_type)
-        self.lambda_f = 1.0 # Typical value, adjust to avoid hurting view synthesis
-
-    def load_teacher(self, type_name):
-        if type_name == 'LSeg':
-            return LSegTeacher()
-        elif type_name == 'DINO':
-            return DINOTeacher()
-        raise ValueError("Unknown teacher")
-
-    def forward(self, x, v, query=None):
-        """
-        x: (N, 3) coordinates
-        v: (N, 3) viewing directions
-        query: text string or image patch tensor
-        """
-        # PE
-        x_pe = positional_encoding(x, length=10)
-        v_pe = positional_encoding(v, length=4)
+        # Volume Rendering for Color (using coarse density/color)
+        rendered_color = volume_render_color(rays, density, color)
         
-        # Radiance MLP
-        h = self.rad_mlp(x_pe)
+        # Volume Rendering for Feature (using coarse density/feature)
+        rendered_feature = volume_render_feature(rays, density, feature)
         
-        # Density
-        sigma = self.density_layer(h)
+        # Get Teacher Targets
+        # Resize teacher features to image size
+        teacher_features = teacher_network.encode(rays.images)
+        teacher_features = F.interpolate(teacher_features, size=rays.image_size, mode='bilinear')
         
-        # Color
-        color_input = torch.cat([h, x_pe], dim=-1)
-        color = self.color_layers(color_input)
+        # Calculate Losses
+        # L_p: Photometric loss
+        loss_p = F.l1_loss(rendered_color, rays.images)
         
-        # Feature
-        if self.use_independent_feat:
-            feat = self.feat_mlp(x_pe)
-        else:
-            feat_input = torch.cat([h, x_pe], dim=-1)
-            feat = self.feat_layers(feat_input)
-            
-        return sigma, color, feat
+        # L_f: Feature loss (MSE between rendered feature and teacher feature)
+        loss_f = F.mse_loss(rendered_feature, teacher_features)
+        
+        # Combined Loss
+        lambda_f = 1.0 # Typical weight; higher values (e.g., 10) hurt view synthesis
+        loss = loss_p + lambda_f * loss_f
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-    def compute_loss(self, rays, teacher_features, query):
-        """
-        rays: (B, 3) origins, (B, 3) directions
-        teacher_features: (B, H, W, C) resized features
-        query: for probability calculation
-        """
-        # 1. Volume Rendering (Coarse sampling for feature training)
-        sigma, color, feat = self.forward(rays.origins, rays.directions)
-        rendered_color, rendered_feat = volume_render(sigma, color, feat, rays)
+def query_semantics(model, rays, query_text=None, query_patch=None, teacher_type='LSeg'):
+    """
+    Generate semantic mask for editing.
+    """
+    # Render features
+    density, _, feature = model.forward(...)
+    rendered_feature = volume_render_feature(rays, density, feature)
+    
+    if teacher_type == 'LSeg':
+        # Encode text query
+        query_vec = teacher_network.encode_text(query_text)
+        # Cosine similarity
+        sim = F.cosine_similarity(rendered_feature, query_vec)
+        prob = sim # Or sigmoid transform depending on teacher
+    elif teacher_type == 'DINO':
+        # Query patch feature (average of patch pixels)
+        query_vec = teacher_network.encode_patch(query_patch)
+        sim = F.cosine_similarity(rendered_feature, query_vec)
+        # Hard threshold
+        prob = (sim > threshold).float()
         
-        # 2. Photometric Loss
-        L_p = F.mse_loss(rendered_color, rays.gt_color)
-        
-        # 3. Feature Loss
-        # Interpolate teacher features to ray positions
-        target_feat = interpolate_teacher_features(teacher_features, rays)
-        L_f = F.mse_loss(rendered_feat, target_feat)
-        
-        return L_p + self.lambda_f * L_f
-
-    def get_segmentation_mask(self, rays, query):
-        """
-        Returns binary mask based on query similarity.
-        """
-        sigma, color, feat = self.forward(rays.origins, rays.directions)
-        
-        if self.teacher.type == 'LSeg':
-            text_vec = self.teacher.encode_text(query)
-            sim = F.cosine_similarity(feat, text_vec)
-            prob = torch.sigmoid(sim) # Or softmax if multi-class
-            return prob > 0.5
-            
-        elif self.teacher.type == 'DINO':
-            patch_feat = self.teacher.get_patch_feature(query)
-            sim = F.cosine_similarity(feat, patch_feat)
-            # Hard decomposition
-            return (sim > self.teacher.threshold).float()
-
-class LSegTeacher:
-    def __init__(self):
-        self.type = 'LSeg'
-        # Load pre-trained LSeg model
-        pass
-    def encode_image(self, img):
-        return self.model.get_features(img)
-    def encode_text(self, text):
-        return self.model.encode_text(text)
-
-class DINOTeacher:
-    def __init__(self, threshold=0.5):
-        self.type = 'DINO'
-        self.threshold = threshold
-        # Load pre-trained DINO model
-        pass
-    def encode_image(self, img):
-        return self.model.get_intermediate_layers(img)
-    def get_patch_feature(self, patch):
-        # Average features of pixels in patch
-        feats = self.encode_image(patch)
-        return torch.mean(feats, dim=(1, 2)) # Assuming spatial dims
-
-def positional_encoding(x, length):
-    # Standard NeRF PE
-    scales = torch.tensor([2**i for i in range(length//2)])
-    xb = torch.reshape(x, (-1, 1, 3)) * scales
-    freq_bands = torch.sin(torch.cat([xb, xb + 0.5 * torch.pi], dim=-1).view(-1, 3 * length))
-    return freq_bands
-
-def volume_render(sigma, color, feat, rays):
-    # Standard differentiable volume rendering
-    # Returns accumulated color and accumulated feature
-    pass
+    return prob
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Feature Loss Weight:** Excessively increasing $\lambda$ (e.g., $\times 10$) hurts view synthesis quality without improving segmentation [S1].
-*   **Sampling Frequency:** Fine sampling introduces high-frequency artifacts in segmentation; coarse sampling is preferred for smooth decomposition [S1].
-*   **Naive NeRF Features:** Using hidden layers of the original NeRF (e.g., 8th layer) for decomposition fails because features leak to regions with similar color/geometry, not semantics [S1].
-*   **Deletion Artifacts:** Deleting foreground objects may leave floating artifacts and blurred volumes in the far distance behind the object [S1].
-*   **Training Time:** Feature loss converges faster than photometric loss; 5K iterations for finetuning is sufficient [S1].
+### Parameters and Typical Values
+*   **Teacher Networks:** LSeg [S1] or DINO [S1].
+*   **Training Iterations:** 200,000 for pre-training (radiance only); 5,000 for finetuning (with feature branch) [S1].
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate:**
+    *   Pre-training: Linearly decaying from $5 \times 10^{-4}$ to $8 \times 10^{-5}$ [S1].
+    *   Finetuning: Fixed at $1 \times 10^{-4}$ [S1].
+*   **Sampling:**
+    *   Coarse: 64 points (stratified) [S1].
+    *   Fine: 128 points (importance) [S1].
+    *   *Note:* Source notes "192 in total" for fine sampling in one context, but explicitly lists "128" in the implementation settings paragraph. We use 128 as the specific setting value [S1].
+*   **Positional Encoding:** Length 10 for coordinates, Length 4 for viewing direction [S1].
+*   **Image Resolution:** 320×240 (Replica dataset); 1008×756 (other datasets) [S1].
+*   **Batch Size:** 1024 rays (Replica); 2048 rays (others) [S1].
+*   **Feature Loss Weight ($\lambda$):** Default 1. Increasing to $\lambda \times 10$ degrades view synthesis without improving segmentation [S1].
+
+### Edge Cases and Pitfalls
+*   **Feature Loss Convergence:** Feature loss converges significantly faster than photometric loss. Therefore, short finetuning (5K iterations) is sufficient; longer training may overfit to features at the expense of photometric accuracy [S1].
+*   **Excessive Feature Weight:** Setting $\lambda$ too high (e.g., 10x default) hurts novel view synthesis quality without further improving segmentation performance [S1].
+*   **Naive NeRF Features:** Using hidden layers of a standard NeRF (e.g., the 8th layer) for decomposition is not robust. These features are entangled with low-level factors (color, geometry, position), causing "leakage" where selections bleed into unrelated regions with similar colors or positions (e.g., floor selection leaking to walls) [S1].
+*   **Deletion Artifacts:** Deleting foreground objects may result in floating artifacts and blurred volumes in the far distance behind the deleted object [S1].
+*   **Sampling Impact:** Fine sampling introduces high-frequency artifacts in semantic segmentation. Coarse sampling is preferred for smooth decomposition [S1].
+*   **Independent MLP:** If using an independent feature MLP, the radiance field MLP must still be prepared to reconstruct geometry well, as the feature field relies on geometrically plausible volume rendering [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Pre-training requires 200K iterations; finetuning requires 5K iterations [S1].
-*   **Memory Complexity:** Branch-based DFF adds minimal overhead to the standard NeRF MLP. Independent DFF adds a separate lightweight MLP (4 layers) [S1].
-*   **Performance:** Achieves 3D semantic segmentation performance comparable to or better than supervised sparse 3D convolution models (e.g., MinkowskiNet) on Replica dataset [S1].
-*   **Strengths:** Enables zero-shot text-based and patch-based editing; multi-view consistent results for deletion/extraction; smooth volume decomposition with coarse sampling [S1].
-*   **Limitations:** Floating artifacts behind deleted objects; feature loss convergence speed requires careful tuning of $\lambda$; original NeRF features are not suitable for decomposition [S1].
-*   **When to Use:** When semantic decomposition and editing are required without 3D labels; when multi-view consistency is critical.
-*   **When Not to Use:** When high-frequency geometric detail in segmentation is required (use fine sampling but accept artifacts); when view synthesis quality is more important than segmentation (avoid high $\lambda$) [S1].
+*   **Time Complexity:** Training requires two phases: 200K iterations for standard NeRF and 5K iterations for distillation. The distillation phase is short due to fast convergence of feature loss [S1].
+*   **Memory Complexity:** Adds a feature output dimension to the radiance field MLP (or an additional MLP). The branch-based approach has small computational and parameter overhead compared to original NeRF [S1].
+*   **Performance:**
+    *   **Segmentation:** Achieves mean Intersection-over-Union (mIoU) and accuracy comparable to or better than supervised sparse 3D convolution models like MinkowskiNet42, despite using no 3D semantic labels during training [S1].
+    *   **View Synthesis:** Does not degrade novel view synthesis quality compared to NeRF without feature fields, provided $\lambda$ is not excessive [S1].
+*   **Strengths:**
+    *   Enables zero-shot semantic segmentation via text (LSeg) or patch (DINO) queries [S1].
+    *   Produces multi-view consistent results for editing/deletion, unlike image inpainting baselines (e.g., LaMa) [S1].
+    *   Independent feature MLP allows integration into existing 3D representations (dynamic NeRFs, meshes) without retraining the radiance field [S1].
+*   **Limitations:**
+    *   Struggles with "volume decomposition" smoothness if fine sampling or high-frequency PE is used without regularization [S1].
+    *   Deletion leaves artifacts in occluded background regions [S1].
+    *   Coarse training may lack high-frequency detail in the feature field [S1].
 
 ## Background
-DFF was introduced in the paper "Decomposing NeRF for Editing Via Feature Field Distillation" [S1]. It addresses the limitations of editable NeRFs in surface and volume decomposition. The method leverages pre-trained 2D teacher networks (LSeg and DINO) to distill semantic features into the 3D radiance field, enabling 3D semantic segmentation and editing without explicit 3D supervision [S1].
+DFF was introduced in the paper "Decomposing NeRF for Editing Via Feature Field Distillation" [S1]. It addresses the challenge that standard NeRF feature spaces are not semantically meaningful, being entangled with low-level visual cues. By distilling features from powerful 2D teacher networks (LSeg and DINO), DFF bridges the gap between 2D semantic understanding and 3D radiance fields, enabling editable 3D scenes. It builds on the standard NeRF training loop [NeRF Training Loop](12494-nerf-editing-and-inpainting-procedures.md) but adds a distillation objective.
 
 ## Sources
 [S1] Decomposing NeRF for Editing Via Feature Field Distillation, https://doi.org/10.52202/068431-1694, fetched 2026-10-26

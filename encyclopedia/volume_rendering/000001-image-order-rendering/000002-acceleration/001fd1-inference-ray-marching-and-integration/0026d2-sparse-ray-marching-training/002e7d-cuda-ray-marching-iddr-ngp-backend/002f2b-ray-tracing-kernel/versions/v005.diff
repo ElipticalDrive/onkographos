@@ -1,0 +1,289 @@
+--- v004.md
++++ v005.md
+@@ -3,189 +3,123 @@
+ 
+ ## Overview
+-The Ray Tracing Kernel is a GPU-accelerated compute shader that performs volumetric tracing and lighting by stepping through a 3D grid, dynamically adjusting step size and cascade resolution based on distance from the center, and accumulating transmittance (alpha) [S1, S2, unofficial]. It serves as the core inference engine for sparse ray marching, supporting both forward rendering (image generation) and backward pass (gradient computation) for training [S2, unofficial]. It distinguishes itself from standard ray marching by using a hierarchical cascade structure where the sampling resolution expands exponentially as the ray moves away from the grid center, optimizing performance for large volumes [S1, unofficial].
++The Ray Tracing Kernel is a CUDA compute kernel that performs forward and backward volumetric ray marching through a sparse hashed density grid, serving as the core inference and training step for the IDDR-NGP backend. It differs from standard uniform ray marching by integrating spherical harmonic (SH) evaluation and adaptive step sizing within a single warp-synchronized launch, and from dense voxel tracing by operating on a sparse grid structure with specific boundary handling [S1, unofficial].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Forward:** Grid data (hashed density/SH coefficients), ray specifications (origin, direction), ray bounds, SH data dimension, and temporary storage. Outputs accumulated color/transmittance.
++*   **Backward:** Gradients of the output (`grad_output`), cached forward values (`color_cache`, `log_transmit_in`), loss weights (`beta_loss`, `sparsity_loss`), and gradient buffers (`grads`) [S1, unofficial].
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   `id`: Thread ID (uint3), representing the output voxel or ray index.
+-*   `GridResolution`: The base resolution of the 3D grid (uint).
+-*   `GridHalfResolution`: Half of `GridResolution` (uint).
+-*   `GridCascadeBase`: A uint2 specifying the base cascade index (`x`) and the maximum cascade index limit (`y`) [S1, unofficial].
+-*   `grid`: Sparse density grid data structure [S2, unofficial].
+-*   `ray_spec`: Ray specifications including origin and direction [S2, unofficial].
+-*   `opt`: Tracing options [S2, unofficial].
+-*   `sphfunc_val`: Spherical harmonic coefficients/values for SH evaluation [S2, unofficial].
+-*   `grad_output`: Gradient of the output loss with respect to the ray color/transmittance (for backward kernel) [S2, unofficial].
+-*   `color_cache`, `log_transmit_in`, `beta_loss`, `sparsity_loss`: Additional inputs for backward pass regularization and gradient accumulation [S2, unofficial].
++**Data Structures:**
++The kernel uses shared memory to batch ray processing within a block. The layout is defined as follows:
++*   `ray_spec[TRACE_RAY_CUDA_RAYS_PER_BLOCK]`: Stores ray origin and direction for each ray in the block.
++*   `sphfunc_val[TRACE_RAY_CUDA_RAYS_PER_BLOCK][9]`: Stores spherical harmonic coefficients/values. Size is 9 floats per ray block [S1, unofficial].
++*   `temp_storage[TRACE_RAY_CUDA_RAYS_PER_BLOCK]`: Temporary storage for warp reduction operations [S1, unofficial].
+ 
+-**Outputs:**
+-*   `LightTex3d` / `CVCT_tex3d`: Output texture storing the accumulated alpha/transmittance or final color [S1, unofficial].
+-*   `grads`: Gradients with respect to grid densities and other parameters (for backward kernel) [S2, unofficial].
++**Parameters:**
++*   **Warp Size:** 32 threads.
++*   **Lane ID:** `lane_id = threadIdx.x & 0x1F` [S1, unofficial].
++*   **SH Data Dimension (`grid.sh_data_dim`):** Limits SH evaluation per lane. If `lane_id >= grid.sh_data_dim`, the thread returns early [S1, unofficial].
++*   **Block Size:** Determined by `TRACE_RAY_CUDA_RAYS_PER_BLOCK` [S1, unofficial].
+ 
+-### Data Structures
+-*   **Shared Memory `sphfunc_val`**: Array of size `TRACE_RAY_CUDA_RAYS_PER_BLOCK` by 9 floats. Stores spherical harmonic function values for rays in the block [S2, unofficial].
+-*   **Shared Memory `ray_spec`**: Array of size `TRACE_RAY_CUDA_RAYS_PER_BLOCK`. Stores ray specifications (origin, direction) for rays in the block [S2, unofficial].
+-*   **Shared Memory `temp_storage`**: Array of size `TRACE_RAY_CUDA_RAYS_PER_BLOCK`. Temporary storage for warp reduction operations [S2, unofficial].
++**Steps:**
++1.  **Initialization:** Load ray specifications into shared memory `ray_spec` [S1, unofficial].
++2.  **SH Evaluation:** Calculate spherical harmonic function values for the current ray direction.
++    *   Call `calc_sphfunc(grid, lane_id, ray_id, ray_spec[ray_blk_id].dir, sphfunc_val[ray_blk_id])` [S1, unofficial].
++3.  **Boundary Calculation:** Find the intersection bounds of the ray with the sparse grid.
++    *   Call `ray_find_bounds(ray_spec[ray_blk_id], grid, opt, ray_id)` [S1, unofficial].
++4.  **Synchronization:** Synchronize warps to ensure shared memory consistency for SH values.
++    *   Execute `__syncwarp((1U << grid.sh_data_dim) - 1)` [S1, unofficial].
++5.  **Ray Marching:** Perform the forward or backward trace.
++    *   Call `trace_ray_cuvol` with grid, ray spec, options, lane ID, SH values, temp storage, output pointer, and optional log transmit output [S1, unofficial].
++    *   For backward pass, the kernel setup includes `grad_output`, `color_cache`, `log_transmit_in`, `beta_loss`, `sparsity_loss`, and `grads` [S1, unofficial].
+ 
+-### Parameters
+-*   `SAMPLE_STEP_BASE`: Base step size for tracing, typically 0.45 [S1, unofficial].
+-*   `EXPAND_STEP`: Multiplier for expansion factor per step, typically 1.21 [S1, unofficial].
+-*   `sh_data_dim`: Dimension limit for SH evaluation per warp lane [S2, unofficial].
+-*   Warp size: 32 threads. `lane_id = threadIdx.x & 0x1F` [S2, unofficial].
++**Pseudocode:**
++```python
++# Pseudocode for the Ray Tracing Kernel launch and core logic
++# Note: This is a high-level representation of the CUDA kernel structure described in [S1, unofficial].
+ 
+-### Algorithm Steps
+-
+-1.  **Initialization**:
+-    *   Calculate the position relative to the grid center: `pos = id - (GridHalfResolution - 0.5)` [S1, unofficial].
+-    *   Calculate the central distance: `central_pos = abs(pos)`, `central_distance = max(central_pos.x, max(central_pos.y, central_pos.z))` [S1, unofficial].
+-    *   Normalize distance and compute expansion factor: `max_distance = GridHalfResolution - 0.5`, `central_distance /= max_distance`, `expand = max(log2(central_distance) + 2, 1)` [S1, unofficial].
+-    *   Initialize alpha: `alpha = 1` [S1, unofficial].
+-    *   Initialize cascade base: `grid_cascade_base = GridCascadeBase.x` [S1, unofficial].
+-
+-2.  **Forward Kernel Specifics (S2, unofficial)**:
+-    *   Calculate spherical harmonic function values: `calc_sphfunc(grid, lane_id, ray_id, ray_spec[ray_blk_id].dir, sphfunc_val[ray_blk_id])` [S2, unofficial].
+-    *   Find ray bounds within the grid: `ray_find_bounds(ray_spec[ray_blk_id], grid, opt, ray_id)` [S2, unofficial].
+-    *   Synchronize warps: `__syncwarp((1U << grid.sh_data_dim) - 1)` [S2, unofficial].
+-    *   If `lane_id >= grid.sh_data_dim`, the thread returns early [S2, unofficial].
+-
+-3.  **Main Tracing Loop**:
+-    *   While `true`:
+-        *   **Cascade Check**: If `expand >= 2.0`:
+-            *   If `grid_cascade_base >= GridCascadeBase.y`, break loop [S1, unofficial].
+-            *   Increment cascade: `grid_cascade_base += GridResolution` [S1, unofficial].
+-            *   Halve expansion: `expand *= 0.5` [S1, unofficial].
+-            *   Halve position: `pos *= 0.5` [S1, unofficial].
+-        *   **Sample Low**: Calculate sample position `p = pos + (GridHalfResolution - 0.5)`, `p.y += grid_cascade_base`. Sample grid: `a_low = SampleGV(p)` [S1, unofficial].
+-        *   **Sample High**:
+-            *   If `grid_cascade_base >= GridCascadeBase.y`, `a_high = 1` [S1, unofficial].
+-            *   Else, calculate `q = pos * 0.5 + (GridHalfResolution - 0.5)`, `q.y += grid_cascade_base + GridResolution`. Sample grid: `a_high = SampleGV(q)` [S1, unofficial].
+-        *   **Interpolate Alpha**: `a = lerp(a_low, a_high, expand - 1)` [S1, unofficial].
+-        *   **Update Step and Accumulate**:
+-            *   `sample_step = SAMPLE_STEP_BASE * expand` [S1, unofficial].
+-            *   `alpha *= pow(a, sample_step)` [S1, unofficial].
+-            *   `pos.z -= sample_step` [S1, unofficial].
+-            *   `expand *= EXPAND_STEP` [S1, unofficial].
+-
+-4.  **Backward Kernel Specifics (S2, unofficial)**:
+-    *   Takes `grad_output`, `color_cache`, `log_transmit_in`, `beta_loss`, `sparsity_loss`, and `grads` as inputs [S2, unofficial].
+-    *   Sets up ray spec and calls `trace_ray_cuvol` (likely handling backward logic internally or calling a specific backward trace function) [S2, unofficial].
+-
+-5.  **Output**:
+-    *   Adjust ID: `id.y += GridCascadeBase.x` [S1, unofficial].
+-    *   Write result: `LightTex3d[id] = alpha` (or equivalent output texture) [S1, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-def ray_tracing_kernel(id: uint3, GridResolution: uint, GridHalfResolution: uint, 
+-                       GridCascadeBase: uint2, grid: SparseGrid, ray_spec: RaySpec, 
+-                       opt: Options, sphfunc_val: float[9], grad_output: float = None, 
+-                       color_cache: float = None, log_transmit_in: float = None, 
+-                       beta_loss: float = None, sparsity_loss: float = None, 
+-                       grads: GradBuffer = None) -> float:
++def ray_tracing_kernel(grid, ray_specs, options, output, grad_output=None, color_cache=None, log_transmit_in=None, beta_loss=0.0, sparsity_loss=0.0, grads=None):
+     """
+-    Performs volumetric tracing/lighting by stepping through a 3D grid.
+-    Supports forward (alpha accumulation) and backward (gradient) passes.
++    CUDA kernel entry point for forward and backward ray tracing.
+     """
+-    # Constants
+-    SAMPLE_STEP_BASE = 0.45
+-    EXPAND_STEP = 1.21
++    # Thread and block identification
++    lane_id = threadIdx.x & 0x1F
++    ray_blk_id = threadIdx.x // 32 # Assuming 1 ray per warp for simplicity in this model, or mapped via block index
++    ray_id = blockIdx.x * blockDim.x + threadIdx.x
+     
+-    # 1. Initialization
+-    pos = id - (GridHalfResolution - 0.5)
+-    central_pos = abs(pos)
+-    central_distance = max(central_pos.x, max(central_pos.y, central_pos.z))
++    # Shared memory allocation (conceptual)
++    shared_ray_spec = SharedMemory[TRACE_RAY_CUDA_RAYS_PER_BLOCK]()
++    shared_sphfunc_val = SharedMemory[TRACE_RAY_CUDA_RAYS_PER_BLOCK][9]()
++    shared_temp_storage = SharedMemory[TRACE_RAY_CUDA_RAYS_PER_BLOCK]()
+     
+-    max_distance = GridHalfResolution - 0.5
+-    central_distance_normalized = central_distance / max_distance
+-    expand = max(log2(central_distance_normalized) + 2, 1.0)
++    # Step 1: Load ray specs
++    shared_ray_spec[threadIdx.x] = ray_specs[ray_id]
++    __syncthreads()
+     
+-    alpha = 1.0
+-    grid_cascade_base = GridCascadeBase.x
++    # Step 2: SH Evaluation
++    # Only threads within the SH data dimension limit perform this
++    if lane_id < grid.sh_data_dim:
++        calc_sphfunc(
++            grid=grid,
++            lane_id=lane_id,
++            ray_id=ray_id,
++            direction=shared_ray_spec[threadIdx.x].dir,
++            out=sphfunc_val[threadIdx.x]
++        )
+     
+-    # 2. Forward Kernel Specifics (if applicable)
+-    # Note: SH evaluation and ray bounds are handled in forward pass
+-    # lane_id = threadIdx.x & 0x1F
+-    # if lane_id >= grid.sh_data_dim: return alpha # Early return for SH limit
++    # Step 3: Find Ray Bounds
++    ray_find_bounds(
++        ray_spec=shared_ray_spec[threadIdx.x],
++        grid=grid,
++        opt=options,
++        ray_id=ray_id
++    )
+     
+-    # 3. Main Tracing Loop
+-    while True:
+-        # Cascade Check
+-        if expand >= 2.0:
+-            if grid_cascade_base >= GridCascadeBase.y:
+-                break
+-            grid_cascade_base += GridResolution
+-            expand *= 0.5
+-            pos *= 0.5
+-            
+-        # Sample Low
+-        p = pos + (GridHalfResolution - 0.5)
+-        p.y += grid_cascade_base
+-        a_low = sample_grid(grid, p)
+-        
+-        # Sample High
+-        if grid_cascade_base >= GridCascadeBase.y:
+-            a_high = 1.0
+-        else:
+-            q = pos * 0.5 + (GridHalfResolution - 0.5)
+-            q.y += grid_cascade_base + GridResolution
+-            a_high = sample_grid(grid, q)
+-            
+-        # Interpolate Alpha
+-        a = lerp(a_low, a_high, expand - 1.0)
+-        
+-        # Update Step and Accumulate
+-        sample_step = SAMPLE_STEP_BASE * expand
+-        alpha *= pow(a, sample_step)
+-        pos.z -= sample_step
+-        expand *= EXPAND_STEP
+-        
+-    # 4. Backward Kernel Specifics (if applicable)
+-    # If grad_output is provided, compute gradients for grid densities, etc.
+-    # This involves backpropagating through the loop steps.
+-    # The kernel likely calls a unified trace function or handles backward logic internally.
+-    # For the purpose of this forward-only pseudocode, we return alpha.
+-    # In a full implementation, grads would be updated here.
++    # Step 4: Synchronize Warps
++    # Mask ensures synchronization only for active lanes in SH evaluation
++    __syncwarp((1U << grid.sh_data_dim) - 1)
+     
+-    # 5. Output
+-    id.y += GridCascadeBase.x
+-    # LightTex3d[id] = alpha
+-    return alpha
+-
+-def sample_grid(grid: SparseGrid, p: float3) -> float:
+-    """
+-    Samples the sparse grid at position p.
+-    Implementation details depend on the specific sparse grid structure (e.g., hash map, octree).
+-    """
+-    # Placeholder for actual grid sampling logic
+-    return grid.sample(p)
++    # Step 5: Trace Ray
++    if grad_output is not None:
++        # Backward Pass
++        trace_ray_cuvol_backward(
++            grid=grid,
++            ray_spec=shared_ray_spec[threadIdx.x],
++            opt=options,
++            lane_id=lane_id,
++            sphfunc_val=shared_sphfunc_val[threadIdx.x],
++            temp_storage=shared_temp_storage[threadIdx.x],
++            grad_output=grad_output,
++            color_cache=color_cache,
++            log_transmit_in=log_transmit_in,
++            beta_loss=beta_loss,
++            sparsity_loss=sparsity_loss,
++            grads=grads
++        )
++    else:
++        # Forward Pass
++        trace_ray_cuvol(
++            grid=grid,
++            ray_spec=shared_ray_spec[threadIdx.x],
++            opt=options,
++            lane_id=lane_id,
++            sphfunc_val=shared_sphfunc_val[threadIdx.x],
++            temp_storage=shared_temp_storage[threadIdx.x],
++            output=output,
++            log_transmit_out=None # Optional
++        )
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Infinite Loop Prevention**: The loop breaks when `expand >= 2.0` and `grid_cascade_base` reaches `GridCascadeBase.y`. If the cascade base is already at the limit, it breaks immediately on the first check [S1, unofficial].
+-*   **SH Data Dimension Check**: If `lane_id >= grid.sh_data_dim`, the thread returns early. This implies SH evaluation is done per lane within a warp, limited by `sh_data_dim` [S2, unofficial].
+-*   **Precision**: The use of `log2` and floating-point arithmetic for `expand` and `sample_step` may introduce precision errors, especially for large grids or extreme distances.
+-*   **Boundary Conditions**: The calculation of `central_distance` and `expand` assumes the ray starts within or near the grid center. Rays starting far outside may have undefined behavior if not clamped or handled by `ray_find_bounds` [S2, unofficial].
++## Subtopics
++
++### [TracingKernel](13916-tracingkernel.md)
++`TracingKernel` is a CUDA compute shader that performs volumetric light transport by stepping through a 3D grid, dynamically adjusting step size and cascade resolution based on distance from the center, and accumulating transmittance (alpha). It is designed for the IDDR-NGP backend, where it serves as the core inference step for sparse ray marching, optimizing performance by coarser sampling in distant regions and finer sampling near the center. It differs from standard uniform ray marching by using a logarithmic expansion factor to vary step sizes and cascade levels, and from dense voxel cone tracing by operating on a sparse grid structure with specific boundary handling.
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity**: The number of steps in the loop depends on the initial `expand` value and the `EXPAND_STEP`. Since `expand` grows exponentially, the number of steps is logarithmic with respect to the distance from the center. However, the cascade switching adds a constant overhead. Overall, it is efficient for large volumes due to adaptive resolution.
+-*   **Memory Complexity**: Uses shared memory for `sphfunc_val`, `ray_spec`, and `temp_storage`, sized by `TRACE_RAY_CUDA_RAYS_PER_BLOCK`. This limits the number of rays processed per block but reduces global memory bandwidth.
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Scales well with GPU parallelism, as each thread handles a ray or voxel independently. The cascade structure allows for efficient rendering of large volumes by coarsening resolution at a distance.
+-*   **Strengths**: Adaptive resolution reduces computation for distant parts of the volume. SH evaluation is optimized for lighting.
+-*   **Limitations**: Complexity of implementation due to cascade logic and backward pass. Precision issues may arise with extreme values.
+-*   **When to Use**: Ideal for large-scale volumetric rendering where adaptive resolution is beneficial, such as in neural radiance fields (NeRF) or volumetric light scattering.
+-*   **When Not to Use**: For small volumes where fixed-step marching is simpler and faster, or when high precision is required at all distances.
++Not given in the sources.
+ 
+ ## Background
+-
+-*   **Origin**: The method is derived from the CascatedVoxelConeTracing (CVCT) technique [S1, unofficial] and integrated into the svox2 framework for training sparse voxel radiance fields [S2, unofficial].
+-*   **History**: CVCT was developed to accelerate volumetric rendering by using a cascade of voxel grids with varying resolutions. svox2 adapted this for differentiable rendering and training.
+-*   **Usage**: Used in neural rendering pipelines for training and inference of 3D scenes represented as sparse voxel grids.
++The Ray Tracing Kernel is part of the svox2 project, which implements neural implicit representations for 3D scenes using sparse voxel grids [S1, unofficial]. It is designed to support both training (via backward pass gradients) and inference (forward pass) efficiently on CUDA-capable GPUs.
+ 
+ ## Sources
+-
+-[S1] arigo/CascatedVoxelConeTracing, https://github.com/arigo/CascatedVoxelConeTracing, fetched 2026-10-26 (unofficial)
+-[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)+[S1] svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

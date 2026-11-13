@@ -1,0 +1,225 @@
+# Underwater 3D Gaussian Splatting with Backscatter Loss
+
+Also called: 3DGS adapted to aquatic environments
+
+## Overview
+This method adapts 3D Gaussian Splatting (3DGS) to underwater environments by integrating ocean optics models, specifically learning direct attenuation ($B_d$), infinite backscatter ($B_\infty$), and backscatter coefficient ($B_b$) alongside scene geometry [S1]. It solves the problem of color distortion and visibility loss in aquatic scenes by using an alternating optimization strategy that refines depth and medium parameters simultaneously [S1]. Unlike vanilla 3DGS, which struggles with underwater color palettes, or NeRF-based methods like STNeRF, this approach maintains real-time inference speeds while significantly improving reconstruction quality at large distances [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of input images (e.g., from the TableDB or public underwater datasets), camera poses extracted via COLMAP, and initial 3D Gaussian positions derived from COLMAP’s sparse 3D point cloud [S1].
+*   **Outputs:** Optimized 3D Gaussian parameters ($\Theta$), including positions, covariances, opacities, and colors, plus learned medium parameters: direct attenuation $B_d$, infinite backscatter $B_\infty$, and backscatter coefficient $B_b$ [S1].
+
+**Data Structures:**
+*   **Gaussians ($\Theta$):** Standard 3DGS representation. Each Gaussian $i$ has position $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients for color $c_i$ [S1].
+*   **Medium Parameters:**
+    *   $B_d$: Direct attenuation coefficient. Follows normalized RGB image range and physically non-negative assumption [S1].
+    *   $B_\infty$: Infinite backscatter color. Bounded to $[0, 1]$ [S1].
+    *   $B_b$: Backscatter coefficient. Bounded to $[0, 5]$ [S1].
+*   **Depth Map ($z$):** Extracted from the 3DGS representation using a customized CUDA implementation. Mapped to $[0, 1.0)$ using a shifted and scaled logistic function: $z = \frac{2}{1 + e^{-0.1 \cdot z}} - 1$, where the inner $z$ is the initial output of 3DGS manipulation [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Initialize 3D Gaussians using COLMAP’s sparse 3D point cloud [S1].
+    *   Initialize medium parameters $B_d, B_\infty, B_b$ to default values (not explicitly stated, but optimization bounds apply) [S1].
+
+2.  **Initial Parameter Estimation (Backscatter Guidance):**
+    *   Extract the depth map $z$ from the current 3DGS estimate [S1].
+    *   Cluster the depth values into 10 evenly-spaced clusters covering the range from minimal to maximal $z$ [S1].
+    *   For each cluster, identify pixels in the ground-truth image whose RGB triplets fall below the bottom 1st percentile [S1].
+    *   Treat these pixels as an overestimate of backscatter. The backscatter model is $B_s = B_\infty (1 - e^{-B_b z})$ [S1].
+    *   Use nonlinear least squares fitting on the pairs of $(B_s, z)$ values to estimate initial parameters $\hat{B}_\infty$ and $\hat{B}_b$ for each RGB channel, ensuring they remain within bounds $[0, 1]$ and $[0, 5]$ respectively [S1].
+    *   Set initial $B_d$ based on the normalized RGB range [S1].
+
+3.  **Alternating Optimization Loop:**
+    *   Repeat for 30,000 steps (or until convergence):
+        a.  **Render:** Render image $I_k^r$ for each input view $k$ using the current parameters $\Theta, B_d, B_\infty, B_b$ [S1].
+        b.  **Compute Loss:** Calculate the total loss $L$ (see Formulas below) [S1].
+        c.  **Update:** Minimize $L$ using the Adam optimizer. Use the same learning rate for $B_d, B_\infty, B_b$ as for the Gaussian color parameters $c_i$ [S1]. Compute partial derivatives for all additional parameters (provided in supplementary materials of the source) [S1].
+        d.  **Refine Backscatter Estimates (Periodic):** Every 500 iterations:
+            i.  Re-extract the depth map $z$ from the improved 3DGS representation [S1].
+            ii. Re-compute $\hat{B}_\infty$ and $\hat{B}_b$ using the nonlinear least squares procedure on the new depth map and ground-truth images [S1].
+            iii. Update the guidance values for the backscatter loss term [S1].
+
+**Formulas:**
+
+*   **Total Loss:**
+    $$L(\Theta, B_d, B_\infty, B_b) = \sum_{k=1}^K (1 - \lambda_1) \|I_k^{gt} - I_k^r(\Theta, B_d, B_\infty, B_b)\|_{\ell_1} + \lambda_1 L_{D-SSIM}(I_k^{gt}, I_k^r(\Theta, B_d, B_\infty, B_b)) + \lambda_2 L_{bs}(B_\infty, B_b)$$
+    Where:
+    *   $K$ is the number of input views.
+    *   $I_k^{gt}$ is the ground-truth image.
+    *   $I_k^r$ is the rendered image.
+    *   $\lambda_1$ is the weight for the D-SSIM loss.
+    *   $\lambda_2$ is the weight for the backscatter loss.
+    *   $L_{D-SSIM}$ is the difference Structural Similarity Index [S1].
+
+*   **Backscatter Guidance Loss:**
+    $$L_{bs}(B_\infty, B_b) = \|B_\infty - \hat{B}_\infty\|_{\ell_1} + \|B_b - \hat{B}_b\|_{\ell_1}$$
+    Where $\hat{B}_\infty$ and $\hat{B}_b$ are the initial estimates computed in Step 2 and refined in Step 3d [S1].
+
+**Parameters:**
+*   $\lambda_1 = 0.3$ (inherited from original 3DGS) [S1].
+*   $\lambda_2 = 0.1$ (fixed across all scenes, chosen to keep the term active without dominating photometric terms) [S1].
+*   Learning Rate: Identical for $B_d, B_\infty, B_b$ and Gaussian color parameters $c_i$ [S1].
+*   Optimization Bounds: $B_\infty \in [0, 1]$, $B_b \in [0, 5]$, $B_d$ follows normalized RGB range and non-negative assumption [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.optimize import least_squares
+
+def underwater_3dgs_training(input_images, camera_poses, initial_gaussians, num_steps=30000, lambda1=0.3, lambda2=0.1):
+    """
+    Main training loop for Underwater 3D Gaussian Splatting with Backscatter Loss.
+    
+    Args:
+        input_images: List of ground-truth images.
+        camera_poses: Camera poses from COLMAP.
+        initial_gaussians: Initial 3D Gaussian parameters from COLMAP sparse points.
+        num_steps: Number of optimization steps.
+        lambda1: Weight for D-SSIM loss.
+        lambda2: Weight for backscatter loss.
+        
+    Returns:
+        Optimized Gaussians and medium parameters.
+    """
+    # Initialize parameters
+    theta = initial_gaussians  # Scene parameters (positions, covariances, opacities, colors)
+    B_d = np.ones(3)           # Direct attenuation, initialized to 1 (normalized)
+    B_inf = np.ones(3)         # Infinite backscatter, initialized to 1
+    B_b = np.ones(3) * 2.5     # Backscatter coefficient, initialized to mid-range of [0, 5]
+    
+    # Learning rate (same for B_d, B_inf, B_b and Gaussian colors)
+    lr = 1e-3  # [G] Typical Adam LR for 3DGS, exact value not specified but inherited from original 3DGS
+    
+    # Adam optimizer state initialization [G]
+    m_B_inf = np.zeros_like(B_inf)
+    v_B_inf = np.zeros_like(B_inf)
+    m_B_b = np.zeros_like(B_b)
+    v_B_b = np.zeros_like(B_b)
+    m_B_d = np.zeros_like(B_d)
+    v_B_d = np.zeros_like(B_d)
+    # [G] Theta optimizer state also initialized similarly
+    
+    t = 0
+    
+    for step in range(num_steps):
+        t += 1
+        
+        # 1. Render images
+        # [G] Assumes a differentiable rasterizer that takes theta, B_d, B_inf, B_b and camera poses
+        rendered_images = render_3dgs(theta, B_d, B_inf, B_b, camera_poses)
+        
+        # 2. Compute Photometric and SSIM Loss
+        photometric_loss = 0
+        ssim_loss = 0
+        for gt_img, render_img in zip(input_images, rendered_images):
+            photometric_loss += np.mean(np.abs(gt_img - render_img))
+            ssim_loss += compute_d_ssim(gt_img, render_img)
+            
+        total_photometric = (1 - lambda1) * photometric_loss + lambda1 * ssim_loss
+        
+        # 3. Compute Backscatter Guidance Loss
+        # [G] Requires current depth map extraction
+        depth_maps = extract_depth_map(theta, camera_poses)
+        B_inf_hat, B_b_hat = estimate_backscatter_guidance(input_images, depth_maps)
+        
+        bs_loss = np.mean(np.abs(B_inf - B_inf_hat)) + np.mean(np.abs(B_b - B_b_hat))
+        
+        # 4. Total Loss
+        loss = total_photometric + lambda2 * bs_loss
+        
+        # 5. Update Parameters
+        # [G] Compute gradients d_loss/d_theta, d_loss/d_B_d, etc.
+        # [G] Apply Adam update rule for each parameter group
+        # [G] Clip B_inf to [0, 1] and B_b to [0, 5] after update
+        update_adam(theta, B_d, B_inf, B_b, gradients, m_B_inf, v_B_inf, m_B_b, v_B_b, m_B_d, v_B_d, lr, t)
+        
+        # 6. Periodic Refinement of Backscatter Estimates
+        if step % 500 == 0:
+            # Re-extract depth and re-estimate guidance
+            depth_maps = extract_depth_map(theta, camera_poses)
+            B_inf_hat, B_b_hat = estimate_backscatter_guidance(input_images, depth_maps)
+            # [G] These new estimates are used in the next step's bs_loss calculation
+            
+    return theta, B_d, B_inf, B_b
+
+def estimate_backscatter_guidance(images, depth_maps):
+    """
+    Estimates initial backscatter parameters using nonlinear least squares.
+    """
+    B_inf_hat = np.zeros(3)
+    B_b_hat = np.zeros(3)
+    
+    for channel in range(3):
+        # Collect (B_s, z) pairs
+        # [G] B_s is the RGB value of pixels in bottom 1st percentile of each depth cluster
+        bs_values = []
+        z_values = []
+        
+        for depth_map in depth_maps:
+            # Cluster depth into 10 bins
+            clusters = np.linspace(depth_map.min(), depth_map.max(), 11)
+            for i in range(10):
+                cluster_mask = (depth_map >= clusters[i]) & (depth_map < clusters[i+1])
+                if np.sum(cluster_mask) == 0: continue
+                
+                # Get RGB values for these pixels
+                # [G] Assuming images are aligned with depth maps
+                pixel_values = images[:, cluster_mask] # Shape: (H*W, 3)
+                bs_channel = pixel_values[:, channel]
+                
+                # Bottom 1st percentile
+                threshold = np.percentile(bs_channel, 1)
+                mask_bs = bs_channel < threshold
+                
+                if np.sum(mask_bs) == 0: continue
+                
+                bs_values.append(bs_channel[mask_bs])
+                z_values.append(depth_map[cluster_mask][mask_bs])
+                
+        if len(bs_values) == 0:
+            B_inf_hat[channel] = 1.0
+            B_b_hat[channel] = 2.5
+            continue
+            
+        bs_all = np.concatenate(bs_values)
+        z_all = np.concatenate(z_values)
+        
+        # Model: B_s = B_inf * (1 - exp(-B_b * z))
+        # Residual function for least_squares
+        def residual(params, bs, z):
+            b_inf, b_b = params
+            model = b_inf * (1 - np.exp(-b_b * z))
+            return bs - model
+            
+        # Initial guess
+        x0 = [1.0, 2.5]
+        
+        # Bounds: B_inf in [0, 1], B_b in [0, 5]
+        bounds = ([0, 0], [1, 5])
+        
+        result = least_squares(residual, x0, args=(bs_all, z_all), bounds=bounds)
+        B_inf_hat[channel] = result.x[0]
+        B_b_hat[channel] = result.x[1]
+        
+    return B_inf_hat, B_b_hat
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training takes only several minutes, significantly faster than NeRF-based methods [S1]. Inference speed is ~140 FPS average across multiple datasets, enabling real-time novel-view synthesis [S1].
+*   **Memory Complexity:** Training memory consumption is ~500 MB per scene over 30,000 steps on a single NVIDIA GeForce RTX 4090 GPU, which is slightly less than STNeRF’s ~600 MB [S1].
+*   **Strengths:** Maintains high speed of vanilla 3DGS while significantly improving reconstruction quality in underwater scenes, particularly at larger distances where color distortion is most severe [S1]. Much faster than NeRF-based methods (STNeRF, STNeRFacto) in both training and inference [S1].
+*   **Limitations:** Relies on accurate depth map extraction and initial backscatter estimation; performance may degrade if depth estimation is poor [S1]. Traditional metrics like PSNR can be misleading in underwater scenarios due to the predominant bluish color palette, requiring visual inspection for validation [S1].
+*   **When to use:** Underwater 3D reconstruction, novel view synthesis, and color-reconstruction applications where real-time performance and accurate color recovery are critical [S1].
+*   **When not to use:** Scenes with extreme light absorption or scattering that violate the assumed ocean optics model, or when computational resources are extremely limited (though it is already efficient) [S1].
+
+## Background
+The method originates from research published in *Scientific Reports* in 2026, titled "Gaussian splashing enables direct volumetric rendering underwater" [S1]. It builds upon the original 3D Gaussian Splatting framework [S1]. The approach integrates established formulations of underwater image formation, specifically the ocean optics model for backscatter, into the differentiable rendering pipeline of 3DGS [S1]. It was evaluated on a new dataset, TableDB (172 images, 1384×918 resolution, unbounded camera-to-scene distances), as well as public underwater datasets from the Red Sea, Curaçao, and Panama [S1].
+
+## Sources
+[S1] Gaussian splashing enables direct volumetric rendering underwater, https://doi.org/10.1038/s41598-026-56917-4, fetched 2026-10-27

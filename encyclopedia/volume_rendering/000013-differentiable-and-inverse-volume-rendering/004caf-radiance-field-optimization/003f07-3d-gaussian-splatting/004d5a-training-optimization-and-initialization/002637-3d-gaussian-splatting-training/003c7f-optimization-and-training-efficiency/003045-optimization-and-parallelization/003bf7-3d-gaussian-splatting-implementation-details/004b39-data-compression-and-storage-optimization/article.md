@@ -1,28 +1,33 @@
 # Data Compression and Storage Optimization
 
-Also called: 3DGS Compression, Gaussian Splatting Storage Optimization
+Also called: 3D Gaussian Compression, Gaussian Pruning and Quantization
 
 ## Overview
-This family of methods addresses the excessive memory footprint and storage requirements of 3D Gaussian Splatting (3DGS) models, which typically consist of millions of Gaussian primitives with high-dimensional attributes [S1, S2, S3]. While standard 3DGS stores explicit per-Gaussian parameters, these optimization techniques reduce redundancy through various mechanisms: ASCII-based encoding for training I/O efficiency [S1], sensitivity-aware vector clustering for quantization [S2], and hybrid representations using hash grids and codebooks for inference [S3]. They differ from sibling methods like [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md) by focusing on data representation rather than rendering throughput, and from [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md) by employing structured compression rather than simple pruning.
+Data compression and storage optimization reduces the memory footprint and transmission bandwidth of 3D Gaussian Splatting (3DGS) models, which typically store large per-Gaussian attribute sets including position, opacity, scale, rotation, and high-order Spherical Harmonic (SH) coefficients. This family addresses the bottleneck of transferring large matrices between CPU and GPU or across distributed nodes, and the high storage cost of real-time rendering assets. It sets itself apart from rendering pipeline optimizations by focusing on the representation and serialization of the Gaussian primitives themselves rather than the sorting or shading logic.
 
 ## Shared principles
-All methods in this family aim to reduce the size of the scene representation without significantly degrading rendering quality. They operate on the core 3DGS attributes: position, opacity, scale, rotation, and view-dependent color (Spherical Harmonics, SH). The shared goal is to replace high-precision, per-primitive storage with compact indices, shared structures, or lossy encodings. Common techniques include vector quantization, codebook-based storage, and spatial hashing. The methods assume the standard 3DGS differentiable rasterization pipeline remains unchanged, with the compression applied to the input data structures before rendering or during the training loop.
+All methods in this family aim to reduce the number of bits required to represent a 3D Gaussian primitive $G_i$ without significantly degrading rendering quality. The core parameters of a Gaussian are:
+*   Position $\mathbf{p} \in \mathbb{R}^3$
+*   Opacity $\alpha \in \mathbb{R}$
+*   Scale $\mathbf{s} \in \mathbb{R}^3$
+*   Rotation $\mathbf{q} \in \mathbb{R}^4$ (quaternion)
+*   SH Coefficients $\mathbf{c} \in \mathbb{R}^{3 \times (L+1)^2}$ for degree $L$
+
+The shared goal is to replace the full precision floating-point storage of these attributes with compact representations such as ASCII strings, codebook indices, or hash grid queries.
 
 ## Subtopics
 
 ### [ASCII-Based Data Compression](11820-ascii-based-data-compression.md)
-Compresses floating-point and integer values into ASCII strings to accelerate training I/O. It targets the bottleneck of data transmission rather than final model size, achieving ~6% training speed improvement.
+Compresses numerical attributes into ASCII strings to accelerate data transmission. It uses base-95/94 encoding and quantizes color matrices to 1 decimal place. It preserves full precision for geometric parameters while optimizing serialization speed.
 
 ### [Sensitivity-Aware Vector Clustering](12167-sensitivity-aware-vector-clustering.md)
-Reduces storage by clustering SH coefficients and geometric features into codebooks using a sensitivity-aware k-Means algorithm. It prioritizes parameters that significantly impact image quality, differing from standard post-training quantization by incorporating gradient-based sensitivity measures.
+Reduces storage by clustering SH coefficients and shape features into codebooks using sensitivity-aware vector quantization. It weights the k-Means distance metric by the gradient of the rendering error, prioritizing high-impact parameters.
 
 ### [Compact 3D Gaussian Representation (C3DGS)](12927-compact-3d-gaussian-representation-c3dgs.md)
-Achieves >25x compression by replacing per-Gaussian attributes with a shared hash-based grid for colors and a discrete codebook for geometry. It eliminates redundant primitives via volume-based masking, setting it apart by integrating spatial redundancy exploitation directly into the representation.
+Reduces storage by exploiting spatial redundancy. It replaces per-Gaussian color storage with a hash-based neural field (Instant NGP) and quantizes geometric attributes (scale/rotation) using a codebook, while pruning redundant primitives via a learnable mask.
 
 ## Background
-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [G]. The method's high fidelity comes at the cost of large model sizes, often exceeding several gigabytes for complex scenes. Subsequent research focused on optimizing this storage. ASCII-based compression was proposed to speed up the training process by reducing I/O overhead [S1]. Sensitivity-aware clustering was developed to enable efficient quantization by identifying critical parameters [S2]. C3DGS introduced a hybrid approach combining hash grids and codebooks to drastically reduce memory usage for real-time rendering [S3]. These methods are used in applications requiring efficient storage and transmission of 3D scenes, such as web-based viewers and mobile AR.
+3D Gaussian Splatting [S1] introduced a novel explicit representation for radiance fields, but its storage requirements (often gigabytes for high-quality scenes) limit its deployment on edge devices or in distributed training environments. Subsequent works focused on compressing these explicit representations.
 
 ## Sources
-[S1] ASCII-Based Data Compression for 3D Gaussian Splatting Training, https://github.com/3DGS-Compression/ASCII-3DGS, 2024
-[S2] Sensitivity-Aware Vector Clustering for 3D Gaussian Splatting, https://github.com/3DGS-Compression/Sensitivity-Clustering, 2024
-[S3] Compact 3D Gaussian Representation, https://github.com/3DGS-Compression/C3DGS, 2024
+[S1] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, Kerbl et al., ACM TOG, 2023.

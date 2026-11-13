@@ -1,0 +1,238 @@
+--- v011.md
++++ v012.md
+@@ -1,144 +1,118 @@
+ # Model Regularization
+ 
+-Also called: Model Regularization Loss
+ 
+ ## Overview
+-Model regularization applies penalties directly to the parameters of the radiance field representation (such as neural network weights, grid features, or Gaussian attributes) to prevent overfitting, enforce smoothness, and improve generalization during optimization [S1, unofficial][S4]. Unlike output noise regularization or perceptual losses, which operate on the rendered image or its derivatives, model regularization constrains the internal state of the scene representation itself [S1, 10334-neural-latent-regularization.md, unofficial]. It is distinct from Total Variation Regularization, which typically targets spatial gradients of the output density or color, by often targeting specific structural components like residual grids, uncertainty estimates, or latent feature vectors [S4, 860-total-variation-regularization.md].
++Model regularization in differentiable volume rendering applies penalties to scene parameters (such as density, opacity, geometry, or neural network weights) to prevent overfitting, enforce physical plausibility, or improve generalization during optimization [S1, unofficial][S2, S4, S5]. Unlike output noise regularization or perceptual losses which target the rendered image or its derivatives, model regularization operates directly on the latent representation or its immediate parameters [S1, unofficial][S4, S5]. It addresses issues such as complex, uninterpretable transfer functions [S1, unofficial], exploding uncertainty estimates [S2], excessive Gaussian counts [S5], or temporal discontinuities in dynamic scenes [S4].
+ 
+ ## How it works
+-Model regularization is implemented as an additive term to the total training loss. The specific formulation depends on the representation type (NeRF, 3D Gaussians, or dynamic fields) and the target of the penalty.
++Model regularization is implemented by computing specific loss terms based on the current state of the scene representation and adding them to the total optimization objective. The general procedure is:
+ 
+-### Inputs and Outputs
+-*   **Inputs:** The current state of the scene representation parameters (e.g., neural network weights $\theta$, grid features $F$, Gaussian attributes $s_i$, uncertainty $\delta_i$, or residual grids $R_t$).
+-*   **Outputs:** A scalar regularization loss value $L_{model}$ for the current optimization step.
++1.  **Compute Regularization Terms:** Evaluate the specific regularization loss function(s) defined for the chosen variant based on the current scene parameters (e.g., opacity $\sigma$, uncertainty $\delta$, Gaussian scales $s$, residual grids $R_t$).
++2.  **Weight and Accumulate:** Multiply each regularization loss by its corresponding hyperparameter $\lambda$.
++3.  **Add to Total Loss:** Sum the weighted regularization losses with other losses (e.g., photometric, geometric) to form the total loss $L_{total}$.
++4.  **Backpropagate:** Compute gradients of $L_{total}$ with respect to the scene parameters and update them using an optimizer.
+ 
+-### Data Structures
+-The parameters vary by method:
+-*   **Neural Networks:** Weights $W$ and biases $b$.
+-*   **Grid-based (e.g., Instant-NGP, JointRF):** Feature grids $F$, residual grids $R_t$.
+-*   **Gaussian Splats:** Scale parameters $s_i$, opacity $\alpha_i$.
+-*   **Uncertainty:** Predicted uncertainty $\delta_{c_i}$ per query point.
++### General Implementation Pattern
++The following pseudocode illustrates the standard integration of model regularization into a training loop, based on the implementation in [S1, unofficial].
+ 
+-### Formulas and Steps
+-The total loss $L_{total}$ is computed as:
+-$$
+-L_{total} = L_{data} + \sum_k \lambda_k L_{model, k}
+-$$
+-where $L_{data}$ is the reconstruction error (e.g., MSE) and $\lambda_k$ are hyperparameters balancing the regularization terms [S1, unofficial][S4].
++```python
++def compute_model_regularization_loss(model, config):
++    """
++    Computes the total model regularization loss.
++    
++    Args:
++        model: The radiance field or Gaussian splatting model instance.
++        config: Configuration object containing loss weights.
++        
++    Returns:
++        float: The total weighted model regularization loss.
++    """
++    total_loss = 0.0
++    
++    # Step 1: Obtain dictionary of raw regularization losses from the model
++    # The model implements specific regularization methods (e.g., L1 on opacity, 
++    # compactness on Gaussians, etc.)
++    losses_model_reg = model.regularizations()
++    
++    # Step 2: Iterate over each regularization term
++    for name, value in losses_model_reg.items():
++        # Step 3: Retrieve the corresponding lambda weight from config
++        # Config structure: config.system.loss[f"lambda_{name}"]
++        lambda_name = f"lambda_{name}"
++        if lambda_name in config.system.loss:
++            lambda_val = config.system.loss[lambda_name]
++        else:
++            # [G] Default to 0 if not specified, effectively disabling the loss
++            lambda_val = 0.0
++            
++        # Step 4: Weight and add to total
++        weighted_loss = lambda_val * value
++        total_loss += weighted_loss
++        
++    return total_loss
++```
+ 
+-**1. General Implementation Loop:**
+-1.  Forward pass: Render images or compute scene representation.
+-2.  Compute data loss $L_{data}$ (e.g., MSE between rendered and ground truth colors) [S4].
+-3.  Compute model regularization losses $L_{model, k}$ based on the specific variant (see Subtopics).
+-4.  Aggregate: $L_{total} = L_{data} + \sum \lambda_k L_{model, k}$ [S1, unofficial][S4].
+-5.  Backpropagate gradients through $L_{total}$ to update scene parameters [44-radiance-field-optimization.md].
++### Specific Regularization Formulas and Parameters
+ 
+-**2. Specific Regularization Formulations:**
++#### Zero Regularization Loss for Uncertainty
++Used in Recursive-NeRF to prevent predicted uncertainty $\delta_i$ from blowing up [S2].
++*   **Formula:** $\mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)$ [S2].
++*   **Purpose:** Encourages $\delta_i$ to be as close to zero as possible [S2].
++*   **Context:** Part of the overall uncertainty loss $\mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0$ [S2].
++*   **Parameters:** $\alpha_1 = 1.0$, $\alpha_2 = 0.01$ [S2].
++*   **Rationale:** L1 loss is avoided because predicting uncertainty $E(r)$ is difficult for shallow networks; regularization provides a more stable training signal [S2].
+ 
+-*   **Uncertainty Regularization (Recursive-NeRF):**
+-    To prevent predicted uncertainty $\delta_{c_i}$ from blowing up, an L1-like penalty is applied only to positive values:
+-    $$
+-    \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)
+-    $$
+-    where $\mathcal{R}$ is the set of rays, $N$ is the number of samples, and $\delta_{c_i}$ is the predicted uncertainty for query coordinate $c_i$ [S2]. The total uncertainty loss is $\mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0$, with $\alpha_1=1.0, \alpha_2=0.01$ [S2].
++#### Compactness Regularizer
++Used in DART-3DGS to control the number of Gaussians [S5].
++*   **Definition:** A regularizer based on volume and opacity, adopted from 3D-GS-MCMC [S5].
++*   **Effect:** Reduces final Gaussian count by 2.5% (3.23M to 3.15M) and raises PSNR by 0.05 dB (to 27.80) on the full model [S5]. Improves SSIM by 0.001, worsens LPIPS by 0.001 (0.203 to 0.204) [S5].
+ 
+-*   **Residual Grid L1 Regularization (JointRF):**
+-    For dynamic NeRFs using residual coding, L1 regularization is applied to the residual grid $R_t$ to ensure temporal continuity and minimize magnitude:
+-    $$
+-    L_{total} = L_{mse} + \lambda_1 L_{rate} + \lambda_2 ||R_t||_1
+-    $$
+-    where $||R_t||_1 = \sum |R_t|$ [S4]. Parameters: $\lambda_1$ (rate-distortion balance, init $10^{-6}$, decaying) and $\lambda_2$ (residual constraint, init $10^{-6}$) [S4].
++#### Scaffold-GS Volume Regularization
++Used in Octree-GS to penalize large Gaussian volumes [S3].
++*   **Formula:** $L_{vol} = \sum_{i=1}^N \text{Prod}(s_i)$ [S3].
++*   **Weight:** 0.01 [S3].
++*   **Context:** Applied in addition to L1 and SSIM losses for the 3D-GS model, and in addition to distortion and normal losses for the 2D-GS model [S3].
+ 
+-*   **Gaussian Volume Regularization (Scaffold-GS):**
+-    Applied to 3D Gaussian splats to control volume:
+-    $$
+-    L_{vol} = \sum_{i=1}^N \text{Prod}(s_i)
+-    $$
+-    where $s_i$ are the scale parameters of the $i$-th Gaussian. Weighted at 0.01 [S3].
+-
+-*   **Transfer Function L1 (Instant-NSR-PL):**
+-    L1 penalty on opacity and color parameters of the transfer function to prevent complex, oscillatory mappings [S1, unofficial].
+-
+-### Parameters
+-*   **$\lambda$ weights:** Hyperparameters controlling the strength of each regularization term. Typical values range from $10^{-6}$ to $10^{-2}$ depending on the scale of the data loss [S2, S4].
+-*   **$\alpha$ weights:** Specific to uncertainty regularization, $\alpha_2=0.01$ [S2].
+-
+-### Edge Cases and Pitfalls
+-*   **Uncertainty Blow-up:** Without $\mathcal{L}_0$, uncertainty predictions $\delta_i$ can diverge, leading to numerical instability [S2].
+-*   **Over-regularization:** Excessive $\lambda$ values can suppress necessary scene details, leading to blurry or simplified reconstructions [S4].
+-*   **Gradient Conflict:** Regularization gradients may conflict with data gradients, requiring careful tuning of $\lambda$ or adaptive learning rates [S1, unofficial].
+-
+-### Pseudocode
+-```python
+-def compute_model_regularization_loss(scene_params, config):
+-    """
+-    Computes model regularization losses based on scene representation type.
+-    scene_params: dict containing 'neural_net', 'grids', 'gaussians', 'uncertainty', etc.
+-    config: dict containing lambda weights.
+-    """
+-    loss = 0.0
+-    
+-    # 1. Uncertainty Regularization (if applicable)
+-    if 'uncertainty' in scene_params:
+-        delta = scene_params['uncertainty']
+-        # L0: encourage delta to be close to zero, only penalize positive values
+-        l0 = torch.sum(torch.maximum(delta, torch.zeros_like(delta)))
+-        alpha_2 = config.get('alpha_2', 0.01)
+-        loss += alpha_2 * l0
+-        
+-    # 2. Residual Grid L1 Regularization (if applicable)
+-    if 'residual_grid' in scene_params:
+-        R_t = scene_params['residual_grid']
+-        l1_residual = torch.norm(R_t, p=1)
+-        lambda_2 = config.get('lambda_2', 1e-6)
+-        loss += lambda_2 * l1_residual
+-        
+-    # 3. Gaussian Volume Regularization (if applicable)
+-    if 'gaussians' in scene_params:
+-        scales = scene_params['gaussians']['scales']
+-        # Prod(s_i) typically means product of scale dimensions or sum of log scales
+-        # Assuming Prod(s_i) refers to the volume of each Gaussian
+-        volumes = torch.prod(scales, dim=-1)
+-        l_vol = torch.sum(volumes)
+-        weight_vol = config.get('weight_vol', 0.01)
+-        loss += weight_vol * l_vol
+-        
+-    # 4. Transfer Function L1 (if applicable)
+-    if 'transfer_function' in scene_params:
+-        tf_params = scene_params['transfer_function']
+-        l1_tf = torch.norm(tf_params, p=1)
+-        lambda_tf = config.get('lambda_tf', 1e-4) # Example value
+-        loss += lambda_tf * l1_tf
+-        
+-    return loss
+-```
++#### L1 Regularization on Residual Grids
++Used in JointRF for dynamic neural radiance field compression [S4].
++*   **Formula:** $L_{total} = L_{mse} + \lambda_1 L_{rate} + \lambda_2 ||R_t||_1$ [S4].
++*   **Components:**
++    *   $L_{mse} = \sum ||c(r) - \hat{c}(r)||_2$ [S4].
++    *   $L_{rate} = -\frac{1}{N} \sum_{\hat{y} \in \hat{R}_t} \log_2(P_1(\hat{y})) - \frac{1}{M} \sum_{\hat{y} \in \hat{C}_t} \log_2(P_2(\hat{y}))$ [S4].
++    *   $||R_t||_1$: L1 regularization on residual grid $R_t$ [S4].
++*   **Purpose:** Ensures temporal continuity and minimizes the magnitude of $R_t$ [S4].
++*   **Parameters:**
++    *   $\lambda_1$: Balances rate and distortion. Initialized at 0.000001, decrements progressively [S4].
++    *   $\lambda_2$: Measures constraint extent on $R_t$. Initialized at 0.000001 [S4].
+ 
+ ## Subtopics
+ 
+ ### [L1 Norm Regularization for Transfer Functions](7273-l1-norm-regularization-for-transfer-functions.md)
+-Applies an L1 penalty to the opacity and color parameters of a neural radiance field's transfer function (TF). It prevents overfitting and reduces visual complexity by discouraging complex, oscillatory TFs with multiple opacity peaks. It differs from Neural Latent Regularization by targeting the output mapping layer rather than internal features. Choose this when user interpretability of the TF is required or when the network tends to learn redundant color mappings. [L1 Norm Regularization for Transfer Functions](7273-l1-norm-regularization-for-transfer-functions.md)
++Applies an L1 penalty to the opacity and color parameters of a transfer function to avoid unnecessary complexity. It addresses the problem where optimization algorithms converge to complex transfer functions with multiple opacity peaks and redundant color mappings that are difficult for users to interpret.
+ 
+ ### [Neural Latent Regularization](10334-neural-latent-regularization.md)
+-Uses a small auxiliary neural network to reconstruct grid features from canonical coordinates and timestamps, preventing overfitting of the radiance field without affecting inference speed. It regularizes the *grid feature representation* itself, ensuring spatial-temporal encoding remains smooth, unlike methods that target the transfer function or output colors. Choose this when optimizing large grid-based representations prone to high-frequency noise. [Neural Latent Regularization](10334-neural-latent-regularization.md)
++Uses a small auxiliary neural network to reconstruct grid features from canonical coordinates and timestamps, preventing overfitting of the radiance field without affecting inference speed. It distinguishes itself from sibling methods like L1 Norm Regularization for Transfer Functions by regularizing the *grid feature representation* itself rather than the transfer function or output colors, ensuring the spatial-temporal encoding remains smooth and consistent during optimization.
+ 
+ ### Zero Regularization Loss
+-A baseline or placeholder case where no model regularization is applied, serving as a control in ablation studies to measure the impact of other regularization terms [S1, unofficial].
++A specific regularization term used in Recursive-NeRF to prevent predicted uncertainty values from exploding during training [S2]. It applies a one-sided L1 penalty ($\max(\delta, 0)$) to uncertainty estimates, encouraging them to remain small [S2].
+ 
+ ### Scaffold-GS Volume Regularization
+-Specific to 3D Gaussian Splatting variants like Scaffold-GS, this regularization penalizes the product of scale parameters ($\text{Prod}(s_i)$) to control the volume of Gaussians [S3]. It helps maintain consistent rendering quality across different levels of detail (LOD) and prevents excessive expansion of Gaussians in texture-less regions [S3]. [Scaffold-GS](3263-multi-task-differentiable-loss-for-3d-gaussian-splatting.md) (Note: Scaffold-GS is a specific method, this is a component of its loss).
++A regularization term used in Octree-GS that penalizes the product of Gaussian scales ($\text{Prod}(s_i)$) [S3]. It encourages Gaussians to remain compact, improving rendering consistency and reducing artifacts in LOD-structured representations [S3].
+ 
+ ### L1 Regularization on Residual Grids
+-Used in dynamic NeRF compression methods like JointRF, this applies L1 regularization to residual grids ($R_t$) to enforce temporal continuity and minimize the magnitude of residuals [S4]. It balances rate and distortion in the compressed representation [S4]. [JointRF](4672-forplane-optimization-loses.md) (Note: JointRF is a specific method, this is a component of its loss).
++A regularization technique used in JointRF for dynamic NeRF compression [S4]. It applies an L1 penalty to the residual grid $R_t$ to enforce temporal continuity and minimize the magnitude of residuals, thereby reducing the model size and improving compression efficiency [S4].
++
++### Compactness Regularizer
++A training detail adopted from 3D-GS-MCMC and used in DART-3DGS [S5]. It adds a penalty based on the volume and opacity of Gaussians to the loss function, which reduces the final number of Gaussians and slightly improves reconstruction quality metrics like PSNR [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds $O(N)$ overhead where $N$ is the number of parameters or samples being regularized (e.g., number of Gaussians, grid cells, or network weights) [S2, S4].
+-*   **Memory Complexity:** Negligible additional memory, as it operates on existing parameters [S1, unofficial][S4].
+-*   **Strengths:** Improves generalization, reduces overfitting, enforces physical plausibility (e.g., non-negative uncertainty), and stabilizes training [S1, unofficial][S2, S4].
+-*   **Limitations:** Requires careful tuning of hyperparameters ($\lambda$); can suppress fine details if too strong; may conflict with data loss gradients [S1, unofficial][S4].
+-*   **When to Use:** When training data is limited, when the representation is prone to high-frequency noise, or when specific physical constraints (like non-negative uncertainty) are needed [S1, unofficial][S2, S4].
+-*   **When Not to Use:** When computational budget is extremely tight and regularization provides minimal benefit, or when the data loss is already sufficiently regularizing [S1, unofficial].
++*   **Computational Cost:** Generally low, as regularization terms are typically simple functions of the parameters (e.g., L1 norm, sum of scales) and can be computed efficiently alongside the forward pass [S2, S4, S5].
++*   **Memory Overhead:** Minimal, as it does not require storing additional intermediate states beyond those needed for the base model [S2, S4, S5].
++*   **Impact on Convergence:** Can stabilize training, particularly for uncertain or dynamic scenes [S2, S4]. Prevents overfitting and controls model complexity (e.g., Gaussian count) [S5].
++*   **Tuning:** Requires careful selection of hyperparameters ($\lambda$ values). Incorrect weights can lead to under-regularization (overfitting) or over-regularization (blurry or simplified results) [S2, S4, S5].
++*   **Applicability:** Widely applicable to various radiance field representations (NeRF, 3DGS, dynamic NeRF) [S1, unofficial][S2, S3, S4, S5].
+ 
+ ## Background
+-Model regularization in volume rendering and neural radiance fields has evolved alongside the complexity of representations. Early NeRF works relied on implicit regularization from the network architecture and data [S1, unofficial]. As representations grew more complex (grids, Gaussians, dynamic fields), explicit regularization terms became necessary to handle overfitting and instability [S2, S3, S4]. Recursive-NeRF introduced uncertainty regularization to handle dynamic scenes [S2]. JointRF applied L1 regularization to residual grids for compression [S4]. Scaffold-GS and other Gaussian splatting variants introduced volume regularization to control Gaussian sizes [S3]. Instant-NSR-PL demonstrated the utility of L1 regularization on transfer functions for interpretability [S1, unofficial].
++Model regularization has been a key component in the development of differentiable volume rendering methods, evolving alongside the complexity of scene representations. Early NeRF methods focused on photometric loss, but overfitting and artifacts led to the introduction of regularization terms for density and uncertainty [S2]. With the advent of 3D Gaussian Splatting, regularization shifted towards controlling the number and size of Gaussians to improve efficiency and quality [S5]. Dynamic NeRF methods introduced temporal regularization to ensure consistency across frames [S4]. The specific variants, such as L1 regularization for transfer functions, address user interpretability and model simplicity [S1, unofficial].
+ 
+ ## Sources
+@@ -146,3 +120,4 @@
+ [S2] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
+ [S3] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-27
+-[S4] JOINTRF: End-To-End Joint Optimization for Dynamic Neural Radiance Field Representation and Compression, https://doi.org/10.1109/icip51287.2024.10647336, fetched 2026-10-26+[S4] JOINTRF: End-To-End Joint Optimization for Dynamic Neural Radiance Field Representation and Compression, https://doi.org/10.1109/icip51287.2024.10647336, fetched 2026-10-26
++[S5] DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting, https://europepmc.org/article/PMC/PMC13705904, fetched 2026-10-27

@@ -1,0 +1,198 @@
+# ShardedVolume
+
+Also called: ShardedArray
+
+## Overview
+ShardedVolume is a data structure that represents a 3D volume partitioned into multiple independent shards (sub-arrays) to facilitate parallel processing and memory management across devices or memory spaces [S1, unofficial]. It solves the problem of managing large volumetric datasets that exceed single-device memory or require distributed computation by treating each shard as an autonomous unit [S1, unofficial]. Unlike [Chunk-based World Streaming](2369-chunk-based-world-streaming.md), which focuses on temporal or spatial streaming of chunks for rendering, ShardedVolume emphasizes arithmetic operations and direct data access patterns (such as slice extraction) over a partitioned layout [S1, unofficial]. It differs from [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md) by providing a high-level API for local shard manipulation and concatenation rather than focusing solely on inter-process communication protocols [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The structure takes a 3D volume and partitions it into $N$ shards. It outputs a unified view of the volume that supports standard array operations (concatenation, arithmetic) and specific slice extractions (Axial, Coronal, Sagittal) across shard boundaries.
+
+**Data Structures:**
+The `ShardedVolume` object contains two primary fields:
+1.  `shards`: A tuple of $N$ arrays, where each array holds the voxel data for one shard.
+2.  `volume_shards`: A tuple of $N$ metadata objects. Each metadata object defines the global position of its corresponding shard and contains the fields:
+    *   `z_start`: The starting index along the Z-axis for this shard.
+    *   `z_stop`: The stopping index along the Z-axis for this shard.
+
+**Numbered Steps:**
+
+1.  **Initialization:** Partition the global volume domain into $N$ shards. Store the data in `shards` and the Z-axis boundaries in `volume_shards`. Ensure that the union of all shard domains covers the global volume without gaps, though overlaps are not explicitly handled in the core access logic described [S1, unofficial].
+
+2.  **Concatenation to NumPy:** To convert the sharded volume to a contiguous NumPy array:
+    *   Iterate over each shard in `self.shards`.
+    *   Convert each shard to a NumPy array using `_to_numpy`.
+    *   Concatenate the arrays along axis 0 (the shard axis) using `np.concatenate`.
+    *   Ensure the resulting array has contiguous memory layout using `np.ascontiguousarray` [S1, unofficial].
+
+3.  **Axial Slice Extraction:** To extract a slice at index $i$ along the Z-axis:
+    *   Identify the shard $j$ such that `volume_shards[j].z_start` $\le i <$ `volume_shards[j].z_stop`.
+    *   Calculate the local index: $idx_{local} = i - \text{volume\_shards}[j].z\_start$.
+    *   Return `shards[j][idx_local]`.
+    *   If no shard contains the index, raise a `ValueError` [S1, unofficial].
+
+4.  **Coronal Slice Extraction:** To extract a coronal slice at index $i$ along the Y-axis:
+    *   Clamp $i$ to the range $[0, \text{shape}[1]-1]$.
+    *   For each shard $j$ in `self.shards`:
+        *   Extract the slice `shards[j][:, i, :]`.
+        *   Concatenate these slices along axis 0.
+    *   Return the concatenated result [S1, unofficial].
+
+5.  **Sagittal Slice Extraction:** To extract a sagittal slice at index $i$ along the X-axis:
+    *   Clamp $i$ to the range $[0, \text{shape}[2]-1]$.
+    *   For each shard $j$ in `self.shards`:
+        *   Extract the slice `shards[j][:, :, i]`.
+        *   Concatenate these slices along axis 0.
+    *   Return the concatenated result [S1, unofficial].
+
+6.  **AXPY Operation:** To perform $dst = dst + \alpha \cdot src$:
+    *   Verify compatibility: `left.global_shape == right.global_shape`, `len(left.shards) == len(right.shards)`, and identical `volume_shards` partitions. Raise `ValueError` if mismatched [S1, unofficial].
+    *   For each pair of corresponding shards $(L_j, R_j)$:
+        *   Update $L_j[\dots] \leftarrow L_j[\dots] + \alpha \cdot R_j[\dots]$ [S1, unofficial].
+
+7.  **Dot Product:** To compute the dot product of two sharded volumes:
+    *   Initialize `total = 0.0`.
+    *   For each pair of corresponding shards $(L_j, R_j)$:
+        *   Compute the sum of element-wise products: $s_j = \sum (L_j \cdot R_j)$, casting to `float64` for precision.
+        *   Move the scalar $s_j$ to the host memory.
+        *   Add $s_j$ to `total`.
+    *   Return `total` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class ShardMetadata:
+    def __init__(self, z_start: int, z_stop: int):
+        self.z_start = z_start
+        self.z_stop = z_stop
+
+class ShardedVolume:
+    def __init__(self, shards: tuple, volume_shards: tuple):
+        self.shards = shards
+        self.volume_shards = volume_shards
+
+    def to_numpy(self) -> np.ndarray:
+        """Concatenate all shards into a contiguous NumPy array."""
+        numpy_arrays = []
+        for shard in self.shards:
+            # Assume _to_numpy converts the shard to a numpy array
+            arr = self._to_numpy(shard)
+            numpy_arrays.append(arr)
+        concatenated = np.concatenate(numpy_arrays, axis=0)
+        return np.ascontiguousarray(concatinated)
+
+    def _to_numpy(self, shard) -> np.ndarray:
+        """Helper to convert a single shard to numpy. Implementation details omitted [G]."""
+        # Placeholder for actual conversion logic
+        return np.array(shard)
+
+    def get_axial_slice(self, index: int) -> np.ndarray:
+        """Extract an axial slice (Z-axis) at the given index."""
+        for shard_meta, shard_data in zip(self.volume_shards, self.shards):
+            if shard_meta.z_start <= index < shard_meta.z_stop:
+                local_index = index - shard_meta.z_start
+                return shard_data[local_index]
+        raise ValueError(f"No shard contains index {index}")
+
+    def get_coronal_slice(self, index: int) -> np.ndarray:
+        """Extract a coronal slice (Y-axis) at the given index."""
+        # Determine global shape to clamp index
+        # Note: Global shape calculation requires iterating all shards [G]
+        global_shape_y = self._get_global_shape()[1]
+        index = max(0, min(index, global_shape_y - 1))
+        
+        slices = []
+        for shard_data in self.shards:
+            # Extract Y-slice from each shard
+            slice_data = shard_data[:, index, :]
+            slices.append(slice_data)
+        
+        return np.concatenate(slices, axis=0)
+
+    def get_sagittal_slice(self, index: int) -> np.ndarray:
+        """Extract a sagittal slice (X-axis) at the given index."""
+        global_shape_z = self._get_global_shape()[2]
+        index = max(0, min(index, global_shape_z - 1))
+        
+        slices = []
+        for shard_data in self.shards:
+            # Extract X-slice from each shard
+            slice_data = shard_data[:, :, index]
+            slices.append(slice_data)
+            
+        return np.concatenate(slices, axis=0)
+
+    def _get_global_shape(self) -> tuple:
+        """Calculate global volume shape from shards. Implementation details omitted [G]."""
+        # Sum dimensions across shards appropriately
+        return (0, 0, 0) # Placeholder
+
+    def axpy(self, alpha: float, src: 'ShardedVolume', dst: 'ShardedVolume'):
+        """Perform dst = dst + alpha * src."""
+        if not self._check_compatibility(src, dst):
+            raise ValueError("Sharded volumes are not compatible for axpy.")
+        
+        for shard_src, shard_dst in zip(src.shards, dst.shards):
+            shard_dst[...] += float(alpha) * shard_src
+
+    def dot(self, other: 'ShardedVolume') -> float:
+        """Compute the dot product of two sharded volumes."""
+        if not self._check_compatibility(self, other):
+            raise ValueError("Sharded volumes are not compatible for dot product.")
+            
+        total = 0.0
+        for shard_left, shard_right in zip(self.shards, other.shards):
+            # Cast to float64 for precision
+            left_f64 = shard_left.astype(np.float64, copy=False)
+            right_f64 = shard_right.astype(np.float64, copy=False)
+            # Compute sum of products
+            scalar_sum = np.sum(left_f64 * right_f64)
+            # Move to host (if on device) and add
+            total += float(scalar_sum)
+        return total
+
+    def _check_compatibility(self, left: 'ShardedVolume', right: 'ShardedVolume') -> bool:
+        """Check if two sharded volumes are compatible for operations."""
+        # Check global shapes
+        if left._get_global_shape() != right._get_global_shape():
+            return False
+        # Check number of shards
+        if len(left.shards) != len(right.shards):
+            return False
+        # Check identical partitions
+        for meta_l, meta_r in zip(left.volume_shards, right.volume_shards):
+            if meta_l.z_start != meta_r.z_start or meta_l.z_stop != meta_r.z_stop:
+                return False
+        return True
+```
+
+**Parameters:**
+*   `alpha`: Scalar multiplier in AXPY operations. Typical values depend on the solver (e.g., PDHG or ADMM) [S1, unofficial].
+*   `index`: Slice index. Must be within global bounds.
+
+**Edge Cases and Pitfalls:**
+*   **Compatibility Mismatch:** `axpy` and `dot` operations require `left.global_shape == right.global_shape`, `len(left.shards) == len(right.shards)`, and identical `volume_shards` partitions. A mismatch raises a `ValueError` [S1, unofficial].
+*   **Index Out of Bounds:** Axial slice extraction raises a `ValueError` if the index is not contained in any shard [S1, unofficial].
+*   **Clamping:** Coronal and Sagittal slice extractions clamp the index to the valid range $[0, \text{shape}[dim]-1]$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   Slice Extraction: $O(N)$ for Coronal/Sagittal (iterates all shards) and $O(1)$ for Axial (direct shard lookup) [S1, unofficial].
+    *   Concatenation: $O(V)$ where $V$ is the total number of voxels, due to copying and concatenation [S1, unofficial].
+    *   AXPY/Dot: $O(V)$, linear in the number of voxels [S1, unofficial].
+*   **Memory Complexity:** $O(V)$, storing all voxel data in shards [S1, unofficial].
+*   **Strengths:** Enables parallel processing of volume data; supports efficient arithmetic operations on partitioned data; provides convenient slice extraction APIs [S1, unofficial].
+*   **Limitations:** Coronal and Sagittal slices require iterating all shards, which may be slower than Axial slices if shards are partitioned along Z [S1, unofficial]. Requires strict partition compatibility for arithmetic operations [S1, unofficial].
+*   **When to Use:** When performing iterative reconstruction algorithms (like PDHG or ADMM) on large volumes that need to be split across devices or memory spaces [S1, unofficial].
+*   **When Not to Use:** For simple rendering where streaming or hierarchical structures (like Chunk Trees) are more appropriate [S1, unofficial].
+
+## Background
+ShardedVolume is part of the TomoAnchor V3 project, an open-source tool for tomographic reconstruction [S1, unofficial]. It was developed to support GPU-based parallel processing for large-scale CT reconstruction tasks, specifically integrating with solvers like PDHG and ADMM [S1, unofficial]. The structure is used in the `tigre_device` backend to manage volume data during reconstruction iterations [S1, unofficial].
+
+## Sources
+[S1] alidarbandi/TomoAnchor-V3, https://github.com/alidarbandi/TomoAnchor-V3, fetched 2026-10-27 (unofficial)
