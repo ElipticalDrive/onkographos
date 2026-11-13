@@ -3,131 +3,162 @@
 Also called: Single Scattering Volume Integration
 
 ## Overview
-This method computes the radiance contribution of a single scattering event in a participating medium using Monte Carlo integration with uniform sampling along the ray distance, specifically adapted for a point light source [S1, unofficial]. It solves the radiative transfer equation by discretizing the ray into fixed steps or random samples, summing the emitted light attenuated by transmittance from the eye and to the light source [S1, unofficial]. Unlike deterministic ray marching approaches [2318-ray-marching-with-in-out-scattering-and-density-scaling.md], this method relies on stochastic sampling to estimate the integral, making it unbiased but potentially noisy without sufficient samples. It is a foundational technique for understanding volumetric light transport before introducing multiple scattering or complex light sources [S2].
+This method computes the radiance contribution of a single scattering event in a participating medium using Monte Carlo integration with uniform sampling along the ray distance, specifically modeling a point light source for background and emission [S1, unofficial]. It solves the problem of calculating in-scattered light in homogeneous volumes by discretizing the ray into fixed steps or random samples and summing the emitted light attenuated by transmittance from the eye and to the light source [S1, S4, unofficial]. Unlike deterministic ray marching approaches that accumulate contributions per step [2318-ray-marching-with-in-out-scattering-and-density-scaling.md], this method uses stochastic sampling to estimate the integral, and unlike analytical approximations that rely on precomputed terms or closed-form solutions [4244-analytical-approximation-of-single-scattering-radiance.md], it iteratively accumulates light contributions based on random samples [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** Ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$; homogeneous volume coefficients $\sigma_s$ (scattering) and $\sigma_t$ (extinction); point light position $\mathbf{l}$ and emitted radiance $L_e$; background radiance $L_b$; number of Monte Carlo samples $N_{samples}$ [S1, unofficial].
-*   **Output:** Accumulated radiance $L_o$ at the camera pixel [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A view ray defined by origin $O$ and direction $D$; a homogeneous volume with constant extinction coefficient $\sigma_T$, scattering coefficient $\sigma_S$, and phase function value $p$; a point light source with position $L_{pos}$ and emitted radiance $L_e$; the distance to the background surface intersection $t_{max}$; and the number of Monte Carlo samples $N_{samples}$ [S1, unofficial].
+*   **Output:** The total radiance $L$ at the pixel, comprising the background radiance attenuated by the volume and the accumulated single-scattered radiance [S1, unofficial].
 
-**Data Structures**
-*   **Volume Properties:** Homogeneous coefficients are constant throughout the medium. $\sigma_t = \sigma_a + \sigma_s$ [G].
-*   **Light Model:** Point light defined by position $\mathbf{l}$ and intensity $L_e$. The incident radiance at a point $\mathbf{x}$ from the light is $L_i(\mathbf{x}, \mathbf{l}-\mathbf{x}) = L_e \cdot \delta(\text{direction})$, effectively treated as a constant source term attenuated by distance [S1, unofficial].
+**Data Structures:**
+*   **Ray:** Contains `origin` (Vector3), `direction` (Vector3), and `t_max` (float).
+*   **Volume:** Contains `sigma_T` (float, total extinction), `sigma_S` (float, scattering coefficient), and `phase_function` (float, value of the phase function for the current geometry). For homogeneous volumes, these are constant [S1, unofficial].
+*   **Light:** Contains `position` (Vector3) and `radiance` (Vector3 or Color) [S1, unofficial].
+*   **Sample:** A random number generator state or pre-generated sample array used to draw uniform random values for distance sampling [S1, unofficial].
 
-**Formulas**
-The single scattering radiance $L_{ss}$ at the eye is the sum of the attenuated background radiance and the in-scattered light from the volume [S1, unofficial]:
-
-$$ L_o = L_b \cdot T(\mathbf{o}, \mathbf{x}_{hit}) + \int_{t_0}^{t_1} L_e \cdot T(\mathbf{x}(t), \mathbf{l}) \cdot \sigma_s \cdot p(\boldsymbol{\omega}, \mathbf{l}-\mathbf{x}(t)) \cdot T(\mathbf{o}, \mathbf{x}(t)) \, dt $$
-
+**Formulas:**
+The single scattering radiance $L_{ss}$ for a point $x$ on the ray is given by:
+$$ L_{ss}(x) = L_e \cdot T(O, x) \cdot \sigma_S \cdot p(\omega_i, \omega_o) \cdot T(x, L_{pos}) $$
 Where:
-*   $T(\mathbf{a}, \mathbf{b}) = e^{-\sigma_t \|\mathbf{b} - \mathbf{a}\|}$ is the transmittance between points $\mathbf{a}$ and $\mathbf{b}$ [G].
-*   $p(\cdot)$ is the phase function value [S1, unofficial].
-*   $t_0$ is the entry point into the volume, $t_1$ is the exit point or background intersection [S1, unofficial].
+*   $L_e$: Emitted radiance from the point light at position $x$ (assuming point light, $L_e$ is constant or attenuated by inverse square law if modeled, but sources imply constant color retrieval `getPixelColorPointLight`) [S1, unofficial].
+*   $T(O, x) = e^{-\sigma_T |x - O|}$: Transmittance from the eye (ray origin) to the scattering point $x$ [S1, unofficial].
+*   $\sigma_S$: Scattering coefficient of the volume [S1, unofficial].
+*   $p(\omega_i, \omega_o)$: Phase function value, assumed constant for homogeneous volumes [S1, unofficial].
+*   $T(x, L_{pos}) = e^{-\sigma_T |L_{pos} - x|}$: Transmittance from the scattering point $x$ to the light source [S1, unofficial].
 
-**Parameters**
-*   $N_{samples}$: Number of Monte Carlo samples. Typical values range from 1 to 16+ depending on noise tolerance [S1, unofficial].
-*   $\sigma_s, \sigma_t$: Scattering and extinction coefficients [S1, unofficial].
+The Monte Carlo estimator for the scattered radiance $L_s$ with $N$ samples is:
+$$ L_s = \frac{1}{N} \sum_{i=0}^{N-1} \frac{L_{ss}(x_i)}{pdf(x_i)} $$
+For uniform distance sampling along the ray segment $[0, t_{max}]$, the PDF is $pdf(x) = \frac{1}{t_{max}}$ [S1, unofficial].
 
-**Algorithm Steps**
-1.  **Calculate Background Intersection:** Determine the hit point $\mathbf{x}_{hit}$ on the background surface or volume boundary using the ray equation $\mathbf{x}_{hit} = \mathbf{o} + \boldsymbol{\omega} \cdot t_{max}$ [S1, unofficial].
-2.  **Calculate Background Transmittance:** Compute the transmittance from the ray origin to the hit point: $T_{eye} = e^{-\sigma_t \|\mathbf{x}_{hit} - \mathbf{o}\|}$ [S1, unofficial].
-3.  **Initialize Accumulator:** Set the initial indirect radiance $L_i = L_b \cdot T_{eye}$ [S1, unofficial]. Initialize scattered radiance accumulator $L_s = 0$ [S1, unofficial].
-4.  **Monte Carlo Loop:** For $i = 0$ to $N_{samples} - 1$:
-    a.  **Sample Distance:** Sample a distance $t_{sample}$ uniformly along the ray segment within the volume (or from origin to $t_{max}$ depending on implementation, typically uniform in $[0, t_{max}]$ or $[t_0, t_1]$) [S1, unofficial]. *Note: Some implementations use uniform distance sampling over the entire ray length for simplicity in homogeneous media [S1, unofficial].*
-    b.  **Calculate Position:** $\mathbf{x}_{sample} = \mathbf{o} + \boldsymbol{\omega} \cdot t_{sample}$ [S1, unofficial].
-    c.  **Calculate Eye Transmittance:** $T_{eye\_sample} = e^{-\sigma_t \|\mathbf{x}_{sample} - \mathbf{o}\|}$ [S1, unofficial].
-    d.  **Calculate Light Transmittance:** Compute distance to light $d_{light} = \|\mathbf{l} - \mathbf{x}_{sample}\|$. $T_{light} = e^{-\sigma_t d_{light}}$ [S1, unofficial].
-    e.  **Get Phase Function:** Evaluate $p = p(\boldsymbol{\omega}, \mathbf{l}-\mathbf{x}_{sample})$ [S1, unofficial].
-    f.  **Get Light Radiance:** Retrieve $L_e$ from the point light [S1, unofficial].
-    g.  **Accumulate Contribution:** Add the contribution divided by the PDF. For uniform sampling over length $L_{ray}$, $PDF = 1/L_{ray}$.
-        $$ L_s \leftarrow L_s + \frac{L_e \cdot T_{eye\_sample} \cdot \sigma_s \cdot p \cdot T_{light}}{PDF} $$
-        *Note: The step size $dt$ is absorbed into the PDF for uniform sampling [S1, unofficial].*
-5.  **Average and Combine:** Average the scattered radiance: $L_{avg} = L_s / N_{samples}$ [S1, unofficial]. Final radiance $L_o = L_i + L_{avg}$ [S1, unofficial].
+**Parameters:**
+*   $t_{max}$: Distance from ray origin to background intersection [S1, unofficial].
+*   $\sigma_S$: Scattering coefficient [S1, unofficial].
+*   $\sigma_T$: Total extinction coefficient ($\sigma_T = \sigma_S + \sigma_A$) [S1, unofficial].
+*   $p$: Phase function value [S1, unofficial].
+*   $N_{samples}$: Number of Monte Carlo samples (e.g., 16, 64) [S1, unofficial].
 
-**Pseudocode**
+**Steps:**
+1.  **Calculate Background Contribution:**
+    *   Determine the hit point on the background surface: $P_{bg} = O + D \cdot t_{max}$ [S1, unofficial].
+    *   Calculate the transmittance from the ray origin to the background: $T_{bg} = e^{-\sigma_T \cdot t_{max}}$ [S1, unofficial].
+    *   Retrieve the background radiance $L_{bg}$ from the point light model at $P_{bg}$ (or the scene background if occluded) [S1, unofficial].
+    *   Initialize accumulated radiance $L = L_{bg} \cdot T_{bg}$ [S1, unofficial].
+
+2.  **Initialize Monte Carlo Accumulator:**
+    *   Initialize scattered radiance accumulator $L_s = 0$ [S1, unofficial].
+
+3.  **Sample Loop:**
+    *   For $i$ from $0$ to $N_{samples} - 1$:
+        a.  **Sample Distance:** Draw a uniform random number $u \in [0, 1]$ and sample the distance $t_{sample} = u \cdot t_{max}$ along the ray [S1, unofficial].
+        b.  **Calculate Position:** Compute the scattering position $x_{sample} = O + D \cdot t_{sample}$ [S1, unofficial].
+        c.  **Calculate Eye Transmittance:** Compute transmittance from the eye to the sample point: $T_{eye} = e^{-\sigma_T \cdot t_{sample}}$ [S1, unofficial].
+        d.  **Retrieve Phase Function:** Get the phase function value $p$ for the current geometry (view direction to light direction) [S1, unofficial].
+        e.  **Calculate Light Radiance:** Retrieve the emitted radiance $L_e$ from the point light at $x_{sample}$ [S1, unofficial].
+        f.  **Calculate Light Transmittance:** Compute transmittance from the sample point to the light source: $T_{light} = e^{-\sigma_T \cdot |L_{pos} - x_{sample}|}$ [S1, unofficial].
+        g.  **Compute Contribution:** Calculate the single scattering contribution:
+            $$ contrib = L_e \cdot T_{eye} \cdot \sigma_S \cdot p \cdot T_{light} $$
+        h.  **Normalize by PDF:** Since sampling is uniform over $[0, t_{max}]$, $pdf = \frac{1}{t_{max}}$. Add to accumulator:
+            $$ L_s = L_s + \frac{contrib}{pdf} = L_s + contrib \cdot t_{max} $$
+            *[Note: Some implementations may absorb $t_{max}$ into the step size or PDF calculation differently, but the unbiased estimator requires division by PDF. The source [S1, unofficial] explicitly states "divided by the PDF".]*
+
+4.  **Average and Combine:**
+    *   Average the scattered radiance: $L_{avg} = \frac{L_s}{N_{samples}}$ [S1, unofficial].
+    *   Add to background: $L = L + L_{avg}$ [S1, unofficial].
+
+5.  **Return:** Return $L$ [S1, unofficial].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volume_single_scattering_monte_carlo_point_light(ray, volume, light, background, n_samples):
+def volume_single_scattering_monte_carlo_point_light(ray, volume, light, t_max, n_samples):
     """
-    ray: Ray object with origin o and direction w
-    volume: Homogeneous volume with sigma_s, sigma_t
-    light: Point light with position l and radiance L_e
-    background: Background radiance L_b
-    n_samples: Number of Monte Carlo samples
+    ray: Object with origin (Vector3), direction (Vector3)
+    volume: Object with sigma_T (float), sigma_S (float), get_phase_function_value() (float)
+    light: Object with position (Vector3), get_radiance_at_point(point) (Vector3)
+    t_max: float, distance to background intersection
+    n_samples: int, number of Monte Carlo samples
     """
-    # 1. Calculate hit point on background
-    t_max = ray.get_intersection_distance() # Or scene intersection
-    x_hit = ray.origin + ray.direction * t_max
     
-    # 2. Calculate transmittance to background
-    dist_to_hit = length(x_hit - ray.origin)
-    t_eye = exp(-volume.sigma_t * dist_to_hit)
+    # 1. Background Contribution
+    # Calculate transmittance from eye to background
+    transmittance_bg = exp(-volume.sigma_T * t_max)
     
-    # 3. Initialize accumulated radiance with background
-    L_i = background * t_eye
+    # Get background radiance (point light contribution at background hit point)
+    # Assuming getPixelColorPointLight handles occlusion and light model
+    hit_point_bg = ray.origin + ray.direction * t_max
+    background_radiance = get_pixel_color_point_light(hit_point_bg, light)
     
-    # 4. Initialize scattered radiance accumulator
-    L_s = 0.0
+    # Initial Li is background attenuated by volume
+    accumulated_radiance = background_radiance * transmittance_bg
     
-    # 5. Monte Carlo Integration
-    # Assuming uniform sampling over the ray length [0, t_max]
-    # PDF for uniform sampling over length L is 1/L
-    ray_length = t_max
-    pdf = 1.0 / ray_length
+    # 2. Monte Carlo Integration for Single Scattering
+    scattered_radiance_sum = Vector3(0, 0, 0)
     
     for i in range(n_samples):
-        # Sample distance uniformly along the ray
-        t_sample = random_float() * ray_length
+        # Sample distance uniformly in [0, t_max]
+        u = random_float(0.0, 1.0)
+        t_sample = u * t_max
         
-        # Calculate sampled position
+        # Calculate sample position
         x_sample = ray.origin + ray.direction * t_sample
         
-        # Calculate transmittance from eye to sample point
-        dist_eye = length(x_sample - ray.origin)
-        t_eye_sample = exp(-volume.sigma_t * dist_eye)
+        # Transmittance from eye to sample point
+        transmittance_eye = exp(-volume.sigma_T * t_sample)
         
-        # Calculate transmittance from sample point to light
-        dist_light = length(light.position - x_sample)
-        t_light = exp(-volume.sigma_t * dist_light)
+        # Phase function value
+        # Note: Phase function depends on angles. 
+        # Source [S1, unofficial] simplifies to getPhaseFunctionValue(), assuming constant or pre-evaluated.
+        # In a full implementation, this would be p(w_i, w_o).
+        phase_val = volume.get_phase_function_value()
         
-        # Get phase function value
-        # Direction from sample to light
-        w_light = normalize(light.position - x_sample)
-        # Phase function p(w_out, w_in)
-        # Note: In single scattering, w_out is ray.direction, w_in is from light
-        pf = volume.get_phase_function(ray.direction, w_light)
+        # Emitted radiance from light at sample point
+        # For a point light, this is often constant color if distance attenuation is handled 
+        # or included in the light model. Source [S1, unofficial] calls getPixelColorPointLight.
+        light_radiance = get_pixel_color_point_light(x_sample, light)
         
-        # Get emitted radiance from light
-        L_e = light.get_radiance()
+        # Transmittance from sample point to light
+        dist_to_light = distance(x_sample, light.position)
+        transmittance_light = exp(-volume.sigma_T * dist_to_light)
         
-        # Scattering coefficient
-        sigma_s = volume.get_sigma_s()
+        # Single scattering contribution
+        # L_ss = L_e * T_eye * sigma_S * p * T_light
+        contribution = light_radiance * transmittance_eye * volume.sigma_S * phase_val * transmittance_light
         
-        # Accumulate contribution: Le * T_eye * sigma_s * p * T_light / PDF
-        # Note: step size is not explicitly multiplied because it is part of the PDF denominator
-        contribution = (L_e * t_eye_sample * sigma_s * pf * t_light) / pdf
-        L_s += contribution
+        # PDF for uniform sampling over [0, t_max] is 1/t_max
+        pdf = 1.0 / t_max
         
-    # 6. Average scattered radiance
-    L_avg = L_s / n_samples
+        # Add to sum divided by PDF
+        scattered_radiance_sum += contribution / pdf
+        
+    # Average the scattered radiance
+    avg_scattered_radiance = scattered_radiance_sum / n_samples
     
-    # 7. Final radiance
-    L_o = L_i + L_avg
+    # Combine with background
+    accumulated_radiance += avg_scattered_radiance
     
-    return L_o
+    return accumulated_radiance
+
+def get_pixel_color_point_light(point, light):
+    """
+    Simplified helper to get radiance from a point light.
+    In the source [S1, unofficial], this function retrieves the color.
+    """
+    # Assuming point light emits constant radiance or inverse square law is applied internally
+    # For a pure point light model in this context, we return the light's color/radiance.
+    return light.radiance
 ```
 
-**Edge Cases and Pitfalls**
-*   **Zero Length Ray:** If the ray does not intersect the volume or $t_{max}=0$, return background radiance directly [S1, unofficial].
-*   **High Extinction:** If $\sigma_t$ is very large, transmittance becomes negligible, leading to dark results. Ensure numerical stability in exponent calculations [S1, unofficial].
-*   **PDF Mismatch:** If sampling is not uniform over the integration domain, the PDF must be adjusted accordingly. Using uniform sampling over $[0, t_{max}]$ is simple but may be inefficient if the volume is small compared to the ray length [S1, unofficial].
-*   **Light Inside Volume:** If the light is inside the volume, the transmittance calculation $T_{light}$ still holds, but the geometry may require handling occlusion if other objects are present [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Zero Length Ray:** If $t_{max} = 0$, the PDF is undefined. Handle by returning background radiance directly [S1, unofficial].
+*   **Light Inside Volume:** If the light source is inside the volume, the transmittance $T_{light}$ calculation remains valid, but occlusion checks might be needed if other objects block the light [S1, unofficial].
+*   **Precision:** Exponential calculations for transmittance can underflow to zero for large optical depths. Use `exp(-tau)` directly. If `tau` is very large, `transmittance` becomes 0, contributing nothing [S1, unofficial].
+*   **Phase Function:** The source [S1, unofficial] assumes a constant phase function value `getPhaseFunctionValue()`. In reality, the phase function $p(\omega_i, \omega_o)$ depends on the angle between the view direction and the light direction. For a homogeneous volume with isotropic scattering, $p = \frac{1}{4\pi}$. For anisotropic scattering (e.g., Henyey-Greenstein), it varies [S3, unofficial]. The pseudocode above uses a placeholder `get_phase_function_value()` which should be implemented based on the specific phase function model [S1, unofficial].
 
 ## Subtopics
 
 ### [Ray Marching with In/Out-Scattering and Density Scaling](2318-ray-marching-with-in-out-scattering-and-density-scaling.md)
-This method computes single scattering radiance in participating media by ray marching, explicitly accounting for absorption, out-scattering (attenuation), and in-scattering (energy gain). It distinguishes between homogeneous media (uniform coefficients) and heterogeneous media (spatially varying density) by using a density scalar to scale extinction and scattering terms. Unlike the parent method which uses Monte Carlo integration, this approach uses deterministic uniform sampling along the ray, and unlike [Single Scattering Approximation with Precomputed Terms](4188-single-scattering-approximation-with-precomputed-terms.md) or [Analytical Approximation of Single Scattering Radiance](4244-analytical-approximation-of-single-scattering-radiance.md), it does not rely on precomputed terms or closed-form solutions but iteratively accumulates light contributions per step.
+This method computes single scattering radiance in participating media by ray marching, explicitly accounting for absorption, out-scattering (attenuation), and in-scattering (energy gain). It distinguishes between homogeneous media (uniform coefficients) and heterogeneous media (spatially varying density) by using a density scalar to scale extinction and scattering terms. Unlike the parent method [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md) which uses Monte Carlo integration, this approach uses deterministic uniform sampling along the ray, and unlike [Single Scattering Approximation with Precomputed Terms](4188-single-scattering-approximation-with-precomputed-terms.md) or [Analytical Approximation of Single Scattering Radiance](4244-analytical-approximation-of-single-scattering-radiance.md), it does not rely on precomputed terms or closed-form solutions but iteratively accumulates light contributions per step.
 
 ### [Single Scattering Approximation with Precomputed Terms](4188-single-scattering-approximation-with-precomputed-terms.md)
 This method is a rendering approximation that considers only single scattering effects and uses pre-computed direction-independent radiance components to improve efficiency. It differs from its siblings by replacing stochastic Monte Carlo sampling with deterministic ray marching and by decoupling the angular integration into pre-computed terms, enabling differentiable optimization of the density field.
@@ -135,37 +166,36 @@ This method is a rendering approximation that considers only single scattering e
 ### [Analytical Approximation of Single Scattering Radiance](4244-analytical-approximation-of-single-scattering-radiance.md)
 This method computes the in-scattered single scattering radiance $J_{ss}$ by approximating the phase function and incident radiance with low-order expansions, allowing the scattering contribution to be decomposed into direction-independent terms that are pre-computed per voxel. It differs from Monte Carlo approaches by avoiding repeated ray tracing for incident light estimation during rendering, making it significantly more efficient for differentiable rendering or multi-viewpoint reconstruction where gradients are required.
 
-### [Volume Single Scattering (Uniform Ray Marching with Point Light Background)](4550-volume-single-scattering-uniform-ray-marching-with-point-lig.md)
-This method computes single scattering radiance in participating media using Monte Carlo integration with uniform sampling along the ray distance, specifically adapted for a sphere light background and emission source. It differs from its parent [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md) by replacing the point light model with a sphere light, requiring equi-angular sampling for the light interaction and specific transmittance calculations from the light position.
+### [Volume Single Scattering (Monte Carlo with Sphere Light)](4549-volume-single-scattering-monte-carlo-with-sphere-light.md)
+This method computes single scattering radiance in participating media using Monte Carlo integration with a sphere light for background and emission. It differs from its parent, [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md), by replacing the point light source with a sphere light and employing equi-angular sampling for distance estimation.
 
 ### [Volume Single Scattering (Uniform Ray Marching with Point Light Background)](4550-volume-single-scattering-uniform-ray-marching-with-point-lig.md)
 This method computes single scattering radiance in a participating medium using uniform ray marching, where the background radiance is computed via a point light model instead of a generic surface object color. It replaces the Monte Carlo integration of its parent method with deterministic uniform sampling along the ray.
 
 ### [BSSRDF Approximation with Dipole and Single Scattering](4750-bssrdf-approximation-with-dipole-and-single-scattering.md)
-The BSSRDF approximation with dipole diffusion and single scattering computes subsurface light transport by evaluating the Bidirectional Surface Scattering Reflectance Distribution Function (BSSRDF) on the surface boundary, combining a dipole diffusion solution for multiple scattering with a first-order scattering term. It replaces expensive volumetric path tracing with an analytical diffusion-based solution using real and virtual point sources, and explicitly accounts for single scattering along refracted ray segments.
+This method approximates subsurface light transport by combining a dipole diffusion model for multiple scattering with a single-scattering term, evaluating the Bidirectional Surface Scattering Reflectance Distribution Function (BSSRDF) at the surface boundary. It solves the problem of computationally expensive volumetric path tracing in participating media under rough dielectric surfaces by replacing volumetric integration with an analytical diffusion-based solution. It sets itself apart from its siblings, such as [Ray Marching with In/Out-Scattering and Density Scaling](2318-ray-marching-with-in-out-scattering-and-density-scaling.md) and [Analytical Approximation of Single Scattering Radiance](4244-analytical-approximation-of-single-scattering-radiance.md), by explicitly modeling the spatial variation of light entry and exit points via the dipole configuration, whereas siblings often assume uniform density or precomputed terms without the dipole's specific boundary handling.
 
 ### [Physical Atmosphere Color Calculation](4820-physical-atmosphere-color-calculation.md)
 Calculates the physical color of the sky and sun disk for a given view direction, accounting for Rayleigh and Mie scattering, optical depth, and phase functions. It differs from sibling methods by providing a closed-form analytical approximation of the atmospheric radiance rather than using Monte Carlo integration or precomputed lookup tables.
 
 ### Single Scattering with Direction Variance Culling
-This variant traverses a hierarchy of volume samples in a top-down manner, discarding nodes not intersected by the camera ray. At leaf nodes, it tests the direction variance of the phase function. If both the direction variance and the phase function value are below a threshold, it gathers the contribution from the leaf node as a whole; otherwise, it gathers contributions from individual volume samples [S5]. The contribution is scaled by a density factor $k_v$:
-$$ \text{single} = \alpha \sum_v p(\hat{\boldsymbol{h}}, \hat{\boldsymbol{d}}_v) \frac{I_v}{k_v} (e^{-\sigma_T d_{\text{near}}} - e^{-\sigma_T d_{\text{far}}}) $$
-where $d_{\text{near}}$ and $d_{\text{far}}$ are the intersections with the sample volume of influence [S5]. Parameters include the density factor $k_v$, albedo/scattering multiplier $\alpha$, total extinction $\sigma_T$, phase function $p$, and incoming radiance $I_v$ [S5].
+This variant optimizes the rendering of single scattering in participating media by traversing a hierarchy of volume samples. It discards nodes not intersected by the camera ray and tests the direction variance of leaf nodes against the phase function value. If both are below a threshold, it gathers the contribution from the leaf node; otherwise, it gathers from each volume sample. The contribution is scaled by a density factor $k_v$: $\text{single} = \alpha \sum_v p(\hat{\boldsymbol{h}}, \hat{\boldsymbol{d}}_v) \frac{I_v}{k_v} (e^{-\sigma_T d_{\text{near}}} - e^{-\sigma_T d_{\text{far}}})$, where $d_{\text{near}}$ and $d_{\text{far}}$ are the intersections with the sample volume of influence [S5]. Parameters include the density factor $k_v$, albedo/scattering multiplier $\alpha$, total extinction $\sigma_T$, phase function $p$, and incoming radiance $I_v$ [S5].
 
 ### Sakas's Projective Polygonal Rendering
-A method to render arbitrary distributions of volume densities using projective polygonal rendering and solid texturing [S6]. It derives the general radiance equation for single scattering and solves it with front-to-back Monte Carlo sampling. Simplifications include neglecting absorption for low-density volumes and assuming constant density. It uses a Bresenham algorithm to traverse a voxel field modeled as a participating medium, often created using fractal techniques [S6].
+This method renders arbitrary distributions of volume densities using projective polygonal rendering and solid texturing. It derives the general equation for radiance reaching the eye for single scattering and solves it with front-to-back Monte Carlo sampling. Simplifications include neglecting absorption for very low density volumes and assuming constant density. It uses a Bresenham algorithm to traverse a voxel field modeled as a participating medium, created using fractal techniques [S6].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_{samples})$ per ray, where $N_{samples}$ is the number of Monte Carlo samples. Each sample requires calculating transmittance to the eye and light, and evaluating the phase function [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory, as it only stores current radiance accumulators and temporary variables [S1, unofficial].
-*   **Performance:** The method is unbiased but converges slowly ($1/\sqrt{N}$). Noise is prominent with low sample counts, especially in highly scattering media [S2].
-*   **Strengths:** Simple to implement; unbiased; handles homogeneous media efficiently [S1, unofficial].
-*   **Limitations:** Noisy with few samples; inefficient for heterogeneous media without adaptive sampling; limited to single scattering [S2].
-*   **When to Use:** Educational purposes, simple homogeneous volumes, or as a base for more complex estimators [S2].
-*   **When Not to Use:** Heterogeneous media, multiple scattering, or real-time applications requiring low noise [S2].
+*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of Monte Carlo samples and $L$ is the cost of evaluating the light contribution (distance calculation, transmittance) per sample [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory, as it processes samples iteratively [S1, unofficial].
+*   **Measured Performance:** Performance depends heavily on the number of samples $N_{samples}$ required to reduce noise. For homogeneous volumes, convergence is relatively fast compared to heterogeneous media, but still suffers from Monte Carlo noise for low sample counts [S1, unofficial].
+*   **Scaling:** Scales linearly with the number of samples. Increasing $N_{samples}$ reduces noise by $\frac{1}{\sqrt{N}}$ [S1, unofficial].
+*   **Strengths:** Unbiased result; simple to implement for homogeneous volumes; handles point lights directly [S1, unofficial].
+*   **Limitations:** Noisy for low sample counts; inefficient for complex lighting or multiple lights (requires multiple sampling or importance sampling); does not handle multiple scattering [S2].
+*   **When to Use:** Real-time applications where noise is acceptable or can be denoised; offline rendering with sufficient samples; homogeneous volumes with point lights [S1, unofficial].
+*   **When Not to Use:** Heterogeneous volumes with complex density functions (ray marching may be more efficient); scenes with many lights (multiple scattering models or precomputed terms are better); high-quality offline rendering requiring noise-free results (requires very high sample counts) [S1, unofficial][S2].
 
 ## Background
-The method originates from fundamental principles of radiative transfer in participating media, specifically the single scattering approximation [S1, unofficial]. It is commonly implemented in educational ray tracers and basic volume rendering engines [S1, unofficial]. The use of Monte Carlo integration for volume rendering was popularized in the early days of computer graphics, with specific implementations for point lights being a standard example in tutorials [S4, unofficial]. The approach is detailed in various online resources and code repositories, such as the WangYue ray tracer [S1, unofficial] and Scratchapixel tutorials [S4, unofficial].
+The method originates from basic volume rendering techniques for participating media, specifically the single scattering approximation. The Monte Carlo approach with uniform sampling is a standard unbiased estimator for the radiative transfer equation's in-scattering term. The specific implementation details, such as using a point light model and homogeneous volume assumptions, are found in educational ray tracing tutorials and open-source implementations [S1, S4, unofficial]. The concept of single scattering as the effect of zero volume bounces is documented in rendering engine manuals like Blender's [S2]. The mathematical foundation involves the Beer-Lambert law for attenuation and the Henyey-Greenstein phase function for scattering directionality [S3, unofficial].
 
 ## Sources
 [S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)

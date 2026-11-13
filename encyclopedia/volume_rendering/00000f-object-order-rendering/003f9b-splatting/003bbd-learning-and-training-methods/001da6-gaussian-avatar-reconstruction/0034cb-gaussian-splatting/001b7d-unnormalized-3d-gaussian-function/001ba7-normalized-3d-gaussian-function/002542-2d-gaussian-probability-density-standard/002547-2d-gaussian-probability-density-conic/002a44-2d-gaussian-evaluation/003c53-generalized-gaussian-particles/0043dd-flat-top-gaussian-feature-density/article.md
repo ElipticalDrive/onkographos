@@ -7,12 +7,12 @@ Flat-top Gaussian Feature Density provides a differentiable approximation of fea
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A set of $M$ grid cells (particles), each defined by a transformation matrix $G_i$ and a flat-top strength parameter $p$.
-*   **Output:** The scalar feature density $\rho(x)$ at an arbitrary 3D coordinate $x$.
+*   **Input:** A set of $M$ grid cells (particles), each defined by a transformation matrix $G_i$ and a flat-top strength parameter $p$ [S1].
+*   **Output:** The scalar feature density $\rho(x)$ at an arbitrary 3D coordinate $x$ [S1].
 
 **Data Structures**
-*   **Grid Cell $i$:** Contains a $3 \times 3$ transformation matrix $G_{i,0:3,0:3}$ representing the local coordinate transformation (scale, rotation, shear). The determinant $\det(G_{i,0:3,0:3})$ accounts for volume scaling.
-*   **Parameter $p$:** A scalar float controlling the flatness of the Gaussian.
+*   **Grid Cell $i$:** Contains a $3 \times 3$ transformation matrix $G_{i,0:3,0:3}$ representing the local coordinate transformation (scale, rotation, shear) [S1]. The determinant $\det(G_{i,0:3,0:3})$ accounts for volume scaling [S1].
+*   **Parameter $p$:** A scalar float controlling the flatness of the Gaussian [S1].
 
 **Formulas**
 The core building block is the 1D flat-top Gaussian function [S1]:
@@ -26,7 +26,7 @@ where:
 
 The total feature density $\rho(x)$ at a point $x$ is the sum of contributions from all $M$ grid cells [S1]:
 $$\rho(x) = \sum_{i=0}^{M-1} \left( \det(G_{i,0:3,0:3}) \cdot \exp \left( - \left( \sum_{d=0}^2 (G_i(x)_d)^{2p} \right) \right) \right)$$
-where $G_i(x)_d$ is the transformed coordinate for axis $d \in \{0, 1, 2\}$ (x, y, z). In this transformed local space, the center is 0 and the standard deviation is 1, so $\mu$ and $\sigma$ are omitted [S1].
+where $G_i(x)_d$ is the transformed coordinate for axis $d \in \{0, 1, 2\}$ (x, y, z) [S1]. In this transformed local space, the center is 0 and the standard deviation is 1, so $\mu$ and $\sigma$ are omitted [S1].
 
 **Parameters**
 *   **$p$ (Flat-top strength):** Experimentally set to $p = 10$ [S1]. This value is strong enough to approximate the box shape of the feature grid but avoids exploding gradients on the ramps leading to and from the flat-top [S1].
@@ -35,6 +35,8 @@ where $G_i(x)_d$ is the transformed coordinate for axis $d \in \{0, 1, 2\}$ (x, 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def compute_flat_top_feature_density(x, grid_cells, p=10.0):
     """
     Computes the feature density at point x using flat-top Gaussians.
@@ -53,63 +55,29 @@ def compute_flat_top_feature_density(x, grid_cells, p=10.0):
     
     for cell in grid_cells:
         # Transform point x into the local coordinate space of the cell
-        # G_i(x) implies applying the inverse transformation or mapping x to local coords.
-        # Based on the formula, G_i(x)_d are the coordinates in the local space.
-        # Assuming G_i represents the transformation from local to world,
-        # we need the inverse to get local coords, or G_i(x) denotes the result of the transform.
-        # The source states: "Gi(x)d is the transformed coordinate... center... is 0".
-        # We assume G_i is the matrix that maps local to world, so we solve for local.
-        # However, standard splatting often pre-computes the inverse or uses the matrix directly if defined as local-to-world inverse.
-        # Given the formula structure exp(-(sum (G_i(x)_d)^2p)), G_i(x)_d must be the local coordinates.
-        
-        # Let's assume G_i is the transformation matrix such that local_coords = G_i * x (or similar linear mapping).
-        # To be precise and self-contained, we define the transformation step clearly.
-        # If G_i is the 3x3 matrix provided in the grid cell data:
-        local_coords = apply_transformation(cell.transform_matrix, x)
+        # G_i(x)_d corresponds to the d-th component of the transformed vector
+        local_coords = [0.0, 0.0, 0.0]
+        m = cell.transform_matrix
+        local_coords[0] = m[0][0]*x[0] + m[0][1]*x[1] + m[0][2]*x[2]
+        local_coords[1] = m[1][0]*x[0] + m[1][1]*x[1] + m[1][2]*x[2]
+        local_coords[2] = m[2][0]*x[0] + m[2][1]*x[1] + m[2][2]*x[2]
         
         # Calculate the sum of powers for the 3 dimensions
         sum_powers = 0.0
         for d in range(3):
-            coord_d = local_coords[d]
-            sum_powers += coord_d ** (2 * p)
+            sum_powers += local_coords[d] ** (2 * p)
             
-        # Calculate the exponential term
-        # Note: The formula has a negative sign inside the exp
+        # Calculate the exponential term and add to total
         density_contribution = cell.det_G * math.exp(-sum_powers)
-        
         total_density += density_contribution
         
     return total_density
-
-def apply_transformation(matrix, point):
-    """
-    Applies a 3x3 linear transformation to a 3D point.
-    Assumes the matrix maps the point to the local coordinate system.
-    """
-    # Standard matrix-vector multiplication
-    x, y, z = point
-    m = matrix
-    
-    # If the matrix is intended to transform world to local, use it directly.
-    # If it transforms local to world, we would need the inverse.
-    # The source text says "Gi(x)d is the transformed coordinate...".
-    # In many adaptive grid contexts, the matrix defines the cell's orientation/scale.
-    # We assume the provided matrix allows direct computation of local coordinates.
-    # If the matrix is Local->World, we must invert it.
-    # To avoid ambiguity, we assume the input matrix is the one that yields G_i(x)_d.
-    
-    # Simple linear transform: y = M * x
-    lx = m[0][0]*x + m[0][1]*y + m[0][2]*z
-    ly = m[1][0]*x + m[1][1]*y + m[1][2]*z
-    lz = m[2][0]*x + m[2][1]*y + m[2][2]*z
-    
-    return [lx, ly, lz]
 ```
 
 **Edge Cases and Pitfalls**
-*   **Gradient Explosion:** If $p$ is too large, the gradients on the "ramps" of the flat-top function can explode, destabilizing training [S1].
-*   **Non-Differentiability:** Standard box functions are non-differentiable at boundaries. The flat-top Gaussian ensures differentiability everywhere, which is critical for learning transformation matrices [S1].
-*   **Coordinate System:** The formula assumes the transformed coordinates are centered at 0 with unit standard deviation. Incorrect transformation matrices will break this assumption [S1].
+*   **Gradient Stability:** The parameter $p$ must be chosen carefully; $p=10$ is used because it matches the box shape without causing exploding gradients on the ramps to and from the flat-top [S1].
+*   **Differentiability:** Standard box functions are non-differentiable at boundaries, whereas the flat-top Gaussian ensures differentiability everywhere, which is critical for learning transformation matrices [S1].
+*   **Coordinate System:** The formula assumes the transformed coordinates are centered at 0 with unit standard deviation, which omits $\mu$ and $\sigma$ terms [S1].
 
 ## Subtopics
 
@@ -117,15 +85,15 @@ def apply_transformation(matrix, point):
 Defines the dynamic target distribution $\rho^*(x)$ used to steer the current feature density $\rho(x)$ during training. It allocates computational resources by increasing density in high-error regions and decreasing it in low-error regions, using logarithmic scaling based on relative error.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(M)$ per query point, where $M$ is the number of grid cells. Each cell requires a matrix-vector multiplication and a power/exponential operation.
-*   **Memory Complexity:** $O(M)$ to store the grid cells and their transformation matrices.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Strengths:** Differentiable everywhere, allowing gradient-based optimization of grid transformations and scales. The box-like shape ($p=10$) closely approximates the discrete feature grid structure [S1].
-*   **Limitations:** Requires careful tuning of $p$ to balance approximation quality and gradient stability. Performance degrades linearly with the number of grid cells.
+*   **Limitations:** Requires careful tuning of $p$ to balance approximation quality and gradient stability [S1].
 *   **When to use:** When training adaptive grid-based scene representations where differentiable density estimation is required to update grid parameters based on reconstruction error [S1].
-*   **When not to use:** For static rendering where differentiability is not needed, or when real-time performance is critical and $M$ is very large (consider simpler splatting methods).
+*   **When not to use:** Not given in the sources.
 
 ## Background
-The method originates from the work on Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization [S1]. It was developed to solve the problem of learning transformation matrices in adaptive grids, which is impossible with non-differentiable box functions. The flat-top Gaussian (or super-Gaussian) is a known class of functions in signal processing and optics, characterized by a flat peak and steep sides, controlled by the exponent $p$ [S1].
+The method originates from the work on Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization [S1]. It was developed to enable learning of transformation matrices in adaptive grids, as without this differentiable approximation, the grid's scales and translations cannot update based on the error of points outside their local domain [S1]. The flat-top Gaussian (or super-Gaussian) is a known class of functions characterized by a flat peak and steep sides, controlled by the exponent $p$ [S1].
 
 ## Sources
 [S1] Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization, https://doi.org/10.1109/tvcg.2023.3327194, fetched 2026-10-26

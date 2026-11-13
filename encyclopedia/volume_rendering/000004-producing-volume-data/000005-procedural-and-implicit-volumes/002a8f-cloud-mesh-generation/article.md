@@ -1,63 +1,62 @@
 # Cloud Mesh Generation
 
-Also called: Chunk Mesh Generation, Procedural Cloud Meshing
 
 ## Overview
 Cloud Mesh Generation constructs a planar mesh from a procedural voxel grid by identifying contiguous regions of cloud data [S1, unofficial]. It differs from [Procedural Volume Rendering with Noise Perturbation](1370-procedural-volume-rendering-with-noise-perturbation.md) by outputting explicit geometry rather than shader-based volume textures, and from [Chunk Generation with Base Terrain](1110-chunk-generation-with-base-terrain.md) by targeting horizontal atmospheric layers [G].
 
 ## How it works
 **Inputs:**
-- `WORLD_AREA`: The total spatial extent of the cloud field in world units.
-- `CHUNK_SIZE`: The resolution of the voxel grid per chunk.
+- `WORLD_AREA`: The total spatial extent of the cloud field in world units [S1, unofficial].
+- `CHUNK_SIZE`: The resolution of the voxel grid per chunk [S1, unofficial].
 - `CLOUD_HEIGHT`: The fixed Y-coordinate for cloud rendering [S1, unofficial].
-- `world_voxels`: A 3D boolean or integer array representing the world state.
+- `world_voxels`: A 3D boolean or integer array representing the world state [S1, unofficial].
 
 **Outputs:**
-- A list of vertex positions and an index buffer representing the generated cloud mesh.
+- A list of vertex positions and an index buffer representing the generated cloud mesh [S1, unofficial].
 
 **Data Structures:**
 - `cloud_data`: A 1D array of size `WORLD_AREA * CHUNK_SIZE ** 2` storing binary cloud presence (1 for cloud, 0 for void) [S1, unofficial].
 - `visited`: A boolean array of the same size tracking processed cells to prevent duplicate mesh generation [S1, unofficial].
 
 **Steps:**
-1. **Voxelization:** Initialize `cloud_data`. Iterate `x` and `z` over world dimensions. If `noise2(0.13 * x, 0.13 * z) < 0.2`, skip. Otherwise, set `cloud_data[idx] = 1` [S1, unofficial].
-2. **Mesh Construction:** Iterate `z` and `x`. If `cloud_data[idx]` is 0 or `idx` in `visited`, skip [S1, unofficial].
+1. **Voxelization:** Initialize `cloud_data` [S1, unofficial]. Iterate `x` and `z` over world dimensions [S1, unofficial]. If `noise2(0.13 * x, 0.13 * z) < 0.2`, skip [S1, unofficial]. Otherwise, set `cloud_data[idx] = 1` [S1, unofficial].
+2. **Mesh Construction:** Iterate `z` and `x` [S1, unofficial]. If `cloud_data[idx]` is 0 or `idx` in `visited`, skip [S1, unofficial].
 3. **X-Strip Detection:** Find continuous quads along X: increment `x_count` while `cloud_data` is 1 and not visited [S1, unofficial].
 4. **Z-Strip Detection:** Find continuous quads along Z for each X in the strip: store `z_count` in `z_count_list` [S1, unofficial].
-5. **Primitive Generation:** Generate geometric primitives (quads or triangles) covering the identified rectangular regions at `CLOUD_HEIGHT`.
+5. **Primitive Generation:** Generate geometric primitives (quads or triangles) covering the identified rectangular regions at `CLOUD_HEIGHT` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def generate_cloud_mesh(world_area, chunk_size, cloud_height):
-    grid_size = chunk_size
-    total_cells = world_area * grid_size * grid_size
+    grid_dim = world_area * chunk_size
+    total_cells = world_area * chunk_size * chunk_size
     cloud_data = [0] * total_cells
     visited = [False] * total_cells
     vertices = []
     indices = []
 
     # 1. Voxelization
-    for x in range(grid_size):
-        for z in range(grid_size):
-            idx = x * grid_size + z
+    for x in range(grid_dim):
+        for z in range(grid_dim):
+            idx = x * grid_dim + z
             if noise2(0.13 * x, 0.13 * z) < 0.2:
                 continue
             cloud_data[idx] = 1
 
     # 2. Mesh Construction
-    for z in range(grid_size):
-        for x in range(grid_size):
-            idx = x * grid_size + z
+    for z in range(grid_dim):
+        for x in range(grid_dim):
+            idx = x * grid_dim + z
             if cloud_data[idx] == 0 or visited[idx]:
                 continue
 
             visited[idx] = True
             x_count = 0
             curr_x = x
-            while curr_x < grid_size and cloud_data[curr_x * grid_size + z] == 1 and not visited[curr_x * grid_size + z]:
-                visited[curr_x * grid_size + z] = True
+            while curr_x < grid_dim and cloud_data[curr_x * grid_dim + z] == 1 and not visited[curr_x * grid_dim + z]:
+                visited[curr_x * grid_dim + z] = True
                 x_count += 1
                 curr_x += 1
 
@@ -65,8 +64,8 @@ def generate_cloud_mesh(world_area, chunk_size, cloud_height):
             for dx in range(x_count):
                 curr_z = z
                 z_count = 0
-                while curr_z < grid_size and cloud_data[(x + dx) * grid_size + curr_z] == 1 and not visited[(x + dx) * grid_size + curr_z]:
-                    visited[(x + dx) * grid_size + curr_z] = True
+                while curr_z < grid_dim and cloud_data[(x + dx) * grid_dim + curr_z] == 1 and not visited[(x + dx) * grid_dim + curr_z]:
+                    visited[(x + dx) * grid_dim + curr_z] = True
                     z_count += 1
                     curr_z += 1
                 z_count_list.append(z_count)
@@ -76,7 +75,6 @@ def generate_cloud_mesh(world_area, chunk_size, cloud_height):
                 z_count = z_count_list[dx]
                 x1, x2 = x + dx, x + dx + 1
                 z1, z2 = z, z + z_count
-                # Quad vertices at fixed CLOUD_HEIGHT
                 v0 = [x1, cloud_height, z1]
                 v1 = [x2, cloud_height, z1]
                 v2 = [x2, cloud_height, z2]
@@ -84,11 +82,10 @@ def generate_cloud_mesh(world_area, chunk_size, cloud_height):
                 vertices.extend([v0, v1, v2, v3])
                 indices.extend([len(vertices)-4, len(vertices)-3, len(vertices)-2])
                 indices.extend([len(vertices)-4, len(vertices)-2, len(vertices)-1])
-            z += 1
     return vertices, indices
 
 def noise2(x, y):
-    # Standard 2D procedural noise function [G]
+    # Simple deterministic hash for procedural noise [G]
     return (x * 12.9898 + y * 78.233) % 1.0
 ```
 
@@ -98,19 +95,21 @@ def noise2(x, y):
 - Cloud Height: Fixed Y-coordinate [S1, unofficial].
 
 **Edge Cases:**
-- Precision: Noise function evaluation must be deterministic across voxelization and rendering passes.
-- Boundaries: Loop conditions must clamp to `grid_size` to prevent out-of-bounds array access during strip detection.
+- Precision: Noise function evaluation must be deterministic across voxelization and rendering passes [G].
+- Boundaries: Loop conditions must clamp to `grid_dim` to prevent out-of-bounds array access during strip detection [G].
 
 ## Subtopics
 
 ### Mesh Inflation
-A technique to 'inflate' a mesh from a point cloud by applying a scalar to the inside/outside values [S2, unofficial]. It adjusts the visual thickness or volume of the generated cloud mesh without altering the underlying voxel density logic.
+A technique to 'inflate' a mesh from a point cloud by applying a scalar to the inside/outside values [S2, unofficial].
+
+### Neural Volumetric Mesh Generator (NVMG)
+A pipeline for generating high-quality artifact-free volumetric and surface meshes from random noise or a reference image without postprocessing [S3, unofficial]. It uses a two-level hybrid approach: a diffusion model for global shape synthesis on voxels, and a neural network plus optimization for mesh deformation and quality control [S3, unofficial]. The pipeline consists of three modules: (1) Voxel generation with diffusion models to get an initial synthesis result; (2) Voxel division to convert the voxel representation into a tetrahedral mesh template; (3) Physically correct mesh deformation using a voxel-conditional neural closest point predictor and regularized projection to add details and ensure quality [S3, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(W \cdot H)$ where $W, H$ are grid dimensions, due to single-pass voxelization and linear strip traversal [G].
 - **Memory Complexity:** $O(W \cdot H)$ for the `cloud_data` and `visited` arrays [G].
-- **Strengths:** Reduces overdraw compared to ray-marching; allows standard rasterization pipelines and GPU instancing.
-- **Limitations:** Fixed height assumption limits vertical cloud structure; noise thresholding creates hard edges unless smoothed or blended.
+- **Strengths:** Reduces overdraw compared to ray-marching; allows standard rasterization pipelines and GPU instancing [G].
 
 ## Background
 Originating from procedural generation techniques in voxel-based games, this method adapts chunk-based terrain meshing for atmospheric effects [G]. The reference implementation uses a noise-based threshold to determine cloud presence, mapping 2D noise to a planar mesh [S1, unofficial].
@@ -118,3 +117,4 @@ Originating from procedural generation techniques in voxel-based games, this met
 ## Sources
 [S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
 [S2] d3x0r/MarchingTetrahedra, https://github.com/d3x0r/MarchingTetrahedra, fetched 2026-10-27 (unofficial)
+[S3] Neural Volumetric Mesh Generator, https://arxiv.org/abs/2210.03158v1, fetched 2026-10-27 (unofficial)

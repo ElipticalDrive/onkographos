@@ -3,97 +3,88 @@
 Also called: One-time IP2P Text Editing for Gaussians, TexGS-VolVis Text-Driven Editing, Text-Driven NPSE
 
 ## Overview
-Text-Driven Gaussian Editing modifies the appearance of volume visualization (VolVis) scenes represented by textured Gaussian primitives using natural language text prompts, while preserving the underlying geometry and lighting [S1]. It distinguishes itself from iterative baseline methods by employing a one-time update strategy that applies image-to-image (IP2P) editing only once on a small subset of multi-view images, significantly reducing editing time and avoiding the blurriness associated with iterative approaches in semi-transparent scenes [S1].
+Text-Driven Gaussian Editing modifies the appearance of volume visualization (VolVis) scenes represented by textured Gaussian primitives using natural language text prompts, while preserving the underlying geometry and lighting [S1]. It distinguishes itself from iterative baseline methods by employing a one-time update strategy that applies image-to-image (IP2P) editing only once on a small subset of multi-view images, significantly reducing editing time [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A pre-reconstructed textured Gaussian representation of a VolVis scene (geometry, base color, opacity, and texture attributes) and a text prompt describing the desired style or appearance change [S1].
+*   **Input:** A pre-reconstructed textured Gaussian representation of a VolVis scene and a text prompt describing the desired style or appearance change [S1].
 *   **Output:** An edited Gaussian representation where the texture attributes are updated to reflect the text prompt, while geometry remains fixed [S1].
 
 **Data Structures:**
-The method operates on Gaussian primitives. Each primitive $i$ is parameterized by:
-*   Geometry: Position $\mathbf{p}_i$, Rotation $\mathbf{R}_i$, Scale $\mathbf{s}_i$ [S1].
-*   Shading/Appearance: Opacity $\alpha_i$, Base Color $\mathbf{c}_i$, and Texture Attributes (e.g., texture map or feature vector) $\mathbf{t}_i$ [S1].
-*   The text-driven editing process specifically targets $\mathbf{t}_i$ [S1].
+The method operates on textured Gaussian primitives [S1]. Each primitive stores geometry attributes (position, rotation, scale) and appearance attributes (opacity, base color, and texture attributes) [G]. The text-driven editing process specifically targets the texture attributes for appearance modification [S1].
 
 **Steps:**
 1.  **Subset Selection:** Select a small subset of multi-view images from the training set [S1].
 2.  **IP2P Editing:** Apply an image-to-image (IP2P) diffusion model to the selected subset of images using the text prompt to generate edited target images [S1].
-    *   *Note:* The IP2P model is typically a pre-trained stable diffusion variant conditioned on the text prompt [S1].
-3.  **Texture Update:** Optimize only the texture attributes $\mathbf{t}_i$ of the Gaussian primitives to match the edited target images from Step 2. The geometry ($\mathbf{p}_i, \mathbf{R}_i, \mathbf{s}_i$) and base color are kept fixed to ensure geometry consistency [S1].
+3.  **Texture Update:** Optimize only the texture attributes of the Gaussian primitives to match the edited target images from Step 2. The geometry and base color are kept fixed to ensure geometry consistency [S1].
 4.  **Rendering:** Render the edited Gaussian representation to verify the result [S1].
 
 **Parameters:**
-*   Number of primitives: Varies by scene. For 512x512 resolution, TexGS-VolVis uses ~108,119 primitives [S1].
-*   Editing Time: ~1.6 minutes for 512x512 resolution [S1].
-*   Rendering Resolution: Typically 512x512 [S1].
+*   Number of primitives: 108,119 for 512×512 resolution [S1].
+*   Editing Time: 1.6 minutes for 512×512 resolution [S1].
+*   Rendering Resolution: 512×512 [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Elliptical Artifacts:** IP2P editing results may not be perfectly geometry-consistent with the scene content. If the method updates the model on a small subset of views without sufficient constraints, these inaccuracies can be amplified, leading to visible elliptical artifacts in the rendered output [S1].
-*   **Geometry Consistency:** Unlike methods that update geometry or use all training views iteratively, this method relies on fixed geometry. This prevents geometric distortion but may limit the expressiveness of the edit if the texture attribute alone cannot capture the desired style [S1].
+*   **Elliptical Artifacts:** IP2P editing results are not always geometry-consistent with scene content, and updating the model on a small subset of multi-view images amplifies these inaccuracies, leading to visible elliptical artifacts in the rendered output [S1].
+*   **Geometry Consistency:** Unlike methods that update geometry or require iterative multi-view consistency updates, this method relies on fixed geometry, which prevents geometric distortion but may limit expressiveness if the texture attribute alone cannot capture complex styles [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def text_driven_gaussian_editing(gaussians, text_prompt, multi_view_images, subset_indices):
-    """
-    Edits Gaussian primitives using text-driven NPSE with a one-time update strategy.
-    
-    Args:
-        gaussians: List of Gaussian primitives with attributes (position, rotation, scale, opacity, base_color, texture).
-        text_prompt: String describing the desired style.
-        multi_view_images: List of original multi-view images.
-        subset_indices: Indices of the subset of images to use for editing.
-        
-    Returns:
-        Updated gaussians with modified texture attributes.
-    """
     # Step 1: Select subset of images
     selected_images = [multi_view_images[i] for i in subset_indices]
     
-    # Step 2: Apply IP2P editing to generate target images
-    # IP2P is a pre-trained image-to-image diffusion model conditioned on text_prompt
-    edited_images = ip2p_model(selected_images, text_prompt)
+    # Step 2: Apply IP2P editing to generate target images [S1]
+    edited_images = apply_ip2p_diffusion(selected_images, text_prompt)
     
-    # Step 3: Update only texture attributes of Gaussians to match edited images
-    # Geometry (position, rotation, scale) and base_color are kept fixed
+    # Step 3: Update only texture attributes of Gaussians to match edited images [S1]
     for primitive in gaussians:
-        # Optimize texture attribute to minimize difference between rendered and edited image
-        # This is typically done via gradient descent on the texture parameter
-        primitive.texture = optimize_texture(primitive, edited_images, selected_images)
+        primitive.texture = optimize_texture_attribute(primitive, edited_images, selected_images)
         
     return gaussians
 
-def optimize_texture(primitive, edited_images, original_images):
-    """
-    Optimizes the texture attribute of a single primitive to match the edited images.
-    [G] In practice, this involves rendering the primitive from the selected viewpoints,
-    comparing the rendered result with the edited image, and backpropagating the loss
-    to the texture attribute.
-    """
-    # Placeholder for the specific optimization loop
-    # Loss = L1/SSIM(Rendered(primitive), Edited_Image)
-    # Gradient descent on primitive.texture
-    pass
+def apply_ip2p_diffusion(images, prompt):
+    # [G] Standard IP2P diffusion: encode images to latent space,
+    # condition on text prompt, denoise, decode to edited images.
+    return [diffusion_model.edit(img, prompt) for img in images]
+
+def optimize_texture_attribute(primitive, edited_images, original_images):
+    # [G] Gradient descent to update texture parameter
+    lr = 0.01
+    for step in range(100):
+        rendered = render_primitive(primitive, original_images)
+        loss = sum((r - e)**2 for r, e in zip(rendered, edited_images))
+        gradient = compute_gradient(loss, primitive.texture)
+        primitive.texture -= lr * gradient
+    return primitive.texture
+
+def render_primitive(primitive, images):
+    # [G] Standard Gaussian splatting render for a single primitive across viewpoints
+    return [splat(primitive, view) for view in images]
+
+def compute_gradient(loss, texture):
+    # [G] Standard backpropagation through the rendering and loss function
+    return gradient_descent_step(loss, texture)
 ```
 
 ## Subtopics
 
 ### [Text-Driven Non-Photorealistic Scene Editing](11108-text-driven-non-photorealistic-scene-editing.md)
-Stylizes VolVis scenes using text instructions while keeping geometry fixed and updating only texture attributes. It uses a one-time update strategy to avoid blurriness and elliptical artifacts common in iterative methods. Choose this when geometry consistency and detailed style patterns are required without iterative multi-view updates.
+Stylizes VolVis scenes using text instructions while keeping geometry fixed and updating only texture attributes. It uses a one-time update strategy to avoid the blurriness associated with iterative approaches in semi-transparent scenes. It sets itself apart from siblings like [StyleSplat](11108-text-driven-non-photorealistic-scene-editing.md) by embedding texture maps within Gaussian primitives to express complex style patterns and reduce elliptical artifacts. Choose this when geometry consistency and detailed style patterns are required without iterative multi-view updates.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Editing Time:** Significantly faster than iterative methods. TexGS-VolVis takes ~1.6 minutes for 512x512 resolution, compared to 7.2 minutes for DGE, 38.3 minutes for IG2G, and 44.69 minutes for IN2N [S1].
-*   **Rendering Time:** Mean/Max rendering time for TexGS-VolVis is 7.21/9.93 ms at 512x512 resolution [S1].
+*   **Editing Time:** TexGS-VolVis takes 1.6 minutes for 512×512 resolution, compared to 7.2 minutes for DGE, 38.3 minutes for IG2G, and 44.69 minutes for IN2N [S1].
+*   **Rendering Time:** Mean/Max rendering time for TexGS-VolVis is 7.21/9.93 ms at 512×512 resolution [S1].
 *   **Model Size:** TexGS-VolVis uses 221 MB for 108,119 primitives, which is larger than DGE (87 MB) and IG2G (57 MB) but smaller than IN2N (1,150 MB) [S1].
 
 **Scaling:**
 *   The method scales well with editing time due to the one-time update strategy, but rendering time depends on the number of primitives and resolution [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** High CLIP directional similarity (0.174) compared to IN2N (0.043), IG2G (0.134), and DGE (0.133) [S1]. Produces detailed and accurate 3D edits that align closely with text prompts. Geometry-consistent editing [S1].
+*   **Strengths:** High CLIP directional similarity (0.174) compared to IN2N (0.043), IG2G (0.134), and DGE (0.133) [S1]. Produces detailed and accurate 3D edits that align closely with text prompts [S1]. Geometry-consistent editing [S1].
 *   **Limitations:** May exhibit elliptical artifacts if IP2P results are not geometry-consistent [S1]. Less expressive than methods that update geometry, potentially resulting in low-frequency appearances if the texture attribute cannot capture complex styles [S1].
 
 **When to Use:**
@@ -103,7 +94,7 @@ Stylizes VolVis scenes using text instructions while keeping geometry fixed and 
 *   Avoid when the desired edit requires significant geometric changes or when the texture attribute alone is insufficient to express the desired style [S1].
 
 ## Background
-Text-Driven Gaussian Editing is part of the TexGS-VolVis framework, which focuses on expressive scene editing for volume visualization using textured Gaussian splatting [S1]. It was introduced to address the limitations of iterative editing methods, which are slow and prone to blurriness in semi-transparent scenes [S1]. The method leverages the one-time update strategy to achieve faster editing times while maintaining high-quality results [S1].
+Text-Driven Gaussian Editing is part of the TexGS-VolVis framework, which focuses on expressive scene editing for volume visualization using textured Gaussian splatting [S1]. It was introduced to address the limitations of iterative editing methods, which are slow [S1]. The method leverages the one-time update strategy to achieve faster editing times while maintaining high-quality results [S1].
 
 ## Sources
 [S1] TexGS-VolVis: Expressive Scene Editing for Volume Visualization via Textured Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3634643, fetched 2026-10-30

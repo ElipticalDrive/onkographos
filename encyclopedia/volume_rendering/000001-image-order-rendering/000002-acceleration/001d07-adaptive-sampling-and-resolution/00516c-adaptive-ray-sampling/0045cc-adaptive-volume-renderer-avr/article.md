@@ -1,94 +1,103 @@
 # Adaptive Volume Renderer (AVR)
+
 Also called: Adapted version of differentiable ray marching algorithm, RM-LSTM based adaptive sampling
 
 ## Overview
-The Adaptive Volume Renderer (AVR) is a hybrid rendering method that combines adaptive ray marching with standard volume rendering to reduce computational cost while maintaining visual fidelity [S1, unofficial]. It addresses the high latency of standard volume rendering in neural radiance fields (NeRFs) by using a recurrent neural network to predict a surface intersection point, then performing localized volume rendering around that point [S1, unofficial]. Unlike pure ray marching methods that output a single color from one sample, AVR samples multiple points around the predicted depth to recover fine details, achieving quality comparable to standard volume rendering but significantly faster [S1, unofficial].
+The Adaptive Volume Renderer (AVR) is a rendering procedure that combines adaptive ray sampling with standard volume rendering to reduce computational cost while maintaining quality [S1, unofficial]. It uses an LSTM to predict a surface intersection point, then samples points around that point for volume rendering [S1, unofficial]. It sets itself apart from its sibling [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md) by using a recurrent neural network (LSTM) to predict depth rather than mip-mapping, and from [Raymarcher](14469-adaptive-ray-sampling.md) (its direct sibling in the source) by performing local volume rendering instead of single-point color extraction [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of source images and their corresponding camera poses.
-*   **Output:** A rendered RGB image for a target view.
-*   **Internal State:** A CNN encoder (e.g., ResNet-34) extracts latent features from source images. An RM-LSTM processes these features to predict depth.
+*   **Input:** Latent features extracted from a CNN encoder (specifically a pretrained ResNet 34 as used in PixelNeRF) [S1, unofficial].
+*   **Output:** Final RGB value for the pixel [S1, unofficial].
 
 **Data Structures:**
-*   **RM-LSTM:** A Long Short-Term Memory network with 512 feature channels [S1, unofficial].
-*   **Ray Parameters:** Depth $d$ is updated iteratively. The ray is defined by origin and direction, but the method operates primarily on the depth parameter along the ray [S1, unofficial].
+*   **RM-LSTM State:** Hidden state and cell state for the LSTM.
+*   **RM-LSTM Parameters:** 512 feature channels [S1, unofficial].
+*   **Ray Parameters:** Near plane depth $d_{near} = 0.5$, Far plane depth $d_{far} = 2.0$ [S1, unofficial].
 
-**Algorithm Steps:**
-1.  **Feature Extraction:** Extract latent features $F$ from the source images using a pretrained CNN encoder (e.g., ResNet-34) [S1, unofficial].
-2.  **Depth Prediction (RM-LSTM):**
-    *   Initialize the LSTM state.
-    *   Feed features $F$ into the RM-LSTM.
-    *   The RM-LSTM runs for $K=10$ steps [S1, unofficial].
-    *   At each step, the LSTM predicts a step length $\Delta d$ and updates the current depth $d$.
-    *   The final output is the predicted depth $d_{pred}$ [S1, unofficial].
-3.  **Regularization (Training Only):** During training, penalize the final depth $d_{pred}$ if it falls outside the bounds $[d_{near}, d_{far}] = [0.5, 2.0]$ [S1, unofficial].
-4.  **Local Sampling:** Sample $n=10$ points uniformly within a neighborhood of radius $\epsilon = 0.05$ around $d_{pred}$ [S1, unofficial]. The sampled depths are $d_i = d_{pred} + \delta_i$, where $\delta_i \in [-0.05, 0.05]$ [S1, unofficial].
-5.  **Volume Rendering:**
-    *   For each sampled point $d_i$, query the neural radiance field (NeRF) to obtain color $c_i$ and density $\sigma_i$ [S1, unofficial].
-    *   Perform standard volume rendering integration along these points to calculate the final RGB value [S1, unofficial].
+**Numbered Steps:**
+1.  **Feature Extraction:** Extract latent features from the input view using the CNN encoder [S1, unofficial].
+2.  **LSTM Initialization:** Initialize the RM-LSTM with the extracted features [S1, unofficial].
+3.  **Depth Prediction Loop:** Run the RM-LSTM for $K=10$ steps [S1, unofficial]. In each step, the LSTM predicts a step length and updates the current depth [S1, unofficial].
+4.  **Regularization:** Apply a regularization term to the loss function that penalizes any final depth outside the bounds $[0.5, 2.0]$ [S1, unofficial].
+5.  **Local Sampling:** Sample $n=10$ points uniformly within a neighborhood of radius $\pm 0.05$ around the final predicted depth from the LSTM [S1, unofficial].
+6.  **Volume Rendering:** Perform standard volume rendering along these $n$ sampled points to calculate the final RGB value [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_volume_rendering(source_images, camera_poses, target_pose):
-    # 1. Feature Extraction
-    # Uses a pretrained ResNet-34 encoder from PixelNeRF
-    latent_features = cnn_encoder(source_images)
+def adaptive_volume_rendering(latent_features, ray_direction, ray_origin, near_plane=0.5, far_plane=2.0):
+    # Step 1 & 2: Initialize RM-LSTM with latent features
+    # RM-LSTM has 512 feature channels
+    lstm_hidden, lstm_cell = initialize_lstm(latent_features)
     
-    # 2. RM-LSTM Depth Prediction
-    # RM-LSTM has 512 feature channels and runs for 10 steps
-    lstm = RMLSTM(feature_channels=512, num_steps=10)
-    predicted_depth = lstm.predict(latent_features)
+    current_depth = near_plane
     
-    # 3. Local Sampling
-    # Sample n=10 points around +/-0.05 neighborhood of predicted depth
-    num_samples = 10
-    neighborhood_radius = 0.05
-    sample_offsets = uniform_random(num_samples, min=-neighborhood_radius, max=neighborhood_radius)
-    sampled_depths = predicted_depth + sample_offsets
-    
-    # 4. Volume Rendering
-    # Query NeRF for color and density at sampled depths
-    colors = []
-    densities = []
-    for depth in sampled_depths:
-        c, sigma = nerf_query(target_pose, depth)
-        colors.append(c)
-        densities.append(sigma)
+    # Step 3: Run LSTM for 10 steps
+    for step in range(10):
+        # LSTM predicts step length and updates depth
+        # Note: Exact internal LSTM update formula is not provided in sources [S1, unofficial]
+        step_length = lstm_predict_step_length(lstm_hidden, lstm_cell)
+        current_depth += step_length
         
-    # Perform standard volume rendering integration
-    # Note: Standard volume rendering formula requires proper ordering and alpha compositing
-    # Assuming sampled_depths are sorted or processed in ray order
-    final_rgb = standard_volume_rendering_integration(colors, densities)
+        # Update LSTM state
+        lstm_hidden, lstm_cell = lstm_update(lstm_hidden, lstm_cell, step_length)
+        
+    # Step 4: Regularization is applied during training loss calculation, 
+    # not explicitly in inference forward pass, but bounds are enforced for valid sampling.
+    # If current_depth is outside [0.5, 2.0], it is penalized in loss.
     
-    return final_rgb
+    # Step 5: Sample points around predicted depth
+    # Neighborhood radius is +/- 0.05
+    radius = 0.05
+    num_samples = 10
+    sample_depths = linspace(current_depth - radius, current_depth + radius, num_samples)
+    
+    # Convert depth to 3D points along the ray
+    # point = ray_origin + ray_direction * depth
+    sample_points = ray_origin + ray_direction * sample_depths[:, None]
+    
+    # Step 6: Standard volume rendering
+    # This involves querying the neural radiance field (NeRF) at sample_points
+    # and performing alpha compositing.
+    # Note: The specific NeRF query function is assumed to be the PixelNeRF decoder.
+    rgbs, alphas = volume_render_standard(sample_points)
+    
+    return composite(rgbs, alphas)
 ```
 
 **Parameters:**
 *   RM-LSTM feature channels: 512 [S1, unofficial].
 *   RM-LSTM steps: 10 [S1, unofficial].
 *   Volume rendering sample count ($n$): 10 [S1, unofficial].
-*   Sampling neighborhood radius: $\pm 0.05$ [S1, unofficial].
-*   Depth bounds (regularization): Near plane 0.5, Far plane 2.0 [S1, unofficial].
+*   Sampling neighborhood radius: $\pm 0.05$ around the predicted depth [S1, unofficial].
+*   Regularization depth bounds: Final depth is penalized if outside 0.5 (near plane) and 2.0 (far plane) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Depth Bounds:** If the predicted depth falls outside $[0.5, 2.0]$, the model may produce artifacts or incorrect colors. The regularization term helps mitigate this during training [S1, unofficial].
-*   **Neighborhood Size:** The fixed radius of 0.05 assumes a certain scale of the scene. If the scene geometry varies significantly, this fixed neighborhood may be too small or too large, affecting quality [S1, unofficial].
-*   **Computational Constraints:** The number of LSTM steps is limited to 10 due to computational constraints, which may limit the accuracy of the depth prediction [S1, unofficial].
+*   **Depth Bounds:** If the LSTM predicts a depth outside $[0.5, 2.0]$, the training loss is penalized [S1, unofficial]. Inference may produce invalid results if bounds are not clamped or handled.
+*   **Precision:** The small neighborhood radius ($\pm 0.05$) requires accurate depth prediction from the LSTM.
+
+## Subtopics
+
+### Raymarcher
+A variant that outputs color directly from the single point predicted by the LSTM, without local volume rendering. It is faster but has slightly lower quality than AVR. Choose when maximum speed is required and minor quality loss is acceptable. See [Raymarcher](14469-adaptive-ray-sampling.md).
 
 ## Operating characteristics
-*   **Performance:** On the ShapeNet cars dataset, AVR achieves a PSNR of 23.22, SSIM of 0.9056, and LPIPS of 0.108 [S1, unofficial].
-*   **Speed:** AVR renders at 4.2 fps, which is approximately 7 times faster than standard volume rendering (0.4 fps) [S1, unofficial].
-*   **Comparison to Raymarcher:** AVR has slightly better quality than the Raymarcher (PSNR 23.22 vs 23.02) but is significantly slower (4.2 fps vs 34.9 fps) [S1, unofficial].
-*   **Comparison to Standard Volume Rendering:** AVR achieves comparable quality to standard volume rendering (PSNR 23.34) with a significant speedup [S1, unofficial].
-*   **Strengths:** Balances speed and quality better than pure ray marching; leverages learned features for efficient depth prediction.
-*   **Limitations:** Requires training a neural network (RM-LSTM) alongside the NeRF; performance is dependent on the accuracy of the depth prediction.
+*   **Time Complexity:** Significantly faster than standard volume rendering.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On the ShapeNet cars dataset (32 resolution, 8 views per scene, single-view reconstruction):
+    *   **AVR:** PSNR 23.22, SSIM 0.9056, LPIPS 0.108, Rendering speed 4.2 fps [S1, unofficial].
+    *   **Baseline (Standard Volume Rendering):** PSNR 23.34, SSIM 0.9048, LPIPS 0.111, Rendering speed 0.4 fps [S1, unofficial].
+    *   **Raymarcher:** PSNR 23.02, SSIM 0.9013, LPIPS 0.137, Rendering speed 34.9 fps [S1, unofficial].
+*   **Scaling:** AVR achieves comparable quality to standard volume rendering (~7 times faster) [S1, unofficial].
+*   **Strengths:** Maintains high quality (comparable to standard volume rendering) while significantly reducing computation time.
+*   **Limitations:** Slower than the single-point Raymarcher variant. Requires training with a CNN encoder and LSTM.
+*   **When to use:** When a balance between rendering quality and speed is needed, and standard volume rendering is too slow.
+*   **When not to use:** When maximum possible speed is required (use Raymarcher) or when highest possible quality is required and speed is not a concern (use standard volume rendering).
 
 ## Background
-The Adaptive Volume Renderer was proposed by Philipp Henzler, Jeremy Reizenstein, Patrick Labatut, Roman Shapovalov, and Tobias as an extension of the PixelNeRF architecture [S1, unofficial]. It was developed to address the computational cost of standard volume rendering in neural radiance fields by integrating adaptive ray marching techniques [S1, unofficial]. The method builds on the idea that predicting the surface location can significantly reduce the number of samples needed for accurate rendering [S1, unofficial].
+The Adaptive Volume Renderer was proposed by Philipp Henzler, Jeremy Reizenstein, Patrick Labatut, Roman Shapovalov, Tobias … as an adapted version of the differentiable ray marching algorithm [S1, unofficial]. It builds on the PixelNeRF architecture, modifying its standard volume rendering procedure to use an RM-LSTM for adaptive sampling [S1, unofficial]. The method was evaluated on the ShapeNet cars dataset [S1, unofficial].
 
 ## Sources
 [S1] Combining Volume Rendering with Adaptive Ray Marching in Neural ..., https://adaptivevolumerenderer.github.io/, fetched 2026-10-28 (unofficial)

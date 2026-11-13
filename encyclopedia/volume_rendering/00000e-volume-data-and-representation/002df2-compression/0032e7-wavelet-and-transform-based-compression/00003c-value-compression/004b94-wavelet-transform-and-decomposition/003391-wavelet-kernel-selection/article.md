@@ -3,17 +3,15 @@
 Also called: Haar/5x3/9x7/(6, 6) Kernel Comparison, Wavelet Kernel Parameters
 
 ## Overview
-Wavelet Kernel Selection is the process of choosing the specific filter coefficients for the lifting scheme or filter bank used in the separable 1D wavelet transform during volume data compression. It solves the trade-off between computational complexity, reversibility (lossless capability), and energy compaction efficiency (lossy performance). It differs from general [Quantization](5935-quantization.md) by defining the basis functions themselves, and from [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by using orthogonal or biorthogonal wavelets rather than fractal-based subdivision surfaces.
+Wavelet Kernel Selection is the process of choosing the specific filter coefficients for the lifting scheme or filter bank used in the separable 1D wavelet transform during volume data compression [S1]. It solves the trade-off between computational complexity, reversibility (lossless capability), and energy compaction efficiency (lossy performance) [S1]. It differs from general [Quantization](5935-quantization.md) by defining the basis functions themselves, and from [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by using orthogonal or biorthogonal wavelets rather than fractal-based subdivision surfaces [G].
 
 ## How it works
-The method involves selecting a kernel configuration defined by a set of structural and coefficient parameters. These parameters dictate the lifting steps, filter lengths, and scaling factors applied to the volume data $V$ to produce coefficients $C$.
-
 ### Inputs and Outputs
-*   **Input:** A set of candidate wavelet kernels (e.g., Haar, 5x3, 9x7, (6,6)) and the volume data $V$.
-*   **Output:** The selected kernel parameters and the transformed coefficient subbands.
+*   **Input:** Candidate wavelet kernels (Haar, 5x3, 9x7, (6,6)) and the volume data $V$ [S1].
+*   **Output:** Selected kernel parameters and the transformed coefficient subbands (approximation and detail) [S1].
 
 ### Data Structures and Parameters
-Each kernel is defined by the following parameters [S1]:
+Each kernel is defined by a fixed set of structural and coefficient parameters [S1]:
 *   $MK$: Number of lifting steps for the prediction filter.
 *   $PK$: Number of lifting steps for the update filter.
 *   $U$: Scaling factor for the update step.
@@ -25,60 +23,65 @@ Each kernel is defined by the following parameters [S1]:
 *   $c_{U,i,k}$: Coefficients for the update lifting step $i$ at offset $k$.
 
 **Kernel Configurations [S1]:**
+1.  **Haar:** $MK=1, PK=1, U=1, G=1, L=1, H=1, k=0$. $c_{P,i,k} = [-1, 1]$. $c_{U,i,k} = [0, 0.5]$.
+2.  **5x3:** $MK=1, PK=1, U=1, G=1, L=1, H=1, k=0$. $c_{P,i,k} = [-1, 1]$. $c_{U,i,k} = [0.5, 0.25]$.
+3.  **9x7:** $MK=2, PK=1, U=1, G=0, L=0.812893066, H=1, k=0,-1$. $c_{P,i,k} = [1.230174105, -0.052980119, -0.882911076, 0.443506852]$. $c_{U,i,k} = [-1, 1]$.
+4.  **(6,6):** $MK=1, PK=3, U=3, G=1, L=1.306139349, H=1.140657705, k=0,-1,-2,2,-3,3$. $c_{P,i,k} = [150/256, 150/512, -25/256, -25/512, 3/256, 3/512]$. $c_{U,i,k} = [-1, 1]$.
 
-1.  **Haar**
-    *   $MK=1, PK=1, U=1, G=1, L=1, H=1, k=0$.
-    *   $c_{P,i,k} = [-1, 1]$.
-    *   $c_{U,i,k} = [0, 0.5]$.
-2.  **5x3**
-    *   $MK=1, PK=1, U=1, G=1, L=1, H=1, k=0$.
-    *   $c_{P,i,k} = [-1, 1]$.
-    *   $c_{U,i,k} = [0.5, 0.25]$.
-3.  **9x7**
-    *   $MK=2, PK=1, U=1, G=0, L=0.812893066, H=1$.
-    *   $k$ indices: $0, -1, 1$.
-    *   $c_{P,i,k}$:
-        *   $i=0: [1.230174105, -0.052980119]$
-        *   $i=1: [-0.882911076, 0.443506852]$
-    *   $c_{U,i,k}$: $[-1, 1]$.
-4.  **(6,6)**
-    *   $MK=1, PK=3, U=3, G=1, L=1.306139349, H=1.140657705$.
-    *   $k$ indices: $0, -1, 1, -2, 2, -3, 3$.
-    *   $c_{P,i,k}$:
-        *   $i=0: [150/256, 150/512]$
-        *   $i=1: [-25/256, -25/512]$
-        *   $i=2: [3/256, 3/512]$
-    *   $c_{U,i,k}$: $[-1, 1]$.
+### Algorithm: Lifting Scheme Implementation
+The transform is applied separably along each axis using a lifting scheme [S1]. The following pseudocode implements a single 1D pass for a given kernel configuration:
 
-### Algorithm: Applying the Kernel
-The wavelet transform is applied separably along each axis. For a 1D signal $x$, the lifting scheme proceeds as follows [S1]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-1.  **Prediction Step:** Update odd samples based on even samples.
-    $$ x_{2i+1}^{(new)} = x_{2i+1} - \sum_{m=0}^{MK-1} \sum_{k} c_{P,m,k} \cdot x_{2(i-k)} $$
-2.  **Update Step:** Update even samples based on the new odd samples.
-    $$ x_{2i}^{(new)} = x_{2i} + \frac{1}{U} \sum_{m=0}^{PK-1} \sum_{k} c_{U,m,k} \cdot x_{2(i-k)+1}^{(new)} $$
-3.  **Scaling:** Apply gains $L$ and $H$ to the resulting low-pass and high-pass subbands.
-
-*Note: For the Haar kernel, the prediction uses a simple average difference, and the update adds half the difference back. For 5x3, the update uses a weighted average to maintain integer precision for lossless compression.*
+```python
+def apply_wavelet_lifting(signal, kernel):
+    # Split into even and odd samples
+    even = signal[0::2]
+    odd = signal[1::2]
+    
+    # Prediction step: update odd samples using even neighbors
+    odd_new = [0.0] * len(odd)
+    for i in range(len(odd)):
+        pred_val = 0.0
+        for m in range(kernel['MK']):
+            for idx, k in enumerate(kernel['k']):
+                pred_val += kernel['cP'][m][idx] * even[i - k]
+        odd_new[i] = odd[i] - kernel['G'] * pred_val
+        
+    # Update step: update even samples using new odd neighbors
+    even_new = [0.0] * len(even)
+    for i in range(len(even)):
+        upd_val = 0.0
+        for m in range(kernel['PK']):
+            for idx, k in enumerate(kernel['k']):
+                upd_val += kernel['cU'][m][idx] * odd_new[i - k]
+        even_new[i] = even[i] + kernel['U'] * upd_val
+        
+    # Scaling: apply gains to subbands
+    low_pass = [kernel['L'] * x for x in even_new]
+    high_pass = [kernel['H'] * x for x in odd_new]
+    
+    return low_pass, high_pass
+```
 
 ### Edge Cases and Pitfalls
-*   **Reversibility:** Kernels with rational coefficients where dividends are powers of two (like 5x3) allow for perfect reversibility in lossless mode by controlling rounding errors [S1]. Kernels like 9x7 and (6,6) are irreversible and require quantization for lossless-like behavior or are used strictly for lossy compression [S1].
-*   **Boundary Handling:** The sources do not specify boundary extension methods (e.g., symmetric, periodic). Implementers must choose a standard extension strategy, noting that kernel support length affects boundary artifacts [S1].
-*   **Precision:** Floating-point kernels (9x7, (6,6) require higher precision arithmetic than integer kernels (Haar, 5x3) to avoid accumulation errors during multi-level decomposition [S1].
+*   **Reversibility:** Kernels with rational coefficients where dividends are powers of two (e.g., 5x3) allow perfect reversibility in lossless mode by controlling rounding errors [S1]. Kernels like 9x7 and (6,6) are irreversible and are used strictly for lossy compression [S1].
+*   **Boundary Handling:** The sources do not specify boundary extension methods (e.g., symmetric, periodic) [S1]. Implementers must choose a standard extension strategy, noting that kernel support length affects boundary artifacts [S1].
+*   **Precision:** The 5x3 kernel is explicitly chosen for lossless compression due to its integer-preserving rational coefficients, while 9x7 and (6,6) require floating-point arithmetic [S1].
 
 ## Subtopics
 
 ### JPEG 2000 5x3 Wavelet Kernel
-A biorthogonal wavelet kernel constructed from the Cohen-Daubechies-Feauveau (CDF) 5/3 wavelet. It features rational coefficients with dividends as powers of two, enabling perfect reversibility without loss of performance. Its synthesis scaling function is a linear B-spline. It was selected by the JPEG committee for lossless compression in JPEG 2000 [S1].
+A biorthogonal wavelet kernel constructed from the Cohen-Daubechies-Feauveau (CDF) 5/3 wavelet [S1]. It features rational coefficients with dividends as powers of two, enabling perfect reversibility without loss of performance [S1]. Its synthesis scaling function is a linear B-spline [S1]. It was selected by the JPEG committee for lossless compression in JPEG 2000 [S1].
 
 ## Operating characteristics
 *   **Lossless Performance:** The 5x3 kernel outperforms the Haar kernel in lossless compression due to its longer support length, which captures more correlation even along the axial dimension where inter-pixel correlation is typically lower [S1].
-*   **Lossy Performance:** In lossy to near-lossless scenarios, the 9x7 and (6,6) kernels offer vastly improved performance over 5x3 and Haar. They provide BD-PSNR improvements of up to 2 dB at target bit-rates of 0.50, 0.75, 1.0, 1.5, 2.0, and 3.0 bits per pixel (bpp) [S1].
+*   **Lossy Performance:** In lossy to near-lossless scenarios, the 9x7 and (6,6) kernels offer vastly improved performance over 5x3 and Haar [S1]. They provide BD-PSNR improvements of up to 2 dB at target bit-rates of 0.50, 0.75, 1.0, 1.5, 2.0, and 3.0 bits per pixel (bpp) [S1].
 *   **Kernel Comparison:** The (6,6) kernel outperforms the 9x7 kernel for 7 out of 11 tested images in lossy/near-lossless scenarios, offering higher energy compaction efficiency [S1].
 *   **Complexity:** The 9x7 and (6,6) kernels have higher computational complexity than the 5x3 and Haar kernels due to longer filter taps and floating-point operations [S1].
 
 ## Background
-The selection of wavelet kernels for volumetric compression is heavily influenced by the JPEG 2000 standard. The JPEG committee selected the 5x3 kernel for lossless and the 9x7 kernel for lossy compression based on an exhaustive study of various wavelet types [S1]. The 5x3 kernel is the shortest symmetrical biorthogonal CDF wavelet with two vanishing moments, while the 9x7 kernel is a variation on the CDF biorthogonal cubic B-spline construction with four vanishing moments per wavelet filter, making it nearly orthogonal [S1]. Alternative kernels like (6,6) have been proposed for directional transforms and specific datasets where they offer superior energy compaction [S1].
+The selection of wavelet kernels for volumetric compression is heavily influenced by the JPEG 2000 standard [S1]. The JPEG committee selected the 5x3 kernel for lossless and the 9x7 kernel for lossy compression based on an exhaustive study of various wavelet types [S1]. The 5x3 kernel is the shortest symmetrical biorthogonal CDF wavelet with two vanishing moments, while the 9x7 kernel is a variation on the CDF biorthogonal cubic B-spline construction with four vanishing moments per wavelet filter, making it nearly orthogonal [S1]. Alternative kernels like (6,6) have been proposed for directional transforms and specific datasets where they offer superior energy compaction [S1].
 
 ## Sources
 [S1] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26

@@ -3,133 +3,201 @@
 Also called: Volumetric MIS
 
 ## Overview
-Multiple Importance Sampling (MIS) for volumetric path tracing reduces variance in estimating direct lighting by combining contributions from phase function sampling and next event estimation (NEE) [S1, S2]. It solves the problem of high variance when sampling light sources in participating media, particularly when paths skip index-matching surfaces or involve delta distributions [S1, S3]. Unlike standard path tracing which may rely on a single sampling strategy, this method uses the power heuristic to balance the probability density functions (PDFs) of both strategies, ensuring robust convergence in heterogeneous and chromatic media [S2, S3].
+Multiple Importance Sampling (MIS) for volumetric path tracing reduces variance in direct lighting estimation by combining contributions from phase function sampling (unidirectional path tracing) and next event estimation (light sampling) [S1, S2]. It solves the problem of high variance when skipping index-matching surfaces, where the sampling strategy that generated the current path vertex may differ from the strategy used to connect to the light source [S1]. Unlike standard MIS which assumes a single domain, this method handles the discontinuity in sampling history caused by index-matching boundaries by caching PDFs and transmittance factors across bounces [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current path vertex position $\mathbf{p}$, incoming direction $\boldsymbol{\omega}_i$, current path throughput $\beta$, scattering function value $\hat{f}$, transmittance $T_{ray}$, and light source radiance $L_s$ [S3].
-*   **Output:** Estimated radiance contribution weighted by MIS weights [S3].
+- **Input:** Current path vertex interaction (surface or volume), current path throughput $\beta$, rescaled path probabilities $r_p$ (for unidirectional sampling up to the vertex), light source samples, and scene data.
+- **Output:** Estimated radiance contribution from direct lighting at the vertex.
 
 **Data Structures:**
-To handle index-matching surfaces that skip scattering events, the integrator caches specific quantities during the main path loop:
-1.  `dir_pdf`: The PDF of the latest phase function sampling in solid angle measure ($\text{rad}^{-2}$) [S1, S2].
-2.  `nee_p_cache`: The position $\mathbf{p}$ of the last vertex capable of issuing NEE. If the current vertex is on an index-matching surface, it is set to `None` because it cannot issue NEE [S1, S2].
-3.  `multi_trans_pdf`: The product PDF of transmittance sampling through index-matching surfaces since the last phase function sampling [S1, S2].
+To handle index-matching surfaces, the main path tracing loop must maintain cache variables:
+- `dir_pdf`: Float (or Spectrum). The PDF of the latest phase function sampling in solid angle measure. Initialized to 0.
+- `nee_p_cache`: Point or None. The last position $p$ that can issue Next Event Estimation (NEE). If the current position is on an index-matching surface, this is None. Initialized to None.
+- `multi_trans_pdf`: Float (or Spectrum). The product PDF of transmittance sampling through index-matching surfaces from the last phase function sampling. Initialized to 1.
 
 **Numbered Steps:**
-1.  **Initialize Cache:** At the start of the path loop, initialize `dir_pdf = 0`, `nee_p_cache = None`, and `multi_trans_pdf = 1` [S1, S2].
-2.  **Update Cache:**
-    *   If a phase function sample is taken, update `dir_pdf` with the solid angle PDF and reset `multi_trans_pdf` to 1 [S1].
-    *   If the path traverses an index-matching surface without scattering, multiply `multi_trans_pdf` by the transmittance sampling PDF [S1].
-    *   If the current vertex is not on an index-matching surface, update `nee_p_cache` to the current position $\mathbf{p}$ [S1].
-3.  **Sample Light Source:** When NEE is performed, sample a point on the light source using `Light::SampleLi`, consuming two 2D sample dimensions [S3]. Pass `true` for `allowIncompletePDF` to enable MIS [S3]. If no valid sample or zero radiance/PDF, return zero [S3].
-4.  **Compute Light PDF:** Calculate the light sampling PDF as the product of the light selection probability $p_l$ and the point sampling PDF $p_{ls}$:
-    $$ p_{light} = p_l \cdot p_{ls} $$
-    [S3]
-5.  **Compute Phase Function PDF:** The PDF for the phase function strategy accounts for the cached directional and transmittance components. Let $p_{phase}$ be the cached `dir_pdf` and $p_{trans}$ be the cached `multi_trans_pdf`. The geometric term $G$ (usually $1/r^2$ or similar projection factor) is included if not already in the PDF definition [S1].
-    $$ p_{phase\_total} = p_{phase} \cdot p_{trans} \cdot G $$
-    [S1]
-    *Note: In ratio tracking implementations, the PDFs for free-flight sampling decisions must also be accumulated when evaluating one PDF [S2].*
-6.  **Calculate MIS Weight:** Compute the power heuristic weight $w$ using the squared PDFs [S2]:
-    $$ w = \frac{p_{phase\_total}^2}{p_{phase\_total}^2 + p_{light}^2} $$
-    [S2]
-    *Special Case:* If the light source is a delta distribution or the previous bounce was a delta scattering event, only the unidirectional (phase function) strategy is valid [S3]. In this case, weights are based solely on the per-wavelength PDFs for the unidirectional sampling strategy to reduce variance in chromatic media [S3].
-7.  **Accumulate Contribution:** Add the radiance contribution weighted by $w$:
-    $$ L_{contrib} = \beta \cdot \hat{f} \cdot T_{ray} \cdot L_s \cdot w $$
-    [S3]
-    *Note:* $\hat{f}$ includes the cosine factor for surface scattering but does **not** include the scattering coefficient $\sigma_s$ for volumetric scattering, as $\sigma_s$ is already accounted for in $\beta$ [S3].
+
+1.  **Cache Maintenance (Main Loop):**
+    During the main path tracing loop, when a ray hits a surface:
+    - If the surface is index-matching (refractive, no scattering):
+        - Do not update `dir_pdf` or `nee_p_cache` with new scattering data.
+        - Update `multi_trans_pdf` by multiplying it with the transmittance sampling PDF of the interface.
+        - Keep `nee_p_cache` as the previous valid position.
+    - If the surface scatters (or is the camera):
+        - Update `dir_pdf` with the PDF of the sampled outgoing direction (solid angle measure).
+        - Update `nee_p_cache` to the current position.
+        - Reset `multi_trans_pdf` to 1.
+
+2.  **Light Sampling (Next Event Estimation):**
+    When estimating direct lighting at a vertex:
+    - Sample a point on the light source using `Light::SampleLi`, consuming two 2D sample dimensions. Pass `true` for `allowIncompletePDF` to enable MIS [S3].
+    - If no valid sample or zero radiance/PDF, return 0 [S3].
+    - Compute the light PDF:
+      $$ p_{light} = p_{selection} \cdot p_{point} $$
+      where $p_{selection}$ is the light selection probability (PMF) and $p_{point}$ is the PDF of the sampled point on the light surface [S3].
+    - Compute the scattering function value $\hat{f}$ and its PDF $p_{scatter}$:
+      - For surfaces: $\hat{f} = f(\omega_i, \omega_o) \cdot |\cos \theta_i|$, $p_{scatter} = f_{pdf}(\omega_i, \omega_o)$ [S3].
+      - For volumes: $\hat{f} = p(\omega_i, \omega_o)$, $p_{scatter} = p_{pdf}(\omega_i, \omega_o)$ [S3].
+      - Note: $\hat{f}$ includes the cosine factor for surfaces but does NOT include the scattering coefficient $\sigma_s$ for volumes, as $\sigma_s$ is already in $\beta$ [S3].
+
+3.  **Rescaled Path Probabilities:**
+    - Initialize $r_l$ (light sampling strategy) and $r_u$ (unidirectional strategy) to 1.
+    - Update $r_l$:
+      $$ r_l = r_p \cdot p_{light} $$
+    - Update $r_u$:
+      $$ r_u = r_p \cdot p_{scatter} $$
+      where $r_p$ is the rescaled path probability passed into the function, interpreted as being rescaled using $1/p_{l, \lambda_1}$ [S3].
+
+4.  **MIS Weight Calculation:**
+    - If the light is a **delta distribution** (e.g., point light) OR the previous bounce was a delta distribution:
+        - Only the light sampling strategy is valid (or only unidirectional if previous was delta).
+        - If previous was delta, use only unidirectional weight.
+        - If light is delta, use only light sampling weight.
+        - In chromatic media, compute weights per wavelength to reduce variance [S3].
+    - If the light is **non-delta** (e.g., area light) and previous bounce was not delta:
+        - Use the power heuristic [S2][S4, unofficial]:
+          $$ w = \frac{p_{phase}^2}{p_{phase}^2 + p_{nee}^2} $$
+        - Here, $p_{phase}$ is the effective PDF for phase function sampling, and $p_{nee}$ is the effective PDF for NEE [S2].
+        - For index-matching surfaces, $p_{phase}$ must account for the cached transmittance PDF:
+          $$ p_{phase} = dir\_pdf \cdot multi\_trans\_pdf \cdot G $$
+          where $G$ is the geometric term (if applicable) or part of the transmittance sampling PDF structure [S1].
+        - $p_{nee}$ is the PDF for the NEE strategy, which must also account for the transmittance sampling decisions made since the last scattering event [S2].
+        - Specifically, when computing the PDF for one strategy, the PDF of the other (ratio tracking decisions) must be accumulated [S2].
+
+5.  **Contribution Estimation:**
+    - Compute the final estimate:
+      - For delta lights:
+        $$ \text{Estimate} = \frac{\beta \cdot \hat{f} \cdot T_{ray} \cdot L_s}{r_l.\text{Average}()} $$
+      - For non-delta lights:
+        $$ \text{Estimate} = \frac{\beta \cdot \hat{f} \cdot T_{ray} \cdot L_s}{(r_l + r_u).\text{Average}()} $$
+      - Where $\beta$ is the path throughput, $T_{ray}$ is the transmittance along the ray to the light, $L_s$ is the light radiance, and `.Average()` denotes averaging over wavelengths [S3].
+
+6.  **Infinite Lights and Emissive Surfaces:**
+    - If the ray escapes the scene and hits an infinite light or emissive surface:
+      - If path depth is 0 or previous bounce was specular:
+        $$ L += \frac{\beta \cdot L_e}{r_u.\text{Average}()} $$
+      - Otherwise:
+        - Compute $lightPDF$ using the light sampler's PMF and the light's PDF for the ray direction.
+        - Update $r_l = r_l \cdot lightPDF$.
+        $$ L += \frac{\beta \cdot L_e}{(r_u + r_l).\text{Average}()} $$
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sample_light_mis(intr, scene, sampler, beta, f_hat, T_ray, wavelength):
+def sample_ld(beta, r_p, intr, light_sampler, scene, sampler):
     """
-    intr: Interaction (surface or volume)
-    scene: Scene object
-    sampler: Sampler object
-    beta: Path throughput
-    f_hat: Scattering function value (BSDF or phase function)
-    T_ray: Transmittance to light
-    wavelength: Current wavelength for chromatic MIS
+    Estimate direct lighting at interaction intr using MIS.
+    beta: Path throughput.
+    r_p: Rescaled path probability for unidirectional sampling.
+    intr: Interaction (Surface or Medium).
+    light_sampler: Light sampling object.
+    scene: Scene data.
+    sampler: Sampler for random numbers.
     """
-    # 1. Sample Light Source
-    u = sampler.Get1D()
-    sampled_light = scene.light_sampler.Sample(intr.context, u)
-    if not sampled_light:
+    # 1. Sample Light
+    u = sampler.get_1d()
+    sampled_light_opt = light_sampler.sample(intr, u)
+    if not sampled_light_opt:
         return 0.0
     
-    light = sampled_light.light
-    u_light = sampler.Get2D()
+    light = sampled_light_opt.light
+    u_light = sampler.get_2d()
+    ls = light.sample_li(intr, u_light, lambda, allow_incomplete_pdf=True)
     
-    # allow_incomplete_pdf=True enables MIS
-    ls = light.SampleLi(intr.context, u_light, wavelength, allow_incomplete_pdf=True)
     if not ls or ls.L == 0 or ls.pdf == 0:
         return 0.0
         
-    # 2. Compute Light PDF
-    light_pmf = scene.light_sampler.PMF(intr.context, light)
-    light_pdf = light_pmf * ls.pdf
+    light_pdf = sampled_light_opt.p * ls.pdf
     
-    # 3. Compute Phase Function PDF (using cached values from main loop)
-    # dir_pdf is cached solid angle PDF of last phase sample
-    # multi_trans_pdf is cached transmittance PDF product
-    # G is geometric term (e.g., 1/distance^2) if not in PDF
-    phase_pdf = intr.cached_dir_pdf * intr.cached_multi_trans_pdf * intr.G
+    # 2. Evaluate Scattering Function
+    wo = intr.wo
+    wi = ls.wi
+    
+    if intr.is_surface():
+        bsdf = intr.bsdf
+        f_hat = bsdf.f(wo, wi) * abs(dot(wi, intr.shading_normal))
+        scatter_pdf = bsdf.pdf(wo, wi)
+    else:
+        phase = intr.medium.phase
+        f_hat = phase.p(wo, wi)
+        scatter_pdf = phase.pdf(wo, wi)
+        
+    if f_hat == 0:
+        return 0.0
+        
+    # 3. Compute Rescaled Probabilities
+    r_l = r_p * light_pdf
+    r_u = r_p * scatter_pdf
     
     # 4. Handle Delta Lights / Specular Bounces
-    if light.is_delta() or intr.prev_bounce_was_delta:
-        # Only unidirectional strategy is valid
-        # Use per-wavelength PDFs for variance reduction in chromatic media
-        # r_u stores the rescaled unidirectional path probability
-        return beta * f_hat * T_ray * ls.L / intr.cached_r_u.Average()
-        
-    # 5. Compute MIS Weight (Power Heuristic)
-    w = (phase_pdf * phase_pdf) / (phase_pdf * phase_pdf + light_pdf * light_pdf)
+    if is_delta_light(light.type()) or intr.is_specular_bounce():
+        # Only one strategy is valid or we use per-wavelength weights
+        # For delta light, r_u is effectively 0 or invalid for MIS combination
+        # Use only r_l if light is delta, else only r_u if previous was delta
+        if is_delta_light(light.type()):
+            return beta * f_hat * intr.transmittance * ls.L / r_l.average()
+        else:
+            return beta * f_hat * intr.transmittance * ls.L / r_u.average()
+            
+    # 5. MIS Weight for Non-Delta
+    # Note: In a full implementation, r_l and r_u might need to account for
+    # transmittance PDFs if index-matching surfaces were skipped.
+    # Here we assume r_l and r_u are the effective PDFs for the strategies.
     
-    # 6. Return Weighted Contribution
-    # Note: f_hat does not include sigma_s
-    return beta * f_hat * T_ray * ls.L * w
+    # Power Heuristic
+    w = (r_l * r_l) / (r_l * r_l + r_u * r_u)
+    
+    # 6. Return Estimate
+    # The denominator in the final estimate is the sum of rescaled probabilities
+    # averaged over wavelengths.
+    return beta * f_hat * intr.transmittance * ls.L / (r_l + r_u).average()
 ```
 
 ## Subtopics
 
 ### [Extended Multiple Importance Sampling](1569-extended-multiple-importance-sampling.md)
-Extended MIS combines estimators from different dimensional spaces, such as standard path sampling and extended-space density estimators (e.g., photon mapping). It solves variance reduction when mixing unbiased path contributions with biased density estimates by deriving a balance heuristic that accounts for integration over kernel support.
+Extended Multiple Importance Sampling (Extended MIS) is a framework for combining estimators of integrals defined on spaces of different dimensions, such as standard path sampling and extended-space density estimators (e.g., photon mapping or beam tracing). It solves the problem of variance reduction in volumetric path tracing when mixing unbiased path contributions with biased density estimates that operate on higher-dimensional spaces. Unlike standard MIS, which requires all strategies to sample from the same domain, Extended MIS derives a balance heuristic that accounts for the additional integration over the kernel support inherent in extended-space techniques.
 
 ### [Multi-View Path Tracing with MWIS](1834-multi-view-path-tracing-with-mwis.md)
-MVPT accelerates rendering of heterogeneous media across multiple views by reusing light paths. It uses Multi-View Weighted Importance Sampling (MWIS) to reweight samples to a target PDF, reducing variance from non-contributing strategies and Jacobian variations, while maintaining consistency with vanishing bias.
+Multi-View Path Tracing with MWIS (MVPT) accelerates the rendering of heterogeneous participating media by exploiting redundancy across multiple camera views, such as in animated sequences or light fields. It jointly renders a sequence by reusing computation during simulation, specifically by transforming light paths from a base view to other views and generating a shared path suffix. Unlike standard multi-view methods that use unbiased Multiple Importance Sampling (MIS) or discard shifted paths based on strict selection criteria, MVPT uses a self-normalized Multiple Weighted Importance Sampling (MWIS) estimator. This approach reweights samples to match a target probability density function (PDF), reducing variance caused by non-contributing strategies and large Jacobian variations, while remaining consistent with a rapidly vanishing bias.
 
 ### [Weighted Importance Sampling](1849-weighted-importance-sampling.md)
-WIS simulates a target PDF $p$ using samples from a source PDF $q$. It addresses intractable resampling of path prefixes in volumetric rendering by accepting bias for feasibility, unlike Resampled Importance Sampling (RIS).
+Weighted Importance Sampling (WIS) is a biased but consistent technique used to simulate the use of a known target probability density function (PDF) $p$ with samples drawn from an arbitrary source PDF $q$. In volumetric path tracing, it allows the estimator to benefit from a target distribution that is well-matched to the integrand, even when the actual sampling process follows a different source distribution. It sets itself apart from standard Multiple Importance Sampling (MIS) by not requiring the source PDF to be a mixture component of the target, and it differs from Resampled Importance Sampling (RIS) by avoiding the intractable resampling of path prefixes in unbounded scenarios.
 
 ### [Direct Lighting with MIS in VolPathIntegrator](1877-direct-lighting-with-mis-in-volpathintegrator.md)
-This method samples direct illumination in volumetric media by combining unidirectional path sampling and light path sampling. It handles transmittance estimation via ratio tracking for light connection segments, reducing MSE compared to non-MIS approaches in heterogeneous media.
+Direct Lighting with MIS in VolPathIntegrator is a method to sample direct illumination in volumetric media by combining unidirectional path sampling and light path sampling using Multiple Importance Sampling (MIS). It solves the high variance problem in spectral volumetric path tracing by allowing the estimator to choose between sampling the phase function to find the next vertex or sampling the light source to connect directly, weighting the contributions via the power heuristic. Unlike standard spectral MIS which may suffer from high variance in heterogeneous media, this method specifically handles the transmittance estimation via ratio tracking for the light connection segment, reducing Mean Squared Error (MSE) significantly compared to non-MIS approaches.
 
 ### [Unknown Distance PDF and MIS](9222-unknown-distance-pdf-and-mis.md)
-This technique enables MIS for rejection-based trackers (like delta tracking) where the free-path PDF cannot be evaluated exactly. It ensures unknown distance PDFs cancel out in the MIS weight calculation, allowing weights to be computed based solely on directional PDFs.
+A technique to enable Multiple Importance Sampling (MIS) for path-construction strategies, such as Next Event Estimation (NEE) or bidirectional methods, in rejection-based volumetric trackers where the free-path sample probability density function (PDF) cannot be evaluated exactly. It solves the problem of combining strategies by ensuring the unknown distance PDFs cancel out in the MIS weight calculation, allowing the weight to be computed based solely on directional PDFs. This sets it apart from general MIS applications by relying on the structural identity of the sampling tracker rather than explicit PDF evaluation.
 
 ### Power Heuristic for Light Sampling
-A heuristic to balance light sampling vs. BRDF/phase function sampling [S4, unofficial]. The weight is calculated as:
-$$ w = \frac{(n_f f_{Pdf})^2}{(n_f f_{Pdf})^2 + (n_g g_{Pdf})^2} $$
-where $n_f, n_g$ are sample counts and $f_{Pdf}, g_{Pdf}$ are the respective PDFs [S4, unofficial].
+A heuristic used to balance the contribution of different sampling strategies (e.g., light sampling vs. BRDF sampling) in path tracing to reduce variance [S4, unofficial]. The weight is calculated as:
+$$ \text{weight} = \frac{(n_f \cdot f_{\text{Pdf}})^2}{(n_f \cdot f_{\text{Pdf}})^2 + (n_g \cdot g_{\text{Pdf}})^2} $$
+where $n_f$ and $n_g$ are the number of samples for each strategy, and $f_{\text{Pdf}}$ and $g_{\text{Pdf}}$ are the respective probability density functions [S4, unofficial].
 
 ### Multiple Importance Sampling for Phase Function and Next Event Estimation
-Combines phase function sampling with NEE by accumulating PDFs for ratio tracking and free-flight sampling [S2]. When evaluating one PDF, the other must also be accumulated [S2]. The throughput update divides transmittance by the average PDF over channels:
+Combining phase function sampling with next event estimation (NEE) by accumulating PDFs for ratio tracking (free-flight sampling decisions) and free-flight sampling (real/fake particle events) during NEE. When evaluating the PDF for one, the PDF of the other must also be accumulated [S2]. The path throughput is updated as:
 $$ \text{current\_path\_throughput} *= \frac{\text{transmittance}}{\text{avg}(\text{trans\_dir\_pdf})} $$
-[S2]
+[S2].
 
 ### Resample Importance Sampling (RIS) for Volumetric Path Tracing
-RIS jointly samples lighting distribution and phase function, addressing low sampling quality of MIS for high-frequency products [S5]. It uses a spatial-directional tree to represent incident radiance and combines with MIS depending on phase function sharpness [S5]. Pitfalls include naive distance sampling impacting convergence speed [S5].
+Extended Müller et al. to translucent materials. Used a spatial-directional tree to represent the incident radiance distribution and then sample the outgoing direction after scattering considering both the learned lighting distribution and the phase function [S5]. Introduced resample importance sampling (RIS) to jointly sample the lighting distribution and the phase function, as they observed the low sampling quality of MIS for the product of two high-frequency functions [S5]. RIS is combined with MIS, depending on the sharpness of the phase function, to save the computational cost in RIS [S5]. Uses naive distance sampling, which has a significant impact on convergence speed [S5]. Can handle any homogeneous participating media, from high scattering to low scattering, from high absorption to low absorption, and from isotropic media to highly anisotropic media [S5].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per light sample addition, but requires caching and additional PDF evaluations [S1].
-*   **Memory Complexity:** $O(1)$ additional state per path vertex for caching `dir_pdf`, `nee_p_cache`, and `multi_trans_pdf` [S1].
-*   **Strengths:** Robust handling of index-matching surfaces, delta distributions, and chromatic media [S1, S3].
-*   **Limitations:** Requires careful caching of PDFs across bounces; naive distance sampling can still impact convergence [S1, S5].
+- **Time Complexity:** $O(1)$ per light sample, but requires caching and additional PDF evaluations.
+- **Memory Complexity:** $O(1)$ additional cache variables per path vertex.
+- **Measured Performance:** Reduces variance significantly in scenes with index-matching surfaces and heterogeneous media [S1, S2].
+- **Scaling:** Scales with the number of light sources and path depth.
+- **Strengths:** Handles discontinuities in sampling history due to index-matching surfaces; reduces variance in chromatic media [S1, S3].
+- **Limitations:** Requires careful caching of PDFs and transmittance factors; complex to implement correctly [S1, S2].
+- **When to use:** Volumetric path tracing with index-matching surfaces and heterogeneous media [S1, S2].
+- **When not to use:** Simple homogeneous media without index-matching surfaces, where standard MIS or single strategy may suffice [S1].
 
 ## Background
-Originating from the need to combine phase function sampling and next event estimation in volumetric path tracing, this method addresses variance issues in participating media [S1, S2]. Key developments include handling index-matching surfaces by caching PDFs [S1] and extending to chromatic media with per-wavelength weights [S3].
+Originated from the need to handle index-matching surfaces in volumetric path tracing, where standard MIS fails due to discontinuities in sampling history [S1]. Developed by researchers at UCSD for their volumetric path tracer implementations [S1, S2]. Used in modern path tracers like PBRT for volume scattering integrators [S3].
 
 ## Sources
 [S1] PDF Volumetric Path Tracing - University of California, San Diego, https://cseweb.ucsd.edu/~tzli/cse272/wi2023/homework2.pdf, fetched 2026-10-30

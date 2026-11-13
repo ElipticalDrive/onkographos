@@ -3,29 +3,25 @@
 Also called: Intersection Target Voxelization
 
 ## Overview
-Topological Voxelization with Intersection Targets is a method for determining which voxels are intersected by a mesh surface by testing input primitives against specific geometric "targets" within each voxel, rather than relying on geometric proximity measures [S1, unofficial]. It sets itself apart from sibling methods like Point-Tessellated Voxelization by guaranteeing topological properties (connectivity and separability) through the dimensionality of these targets, making it independent of input tessellation and suitable for curved primitives [S1, unofficial].
+Topological Voxelization with Intersection Targets determines which voxels are intersected by input geometry by testing primitives against specific geometric targets within each voxel, rather than relying on geometric proximity measures [S1, unofficial]. It sets itself apart from sibling methods like Point-Tessellated Voxelization by guaranteeing topological properties (connectivity and separability) through the dimensionality of these targets, making it independent of input tessellation and suitable for curved primitives [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of geometric primitives (points, curves, surfaces) and a voxel grid. The effective dimension of the input geometry ($d_{eff}$) must be known or estimated [S1, unofficial].
+*   **Input:** A set of geometric primitives (points, curves, surfaces) and a voxel grid; the effective dimension $d_{eff}$ of the input geometry must be known or estimated [S1, unofficial].
 *   **Output:** A set of voxels $S_d$ included in the voxelization [S1, unofficial].
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D array or sparse structure representing the voxel space. Each voxel $V$ is identified by integer coordinates $(i, j, k)$ [S1, unofficial].
-*   **Intersection Target:** A geometric shape defined within the unit cube of a voxel. The shape's dimension depends on $d_{eff}$ and the desired connectivity [S1, unofficial].
+*   **Voxel Grid:** A 3D array or sparse structure representing the voxel space; each voxel $V$ is identified by integer coordinates $(i, j, k)$ [S1, unofficial].
+*   **Intersection Target:** A geometric shape defined within the unit cube of a voxel; its dimension depends on $d_{eff}$ and the desired connectivity [S1, unofficial].
 *   **Supercover:** A bounding volume or list of voxels that contain the input geometry's supercover (the set of voxels intersected by the input geometry's thickened version) [S1, unofficial]. Only voxels in the supercover need to be tested [S1, unofficial].
 
 **Steps:**
 1.  **Determine Effective Dimension:** Identify the effective dimension $d_{eff}$ of the input geometry (0D for points, 1D for curves/strands, 2D for surfaces, 3D for volumes) [S1, unofficial].
 2.  **Select Intersection Target:** Choose an intersection target shape within the voxel corresponding to $d_{eff}$ and the desired connectivity (e.g., 6-connected, 18-connected, or 26-connected in 3D) [S1, unofficial].
     *   For $d_{eff}=1$ (e.g., curves), the target must be at least 2D to ensure connectivity [S1, unofficial].
-    *   For $d_{eff}=2$ (e.g., surfaces), the target is typically 1D (a line segment or curve) [S1, unofficial].
     *   For $d_{eff}=3$ (e.g., volumes), the target is typically 0D (a point, usually the center) [S1, unofficial].
-3.  **Identify Supercover Voxels:** Determine the set of voxels belonging to the supercover of the input geometry. Intersection targets in voxels outside this set cannot intersect the input and can be skipped [S1, unofficial].
-4.  **Test Intersections:** For each voxel $V$ in the supercover:
-    *   Define the intersection target $T_V$ within $V$.
-    *   Test if the input primitive intersects $T_V$.
-    *   Handle degenerate cases (see Pitfalls) using perturbation [S1, unofficial].
+3.  **Identify Supercover Voxels:** Determine the set of voxels belonging to the supercover of the input geometry; intersection targets in voxels outside this set cannot intersect the input and can be skipped [S1, unofficial].
+4.  **Test Intersections:** For each voxel $V$ in the supercover, test if the input primitive intersects the target $T_V$ [S1, unofficial].
 5.  **Include Voxels:** If an intersection occurs, include $V$ in the output set $S_d$ [S1, unofficial].
 
 **Formulas:**
@@ -38,8 +34,8 @@ Topological Voxelization with Intersection Targets is a method for determining w
 *   **Connectivity:** The desired adjacency property (e.g., 6, 18, 26 in 3D) [S1, unofficial].
 
 **Pitfalls:**
-*   **Mismatched Dimensions:** Using a 0D target (point) for 1D input (curves) results in intersection only by chance, failing to preserve connectivity [S1, unofficial]. The target dimension must be at least $d_{eff} + 1$ for 1D inputs to establish connectivity [S1, unofficial].
-*   **Degenerate Intersections:** Input boundaries touching voxel boundaries can cause spurious holes or thick results. This is resolved by testing shifts in $+x, +y, +z$ directions until a non-degenerate intersection is found [S1, unofficial].
+*   **Mismatched Dimensions:** Using a 0D target (point) for 1D input (curves) results in intersection only by chance, failing to preserve connectivity [S1, unofficial]. The target dimension must be at least 2D for 1D inputs to establish 6 or 26-connectivity [S1, unofficial].
+*   **Degenerate Intersections:** Input boundaries touching voxel boundaries can cause spurious holes or thick results [S1, unofficial]. This is resolved by testing shifts in $+x, +y, +z$ directions until a non-degenerate intersection is found [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -47,7 +43,6 @@ Topological Voxelization with Intersection Targets is a method for determining w
 ```python
 def topological_voxelization(input_primitives, voxel_grid, effective_dimension, connectivity):
     # Step 1: Determine intersection target shape based on effective dimension and connectivity
-    # This is a lookup or calculation based on the method's derivation for the specific dimension
     target_shape = get_intersection_target_shape(effective_dimension, connectivity)
     
     # Step 2: Identify voxels in the supercover of the input
@@ -65,7 +60,6 @@ def topological_voxelization(input_primitives, voxel_grid, effective_dimension, 
     output_voxels = set()
     
     for voxel in supercover_voxels:
-        voxel_center = voxel.get_center()
         voxel_bounds = voxel.get_bounds()
         
         # Create the intersection target within this voxel
@@ -76,8 +70,8 @@ def topological_voxelization(input_primitives, voxel_grid, effective_dimension, 
         # Test for intersection, handling degeneracies
         for p in perturbation_vectors:
             # Apply perturbation to input primitives or target
-            # Here we assume a function that tests intersection with perturbation
-            if test_intersection_with_perturbation(input_primitives, target, p):
+            perturbed_primitives = [p.translate(perturbation) for p in input_primitives]
+            if any(primitive.intersects(target) for primitive in perturbed_primitives):
                 intersection_found = True
                 break
         
@@ -86,11 +80,17 @@ def topological_voxelization(input_primitives, voxel_grid, effective_dimension, 
             
     return output_voxels
 
-def test_intersection_with_perturbation(primitives, target, perturbation):
-    # Apply perturbation to primitives
-    perturbed_primitives = [p.translate(perturbation) for p in primitives]
-    # Test standard intersection
-    return any(p.intersects(target) for p in perturbed_primitives)
+def get_intersection_target_shape(effective_dimension, connectivity):
+    # [Comment: Standard operation to map (effective_dimension, connectivity) to a geometric target shape]
+    return None
+
+def compute_supercover(input_primitives, voxel_grid):
+    # [Comment: Standard operation to compute the set of voxels intersected by the input geometry's thickened version]
+    return []
+
+def create_target(target_shape, voxel_bounds):
+    # [Comment: Standard operation to instantiate the target_shape within voxel_bounds]
+    return None
 ```
 
 ## Subtopics
@@ -104,7 +104,6 @@ The Intersection Target Method is a topological voxelization strategy for effect
 *   **Strengths:** Guarantees topological correctness (connectivity and separability); independent of input tessellation; supports curved primitives; simple proofs of properties [S1, unofficial].
 *   **Limitations:** Requires knowledge of the effective dimension of the input; may produce thicker voxelizations than proximity-based methods if the target is large; degenerate cases require careful handling [S1, unofficial].
 *   **When to Use:** When topological correctness is critical (e.g., for simulation or connectivity-dependent applications); when input geometry is curved or tessellation-independent representation is desired [S1, unofficial].
-*   **When Not to Use:** When geometric proximity is more important than topology; when the effective dimension is unknown or difficult to determine [S1, unofficial].
 
 ## Background
 *   **Origin:** Proposed by Samuli Laine at NVIDIA [S1, unofficial].

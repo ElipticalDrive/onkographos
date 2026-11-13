@@ -3,48 +3,85 @@
 Also called: VolumePro Rendering Pipeline Stages
 
 ## Overview
-Template-based ray-casting is a hardware-accelerated direct volume rendering technique that optimizes memory access patterns by processing voxels in planar slices parallel to the volume face nearest to the image plane [S1, unofficial]. It differs from standard ray casting by enforcing object-order data access within these slices and differs from shear-warp methods by performing full tri-linear interpolation and supporting sub-pixel ray origins to eliminate view-dependent artifacts [S1, unofficial].
+Template-based Ray-Casting is a hardware-accelerated direct volume rendering technique that optimizes memory access patterns by processing voxels in planar slices parallel to the image plane [S1, unofficial]. It distinguishes itself from shear-warp methods by performing full tri-linear interpolation and supporting sub-pixel ray origins, thereby eliminating view-dependent artifacts during base-plane switches [S1, unofficial].
 
 ## How it works
-**Inputs:** Volume dataset (voxel grid), camera position, camera orientation, image resolution.
-**Outputs:** Final rendered image.
+**Inputs:** 3D volume dataset, camera position, camera orientation, image plane resolution.
+**Outputs:** Final rendered image on the display plane.
 
 **Data Structures:**
-The method relies on a rendering pipeline architecture (specifically the VolumePro vg500 ASIC) containing four identical pipelines [S1, unofficial]. Each pipeline maintains state for the current ray being processed, including the current voxel coordinates and accumulated color/transparency. The volume memory is accessed sequentially by scanline within a slice [S1, unofficial].
+*   **Volume Memory:** Stores voxel data. The architecture ensures each voxel is read exactly once per frame [S1, unofficial].
+*   **Rendering Pipelines:** Parallel processing units (e.g., 4 pipelines in the vg500 ASIC) [S1, unofficial].
+*   **Intermediate Buffer:** Stores the rendered image on the "base plane" before warping.
 
 **Steps:**
-1.  **Base Plane Identification:** Identify the volume face (one of the six sides of the bounding box) that is most parallel and nearest to the image plane. This face defines the "base plane" [S1, unofficial].
-2.  **Ray Generation:** Cast rays from each pixel in the final image back into the volume. Determine the intersection of these rays with the identified base plane. These intersection points serve as the starting locations for the ray traversal [S1, unofficial].
-3.  **Slice-Based Traversal:** Process voxels in planes (slices) parallel to the base plane. Within each slice, voxels are read from memory a scanline at a time in top-to-bottom order. This ensures regular, object-order data access, maximizing memory bandwidth efficiency [S1, unofficial].
-4.  **Voxel Processing:** For each voxel encountered by a ray:
-    *   Read the voxel value from memory.
-    *   Perform tri-linear interpolation using the voxel and its neighbors to determine the sample value at the ray's precise position [S1, unofficial].
-    *   Apply classification (mapping scalar value to color and opacity).
-    *   Perform front-to-back compositing: $C_{out} = C_{in} + (1 - C_{in}) \cdot c \cdot \alpha$, where $C_{in}$ is the accumulated color, $c$ is the sample color, and $\alpha$ is the sample opacity [G].
-5.  **Warping:** The resulting image formed on the base plane is warped onto the final image plane. This warping accounts for the angle between the base plane and the image plane [S1, unofficial].
+1.  **Base Plane Identification:** Identify the volume face (plane of voxels) that is most parallel and nearest to the current image plane. This plane becomes the "base plane" [S1, unofficial].
+2.  **Ray Generation:** Cast rays from each pixel on the base plane into the volume dataset [S1, unofficial]. Rays may start at sub-pixel locations to support supersampling and prevent artifacts [S1, unofficial].
+3.  **Voxel Access:** Read and process voxels in planes parallel to the base plane. Within each slice, voxels are accessed in top-to-bottom scanline order to maximize memory bandwidth efficiency [S1, unofficial].
+4.  **Interpolation:** Perform tri-linear interpolation on the sampled voxel values [S1, unofficial].
+5.  **Compositing:** Accumulate color and opacity along the ray path within the base plane buffer [S1, unofficial].
+6.  **Warping:** Warp the resulting base-plane image onto the final image plane using 2D texture mapping [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def template_based_ray_casting(volume, camera, image_plane):
+    # 1. Identify base plane
+    base_plane = find_most_parallel_face(volume, camera)
+    
+    # 2. Initialize base plane buffer
+    base_image = create_empty_image(base_plane.resolution)
+    
+    # 3. Process rays for each pixel in the base plane
+    for pixel in base_plane.pixels:
+        ray = cast_ray_from_pixel(pixel, camera)
+        
+        # 4. Traverse volume in slice-parallel order
+        # Voxels are read in top-to-bottom scanline order within slices
+        color = 0.0
+        alpha = 0.0
+        
+        while ray.has_intersection(volume):
+            # Read voxel from memory (each voxel read once per frame)
+            voxel = volume.read_voxel(ray.position)
+            
+            # Tri-linear interpolation
+            sample = tri_linear_interpolate(volume, ray.position)
+            
+            # Compositing step (front-to-back)
+            color, alpha = composite_step(sample, color, alpha)
+            
+            ray.step()
+            
+        base_image.set_pixel(pixel, color, alpha)
+        
+    # 5. Warp base plane to image plane
+    final_image = warp_image(base_image, camera.transform)
+    return final_image
+```
 
 **Parameters:**
-*   **Pipeline Clock Speed:** 125 MHz. Each pipeline accepts a new voxel every cycle [S1, unofficial].
-*   **Interpolation:** Tri-linear interpolation is used [S1, unofficial].
+*   **Pipeline Clock Speed:** 125 MHz (each pipeline accepts a new voxel every cycle) [S1, unofficial].
+*   **Interpolation:** Tri-linear [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **View-Dependent Artifacts:** Switching the base plane (e.g., as the camera rotates) can cause visible artifacts if rays start at integer pixel locations. VolumePro prevents this by allowing rays to start at sub-pixel locations and performing tri-linear interpolation [S1, unofficial].
-*   **Memory Access:** The algorithm assumes the ability to read voxels in scanline order within a slice. If the hardware does not support this sequential access pattern, performance degrades significantly [S1, unofficial].
+*   **View-dependent artifacts:** Occur when switching base planes if sub-pixel ray starting locations are not supported. VolumePro prevents this by allowing sub-pixel ray origins and tri-linear interpolation [S1, unofficial].
 
 ## Subtopics
 
 ### [Cube-4](14515-cube-4.md)
-A parallel and scalable volume rendering architecture using modular rendering pipelines with local and fixed bandwidth interconnections. It implements a slice-parallel ray-casting algorithm with tri-linear interpolation and surface normal estimation from interpolated samples. Shading, classification, and compositing are part of the rendering pipeline.
+A parallel and scalable architecture implementing slice-parallel ray-casting with tri-linear interpolation and surface normal estimation. It uses local, fixed-bandwidth interconnections and avoids precomputations.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of voxels traversed per ray and the number of rays (pixels). The hardware implementation processes one voxel per cycle per pipeline [S1, unofficial].
-*   **Memory Complexity:** Depends on the volume size and the number of pipelines. The vg500 ASIC contains 2 Mbits of on-chip SRAM for caching intermediate results [S1, unofficial].
-*   **Performance:** The VolumePro system achieves high performance by ensuring each voxel is read from volume memory exactly once per frame [S1, unofficial].
-*   **Strengths:** Regular, object-order data access leads to efficient memory bandwidth utilization. Tri-linear interpolation and sub-pixel ray origins provide high visual quality without view-dependent artifacts [S1, unofficial].
-*   **Limitations:** Requires specialized hardware (ASIC) for optimal performance. The warping step must be handled by a separate graphics card [S1, unofficial].
+*   **Memory Access:** Optimized for regular, object-order data access. Each voxel is read exactly once per frame [S1, unofficial].
+*   **Performance:** Hardware pipelines run at 125 MHz, processing one voxel per cycle per pipeline [S1, unofficial].
+*   **Strengths:** High memory bandwidth efficiency; high-quality 3D interpolation; no view-dependent artifacts during base-plane switching [S1, unofficial].
+*   **Limitations:** Requires specific hardware support (e.g., vg500 ASIC) for optimal performance; warping step requires off-screen 2D texture mapping capabilities [S1, unofficial].
+*   **When to use:** When hardware acceleration is available and high-quality interpolation is required without precomputed data structures [S1, unofficial].
 
 ## Background
-Template-based ray-casting is associated with the VolumePro system, implemented as a PCI card for PC class computers containing the vg500 volume rendering ASIC [S1, unofficial]. It was developed as an improvement over shear-warp implementations, such as that by Lacroute and Levoy, by incorporating tri-linear interpolation and sub-pixel ray starting locations [S1, unofficial].
+Template-based Ray-Casting is the core algorithm implemented in the VolumePro system, a PCI-based volume rendering accelerator [S1, unofficial]. The system uses the vg500 ASIC, which contains four rendering pipelines [S1, unofficial]. It was developed as an improvement over shear-warp methods, specifically addressing their limitations in interpolation quality and artifact generation [S1, unofficial].
 
 ## Sources
 [S1] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

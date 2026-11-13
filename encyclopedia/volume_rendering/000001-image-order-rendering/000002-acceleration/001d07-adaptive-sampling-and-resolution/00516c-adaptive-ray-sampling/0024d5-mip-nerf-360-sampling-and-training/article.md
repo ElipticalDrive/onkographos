@@ -1,241 +1,81 @@
 # Mip-NeRF 360 Sampling and Training
 
-Also called: Mip-NeRF 360 training, Mip-NeRF 360 sampling, Mip-NeRF 360 distillation
+Also called: Mip-NeRF 360 Training, Mip-NeRF 360 Proposal Sampling
 
 ## Overview
-Mip-NeRF 360 Sampling and Training is a method for optimizing unbounded radiance fields that addresses the artifacts of "floaters" and "background collapse" while maintaining anti-aliasing properties. It solves the problem of inefficient sampling in unbounded scenes by using a proposal network trained via online distillation to bound the density distribution of the main network, combined with disparity-linear ray parameterization. It sets itself apart from standard NeRF training by enforcing an upper-envelope constraint on the proposal weights and from [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) by using a specific asymmetric loss that only penalizes underestimation of the NeRF's mass, ensuring the proposal network acts as a robust sampler for the fine network.
+Mip-NeRF 360 Sampling and Training optimizes radiance fields for unbounded scenes using a disparity-based ray parameterization, a coordinate contraction function, and a coarse-to-fine training loop with a proposal network [S1]. It mitigates artifacts such as floaters and background collapse by regularizing the density distribution and ensuring efficient sampling through online distillation [S1]. The method differs from standard NeRF by using linear-in-disparity sampling and handles unbounded scenes via coordinate contraction [S1].
 
 ## How it works
-The method operates within the training loop, jointly optimizing a "proposal MLP" and a "NeRF MLP". The proposal MLP is smaller and faster, used to generate initial samples and guide resampling. The NeRF MLP is larger and produces the final color and density. The method relies on three core components: disparity-linear ray parameterization, online distillation via a bounding loss, and a regularization term to prevent volumetric artifacts.
+**Inputs:**
+- Set of training rays $\mathcal{R}$ with ground truth colors $\mathbf{C}^*(\mathbf{r})$ [S1].
+- Near and far clip distances $t_n, t_f$ for each ray [S1].
 
-### Inputs and Outputs
-*   **Inputs:** A set of training rays $\mathcal{R}$, each defined by near and far clipping planes $t_n, t_f$ in Euclidean distance. Ground truth image colors $\mathbf{C}^*(\mathbf{r})$.
-*   **Outputs:** Rendered colors $\mathbf{C}(\mathbf{r})$ for each ray, optimized MLP parameters $\Theta_{prop}$ and $\Theta_{NeRF}$.
+**Outputs:**
+- Rendered image colors $\mathbf{C}(\mathbf{r})$ [S1].
+- Trained parameters for the Proposal MLP $\Theta_{prop}$ and the NeRF MLP $\Theta_{NeRF}$ [S1].
 
-### Data Structures
-*   **Ray Parameterization:** Rays are parameterized by normalized distance $s \in [0, 1]$. The mapping between Euclidean distance $t$ and normalized distance $s$ is defined by an invertible scalar function $g(\cdot)$:
-    $$ s \triangleq \frac{g(t) - g(t_n)}{g(t_f) - g(t_n)} $$
-    $$ t \triangleq g^{-1}(s \cdot g(t_f) + (1-s) \cdot g(t_n)) $$
-    The function $g(x)$ is set to $1/x$ to produce ray samples distributed linearly in disparity (inverse depth). Setting $g(x) = \log(x)$ yields logarithmic spacing [S1].
-*   **Coordinate Contraction:** To handle unbounded scenes, 3D coordinates $\mathbf{x}$ are mapped to a ball of radius 2 using the contraction function:
-    $$ \text{contract}(\mathbf{x}) = \begin{cases} \mathbf{x} & \text{if } \|\mathbf{x}\| \le 1 \\ \left(2 - \frac{1}{\|\mathbf{x}\|}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \text{if } \|\mathbf{x}\| > 1 \end{cases} $$
-    This function is applied to input coordinates before passing them to the MLPs [S1].
-*   **Histograms:** Both networks output a set of intervals defined by sorted distances $\mathbf{t}$ (or $\mathbf{s}$) and corresponding weights $\mathbf{w}$. The proposal network outputs $(\hat{\mathbf{t}}, \hat{\mathbf{w}})$ and the NeRF network outputs $(\mathbf{t}, \mathbf{w})$.
+**Data Structures:**
+- **Proposal MLP ($\Theta_{prop}$):** A small MLP predicting volumetric density, converted to proposal weights $\hat{\mathbf{w}}$ [S1].
+- **NeRF MLP ($\Theta_{NeRF}$):** A larger MLP predicting weights $\mathbf{w}$ and color $\mathbf{c}$ [S1].
+- **Ray Samples:** Sorted arrays of normalized distances $\mathbf{s}$ and weights $\mathbf{w}$ [S1].
 
-### Steps
-1.  **Ray Sampling:** For each training ray, generate initial sample points. If using the proposal network, samples are drawn from the proposal weights $\hat{\mathbf{w}}$. The distances are sampled in normalized space $s$ and converted to Euclidean space $t$ using the inverse mapping.
-2.  **Coordinate Transformation:** Input 3D coordinates $\mathbf{x}$ are contracted using $\text{contract}(\mathbf{x})$.
-3.  **Gaussian Approximation (Mip-NeRF):** Instead of point samples, the method uses conical frustums (or Gaussians in the limit). For a smooth coordinate transformation $f: \mathbb{R}^n \to \mathbb{R}^n$ (where $f$ is the contraction function), the mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$ are transformed as:
-    $$ f(\boldsymbol{\mu}, \boldsymbol{\Sigma}) = (f(\boldsymbol{\mu}), \mathbf{J}_f(\boldsymbol{\mu}) \boldsymbol{\Sigma} \mathbf{J}_f(\boldsymbol{\mu})^T) $$
-    where $\mathbf{J}_f(\boldsymbol{\mu})$ is the Jacobian of $f$ at $\boldsymbol{\mu}$ [S1]. This allows the MLP to receive the first two moments of the conical frustum, enabling anti-aliasing.
-4.  **Network Evaluation:**
-    *   Evaluate the proposal MLP $\Theta_{prop}$ at the sample points to get proposal densities, converted to proposal weights $\hat{\mathbf{w}}$.
-    *   Evaluate the NeRF MLP $\Theta_{NeRF}$ at the sample points to get densities and colors, converted to weights $\mathbf{w}$ and colors $\mathbf{c}$.
-5.  **Resampling (Optional/Implicit):** The proposal weights $\hat{\mathbf{w}}$ are used to resample points for the fine network evaluation, concentrating samples in high-density regions.
-6.  **Rendering:** Compute the final color $\mathbf{C}(\mathbf{r})$ using standard volume rendering integration over the weights and colors.
-7.  **Loss Computation:**
-    *   **Reconstruction Loss:** Compute the weighted sum of reconstruction losses for coarse (proposal) and fine (NeRF) rays:
-        $$ \mathcal{L}_{\text{total}} = \sum_{\mathbf{r} \in \mathcal{R}} \frac{1}{10} \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{r}, \mathbf{t}^c), \mathbf{C}^*(\mathbf{r})) + \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{r}, \mathbf{t}^f), \mathbf{C}^*(\mathbf{r})) $$
-        where $\mathcal{L}_{\text{recon}}$ is mean squared error [S1].
-    *   **Proposal Loss:** Compute the distillation loss $\mathcal{L}_{\text{prop}}$ to ensure proposal weights bound NeRF weights.
-    *   **Distance Regularization:** Compute $\mathcal{L}_{\text{dist}}$ to prevent floaters and background collapse.
-8.  **Optimization:** Update $\Theta_{prop}$ and $\Theta_{NeRF}$ using gradient descent.
+**Coordinate Transformation and Contraction:**
+To handle unbounded scenes, input coordinates $\mathbf{x}$ are mapped to a ball of radius 2 using the contraction function [S1]:
+$$
+\text{contract}(\mathbf{x}) = \begin{cases} 
+\mathbf{x} & \text{if } \|\mathbf{x}\| \le 1 \\
+\left(2 - \frac{1}{\|\mathbf{x}\|}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \text{if } \|\mathbf{x}\| > 1 
+\end{cases}
+$$
+Gaussian intervals $(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ are transformed using the linear approximation of the contraction function $f$ (where $f$ is `contract`) [S1]:
+$$
+f(\boldsymbol{\mu}, \boldsymbol{\Sigma}) = \left(f(\boldsymbol{\mu}), \mathbf{J}_f(\boldsymbol{\mu}) \boldsymbol{\Sigma} \mathbf{J}_f(\boldsymbol{\mu})^T\right)
+$$
+where $\mathbf{J}_f(\boldsymbol{\mu})$ is the Jacobian of $f$ at $\boldsymbol{\mu}$ [S1].
 
-### Formulas
-*   **Bounding Function:** Computes the sum of proposal weights overlapping an interval $T_i$ from the NeRF histogram:
-    $$ \text{bound}(\hat{\mathbf{t}}, \hat{\mathbf{w}}, T_i) = \sum_{j: T_i \cap \hat{T}_j \neq \emptyset} \hat{w}_j $$
-    Since $\hat{\mathbf{t}}$ and $\mathbf{t}$ are sorted, this can be computed efficiently using summed-area tables [S1].
-*   **Proposal Loss:** Penalizes surplus NeRF mass $w_i$ exceeding the bound of proposal weights:
-    $$ \mathcal{L}_{\text{prop}}(\mathbf{t}, \mathbf{w}, \hat{\mathbf{t}}, \hat{\mathbf{w}}) = \sum_i \frac{1}{w_i} \max(0, w_i - \text{bound}(\hat{\mathbf{t}}, \hat{\mathbf{w}}, T_i))^2 $$
-    This loss is asymmetric; it only penalizes the proposal for underestimating the NeRF distribution. Overestimates are expected as proposal weights form an upper envelope [S1]. The division by $w_i$ ensures well-behaved optimization gradients [S1].
-*   **Distance Regularization:** Prevents floaters and background collapse:
-    $$ \mathcal{L}_{\text{dist}}(\mathbf{s}, \mathbf{w}) = \iint_{-\infty}^{\infty} \mathbf{w}_{\mathbf{s}}(u) \mathbf{w}_{\mathbf{s}}(v) |u - v| \, du \, dv $$
-    where $\mathbf{w}_{\mathbf{s}}(u)$ is the weight function defined by the ray distances $s$ and weights $w$ [S1].
+**Ray Parameterization:**
+Ray distances are parameterized by an invertible mapping between Euclidean distance $t$ and normalized distance $s \in [0, 1]$ [S1]:
+$$
+s \triangleq \frac{g(t) - g(t_n)}{g(t_f) - g(t_n)}, \quad t \triangleq g^{-1}(s \cdot g(t_f) + (1-s) \cdot g(t_n))
+$$
+The function $g(x)$ is set to $1/x$ to produce ray samples distributed linearly in disparity (inverse depth) [S1]. Setting $g(x) = \log(x)$ yields logarithmic spacing [S1].
 
-### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Training Loop Steps:**
+1. **Initialization:** Initialize $\Theta_{prop}$ and $\Theta_{NeRF}$ randomly [S1].
+2. **Coarse Sampling:** For each ray $\mathbf{r} \in \mathcal{R}$, sample $N_c$ points uniformly in normalized disparity space $s \in [0, 1]$ and convert to Euclidean distance $t$ using the inverse mapping [S1]. Evaluate $\Theta_{prop}$ on these coarse samples to obtain proposal weights $\hat{\mathbf{w}}$ [S1].
+3. **Fine Sampling:** Resample $N_f$ points from the proposal distribution $\hat{\mathbf{w}}$ to obtain fine samples $\mathbf{t}^f$ [S1]. Evaluate $\Theta_{NeRF}$ on $\mathbf{t}^f$ to obtain fine weights $\mathbf{w}^f$ and colors $\mathbf{c}^f$ [S1].
+4. **Coarse NeRF Evaluation:** Evaluate $\Theta_{NeRF}$ on the coarse samples $\mathbf{t}^c$ to obtain coarse weights $\mathbf{w}^c$ and colors $\mathbf{c}^c$ [S1].
+5. **Rendering:** Compute rendered colors $\mathbf{C}(\mathbf{r}, \mathbf{t}^c)$ and $\mathbf{C}(\mathbf{r}, \mathbf{t}^f)$ [S1].
+6. **Reconstruction Loss:** Compute the weighted sum of reconstruction losses for coarse and fine rays [S1]:
+   $$
+   \sum_{\mathbf{r} \in \mathcal{R}} \frac{1}{10} \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{r}, \mathbf{t}^c), \mathbf{C}^*(\mathbf{r})) + \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{r}, \mathbf{t}^f), \mathbf{C}^*(\mathbf{r}))
+   $$
+   where $\mathcal{L}_{\text{recon}}$ is mean squared error [S1].
+7. **Proposal Loss:** Compute the proposal loss $\mathcal{L}_{\text{prop}}$ to ensure proposal weights bound NeRF weights [S1].
+   - Define the bound function:
+     $$
+     \text{bound}(\hat{\mathbf{t}}, \hat{\mathbf{w}}, T) = \sum_{j: T \cap \hat{T}_j \neq \emptyset} \hat{w}_j
+     $$
+   - Compute the loss:
+     $$
+     \mathcal{L}_{\text{prop}}(\mathbf{t}, \mathbf{w}, \hat{\mathbf{t}}, \hat{\mathbf{w}}) = \sum_i \frac{1}{w_i} \max(0, w_i - \text{bound}(\hat{\mathbf{t}}, \hat{\mathbf{w}}, T_i))^2
+     $$
+   - Apply a stop-gradient on the NeRF MLP's outputs $\mathbf{t}$ and $\mathbf{w}$ when computing $\mathcal{L}_{\text{prop}}$ so the NeRF MLP leads and the proposal MLP follows [S1].
+   - Compute $\mathcal{L}_{\text{prop}}$ efficiently using summed-area tables because $\hat{\mathbf{t}}$ and $\mathbf{t}$ are sorted [S1].
+8. **Optimization:** Minimize the combined reconstruction and proposal losses using gradient descent [S1].
 
-```python
-def mip_nerf_360_training_step(rays, gt_colors, theta_prop, theta_nerf, num_samples_prop, num_samples_nerf):
-    """
-    Performs one training step for Mip-NeRF 360.
-    
-    Args:
-        rays: List of ray origins and directions, with near/far t_n, t_f.
-        gt_colors: Ground truth colors for the rays.
-        theta_prop: Parameters for the proposal MLP.
-        theta_nerf: Parameters for the NeRF MLP.
-        num_samples_prop: Number of samples for the proposal network.
-        num_samples_nerf: Number of samples for the NeRF network.
-        
-    Returns:
-        loss: Total loss value.
-        theta_prop: Updated proposal parameters.
-        theta_nerf: Updated NeRF parameters.
-    """
-    
-    # 1. Ray Parameterization
-    # Define g(x) = 1/x for disparity-linear spacing
-    def g(t):
-        return 1.0 / t
-    
-    def g_inv(s, t_n, t_f):
-        # t = g_inv(s * g(t_f) + (1-s) * g(t_n))
-        # s * (1/t_f) + (1-s) * (1/t_n) = 1/t
-        # t = 1 / (s/t_f + (1-s)/t_n)
-        inv_t = s / t_f + (1 - s) / t_n
-        return 1.0 / inv_t
-
-    # 2. Sample Proposal Points
-    # Sample s uniformly in [0, 1]
-    s_prop = random_uniform(0, 1, size=(num_samples_prop,))
-    # Convert to Euclidean t
-    t_prop = g_inv(s_prop, rays.t_n, rays.t_f)
-    # Convert to 3D coordinates x
-    x_prop = rays.origin + t_prop * rays.direction
-    
-    # 3. Evaluate Proposal MLP
-    # Contract coordinates
-    x_prop_contracted = contract(x_prop)
-    # Get density from proposal MLP
-    density_prop = theta_prop(x_prop_contracted)
-    # Convert density to weights w_prop
-    # Note: Standard NeRF weight calculation involves alpha = 1 - exp(-sigma * delta)
-    # For simplicity, assuming standard volume rendering weight computation is handled internally
-    # or approximated. Here we assume a helper function `compute_weights` exists.
-    w_prop = compute_weights(density_prop, t_prop)
-    
-    # 4. Sample NeRF Points (Resampling from Proposal)
-    # Sample s_nerf based on w_prop
-    s_nerf = sample_from_histogram(s_prop, w_prop, num_samples_nerf)
-    t_nerf = g_inv(s_nerf, rays.t_n, rays.t_f)
-    x_nerf = rays.origin + t_nerf * rays.direction
-    
-    # 5. Evaluate NeRF MLP
-    x_nerf_contracted = contract(x_nerf)
-    density_nerf, color_nerf = theta_nerf(x_nerf_contracted)
-    w_nerf = compute_weights(density_nerf, t_nerf)
-    
-    # 6. Render
-    # Render coarse image using proposal weights (optional, for loss)
-    # Render fine image using NeRF weights
-    color_nerf_rendered = volume_render(w_nerf, color_nerf)
-    
-    # 7. Compute Losses
-    # Reconstruction Loss
-    loss_recon = mean_squared_error(color_nerf_rendered, gt_colors)
-    
-    # Proposal Loss (Distillation)
-    # Compute bound for each NeRF interval
-    # Note: This requires iterating over intervals. 
-    # For a single ray, we have sorted t_nerf and w_nerf.
-    # We compute the sum of proposal weights overlapping each NeRF interval.
-    loss_prop = 0
-    for i in range(len(t_nerf) - 1):
-        t_i_start = t_nerf[i]
-        t_i_end = t_nerf[i+1]
-        w_i = w_nerf[i]
-        
-        # Find proposal weights overlapping [t_i_start, t_i_end]
-        # Since t_prop and w_prop are sorted, we can use a sliding window or summed-area table
-        bound_i = sum(w_prop[j] for j in range(len(w_prop)) 
-                      if t_prop[j] < t_i_end and t_prop[j+1] > t_i_start) # Approximate interval overlap
-        
-        # Asymmetric loss
-        surplus = max(0, w_i - bound_i)
-        loss_prop += (1.0 / w_i) * (surplus ** 2)
-        
-    # Distance Regularization
-    # Compute L_dist using s and w_nerf
-    loss_dist = compute_distance_regularization(s_nerf, w_nerf)
-    
-    # Total Loss
-    # Note: The paper uses a weighted sum for coarse and fine. 
-    # Here we assume coarse is not explicitly rendered separately for reconstruction, 
-    # but the proposal loss acts as the coarse supervision.
-    # The formula in [S1] is: sum(1/10 * L_recon(coarse) + L_recon(fine))
-    # If coarse is not rendered, we might skip L_recon(coarse) or render it.
-    # Assuming we render coarse for completeness:
-    color_prop_rendered = volume_render(w_prop, color_prop) # color_prop from theta_prop? 
-    # Note: Proposal MLP only outputs weights/density, not color. 
-    # So L_recon(coarse) might not be applicable in the same way, or color_prop is dummy.
-    # The paper says "weighted combination of coarse and fine reconstruction losses".
-    # If proposal doesn't output color, L_recon(coarse) is 0 or undefined.
-    # We assume the paper implies the fine network's reconstruction is the primary visual loss,
-    # and the proposal loss is the distillation loss.
-    # However, [S1] explicitly writes the sum. We will assume color_prop is available or ignored.
-    # Let's assume color_prop is not used for L_recon, only L_prop.
-    # Actually, [S1] says "proposal MLP... emits weights (but not color)".
-    # So L_recon(coarse) is likely 0 or not computed.
-    # We will stick to the formula structure but note the color issue.
-    loss_total = (1.0/10.0) * mean_squared_error(color_prop_rendered, gt_colors) + loss_recon + loss_prop + loss_dist
-    
-    # 8. Backpropagation
-    # Stop-gradient on NeRF outputs for Proposal Loss
-    loss_prop_stopped = loss_prop.detach() # Stop gradient from flowing to NeRF for L_prop
-    
-    # Update Prop
-    grad_prop = gradient(loss_prop_stopped + loss_dist, theta_prop) # L_dist might depend on NeRF? 
-    # [S1] says L_dist is defined on s, w. If s, w are from NeRF, then L_dist depends on NeRF.
-    # But L_dist is a regularizer for the scene, so it should apply to NeRF.
-    # The paper says "Here we presents a regularizer...". It doesn't explicitly say it applies to Prop.
-    # We apply L_dist to NeRF.
-    
-    # Update NeRF
-    grad_nerf = gradient(loss_recon + loss_prop_stopped + loss_dist, theta_nerf)
-    
-    theta_prop = theta_prop - learning_rate * grad_prop
-    theta_nerf = theta_nerf - learning_rate * grad_nerf
-    
-    return loss_total, theta_prop, theta_nerf
-
-def contract(x):
-    norm = np.linalg.norm(x, axis=-1, keepdims=True)
-    mask = norm <= 1.0
-    result = np.where(mask, x, (2 - 1/norm) * (x/norm))
-    return result
-
-def compute_weights(density, t):
-    # Standard volume rendering weight computation
-    # delta = t[i+1] - t[i]
-    # alpha = 1 - exp(-density * delta)
-    # w = alpha * product(1 - alpha_prev)
-    # This is a placeholder for the actual volume rendering integration
-    pass
-
-def compute_distance_regularization(s, w):
-    # Compute L_dist = int int w_s(u) w_s(v) |u-v| du dv
-    # This is a placeholder for the actual computation
-    pass
-```
-
-### Parameters
-*   **$g(x)$:** Set to $1/x$ for disparity-linear spacing [S1].
-*   **Loss Weights:** The reconstruction loss for coarse rays is weighted by $1/10$ relative to fine rays [S1].
-*   **MLP Sizes:** The NeRF MLP is large, and the proposal MLP is small [S1].
-
-### Edge Cases and Pitfalls
-*   **Floaters and Background Collapse:** Unbounded scenes suffer from floaters (small disconnected dense regions) and background collapse (distant surfaces modeled as close semi-transparent clouds). The $\mathcal{L}_{\text{dist}}$ regularizer mitigates these [S1].
-*   **Asymmetric Loss:** The proposal loss only penalizes underestimation. Overestimation is expected and not penalized, as proposal weights form an upper envelope [S1].
-*   **Stop-Gradient:** A stop-gradient must be applied to the NeRF MLP's outputs when computing $\mathcal{L}_{\text{prop}}$ to ensure the NeRF leads and the proposal follows [S1].
-
-## Subtopics
-
-### Mip-NeRF 360 Anti-Aliasing
-Uses conical frustums and Gaussian approximations to handle aliasing. See [Mip-NeRF 360 Anti-Aliasing](link).
-
-### Unbounded Scene Contraction
-Maps infinite space to a bounded ball. See [Unbounded Scene Contraction](link).
+**Pitfalls:**
+- The proposal loss is asymmetric; it only penalizes proposal weights for underestimating the NeRF distribution [S1]. Overestimates are expected as proposal weights form an upper envelope [S1].
+- Floaters (small disconnected dense regions) and background collapse (distant surfaces modeled as close semi-transparent clouds) are mitigated by the regularization and parameterization [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The method requires two MLP evaluations per ray (proposal and NeRF), plus resampling. The proposal loss computation can be optimized with summed-area tables due to sorted intervals [S1].
-*   **Memory Complexity:** Requires storing weights and distances for both proposal and NeRF networks. The proposal MLP is smaller, reducing memory footprint for the coarse pass [S1].
-*   **Strengths:** Effectively reduces floaters and background collapse in unbounded scenes. Efficient sampling via proposal network. Anti-aliased rendering.
-*   **Limitations:** Requires careful tuning of the proposal loss and regularization. The asymmetric loss requires correct implementation to avoid instability.
-*   **When to Use:** Unbounded scenes with significant background content. When floaters or background collapse are observed in standard NeRF training.
+- **Time Complexity:** The proposal loss computation scales efficiently using summed-area tables [S1].
+- **Memory Complexity:** Requires storing weights and distances for coarse and fine samples, plus the MLP parameters [S1].
+- **Strengths:** Handles unbounded scenes effectively; reduces floaters and background collapse; efficient sampling via disparity-based parameterization and proposal network [S1].
+- **Limitations:** Not given in the sources.
 
 ## Background
-Mip-NeRF 360 was introduced by Barron et al. in 2022. It extends the original Mip-NeRF by handling unbounded scenes and introducing a novel sampling and training procedure to mitigate volumetric artifacts. The method builds on the idea of online distillation from a larger network to a smaller one, adapted for the specific challenges of unbounded radiance fields [S1].
+Introduced in [S1]. The method introduces coordinate contraction and disparity-based sampling to improve reconstruction quality and efficiency [S1].
 
 ## Sources
 [S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26

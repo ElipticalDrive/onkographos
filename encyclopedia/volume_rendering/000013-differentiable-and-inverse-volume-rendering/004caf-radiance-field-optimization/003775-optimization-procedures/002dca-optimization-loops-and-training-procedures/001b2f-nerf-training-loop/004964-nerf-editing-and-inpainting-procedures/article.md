@@ -1,66 +1,71 @@
 # NeRF Editing and Inpainting Procedures
 
-Also called: NeRF Editing, NeRF Inpainting, 3D Scene Editing, Radiance Field Manipulation
+Also called: NeRF Editing, NeRF Inpainting, 3D Scene Editing
 
 ## Overview
-NeRF Editing and Inpainting Procedures are optimization and rendering strategies that modify a pre-trained Neural Radiance Field (NeRF) to remove objects, insert new content, or alter appearance without retraining the entire network from scratch. They solve the problem of applying 3D-consistent edits using 2D inputs (masks, text prompts, or reference images) by either optimizing the NeRF parameters to match external guidance or modifying the rendering query logic directly. Unlike standard NeRF training which assumes consistent multi-view observations, these methods handle missing or conflicting data by integrating external priors (e.g., diffusion models, semantic fields) and enforcing view consistency through specialized loss functions or blending techniques.
+NeRF Editing and Inpainting Procedures modify a pre-trained Neural Radiance Field (NeRF) to alter its appearance, geometry, or content without retraining the entire network from scratch. They solve the problem of localized 3D modification—such as object removal, style transfer, or inpainting missing regions—while maintaining view consistency across novel viewpoints. Unlike global optimization methods that retrain the full scene representation, these procedures typically intercept the rendering loop or optimize specific parameter subsets using external priors (e.g., 2D diffusion models, semantic masks, or text prompts) to guide changes only in targeted 3D regions [S1, 12491-nerf-editing-procedure.md].
 
 ## Shared principles
-All methods in this family operate on a pre-trained NeRF representation $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$, where $\mathbf{x}$ is a 3D position, $\mathbf{d}$ is a viewing direction, $\sigma$ is volume density, and $\mathbf{c}$ is color. The core mechanism involves either **optimizing** the parameters $\theta$ or **modifying** the ray marching process.
+All methods in this family operate on a pre-trained NeRF representation $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$, where $\mathbf{x}$ is a 3D coordinate, $\mathbf{d}$ is the viewing direction, $\sigma$ is volume density, and $\mathbf{c}$ is color [Parent]. The core mechanism involves an optimization loop that minimizes a loss function $L$ to update the NeRF parameters $\theta$ (or a subset thereof).
 
-1.  **Ray Marching and Volume Rendering:** The fundamental rendering equation remains:
-    $$
-    \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
-    $$
-    where $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is a camera ray, $N$ is the number of sample points, $\delta_i = t_{i+1} - t_i$, and $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance [Parent].
+The general optimization objective is:
+$$
+L = L_{render} + \lambda_{guidance} L_{guidance} + \lambda_{reg} L_{reg}
+$$
+where $L_{render}$ is the standard photometric reconstruction loss on visible pixels, $L_{guidance}$ incorporates external priors (e.g., 2D inpainted images, diffusion model gradients, or semantic features), and $L_{reg}$ prevents artifacts or overfitting [S1, 12372-nerf-in-inpainting-optimization.md, 13438-nerf-art.md].
 
-2.  **External Guidance Integration:** Methods incorporate external information via:
-    *   **2D Priors:** Inpainting models (e.g., Stable Diffusion, LaMa) generate color/depth guidance images $I^G$ for masked regions [S1, 12372-nerf-in-inpainting-optimization.md].
-    *   **Semantic/Geometric Fields:** Distillation Feature Fields (DFF) or semantic segmentations identify regions for editing [12491-nerf-editing-procedure.md].
-    *   **Reference Views:** Single or multiple inpainted reference images guide geometry and appearance [13952-reference-guided-controllable-inpainting-of-nerfs.md].
-
-3.  **Loss Functions:** Optimization-based methods minimize a total loss $L = L_{rec} + L_{guidance} + L_{reg}$, where:
-    *   $L_{rec}$ is the reconstruction loss on unmasked pixels.
-    *   $L_{guidance}$ aligns rendered pixels with external priors (color, depth, or semantic similarity) in masked or edited regions.
-    *   $L_{reg}$ includes regularization terms like transmittance or depth variance to prevent artifacts [12273-blended-nerf.md, 12372-nerf-in-inpainting-optimization.md].
-
-4.  **View Consistency:** To ensure 3D consistency, methods enforce constraints across multiple views, such as warping depth maps between poses, using bilateral solvers for view-dependent effects, or matching gradients between rendered and inpainted images [12405-adaptive-view-selection-for-inpainting.md, 13952-reference-guided-controllable-inpainting-of-nerfs.md].
+Key shared components include:
+1.  **Masking/Selection:** A binary or probabilistic mask $M$ or selection field identifies the region of interest (ROI) or occluded areas. This can be user-defined, derived from semantic segmentation (e.g., LSeg, CLIP), or computed via geometric conflict detection [S1, 14365-repaint-nerf.md, 8658-progressive-inpainting-and-erasing.md].
+2.  **External Priors:** Most methods rely on 2D priors to guide 3D changes. Common priors include:
+    *   **2D Inpainting:** Using models like LaMa or Stable Diffusion to generate color/depth priors for occluded regions [S1, 12405-adaptive-view-selection-for-inpainting.md].
+    *   **Diffusion Guidance:** Using Score Distillation Sampling (SDS) from text-to-image models (e.g., Stable Diffusion) to guide appearance and geometry [S1, 14365-repaint-nerf.md].
+    *   **Semantic/Text Features:** Using CLIP or LSeg to align rendered features with text prompts or semantic labels [S1, 13438-nerf-art.md, 14365-repaint-nerf.md].
+3.  **View Consistency Enforcement:** To prevent flickering or inconsistencies across views, methods enforce multi-view constraints. This is achieved through:
+    *   **Geometric Consistency:** Using depth maps or epipolar constraints to ensure warped views align [S1, 11860-deceptive-nerf-3dgs-pipeline.md].
+    *   **Gradient-Based Selection:** Adapting the reliance on 2D priors vs. multi-view geometry based on local texture gradients [S1, 12405-adaptive-view-selection-for-inpainting.md].
+    *   **Reference Views:** Using a single or multiple inpainted reference views to propagate consistent content [S1, 13952-reference-guided-controllable-inpainting-of-nerfs.md].
 
 ## Subtopics
 
 ### [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md)
-A training procedure for generating a panoramic NeRF from a single input panorama by iteratively synthesizing novel views and refining the 3D geometry. It solves the problem of geometry conflicts that arise when inpainting invisible regions with external priors (e.g., diffusion models), which may contradict the existing learned structure. Unlike standard NeRF training that assumes consistent multi-view observations, PERF explicitly detects and erases conflicted regions from the supervision signal, ensuring that the inpainted content aligns with the established 3D geometry.
+Progressive Inpainting-and-Erasing (PERF) reconstructs a panoramic NeRF from a single input panorama by iteratively expanding viewpoint coverage. It solves the geometry conflict between visible and invisible regions by computing conflict masks and erasing inconsistent pixels from training supervision. Unlike methods requiring multiple views, PERF generates novel views via inpainting and progressively integrates them.
 
 ### [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md)
-A sparse-view reconstruction method that enhances NeRF or 3D Gaussian Splatting (3DGS) representations by continuously densifying input observations with synthetic pseudo-observations generated by a diffusion model during training. Unlike methods that rely on ensemble learning, variational inference, or spatial perturbations to estimate uncertainty, this approach acquires uncertainty through correspondence matching by reprojecting real input observations to novel views, thereby minimizing additional computation while enforcing epipolar constraints. It sets itself apart by conditioning a 2D diffusion model on rendered RGB images, depth maps, and view-consistency uncertainty maps to rectify artifacts and generate photorealistic pseudo-observations that are then used to supervise the radiance field.
+Deceptive-NeRF/3DGS enhances sparse-view reconstruction by densifying input observations with synthetic pseudo-observations generated by a diffusion model. It acquires uncertainty through correspondence matching (reprojecting real observations to novel views) rather than ensemble learning. It conditions a 2D diffusion model on rendered RGB, depth, and uncertainty maps to generate photorealistic pseudo-observations filtered by perceptual similarity.
 
 ### [Blended-NeRF](12273-blended-nerf.md)
-A framework for editing a specific region of interest (ROI) in an existing NeRF scene based on text prompts and a 3D ROI box. It solves the problem of local 3D editing by initializing a generator NeRF with the original scene's weights and blending the synthesized content with the original scene using volumetric blending. Unlike methods that synthesize new objects from scratch or require semantic decomposition/2D masks for localization, Blended-NeRF operates on any region using a 3D box without learning a new feature space.
+Blended-NeRF edits specific Regions of Interest (ROI) in an existing NeRF using text prompts and a 3D bounding box. It initializes a generator NeRF with the original scene's weights and blends synthesized content with the original scene using volumetric blending. Unlike methods requiring semantic masks, it operates on any 3D box without learning a new feature space.
 
 ### [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md)
-A method for removing unwanted objects from a pre-trained NeRF without category-specific training data or retraining from scratch. It solves the problem of 3D object removal by optimizing the NeRF parameters $\Theta$ to match 2D color and depth guidance derived from a single user-drawn mask and external inpainting priors. Unlike methods that require retraining from random initialization or category-specific data, NeRF-In updates an existing model using a joint color and depth loss, ensuring geometric consistency and view coherence.
+NeRF-In removes unwanted objects from a pre-trained NeRF by optimizing model parameters using user-provided masks and external RGB-D priors. It jointly optimizes color and depth guidance losses to prevent visual inconsistencies and incorrect geometry. Unlike methods requiring category-specific training, it updates an existing model to inpaint masked regions across multiple views while maintaining 3D consistency.
 
 ### [Adaptive View Selection for Inpainting](12405-adaptive-view-selection-for-inpainting.md)
-This method addresses the inconsistency of single-view 2D inpainting in 3D scenes by introducing a training view selection mechanism based on regional average gradients. It differs from standard NeRF editing by dynamically weighting the reconstruction loss between ground-truth pixels and 2D inpainting priors based on texture richness, ensuring multi-view consistency for occluded regions.
+This method addresses inconsistency artifacts from applying 2D inpainting priors by introducing a training view selection mechanism based on regional average gradients. It adaptively switches between using 2D inpainted color priors and multi-view geometric consistency based on texture richness. It explicitly models the fidelity of supplementary information from other views versus 2D priors via gradient thresholds.
 
 ### [NeRF Editing Procedure](12491-nerf-editing-procedure.md)
-The NeRF Editing Procedure enables direct manipulation of a trained NeRF by integrating external semantic or geometric guidance into the volume rendering process, rather than retraining the network from scratch. It solves the problem of applying 3D-consistent edits (such as deletion, colorization, or translation) to a continuous radiance field using 2D or sparse 3D inputs. It differs from iterative optimization methods like [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md) by modifying the rendering query logic directly via a distillation feature field, allowing for immediate, differentiable editing without gradient descent over the NeRF weights.
+The NeRF Editing Procedure modifies the standard volume rendering process by integrating semantic or geometric guidance fields (e.g., Distillation Feature Fields) to selectively alter density and color at specific 3D coordinates. It intercepts the ray-marching loop to apply transforms (deletion, colorization, warping) only where a query field indicates a match. It operates directly on feature query probability rather than blending rendered images.
+
+### [NeRF-Art](13438-nerf-art.md)
+NeRF-Art is a text-guided method for stylizing pre-trained NeRFs that simultaneously alters appearance and 3D geometry without mesh guidance. It introduces a global-local contrastive learning strategy combined with directional constraints to ensure strong style adherence and cross-view consistency, addressing the insufficiency of direct CLIP similarity supervision.
 
 ### [Reference-guided Controllable Inpainting of NeRFs](13952-reference-guided-controllable-inpainting-of-nerfs.md)
-Reference-guided Controllable Inpainting of NeRFs is a 3D inpainting algorithm that uses a single inpainted reference view to guide the geometry and appearance of a NeRF, avoiding view inconsistencies and generating view-dependent effects. It solves the problem of editing NeRFs with limited guidance by back-projecting a single 2D inpainted image into 3D space and propagating its appearance to other viewpoints via a bilateral solver, while handling disocclusions using image inpainters. Unlike methods requiring multi-view consistency checks or extensive user interaction, this approach allows a user to control the generated scene via a single inpainted image.
+This method performs 3D inpainting on a pre-trained NeRF using a single inpainted reference view to guide geometry and appearance. It ensures view consistency and generates view-dependent effects (VDEs) in novel views. It distinguishes itself by requiring only one user-provided inpainted image, avoiding view inconsistencies from multiple sources, while handling disocclusions in non-reference views.
 
 ### [RePaint-NeRF Limitations](14340-repaint-nerf-limitations.md)
-This article documents the known limitations of the RePaint-NeRF framework, a method for editing radiance fields using semantic masks and 2D diffusion model guidance. It addresses the primary failure modes of this specific approach, including high computational costs, geometric inconsistencies during drastic shape changes, and view-dependent artifacts at image peripheries. These constraints distinguish RePaint-NeRF from more scalable or geometrically robust siblings like [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md) or [Blended-NeRF](12273-blended-nerf.md), which may employ different priors or representations to mitigate these specific issues.
+This article documents the empirical limitations of the RePaint-NeRF method, specifically regarding computational efficiency, geometric fidelity under significant shape changes, and view-angle consistency. It serves as a critical reference for implementers to understand failure modes and resource constraints inherent in diffusion-guided NeRF editing.
+
+### [RePaint-NeRF](14365-repaint-nerf.md)
+RePaint-NeRF edits 3D content in NeRFs using text prompts, leveraging pre-trained diffusion models to guide changes in designated 3D content while ensuring view consistency. It first extracts a view-consistent semantic mask to isolate the target object, then uses a diffusion model (Stable Diffusion) for shape/appearance guidance and a CLIP model for background filling.
 
 ### [Semantic and Language-Guided Editing](14393-semantic-and-language-guided-editing.md)
 Not given in the sources.
 
 #### Post-Refinement Strategy
-- [S1] A strategy employed after the NeRF has been trained on updated data to enhance consistency by generating a more accurate target for each view using the modified Instruct-Pix2Pix with averaging architecture.
-- [S1] Use the rendered image as input while continuing to use the mixup image as a condition.
+**Definition:** A strategy employed after the NeRF has been trained on updated data to enhance consistency by generating a more accurate target for each view using the modified Instruct-Pix2Pix with averaging architecture [S1].
+**Step:** Use the rendered image as input while continuing to use the mixup image as a condition [S1].
 
 ## Background
-NeRF editing and inpainting emerged as a natural extension of the original NeRF paper [S1, Parent], addressing the limitation that NeRFs are static representations of captured scenes. Early methods focused on simple object removal or insertion by retraining the NeRF with modified input data. As 2D diffusion models (e.g., Stable Diffusion) gained prominence, researchers began integrating them as priors for 3D editing, leading to methods like [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md) and [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md). The field has since diversified into optimization-based approaches (e.g., [NeRF-In](12372-nerf-in-inpainting-optimization.md)), rendering-time modifications (e.g., [NeRF Editing Procedure](12491-nerf-editing-procedure.md)), and reference-guided techniques (e.g., [Reference-guided Controllable Inpainting](13952-reference-guided-controllable-inpainting-of-nerfs.md)). These methods are widely used in virtual production, augmented reality, and content creation tools to manipulate 3D scenes without full re-scanning.
+NeRF editing and inpainting emerged as a natural extension of the original NeRF paper [Mildenhall et al., 2020], which focused on novel view synthesis from multi-view images. Early methods relied on retraining the entire network with modified input data or masks, which was computationally expensive and prone to overfitting [12372-nerf-in-inpainting-optimization.md]. The field evolved with the integration of 2D generative models (e.g., Stable Diffusion, InstructPix2Pix) to provide strong priors for 3D consistency, leading to methods like RePaint-NeRF [14365-repaint-nerf.md] and NeRF-Art [13438-nerf-art.md]. Recent developments focus on efficient editing via feature fields [12491-nerf-editing-procedure.md] and adaptive view selection to balance 2D priors with multi-view geometry [12405-adaptive-view-selection-for-inpainting.md].
 
 ## Sources
 [S1] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
