@@ -1,0 +1,115 @@
+# Statistical Sensitivity-Driven Online Sparsification
+
+Also called: ACE-GS sparsification, sensitivity-based pruning
+
+## Overview
+Statistical Sensitivity-Driven Online Sparsification is a method for maintaining model compactness in 3D Gaussian Splatting by evaluating the actual contribution of each primitive within the optimization loop [S1, unofficial]. It solves the problem of prohibitive time costs associated with offline pruning by performing sparsification online, ensuring the model remains refined throughout training [S1, unofficial]. It differs from its parent, [Sensitivity Calculation and Pruning](11423-sensitivity-calculation-and-pruning.md), by specifically defining sensitivity as the expected gradient magnitude of the global photometric loss over a fixed accumulation window, rather than a general gradient of total image energy [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: The current set of 3D Gaussians, each with opacity $\alpha_i$; the global photometric loss $\mathcal{L}$; the sparsification lower-bound threshold $\tau_{\text{low}}$.
+- **Output**: A binary survival state $\mathcal{S}_i$ for each primitive $i$, indicating whether to keep or prune the primitive.
+
+**Data Structures**
+- **Primitive State**: Each Gaussian primitive $i$ maintains a statistical sensitivity score $S_i$.
+- **Accumulation Window**: A fixed window of optimization iterations is used to compute the expected value of the gradient magnitude. The exact size of this window is not specified in the sources [G: Typically, this implies a moving average or a fixed number of recent iterations, but the specific count is "Not given in the sources."].
+
+**Parameters**
+- **$\tau_{\text{low}}$**: The sparsification lower-bound threshold. It controls the compactness of the model. Set to 0.01 [S1, unofficial].
+
+**Steps**
+1. **Compute Gradient**: For each primitive $i$, compute the partial derivative of the loss function $\mathcal{L}$ with respect to its opacity $\alpha_i$, denoted as $\frac{\partial \mathcal{L}}{\partial \alpha_i}$ [S1, unofficial].
+2. **Calculate Sensitivity**: Compute the statistical sensitivity $S_i$ as the expected value of the absolute gradient magnitude over the fixed accumulation window [S1, unofficial]:
+   $$
+   S_i = \mathbb{E} \left[ \left| \frac{\partial \mathcal{L}}{\partial \alpha_i} \right| \right]
+   $$
+   where $\mathbb{E}$ denotes the expectation over the accumulation window [S1, unofficial].
+3. **Determine Survival State**: Compare $S_i$ against $\tau_{\text{low}}$ to determine the survival state $\mathcal{S}_i$:
+   $$
+   \mathcal{S}_i = \begin{cases} 
+   \text{keep} & \text{if } S_i \geq \tau_{\text{low}} \\
+   \text{prune} & \text{if } S_i < \tau_{\text{low}}
+   \end{cases}
+   $$
+   [S1, unofficial].
+4. **Prune**: Remove primitives where $\mathcal{S}_i = \text{prune}$ from the scene representation [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_statistical_sensitivity(primitives, loss_fn, accumulation_window):
+    """
+    Computes the statistical sensitivity for each primitive.
+    
+    Args:
+        primitives: List of Gaussian primitives, each with an opacity alpha_i.
+        loss_fn: Function that computes the global photometric loss given the scene.
+        accumulation_window: Number of recent iterations to average over.
+        
+    Returns:
+        sensitivities: Dictionary mapping primitive index to sensitivity score S_i.
+    """
+    sensitivities = {}
+    
+    # Initialize history for each primitive
+    # Note: The exact implementation of the accumulation window (e.g., fixed buffer vs. exponential moving average)
+    # is not specified in the sources. We assume a fixed buffer of recent gradient magnitudes.
+    history = {p.id: [] for p in primitives}
+    
+    # This function is called within the optimization loop
+    # We assume 'current_loss' and 'gradients' are available from the current iteration
+    def update_sensitivity(primitive, current_grad_mag):
+        history[primitive.id].append(current_grad_mag)
+        # Keep only the last 'accumulation_window' entries
+        if len(history[primitive.id]) > accumulation_window:
+            history[primitive.id].pop(0)
+        
+        # Compute expected value (mean) over the window
+        if len(history[primitive.id]) > 0:
+            sensitivities[primitive.id] = sum(history[primitive.id]) / len(history[primitive.id])
+        else:
+            sensitivities[primitive.id] = 0.0
+
+    return sensitivities, update_sensitivity
+
+def apply_online_sparsification(primitives, sensitivities, tau_low=0.01):
+    """
+    Prunes primitives based on their statistical sensitivity.
+    
+    Args:
+        primitives: List of Gaussian primitives.
+        sensitivities: Dictionary mapping primitive index to sensitivity score S_i.
+        tau_low: Sparsification lower-bound threshold.
+        
+    Returns:
+        kept_primitives: List of primitives to keep.
+    """
+    kept_primitives = []
+    for p in primitives:
+        s_i = sensitivities.get(p.id, 0.0)
+        if s_i >= tau_low:
+            kept_primitives.append(p)
+        # Else: prune (do not add to kept_primitives)
+    return kept_primitives
+```
+
+**Edge Cases and Pitfalls**
+- **Precision**: The computation of $\frac{\partial \mathcal{L}}{\partial \alpha_i}$ requires accurate gradient tracking. Numerical instability may arise if gradients are very small or very large [G: Standard floating-point precision issues apply].
+- **Boundaries**: The accumulation window must be large enough to provide a stable estimate of the expected value but small enough to reflect recent changes in the primitive's contribution [G: The exact window size is "Not given in the sources."].
+- **Degenerate Input**: If a primitive has never contributed to the loss (e.g., it is outside the view frustum), its gradient will be zero, leading to $S_i = 0$ and subsequent pruning [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Online sparsification is performed within the optimization loop, avoiding the prohibitive time cost of offline pruning [S1, unofficial]. The cost per iteration is proportional to the number of primitives, as each primitive's gradient and sensitivity must be updated [S1, unofficial].
+- **Memory Complexity**: Requires storing the history of gradient magnitudes for each primitive over the accumulation window [G: Memory usage is $O(N \cdot W)$ where $N$ is the number of primitives and $W$ is the window size].
+- **Measured Performance**: In the ACE-GS framework, this method significantly reduces training duration compared to existing baselines while maintaining superior rendering quality [S1, unofficial].
+- **Strengths**: Maintains model compactness without significant overhead; ensures the model remains refined throughout training [S1, unofficial].
+- **Limitations**: The choice of $\tau_{\text{low}}$ and the accumulation window size can impact performance. A threshold that is too low may retain unnecessary primitives, while a threshold that is too high may prune important primitives [G: These are general trade-offs for threshold-based pruning].
+- **When to Use**: Use when training time is a constraint and model compactness is desired [S1, unofficial].
+- **When Not to Use**: Use when offline pruning is feasible and computational resources are abundant, or when the accumulation window cannot be effectively defined [G: General advice].
+
+## Background
+Statistical Sensitivity-Driven Online Sparsification was introduced in the ACE-GS paper, which aims to balance accuracy, compactness, and efficiency in 3D Gaussian Splatting [S1, unofficial]. The method addresses the inherent blurring artifacts of Gaussian kernels and the need for efficient training by incorporating an online sparsification mechanism [S1, unofficial]. It is part of the ACE-GS framework, which also includes a Cross-Dimensional Residual Frequency Compensation module [S1, unofficial].
+
+## Sources
+[S1] ACE-GS: Acing the Trade-off with Accurate, Compact and Efficient 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.21244, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,132 @@
+--- v002.md
++++ v003.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-The cursor is defined by its geometric parameters. For a standard cross-hair/cross-plane cursor (as in VolumePro), the structure includes:
++The cursor is defined by its geometric parameters [S2, unofficial]. For a standard cross-hair/cross-plane cursor, the structure includes:
+ *   `origin`: $(x, y, z)$ coordinates in volume space.
+ *   `dimensions`: $(w_x, w_y, w_z)$ defining the length of the cursor arms along each axis.
+@@ -21,55 +21,61 @@
+ 
+ **Steps:**
+-1.  **Acquire Position:** Determine the 3D position of the cursor based on user input. In local interaction, this maps directly to the user's hand position [S1, unofficial]. In action-at-a-distance, it may follow a laser beam or virtual drone path [S1, unofficial].
+-2.  **Define Geometry:** Construct the cursor geometry. For a cross-hair, this involves defining line segments or thin boxes centered at `origin` with lengths `w_x`, `w_y`, `w_z` along the respective axes [S2, unofficial].
+-3.  **Render Cursor:** Render the cursor geometry into the frame buffer. The cursor is typically rendered after the volume data but before post-processing, or via alpha blending [S2, unofficial].
+-4.  **Blend:** Apply alpha blending to integrate the cursor into the volume visualization. The blending equation is standard:
+-    $$ C_{final} = C_{cursor} \cdot \alpha_{cursor} + C_{volume} \cdot (1 - \alpha_{cursor}) $$
+-    where $C$ is color and $\alpha$ is opacity [S2, unofficial].
+-5.  **Query Data (Optional):** If the cursor is a probe (e.g., Data Probe Widget), query the volume data $V(x,y,z)$ and its derivatives at the tip position [S3].
++1.  **Acquire Position:** Determine the 3D position of the cursor based on user input [S1, unofficial]. In local interaction, this maps directly to the user's hand position [S1, unofficial]. In action-at-a-distance, it may follow a laser beam or virtual drone path [S1, unofficial].
++2.  **Define Geometry:** Construct the cursor geometry from enabled axes, origin, dimensions, and attributes [S2, unofficial].
++3.  **Transform & Rasterize:** Project cursor primitives to clip space and rasterize them into the frame buffer [G].
++4.  **Blend:** Apply alpha blending to integrate the cursor into the volume visualization [S2, unofficial].
++5.  **Query Data (Optional):** If the cursor is a probe, query the volume data $V(x,y,z)$ and its derivatives at the tip position [S3].
+ 6.  **Feedback:** Display queried values in a transfer function widget or UI [S3].
+ 
+ **Pseudocode:**
+ ```python
++def create_axis_primitive(axis, origin, length, thickness, color):
++    half_len = length / 2.0
++    half_thick = thickness / 2.0
++    offsets = []
++    if axis == 'x': offsets = [(1, 1, 1), (1, 1, -1), (1, -1, -1), (1, -1, 1), (-1, 1, 1), (-1, 1, -1), (-1, -1, -1), (-1, -1, 1)]
++    elif axis == 'y': offsets = [(1, 1, 1), (1, 1, -1), (1, -1, -1), (1, -1, 1), (-1, 1, 1), (-1, 1, -1), (-1, -1, -1), (-1, -1, 1)]
++    else: offsets = [(1, 1, 1), (1, 1, -1), (1, -1, -1), (1, -1, 1), (-1, 1, 1), (-1, 1, -1), (-1, -1, -1), (-1, -1, 1)]
++    verts = [(origin[0] + o[0]*half_len, origin[1] + o[1]*half_thick, origin[2] + o[2]*half_thick) for o in offsets]
++    return {'verts': verts, 'color': color}
++
++def transform_to_clip_space(verts, view_mat, proj_mat):
++    clip_verts = []
++    for v in verts:
++        w = sum(view_mat[3][j]*v[j] for j in range(3)) + view_mat[3][3]
++        x = sum(view_mat[0][j]*v[j] for j in range(3)) + view_mat[0][3]
++        y = sum(view_mat[1][j]*v[j] for j in range(3)) + view_mat[1][3]
++        z = sum(view_mat[2][j]*v[j] for j in range(3)) + view_mat[2][3]
++        clip_verts.append((x/w, y/w, z/w))
++    return clip_verts
++
++def rasterize_and_blend(primitive, framebuffer):
++    alpha = primitive['color'][3]
++    for pixel in framebuffer:
++        framebuffer[pixel] = tuple(primitive['color'][k]*alpha + framebuffer[pixel][k]*(1-alpha) for k in range(3))
++
++def trilinear_interpolate(volume, pos):
++    # Standard trilinear interpolation [G]
++    return volume[pos]
++
++def compute_gradient(volume, pos):
++    # Central difference approximation [G]
++    return (volume[pos+(1,0,0)]-volume[pos-(1,0,0)], volume[pos+(0,1,0)]-volume[pos-(0,1,0)], volume[pos+(0,0,1)]-volume[pos-(0,0,1)])
++
+ def render_3d_cursor(cursor_pos, cursor_dims, cursor_attrs, volume_data, camera):
+-    """
+-    Renders a 3D cursor into the volume.
+-    cursor_pos: (x, y, z) float tuple
+-    cursor_dims: (wx, wy, wz) float tuple
+-    cursor_attrs: dict with keys 'enabled' (bool list), 'color' (list of tuples), 'thickness' (list of ints)
+-    volume_data: 3D array or texture
+-    camera: Camera object with view/projection matrices
+-    """
+-    # 1. Define cursor geometry based on enabled axes
+     cursor_primitives = []
+     for i, axis in enumerate(['x', 'y', 'z']):
+         if cursor_attrs['enabled'][i]:
+-            # Create a thin box or line segment along the axis
+-            # Centered at cursor_pos
+-            # Length = cursor_dims[i]
+-            # Thickness = cursor_attrs['thickness'][i]
+-            # Color = cursor_attrs['color'][i]
+-            primitive = create_axis_primitive(axis, cursor_pos, cursor_dims[i], 
+-                                            cursor_attrs['thickness'][i], 
++            primitive = create_axis_primitive(axis, cursor_pos, cursor_dims[i],
++                                            cursor_attrs['thickness'][i],
+                                             cursor_attrs['color'][i])
+             cursor_primitives.append(primitive)
+-
+-    # 2. Transform primitives to clip space
+     clip_primitives = []
+     for prim in cursor_primitives:
+-        # Transform vertices using camera view and projection matrices
+-        transformed = transform_to_clip_space(prim, camera)
+-        clip_primitives.append(transformed)
+-
+-    # 3. Rasterize and Blend
+-    # Render primitives with alpha blending enabled
+-    # Depth test should be enabled to occlude volume behind cursor if desired,
+-    # or disabled if cursor should always be visible on top.
++        clip_verts = transform_to_clip_space(prim['verts'], camera.view_mat, camera.proj_mat)
++        clip_primitives.append({'verts': clip_verts, 'color': prim['color']})
+     for prim in clip_primitives:
+-        rasterize_and_blend(prim, alpha=1.0) # Alpha handled by primitive color
+-
+-    # 4. Query Data if Probe Mode
++        rasterize_and_blend(prim, camera.framebuffer)
+     if cursor_attrs.get('probe_mode', False):
+-        # Interpolate volume data at cursor_pos
+         val = trilinear_interpolate(volume_data, cursor_pos)
+         grad = compute_gradient(volume_data, cursor_pos)
+@@ -93,5 +99,5 @@
+ 
+ ### Go-Go Technique
+-A selection technique enhancing 3D cursor range for distant objects using a non-linear arm-growing metaphor [S1, unofficial]. For nearby objects, virtual hand movement maps directly to real hand movement. When the user extends their hand beyond 2/3 of their arm length, the mapping becomes non-linear, and the virtual arm grows to reach remote objects, overcoming the arm's-length limitation of standard cursors [S1, unofficial].
++A selection technique enhancing 3D cursor range for distant objects using a non-linear arm-growing metaphor [S1, unofficial]. For nearby objects, virtual hand movement maps directly to real hand movement [S1, unofficial]. When the user extends their hand beyond 2/3 of their arm length, the mapping becomes non-linear, and the virtual arm grows to reach remote objects, overcoming the arm's-length limitation of standard cursors [S1, unofficial].
+ 
+ ### Silk Cursor
+@@ -99,10 +105,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(N_c)$ where $N_c$ is the number of cursor primitives (typically constant, e.g., 3 for cross-hair). Data querying is $O(1)$ with trilinear interpolation.
+-*   **Memory Complexity:** $O(1)$ for cursor state.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Hardware-accelerated cursors (like in VolumePro) are efficient, leveraging dedicated ASIC pipelines [S2, unofficial].
+-*   **Strengths:** Direct, intuitive selection; supports both local and distant interaction; provides immediate visual feedback on spatial relationships [S1, S2, unofficial].
+-*   **Limitations:** Range limited by input device or technique (e.g., Go-Go mitigates this); depth ambiguity can occur without features like the Silk Cursor's lining [S1, unofficial].
+-*   **When to use:** For precise selection of specific points or features within a volume, or for exploring spatial relationships. Not suitable for global volume modification.
++*   **Strengths:** Supports both local and distant interaction [S1, unofficial]. Provides immediate visual feedback on spatial relationships [S2, unofficial].
++*   **Limitations:** Range limited by input device or technique (e.g., Go-Go mitigates this) [S1, unofficial]. Depth ambiguity can occur without features like the Silk Cursor's lining [S1, unofficial].
++*   **When to use:** Not given in the sources.
++*   **Not suitable for global volume modification:** Not given in the sources.
+ 
+ ## Background

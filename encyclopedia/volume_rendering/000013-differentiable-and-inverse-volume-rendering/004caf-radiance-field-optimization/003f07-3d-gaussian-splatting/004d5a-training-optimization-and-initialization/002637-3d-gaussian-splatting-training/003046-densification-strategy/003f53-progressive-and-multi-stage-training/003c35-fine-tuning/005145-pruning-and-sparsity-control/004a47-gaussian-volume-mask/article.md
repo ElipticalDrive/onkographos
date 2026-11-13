@@ -3,165 +3,166 @@
 Also called: Learnable volume and transparency masking, Masking based on volume and transparency, Volume-based masking
 
 ## Overview
-Gaussian Volume Mask is a densification strategy for 3D Gaussian Splatting that reduces the number of active Gaussians by applying binary masks to scale and opacity attributes based on a learnable parameter [S1]. It addresses the excessive memory and storage requirements caused by the proliferation of Gaussians during training, which often include redundant primitives with negligible volume or transparency [S1]. Unlike original 3DGS, which relies solely on opacity-based control and stops densifying in the middle of training, this method consistently masks out unessential Gaussians throughout the entire process by considering both geometric volume and transparency [S1].
+Gaussian Volume Mask is a pruning and sparsity control technique for 3D Gaussian Splatting that reduces the number of active Gaussian primitives by applying binary masks to their scale (volume) and opacity (transparency) attributes [S1]. Unlike the original 3D Gaussian Splatting method, which relies primarily on opacity thresholds to eliminate redundant Gaussians, this method jointly considers geometric volume and transparency, identifying Gaussians that contribute negligibly to the rendered image due to either small size or low visibility [S1]. It sets itself apart from sibling methods like Visibility-Based Pruning by introducing a learnable parameter for masking that is optimized alongside the scene, allowing for continuous sparsity control throughout the entire training process rather than just at densification intervals [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** The set of $N$ Gaussians, each defined by position, rotation, scale $s_n \in \mathbb{R}^3_+$, opacity $o_n \in [0, 1]$, and a learnable mask parameter $m_n \in \mathbb{R}$.
-*   **Outputs:** Masked scale $\tilde{s}_n$, masked opacity $\tilde{o}_n$, and a binary mask $M_n \in \{0, 1\}$ for each Gaussian.
+*   **Input:** The set of $N$ Gaussians, each defined by position, rotation, scale $s_n \in \mathbb{R}^3_+$, opacity $o_n \in [0, 1]$, and color. A learnable mask parameter $m_n \in \mathbb{R}$ for each Gaussian.
+*   **Output:** A pruned set of Gaussians with modified scale $\tilde{s}_n$ and opacity $\tilde{o}_n$, and a binary mask $M_n \in \{0, 1\}$ indicating whether the Gaussian is active.
 
 **Data Structures:**
-*   **Gaussian Attributes:** Standard 3DGS attributes. Scale $s_n$ is non-negative. Opacity $o_n$ is in $[0, 1]$.
-*   **Mask Parameter:** A learnable vector $m \in \mathbb{R}^N$, one scalar per Gaussian.
-*   **Binary Mask:** $M \in \{0, 1\}^N$.
-
-**Parameters:**
-*   $\epsilon$: Masking threshold used in the indicator function. Not given in the sources.
-*   $\lambda_m$: Control factor for the masking loss. Typical values are $5 \times 10^{-4}$ for real scenes and $4 \times 10^{-3}$ for synthetic scenes [S1].
-*   Learning Rate for $m$: $1 \times 10^{-2}$ for real scenes, $1 \times 10^{-3}$ for synthetic scenes [S1].
-
-**Formulas:**
-The binary mask $M_n$ for Gaussian $n$ is calculated using a straight-through estimator to allow gradient flow through the binarization [S1]:
-
-$$
-M_n = \text{sg}(\mathbb{1}[\sigma(m_n) > \epsilon] - \sigma(m_n)) + \sigma(m_n)
-$$
-
-where:
-*   $\text{sg}(\cdot)$ is the stop-gradient operator.
-*   $\mathbb{1}[\cdot]$ is the indicator function (1 if true, 0 if false).
-*   $\sigma(\cdot)$ is the sigmoid function.
-*   $\epsilon$ is the masking threshold.
-
-The masked scale $\tilde{s}_n$ and masked opacity $\tilde{o}_n$ are computed as:
-
-$$
-\tilde{s}_n = M_n s_n
-$$
-$$
-\tilde{o}_n = M_n o_n
-$$
-
-The masking loss $L_m$ is defined as the mean of the sigmoid of the mask parameters, encouraging the elimination of Gaussians:
-
-$$
-L_m = \frac{1}{N} \sum_{n=1}^{N} \sigma(m_n)
-$$
+*   **Mask Parameter ($m$):** A vector of size $N$ containing learnable scalar values, one per Gaussian. Initialized to zero or small random values.
+*   **Binary Mask ($M$):** A vector of size $N$ with values 0 or 1, computed from $m$ during the forward pass.
 
 **Numbered Steps:**
-1.  **Initialize:** For each Gaussian $n$, initialize the learnable mask parameter $m_n$.
-2.  **Compute Mask:** Calculate the binary mask $M_n$ using the formula above. Note that during the backward pass, gradients flow through $\sigma(m_n)$, while the forward pass uses the hard binary value $M_n$ [S1].
-3.  **Apply Mask:** Compute the effective scale $\tilde{s}_n$ and opacity $\tilde{o}_n$ by multiplying the original attributes by $M_n$.
-4.  **Render:** Use $\tilde{s}_n$ and $\tilde{o}_n$ for projection and rasterization.
-5.  **Loss Calculation:** Compute the masking loss $L_m$ and add it to the total training loss, weighted by $\lambda_m$ [S1].
-6.  **Elimination:** At every densification interval, eliminate Gaussians where $M_n = 0$ [S1].
-7.  **Consistency:** Unlike standard 3DGS, continue this masking and elimination process throughout the entire training duration [S1].
-8.  **Post-Training:** After training, remove all Gaussians with $M_n = 0$ and discard the mask parameter $m$ to save storage [S1].
+
+1.  **Compute Binary Mask:** For each Gaussian $n$, compute the binary mask $M_n$ using a straight-through estimator to allow gradient flow through the binarization operation [S1]:
+    $$ M_n = \text{sg}(1[\sigma(m_n) > \epsilon] - \sigma(m_n)) + \sigma(m_n) $$
+    where:
+    *   $\text{sg}(\cdot)$ is the stop-gradient operator.
+    *   $1[\cdot]$ is the indicator function (1 if true, 0 if false).
+    *   $\sigma(\cdot)$ is the sigmoid function.
+    *   $\epsilon$ is the masking threshold (a hyperparameter).
+    *   $m_n$ is the learnable mask parameter for Gaussian $n$.
+
+2.  **Apply Masking to Attributes:** Multiply the original scale and opacity by the binary mask to obtain the masked attributes used in rendering [S1]:
+    $$ \tilde{s}_n = M_n s_n $$
+    $$ \tilde{o}_n = M_n o_n $$
+    If $M_n = 0$, the Gaussian's scale and opacity become zero, effectively removing it from the rendering process.
+
+3.  **Compute Masking Loss:** Calculate the masking loss $L_m$ to regularize the number of active Gaussians and encourage sparsity [S1]:
+    $$ L_m = \frac{1}{N} \sum_{n=1}^{N} \sigma(m_n) $$
+    This loss is added to the total training loss. The coefficient $\lambda_m$ controls the strength of this regularization.
+
+4.  **Eliminate Gaussians:** At every densification interval, identify Gaussians where $M_n = 0$ (or $\sigma(m_n) \le \epsilon$) and remove them from the scene representation [S1]. This step is performed consistently throughout the entire training process, unlike original 3DGS which stops densifying and pruning in the middle of training [S1].
+
+5.  **Post-Training Cleanup:** After training is complete, permanently remove all Gaussians with $M_n = 0$ and discard the mask parameter $m$ to save storage [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-x))
-
-def gaussian_volume_mask_forward(m, s, o, epsilon):
+def gaussian_volume_mask_step(gaussians, mask_params, epsilon, lambda_m):
     """
-    Forward pass: compute masked attributes using binary mask.
-    m: learnable mask parameter, shape (N,)
-    s: scale, shape (N, 3)
-    o: opacity, shape (N,)
-    epsilon: threshold for binarization
-    """
-    # Compute sigmoid probability
-    prob = sigmoid(m)
+    Performs one step of Gaussian Volume Masking.
     
-    # Compute binary mask
-    # Indicator function: 1 if prob > epsilon, else 0
-    indicator = (prob > epsilon).astype(np.float32)
+    Args:
+        gaussians: Object containing attributes for N Gaussians.
+                   gaussians.scale: (N, 3) array of scales.
+                   gaussians.opacity: (N, 3) array of opacities (RGB).
+        mask_params: (N,) array of learnable mask parameters m_n.
+        epsilon: Float, masking threshold.
+        lambda_m: Float, weight for masking loss.
+        
+    Returns:
+        masked_gaussians: Object with masked scale and opacity.
+        masking_loss: Float, value of L_m.
+    """
+    import numpy as np
+    from scipy.special import expit # Sigmoid function
     
-    # Binary mask M_n
-    # Note: In forward pass, we use the hard binary value for rendering
-    M = indicator
+    N = len(gaussians.scale)
     
-    # Apply mask to scale and opacity
-    # s is (N, 3), M is (N,), broadcast M to (N, 1)
-    masked_s = s * M[:, np.newaxis]
-    masked_o = o * M
+    # Step 1: Compute Binary Mask using Straight-Through Estimator
+    # Compute sigmoid of mask parameters
+    sigma_m = expit(mask_params)
     
-    return masked_s, masked_o, M
+    # Compute indicator function: 1 if sigma(m_n) > epsilon, else 0
+    indicator = (sigma_m > epsilon).astype(np.float32)
+    
+    # Compute the straight-through estimator
+    # Forward pass uses the binary mask (indicator)
+    # Backward pass uses the sigmoid (sigma_m)
+    # M_n = sg(indicator - sigma_m) + sigma_m
+    # Note: sg() stops gradients, so the gradient flows through sigma_m
+    # In practice, this is implemented as:
+    #   forward: M = indicator
+    #   backward: grad = grad_sigma_m * (1 - indicator) + grad_indicator * 0 
+    #   But the formula given is M = sg(indicator - sigma_m) + sigma_m
+    #   This simplifies to: if indicator=1, M=1; if indicator=0, M=0.
+    #   The gradient w.r.t m_n is: dM/dm_n = d(sigma_m)/dm_n * (1 - indicator) 
+    #   because sg() stops the gradient from the indicator part.
+    
+    binary_mask = indicator
+    
+    # Step 2: Apply Masking to Attributes
+    # Masked scale: s_tilde = M * s
+    masked_scale = binary_mask[:, np.newaxis] * gaussians.scale
+    
+    # Masked opacity: o_tilde = M * o
+    # Note: opacity is (N, 3), mask is (N,)
+    masked_opacity = binary_mask[:, np.newaxis] * gaussians.opacity
+    
+    # Step 3: Compute Masking Loss
+    # L_m = (1/N) * sum(sigma(m_n))
+    masking_loss = np.mean(sigma_m) * lambda_m
+    
+    # Create a new Gaussian object with masked attributes
+    masked_gaussians = Gaussians(
+        position=gaussians.position,
+        rotation=gaussians.rotation,
+        scale=masked_scale,
+        opacity=masked_opacity,
+        color=gaussians.color
+    )
+    
+    return masked_gaussians, masking_loss
 
-def gaussian_volume_mask_backward(m, epsilon):
+def prune_gaussians(gaussians, mask_params, epsilon):
     """
-    Backward pass: compute gradients for m using straight-through estimator.
-    Gradients flow through the sigmoid term, not the binary mask.
+    Removes Gaussians where the binary mask is 0.
+    
+    Args:
+        gaussians: Current Gaussian object.
+        mask_params: (N,) array of learnable mask parameters.
+        epsilon: Float, masking threshold.
+        
+    Returns:
+        pruned_gaussians: New Gaussian object with only active Gaussians.
     """
-    # The gradient of the loss w.r.t M is zero in forward, 
-    # but we pass gradients through sigma(m) as per straight-through estimator.
-    # The term passed is sigma(m).
-    # So dL/dm = dL/d(sigma(m)) * d(sigma(m))/dm
-    # This is handled by the autograd engine if we define the forward as sigma(m)
-    # but here we just return the value that gradients flow through.
-    return sigmoid(m)
-
-def compute_masking_loss(m, lambda_m):
-    """
-    Compute the masking loss L_m.
-    """
-    N = len(m)
-    loss = np.mean(sigmoid(m))
-    return lambda_m * loss
-
-def eliminate_gaussians(m, epsilon):
-    """
-    Identify Gaussians to eliminate.
-    """
-    prob = sigmoid(m)
-    # Eliminate if prob <= epsilon
-    to_remove = prob <= epsilon
-    return to_remove
+    import numpy as np
+    from scipy.special import expit
+    
+    sigma_m = expit(mask_params)
+    binary_mask = (sigma_m > epsilon).astype(bool)
+    
+    # Filter Gaussians
+    pruned_gaussians = Gaussians(
+        position=gaussians.position[binary_mask],
+        rotation=gaussians.rotation[binary_mask],
+        scale=gaussians.scale[binary_mask],
+        opacity=gaussians.opacity[binary_mask],
+        color=gaussians.color[binary_mask]
+    )
+    
+    return pruned_gaussians
 ```
 
+**Parameters:**
+*   $\epsilon$: Masking threshold. Not given in the sources.
+*   $\lambda_m$: Control factor for the number of Gaussians. Typical values are $5 \times 10^{-4}$ for real scenes and $4 \times 10^{-3}$ for synthetic scenes [S1].
+
 **Edge Cases and Pitfalls:**
-*   **Precision:** The straight-through estimator requires careful implementation to ensure gradients flow correctly through the non-differentiable binarization step [S1].
-*   **Threshold $\epsilon$:** The value of $\epsilon$ is not specified in the sources. It must be chosen to balance between aggressive pruning and retaining necessary Gaussians.
-*   **Degenerate Input:** If all Gaussians are masked out, rendering fails. The loss term $L_m$ encourages sparsity but does not guarantee a minimum number of Gaussians. [G] A safeguard to ensure at least a small number of Gaussians remain might be necessary in practice, though not specified in the source.
+*   **Precision:** The straight-through estimator requires careful implementation to ensure gradients flow correctly to $m_n$ without being blocked by the binarization [S1].
+*   **Boundaries:** The threshold $\epsilon$ must be chosen carefully. If too high, too many Gaussians are pruned, degrading quality. If too low, insufficient pruning occurs [S1].
+*   **Degenerate Input:** Gaussians with zero scale or opacity are effectively masked out. The method assumes that small-scale Gaussians are negligible, which is generally true for 3D Gaussian Splatting [S1].
 
 ## Subtopics
 
-### Exponentially Ascending Gradient Threshold
-Uses gradient magnitude thresholds that increase over time to control densification. [Link](9684-exponentially-ascending-gradient-threshold.md)
-
-### Hard Gaussian Splatting
-Enforces hard constraints on Gaussian attributes. [Link](10590-hard-gaussian-splatting.md)
-
-### SplatFormer Training Objective & Refinement
-Uses a transformer-based approach for training and refinement. [Link](11745-splatformer-training-objective-refinement.md)
-
-### MCMC-based 3DGS / SGLD for 3DGS
-Uses Markov Chain Monte Carlo and Stochastic Gradient Langevin Dynamics for optimization. [Link](11917-mcmc-based-3dgs-sgld-for-3dgs.md)
-
-### Deblurring 3D Gaussian Splatting
-Focuses on handling motion blur and defocus. [Link](12318-deblurring-3d-gaussian-splatting.md)
-
-### Supplementary Point Addition for Sparse Point Clouds
-Adds points to improve initialization in sparse scenarios. [Link](12323-supplementary-point-addition-for-sparse-point-clouds.md)
+### Visibility-Based Pruning for 3D Gaussian Splatting
+A sibling method that prunes Gaussians based on their visibility in rendered images rather than volume and transparency. Choose this when visibility is a more reliable indicator of redundancy than geometric size. [Visibility-Based Pruning for 3D Gaussian Splatting](14019-visibility-based-pruning-for-3d-gaussian-splatting.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Training time is slightly increased compared to original 3DGS due to the iteration over neural fields and R-VQ search, but rendering time is reduced due to fewer Gaussians [S1].
-*   **Memory Complexity:** Significantly reduced memory usage due to the elimination of redundant Gaussians [S1].
-*   **Measured Performance:** On the Bonsai scene, the method achieves 2.42x fewer Gaussians while maintaining similar PSNR (29.91 vs 29.87) and reducing training time (17m 51s vs 19m 22s) and increasing FPS (254 vs 154) [S1].
-*   **Scaling:** The method scales well with the number of Gaussians, as it actively prunes them.
-*   **Strengths:** Effective reduction in Gaussian count, reduced training and rendering times, consistent masking throughout training.
-*   **Limitations:** Slightly longer training time due to additional computations. Requires tuning of $\lambda_m$ and $\epsilon$.
-*   **When to Use:** When memory and storage are constrained, or when faster rendering is desired without significant loss in quality.
-*   **When Not to Use:** When maximum possible quality is required and computational resources are abundant.
+*   **Time and Memory Complexity:** The method adds a small overhead for computing the mask and loss, but significantly reduces the number of Gaussians $N$, leading to faster rendering and training times [S1]. Memory usage is reduced due to fewer Gaussians and the ability to discard the mask parameter $m$ after training [S1].
+*   **Measured Performance:** On the Bonsai scene, the method achieves 2.42x fewer Gaussians while maintaining similar PSNR (29.91 vs 29.87) and reducing training time (17m 51s vs 19m 22s) and increasing FPS (254 vs 154) [S1]. On default scene evaluation, masking with $\lambda_m=0.0005$ reduces Gaussians from 629,837 to 311,786 with PSNR 31.50 [S1].
+*   **Scaling:** The method scales well with the number of Gaussians, as the pruning is applied per-Gaussian and the loss is averaged [S1].
+*   **Strengths and Limitations:** Strengths include effective reduction of redundant Gaussians, faster training and rendering, and consistent sparsity control throughout training [S1]. Limitations include the need to tune $\lambda_m$ and $\epsilon$, and the potential for over-pruning if parameters are not set correctly [S1].
+*   **When to Use:** Use this method when memory and storage are constraints, and when the scene contains many small or transparent Gaussians that contribute little to the final image [S1].
+*   **When Not to Use:** Avoid if the scene requires high-fidelity representation of small details that might be incorrectly pruned, or if the overhead of learning the mask parameters is prohibitive [S1].
 
 ## Background
-Gaussian Volume Mask was proposed in the paper "Compact 3D Gaussian Representation for Radiance Field" [S1]. It addresses the issue of excessive Gaussian proliferation in 3D Gaussian Splatting, which leads to high memory and storage costs. The method builds on the observation that many Gaussians have negligible volume or transparency and can be safely removed. It is used in the context of compact 3D Gaussian representations to improve efficiency.
+Gaussian Volume Mask was proposed in the paper "Compact 3D Gaussian Representation for Radiance Field" [S1]. It addresses the high memory and storage costs associated with the large number of Gaussians in 3D Gaussian Splatting [S1]. The method builds on the observation that many Gaussians have negligible volume or transparency and can be safely removed without significant quality loss [S1]. It extends the original 3DGS densification and pruning strategy by introducing a learnable mask that is optimized throughout the training process [S1].
 
 ## Sources
 [S1] Compact 3D Gaussian Representation for Radiance Field, https://doi.org/10.1109/cvpr52733.2024.02052, fetched 2026-10-26

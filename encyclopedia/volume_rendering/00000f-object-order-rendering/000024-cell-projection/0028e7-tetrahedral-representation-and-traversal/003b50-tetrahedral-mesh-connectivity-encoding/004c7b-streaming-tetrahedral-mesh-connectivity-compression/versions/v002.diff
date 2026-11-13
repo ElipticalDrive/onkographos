@@ -1,0 +1,238 @@
+--- v001.md
++++ v002.md
+@@ -1,82 +1,176 @@
+ # Streaming Tetrahedral Mesh Connectivity Compression
+ 
+-Also called: Isenburg et al. connectivity compression, Predictive Geometry Compression for Tetrahedral Meshes, SCTVM, Streaming Tet Mesh Compression, Streaming Tetrahedral Mesh Compression, Streaming Vertex Position Compression
++Also called: Isenburg et al. connectivity compression, Predictive Geometry Compression for Tetrahedral Meshes, SCTVM, Streaming Tet Mesh Compression, Streaming Vertex Position Compression
+ 
+ ## Overview
+-Streaming Tetrahedral Mesh Connectivity Compression is a method for compressing tetrahedral volume meshes by incrementally encoding tetrahedra and vertices as they stream in, allowing memory to be freed immediately after use [S1, unofficial]. It solves the problem of processing gigabyte-sized meshes that exceed main memory capacity by avoiding the need to keep the entire uncompressed mesh in memory [S1, unofficial]. It sets itself apart from in-core methods like [Gumhold et al.](4567-gumhold-tetrahedral-mesh-compression.md) by processing data in a streaming fashion with a small delay buffer for local reordering, achieving connectivity rates within a factor of two of the state-of-the-art while using drastically less memory [S1, unofficial].
++Streaming Tetrahedral Mesh Connectivity Compression is an algorithm for compressing tetrahedral volume meshes by incrementally encoding tetrahedra and vertices as they stream in, allowing memory to be freed immediately after use [S1, unofficial]. It solves the problem of compressing gigabyte-sized meshes that do not fit in main memory by avoiding the need to keep the entire uncompressed mesh in memory [S1, unofficial]. It sets itself apart from in-core methods like [Tetrahedral Mesh Connectivity Encoding](8957-tetrahedral-mesh-connectivity-encoding.md) by processing data in a streaming fashion with a small delay buffer for local reordering, and from [Implicit Connectivity Mesh (ICM)](11226-implicit-connectivity-mesh-icm.md) by explicitly managing active vertex finalization and dynamic indexing based on stream width rather than global indices [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A stream of tetrahedra and vertices. The stream may be interleaved or block-ordered, but must provide explicit finalization tags indicating the last reference to each vertex [S1, unofficial].
+-- Output: A bit stream containing connectivity opcodes, dynamic indices, and compressed vertex positions [S1, unofficial].
++- Input: A stream of tetrahedra and vertices. The stream can be interleaved or block-based, but must be reasonably coherent.
++- Output: A bit stream containing connectivity opcodes, dynamic indices, and compressed vertex positions.
+ 
+ **Data Structures:**
+-The compressor maintains a set of **active vertices** and **active half-edges** representing the "cut-border" between compressed and uncompressed regions [S1, unofficial].
+-- **Active Half-Edge:** Stores:
+-  1. A pointer to its origin vertex.
+-  2. A pointer to the next half-edge of the tetrahedral face it lives in.
+-  3. A copy of the position of the tip vertex (the non-incident fourth vertex of the tetrahedron that "created" the face) [S1, unofficial].
+-- **Active Vertex:** Stores a list of pointers to the active half-edges for which the vertex is the origin [S1, unofficial].
+-- **Dynamic Vector:** A list of all currently active vertices, used for dynamic indexing [S1, unofficial].
+-- **Delay Buffer:** A buffer holding up to $N$ tetrahedra (typically 10,000) to allow local reordering [S1, unofficial].
++- **Active Vertices:** Stored in a dynamic vector. Each vertex is active from the moment it is first referenced until it is finalized.
++- **Active Half-Edges:** Linked into units of three describing oriented faces. Each active half-edge stores:
++    1. A pointer to its origin vertex.
++    2. A pointer to the next half-edge of the tetrahedral face it lives in.
++    3. A copy of the position of the tip vertex (the non-incident fourth vertex of the tetrahedron that "created" the face) [S1, unofficial].
++- **Vertex Lists:** Each active vertex stores a list of pointers to the active half-edges for which the vertex is the origin [S1, unofficial].
++- **Delay Buffer:** A circular buffer holding up to $N$ tetrahedra (typically 10,000) to allow local reordering [S1, unofficial].
+ 
+ **Parameters:**
+-- **Delay Buffer Size ($N$):** Typically 10,000 tetrahedra [S1, unofficial].
++- **Delay Buffer Size ($N$):** Typically 10,000 tetrahedra. Smaller sizes (100, 1,000) reduce memory but increase bit rates due to less sharing [S1, unofficial].
+ - **Quantization Precision:** User-defined, typically 16 bits per coordinate [S1, unofficial].
+-- **Stream Width ($w$):** The current number of active vertices in memory [S1, unofficial].
++- **Stream Width ($w$):** The maximal number of vertices in memory simultaneously. Dynamic indices use $\lceil \log_2 w \rceil$ bits [S1, unofficial].
+ 
+-**Algorithm Steps:**
++**Steps:**
++1. **Initialization:** Initialize the delay buffer, active vertex list, and half-edge structures.
++2. **Buffering:** Read tetrahedra from the input stream into the delay buffer.
++3. **Reordering:** Select the next tetrahedron from the buffer that maximizes sharing (face, edge, or vertex) with the previously compressed tetrahedron [S1, unofficial].
++4. **Configuration Detection:** Determine the configuration of the selected tetrahedron relative to the active cut-border. Classify it as one of five labels: START, ADD, JOIN, FLIP, or FILL [S1, unofficial].
++5. **Connectivity Encoding:**
++    - Encode the configuration label using an arithmetic coder with context switching based on the previous label [S1, unofficial].
++    - **START:** Topologically rotate so active vertices come before new ones. Encode the count of active vertices. Address non-shared active vertices via dynamic indexing ($\log_2 w$ bits). Compress new vertices with predictive coding and add to the dynamic vector [S1, unofficial].
++    - **ADD:** Ideally, the active face is shared with the previous tetrahedron. If not, share an edge or vertex. Otherwise, address one vertex via dynamic indexing. Address remaining vertices using local indices into active half-edge lists of known vertices or the intersection of two known vertices' lists. Compress the new vertex and add to the dynamic vector [S1, unofficial].
++    - **JOIN:** Like ADD, but also needs to address the fourth vertex. Can be done locally through half-edge lists of the active face vertices. Otherwise, use dynamic indexing [S1, unofficial].
++    - **FLIP:** One face is addressed like an ADD. The other face is specified locally within the intersection of half-edge lists maintained with the two vertices shared by both faces [S1, unofficial].
++    - **FILL:** One face is addressed like an ADD. The other two faces are addressed using half-edge lists of known vertices. This also covers the case where all four faces are active [S1, unofficial].
++    - **Local Indexing:** If a vertex is reachable via an active half-edge, reference it locally within the list of half-edges maintained by a known vertex, or within the intersection of lists of two already known vertices. If an intersection results in only one correctly oriented face, no further information is stored for that face [S1, unofficial].
++6. **Finalization Encoding:** For each of the four vertices of the current tetrahedron, specify whether it is finalized (referenced for the last time) using context-sensitive arithmetic coding. The context is based on the total number of tetrahedra referencing the vertex and the current number of active half-edges around it [S1, unofficial].
++7. **Memory Management:** If a vertex is finalized, remove it from the active vertex list and deallocate its associated half-edges [S1, unofficial].
++8. **Geometry Compression:** When a new vertex is encountered, compress its position:
++    - Quantize the floating-point position to the user-defined precision (e.g., 16 bits per coordinate) [S1, unofficial].
++    - Predict the position based on known neighbors using a predictor (e.g., Midpoint, Mirror, Heightmirror, Baseheight) [S1, unofficial].
++    - Calculate the correction vector (actual position - predicted position) [S1, unofficial].
++    - Optionally, express the correction vector in a local coordinate system (one axis along the base triangle's normal, origin at the midpoint) to separate normal and tangential errors [S1, unofficial].
++    - Encode the correction vector [S1, unofficial].
++9. **Loop:** Repeat steps 2-8 until the stream is exhausted.
+ 
+-1. **Initialization:** Initialize the arithmetic coder. Initialize the delay buffer. Initialize the active vertex list and half-edge structures as empty.
++**Formulas:**
++- **Mirror Rule Prediction:** $P = 2M - A$, where $M$ is the midpoint (centroid) of the known base triangle of the tetrahedron, and $A$ is the tip vertex of the already known tetrahedron sharing the base [S1, unofficial].
++- **Midpoint Rule Prediction:** $P = M$, where $M$ is the midpoint (centroid) of the known base triangle of the tetrahedron [S1, unofficial].
+ 
+-2. **Stream Processing Loop:** For each tetrahedron $T$ arriving in the stream:
+-   a. **Reordering:** If the delay buffer is not empty, select the next tetrahedron to encode from the buffer. The selection heuristic prioritizes tetrahedra that share a face, edge, or vertex with the previously encoded tetrahedron to maximize coherence [S1, unofficial].
+-   b. **Configuration Detection:** Determine the configuration of $T$ relative to the active cut-border. Classify $T$ into one of five labels:
+-      - **START:** $T$ has up to four active vertices. No faces are shared with the previous tetrahedron.
+-      - **ADD:** $T$ shares an active face with the previous tetrahedron.
+-      - **JOIN:** $T$ shares an active edge with the previous tetrahedron.
+-      - **FLIP:** $T$ shares two vertices with the previous tetrahedron, forming a flip across a common edge.
+-      - **FILL:** $T$ shares three vertices (a face) with the previous tetrahedron, or all four faces are active [S1, unofficial].
+-   c. **Context Switching:** Switch the arithmetic coding context based on the previous configuration label to exploit correlation [S1, unofficial].
+-   d. **Encode Configuration Label:** Encode the label (START, ADD, JOIN, FLIP, FILL) using the arithmetic coder [S1, unofficial].
+-   e. **Address Vertices:**
+-      - **Shared Elements:** Check if $T$ shares a face, edge, or vertex with the previous tetrahedron. If so, encode which one. This avoids specifying global indices [S1, unofficial].
+-      - **Dynamic Indexing:** For active vertices not addressed via sharing, use dynamic indexing. Each index requires $\lceil \log_2 w \rceil$ bits, where $w$ is the current number of active vertices [S1, unofficial].
+-      - **Local Indexing:** If vertices are reachable via active half-edges, reference them locally within the half-edge list of a known vertex or the intersection of two known vertices' lists. If an intersection results in only one correctly oriented face, no further information is stored for that face [S1, unofficial].
+-      - **New Vertices:** For any new vertices in $T$, compress their positions (see Geometry Compression below) and add them to the dynamic vector. Increment $w$ [S1, unofficial].
+-   f. **Encode Finalization:** For each of the four vertices of $T$, encode a binary choice: finalized or not. The context for this arithmetic coding is chosen based on:
+-      - The total number of tetrahedra that have referenced this vertex so far.
+-      - The current number of active half-edges around this vertex [S1, unofficial].
+-   g. **Memory Management:** If a vertex is marked as finalized, remove it from the active vertex list and deallocate its associated half-edges and data structures. Decrement $w$ if the vertex was in the dynamic vector [S1, unofficial].
+-   h. **Buffer Management:** If the delay buffer is full, flush the oldest tetrahedron or replace it based on the reordering heuristic [S1, unofficial].
++**Pseudocode:**
++```python
++def streaming_tet_compression(input_stream, delay_buffer_size=10000, quantization_bits=16):
++    active_vertices = []  # List of active vertex objects
++    active_half_edges = []  # List of active half-edge objects
++    delay_buffer = []  # Circular buffer for tetrahedra
++    compressed_bits = []  # Output bit stream
++    
++    # Helper to get dynamic index bits
++    def get_dynamic_index_bits():
++        return ceil(log2(len(active_vertices))) if active_vertices else 0
+ 
+-3. **Geometry Compression (Vertex Position Encoding):**
+-   When a new vertex $V$ is encountered:
+-   a. **Quantization:** Quantize the floating-point position of $V$ to the user-defined precision (e.g., 16 bits per coordinate) [S1, unofficial].
+-   b. **Prediction:** Predict the position $P$ based on known neighbor vertices. Common predictors include:
+-      - **Midpoint Rule:** $P = M$, where $M$ is the midpoint (centroid) of the known base triangle of the tetrahedron [S1, unofficial].
+-      - **Mirror Rule:** $P = 2M - A$, where $M$ is the midpoint of the known base triangle and $A$ is the tip vertex of the already known tetrahedron sharing the base [S1, unofficial].
+-      - **Heightmirror/Baseheight:** Variations using local coordinate systems [S1, unofficial].
+-   c. **Correction Vector:** Calculate the correction vector $C = V_{quantized} - P$ [S1, unofficial].
+-   d. **Local Coordinates (Optional):** Express $C$ in a local coordinate system (e.g., one axis along the base triangle's normal, origin at $M$) to separate normal and tangential errors [S1, unofficial].
+-   e. **Encode:** Encode the correction vector $C$ using the arithmetic coder [S1, unofficial].
++    # Helper to predict vertex position
++    def predict_position(base_triangle_vertices, known_tip_vertex=None):
++        # Calculate midpoint M of base triangle
++        M = sum(base_triangle_vertices) / 3.0
++        if known_tip_vertex is not None:
++            # Mirror Rule
++            return 2 * M - known_tip_vertex
++        else:
++            # Midpoint Rule
++            return M
+ 
+-**Edge Cases and Pitfalls:**
+-- **Unfinalized Vertices:** If vertices are not explicitly finalized, they accumulate in memory. For meshes with large boundaries, guessing finalization leads to a significant increase in memory footprint [S1, unofficial].
+-- **Grid-Aligned Data:** For meshes with positions aligned on an adaptive octree grid (e.g., 'sf1'), predictive coding is less effective. Delta coding (using a neighbor vertex as prediction) is better, achieving 7.8 bpv [S1, unofficial].
+-- **Half-Edge Intersection:** If an intersection of half-edge lists results in only one correctly oriented face, no further information needs to be stored for that face [S1, unofficial].
++    # Helper to quantize and encode correction
++    def encode_vertex_position(new_vertex_pos, base_triangle_vertices, known_tip_vertex=None):
++        predicted = predict_position(base_triangle_vertices, known_tip_vertex)
++        correction = new_vertex_pos - predicted
++        # Quantize correction to quantization_bits
++        quantized_correction = quantize(correction, quantization_bits)
++        # Encode quantized_correction to compressed_bits
++        arithmetic_encode(quantized_correction)
++
++    while input_stream has more data:
++        # 1. Buffering
++        if len(delay_buffer) < delay_buffer_size:
++            tet = input_stream.read_tetrahedron()
++            delay_buffer.append(tet)
++        
++        # 2. Reordering
++        # Select tet from delay_buffer that shares max elements with last_processed_tet
++        current_tet = select_best_tet(delay_buffer, last_processed_tet)
++        delay_buffer.remove(current_tet)
++        
++        # 3. Configuration Detection
++        config = detect_config(current_tet, active_vertices, active_half_edges)
++        
++        # 4. Connectivity Encoding
++        arithmetic_encode_config(config, prev_config)
++        
++        if config == START:
++            # Rotate so active vertices come first
++            active_count = count_active_vertices(current_tet)
++            arithmetic_encode(active_count)
++            for i in range(active_count):
++                if not shared_with_last(current_tet.vertices[i]):
++                    idx = get_index_in_active_vertices(current_tet.vertices[i])
++                    arithmetic_encode_dynamic_index(idx, get_dynamic_index_bits())
++            # Encode new vertices
++            for v in current_tet.vertices[active_count:]:
++                encode_vertex_position(v, get_base_triangle(current_tet), get_known_tip(current_tet))
++                add_to_active_vertices(v)
++                
++        elif config == ADD:
++            # Address active face (shared, edge, vertex, or dynamic)
++            address_active_face(current_tet, active_vertices, active_half_edges, compressed_bits)
++            # Address remaining vertices via local indices or dynamic
++            address_remaining_vertices(current_tet, active_vertices, active_half_edges, compressed_bits)
++            # Encode new vertex
++            new_v = get_new_vertex(current_tet)
++            encode_vertex_position(new_v, get_base_triangle(current_tet), get_known_tip(current_tet))
++            add_to_active_vertices(new_v)
++            
++        elif config == JOIN:
++            # Like ADD, but address fourth vertex locally or dynamically
++            address_active_face(current_tet, active_vertices, active_half_edges, compressed_bits)
++            address_fourth_vertex(current_tet, active_vertices, active_half_edges, compressed_bits)
++            # Encode new vertex
++            new_v = get_new_vertex(current_tet)
++            encode_vertex_position(new_v, get_base_triangle(current_tet), get_known_tip(current_tet))
++            add_to_active_vertices(new_v)
++            
++        elif config == FLIP:
++            # Address one face like ADD, other locally via intersection
++            address_one_face(current_tet, active_vertices, active_half_edges, compressed_bits)
++            address_other_face_locally(current_tet, active_vertices, active_half_edges, compressed_bits)
++            
++        elif config == FILL:
++            # Address one face like ADD, other two via half-edge lists
++            address_one_face(current_tet, active_vertices, active_half_edges, compressed_bits)
++            address_other_faces_via_lists(current_tet, active_vertices, active_half_edges, compressed_bits)
++            
++        # 5. Finalization Encoding
++        for v in current_tet.vertices:
++            is_finalized = is_last_reference(v)
++            arithmetic_encode_finalization(v, is_finalized)
++            if is_finalized:
++                remove_from_active_vertices(v)
++                deallocate_half_edges(v)
++                
++        prev_config = config
++        last_processed_tet = current_tet
++
++    return compressed_bits
++```
++
++## Subtopics
++
++### [Mesh Layout for Streaming](14444-mesh-layout-for-streaming.md)
++Organizes tetrahedral meshes on disk in a coherent, I/O-efficient format to minimize memory footprint during streaming simplification. It prioritizes topological contiguity to reduce the "front width" and "span" of the active mesh portion, enabling the use of fixed-size circular arrays instead of hash tables. Choose this when I/O efficiency and memory footprint are critical constraints for streaming operations.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of tetrahedra, $O(N)$, where $N$ is the number of tetrahedra. The delay buffer adds a constant overhead for reordering [S1, unofficial].
+-- **Memory Complexity:** Proportional to the "width" of the streaming mesh, defined as the maximal number of vertices that need to be in memory simultaneously [S1, unofficial]. This is significantly lower than the $O(V+E+F)$ memory requirement of in-core methods [S1, unofficial].
+-- **Measured Performance:**
+-  - For the 'torso' mesh with a 10,000 tetrahedron delay buffer, connectivity compression rates are approximately 3.88 bpt (bits per tetrahedron) with explicit finalization [S1, unofficial].
+-  - Total bit rates are 25 to 40 percent larger than those reported by Gumhold et al., but achieved with drastically less memory (20 MB vs. 645 MB for 'sf1') and less than half the processing time (44 seconds vs. 100 seconds) [S1, unofficial].
+-  - Connectivity compression rates are within a factor of two of the state-of-the-art in-core method [S1, unofficial].
+-- **Strengths:** Low memory footprint, IO-efficient, suitable for meshes too large for main memory, fast processing time [S1, unofficial].
+-- **Limitations:** Connectivity compression takes almost twice as much space as conventional methods. Performance depends on the coherence of the input order, though a delay buffer mitigates this [S1, unofficial].
++- **Time Complexity:** Linear with respect to the number of tetrahedra, $O(N)$, where $N$ is the number of tetrahedra. The delay buffer reordering adds a constant factor overhead proportional to the buffer size [S1, unofficial].
++- **Memory Complexity:** Proportional to the stream width $w$, which is the maximal number of active vertices. This is significantly lower than in-core methods that require $O(V)$ memory for all vertices [S1, unofficial]. For example, on the 'sf1' mesh, it uses 20 MB compared to 645 MB for conventional methods [S1, unofficial].
++- **Measured Performance:** On the 'torso' mesh with a 10,000 tetrahedron delay buffer, connectivity compression achieves approximately 3.88 bpt (bits per tetrahedron) with explicit finalization [S1, unofficial]. Total bit rates (connectivity + geometry) are 25-40% larger than Gumhold et al.'s in-core method but achieved with drastically less memory and less than half the processing time (44 seconds vs. 100 seconds for 'sf1') [S1, unofficial].
++- **Strengths:** Low memory footprint, fast processing, suitable for meshes larger than main memory, robust to input order with a sufficient delay buffer [S1, unofficial].
++- **Limitations:** Connectivity compression rates are higher (worse) than in-core methods (almost twice as much space) [S1, unofficial]. Predictive geometry compression is less effective for grid-aligned data (e.g., 'sf1') where delta coding is better [S1, unofficial]. Unfinalized vertices can lead to significant memory increases if not handled correctly [S1, unofficial].
++- **When to Use:** Large tetrahedral meshes that do not fit in main memory, or when streaming I/O is preferred.
++- **When Not to Use:** When maximum compression ratio is the primary goal and memory is not a constraint, or for meshes with very large boundaries where guessed finalization leads to high memory usage [S1, unofficial].
+ 
+ ## Background
+-The method was introduced by Isenburg and Lindstrom in their paper "Streaming compression of tetrahedral volume meshes" [S1, unofficial]. It extends the streaming mesh compression approach previously developed for triangle meshes by Isenburg et al. [14, unofficial] to tetrahedral volume meshes. The work addresses the limitations of in-core compression methods like those by Gumhold et al. [4, unofficial], which require the entire mesh to be in memory. The algorithm is available for demo and software at http://www.cs.unc.edu/~isenburg/sctvm/ [S1, unofficial].
++The method was introduced by Isenburg and Lindström in their paper "Streaming compression of tetrahedral volume meshes" [S1, unofficial]. It extends the streaming mesh compression approach for triangle meshes by Isenburg et al. [14] to tetrahedral volume meshes. The work addresses the limitations of in-core compression methods like those by Gumhold et al. [4], which require the entire mesh in memory and global reordering. The algorithm was demonstrated at Graphics Interface 2006 [S1, unofficial].
+ 
+ ## Sources

@@ -7,116 +7,90 @@ Off-axis stereoscopic rendering is a technique that uses non-symmetric camera fr
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Image width $w$ (pixels), image height $h$ (pixels), focal length $f_o$, stereo base $b$ (half the camera x-offset), and angle of view $\alpha$.
-*   **Outputs:** Two trimmed images of resolution $w \times h$, one for the left eye and one for the right eye, which are combined for display.
+*   **Inputs:** Image width $w$ (pixels), image height $h$ (pixels), focal length $f_o$, stereo base $b$ (half the camera x-offset), and angle of view $\alpha$ [S2].
+*   **Outputs:** Two trimmed images of resolution $w \times h$, one for the left eye and one for the right eye, which are combined for display [S1, S2].
 
 **Data Structures:**
-No specific complex data structures are required beyond standard image buffers. The process involves rendering to an extended buffer of size $(w + \delta) \times h$ and then cropping.
+Standard image buffers are used, initially sized at $(w + \delta) \times h$ for rendering and trimmed to $w \times h$ [S2].
 
 **Steps:**
-1.  **Compute the angle of view** $\alpha$ using the normalized image plane width $d$ (where $d=2$ for a range of $-1$ to $1$) and focal length $f_o$:
+1.  Compute the angle of view $\alpha$ using the normalized image plane width $d$ (where $d=2$ for a range of $-1$ to $1$) and focal length $f_o$:
     $$ \alpha = 2 \cdot \arctan\left(\frac{d}{2 \cdot f_o}\right) $$
     [S2]
-
-2.  **Compute the non-overlapping pixel amount** $\delta$:
+2.  Compute the non-overlapping pixel amount $\delta$:
     $$ \delta = \frac{b \cdot w}{2 \cdot f_o \cdot \tan(\alpha/2)} $$
     [S2]
-
-3.  **Determine extended resolution:** Calculate the required render buffer width as $w_{ext} = w + \delta$. The height remains $h$. [S2]
-
-4.  **Setup Left Camera:** Configure the left camera with an off-axis (non-symmetric) frustum. The camera's central viewing direction is aligned parallel to the right camera's direction, but the projection plane is shifted to account for the left eye's position. [S2]
-
-5.  **Render Left Image:** Render the scene to a buffer of size $(w + \delta) \times h$ using the left camera's off-axis projection. [S2]
-
-6.  **Setup Right Camera:** Configure the right camera with a corresponding off-axis frustum. The central viewing directions of both cameras are parallel. [S2]
-
-7.  **Render Right Image:** Render the scene to a buffer of size $(w + \delta) \times h$ using the right camera's off-axis projection. [S2]
-
-8.  **Trim Images:** Crop both rendered images from the center (or appropriate offset depending on implementation symmetry) to the original resolution $w \times h$. This yields the final off-axis projection planes. [S2]
-
-9.  **Combine and Display:** Combine the left and right images for display. This can be done via a 120 Hz frame-sequential system with active LCD shutter glasses or a dual display passive stereo system with polaroid glasses. [S1]
+3.  Determine the extended resolution by calculating the render buffer width as $w_{ext} = w + \delta$, while keeping the height at $h$ [S2].
+4.  Configure the left camera with a non-symmetric (off-axis) frustum, aligning its central viewing direction parallel to the right camera's direction [S2].
+5.  Render the scene to a buffer of size $(w + \delta) \times h$ using the left camera's off-axis projection [S2].
+6.  Configure the right camera with a corresponding off-axis frustum, maintaining parallel central viewing directions [S2].
+7.  Render the scene to a buffer of size $(w + \delta) \times h$ using the right camera's off-axis projection [S2].
+8.  Trim both rendered images to the original resolution $w \times h$ to obtain the final off-axis projection planes [S2].
+9.  Combine the left and right images for display on a 120 Hz frame-sequential stereo system with active LCD shutter glasses or a dual display passive stereo system with polaroid glasses [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def off_axis_stereo_render(scene, w, h, f_o, b):
-    """
-    Renders off-axis stereo images.
-    
-    Args:
-        scene: The 3D scene data.
-        w: Original image width in pixels.
-        h: Original image height in pixels.
-        f_o: Focal length.
-        b: Stereo base (half the camera x-offset).
-        
-    Returns:
-        left_image: numpy array of shape (h, w, 3)
-        right_image: numpy array of shape (h, w, 3)
-    """
     # 1. Compute angle of view
-    # d = 2 because normalized image plane range is -1 to 1
-    d = 2.0
+    d = 2.0  # Normalized image plane width (-1 to 1)
     alpha = 2.0 * math.atan(d / (2.0 * f_o))
-    
-    # 2. Compute non-overlapping pixels delta
-    # Note: tan(alpha/2) is computed directly
+
+    # 2. Compute non-overlapping pixel amount
     tan_half_alpha = math.tan(alpha / 2.0)
     delta = (b * w) / (2.0 * f_o * tan_half_alpha)
-    
-    # 3. Determine extended resolution
+
+    # 3. Extended resolution
     w_ext = w + delta
     h_ext = h
-    
-    # 4 & 5. Render Left Eye
-    # Setup left camera with off-axis frustum.
-    # The frustum is non-symmetric. The exact matrix construction depends on the
-    # graphics API, but conceptually it shifts the projection plane.
-    left_camera = Camera()
-    left_camera.set_off_axis_frustum(width=w_ext, height=h_ext, 
-                                     focal_length=f_o, 
-                                     stereo_base=b, 
-                                     eye='left')
-    left_buffer = render_scene(scene, left_camera, width=w_ext, height=h_ext)
-    
-    # 6 & 7. Render Right Eye
-    # Setup right camera with off-axis frustum.
-    # Central viewing directions are parallel.
-    right_camera = Camera()
-    right_camera.set_off_axis_frustum(width=w_ext, height=h_ext, 
-                                      focal_length=f_o, 
-                                      stereo_base=b, 
-                                      eye='right')
-    right_buffer = render_scene(scene, right_camera, width=w_ext, height=h_ext)
-    
+
+    # 4-5. Render left eye with off-axis frustum
+    left_frustum = build_off_axis_frustum(w_ext, h_ext, f_o, b, 'left')
+    left_buffer = render_to_buffer(scene, left_frustum, w_ext, h_ext)
+
+    # 6-7. Render right eye with off-axis frustum
+    right_frustum = build_off_axis_frustum(w_ext, h_ext, f_o, b, 'right')
+    right_buffer = render_to_buffer(scene, right_frustum, w_ext, h_ext)
+
     # 8. Trim images to original resolution
-    # Trim delta/2 from left and right sides (or appropriate offset)
-    # Assuming symmetric trimming for simplicity, though exact offset depends on
-    # the specific frustum matrix implementation.
+    # [G] The trimming offset assumes the non-overlapping regions are distributed
+    # symmetrically or that the off-axis matrix accounts for the shift such that
+    # the center of the original view is preserved.
     start_x = delta / 2.0
     left_image = left_buffer[:, int(start_x):int(start_x) + w, :]
     right_image = right_buffer[:, int(start_x):int(start_x) + w, :]
-    
+
     return left_image, right_image
+
+def build_off_axis_frustum(width, height, focal_length, stereo_base, eye):
+    # [G] Constructs a non-symmetric projection matrix.
+    # The matrix shifts the projection plane so that the central viewing
+    # directions of left and right cameras remain parallel.
+    return {"width": width, "height": height, "focal_length": focal_length, "stereo_base": stereo_base, "eye": eye}
+
+def render_to_buffer(scene, frustum, width, height):
+    # [G] Rasterizes the scene using the provided camera frustum.
+    # Returns an image buffer of shape (height, width, channels).
+    return [[0.0] * width for _ in range(height)]
 ```
-[G] The trimming offset assumes the non-overlapping regions are distributed symmetrically or that the off-axis matrix accounts for the shift such that the center of the original view is preserved. The exact pixel offset for trimming may vary based on how the off-axis frustum matrix is constructed relative to the viewport.
 
 **Edge Cases and Pitfalls:**
-*   **Vertical Parallax:** If symmetric frustums are used instead of off-axis, vertical parallax occurs when eyes are misaligned vertically, causing visual discomfort and inaccurate stereo effects [S2].
-*   **Perspective Rendering:** Perspective rendering is essential for meaningful stereoscopic display; orthographic projection does not provide the necessary depth cues [S1].
-*   **Precision:** The calculation of $\delta$ involves trigonometric functions and division; ensure floating-point precision is sufficient to avoid artifacts in the trim boundaries.
+*   **Vertical Parallax:** Using symmetric frustums instead of off-axis frustums causes vertical parallax when eyes are misaligned vertically, leading to visual discomfort and inaccurate stereo effects [S2].
+*   **Perspective Rendering:** Perspective rendering is essential for meaningful stereoscopic display [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering two views independently doubles the rendering time compared to a single view, assuming similar scene complexity. The additional cost of computing $\delta$ and trimming is negligible.
-*   **Memory Complexity:** Requires buffer space for two images of size $(w + \delta) \times h$ during rendering, plus the final $w \times h$ buffers.
-*   **Strengths:** Prevents vertical parallax, which is critical for viewer comfort and accurate depth perception [S2]. Produces coincident projection planes for both eyes [S1].
-*   **Limitations:** Requires rendering two views, increasing computational load. The extended frustum may require careful handling of near/far clipping planes to avoid artifacts in the trimmed regions.
-*   **When to use:** When high-quality, comfortable stereo visualization is required, especially for applications where vertical misalignment would cause discomfort (e.g., medical imaging, scientific visualization) [S2].
-*   **When not to use:** When computational resources are extremely limited and stereo comfort is secondary, or when orthographic projection is sufficient (though stereo is less meaningful in that case) [S1].
+*   **Time Complexity:** Rendering two views independently doubles the rendering time compared to a single view [S1].
+*   **Memory Complexity:** Requires buffer space for two images of size $(w + \delta) \times h$ during rendering, plus the final $w \times h$ buffers [S2].
+*   **Strengths:** Prevents vertical parallax and visual discomfort [S2]. Produces coincident projection planes for both eyes [S1].
+*   **Limitations:** Requires rendering two views, increasing computational load [S1].
+*   **When to use:** When high-quality, comfortable stereo visualization is required [S2].
+*   **When not to use:** Not given in the sources.
 
 ## Background
-Off-axis stereoscopic rendering is a standard technique in computer graphics for generating stereo images. It is discussed in the context of volume rendering for astronomical cubes [S1] and GPU-enabled volume renderers for MATLAB [S2]. The method is based on the principle that the projection planes for the left and right eyes should be coincident to avoid vertical parallax [S1, S2]. An introduction to the subtleties of stereographics can be found in external resources [S1].
+Off-axis stereoscopic rendering is discussed in the context of volume rendering for astronomical cubes [S1] and GPU-enabled volume renderers for MATLAB [S2]. The method uses non-symmetric camera frustums to produce coincident projection planes for both eyes [S1]. An introduction to the subtleties of stereographics can be found in external resources [S1].
 
 ## Sources
 [S1] A Distributed-Data Implementation of the Perspective Shear-Warp Volume Rendering Algorithm for Visualisation of Large Astronomical Cubes, http://web.eng.ucsd.edu/~jschulze/projects/Beeson2003.pdf, fetched 2026-10-29

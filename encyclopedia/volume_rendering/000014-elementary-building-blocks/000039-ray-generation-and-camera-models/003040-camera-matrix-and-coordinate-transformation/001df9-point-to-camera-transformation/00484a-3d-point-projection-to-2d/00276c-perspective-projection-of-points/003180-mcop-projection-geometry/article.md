@@ -18,13 +18,13 @@ MCOP Projection Geometry is a projection method for light field displays that us
 - Normalized projected coordinates $H = (H_x, H_y, H_z)$ for rasterization [S1].
 
 **Data Structures:**
-- Points are represented as 3D vectors $(x, y, z)$.
-- Rectangle parameters are stored as four scalar values defining the bounds in the image plane.
+- Points are represented as 3D vectors $(x, y, z)$ [S1].
+- Rectangle parameters are stored as four scalar values defining the bounds in the image plane [S1].
 
 **Steps:**
-1. **Compute Horizontal Screen Coordinate ($S_x$):** Intersect the ray originating from emitter $E$ passing through point $P$ with the screen plane $z=0$. The intersection yields $S_x$ [S1][S2].
-2. **Compute Vertical Screen Coordinate ($S_y$):** Intersect the ray originating from point $P$ passing through the virtual viewer $V$ with the screen plane $z=0$. The intersection yields $S_y$ [S1][S2].
-3. **Remap to Normalized Coordinates:** Transform $S$ into the image rectangle defined by $R^-$ and $R^+$ to obtain $H_x$ and $H_y$. Assign depth $H_z$ based on the distance of $P$ to the screen relative to the viewer distance [S1].
+1. **Compute Horizontal Screen Coordinate ($S_x$):** Intersect the ray originating from emitter $E$ passing through point $P$ with the screen plane $z=0$ [S1][S2].
+2. **Compute Vertical Screen Coordinate ($S_y$):** Intersect the ray originating from point $P$ passing through the virtual viewer $V$ with the screen plane $z=0$ [S1][S2].
+3. **Remap to Normalized Coordinates:** Transform $S$ into the image rectangle defined by $R^-$ and $R^+$ to obtain $H_x$ and $H_y$ [S1].
 
 **Formulas:**
 The screen projected position $S$ is computed as [S1][S2]:
@@ -60,7 +60,7 @@ $$
 - Screen plane $z$-coordinate: $z = 0$ [S2].
 
 **Edge Cases and Pitfalls:**
-- Division by zero occurs if $P_z = E_z$ or $P_z = V_z$. The emitter and viewer must not be coplanar with the point in the Z-dimension for valid projection [S1].
+- Division by zero occurs if $P_z = E_z$ or $P_z = V_z$, requiring $P_z \neq E_z$ and $P_z \neq V_z$ for valid projection [S1].
 - The model assumes a pinhole emitter model [S1].
 - The solution is exact for all viewers at the same distance from the screen and height as the virtual viewer [S1].
 
@@ -138,7 +138,7 @@ Standard single-center projection. MCOP builds on this but uses two centers for 
 - **When not to use:** For standard displays or when a wide range of vertical viewing angles are required without a fixed virtual viewer model [S1].
 
 ## Background
-The method was introduced in the context of GPU-accelerated direct volume rendering on interactive light field displays [S1]. It addresses the specific optical properties of holographic screens used in light field displays, which maintain sub-degree view separation horizontally but scatter widely vertically [S1][S2]. The approach was developed to allow 3D graphics applications to project models correctly onto such displays by accounting for the screen's transformation properties [S1][S2]. The hardware implementation described involves an array of LCD displays and FPGA processing units [S2].
+The method is described in the context of interactive light field displays [S1]. It addresses the specific optical properties of holographic screens used in light field displays, which maintain sub-degree view separation horizontally but scatter widely vertically [S1][S2]. The approach was developed to allow 3D graphics applications to project models correctly onto such displays by accounting for the screen's transformation properties [S1][S2]. The hardware implementation described involves an array of LCD displays and FPGA processing units [S2].
 
 ## Sources
 [S1] GPU Accelerated Direct Volume Rendering on an Interactive Light Field Display, https://doi.org/10.1111/j.1467-8659.2008.01120.x, fetched 2026-10-29

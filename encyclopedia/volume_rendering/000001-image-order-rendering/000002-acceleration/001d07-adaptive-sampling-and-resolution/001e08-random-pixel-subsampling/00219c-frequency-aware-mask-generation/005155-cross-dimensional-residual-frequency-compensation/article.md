@@ -1,0 +1,138 @@
+# Cross-Dimensional Residual Frequency Compensation
+
+Also called: Frequency-domain compensation scheme, High-frequency residual injection
+
+## Overview
+Cross-Dimensional Residual Frequency Compensation is a frequency-domain optimization technique designed to mitigate the inherent blurring artifacts caused by Gaussian kernels in 3D Gaussian Splatting [S1, unofficial]. It addresses the limitation of spatial-domain optimization, which struggles to fit high-frequency details, by extracting high-frequency components from the rendering residual and injecting them directly into primitive attributes [S1, unofficial]. It differs from sibling methods like [Frequency-Modulated Edge-Aware Loss](4658-frequency-modulated-edge-aware-loss.md) by operating in the spectral domain to recover fine textures rather than relying on spatial edge weighting [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**: Ground truth image $I_{gt}$, current rendered image $I_{render}$, primitive attributes $p_i$ (implicitly updated), scaling coefficient $\lambda$, spatial weighting term $W_i$.
+- **Outputs**: Updated primitive attributes $p_i$ (via additive update $\Delta p_i$).
+
+**Data Structures**
+- $I_{gt}$: 2D tensor of ground truth pixel values.
+- $I_{render}$: 2D tensor of rendered pixel values.
+- $R$: Spatial residual map, $R = I_{gt} - I_{render}$.
+- $\hat{R}_{high}$: Complex-valued frequency domain tensor representing high-frequency components.
+- $\Delta p_i$: Update vector for primitive $i$.
+
+**Numbered Steps**
+1. Compute the spatial residual map $R$ by subtracting the rendered image from the ground truth image:
+   $$ R = I_{gt} - I_{render} $$
+2. Transform the residual map into the frequency domain using the Fast Fourier Transform (FFT):
+   $$ \hat{R} = \mathcal{F}(R) $$
+3. Apply a high-pass filter to isolate high-frequency components, resulting in $\hat{R}_{high}$:
+   $$ \hat{R}_{high} = \text{HighPass}(\hat{R}) $$
+   The `HighPass` operation removes low-frequency components (typically the DC component and low spatial frequencies) to retain fine texture details [S1, unofficial].
+4. Scale the high-frequency components by the frequency scaling coefficient $\lambda$:
+   $$ \hat{R}_{scaled} = \lambda \cdot \hat{R}_{high} $$
+5. Distribute the scaled frequency energy to the spatial locations corresponding to primitive $i$ using the normalized spatial weighting term $W_i$:
+   $$ \hat{U}_i = \hat{R}_{scaled} \cdot W_i $$
+   $W_i$ ensures the frequency energy is projected back to the correct spatial coordinates associated with the primitive [S1, unofficial].
+6. Transform the weighted frequency update back to the spatial domain using the Inverse Fast Fourier Transform (IFFT) to calculate the update amount $\Delta p_i$:
+   $$ \Delta p_i = \mathcal{F}^{-1}(\hat{U}_i) $$
+7. Update the primitive attributes $p_i$ by adding $\Delta p_i$.
+
+**Formulas**
+- Residual extraction:
+  $$ \hat{R}_{high} = \text{HighPass}(\mathcal{F}(I_{gt} - I_{render})) \quad (9) $$
+- Primitive update:
+  $$ \Delta p_i = \mathcal{F}^{-1}(\lambda \cdot \hat{R}_{high} \cdot W_i) \quad (10) $$
+
+**Symbol Definitions**
+- $I_{gt}$: Ground truth image.
+- $I_{render}$: Current rendered image.
+- $\mathcal{F}$: Fast Fourier Transform.
+- $\mathcal{F}^{-1}$: Inverse Fast Fourier Transform.
+- $\text{HighPass}(\cdot)$: High-pass filtering operation isolating fine texture details.
+- $\lambda$: Frequency scaling coefficient controlling the intensity of frequency injection.
+- $W_i$: Normalized spatial weighting term distributing frequency energy to corresponding spatial locations for primitive $i$.
+- $\Delta p_i$: Update amount for primitive attributes.
+
+**Parameters**
+- $\lambda$ (also referred to as $\lambda_A$ in implementation): Frequency scaling coefficient. Typical value: 1.0 [S1, unofficial]. This value balances high-frequency detail injection and numerical stability.
+
+**Edge Cases and Pitfalls**
+- **Precision**: The method relies on FFT/IFFT operations which are sensitive to numerical precision. Ensure complex number handling is robust.
+- **Boundary Conditions**: The high-pass filter must be defined to avoid removing essential low-frequency structure while targeting blurring artifacts. The specific cutoff for `HighPass` is not detailed in the source but is implied to target frequencies difficult to fit in the spatial domain [S1, unofficial].
+- **Weighting Normalization**: $W_i$ must be properly normalized to ensure energy conservation during the projection back to spatial domain.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.fft
+
+def cross_dimensional_residual_frequency_compensation(I_gt, I_render, lambda_val, W_i):
+    """
+    Computes the update delta_p_i for a primitive based on frequency-domain residual compensation.
+    
+    Args:
+        I_gt (torch.Tensor): Ground truth image tensor.
+        I_render (torch.Tensor): Rendered image tensor.
+        lambda_val (float): Frequency scaling coefficient (e.g., 1.0).
+        W_i (torch.Tensor): Normalized spatial weighting term for primitive i.
+        
+    Returns:
+        torch.Tensor: Update amount delta_p_i.
+    """
+    # Step 1: Compute spatial residual
+    R = I_gt - I_render
+    
+    # Step 2: Transform to frequency domain
+    R_hat = torch.fft.fft2(R)
+    
+    # Step 3: Apply high-pass filter
+    # Note: The specific implementation of HighPass is not detailed in the source.
+    # A common approach is to zero out low-frequency bins in the center of the spectrum.
+    # This is marked as [G] for implementation gap.
+    R_hat_high = apply_high_pass_filter(R_hat)
+    
+    # Step 4: Scale by lambda
+    R_hat_scaled = lambda_val * R_hat_high
+    
+    # Step 5: Distribute energy using spatial weighting W_i
+    # W_i must be broadcastable to the shape of R_hat_scaled
+    U_hat_i = R_hat_scaled * W_i
+    
+    # Step 6: Inverse transform to spatial domain
+    delta_p_i = torch.fft.ifft2(U_hat_i).real
+    
+    return delta_p_i
+
+def apply_high_pass_filter(R_hat, cutoff_ratio=0.1):
+    """
+    [G] Helper function to apply a simple high-pass filter.
+    Zeros out low-frequency components in the center of the FFT output.
+    """
+    H, W = R_hat.shape[-2], R_hat.shape[-1]
+    freq_h = torch.fft.fftfreq(H)
+    freq_w = torch.fft.fftfreq(W)
+    Freq_H, Freq_W = torch.meshgrid(freq_h, freq_w, indexing='ij')
+    distance = torch.sqrt(Freq_H**2 + Freq_W**2)
+    max_dist = distance.max()
+    mask = (distance > cutoff_ratio * max_dist).to(R_hat.dtype)
+    return R_hat * mask
+```
+
+## Subtopics
+
+### [Frequency-Modulated Edge-Aware Loss](4658-frequency-modulated-edge-aware-loss.md)
+A spatial-domain loss that modulates edge weights based on frequency information. Choose this when spatial edge preservation is prioritized over spectral detail injection.
+
+## Operating characteristics
+- **Time Complexity**: Dominated by FFT and IFFT operations, which are $O(N \log N)$ for an image of size $N$. This is generally efficient compared to iterative spatial optimization for high-frequency recovery.
+- **Memory Complexity**: Requires storage for the residual map, frequency domain representations, and weighting terms. The source does not specify exact memory overhead beyond standard 3DGS requirements [S1, unofficial].
+- **Measured Performance**: In experiments on NVIDIA RTX 4090, ACE-GS (which includes this method) achieved superior rendering quality (SSIM, PSNR) and reduced training duration compared to baselines [S1, unofficial].
+- **Strengths**: Directly addresses Gaussian kernel blurring by injecting high-frequency energy where spatial gradients may be insufficient. Provides a more direct path for recovering details [S1, unofficial].
+- **Limitations**: Relies on the effectiveness of the high-pass filter and spatial weighting. May introduce artifacts if $\lambda$ is too high or if $W_i$ is not accurately computed.
+- **When to use**: When training 3D Gaussian Splatting models suffer from blurring artifacts and lack fine texture details.
+- **When not to use**: When computational resources are extremely limited and FFT overhead is prohibitive, or when the scene is predominantly low-frequency.
+
+## Background
+The method was introduced in the paper "ACE-GS: Acing the Trade-off with Accurate, Compact and Efficient 3D Gaussian Splatting" [S1, unofficial]. It is part of the ACE-GS framework, which aims to balance accuracy, compactness, and efficiency in 3D Gaussian Splatting. The approach builds on the observation that Gaussian kernels inherently blur high-frequency details, which are difficult to optimize in the spatial domain alone. By leveraging frequency-domain analysis, the method compensates for this limitation. The implementation is built upon the 3DGS codebase using PyTorch [S1, unofficial].
+
+## Sources
+[S1] ACE-GS: Acing the Trade-off with Accurate, Compact and Efficient 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.21244, fetched 2026-10-29 (unofficial)

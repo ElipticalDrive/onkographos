@@ -26,7 +26,7 @@ The input tensor has shape $(H, W, C_{total})$, where $H$ and $W$ are the spatia
 7.  Output the reconstructed high-resolution RGB image [S1].
 
 **Formulas:**
-Let $I_{LR}$ be the low-resolution RGB image (3 channels). Let $D$ be the depth map (1 channel). Let $C_{op}$ be the color-opacity vector at max alpha (4 channels). Let $M$ be the motion vector field (2 channels). The input to the SR network is $F_{in} = \text{Concat}(I_{LR}, D, C_{op}, M)$ [S1]. The output is $I_{HR} = \text{SR\_Network}(F_{in})$ [S1].
+Let $I_{LR}$ be the low-resolution RGB image (3 channels) [S1]. Let $D$ be the depth map (1 channel) [S1]. Let $C_{op}$ be the color-opacity vector at max alpha (4 channels) [S1]. Let $M$ be the motion vector field (2 channels) [S1]. The input to the SR network is $F_{in} = \text{Concat}(I_{LR}, D, C_{op}, M)$ [S1]. The output is $I_{HR} = \text{SR\_Network}(F_{in})$ [S1].
 
 **Parameters:**
 *   **Neighborhood Clamping:** A $3 \times 3$ neighborhood clamping is applied, which produced reasonably effective results for the volume rendering case [S1].
@@ -41,8 +41,8 @@ Let $I_{LR}$ be the low-resolution RGB image (3 channels). Let $D$ be the depth 
 This method is a deep learning pipeline for super-resolving volume-rendered images by supplementing the network with auxiliary volumetric features (depth, color, opacity at max alpha) and using temporal warping with a reweighting network to handle motion and lighting changes. It sets itself apart from standard image super-resolution by generating low-resolution inputs directly from the volume renderer without anti-aliasing and by incorporating volumetric-specific auxiliary features to resolve depth ambiguity inherent in volume rendering. It builds on [Supplementary Feature Input for Super-Resolution](7251-supplementary-feature-input-for-super-resolution.md) by adding temporal consistency mechanisms.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources. Requires storing depth, color-opacity, and motion vectors per frame [S1].
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
 *   **Strengths:** Improves reconstruction quality by providing geometric and volumetric context that RGB alone lacks [S1].
 *   **Limitations:** Requires rendering additional auxiliary buffers, increasing rendering time and memory bandwidth. Depth is still an approximation for complex volumetric structures [S1].
 

@@ -3,21 +3,21 @@
 Also called: Sphere tracing, SDF ray marching, Distance field rendering
 
 ## Overview
-Distance-field ray marching is an image-order rendering technique that finds surface intersections by iteratively stepping along a ray using a Signed Distance Function (SDF) to determine the step size, allowing for approximate intersection detection without explicit mesh geometry [S1, S2, S8, unofficial]. It solves the problem of rendering complex, continuous implicit surfaces by leveraging the mathematical guarantee that no geometry exists within the distance value returned by the SDF [S9, S9643]. Unlike [Direct volume ray casting](19-direct-volume-ray-casting.md) which integrates density, or [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) which may use analytic intersections, this method relies on the Lipschitz property of the distance field to ensure safe, non-penetrating steps [S27][S51, unofficial].
+Distance-field ray marching is an image-order rendering technique that finds surface intersections by iteratively stepping along a ray using a Signed Distance Function (SDF) to determine the step size, allowing for approximate intersection detection without explicit mesh geometry [S1, unofficial][S2, unofficial][S8, unofficial]. It solves the problem of rendering complex, continuous implicit surfaces by leveraging the mathematical guarantee that no geometry exists within the distance value returned by the SDF [S27][S51, unofficial]. Unlike [Direct volume ray casting](19-direct-volume-ray-casting.md) which integrates density, or [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) which may use analytic intersections, this method relies on the Lipschitz property of the distance field to ensure safe, non-penetrating steps [S27][S51, unofficial].
 
 ## Shared principles
-The method operates on the principle that a Signed Distance Function $f(\mathbf{p})$ provides a lower bound on the distance to the nearest surface. For any point $\mathbf{p}$ in space, $f(\mathbf{p})$ returns the shortest Euclidean distance to the implicit surface, with a sign indicating position: $f(\mathbf{p}) < 0$ inside, $f(\mathbf{p}) = 0$ on the surface, and $f(\mathbf{p}) > 0$ outside [S2, S5, S9643].
+The method operates on the principle that a Signed Distance Function $f(\mathbf{p})$ provides a lower bound on the distance to the nearest surface [G]. For any point $\mathbf{p}$ in space, $f(\mathbf{p})$ returns the shortest Euclidean distance to the implicit surface, with a sign indicating position: $f(\mathbf{p}) < 0$ inside, $f(\mathbf{p}) = 0$ on the surface, and $f(\mathbf{p}) > 0$ outside [S2, unofficial][S5, unofficial][G].
 
 The core algorithm, known as sphere tracing, proceeds as follows for each pixel:
 1.  **Ray Definition**: A ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector [G].
-2.  **Initialization**: The accumulated distance $t$ is initialized to 0 (or a near-plane value) [S1, S3, unofficial].
+2.  **Initialization**: The accumulated distance $t$ is initialized to 0 (or a near-plane value) [S1, unofficial][S34, unofficial].
 3.  **Marching Loop**:
-    *   Evaluate the scene SDF at the current ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to get the distance $d = f(\mathbf{p})$ [S1, S34, unofficial].
-    *   **Termination Check**: If $d < \epsilon$ (a small convergence threshold, e.g., $0.001$), the ray has hit the surface [S1, S39, unofficial]. If $t > t_{max}$ (maximum ray distance), the ray has escaped [S2, S8, unofficial].
-    *   **Step**: Advance the ray by the distance value: $t \leftarrow t + d$ [S1, S34, unofficial]. This step size is guaranteed not to penetrate the surface because the SDF satisfies the Lipschitz condition with constant 1 [S27][S51, unofficial].
+    *   Evaluate the scene SDF at the current ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to get the distance $d = f(\mathbf{p})$ [S1, unofficial][S34, unofficial].
+    *   **Termination Check**: If $d < \epsilon$ (a small convergence threshold, e.g., $0.001$), the ray has hit the surface [S1, unofficial][S39, unofficial]. If $t > t_{max}$ (maximum ray distance), the ray has escaped [S2, unofficial][S8, unofficial].
+    *   **Step**: Advance the ray by the distance value: $t \leftarrow t + d$ [S1, unofficial][S34, unofficial]. This step size is guaranteed not to penetrate the surface because the SDF satisfies the Lipschitz condition with constant 1 [S27][S51, unofficial].
 4.  **Shading**: Upon hit, compute surface properties (normal, color) and lighting [S1, unofficial].
 
-The scene SDF is typically composed of primitives using Boolean operations: union is `min(d1, d2)`, intersection is `max(d1, d2)`, and subtraction is `max(-d1, d2)` [S39, unofficial]. Transformations are applied by mapping the query point $\mathbf{p}$ to the local space of the primitive via $M^{-1}\mathbf{p}$ before evaluation [S3850].
+The scene SDF is typically composed of primitives using Boolean operations: union is `min(d1, d2)`, intersection is `max(d1, d2)`, and subtraction is `max(-d1, d2)` [S39, unofficial]. Transformations are applied by mapping the query point $\mathbf{p}$ to the local space of the primitive via $M^{-1}\mathbf{p}$ before evaluation [G].
 
 ## Subtopics
 
@@ -96,44 +96,41 @@ Not given in the sources.
 ### [Gridhopping](10027-gridhopping.md)
 An algorithm for transforming a Signed Distance Bound (SDB) into a polygon mesh by combining sphere tracing (ray marching) with traditional polygonization techniques like Marching Cubes.
 
-### Spatially Varying Threshold
-A technique to use FBM for amplifying shapes (hypertextures) by defining an isosurface $SDF(p) + B_n(p) = 0$, which is equivalent to finding the root of $B_n(p) = v(p)$ where $v(p) = -SDF(p)$ [S56]. To handle a spatially varying threshold $v(p)$, approximate it non-safely using its first-order Taylor polynomial at the current ray position $t_0$: $v(t) = v(t_0) + v'(t_0) \cdot (t - t_0)$ [S56]. If the intersection with $v(p)$ is too hard to compute, use the forward inclusion function $[v](p)$ instead to safely approximate $v(p)$ [S56].
-
 ### ST-Fallback Focus Sphere
-An alternative focus+context visualization used when WebGL2 image2D/atomic_uint support is unavailable (e.g., SwiftShader, sandboxed environments). It modulates the per-sample alpha of a ray-march shader using a focus sphere kernel [S57, unofficial]. Initialize sphere center to mesh bounding box center: `sphereCenter = ((bbox.min + bbox.max) * 0.5)` and radius to 25% of the smallest bounding box dimension: `initialRadius = min(bboxSize.x, bboxSize.y, bboxSize.z) * 0.25` [S57, unofficial]. The focus mask is computed as `focusMask = pow(focusT, 4.0)` where `focusT = clamp(distance(p, sphereCenter) / sphereRadius, 0, 1)` [S57, unofficial].
+An alternative focus+context visualization used when WebGL2 image2D/atomic_uint support is unavailable (e.g., SwiftShader, sandboxed environments) [S56, unofficial]. It modulates the per-sample alpha of a ray-march shader using a focus sphere kernel [S56, unofficial]. Initialize sphere center to mesh bounding box center: `sphereCenter = ((bbox.min + bbox.max) * 0.5)` [S56, unofficial]. Initialize sphere radius to 25% of the smallest bounding box dimension: `initialRadius = min(bboxSize.x, bboxSize.y, bboxSize.z) * 0.25` [S56, unofficial]. Set uniforms: `uSphereCenter = sphereCenter`, `uSphereRadius = initialRadius`, `uFocusMode = 1` [S56, unofficial]. On pointer down (button 0), set `dragging=true`, record `lastX`/`lastY`, and capture pointer [S56, unofficial]. On pointer move while dragging, calculate `dx`/`dy` from `lastX`/`lastY`. Compute `worldPerPixel = (sphereRadius / canvas.clientHeight) * 2.0`. Extract camera right/up vectors. Update `sphereCenter`: `sphereCenter += right * (dx * worldPerPixel) + up * (-dy * worldPerPixel)` [S56, unofficial]. Update `uSphereCenter` uniform [S56, unofficial]. On pointer up, set `dragging=false` and release pointer capture [S56, unofficial]. On dispose, remove event listeners and set `uFocusMode = 0` [S56, unofficial]. The focus mask is computed as `focusT = clamp(distance(p, sphereCenter) / sphereRadius, 0, 1)`; `focusMask = pow(focusT, 4.0)`; `perSampleAlpha *= focusMask` [S56, unofficial].
 
 ### Blinn Soft Objects Ray Tracing
-A method to ray trace Blinn soft objects with constant radius by applying sphere-tracing after performing a mapping that allows computing a signed distance approximation to the density field [S58].
-
-### Span-Based Wing Un-bending
-A technique to render thin, flapping sheets (like butterfly wings) by using the distance from the body's long axis (span) as an invariant coordinate. Since rotation about the body axis preserves this distance, the wing can be 'un-bent' by rotating points back by the local flap angle to evaluate a simple flat 2D shape in that plane [S59, unofficial]. The span is $\mathrm{span} = \lVert p_{xy} \rVert$, where $p_{xy}$ is the projection of the point $p$ onto the plane perpendicular to the body axis [S59, unofficial]. The flap angle is $\theta = \Theta\left(t - \lambda\,\mathrm{span}\right)$, where $\Theta$ is the stroke function, $t$ is time, and $\lambda$ is the tip lag coefficient [S59, unofficial].
-
-### Tri-planar procedural materials
-Applies world-projected rgb-multiplier textures with a shared micro-grain layer, continuous across voxel boundaries [S60, unofficial]. Generates natural strata-and-crack stone, clumpy dirt with pebbles, wind-rippled sand, drifted sparkling snow, per-species bark (coarse oak ridges, birch lenticels, pine plates) with ring end-grain, streaked ice, ore veins (dark coal seams, rusty iron, glinting gold, cyan diamond crystals), pulsing lava crust cracks and ribbed spiny cactus [S60, unofficial].
-
-### Local Distance Field Ambient Occlusion
-A modern approach offloading meshing and AO to compute shaders to achieve smooth, high-fidelity AO that avoids the rigid look of per-vertex discrete levels [S61, unofficial]. Voxel Neighborhood 3D Textures hold voxel chunk data in a 3D texture. A compute shader evaluates the local density field within a small spherical kernel (e.g., a 3x3x3 or 5x5x5 window) around each surface point [S61, unofficial]. If the procedural generation pipeline generates a distance field rather than raw block binaries, perform short-range cone tracing through the local SDF to provide smooth, realistic contact shadows baked directly into the output mesh buffers during the surface extraction pass (such as Marching Cubes or Surface Nets) [S61, unofficial].
+A method to ray trace Blinn soft objects with constant radius by applying sphere-tracing after performing a mapping that allows computing a signed distance approximation to the density field [S57].
 
 ### Augmented Sphere Tracing
-A pipeline for rendering mega-scale periodic shell-lattice structures that combines hybrid implicit lattice and mesh shell representations, using an augmented tracing distance query to avoid costly SDF calculations [S62, abstract only, unofficial]. Leverages lattice periodicity for efficiency by employing a local tracing distance query within a single cell [S62, abstract only, unofficial].
+A pipeline for rendering mega-scale periodic shell-lattice structures that combines hybrid implicit lattice and mesh shell representations, using an augmented tracing distance query to avoid costly SDF calculations [S58, abstract only, unofficial]. Leverages lattice periodicity for efficiency by employing a local tracing distance query within a single cell [S58, abstract only, unofficial].
 
-### SDF Transformations
-Repetition (tiling) is applied by $p = mod(p, spacing) - spacing/2$ to the position before evaluating the SDF [S63, unofficial]. Deformation is applied by a transformation function to the position, e.g., $p = twist(p)$, before evaluating the SDF [S63, unofficial].
+### NeuMesh Rendering Pipeline
+Pre-compute near-far bounds for each ray by counting the minimum and maximum distances of ray-to-mesh intersections [S59]. Sample 64 coarse points along the ray [S59]. Adopt a progressive up-sampling strategy to guide the sampling of 64 fine points, yielding 128 samples for each ray [S59]. Distillation loss: Supervised with output from the teacher model (NeuS) for queried color and SDF value [S59]. Background supervision: Binary cross-entropy loss using foreground masks for unbounded backgrounds [S59]. Batch size: 512 rays [S59]. Optimizer: Adam with initial learning rate 0.0005 and cosine annealing scheduler with 5000 warm-up steps [S59]. Hardware: Single Nvidia RTX3090-24G GPU [S59]. Training time: Approximately 16 hours for each model [S59]. Model Architecture: Geometry Code $l_g(x)$ (dim 32), Texture Code $l_t(x)$ (dim 32), Sign Distance $h(x)$ (dim 1) [S59]. Interpolated Items include $l_t(x)$ (dim 32), gradient of SDF $|\text{grad}_x s|$ (dim 256), $s$ (dim 256), $\gamma$ (dim 256), $h(x)$ (dim 1), $d$ (dim 160), $\gamma$ (dim 32) [S59]. Geometry Decoder outputs (256, 256, 256) [S59]. Radiance Decoder outputs (3) [S59].
+
+### Volume Ray Casting with Marching
+Calculate the back plate position first [S60, unofficial]. Calculate the front plate position [S60, unofficial]. Perform the marching algorithm along the ray from the observer's point of view through the cube, potentially starting this in the same shader as the front plate calculation to avoid launching the process twice [S60, unofficial]. Update the controller and view matrix based on the old one, applying rescaling if necessary [S60, unofficial]. Draw the frame around the volume and generate the color maps [S60, unofficial].
+
+### Sphere Tracing Step-Count Heatmap
+A raymarching debug overlay that color-codes each pixel based on the number of sphere tracing iterations required to reach the surface, visualized with a Turbo/Viridis colormap [S61, unofficial]. Map step count 1–12 to cobalt/emerald colors [S61, unofficial]. Map step count 13–30 to cyan/yellow colors [S61, unofficial]. Map step count 31–64 to orange/magenta colors, typically occurring at grazing silhouettes [S61, unofficial]. Render a chain of 5 translucent Marching Spheres along a demonstration ray converging toward the target geometry [S61, unofficial].
 
 ## Background
-Distance-field ray marching, often referred to as sphere tracing, was popularized by John C. Hart in 1992 with his paper "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S27]. The method gained significant traction in the demoscene and real-time graphics community in the early 2000s, particularly through the work of Inigo Quilez, who detailed distance estimators and procedural modeling techniques [S1, S2, S28, unofficial]. It has since become a standard technique for rendering implicit surfaces, fractals, and procedural geometry in shaders and real-time applications [S1, S5, S6, unofficial].
+Distance-field ray marching, often referred to as sphere tracing, was popularized by John C. Hart in 1992 with his paper "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S27]. The method gained significant traction in the demoscene and real-time graphics community in the early 2000s, particularly through the work of Inigo Quilez, who detailed distance estimators and procedural modeling techniques [S1, unofficial][S2, unofficial][S28, unofficial]. It has since become a standard technique for rendering implicit surfaces, fractals, and procedural geometry in shaders and real-time applications [S1, unofficial][S5, unofficial][S6, unofficial].
 
 ## Sources
 [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
 [S2] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)
 [S5] larsbrinkhoff/glsl-sphere-tracing, https://github.com/larsbrinkhoff/glsl-sphere-tracing, fetched 2026-10-26 (unofficial)
 [S6] devnio/Optimized-CPU-Ray-Marcher, https://github.com/devnio/Optimized-CPU-Ray-Marcher, fetched 2026-10-26 (unofficial)
+[S8] AustinGoodman/non-linear-sphere-tracing, https://github.com/AustinGoodman/non-linear-sphere-tracing, fetched 2026-10-26 (unofficial)
 [S27] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
-[S56] Fast sphere tracing of procedural volumetric noise for very large and detailed scenes, https://doi.org/10.1111/cgf.70072, fetched 2026-10-26
-[S57] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)
-[S58] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26
-[S59] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
+[S28] Sphere Tracing Basics | ronja-tutorials/ShaderTutorials | DeepWiki, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5.1-sphere-tracing-basics, fetched 2026-10-27 (unofficial)
+[S34] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
+[S39] yeataro/TD-Raymarching-System, https://github.com/yeataro/TD-Raymarching-System, fetched 2026-10-27 (unofficial)
+[S51] Ray Marching and Signed Distance Functions: Sphere Tracing..., https://www.mysimulator.uk/articles/ray-marching/, fetched 2026-10-29 (unofficial)
+[S56] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)
+[S57] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26
+[S58] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)
+[S59] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26
 [S60] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
 [S61] Baking Dynamic Ambient Occlusion in Procedural Voxels, https://salivity.github.io/game-development/article/baking-dynamic-ambient-occlusion-in-procedural-voxels, fetched 2026-10-29 (unofficial)
-[S62] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)
-[S63] ray marching vs ray tracing, https://tutorials.tektite.studio/ray-marching/ray-marching-vs-ray-tracing/, fetched 2026-10-27 (unofficial)

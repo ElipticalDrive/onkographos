@@ -7,32 +7,32 @@ Block subdivision partitions a volumetric particle set into disjoint spatial blo
 
 ## How it works
 **Inputs:**
-*   List of particles, each with position and radius of influence $R_c$.
-*   Block dimensions in cubes: $W \times H \times D$.
-*   Cube size: $S$.
-*   Isosurface threshold: $T$.
-*   Margin width in cubes: $M$ (determined by $R_c$ and $S$).
+*   List of particles, each with position and radius of influence $R_c$ [S1].
+*   Block dimensions in cubes: $W \times H \times D$ [G].
+*   Cube size: $S$ [S1].
+*   Isosurface threshold: $T$ [S1].
+*   Margin width in cubes: $M$ (determined by $R_c$ and $S$) [G].
 
 **Outputs:**
-*   Vertex and index buffers for the isosurface mesh.
+*   Vertex and index buffers for the isosurface mesh [S1].
 
 **Data Structures:**
-*   **Block List:** A collection of disjoint blocks covering the volume.
+*   **Block List:** A collection of disjoint blocks covering the volume [S1].
 *   **Particle Cache:** For each block, a list of particles within distance $R_c$ of the block boundary, plus all particles inside the block. This cache accelerates field value calculations [S1].
 
 **Parameters:**
 *   $R_c$: Radius of influence of a particle. Determines the margin size and particle inclusion range [S1].
 *   $S$: Size of a cube (voxel edge length) [S1].
 *   $T$: Threshold value for surface generation [S1].
-*   $M$: Margin width in cubes. Calculated such that the physical margin covers distance $R_c$. Typically $M \approx \lceil R_c / S \rceil$ [S1].
+*   $M$: Margin width in cubes. Calculated such that the physical margin covers distance $R_c$ [G].
 
 **Steps:**
-1.  **Partition Volume:** Divide the global volume containing particles into a grid of disjoint blocks of size $W \times H \times D$ cubes.
+1.  **Partition Volume:** Divide the global volume containing particles into a grid of disjoint blocks [S1].
 2.  **Build Particle Lists:** For each block, identify all particles located within the block. Additionally, identify all particles located outside the block but within a distance $R_c$ from the block's boundary. Insert these external particles into the block's particle list to ensure field consistency at the boundaries [S1].
 3.  **Expand Geometry:** Conceptually expand the block's processing volume by a margin of $M$ cubes in all directions. This expanded volume encloses the region where particles from the margin might influence the interior field values [S1].
 4.  **Process Blocks Sequentially:** Iterate through each block in the list:
     a.  **Initialize Cache:** Load the block's particle list into a lookup cache [S1].
-    b.  **Marching Slices:** Execute the marching slices algorithm over the expanded volume (original block + margin).
+    b.  **Marching Slices:** Execute the marching slices algorithm over the expanded volume (original block + margin) [S1].
     c.  **Field Calculation:** For each cube in the expanded volume, calculate the field value $f(r)$ based on nearby particles in the cache. The field function is defined as:
         $$
         f(r) = \begin{cases} 
@@ -44,77 +44,128 @@ Block subdivision partitions a volumetric particle set into disjoint spatial blo
     d.  **Boundary Instrumentation:** To guarantee the marching slices algorithm can traverse the closed isosurface, force field values to zero at sample points on the outer boundary of the margin. This is achieved by instrumenting the lookup cache to exclude particles when sampling points lie exactly on the margin boundary [S1].
     e.  **Mesh Generation:** Generate vertices and indices for cubes where the isosurface intersects. Do not output mesh triangles for cubes located in the margin region [S1].
     f.  **Buffer Output:** Write the generated vertices and indices to the user-specified buffers [S1].
-5.  **Repeat:** Continue until all blocks are processed.
+5.  **Repeat:** Continue until all blocks are processed [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def block_subdivision(particles, block_dims, cube_size, threshold, radius_influence):
     """
-    particles: List of Particle objects with pos and radius.
-    block_dims: Tuple (W, H, D) in number of cubes.
-    cube_size: Float S.
-    threshold: Float T.
-    radius_influence: Float Rc.
+    particles: List of dicts with 'pos' (x,y,z) and 'radius'.
+    block_dims: Tuple (W, H, D) in number of cubes [G].
+    cube_size: Float S [S1].
+    threshold: Float T [S1].
+    radius_influence: Float Rc [S1].
     """
-    margin_cubes = int(math.ceil(radius_influence / cube_size))
-    blocks = create_block_grid(particles, block_dims, cube_size)
+    # Margin width in cubes to enclose Rc [G]
+    margin_cubes = math.ceil(radius_influence / cube_size)
+    
+    # Step 1: Partition volume into disjoint blocks [S1]
+    blocks = generate_block_grid(particles, block_dims, cube_size)
+    
+    all_vertices = []
+    all_indices = []
     
     for block in blocks:
-        # Step 2: Build particle list for this block
+        # Step 2: Build particle list for this block [S1]
         block_particles = []
         for p in particles:
-            if is_within_block(p.pos, block.bounds):
+            if is_within_block(p['pos'], block.bounds):
                 block_particles.append(p)
-            elif distance_to_block_boundary(p.pos, block.bounds) <= radius_influence:
+            elif distance_to_block_boundary(p['pos'], block.bounds) <= radius_influence:
                 block_particles.append(p)
         
-        # Step 3: Define expanded bounds
+        # Step 3: Expand geometry by margin [S1]
         expanded_bounds = expand_bounds(block.bounds, margin_cubes * cube_size)
         
-        # Step 4: Process block
-        vertices = []
-        indices = []
-        
-        # Iterate over all cubes in the expanded volume
+        # Step 4: Process block sequentially [S1]
         for cube in cubes_in_volume(expanded_bounds, cube_size):
-            # Check if cube is in margin
+            # Determine if cube is in the margin region [S1]
             is_margin = is_in_margin(cube, block.bounds, margin_cubes)
             
-            # Calculate field values for corners
+            # Step 4c: Field Calculation [S1]
             field_values = []
             for corner in cube.corners:
-                # Instrumentation: Force field to 0 on outer margin boundary
+                # Step 4d: Boundary Instrumentation [S1]
                 if is_on_outer_margin_boundary(corner, expanded_bounds):
                     field_val = 0.0
                 else:
                     field_val = 0.0
                     for p in block_particles:
-                        r = distance(corner, p.pos)
+                        r = distance(corner, p['pos'])
                         if r < radius_influence:
-                            # Field function from [S1]
                             norm_r = r / (math.sqrt(2) * radius_influence)
                             field_val += (norm_r**4 - norm_r**2 + 0.25)
                 field_values.append(field_val)
             
-            # Marching Slices logic (simplified)
+            # Step 4e: Mesh Generation [S1]
             if not is_margin:
-                # Generate mesh for this cube if it intersects isosurface
+                # Step 4b: Marching Slices logic [S1]
+                # Core traversal/polygonization follows [S1, Section 4] [G]
                 mesh = marching_slices_cube(field_values, threshold, cube.pos, cube_size)
-                vertices.extend(mesh.vertices)
-                indices.extend(mesh.indices)
-            else:
-                # Margin cubes: only need sign check for traversal, no output
-                pass
-                
-        write_to_buffers(vertices, indices)
+                all_vertices.extend(mesh.vertices)
+                all_indices.extend(mesh.indices)
+            # Margin cubes: only sign check needed for traversal, no output [S1]
+            
+        # Step 4f: Buffer Output [S1]
+        # In practice, buffers are written per block or accumulated
+        pass
+        
+    return all_vertices, all_indices
+
+# Self-contained helper definitions
+def generate_block_grid(particles, block_dims, cube_size):
+    """Standard grid partitioning of the volume [G]"""
+    # Returns list of Block objects with bounds and dimensions
+    pass
+
+def is_within_block(pos, bounds):
+    return bounds.min_x <= pos[0] < bounds.max_x and bounds.min_y <= pos[1] < bounds.max_y and bounds.min_z <= pos[2] < bounds.max_z
+
+def distance_to_block_boundary(pos, bounds):
+    dx = max(bounds.min_x - pos[0], 0, pos[0] - bounds.max_x)
+    dy = max(bounds.min_y - pos[1], 0, pos[1] - bounds.max_y)
+    dz = max(bounds.min_z - pos[2], 0, pos[2] - bounds.max_z)
+    return math.sqrt(dx*dx + dy*dy + dz*dz)
+
+def expand_bounds(bounds, margin_distance):
+    return Bounds(bounds.min_x - margin_distance, bounds.min_y - margin_distance, bounds.min_z - margin_distance,
+                  bounds.max_x + margin_distance, bounds.max_y + margin_distance, bounds.max_z + margin_distance)
+
+def cubes_in_volume(bounds, cube_size):
+    """Yields Cube objects for each grid cell in bounds [G]"""
+    pass
+
+def is_in_margin(cube, block_bounds, margin_cubes):
+    """Returns True if cube is within margin_cubes of block_bounds [G]"""
+    pass
+
+def is_on_outer_margin_boundary(corner, expanded_bounds):
+    """Returns True if corner lies exactly on the outer edge of expanded_bounds [G]"""
+    eps = 1e-6
+    return (abs(corner[0] - expanded_bounds.min_x) < eps or abs(corner[0] - expanded_bounds.max_x) < eps or
+            abs(corner[1] - expanded_bounds.min_y) < eps or abs(corner[1] - expanded_bounds.max_y) < eps or
+            abs(corner[2] - expanded_bounds.min_z) < eps or abs(corner[2] - expanded_bounds.max_z) < eps)
+
+def distance(p1, p2):
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)
+
+def marching_slices_cube(field_values, threshold, cube_pos, cube_size):
+    """Standard polygonization of a cube given 8 corner field values [G]"""
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Closed Isosurface Assumption:** The marching slices algorithm assumes a closed surface. If particles in the margin are not handled correctly, traversal may fail. Forcing field values to zero at the outer margin boundary resolves this [S1].
 *   **Seams:** Varying cube size $S$ between blocks for Level of Detail (LOD) control can cause visible seams. Care must be taken to ensure compatibility at block boundaries [S1].
-*   **Precision:** Field values are summed from multiple particles. Precision issues may arise if many particles contribute to a single sample point, though the specific numerical stability is not detailed in the sources [S1].
+
+## Subtopics
+
+### Stack-based Adaptive Cuboid Subdivision
+An algorithm that uses a stack to iteratively subdivide a cuboid volume based on the number of divisible sides ($D$) to identify empty space and polygonize surfaces, avoiding recursion [S2]. It pushes the entire volume as a cuboid onto a stack, then iteratively pops cuboids. If a cuboid and its neighbours are empty, it is discarded. If $D$ equals 0, the cuboid is polygonized. If `(D | (1 << s)) >> (s - 1)` is true, side $s$ of the cuboid is divided. If the new length of side $s$ equals 1, $D$ is updated: `D ← D | (7 - (1 << s))`. The side index $s$ cycles through 0, 1, 2 via `s ← (s + 1) % 3`. Both new cuboids are pushed onto the stack. If the condition is false, $s$ is updated and the original cuboid is pushed back. $D$ represents the divisible sides of a cuboid, calculated based on X, Y, Z dimensions [S2].
 
 ## Operating characteristics
 *   **Time Complexity:** The overhead of blocking is approximately 12% of total work for randomly distributed particles in a typical 100x100x100 block with a 5-cube margin [S1]. This is significantly lower than hashing approaches, which require hashing for both corner retrieval and particle lookups [S1].
@@ -136,3 +187,4 @@ Block subdivision was introduced in the context of real-time particle isosurface
 
 ## Sources
 [S1] Real-time particle isosurface extraction, https://doi.org/10.1145/1342250.1342256, fetched 2026-11-04
+[S2] A Comparative Study about Data Structures Used for Efficient Management of Voxelised Full-Waveform Airborne LiDAR Data during 3D Polygonal Model Creation, https://doi.org/10.3390/rs13040559, fetched 2026-10-26

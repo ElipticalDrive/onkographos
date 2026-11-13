@@ -3,13 +3,13 @@
 Also called: Voxel traversal, Grid traversal, DDA traversal, Amanatides-Woo traversal
 
 ## Overview
-Ray-grid traversal determines the sequence of uniform grid cells (voxels or tiles) intersected by a ray, enabling efficient sampling and compositing in volume rendering [S2, S3, unofficial]. It solves the problem of enumerating grid intersections without missing thin cells or performing redundant work [S2, unofficial]. Unlike hierarchical methods that skip empty space via tree structures, standard ray-grid traversal steps through every cell boundary along the ray path [S1, unofficial][S2, unofficial]. It differs from [Acceleration](18-acceleration.md) by focusing on the geometric stepping logic itself, and from [Direct volume ray casting](19-direct-volume-ray-casting.md) by providing the traversal indices required for the sampling phase [G].
+Ray-grid traversal determines the sequence of uniform grid cells (voxels or tiles) intersected by a ray, enabling efficient sampling and compositing in volume rendering [S2, unofficial][S3, unofficial]. It solves the problem of enumerating grid intersections without missing thin cells or performing redundant work [S2, unofficial]. Unlike hierarchical methods that skip empty space via tree structures, standard ray-grid traversal steps through every cell boundary along the ray path [S2, unofficial][S3, unofficial]. It differs from [Acceleration](18-acceleration.md) by focusing on the geometric stepping logic itself, and from [Direct volume ray casting](19-direct-volume-ray-casting.md) by providing the traversal indices required for the sampling phase [G].
 
 ## Shared principles
 All methods in this family share the core mechanism of advancing analytically from one cell boundary to the next, avoiding fixed-distance sampling steps [S5][S7, unofficial]. The algorithm determines the next cell by comparing the distances to the upcoming boundaries on the x, y, and z axes, selecting the minimum distance to advance [S2, unofficial][S3, unofficial][S5].
 
 ### Mathematical Foundation
-Let the ray be defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized or unnormalized) [G]. The grid is defined by cell boundaries. For a uniform grid with voxel size $v$ and dimensions $N_x, N_y, N_z$, the traversal relies on three key precomputed values per axis $i \in \{x, y, z\}$ [S2, unofficial][S3, unofficial][S5]:
+Let the ray be defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized or unnormalized) [G]. The grid is defined by cell boundaries. For a uniform grid with voxel size $v$ and dimensions $N_x, N_y, N_z$, the traversal calculates the distances to the next boundaries for each axis $i \in \{x, y, z\}$ [S2, unofficial][S3, unofficial][S5]:
 
 1.  **Step Direction ($\text{step}_i$):** Determines the index increment direction [S4, unofficial].
     $$
@@ -47,36 +47,30 @@ The core loop iterates while the ray remains within the grid bounds [S5]:
 ```python
 def dda_traversal(ray_origin, ray_direction, voxel_size, grid_bounds):
     # Initialize current voxel index
-    current_voxel = floor(ray_origin / voxel_size)
-    current_voxel = clamp(current_voxel, grid_bounds.min, grid_bounds.max)
+    current_voxel = [int(ray_origin[i] // voxel_size) for i in range(3)]
+    current_voxel = [max(grid_bounds.min[i], min(grid_bounds.max[i], current_voxel[i])) for i in range(3)]
     
     # Step direction per axis
-    step = sign(ray_direction)
+    step = [1 if ray_direction[i] > 0 else (-1 if ray_direction[i] < 0 else 0) for i in range(3)]
     
     # Distance to next boundary
-    next_boundary = (current_voxel + step) * voxel_size
-    t_max = (next_boundary - ray_origin) / ray_direction
+    next_boundary = [(current_voxel[i] + step[i]) * voxel_size for i in range(3)]
+    t_max = [(next_boundary[i] - ray_origin[i]) / ray_direction[i] if ray_direction[i] != 0 else float('inf') for i in range(3)]
     
     # Distance delta per axis
-    t_delta = voxel_size / abs(ray_direction)
+    t_delta = [voxel_size / abs(ray_direction[i]) if ray_direction[i] != 0 else 0.0 for i in range(3)]
     
-    # Handle zero direction components
-    for i in range(3):
-        if ray_direction[i] == 0:
-            t_max[i] = float('inf')
-            t_delta[i] = 0
-            
     t_entry = 0.0
     
-    while current_voxel is within grid_bounds:
-        # Find minimum boundary distance
-        min_idx = argmin(t_max)
+    while grid_bounds.min[0] <= current_voxel[0] <= grid_bounds.max[0] and \
+          grid_bounds.min[1] <= current_voxel[1] <= grid_bounds.max[1] and \
+          grid_bounds.min[2] <= current_voxel[2] <= grid_bounds.max[2]:
+        
+        min_idx = t_max.index(min(t_max))
         t_exit = t_max[min_idx]
         
-        # Record cell and interval
         yield current_voxel, t_entry, t_exit
         
-        # Advance index and update boundary
         current_voxel[min_idx] += step[min_idx]
         t_max[min_idx] += t_delta[min_idx]
         t_entry = t_exit
@@ -141,37 +135,37 @@ Accelerates rendering by replacing fixed-distance steps with analytical traversa
 Adapts traversal algorithms to exploit GPU/SIMD architectural features [G].
 
 ### Barycentric Coordinate Traversal
-An alternative traversal algorithm that uses barycentric coordinates (u, v, w, x) to determine the child tetrahedron, avoiding explicit plane tests [S10, unofficial]. The loop continues while `childCounts[tetID] > 0` and `rLevel ≤ maxDepth`. Barycentric coordinates are calculated as $u = \text{volume}(point,l,r,b)/\text{vol}$, $v = \text{volume}(point,t,b,r)/\text{vol}$, $w = \text{volume}(point,t,l,b)/\text{vol}$, and $x = 1 - (u + v + w)$ [S10, unofficial]. The child index is computed using boolean logic: `tet = (RB × 4) + ((RB == TB) × 2) + inner`, where `RB` is `(u + v) < 0.5`, `TB` is `(v + w) < 0.5`, and `inner` is `(u < 0.5) & (v < 0.5) & (w < 0.5) & (x < 0.5)` [S10, unofficial].
+An alternative traversal algorithm that uses barycentric coordinates (u, v, w, x) to determine the child tetrahedron, avoiding explicit plane tests [S13, unofficial]. The loop continues while `childCounts[tetID] > 0` and `rLevel ≤ maxDepth` [S13, unofficial]. Barycentric coordinates are calculated as $u = \text{volume}(point,l,r,b)/\text{vol}$, $v = \text{volume}(point,t,b,r)/\text{vol}$, $w = \text{volume}(point,t,l,b)/\text{vol}$, and $x = 1 - (u + v + w)$ [S13, unofficial]. The child index is computed using boolean logic: `tet = (RB × 4) + ((RB == TB) × 2) + inner`, where `RB` is `(u + v) < 0.5`, `TB` is `(v + w) < 0.5`, and `inner` is `(u < 0.5) & (v < 0.5) & (w < 0.5) & (x < 0.5)` [S13, unofficial].
 
 ### Perspective-Correct AMR Patch Traversal
-A hybrid CPU-GPU traversal strategy where the CPU traverses the KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch [S11]. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer. The vertex shader modifies each index according to the current observer position to generate proper cell ordering [S11].
+A hybrid CPU-GPU traversal strategy where the CPU traverses the KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch [S11, unofficial]. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer [S11, unofficial]. The vertex shader modifies each index according to the current observer position to generate proper cell ordering [S11, unofficial].
 
 ### Majorant Supergrid Traversal
-A medium traversal structure using a supergrid to allow empty and thin regions to be crossed in far fewer null collisions than paying for the densest voxel in the volume [S12, unofficial]. The `Medium::sample_real_interaction` consumes null collisions in one fused C++ walk instead of iterating them in Python, sharing a single loop with the DDA traversal when a supergrid is used [S12, unofficial]. It is faster than the global majorant approach because it avoids paying `optixTrace` for every null collision [S12, unofficial]. The `majorant_resolution_factor` controls supergrid resolution (default 8), and `majorant_factor` is a safety factor (default 1.2) [S12, unofficial]. The 'homogeneous' medium type explicitly rejects the supergrid parameter [S12, unofficial].
+A medium traversal structure using a supergrid to allow empty and thin regions to be crossed in far fewer null collisions than paying for the densest voxel in the volume [S14, unofficial]. The `Medium::sample_real_interaction` consumes null collisions in one fused C++ walk instead of iterating them in Python, sharing a single loop with the DDA traversal when a supergrid is used [S14, unofficial]. It is faster than the global majorant approach because it avoids paying `optixTrace` for every null collision [S14, unofficial]. The `majorant_resolution_factor` controls supergrid resolution (default 8), and `majorant_factor` is a safety factor (default 1.2) [S14, unofficial]. The 'homogeneous' medium type explicitly rejects the supergrid parameter [S14, unofficial].
 
 ### Grid Traversal Setup (CUDA)
-A CUDA device function that initializes the parameters for stepping through a voxel grid along a ray [S7, unofficial].
+A CUDA device function that initializes the parameters for stepping through a voxel grid along a ray [S10, unofficial].
 
 ### Target Value Classification and Parameterization
-A method to determine if a target isosurface lies within a ray segment defined by voxel entry/exit points, and to calculate its relative position for opacity/color contribution [S13, unofficial]. Trilinear interpolation is used to get values at entry ($V_{in}$) and exit ($V_{out}$). Target values are classified into three categories: (1) strictly between $V_{in}$ and $V_{out}$, (2) one endpoint within allowable window, (3) neither endpoint within window. For Category 1, the relative distance $t$ is parameterized using linear interpolation. For Category 2, $t$ is set to 0 or 1. Values are sorted by depth and effects calculated [S13, unofficial].
+A method to determine if a target isosurface lies within a ray segment defined by voxel entry/exit points, and to calculate its relative position for opacity/color contribution [S16, unofficial]. Trilinear interpolation is used to get values at entry ($V_{in}$) and exit ($V_{out}$) [S16, unofficial]. Target values are classified into three categories: (1) strictly between $V_{in}$ and $V_{out}$, (2) one endpoint within allowable window, (3) neither endpoint within window [S16, unofficial]. For Category 1, the relative distance $t$ is parameterized using linear interpolation [S16, unofficial]. For Category 2, $t$ is set to 0 or 1. Values are sorted by depth and effects calculated [S16, unofficial].
 
 ### Ray Connectivity
-A property defining the set of cells a ray can traverse to from its current cell, inspired by pixel connectivity in image processing [S14, unofficial]. In 2D, there are 4-connectivity (orthogonal neighbors) and 8-connectivity (including diagonal neighbors) [S14, unofficial]. The Taxicab metric is $|x_1 - x_2| + |y_1 - y_2|$ and the Chebyshev metric is $\max(|x_1 - x_2|, |y_1 - y_2|)$ [S14, unofficial].
+A property defining the set of cells a ray can traverse to from its current cell, inspired by pixel connectivity in image processing [S17, unofficial]. In 2D, there are 4-connectivity (orthogonal neighbors) and 8-connectivity (including diagonal neighbors) [S17, unofficial]. The Taxicab metric is $|x_1 - x_2| + |y_1 - y_2|$ and the Chebyshev metric is $\max(|x_1 - x_2|, |y_1 - y_2|)$ [S17, unofficial].
 
 ### Block Walking
-An algorithm that traverses all blocks a ray intersects with, starting from closest to the camera, to measure the direct impact of block-walking on performance by writing to a scalar at each block visit [S15, unofficial]. Block walking reduces the number of queries (acceleration structure accesses) by 5-10x compared to standard ray tracing, translating to a 1.5x average performance improvement in block traversal mode [S15, unofficial]. However, when content becomes too sparse, block walking is not effective and can have a high cost [S15, unofficial]. In blend mode, performance improvements shrink due to costly access to individual voxel values [S15, unofficial].
+An algorithm that traverses all blocks a ray intersects with, starting from closest to the camera, to measure the direct impact of block-walking on performance by writing to a scalar at each block visit [S18, unofficial]. Block walking reduces the number of queries (acceleration structure accesses) by 5-10x compared to standard ray tracing, translating to a 1.5x average performance improvement in block traversal mode [S18, unofficial]. However, when content becomes too sparse, block walking is not effective and can have a high cost [S18, unofficial]. In blend mode, performance improvements shrink due to costly access to individual voxel values [S18, unofficial].
 
 ### Adaptive grid traversal dispatcher
-A dispatcher function that selects the appropriate traversal variant based on the maximum range of the segment [S16, unofficial]. It computes absolute deltas $dx = |end.x - start.x|$ and $dy = |end.y - start.y|$, then `maxRange = max(dx, dy)`. If `maxRange < 256.0f`, it calls `traverseGridSegment16` (Q8.8 fixed-point); otherwise, it calls `traverseGridSegment32` (Q24.8 fixed-point) [S16, unofficial].
+A dispatcher function that selects the appropriate traversal variant based on the maximum range of the segment [S19, unofficial]. It computes absolute deltas $dx = |end.x - start.x|$ and $dy = |end.y - start.y|$, then `maxRange = max(dx, dy)` [S19, unofficial]. If `maxRange < 256.0f`, it calls `traverseGridSegment16` (Q8.8 fixed-point); otherwise, it calls `traverseGridSegment32` (Q24.8 fixed-point) [S19, unofficial].
 
 ### Regular Grid (rgridb) Renderer
-A renderer for regular grids (rgridb) that separates primitive generation and rendering into two distinct steps, regenerating all primitives if the volume changes [S17, unofficial]. Unlike the hgridf renderer, it does not support partial updates of dirty cells; it regenerates the entire primitive set upon volume change [S17, unofficial].
+A renderer for regular grids (rgridb) that separates primitive generation and rendering into two distinct steps, regenerating all primitives if the volume changes [S20, unofficial]. Unlike the hgridf renderer, it does not support partial updates of dirty cells; it regenerates the entire primitive set upon volume change [S20, unofficial].
 
 ### Ray-Plane-based Traversal
-All processors accumulate interpolated values along a ray independently. Contributions are sorted with respect to visibility order before composing the final image [S18, unofficial]. Frame rate scales linearly with the number of processors [S18, unofficial].
+All processors accumulate interpolated values along a ray independently [S21, unofficial]. Contributions are sorted with respect to visibility order before composing the final image [S21, unofficial]. Frame rate scales linearly with the number of processors [S21, unofficial].
 
 ## Background
-The foundational algorithm, known as the Amanatides-Woo algorithm or 3D DDA, was introduced by J. Amanatides and A. Woo in 'A Fast Voxel Traversal Algorithm for Ray Tracing', published in Eurographics '87 [S2, unofficial][S5]. It was designed to efficiently list all voxel IDs traversed by a ray in a 3D grid [S2, unofficial]. The method has been widely implemented in various forms, including in real-time procedural voxel renderers like Minecraft-style raycasting [S6, unofficial], and in scientific computing tools like FIDASIM for collision detection [S5]. Modern implementations often optimize this core logic for hardware-specific constraints such as SIMD parallelism and cache hierarchy [S10277-hardware-specific-optimization.md].
+The foundational algorithm, known as the Amanatides-Woo algorithm or 3D DDA, was introduced by J. Amanatides and A. Woo in 'A Fast Voxel Traversal Algorithm for Ray Tracing', published in Eurographics '87 [S2, unofficial]. It was designed to efficiently list all voxel IDs traversed by a ray in a 3D grid [S2, unofficial]. The method has been widely implemented in various forms, including in real-time procedural voxel renderers like Minecraft-style raycasting [S6, unofficial], and in scientific computing tools like FIDASIM for collision detection [S5].
 
 ## Sources
 [S1] jw3126/VoxelRayTracers.jl, https://github.com/jw3126/VoxelRayTracers.jl, fetched 2026-10-24 (unofficial)
@@ -179,16 +173,21 @@ The foundational algorithm, known as the Amanatides-Woo algorithm or 3D DDA, was
 [S3] Victorique-GOSICK/Voxel-3D-DDA, https://github.com/Victorique-GOSICK/Voxel-3D-DDA, fetched 2026-10-24 (unofficial)
 [S4] Super Fast Ray Casting in Tiled Worlds using DDA, https://www.youtube.com/watch?v=NbSee-XM7WA, fetched 2026-10-25 (unofficial)
 [S5] 2026_surface_mesh_tools/docs/collision_detection/04_ray_grid_traversal ..., https://github.com/canesesmarjf/2026_surface_mesh_tools/blob/main/docs/collision_detection/04_ray_grid_traversal.md, fetched 2026-10-25
-[S6] Minecraft Voxel DDA Raycast - Shadertoy, https://www.shadertoy.com/view/WccyWl, fetched 2026-10-26 (unofficial)
-[S7] nerfstudio-project/nerfacc, https://github.com/nerfstudio-project/nerfacc, fetched 2026-10-26 (unofficial)
-[S8] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
-[S9] Linirby/HelloVoxel, https://github.com/Linirby/HelloVoxel, fetched 2026-10-27 (unofficial)
-[S10] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
-[S11] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26
-[S12] Sample matching for extinction gradients (review branch), https://github.com/AuroraRyan0301/mitsuba3/pull/1, fetched 2026-10-26 (unofficial)
-[S13] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)
-[S14] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
-[S15] [PDF] Sparse Volume Rendering using Hardware Ray Tracing and Block ..., https://gpuopen.com/download/SA2021_BlockWalk.pdf, fetched 2026-10-26 (unofficial)
-[S16] FastLED: fl/traverse_grid.h Source File, https://fastled.io/docs/d9/d42/traverse__grid_8h_source.html, fetched 2026-10-30 (unofficial)
-[S17] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)
-[S18] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S6] Grids in Ray Tracing: A Comprehensive Survey, https://www.scribd.com/document/349616186/GG-400, fetched 2026-10-25 (unofficial)
+[S7] cvcGL VolRenNode, CUDA raycast backend, and the volren_bunny demo, https://github.com/transfix/libcvc/pull/323, fetched 2026-10-25 (unofficial)
+[S8] Почему Моя Функция Трассировки Лучей Через Воксели С Использованием Dda ..., https://otvet.mail.ru/question/240929436, fetched 2026-10-25 (unofficial)
+[S9] Minecraft Voxel DDA Raycast - Shadertoy, https://www.shadertoy.com/view/WccyWl, fetched 2026-10-26 (unofficial)
+[S10] nerfstudio-project/nerfacc, https://github.com/nerfstudio-project/nerfacc, fetched 2026-10-26 (unofficial)
+[S11] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+[S12] Linirby/HelloVoxel, https://github.com/Linirby/HelloVoxel, fetched 2026-10-27 (unofficial)
+[S13] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+[S14] Sample matching for extinction gradients (review branch), https://github.com/AuroraRyan0301/mitsuba3/pull/1, fetched 2026-10-26 (unofficial)
+[S15] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26
+[S16] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)
+[S17] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
+[S18] [PDF] Sparse Volume Rendering using Hardware Ray Tracing and Block ..., https://gpuopen.com/download/SA2021_BlockWalk.pdf, fetched 2026-10-26 (unofficial)
+[S19] FastLED: fl/traverse_grid.h Source File, https://fastled.io/docs/d9/d42/traverse__grid_8h_source.html, fetched 2026-10-30 (unofficial)
+[S20] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)
+[S21] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S22] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S23] A Scalable Hybrid Scheme for Ray-Casting of Unstructured Volume Data, https://doi.org/10.1109/tvcg.2018.2833113, fetched 2026-10-24

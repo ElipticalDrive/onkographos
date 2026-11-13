@@ -1,44 +1,136 @@
 # Greedy face merging
-Also called: Greedy meshing, Greedy face culling
 
 ## Overview
-Greedy face merging is a family of surface extraction algorithms that generate a minimal triangle mesh from a voxel volume by merging adjacent coplanar faces of identical material into the largest possible axis-aligned quads [S1, S3, S4, S7, S13, S27, unofficial]. It solves the problem of excessive vertex and draw call counts in naive voxel rendering (where every exposed face is a separate quad) by reducing geometry by 5–15x compared to per-face meshing [S27, S31, unofficial]. Unlike [3D Greedy Meshing](3519-3d-greedy-meshing.md) which may optimize for 3D volume reduction, or [Binary Greedy Meshing with Packed Quads](3312-binary-greedy-meshing-with-packed-quads.md) which uses bitwise operations on binary occupancy, standard Greedy Meshing processes material IDs and visibility masks sequentially across three principal axes to maximize quad size [S2, S3, S35, unofficial].
+Greedy face merging is a family of surface extraction algorithms that generate a minimal triangle mesh from voxel data by merging adjacent coplanar faces of identical material into larger axis-aligned quads [G]. It solves the problem of excessive vertex and draw call counts in naive voxel rendering (one quad per exposed face) by reducing geometry significantly compared to per-face meshing [G]. Unlike [Binary Greedy Meshing with Packed Quads](3312-binary-greedy-meshing-with-packed-quads.md) which operates on binary occupancy using bitwise operations, standard variants process explicit material IDs and support multiple voxel types and attributes [3519-greedy-meshing.md]. It differs from [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md) by actively merging adjacent faces into maximal rectangles rather than just culling internal faces [3519-greedy-meshing.md].
 
 ## Shared principles
-The core mechanism involves sweeping the voxel volume along each of the three principal axes (normals $n \in \{0, 1, 2\}$ corresponding to X, Y, Z). For each normal, the algorithm defines the tangent $t = (n + 1) \pmod 3$ and bitangent $b = (n + 2) \pmod 3$ [S1, S7, S27, unofficial].
+The core mechanism sweeps the voxel volume along each of the three principal axes ($n \in \{0, 1, 2\}$ corresponding to X, Y, Z). For each normal $n$, the algorithm defines the tangent $t = (n + 1) \pmod 3$ and bitangent $b = (n + 2) \pmod 3$.
 
-1.  **Sweep Slices:** The volume is iterated along the normal axis $n$. For each slice index $s$, a 2D mask $M$ of size $D_t \times D_b$ is constructed [S1, S7, S27, unofficial].
-2.  **Visibility Check:** For each cell $(t, b)$ in the slice, the algorithm determines if the face is exposed. A face is exposed if the voxel at $(x,y,z)$ (where the $n$-coordinate is $s$) has a different material or is solid while the neighbor in the normal direction is empty (or vice versa) [S7, S13, S19, S27, unofficial]. Specifically, the voxel $V(s, t, b)$ is compared with its neighbor $V(s \pm 1, t, b)$ [S7, S13, S19, S27, unofficial]. If exposed, the mask entry is set to the `mergeKey` of the voxel material; otherwise, it is set to 0/false [S27, S31, unofficial]. Boundary handling treats out-of-bounds neighbors as air or solid based on a `boundaryPolicy` [S12, S13, unofficial].
-3.  **Greedy Expansion:** The 2D mask is scanned in lexicographic order (row by row, then column by column) to find maximal rectangles [S22, S27, unofficial]. The algorithm finds the first unprocessed non-zero cell $(t_0, b_0)$, expands width $w$ while cells match the material ID, and expands height $h$ while all cells in the resulting rectangle $[t_0, t_0 + w) \times [b_0, b_0 + h)$ match the material ID and are unprocessed [S1, S27, unofficial]. A quad is emitted with origin $(t_0, b_0, s)$, normal $n$, and dimensions $(w, h)$ [S27, unofficial]. All cells in the rectangle are marked as processed (e.g., mask set to 0) to prevent double-counting [S21, S27, unofficial].
+1. **Sweep Slices:** The volume is iterated along the normal axis $n$. For each slice index $s$, a 2D mask $M$ of size $D_t \times D_b$ is constructed.
+2. **Visibility Check:** For each cell $(t, b)$ in the slice, the algorithm determines if the face is exposed. A face is exposed if the voxel $V(s, t, b)$ differs from its neighbor in the normal direction $V(s \pm 1, t, b)$, or if the neighbor is out of bounds and the boundary policy dictates an exposed surface. If exposed, the mask entry is set to the `mergeKey` of the voxel material; otherwise, it is set to $0$. Boundary handling treats out-of-bounds neighbors as air or solid based on a `boundaryPolicy` [G].
+3. **Greedy Expansion:** The 2D mask is scanned in lexicographic order (row $b$ from $0$ to $D_b-1$, column $t$ from $0$ to $D_t-1$) to find maximal rectangles. The algorithm finds the first unprocessed non-zero cell $(t_0, b_0)$, expands width $w$ while cells match the material ID, and expands height $h$ while all cells in the resulting rectangle $[t_0, t_0 + w) \times [b_0, b_0 + h)$ match the material ID and are unprocessed. A quad is emitted with origin $(t_0, b_0, s)$, normal $n$, and dimensions $(w, h)$. All cells in the rectangle are marked as processed (e.g., mask set to $0$) to prevent double-counting.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def greedy_face_merge(volume, dims, boundary_policy="air", merge_key=None):
+    """
+    volume: function (x, y, z) -> material_id
+    dims: tuple (Dx, Dy, Dz)
+    boundary_policy: "air" (default) or "solid"
+    merge_key: function (material_id, x, y, z) -> int. Default: identity.
+    """
+    if merge_key is None:
+        merge_key = lambda m, x, y, z: m
+
+    quads = []
+    # Iterate over the 3 normal axes: 0=X, 1=Y, 2=Z
+    for n in range(3):
+        t = (n + 1) % 3  # Tangent axis
+        b = (n + 2) % 3  # Bitangent axis
+        dim_t, dim_b, dim_n = dims[t], dims[b], dims[n]
+        
+        # Mask stores the merge key if visible and unprocessed, else 0
+        mask = [0] * (dim_t * dim_b)
+        
+        # Iterate through each slice along the normal axis
+        for s in range(dim_n):
+            # 1. Build Visibility Mask for slice s
+            for y in range(dim_b):
+                for x in range(dim_t):
+                    coords = [0, 0, 0]
+                    coords[n] = s
+                    coords[t] = x
+                    coords[b] = y
+                    voxel_val = volume(*coords)
+                    
+                    exposed = False
+                    # Check both neighbors along the normal axis
+                    for dir in [-1, 1]:
+                        nb_s = s + dir
+                        if 0 <= nb_s < dim_n:
+                            nb_coords = coords.copy()
+                            nb_coords[n] = nb_s
+                            nb_val = volume(*nb_coords)
+                            if voxel_val != nb_val:
+                                exposed = True
+                                break
+                        else:
+                            # Out of bounds neighbor
+                            if boundary_policy == "air":
+                                exposed = True  # Air neighbor implies exposed face
+                                break
+                            else:  # solid
+                                exposed = False  # Solid neighbor implies internal
+                                break
+                    
+                    if exposed:
+                        mask[y * dim_t + x] = merge_key(voxel_val, *coords)
+                    else:
+                        mask[y * dim_t + x] = 0
+
+            # 2. Greedy Expansion on the 2D Mask
+            for y in range(dim_b):
+                for x in range(dim_t):
+                    idx = y * dim_t + x
+                    key = mask[idx]
+                    
+                    if key == 0:
+                        continue
+                    
+                    # Start of a new quad
+                    w = 1
+                    # Expand width
+                    while x + w < dim_t and mask[y * dim_t + (x + w)] == key:
+                        w += 1
+                    
+                    h = 1
+                    # Expand height
+                    while y + h < dim_b:
+                        row_match = True
+                        for k in range(w):
+                            if mask[(y + h) * dim_t + (x + k)] != key:
+                                row_match = False
+                                break
+                        if not row_match:
+                            break
+                        h += 1
+                    
+                    # Emit Quad
+                    origin = [0, 0, 0]
+                    origin[n] = s
+                    origin[t] = x
+                    origin[b] = y
+                    quads.append({
+                        'origin': origin,
+                        'normal': n,
+                        'width': w,
+                        'height': h
+                    })
+                    
+                    # Mark cells as processed (set to 0)
+                    for dy in range(h):
+                        for dx in range(w):
+                            mask[(y + dy) * dim_t + (x + dx)] = 0
+                            
+    return quads
+```
 
 ## Subtopics
 
-### [Greedy Meshing](1776-greedy-meshing.md)
+### [Greedy Meshing](3519-greedy-meshing.md)
 Standard greedy meshing processes material IDs and visibility masks sequentially across three principal axes to maximize quad size. It handles opaque blocks and uses a `mergeKey` function to allow merging based on attributes beyond material ID, such as ambient occlusion or UV offset. Choose this for general voxel rendering where material consistency is key.
 
-### [3D Greedy Meshing](3519-3d-greedy-meshing.md)
-Extends 2D greedy meshing to three dimensions by explicitly decomposing the 3D problem into six directional 2D sub-problems rather than operating directly on 3D volumes or using run-length encoding along axes. It achieves a simplified mesh that has at most 8x the number of faces that a perfect mesh would have. Choose this when explicit decomposition into directional slices is required for specific rendering pipelines.
-
 ### [Greedy Meshing for Opaque/Undefined Blocks](4917-greedy-meshing-for-opaque-undefined-blocks.md)
-Extends standard greedy face merging to handle voxel volumes containing both opaque and undefined (transparent/empty) blocks, ensuring that only exposed faces of opaque materials are meshed while correctly handling visibility against undefined neighbors. It differs from standard [Greedy Meshing](1776-greedy-meshing.md) by explicitly defining visibility logic for "undefined" block types, preventing the emission of internal faces between opaque blocks and undefined space, and ensuring no geometry is generated for undefined blocks themselves. Choose this for games or simulations with transparent/empty space logic.
+Extends standard greedy face merging to handle voxel volumes containing both opaque and undefined (transparent/empty) blocks, ensuring that only exposed faces of opaque materials are meshed while correctly handling visibility against undefined neighbors. It differs from standard [Greedy Meshing](3519-greedy-meshing.md) by explicitly defining visibility logic for "undefined" block types, preventing the emission of internal faces between opaque blocks and undefined space, and ensuring no geometry is generated for undefined blocks themselves. Choose this for games or simulations with transparent/empty space logic.
+
+### Rectangular Face Merging (2D Dynamic Programming)
+**Definition:** Algorithm to merge exposed triangular faces into large rectangular quads to minimize triangle count, operating on 2D slices of the voxel data [S1, unofficial].
+**Steps:** Extract faces that lie in the same geometric plane and share the same color. Represent the extracted faces as a 2D binary grid where 1 indicates an occupied face and 0 indicates empty space. Use a dynamic programming algorithm to find the largest rectangle of 1s in the grid. Render the identified rectangle as two triangles, remove those faces from the grid, and repeat until all faces are accounted for [S1, unofficial].
+**Performance:** Applied to 577 color-planes, the model uses 2,966 triangles (1,483 rectangular faces), a 1,000-fold improvement over naive and 2% of the exposed-faces approach [S1, unofficial].
 
 ## Background
-Greedy meshing originated as a method to reduce the vertex count of voxel-based terrains, which are naturally represented as grids of cubes. The naive approach of rendering every exposed face results in $O(N)$ faces for $N$ voxels, which is computationally expensive. The greedy approach reduces this to a minimal set of quads. The algorithm is widely used in voxel engines, Minecraft-like games, and procedural terrain generation systems. The specific variant handling opaque/undefined blocks is common in games that support transparency or void space.
+Greedy meshing originated as a method to reduce the vertex count of voxel-based terrains, which are naturally represented as grids of cubes. The naive approach of rendering every exposed face results in $O(N)$ faces for $N$ voxels, which is computationally expensive. The greedy approach reduces this to a minimal set of quads. The algorithm is widely used in voxel engines, Minecraft-like games, and procedural terrain generation systems. The specific variant handling opaque/undefined blocks is common in games that support transparency or void space [G].
 
 ## Sources
-[S1] Greedy Meshing Implementation Notes, 2023
-[S2] Voxel Rendering Optimization Techniques, 2022
-[S3] Efficient Voxel Surface Extraction, 2021
-[S4] Blocky Meshing Fundamentals, 2020
-[S7] Greedy Face Culling Algorithm, 2023
-[S12] Voxel Boundary Handling Policies, 2022
-[S13] Visibility Masks in Voxel Rendering, 2021
-[S19] Material ID Merging in Voxels, 2020
-[S21] Chunk-Based Greedy Meshing, 2023
-[S22] Edge Cases in Voxel Meshing, 2022
-[S24] Custom Merge Keys for Voxel Attributes, 2021
-[S27] Greedy Meshing Performance Analysis, 2020
-[S28] GPU-Accelerated Voxel Meshing, 2023
-[S30] Ambient Occlusion and Greedy Meshing, 2022
-[S31] Geometry Reduction in Voxel Engines, 2021
-[S35] Binary vs. Material-Based Greedy Meshing, 2020
+[S1] Voxel Rendering Techniques - Medium, https://medium.com/@fogleman/voxel-rendering-techniques-fa8d869457ca, fetched 2026-10-27 (unofficial)

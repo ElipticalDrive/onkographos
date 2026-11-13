@@ -1,0 +1,1978 @@
+arXiv:2308.13934v2 [cs.GR] 16 Mar 2025
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface
+Representation
+GUYING LIN∗ , The University of Hong Kong, China
+LEI YANG∗† , The University of Hong Kong, China
+CONGYI ZHANG, The University of Hong Kong, China
+HAO PAN, Microsoft Research Asia, China
+YUHAN PING, The University of Hong Kong, China
+GUODONG WEI, The University of Hong Kong, China
+TAKU KOMURA, The University of Hong Kong, China
+JOHN KEYSER, Texas A&M University, United States of America
+WENPING WANG† , Texas A&M University, United States of America
+(a) Shape fitting
+(b) Shape editing
+Fig. 1. We propose Patch-Grid, a method capable of (a) efficiently modeling diverse geometric features, such as thin geometric features, sharp features, and
+open surface boundaries (from left to right); (b) Patch-Grid also allows updating a thus learned implicit representation to incorporate bump textures (top right)
+or reshape a geometric feature (bottom) within 2 seconds.
+Neural implicit representations are increasingly used to depict 3D shapes
+owing to their inherent smoothness and compactness, contrasting with
+traditional discrete representations. Yet, the multilayer perceptron (MLP)
+based neural representation, because of its smooth nature, rounds sharp
+corners or edges, rendering it unsuitable for representing objects with sharp
+∗ Both authors contributed equally to this research.
+† Corresponding authors.
+Authors’ addresses: Guying Lin, guyingl@andrew.cmu.edu, The University of Hong
+Kong, Hong Kong, China; Lei Yang, l.yang@transgp.hk, The University of Hong Kong,
+Hong Kong, China; Congyi Zhang, zhcy@outlook.com, The University of Hong Kong,
+Hong Kong, China; Hao Pan, haopan@microsoft.com, Microsoft Research Asia, Beijing,
+China; Yuhan Ping, csyhping@connect.hku.hk, The University of Hong Kong, Hong
+Kong, China; Guodong Wei, g.d.wei.china@gmail.com, The University of Hong Kong,
+Hong Kong, China; Taku Komura, taku@cs.hku.hk, The University of Hong Kong,
+Hong Kong, China; John Keyser, keyser@cse.tamu.edu, Texas A&M University, College
+station, United States of America; Wenping Wang, wenping@tamu.edu, Texas A&M
+University, College station, United States of America.
+features like CAD models. Moreover, neural implicit representations need
+long training times to fit 3D shapes. While previous works address these
+issues separately, we present a unified neural implicit representation called
+Patch-Grid, which efficiently fits complex shapes, preserves sharp features
+delineating different patches, and can also represent surfaces with open
+boundaries and thin geometric features.
+Patch-Grid learns a signed distance field (SDF) to approximate an encompassing surface patch of the shape with a learnable patch feature volume.
+To form sharp edges and corners in a CAD model, Patch-Grid merges the
+learned SDFs via the constructive solid geometry (CSG) approach. Core to
+the merging process is a novel merge grid design that organizes different
+patch feature volumes in a common octree structure. This design choice
+ensures robust merging of multiple learned SDFs by confining the CSG operations to localized regions. Additionally, it drastically reduces the complexity
+of the CSG operations in each merging cell, allowing the proposed method
+to be trained in seconds to fit a complex shape at high fidelity.
+2 •
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+Experimental results demonstrate that the proposed Patch-Grid representation is capable of accurately reconstructing shapes with complex sharp
+features, open boundaries, and thin geometric elements, achieving state-ofthe-art reconstruction quality with high computational efficiency within
+seconds.
+CCS Concepts: • Computing methodologies → Shape modeling; Neural
+networks.
+1
+INTRODUCTION
+The implicit surface representation typically defines a shape as
+the zero-level set of some function, such as the signed distance
+function of the shape. The implicit representation is widely used
+for shape modeling [Mitchell et al. 2015; Ohtake et al. 2005; Turk
+and O’brien 2002] and downstream engineering applications like
+simulation [Allen 2021]. Recent years have seen a surge in research
+on neural implicit representations [Gropp et al. 2020; Martel et al.
+2021; Park et al. 2019; Tancik et al. 2020b] where a deep neural
+network is used to encode the implicit function in question. Neural
+implicit representations are inherently smooth and can represent
+complex shape details more compactly than traditional discrete
+representations, e.g. point clouds and polygonal meshes [Sitzmann
+et al. 2020; Takikawa et al. 2021].
+There are two main challenges with current neural implicit surface representations. First, they struggle to represent various geometric features, such as sharp geometric edges, surfaces with open
+boundaries, and narrow gaps formed by surfaces in spatial proximity; see the examples in Fig. 1. Although two exemplar shapes
+possess sharp geometric features and narrow gaps as shown in the
+zoom-in views, no existing method can handle these geometric features simultaneously, leading to less satisfactory modeling results.
+Furthermore, open surfaces, which find important applications in
+modeling cloth and representing clothed humans, are known to be
+challenging to model with implicit surface representations. Therefore, a framework capable of faithfully representing these geometric
+features in a shape can significantly extend the application of neural
+implicit surface representations.
+Second, learning a neural implicit representation to fit a given
+shape accurately often takes an excessively long time, from minutes to around an hour, precluding its application to interactive
+design. Several methods [Saragadam et al. 2022; Wang et al. 2022]
+have proposed to address this efficiency issue. While these methods
+can improve training efficiency through a hierarchical design or a
+pretrained shape space, they struggle to balance high quality and efficiency. In contrast to these previous methods, InstantNGP [Müller
+et al. 2022] is designed with algorithmic improvements and customized CUDA kernels, establishing state-of-the-art performance
+in both efficiency and fitting accuracy.
+To tackle these two challenges, we present Patch-Grid, a compositional framework for modeling neural implicit surfaces with two
+distinctive advantages: 1) Versatile representation: it can represent sharp geometric features, open surface boundaries, and thin
+geometric features (such as slender tubes or narrow gaps), which are
+challenging or impossible for current neural surface representations,
+as shown in Fig. 1. 2) Efficiency: Patch-Grid is faster to train than
+most existing neural representations that achieve state-of-the-art
+performance. It typically takes about 5 seconds to train Patch-Grid
+to fit a given shape with state-of-the-art fitting accuracy and less
+than 2 seconds to complete a local shape update of an existing surface represented by Patch-Grid to the same level of accuracy. This
+enables interactive modeling and editing of neural implicit surfaces.
+The problem we address is formulated as follows. Given a boundary representation (B-Rep) of a 3D shape, which defines the 3D
+surface shape as a set of surface patches, we aim to convert this
+B-rep representation into a neural implicit representation, by representing each surface patch as a zero-level set of a neural implicit
+function. Specifically, each surface patch is tightly contained in a
+bounding volume that comprises a regular grid of cubic cells with a
+learnable feature vector assigned to each grid point.
+The collection of these grid cells is referred to as the patch volume
+and the collection of feature vectors defined on it is referred to as the
+patch feature volume of the surface patch. For any point x inside a
+cubic cell, a Multi-Layer Perceptron (MLP) decoder with one hidden
+layer is used to map the feature vector at x, which is obtained via
+trilinear interpolation from feature vectors at the corners of the cell,
+to a signed distance value, as shown in Fig. 2.
+We observe that the global CSG approach adopted by NH-Rep [Guo
+et al. 2022] for the same task often leads to failure cases in highly
+concave and narrow regions (cf. Fig. 4). This is because merging
+zero-level sets of multiple surface patches requires careful coordination to avoid undesired interference (cf. Fig. 5). Since the intersection
+of two or more surface patches forming a sharp geometric feature
+(edges or corners) is only a local operation, we propose to use a
+merge grid for robustly modeling sharp features of a given shape in
+a local manner. Specifically, the merge grid uses an octree structure
+to adaptively subdivide the spatial domain into cubic cells so that
+each leaf cell ideally contains no more than one sharp feature to
+simplify the task. This simplifies the task by circumventing the difficulty in merging learned SDFs of multiple patches and trimming
+off the extraneous zero-level sets (c.f. Fig. 5) into various sharp features globally, as encountered in [Guo et al. 2022]. By adopting a
+divide-and-conquer strategy for merging learned SDFs of multiple
+patches in a local region, our approach achieves robust and superior
+performance for modeling various geometric features, as shown in
+Fig. 1.
+Besides sharp features, our local approach is also capable of modeling thin geometric features and open surface boundaries. In
+a general sense, a slender tube or a narrow gap/slit is considered
+a thin geometric feature (e.g. columns 1, 2, and 4 of Fig. 14). By
+adopting a local approach, Patch-Grid robustly models thin geometric features by placing spatially proximal but disjoint surface
+patches in different patch volumes which may overlap. In this way,
+the distance fields induced by the different surface patches do not
+interfere with each other, thereby enabling the modeling of narrow
+gaps or thin solids formed by these surface patches. Furthermore,
+we model a boundary curve of an open surface patch as the result
+of a trimming operation. This involves constructing a trimming
+surface followed by a trimming operation, which can be performed
+locally to produce accurate results.
+Efficiency. Even without using a customized CUDA implementation, the proposed approach that uses patch-level feature vectors
+and a merge grid for modeling geometric features can achieve high
+training efficiency. Typically, our method takes about 5 seconds to
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation • 3
+fit a given shape from scratch and supports local shape updates
+at an interactive rate (within 2 seconds). The increased efficiency
+of Patch-Grid stems from two key aspects. Firstly, Patch-Grid decomposes a given shape into patches and independently learns a
+patch feature volume for each patch, reducing the overall learning
+complexity. Secondly, we propose an adaptive merge grid to simplify
+the CSG operations among several surface patches that form a sharp
+feature. With this adaptive merge grid, the training objective is drastically simplified and thus improves the overall training efficiency.
+Moreover, Patch-Grid can leverage a pretrained shallow MLP to
+significantly reduce the training time for learning the patch feature
+volumes. We show that the proposed representation can facilitate
+local updates of individual surface patches, enabling interactive
+shape editing tasks. We will release our code upon the acceptance
+of the paper to enable future works to build on our work.
+In summary, the contributions of this paper are:
+• Versatile representation. We present Patch-Grid, a compositional neural implicit representation capable of modeling a
+variety of geometric features that are challenging for previous methods, such as sharp or thin geometric features and
+open boundaries;
+• Robustness. A novel merge grid as illustrated in Fig. 5 is
+proposed that adaptively partitions the spatial domain and
+locally composes neural implicit surface patches to faithfully
+model a target surface shape with sharp features (i.e. edges
+and corners) in a more robust manner than the existing
+global approach [Guo et al. 2022].
+• Superior efficiency. Combining the design choices of Patch
+feature volume and Merge Grid, our method Patch-Grid, implemented solely in PyTorch, achieves state-of-the-art fitting
+quality within a few seconds, outperforming most existing
+methods. Additionally, Patch-Grid supports local shape updates at an interactive rate (within 2 secs).
+2 RELATED WORKS
+2.1 Constructive solid geometry and implicit functions
+Implicit representations employ a (continuous) function to determine whether a given query point, specified by its x-y-z coordinates,
+is located inside or outside of a shape. A more complicated shape can
+be composed by combining several implicit functions. Specifically,
+constructive solid geometry (CSG) is a widely used technique for
+modeling complex geometries by organizing a set of implicit functions as a tree through recursive application of Boolean operations
+[Requicha and Voelcker 1977] or more general transformations like
+R-functions [Pasko et al. 1995; Shapiro 2007]. Compared with standard boundary representation (B-Rep), CSG representations based
+on continuous implicit functions are more compact, can handle flexible topologies, and allow for shape recovery at arbitrary resolutions.
+These advantages make it a prominent choice for simulation, inverse
+optimization, and manufacturing [Allen 2021].
+In recent years, machine learning approaches have been applied
+to CSG modeling. These methods either recover CSG trees from
+unstructured point clouds using neural networks [Kania et al. 2020;
+Ren et al. 2021; Sharma et al. 2018; Yu et al. 2023], or perform CSG
+operations on neural SDFs [Guo et al. 2022; Marschner et al. 2023].
+Our method is similar to the latter which applies CSG operations on
+neural SDFs to compose complex geometry. This drastically extends
+the CSG modeling capability beyond simple geometric primitives,
+such as spheres, cones, boxes, or convex shapes. Our work differs
+from previous works with the use of localized patch-grids to efficiently convert any B-Rep solid into a feature-preserving implicit
+representation. In the following, we expand in detail on the relationships of our approach and various neural implicit functions.
+2.2
+Neural implicit representations
+Global neural implicit functions. Neural implicit representation
+is a novel approach that turns traditional explicit discrete representations (e.g., point clouds, polygon meshes, or voxels) into the
+iso-surface of some continuously defined differentiable fields represented through a neural network [Chen and Zhang 2019; Mescheder
+et al. 2019; Park et al. 2019]. To improve the performance when overfitting the network to complex 3D shapes, several techniques have
+been proposed including exploring the optimal hyper-parameters
+[Davies et al. 2020], different training strategies [Duan et al. 2020],
+positional encoding [Tancik et al. 2020a], and sinusoidal activation
+[Sitzmann et al. 2020]. Another line of work focuses on extending
+the capability of neural implicit representations to general shapes
+like open surfaces using a neural unsigned distance field [Chibane
+et al. 2020b] or modified SDF [Chen et al. 2022]. However, these
+prior approaches cannot faithfully recover sharp features or cannot
+scale between fine-grained shapes and large scenes.
+Hierarchical neural implicit functions. A class of methods based
+on hierarchical representation has been proposed to achieve more
+compact representations, reconstruct highly detailed geometry, and
+adaptively scale to different levels of detail (LODs). These methods can be divided into two branches. The first branch focuses
+on hierarchical designs within the network architecture [Chibane
+et al. 2020a; Lindell et al. 2022]. For example, Lindell et al. [2022]
+introduce a multiplicative filter network [Fathony et al. 2020] to
+limit the bandwidth of each layer’s output, enabling the network to
+learn a multi-resolution decomposition of the output. The second
+branch involves using explicit representations, such as octrees or
+hash tables [Martel et al. 2021; Müller et al. 2022; Takikawa et al.
+2021; Tatarchenko et al. 2017]. NGLOD [Takikawa et al. 2021] and
+ACORN [Martel et al. 2021] are two examples. NGLOD maps the
+point coordinates to octree-organized features and decodes these
+features into an SDF, while ACORN [Martel et al. 2021] utilizes
+an octree-like coordinate network to learn an adaptive decomposition of the 3D occupancy fields, enabling the network to fit 3D
+shapes faster and more accurately. While these hierarchical methods
+have made significant advancements in terms of spatial and computational efficiency, as well as LOD applications in neural surface
+representation, they still lack the ability to express diverse geometric
+features that include sharp features and open boundaries.
+While our work utilizes an adaptive grid, the purpose of this
+adaptive grid is different from that in the previous works which
+build the hierarchical feature volumes on top of the octree data
+structure. The adaptive grid in our work is complementary to the
+state-of-the-art methods. It is used to confine CSG operations to
+localized grid cells, thereby avoiding undesired interference between
+4
+•
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+(a) Input shape
+(b) Patch-Grid representation
+(c) Individual patches
+(d) Composed result
+Patch feature volumes 𝐹𝑉
+Lpatch
+Merge grid G
+𝑓
+Lmerge
+Composition
+Fig. 2. Overview. (a) Input to Patch-Grid is a B-Rep model of a 3D shape S; (b) Patch-Grid encloses each surface patch of the given shape with a patch
+volume. We assign a learnable feature vector to each grid point of the patch volume and convert this volume into a patch feature volume 𝐹𝑉 , which defines a
+continuous feature field 𝐹 (x) via trilinear interpolation within each cell. Then, a shared MLP decoder 𝑓 is used to map 𝐹 (x) to R, representing the SDF of the
+target surface patch. As there exists an extended zero-level set beyond the fitting surface (called extraneous zero-level set in the following), patches are robustly
+trimmed off through CSG merging operations to derive a neural implicit field that reproduces the SDF of the given shape. To this end, we construct a merge
+grid G and enforce a merge loss within each merge grid cell. The merge grid confines the CSG operations required to merge multiple learned SDFs to localized
+regions. (c) We design two types of loss terms to enable accurate fitting of individual patches (Lpatch ) and model the relationship between connected patches
+(Lmerge ), respectively; (d) Finally, the individual neural surface patches are composed into the final surface shape that reconstructs the target shape. It takes
+on average 5 seconds to fit a 3D CAD model.
+spatially close but unrelated patches and ensuring the validity of
+the merged results.
+Patch-based neural implicit functions. Representing the entire
+shape using a set of shape primitives is a classic point of view
+in traditional explicit geometry processing [Li et al. 2011; Nan and
+Wonka 2017; Schnabel et al. 2007]. Those patch-wise representations
+decompose complex models into multiple patches with parametric
+shape priors to extract high-level shape structures for downstream
+applications like shape completion or semantic editing. Motivated
+by the simplicity of patches, neural implicit representations adopted
+similar ideas to decompose shapes, allowing learning of locally controllable models [Genova et al. 2020], generalizable parts [Tretschk
+et al. 2020], or a semantic compositional parametric model [Zhang
+et al. 2022]. However, it is not easy to achieve high representation
+accuracy by using patch-based implicit representations, due to the
+difficulty in stitching together or trimming patches.
+Focusing on neural implicit modeling of CAD shapes with sharp
+features, Guo et al. [2022] give a global CSG-based solid entity
+representation that is based on patch-wise halfspaces. It first adopts
+a top-down constructive method to build the global CSG tree that
+ensures the order of Boolean operations yields theoretically sound
+results. Then it learns patch-wise halfspace-based representations
+on all sample points in the domain, thus coordinating them in the
+whole space. A similar work [Reddy et al., 2021] uses the global
+superposition of multiple learned 2D SDFs to reconstruct fonts
+while preserving their sharp corners and edges. As we will show in
+experiments, in contrast to our local approach to CSG construction
+for sharp feature modeling, the global approach [Guo et al. 2022]
+has difficulty precisely representing complex 3D shapes with many
+concave patches. Moreover, our approach handles more general
+surface types than solid CAD shapes, including open surfaces, selfintersecting surfaces, and non-orientable surfaces.
+3 OUR METHOD
+3.1 Overview
+We present the overview of Patch-Grid in Fig. 2. Input to our method
+Ð
+is a shape S = 𝐾
+𝑝=1 𝑆𝑝 composed of a collection of surface patches
+𝑆𝑝 along with the type of connection between adjacent patches.
+Our goal is to represent the shape S as a neural implicit surface
+Z composed of a collection of neural signed distance fields. We
+denote the zero-level set of a neural signed distance field as 𝑍𝑝
+which contains a target surface patch 𝑆𝑝 . To facilitate fast training
+and effective modeling, we introduce a patch volume that tightly
+encloses a surface patch 𝑆𝑝 and defines the extent of 𝑍𝑝 as shown
+in Fig. 2(b). Furthermore, we impose a regular grid structure on the
+patch volume of 𝑆𝑝 and assign a feature vector at each grid point.
+Then the collection of all these feature vectors is referred to as the
+patch feature volume. Here, the grid resolution is determined by the
+local shape complexity, as will be explained later. Given the patch
+feature volume and a query coordinate relative to the patch volume,
+we use an MLP to map the interpolated feature vector at the query
+point to a signed distance value, thus approximating the SDF of the
+surface patch 𝑆𝑝 (Sec. 3.2). We use a local approach based on another
+grid structure, named the merge grid G, to effectively assemble
+{𝑍𝑝 }𝐾
+𝑝=1 into the final neural representation Z. The merge grid
+adaptively subdivides the spatial domain around the sharp geometric
+features to simplify the adjacency graph of surface patches enclosed
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation • 5
+in the individual merge grid cells (Sec. 3.3). A patch volume and the
+merge grid of a 3D shape are shown in Fig. 3. The overall training
+process is presented in Sec. 3.4. In addition, we also present a fast
+adapting strategy for local shape update in Sec. 3.5.
+3.2
+Patch Feature Volumes
+A patch feature volume is constructed as follows. First, for each
+surface patch 𝑆𝑝 of a given shape, we determine its axis-aligned
+rectangular bounding box and partition the bounding box into a
+grid of regular rectangular cells whose size is determined adaptively
+according to the shape complexity of the patch. Then, we prune the
+cells to keep only those that enclose part of the surface patch 𝑆𝑝 ,
+so that the union of these remaining nonempty cells forms a tight
+bounding volume of 𝑆𝑝 . We call these cells a patch volume denoted
+by 𝑉𝑝 , as shown in Fig. 3(b).
+Next, for each patch volume, we introduce a learnable feature
+𝑝
+𝑝
+volume, 𝐹𝑉𝑝 = {f (𝑖,𝑗,𝑘 ) }, where feature vectors f (𝑖,𝑗,𝑘 ) ∈ R𝐷 are
+assigned to the grid points of the patch volume, indexed by (𝑖, 𝑗, 𝑘).
+A feature field 𝐹𝑝 (x) : 𝑉𝑝 → R𝐷 is defined over the patch volume
+𝑉𝑃 by trilinear interpolation of the feature vectors at the 8 corner
+points of the cell containing the spatial query point x ∈ R3 . The
+grid resolution is determined adaptively according to the shape
+complexity of individual patches. Specifically, it is based on the
+averaged shape diameter function [Shapira et al. 2008], which is
+a reasonable approximation of the local feature size [Amenta and
+Bern 1998].
+Given the continuous feature vector field 𝐹𝑝 (x), we use an MLP
+decoder 𝑓 to represent surface patch 𝑆𝑝 as part of the zero-level set
+𝑍𝑝 of the following function,
+𝑆𝑝 ⊂ 𝑍𝑝 = {x|𝑓 (𝐹𝑝 (x)) = 0}.
+(1)
+The surface shape thus generated is independent of the absolute
+position of the query point but depends solely on the interpolated
+features. The use of the patch feature volume allows the decoder 𝑓
+to be pretrained on a shape dataset to learn a local shape prior, as
+we will explain in Sec. 3.5.
+Representing a surface patch locally by the patch volume is a
+key design that distinguishes our method from the global approach
+used in NH-Rep [Guo et al. 2022]. In this way, each learned implicit
+function of a surface patch is only defined within the patch volume
+as shown in Fig. 2(c). This effectively trims off the extraneous zerolevel set of a learned implicit function outside the patch volume,
+thus avoiding undesired interference between extraneous zero-level
+sets faced by the global approach.
+For the remaining extraneous zero-level sets within the patch
+volumes 𝑉𝑝 , we need to merge 𝑍𝑝 with its neighboring patches
+following a sequence of pre-defined Boolean operations, i.e., a CSG
+tree, to form 𝑆𝑝 , as will be represented next.
+3.3
+Merge Grid and Merging Constraints
+Patch connectivity and Boolean operations. We adhere to the definition used in NH-Rep [Guo et al. 2022], where the connectivity
+between any two adjacent patches is determined as concave, convex,
+or smooth, based on the dihedral angles of patches adjacent to a
+common boundary curve. Assuming a point 𝑏 ∈ Γ on a boundary
+(a) GT
+(b) A patch volume
+(c) The merge grid
+Fig. 3. Given a 3D shape (a), we show (b) a patch volume for the patch in
+orange and (c) the merge gird.
+(a) GT
+(b) NH-Rep
+(c) Patch-Grid
+Fig. 4. (a) A challenging case with highly concave regions at the top and
+bottom of the cylindrical shell. (b) NH-Rep fails in this challenging case due
+to the difficulty in merging the learned implicit functions in a global manner.
+(c) Our Patch-Grid performs robustly due to the localized approach adopted.
+𝐶0
+𝐶0
+𝐶0
+𝐶 00
+𝐶 01
+𝐶 030 𝐶 031
+𝐶 033 𝐶 032
+(a)
+𝐶0
+𝐶0
+(b)
+(c)
+𝐶 031
+𝐶 02
+𝐶 032
+(d)
+Fig. 5. (a) The ground truth shape; (b) An ideal case of the extraneous
+zero-level set of curve 𝐴 learned by Patch-Grid; (c) A failure case caused
+by undesired interference between the zero-level sets of curves 𝐴 and 𝐶;
+(d) Applying the merge grid G converts the original CSG operations to
+localized regions (i.e., cell 𝐶 031 ). The first row depicts 2D illustrations of the
+curves. The second row shows the merged zero-level sets in black. The third
+row shows the CSG operations under different circumstances, and applying
+merge grid G simplifies the CSG operations in each cell and significantly
+reduces the burden for learning coordinated extraneous zero-level sets.
+6 •
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+curve Γ, the dihedral angle 𝛼𝑏 ∈ [0, 2𝜋] is formed by patch tangent
+directions pointing away from the boundary curve and excluding
+the outward normal vector. If 𝛼𝑏 < 𝜋 − 𝜖, ∀𝑏 ∈ Γ, the boundary
+curve Γ is classified as convex; if 𝛼𝑏 > 𝜋 + 𝜖, ∀𝑏 ∈ Γ, Γ is classified
+as concave; otherwise, Γ is smooth. We follow Guo et al. [2022] in
+using 𝜖 = 0.35 as the tolerance.
+For hybrid boundary curves that simultaneously exhibit convex
+and concave features at different points, we adopt the patch decomposition algorithm from NH-Rep [Guo et al. 2022] to divide the
+boundary curve into segments of singular connectivity types, and
+draw smooth-type curves within the adjacent patches to subdivide
+them and maintain consistent topology.
+To create the boundary edge shared by two adjacent patches, we
+employ a Boolean operation (max for intersection or min for union)
+based on whether the edge is convex or concave; the smooth type can
+be regarded as either convex or concave without special treatment.
+The adjacency of two connected patches forming a convex edge
+is denoted as +, indicating the max operation. Conversely, if the
+adjacency is concave, it is denoted by −, indicating the min operation.
+Consequently, a CSG tree, i.e., a sequence of Boolean operations,
+assembles the surface patches into the desired shape.
+In contrast to the global approach of constructing the CSG tree [Guo
+et al. 2022], which is susceptible to robustness issues (refer to Fig. 4
+for an example), we adopt a local approach based on an adaptive
+merge grid G to enhance the robustness of our learned neural implicit representation.
+Global approach lacks robustness. We will use a simple 2D example in Fig. 5 to illustrate the robustness issue encountered by
+the global approach. Consider a 2D solid shape (shaded in pale yellow) bounded by three curve segments 𝐴, 𝐵, and 𝐶, with two sharp
+geometric features, i.e., corners in 2D.
+Because the SDF of curves 𝐴, 𝐵, and 𝐶 will be merged into an
+entire signed distance field according to the Boolean operations
+in the CSG tree, there are certain requirements for the extended
+zero-level set of each curve. Here, we refer to the naturally extended
+part of each curve’s zero-level sets, excluding the curve itself, as the
+extraneous zero-level set, which is shown by dashed curves.
+Due to the lack of SDF supervision in the extended region, the
+learning progress may lead to extended SDF as shown in either (b)
+or (c). Since curves 𝐴 and 𝐶 are not directly connected, supervising
+the extraneous zero-level set of 𝐴 to avoid undesired interference
+with patch 𝐶 (c), thus leading to an ideal result (b), relies on the
+supervision imposed on the entire SDF after merging. While the
+illustrated case is rather simple and thus easy to handle by a neural
+network, a more complicated 3D shape can lead to the failure of
+the global approach as shown in Fig. 4. In contrast, our localized
+approach first models each surface patch (or curves in this example)
+within its bounding volume to constrain the extent of the extraneous
+zero-level set of the patch. Then, a merge grid is applied to subdivide
+the spatial domain, ensuring that each merge grid cell contains the
+patch relationship in the simplest possible form as explained next.
+Adaptive merge grid. We adopt a divide-and-conquer strategy
+by subdividing the spatial domain with an adaptive merge grid. Let
+us continue our explanation with the aforementioned 2D example.
+By subdividing the spatial domain (denoted 𝐶 0 ) in Fig. 5(a), each
+(a)
+(b)
+(c)
+Fig. 6. Sharp geometric features in a 3D shape. (a) A 3D example; (b) The
+adjacency graph of an edge feature; (c) The adjacency graph of a corner
+feature.
+subdivided cell in Fig. 5(d) contains a simpler geometry – at most
+one sharp corner is enclosed in each cell. The benefit is two-fold.
+First, the curve segment 𝐶 is now defined only in cell 𝐶 01 , 𝐶 02 , and
+𝐶 032 and so is its extraneous zero-level set. This circumvents the
+demanding task of globally coordinating extraneous zero-level sets
+of multiple patches. Second, the construction of the sharp corner
+formed by 𝐵 and 𝐶 (in 𝐶 032 ) now involves only these two relevant
+patches; curve segment 𝐴 is trimmed off in 𝐶 031 avoiding any potential interference from other unconnected patches (e.g. as it did
+to 𝐶 in Fig. 5(c)). This localized approach drastically improves the
+robustness of CSG operations compared to the global approach.
+Now, we elaborate on this subdividing scheme for 3D shapes.
+Consider each patch as a node. An undirected adjacency graph can
+be defined for the patches bounded in each domain. Then, a sharp
+edge formed by two adjacent patches corresponds to a link in the
+adjacency graph and a corner feature at which multiple patches
+intersect corresponds to a complete subgraph of the adjacency graph,
+as shown in Fig. 6.
+We initialize the merge grid as an octree grid and subdivide it
+based on two criteria: 1) whether this cell contains a patch feature volume with a finer resolution, and 2) whether the adjacency
+graph of the cell is a complete graph (i.e., a clique). The second
+criterion translates into the situation where the CSG operations
+are defined between all pairs of patches in the grid cell, therefore
+the cell cannot be further simplified by subdivision. The second
+criterion can be achieved ideally through subdivision, but for computational practicality we impose a maximum depth constraint on
+the octree subdivision. Thus, there may be cells whose graphs are
+not cliques at the maximum depth. That said, the presented octree
+subdivision can already significantly reduce the complexity of the
+graph in a cell, ensuring the robustness of the proposed method as
+shown empirically. The pseudo-code for constructing the adaptive
+merge grid is provided in Alg. 1.
+There may exist more than two connected components in the
+adjacency graph of a leaf cell of the octree merge grid. Such cases
+can occur for disjoint patches with close proximity, or for modeling
+self-intersecting shapes. To handle such cases uniformly, drawing
+on ideas of how they can be meshed [Li and Barbič 2018], we simply
+create 𝑄 copies of the cell, with each copy representing one connected component within the cell, and assign the duplicated cells
+for merge loss computation according to their corresponding patch
+identity.
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation • 7
+3.4
+Algorithm 1 Construction of Merge Grid
+Input:
+Surface shape S
+Initial merge grid G
+Maximal depth 𝑑𝑚𝑎𝑥 ;
+Output:
+Merge grid G;
+1: while #subdivisible leaf cells > 0 do
+2:
+for 𝐶 ∈ G do
+3:
+if 𝐶.𝑠𝑢𝑏 == 𝐹𝑎𝑙𝑠𝑒 then
+4:
+continue;
+Ñ
+5:
+else if S 𝐶 ≠ ∅ and 𝐶.𝑑 < 𝑑𝑚𝑎𝑥 then
+6:
+for every connected graph 𝑔 in 𝐶 do
+7:
+if 𝑔 is not a clique graph then
+8:
+𝑀 ← 𝑠𝑢𝑏𝑑𝑖𝑣𝑖𝑑𝑒 (𝐶);
+9:
+𝐶 ′ .𝑠𝑢𝑏 ← 𝑇𝑟𝑢𝑒, ∀𝐶 ′ ∈ 𝑀;
+10:
+break;
+11:
+end if
+12:
+end for
+13:
+𝐶.𝑠𝑢𝑏 ← 𝐹𝑎𝑙𝑠𝑒;
+{/*clique cell*/}
+14:
+else
+15:
+𝐶.𝑠𝑢𝑏 ← 𝐹𝑎𝑙𝑠𝑒
+{/*empty cell or cell reaches 𝑑𝑚𝑎𝑥 */}
+16:
+end if
+17:
+end for
+18: end while
+Lpatch = 𝜆surface Lsurface + 𝜆normal Lnormal
+where
+Lsurface =
+Lnormal =
+𝐿
+LSDF =
+1 ∑︁
+∇x 𝑓 (𝐹𝑝 (x)) − n(x) 2,
+|𝑆𝑝 |
+(6)
+1 ∑︁
+𝑓 (𝐹𝑝 (x + 𝑑n)) − 𝑑 ,
+|𝑆𝑝 |
+(7)
+1 ∑︁
+∥∇x 𝑓 (𝐹𝑝 (x))∥ − 1 .
+|Ω𝑝 |
+(8)
+x∈𝑆𝑝
+LEikonal =
+x∈Ω𝑝
+𝐽
+(3)
+𝑙=1
+𝐿 the collection of cells in 𝑆 containing
+Here, we denote as {𝐹𝐶𝑙 }𝑙=1
+𝑝
+merge cells and {𝐶 𝑙𝑗 } 𝐽𝑗=1 is the collection of merge cells in 𝐹𝐶𝑙 .
+(5)
+x∈𝑆𝑝
+where x are sampled from 𝑆 {𝑝,𝑞 } in cell 𝐶𝑖 and 𝑁𝑥 is the number of sample points. Then, we assign this merge loss to the involved patches 𝑆 {𝑝,𝑞 } . Note that a cell in the patch volume (e.g. 𝐶 0
+in Fig. 5(d)) can be subdivided into smaller, nested merge cells (e.g.
+𝐶 031 or 𝐶 032 inside 𝐶 0 ). We define the patch-wise merge loss as
+follows to balance the patch loss and the merge loss:
+1 ∑︁ 1 ∑︁ 𝑗
+(
+L
+).
+𝐿
+𝐽 𝑗=1 merge
+1 ∑︁
+𝑓 (𝐹𝑝 (x)) ,
+|𝑆𝑝 |
+x∈𝑆𝑝
+x∈𝐶𝑖
+𝑝
+(4)
++ 𝜆SDF LSDF + 𝜆Eikonal LEikonal,
+Merge loss design. Once the merge grid has been adaptively subdivided, for each connected component at the non-empty leaf node,
+we utilize the Boolean tree construction algorithm described in Guo
+et al. [2022] to build a CSG tree. The Boolean operations of the
+CSG tree impose merging constraints on the learned implicit functions. The objective is to ensure that the zero-level set of the merged
+implicit function, denoted as 𝑀, accurately reproduces the target
+geometry.
+𝑝
+We now introduce how the patch-wise merge loss Lmerge of
+surface patch 𝑆𝑝 is computed. First, assume that a merge cell 𝐶𝑖
+contains two patches 𝑆𝑝 and 𝑆𝑞 . We compute the merge loss L𝑖merge
+in this cell as follows:
+1 ∑︁
+L𝑖merge =
+|𝑀 (x)|,
+(2)
+𝑁𝑥
+Lmerge =
+Learning Patch-Grid Representation
+The patch feature volumes {𝐹𝑉𝑝 }𝐾
+𝑝=1 and the weights of the shared
+decoder 𝑓 are trainable parameters and optimized to fit the target
+shape S. We adopt a surface fitting loss Lsurface and a surface normal fitting loss Lnormal as the data terms for the fitting loss. Besides,
+we also adopt a pseudo SDF loss LSDF and a regularization term
+Leikonal proposed by Gropp et al. [2020] to improve the reconstruction quality. Hence, the loss function for learning each patch is
+defined as
+Here, n(x) denotes the unit normal vector at x; 𝑑 is a small offset
+distance within a range of (0, 0.1) of the grid cell size; and Ω𝑝
+denotes the set of point samples from the patch volume of surface
+patch 𝑆𝑝 .
+The final loss of the optimization problem takes the following
+form:
+𝐾
+𝐾
+1 ∑︁ 𝑝
+1 ∑︁ 𝑝
+Lpatch + 𝜆merge
+L
+.
+(9)
+Ltotal =
+𝐾 𝑝=1
+𝐾 𝑝=1 merge
+3.5
+Fast Local Shape Updating with Pretrained Decoder
+Editing is an important part of 3D shape modeling. In CAD modeling, users commonly adjust the size of a component or deform
+its geometry to edit an existing 3D model. Therefore, it would be
+desirable if the learned representation can be updated at an interactive rate as the CAD model is edited. Existing methods [Guo et al.
+2022; Martel et al. 2021; Takikawa et al. 2021] must overfit the edited
+shape from scratch, which takes too long for interactive editing.
+For all these prior methods, a change to a surface patch will inevitably propagate to the rest of the patches in proximity due to
+using a shared feature volume to model these spatially close surface
+patches. Patch-Grid circumvents this limitation by modeling each
+surface patch with a separate patch feature volume, allowing for
+independent manipulation and efficient update of a surface patch.
+We leverage the compositional nature of Patch-Grid and develop
+a new strategy to enable a fast (i.e. less than 2 seconds) local update.
+The overall idea is to perform a test-time optimization that only
+optimizes the patch feature volumes of the edited patches while
+fixing all other patch feature volumes and the shared MLP decoder
+𝑓 . This local updating strategy thus reduces the computational time
+significantly which allows for interactive local shape updates.
+8 •
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+(a) GT
+(b) NH-Rep
+(c) Patch-Grid
+(d) GT
+(e) NGLOD
+(f) Patch-Grid
+Fig. 7. Modeling of thin structures. Due to their global scheme, NGLOD
+and NH-Rep struggle to represent thin structures; however, our localized
+method robustly and faithfully addresses these challenging cases.
+Fig. 8. Processing thin geometric features. Each of the two surface patches
+bounding the thin solid is modeled by a separate independent neural signed
+distance field.
+4.1
+To this end, we pretrain the shared MLP decoder 𝑓 with various
+surface patches. During the pretraining stage, given a patch 𝑆𝑝 from
+a shape, we construct its patch volume 𝑉𝑝 and randomly initialize the
+patch feature volume 𝐹𝑉𝑝 as described earlier. The decoder 𝑓 along
+with the patch feature volume 𝐹𝑉𝑝 are trained to reconstruct the
+corresponding surface patch 𝑆𝑝 during the pretraining process using
+Eq. 4. This process exposes the decoder 𝑓 to a diverse collection of
+surface patches and thus instills to decoder 𝑓 a local shape prior.
+We will explain the pretraining details and demonstrate its benefit
+later in Sec. 5.
+4
+MODELING DIVERSE GEOMETRIC FEATURES
+In this section, we first briefly describe how the mesh is extracted
+from the learned compositional SDFs and then elaborate on how
+the proposed Patch-Grid representation can be applied to modeling
+diverse geometric features, such as narrow slits or thin solids (which
+are together termed here as thin geometric features) or open surface
+boundaries, and enabling global distance queries via a local-global
+blending scheme.
+Mesh extraction. Patch-Grid encloses the given shape composed of multiple surface patches with patch volumes. When two
+or more patches intersect, the overlapped grid cells in the relevant
+patch volumes subdivide into a merge grid. To extract the mesh
+representation, we perform the MarchingCubes algorithm to mesh
+the zero-level sets in the patch volume cells which contain only a
+single surface patch. For patch volume cells containing intersecting patches, we only mesh the zero-level sets of the patches in the
+merge cells. In this way, we ensure the validity of the obtained mesh
+surface by extracting it from the cells where the patch loss and the
+merge loss are enabled.
+Modeling of Thin Geometric Features
+It is challenging for a global approach like NH-Rep [Guo et al. 2022]
+or NGLOD [Takikawa et al. 2021] to fit a neural implicit representation to a 3D shape with thin geometric features, such as the thin
+solid shown in Fig. 7 (upper row) and the very thin gap shown in
+Fig. 7 (bottom row). On the one hand, insufficient samples around
+these thin features, coupled with the inherent difficulty that the MLP
+faces in handling sharp changes in SDF, accounts for the failures
+encountered in such regions by NGLOD [Takikawa et al. 2021].
+On the other hand, NH-Rep [Guo et al. 2022], while being a patchbased representation, is limited by the global approach it adopts.
+As described earlier, the need for managing global interaction between all pairs of patches makes it prone to fail when modeling thin
+features, as shown in the top of Fig. 7.
+In contrast to previous methods, our Patch-Grid locally represents
+each composing surface patch with a bounding patch volume and
+achieves robust results in regions of thin geometric features; see
+our results in Fig. 7. We demonstrate how our local representation
+benefits the modeling of thin geometric features with Fig. 8 where a
+thin solid is bounded by two spatially close yet disconnected surface
+patches. First, the two surface patches are separately represented
+by their respective patch volumes, and so are their signed distance
+fields. Therefore, learning the two individual signed distance fields
+avoids excessively dense sampling around the thin solid as required
+by NGLOD. On the other hand, while it adopts a similar patch-based
+representation, NH-Rep defines the patches in the global domain
+and can only evaluate the geometry through the CSG tree in a
+global manner that struggles to disentangle the two disconnected
+but almost overlapping patches. In contrast, our Patch-Grid enables
+local evaluation of a surface patch within its patch volume. If two
+patches are not connected (see Fig. 8), each surface patch can be
+individually extracted without going through the CSG tree. Hence,
+our local approach exhibits high flexibility in modeling these thin
+geometric features.
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation • 9
+𝑁𝑛
+𝑁𝑠
+𝑁𝑡
+(a) GT
+(b) Training supervision
+(a) GT shape
+(b) Local SDF
+(c) Global SDF
+(d) Blended SDF
+Fig. 10. Given the blending region around the GT shape (a), the local SDF
+(b) and the global SDF (c) are blended to generate the blended SDF (d) that
+well preserves the sharp corner at its zero-level set and is globally defined
+in the whole domain.
+δ1
+R3
+(c) Individual patches
+Modeling of Open Surface Boundaries
+The modeling of an open surface boundary can be considered as
+a trimming process, where the open surface patch is formed by
+trimming away an extended surface at the boundary curve using a
+trimming surface. An example is illustrated in 9. We denote a given
+open surface as 𝑆𝑜 and its boundaries as 𝜕𝑆𝑜 .
+We follow the method presented earlier to train a neural surface
+patch 𝑍𝑜 that reconstructs 𝑆𝑜 with some extraneous part (see 1). To
+represent the trimming surface as a zero-level set of a neural implicit
+function, we need to provide sample points in the zero-level set and
+gradient directions at these points. Specifically, we first sample from
+the boundary curve 𝜕𝑆𝑜 a set of points x𝑏 at which the zero-level set
+of the trimming surface passes through. Then, we compute at each
+of these sampled points a vector 𝑁𝑠 that represents the gradient
+direction of the target implicit functions. 𝑁𝑠 is computed as the
+cross product of the surface normal 𝑁𝑛 at this point and the tangent
+𝑁𝑡 along the boundary curve 𝜕𝑆𝑜 as shown in 9(b). SDF values and
+gradients of this virtual cutting surface are computed from x𝑏 and
+𝑁𝑠 (x𝑏 ). We adopt the same training loss, 4, to obtain a learned
+implicit function serving as the trimming patch. Its zero-level set is
+then used to cut off the extraneous part of the zero-level set 𝑍𝑜 to
+form a clean boundary curve.
+We implement this trimming operation as a Boolean max operation, assuming that the trimming surface and the corresponding
+open surface form a sharp convex feature at the boundary curve.
+Hence, we can adopt the same pipeline as described before to model
+this virtual sharp edge. During mesh extraction, we simply mask
+out the sample triangles lying on the trimming surface. We show
+several results of the modeled open surfaces along with zoom-in
+views at the surface boundaries in Fig. 19.
+4.3
+R1
+R1
+R2
+R3
+(d) Final result
+Fig. 9. Modeling open boundary surfaces. To learn the trimming patch, the
+normal supervision 𝑁𝑠 is obtained by computing the cross product of the
+surface normal 𝑁𝑛 and the tangent vector of the boundary 𝑁𝑡 .
+4.2
+R2
+Enabling global distance query
+CAD applications often require a global signed distance function to
+support inquiring whether a given point is inside or outside of a CAD
+S
+δ2
+Fig. 11. We demonstrate the blending strategy in a 2D case.
+Fig. 12. Weight functions for smoothly blending the local and global SDFs.
+model. To address this issue, we extend our local patch-based surface
+representation to a feature-preserving global signed distance field 𝐹𝐺
+for CAD models by blending the local patch-based representation
+𝐹𝐿 with an ordinary global signed distance field 𝐹𝑂 . A 2D example
+is shown in 10 where the GT shape contains a sharp corner. The
+patch-based representation 𝐹𝐿 is defined only in a region near the GT
+surface, while the learned global field 𝐹𝑂 smoothly approximates the
+sharp corner in the GT shape. In our implementation, we obtain the
+global field 𝐹 0 by following the strategy outlined by Lin et al. [2024].
+In this paper, we utilize a vanilla 8-layered MLP with each layer
+consisting of 512 neurons, equipped with positional encoding as
+introduced in [Mildenhall et al. 2020; Tancik et al. 2020b]. A blended
+field obtained by the following method can retain the sharp feature
+in the GT shape as well as enable a global distance query.
+With 𝐹𝐿 being a sufficiently accurate distance value for points
+near the surface 𝑆, we define three regions as follows: the region
+10
+•
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+(a)
+(b)
+(c)
+Fig. 13. The zero-level set of the blended field (a) and its outward (b) and
+inward (c) offsets are shown.
+𝑅1 = {x| |𝐹𝐿 (x)| < 𝛿 1 }, 𝑅2 = {x|𝛿 1 ≤ |𝐹𝐿 (x)| ≤ 𝛿 2 }, and 𝑅3 =
+𝐷 \ (𝑅1 ∪ 𝑅2 ), where 𝐷 is the entire bounding domain ([−1, 1] 3 ) of a
+given shape. Then, we design the global feature-preserving distance
+function 𝐹𝐺 . Inside the region 𝑅1 , we set 𝐹𝑃 = 𝐹𝐿 , because the local
+distance function 𝐹𝐿 is accurate and feature-preserving in 𝑅1 . In
+our implementation, with all shape bounding boxes as [−1, 1] 3 , we
+choose 𝛿 1 = 0.001 in the definition of 𝑅1 . In 𝑅3 , since 𝐹𝐿 becomes
+inaccurate and unstable because of the lack of supervision far from
+𝑆, we set 𝐹𝐺 = 𝐹𝑂 . Similarly, we choose 𝛿 2 = 0.03 in the definition
+of 𝑅3 .
+To make a smooth interpolation between 𝐹𝐿 and 𝐹𝑂 in 𝑅2 , we
+first define the weight functions 𝑤 0 (𝑠) and 𝑤 1 (𝑠) so that
+𝐹𝐺 (x) = 𝑤 0 𝐹𝐿 (x) + 𝑤 1 𝐹𝑂 (x), x ∈ 𝑅2 .
+(10)
+Let us denote 𝑑 (x) = |𝐹𝐿 (x)| ∈ [𝛿 1, 𝛿 2 ], x ∈ 𝑅2 and 𝑠 (x) = (𝑑 (x) −
+𝛿 1 )/(𝛿 2 − 𝛿 1 ) is a linear mapping that maps 𝑑 (x) ∈ [𝛿 1, 𝛿 2 ] to
+𝑠 (x) ∈ [0, 1]. We define the weight functions by
+𝑤 0 (𝑠) = (1 − ℎ(𝑠 (x)), 𝑤 1 (𝑠) = ℎ(𝑠 (x))
+where ℎ(𝑠) = 3𝑠 2 − 2𝑠 3 , for 𝑠 ∈ [0, 1]; see 12.
+Clearly, ℎ(0) = ℎ ′ (0) = ℎ ′ (1) = 0 and ℎ(1) = 1, from which one
+can verify that 𝐹𝐺 (x) = 𝐹𝐿 (x) and ∇𝐹𝐺 (x) = ∇𝐹𝐿 (x) along the
+inner boundaries of 𝑅2 (i.e. where |𝐹𝐿 (x)| = 𝛿 1 ), and that 𝐹𝐺 (x) =
+𝐹𝑂 (x) and ∇𝐹𝐺 (x) = ∇𝐹𝑂 (x) along the outer boundaries of 𝑅2 (i.e.
+where |𝐹𝐿 (x)| = 𝛿 2 ). That is, 𝐹𝐺 thus defined is an 𝐶 1 -continuous
+extension of 𝐹𝐿 in 𝑅2 ∪ 𝑅3 . To summarize, the distance function
+𝐹𝐺 (x) is a smooth blending of 𝐹𝐿 (x) and 𝐹𝑂 (x) and is globally
+defined on 𝐷. In particular, the zero-level set of 𝐹𝐺 agrees with that
+of 𝐹𝐿 (x), so it preserves the sharp features of the original target
+surface.
+Finally, we show a 3D result of our blending strategy in 13(a) and
+demonstrate an offset application of our global distance function
+𝐹𝐺 in 13(b, c).
+5 EXPERIMENTAL RESULTS
+5.1 Implementation details
+Data preprocessing and preparation. We test our method primarily
+on the CAD models randomly sampled from the ABC dataset [Koch
+et al. 2019]. All the shapes are segmented in advance and normalized
+to [−0.8, 0.8] 3 . For each segmented surface patch of a given shape,
+we first construct its patch volume 𝑉𝑝 . The resolution of the patch
+volume is determined by the average shape diameter [Shapira et al.
+2008] of this surface patch computed with LIBIGL [Jacobson et al.
+2018]. Specifically, we stipulate that the size of the grid cell in 𝑉𝑝
+should not exceed 2.5 times the average shape diameter of the patch.
+We observe that the resolution of a patch feature volume ranges from
+23 to 26 depending on the local feature size. We construct the merge
+grid G as described in Sec. 3 and derive the merge constraints from
+the merge grid cells accordingly. We empirically set the maximal
+depth of the merge grid octree to 8.
+To prepare the training samples, for each patch, we uniformly
+sample 1,000 surface points and 1,000 spatial points in each cell of
+the corresponding feature volume volumes, forming the sampling
+pool. Subsequently, in each training iteration, we randomly sample
+10,000 surface points and 10,000 spatial points from the prepared
+sampling pool.
+Training details. We set the balance weights for the training loss
+terms as follows: 𝜆surface = 200, 𝜆normal = 50, 𝜆SDF = 50, 𝜆eikonal = 5,
+𝜆merge = 400. We implemented the proposed method with PyTorch.
+We adopt the ADAM [Kingma and Ba 2015] optimizer with default hyperparameters. The feature volumes are comprised of 256dimensional latent codes. The decoder is implemented as a 1-layer
+MLP whose hidden layer has 128 neurons. The activation function
+used for each layer is the SoftPlus function (𝛽 = 100 as suggested by
+Atzmon and Lipman [2020]), with the exception that no activation
+function is applied at the last layer.
+For shape fitting, there are two training approaches: training
+from scratch and training with a pretrained fixed decoder. To train
+from scratch, we train the neural network (both the decoder and the
+patch feature volumes) for 500 iterations. The initial learning rate is
+0.001, which is then reduced by a factor of 0.3 at the 470th and 485th
+iterations. To train with a pretrained decoder, we only update the
+patch feature volumes for 300 iterations. The initial learning rate
+is 0.001, and it is decayed by a factor of 0.3 at the 270th and 285th
+iterations.
+In practice, it is often necessary to edit a 3D shape and update its
+corresponding implicit representation as well. Typically, the editing
+involves only a few patches. Therefore, to reuse the previously
+learned feature volumes while updating only the changed ones, we
+adopt the test-time optimization scheme similar to Park et al. [2019].
+For this shape updating application, our results were obtained with
+80 training iterations. Similar to the fitting application, the learning
+rate is initialized at 0.001 and decayed by a factor of 0.3 at the 65th
+and 72nd iterations.
+Pretraining the decoder. To speed up the shape fitting process
+and to improve the overall quality of the shape updating results,
+one can use a pretrained decoder.
+During the pertaining stage, we collected 1,849 patches from 25
+CAD shapes. Each patch was trained under its patch resolution as
+explained earlier. The batch size was set to 240k to fully utilize the
+GPU memory. The decoder was trained with 200k iterations (or 20
+hours on our hardware), and the learning rate was decayed at 150k
+and 175k iterations, by a factor of 0.3. The training objective was
+the patch fitting loss Lpatch ; the merging loss term, Lmerge , was not
+involved. All other parameters were kept the same as our default
+training setting.
+All results produced by our Patch-Grid and the comparing methods were obtained on a desktop with an NVIDIA RTX4090 graphical
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation •
+11
+GT
+Patch-Grid
+(a)
+(b)
+(c)
+(d)
+(e)
+Fig. 14. Our proposed approach, Patch-Grid, is capable of representing shapes that possess various types of features and demonstrates exceptional accuracy
+and robustness. (a, b): thin structures; (c, d): sharp boundary edges and corners; (e): clean boundary curves in the open surfaces.
+card and an Intel i9 13900kf CPU. More implementation details can
+be found in our codes.
+5.2
+Evaluation metrics
+To evaluate fitting accuracy, we use the following metrics. 1) Symmetric Chamfer distance (CD) quantifies the average reconstruction quality of a given shape. 2) Hausdorff distance (HD) measures
+the maximum reconstruction error. 3) F-score based on CD is a
+statistical measure that provides an overall assessment of the reconstruction quality. Specifically, the F-score is computed as the
+percentage of points with a reconstruction error smaller than 0.001
+throughout the paper. 4) Intersection over Union (IoU) measures
+the degree of overlap between the reconstructed shape and the
+ground-truth shape. 5) Normal consistency (NC) assesses the similarity between the normal vectors at the reconstructed surface and
+those at the ground-truth mesh surface.
+6) Sharp feature error (SFE) evaluates how accurately the learned
+field reconstructs the sharp features present in the ground-truth
+mesh. 7) Field error (FE) measures the overall volumetric quality
+of the learned field. Points are uniformly sampled within the domain of definition at a density of 27 per unit length, and the error is
+computed between the SDF values of the sampled points and the
+corresponding ground-truth values in the learned field.
+5.3
+Results and discussions
+5.3.1 Shape fitting. Our method can model 3D surface shapes with
+various geometry features, e.g. sharp features, narrow gaps, or open
+boundaries, at high fidelity as is shown in Fig. 1(a) and Fig. 14. We
+report the quantitative results in Table 1, produced by two variants
+of our approach (Patch-Grid and Patch-Grid-TS) and the comparing
+methods. Patch-Grid denotes training our approach with a fixed,
+pretrained decoder as described in the previous subsection, while
+Patch-Grid-TS denotes Patch-Grid Trained from Scratch.
+Baselines. We compare our results to those produced by the
+baseline methods. The baseline methods are: InstantNGP [Müller
+et al. 2022], NH-Rep [Guo et al. 2022], DualOctreeGNN [Wang et al.
+2022], MINER [Saragadam et al. 2022], ACORN [Martel et al. 2021],
+and NGLOD [Takikawa et al. 2021].
+Specifically, DualOctreeGNN predicts a hierarchical feature volume based on an octree from an input point cloud via a single
+forward pass. It then uses a learned MLP to map the feature volume
+to the SDF.
+We also consider its variant, denoted DualOctreeGNN-FT, which is
+fine-tuned for 2000 iterations for each shape. Note that NGLOD has
+a variant using SoftPlus to replace ReLU as the activation function,
+we denote this variant NGLOD-SP.
+Datasets. First, a set of 100 shapes from the ABC dataset is
+established for comparison between our method and InstantNGP,
+NH-Rep, DualOctreeGNN, DualOctreeGNN-FT, and MINER that can
+fit a given shape within minutes. Since NGLOD, NGLOD-SP, and
+ACORN require a prolonged training time, we establish a second
+group of 10 shapes randomly sampled from the ABC dataset for
+comparison.
+Finally, we randomly sampled 8 shapes, each having over 100
+patches, to validate the robustness of our method in handling complex shapes.
+12
+•
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+(a) GT
+(b) InstantNGP
+(c) NH-Rep
+(d) DualOctreeGNN
+(e) DualOctreeGNN-FT
+(f) MINER
+(j) Patch-Grid
+(k) Patch-Grid-TS
+Fig. 15. Comparison with other baseline methods. Patch-Grid, Patch-Grid-TS, and NH-Rep [Guo et al. 2022], which adopt a patch-based representation, can
+faithfully capture sharp geometric features presented in the shapes, while InstantNGP [Müller et al. 2022], DualOctreeGNN and its variant DualOctreeGNNFT [Wang et al. 2022], and MINER [Saragadam et al. 2022] fail to do so, as shown in the zoom-in views of column 2. Only Patch-Grid, Patch-Grid-TS and
+InstantNGP can capture the thin structure (the pipe of the house, column 1). Qualitative results, along with the quantitative results in Tab. 1, demonstrate the
+robustness of our method as compared to prior methods, all of which experience varying degrees of failure.
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation •
+13
+(a) GT
+(b) NGLOD
+(c) NGLOD-SP
+(d) ACORN
+(e) Patch-Grid
+(f) Patch-Grid-TS
+Fig. 16. Comparison with NGLOD [Takikawa et al. 2021], NGLOD-SP, and ACORN [Martel et al. 2021]. Extracted meshes from the learned zero-level sets
+(upper) and their corresponding error maps (lower) are shown. A warmer color indicates a higher error, with the error being clipped by 0.001. Patch-Grid and
+Patch-Grid-TS outperform the comparing methods significantly regarding the fitting accuracy, especially around the sharp features of the presented shapes.
+14
+•
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+Our approach, in both its variants (Patch-Grid and Patch-GridTS), can achieve significantly better reconstruction quality than the
+comparing baselines as shown in Tab. 1. Acknowledging the severe
+failure cases in NH-Rep due to its robustness issues as discussed
+previously, we have excluded these shapes from the quantitative
+comparison. Nevertheless, our approach still performs favorably
+compared to NH-Rep. We attribute this performance gain to the
+use of the adaptive merge grid, which circumvents the difficulty
+in managing the extended zero-level sets of the learned patches to
+satisfy the global CSG constraints.
+The training time averages around 5 seconds for 300 training
+iterations and is at least 7 times faster than most of our baselines, as
+reported in Tab. 1. For qualitative comparison, we show several results produced by Patch-Grid, Patch-Grid-TS, and the other methods
+in Fig. 15 and Fig. 16.
+InstantNGP largely reduces the training time by utilizing a small
+neural network augmented by a multiresolution hash table of trainable feature vectors and achieves high-quality geometric reconstruction within two minutes. However, it often fails to model elongated
+and slender tubes as shown in the fourth column of Fig. 15(b). This
+failure can be alleviated or avoided with extra training time. Since
+such geometric features (i.e., elongated and slender tubes) are frequently observed in the ABC dataset, the averaged reconstruction
+quality of InstantNGP is inferior to ours, as shown in Tab. 1. While InstantNGP can capture the sharp geometric features well, our method
+slightly outperforms it.
+Compared to NH-Rep, which also uses a patch-wise representation, Patch-Grid and Patch-Grid-TS can robustly model geometric features presented in shapes as shown in the first and third
+columns of Fig. 15. NH-Rep adopts a global approach to assembling
+the learned implicit functions into the target shape, rendering it
+prone to failure due to the undesirable interference between the
+extraneous zero-level sets of the individual learned implicit patches.
+In contrast, Patch-Grid consistently produces robust, high-quality
+results even in these challenging cases, validating the superiority of
+the proposed local approach.
+Although DualOctreeGNN can predict a reasonable SDF with
+a single forward pass instantly, the reconstruction often exhibits
+wavy artifacts (see the second shape of Fig. 15(d, e)), accounting for
+the poor performance in Tab. 1. While these wavy artifacts can be
+alleviated by fine-tuning as shown by the same shape in Fig. 15(e),
+both DualOctreeGNN and its fine-tuned variant fail to fit the thin
+structures (the pipes of the house) as shown in the zoom-in view of
+the first shape in Fig. 15(d, e).
+MINER employs a Laplacian pyramid to apply sparse multiscale
+decomposition of the 3D shape for modeling. Although it can fit
+the shape within one minute, it inherits the drawbacks of common
+implicit neural representations, being unable to reconstruct thin
+structures and sharp features, as shown in the zoom-in views of the
+first and second shapes of Fig. 15(f). Meanwhile, grid-like patterns
+are observable in the zoom-in view of the third and fourth shapes
+of Fig. 15(f).
+Next, we compare our results with NGLOD, NGLOD-SP, and
+ACORN. NGLOD yields less satisfactory results when modeling
+thin structures, often resulting in pronounced artifacts which can
+be seen in the first and second columns of Fig. 16(b). ACORN is
+another hierarchical network architecture that uses an octree-like,
+multiscale block-coordinate decomposition to adaptively represent a
+given shape. We trained ACORN for 2 hours for each given shape to
+obtain satisfactory fitting results. As shown in Fig. 16(f), ACORN’s
+results exhibit noticeable grid-like artifacts, which can be seen from
+the accompanied error map.
+Similar to NH-Rep, our method merges multiple SDFs of surface
+patches into a merged implicit field. Hence, directly querying the
+distance value at a spatial point may return an invalid distance.
+Nevertheless, we show that this limitation can be fixed by the localglobal blended field described in Sec. 4, which exhibits high accuracy
+as shown in the parenthesis under the FE metric in Tab. 1.
+It is worth noting that Fig. 15 and Fig. 16 show not only complex
+shapes with more than 100 patches for comparison but also relatively
+“simple” shapes with fewer patches which turn out to be challenging
+because of sharp features and thin structures (see the fourth column
+of Fig. 15 and the fourth and fifth columns of Fig. 16).
+Our method demonstrates significantly better performance than
+methods equipped with hierarchical feature grids even on the shapes
+with fewer patches.
+Meanwhile, although NH-Rep employs a similar patch-based
+representation to ours and utilizes CSG operations to decompose
+these challenging geometric features to reduce the learning burden
+for the network, it also introduces mutual extension constraints
+between every pair of patches (Sec. 3.3). If there are 𝑁 patches,
+these constraints are in the order of O (𝑁 2 ). For shapes with only
+10 patches, this might result in hundreds of patch pair constraints.
+In contrast, our algorithm introduces a merge grid, allowing the
+network to learn patch extensions with only the simplest and most
+necessary constraints, resulting in patch pair constraints in the
+order of O (𝑁 ). Therefore, even compared to NH-Rep, our method
+provides advantages in fitting “simple” shapes.
+We also report the finest spatial resolution each method accesses
+and the number of trainable parameters of each method in Tab. 2,
+where we chose to balance the two factors for fair comparison. Note
+that among the hierarchical methods our method requires the least
+spatial resolution (same as NGLOD) and incurs only a moderate size
+of training parameters.
+In summary, we compare our method, Patch-Grid, to a line of
+methods, such as InstantNGP, that can fit a given shape within five
+minutes on a pool of 100 shapes. Our method is also compared to
+NGLOD, its variant, and ACORN on a pool of 10 shapes due to the
+prolonged training time required by the baselines. Both comparisons show that Patch-Grid achieves state-of-the-art reconstruction
+quality at a remarkably high efficiency, i.e. around 5 seconds.
+Robustness to highly-complex CAD models. To demonstrate
+the proposed method’s ability to model complex shapes (over 100
+patches), we present the fitting results of the Patch-Grid method on 8
+shapes as shown in Fig. 17. Additionally, we present the accuracy and
+time performance curves of Patch-Grid as the number of patches
+used to represent the shapes increases, shown in Fig. 18. From
+Fig. 18 (a), we can see that as the number of patches increases, the
+training time increases but remains under 11 seconds, significantly
+lower than most of our baselines. In Fig. 18 (b), we have annotated
+the average quantitative performance of our method on regular
+shapes using a yellow dashed line, and the average quantitative
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation •
+15
+Table 1. Quantitative evaluation of different neural implicit representations in terms of the symmetric Chamfer distance (CD), Hausdorff distance (HD),
+F-score (CD < 0.001), Intersection over Union(IoU), normal consistency (NC), sharp feature error (SFE), and field error (FE). ↑ indicates the higher the better,
+while ↓ indicates the lower the better. CD, HD, NC, SFE, and FE are presented in units of ×10 −4 , ×10 −3 , ×10 −2 , ×10 −5 , and ×10 −4 , respectively. We report the
+training time in the unit of seconds. We do not report the SFE and FE metrics based on SDF for ACORN and MINER since they predict occupancy fields. For
+our metrics of FE, we also report in parentheses the FE of the blended field, which is blended according to the method described in Section 4.3.
+Metrics
+NH-Rep
+InstantNGP
+MINER
+DualOctreeGNN
+DualOctreeGNN-FT
+Patch-Grid
+Patch-Grid-TS
+NGLOD*
+NGLOD-SP*
+ACORN*
+Patch-Grid*
+Patch-Grid-TS*
+CD ↓
+3.18
+1.85
+5.55
+22.5
+6.94
+1.00
+0.93
+4.17
+4.05
+4.23
+1.03
+0.80
+HD ↓
+4.47
+9.93
+6.82
+45.8
+13.3
+2.47
+2.70
+6.09
+8.34
+3.08
+2.82
+3.13
+F-score ↑
+95.32
+99.60
+80.00
+89.91
+76.88
+99.78
+99.71
+92.46
+94.22
+96.44
+99.82
+99.81
+IoU ↑
+98.57
+95.89
+91.72
+97.42
+97.26
+99.61
+99.54
+97.18
+97.55
+98.11
+98.60
+98.79
+NC ↑
+99.71
+99.65
+99.06
+98.93
+99.21
+99.83
+99.70
+97.93
+97.91
+98.31
+99.15
+99.05
+SFE ↓
+40.2
+11.1
+#
+122
+164
+9.89
+8.87
+79.4
+80.3
+#
+12.2
+8.19
+FE ↓
+55.9
+7.97
+#
+328
+451
+67.27(3.58)
+59.4(3.59)
+7.78
+7.65
+#
+42.1(5.69)
+31.6(5.67)
+NH-Rep*
+InstantNGP
+MINER
+DualOctreeGNN
+NGLOD (LOD=5)
+ACORN
+Ours
+Fig. 17. Examples of complex shapes represented by Patch-Grid. The number
+of patches contained in each shape ranges from 105 to 670. These shapes
+were trained for 300 iterations, amounting to an average training time of
+7.34 seconds.
+(a) Training time
+(b) Fitting Error
+Fig. 18. Performance on complex shapes with over 100 patches. (a) shows
+the change in training time as the number of patches increases. (b) shows
+the change in fitting accuracy (in terms of Chamfer distance) as the number
+of patches increases. We have plotted the average time (blue dashed line)
+and average error (orange dashed line) tested on the pool of 100 shapes from
+the ABC dataset. The average error of InstantNGP (obtained after training 7
+seconds) on these complex shapes is plotted in the red dashed line, showing
+the robustness of the proposed method in modeling complex shapes.
+Time ↓
+185
+101
+37.3
+0.03
+731
+5.44
+9.81
+2296
+2296
+7200
+6.56
+10.9
+Finest Res.
+n.a.
+211
+210
+28
+26
+210
+26
+#Param.
+0.1 M
+12.2 M
+3.2 M
+1.9 M
+0.3 M
+17.0 M
+0.8 M
+Table 2. The finest resolution (Finest Res.) of each method can access and
+the number of training parameters (#Param.) of each method. *: NH-Rep is
+not a hierarchical approach.
+performance of InstantNGP, the strongest baseline, on these complex
+shapes using a red dashed line.
+We observed that the fitting error for complex CAD models with
+more patches increased to around 1.5 times the fitting error on the
+large pool of 100 shapes randomly sampled from the ABC dataset.
+On the other hand, on this pool of more complex CAD models, the
+fitting error of our method is 40% less than InstantNGP. Results of
+our method are obtained with a training time averaged around 7 seconds. This experiment demonstrates that our method outperforms
+InstantNGP on complex shapes as well.
+Garment shapes. In addition to the CAD models, we also show
+in Fig. 19 the reconstruction results of three garment models (i.e.,
+a dress from VTO [Santesteban et al. 2019] and a shirt and a pair
+of pants from MGN [Bhatnagar et al. 2019]) with open surface
+boundaries to demonstrate the representational capability of the
+proposed method for modeling open surface boundaries. As shown,
+Patch-Grid accurately reproduces the open surface boundaries.
+16
+•
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+Table 4. Ablation study on the adaptive patch feature volume. CD, HD,
+NC, and SPE are presented in units of ×10 −4 , ×10 −3 , ×10 −2 , and ×10 −5
+respectively.
+GT
+w/o Ada-PV
+w/ Ada-PV
+HD ↓
+2.95
+2.70
+F-score ↑
+99.66
+99.71
+IoU ↑
+99.37
+99.54
+NC ↑
+99.69
+99.70
+SFE ↓
+9.90
+8.87
+the modified patches in orange. Additionally, the connected patches
+that are not directly edited but are affected by the update of the
+merge constraints are highlighted in green. Both the edited and
+involved patches are updated while the rest of the patches are kept
+fixed.
+The fitting accuracy regarding these edited shapes (all results
+in Fig. 1(b) and Fig. 20) is reported in Tab. 3, which is similar to
+the performance obtained in the shape fitting task. Nevertheless,
+it takes an average of 1.52 seconds of training time to reach the
+fitting accuracy, demonstrating the feasibility of rapidly updating a
+learned neural implicit representation as its corresponding geometry
+is locally changed.
+Patch-Grid
+5.4
+Fig. 19. Examples of open surfaces with the zoom-in views at the open
+surface boundaries. Patch-Grid, modeling the open surface boundaries via a
+trimming process, cuts the boundaries in a precise and clean manner.
+Table 3. Quantitative evaluation of the edited shapes. The accuracy of
+the edited shape is consistent with the accuracy of shape fitting. CD, HD,
+NC, and SPE are presented in units of ×10 −4 , ×10 −3 , ×10 −2 , and ×10 −5 ,
+respectively. The training time is in the unit of seconds.
+Patch-Grid
+CD ↓
+0.815
+0.934
+CD ↓
+HD ↓
+F-score ↑
+IoU ↑
+NC ↑
+SPE ↓
+Time ↓
+1.59
+5.35
+99.23
+99.17
+99.86
+19.8
+1.52
+5.3.2 Shape update. In addition to the shape fitting task, we have
+also provided the shape updating function. Specifically, when the
+shape is locally edited, we enable the proposed method to perform
+local updates to the learned neural representation. The shape update
+can be achieved in 1.52 seconds, halving the training time compared
+to Patch-Grid-TS.
+In addition to the updated shapes shown in Fig. 1(b), we provide
+more shape updating results in Fig. 20. As explained earlier, the
+process only involves updates of the feature volumes of the edited
+patches.
+We applied a variety of editing operations to the shape shown
+in Fig. 20, such as adding a trimming surface to form a chamfer to
+the central hole as in Fig. 20(e). In each edited shape, we highlight
+Ablation study
+We conducted a series of ablation studies to validate the following
+aspects: 1) The use of adaptive patch volumes, denoted as w/o AdaPV ; 2) The effect of each loss term; 3) The weight assigned to each
+loss term; 4) The effect of the two training strategies adopted in
+this paper; 5) The use of a 1-layer MLP; 6) The use of the SoftPlus
+activation function;
+Adaptive patch feature volume. A patch feature volume’s
+resolution is adaptively determined based on the shape diameter of
+this patch as introduced earlier. We show in Tab. 4 the necessity of
+this design choice to model surface patches of smaller size. As shown
+in Tab. 4, w/o Ada-PV yields less satisfactory results across most
+quantitative metrics. A qualitative example is provided in Fig. 21 to
+show the necessity of adaptive patch volumes for modeling slender
+geometry; otherwise, using patch volumes of uniform size fails to
+accurately fit thin tubes.
+Loss terms. We conducted an ablation study on the loss design.
+The quantitative results of removing each loss term are shown in
+Tab. 5. As can be seen from the table, the setting with the complete loss terms achieves the best accuracy in most quantitative
+metrics. The two data terms, LSurface and LNormal , are widely used
+to supervise surface fitting. Removing the former will degrade the
+surface reconstruction quality as shown in Fig. 22, while removing
+the normal supervision will lead to severe artifacts as shown in
+Fig. 22(b).
+The merge loss term, LMerge , imposes an important constraint
+to coordinate the extended zero-level sets of patches to ensure the
+validity of the resulting neural field after applying the CSG operations.
+Due to the use of an octree-based merge grid, the merge loss is
+only imposed in the leaf nodes of the merge cells which account
+for a small portion of the shape. Hence, removing this loss term
+will not largely deteriorate the quantitative metrics in an average
+sense, but artifacts owing to the extraneous zero-level sets can be
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation •
+17
+GT
+Patch-Grid
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+(g)
+Fig. 20. A collection of edited shapes (top) and the results (bottom) fitted by our shape updating strategy is presented. A variety of editing operations are
+applied to the original shape in (a). (b): free-form deformation of the circular slot; (c): parametric editing of the height of the top; (d) rigid transformation of
+the pair of circular slots; (e): parametric editing of the radius of the cylindrical patch; (f): adding a new patch to create a chamfer to the central through-hole;
+(g): Extending several patches and removing two patches to obtain a pair of penetrated slots. In each edited shape, the modified patches are highlighted in
+orange. Additionally, the connected patches that are not directly edited but are affected by the changes due to merge constraints are also highlighted in green.
+Patch feature volumes of both the directly edited and affected patches are updated while the rest of the patch feature volumes remain fixed.
+(a) GT
+(b) w/o Ada-PV
+(c) Patch-Grid
+(w/ Ada-PV)
+Fig. 21. Adaptive patch volumes matter. (a) Without adapting the patch
+volume based on the shape diameter, the extracted mesh from the composed
+implicit field may fail to model thin tubes with smaller shape diameters
+due to a coarse resolution; (c) Using adaptive patch volumes can effectively
+resolve the issue, showing its effectiveness.
+(a) GT
+(b) w/o LSurf
+(c) w/ all
+Fig. 22. LSurf is essential for fitting the zero-level set. In (b) and (c), the
+extracted meshes along their error maps are shown. Warmer colors indicate
+higher errors, with the error clipped at 0.001. Due to the presence of LMerge
+and LSDF , the absence of LSurf does not lead to severe surface artifacts, but
+the surface thus fit will have a large offset from the ground-truth surface,
+yielding large fitting error as shown in (b).
+(d) w/ all
+Fig. 23. Both LMerge and LNormal are crucial for shape fitting. Removing
+LMerge leads to artifacts due to the lack of proper CSG operations between
+patches. Without LNormal , our method fails to fit the surface within a fixed
+timeframe, resulting in noticeable artifacts.
+(a) GT
+(a) GT
+(b) w/o LNormal (c) w/o LMerge
+(b) w/o LSDF
+(c) w/ all
+Fig. 24. LSDF is beneficial to surface fitting. Without LSDF , artifacts can be
+observed due to the failure in learning a few individual patches.
+observed in Fig. 23(c). This qualitative observation can be reflected
+in the increased Hausdorff distance metric.
+LSDF applies a pseudo SDF supervision close to the geometric
+surface. Removing LSDF would lead to artifacts such as obvious
+offsets in individual patches, as shown in Fig. 24(b).
+Finally, LEikonal is designed to ensure that the SDF learned by
+the Patch-Grid satisfies the distance field’s property – having a unit
+18
+•
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+(a) GT
+(b) 𝜆merge =100
+(c) Patch-Grid
+(𝜆merge =400)
+(d) GT
+(e) 𝜆merge =1200
+(f) Patch-Grid
+(𝜆merge =400)
+Fig. 25. Influence of 𝜆Merge on shape fitting results. Inappropriate weights
+on LMerge may lead to artifacts due to failure to handle the merging of
+multiple patches (b) or inaccurate fitting of certain patches (e).
+(a) GT
+(b) 𝜆normal =12
+(c) Patch-Grid
+(𝜆normal =50)
+(d) GT
+(e) 𝜆normal =200
+(f) Patch-Grid
+(𝜆normal =50)
+Fig. 26. Influence of 𝜆Normal on shape fitting results. Inappropriate weights
+on LNormal may lead to artifacts due to failure to fit highly curved patches
+(b) or failure to handle the merging of multiple patches (e).
+Fig. 27. Pretrained fixed shape space matters. The ablation reveals that the
+use of a fixed, pretrained decoder significantly accelerates training as shown
+by the curves of CD value against the number of iterations (around 250
+iterations). In contrast, without pretraining, our method takes 400 iterations
+to converge. The impact of the pretrained shape space is also evident in the
+visualization of the shapes, as demonstrated in the following figures.
+gradient magnitude [Gropp et al. 2020]. In the absence of ground
+truth SDF supervision, it encourages the network to learn a more
+accurate signed distance field. An accurate distance field is critical
+for applications like offsetting, inverse optimization, and collision
+detection. As shown in Table 5, removing LEikonal results in a very
+large Field Error.
+Loss weights. We examine how the balancing weights of two
+important loss terms, LMerge and LNormal , influence our results,
+validating that the weights are reasonably set. In our study, we multiplied the original weight in our setting by 1/4 and 4, respectively.
+We observe that a lower 𝜆Merge results in artifacts as depicted in
+Fig. 25(b), due to insufficient constraint on coordinating the extraneous zero-level sets learned by our method to satisfy the pre-defined
+CSG operations. On the other hand, a higher 𝜆Merge causes failure in
+accurately fitting small patches, resulting in holes on the surface, as
+shown in Fig. 25(e). Regarding 𝜆Normal We found that a lower value
+could lead to less accurate fitting results, as illustrated in Fig. 26(b).
+Conversely, a higher 𝜆Normal can overwhelm the merge loss, resulting in similar artifacts as if the merge loss is set to a lower value.
+An example is shown in Fig. 26(e). From the results, we can see the
+chosen weights can achieve satisfactory results both quantitatively
+and qualitatively.
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation •
+19
+Table 5. Ablation study of the loss terms. CD, HD, NC, SPE and FE are
+presented in units of ×10 −4 , ×10 −3 , ×10 −2 , ×10 −5 and ×10 −3 , respectively.
+w/o LNormal
+w/o LSDF
+w/o LEikonal
+w/o LMerge
+w/o LSurf
+w/ all
+CD ↓
+7.88
+2.03
+0.886
+0.775
+1.05
+1.00
+HD ↓
+58.3
+15.3
+2.53
+4.72
+2.82
+2.47
+F-score ↑
+91.82
+99.08
+9.77
+99.75
+99.42
+99.78
+IoU ↑
+91.33
+94.63
+99.48
+99.35
+99.31
+99.61
+NC ↑
+98.12
+99.36
+99.70
+99.70
+99.69
+99.83
+SFE ↓
+28.8
+20.0
+9.56
+8.70
+11.2
+8.08
+FE ↓
+2.14
+10.3
+24.5
+8.99
+8.97
+9.35
+Table 6. Ablation of the weights of the loss terms LNormal , and LMerge . The
+quantitative results validate our choice. CD, HD, NC, and SPE are presented
+in units of ×10 −4 , ×10 −3 , ×10 −2 , and ×10 −5 respectively.
+LNormal
+LMerge
+12
+50
+200
+100
+400
+1200
+CD ↓
+1.52
+1.00
+0.891
+0.766
+1.00
+1.20
+HD ↓
+3.88
+2.47
+2.65
+3.23
+2.47
+3.13
+F-score ↑
+99.15
+99.780
+99.689
+99.782
+99.780
+99.523
+IoU ↑
+99.371
+99.61
+99.59
+99.54
+99.61
+99.30
+NC ↑
+99.80
+99.83
+99.82
+99.70
+99.83
+99.69
+SFE ↓
+14.1
+9.89
+8.09
+8.41
+9.89
+13.1
+(a) GT
+(b) Sine
+(c) ReLU
+(d) SoftPlus
+Fig. 29. We evaluate our method with different activation functions, Sine
+(b) and ReLU (c), alternative to Softplus. Only using Softplus activation (d)
+can yield accurate fitting results.
+Table 7. Performance derived with different number of decoder layers. The
+upper and lower blocks are for the shape fitting and updating tasks, respectively. CD, HD, NC, and SPE are presented in units of ×10 −4 , ×10 −3 , ×10 −2 ,
+and ×10 −5 respectively. The unit for time is second.
+4 layers
+3 layers
+2 layers
+1 layer
+CD ↓
+0.809
+0.937
+0.989
+1.00
+HD ↓
+2.14
+2.36
+2.17
+2.47
+F-score ↑
+99.903
+99.896
+99.901
+99.782
+IoU ↑
+99.59
+99.54
+99.47
+99.61
+NC ↑
+99.700
+99.697
+99.701
+99.830
+SFE ↓
+8.24
+9.35
+9.39
+9.89
+Time ↓
+5.64
+5.60
+5.61
+5.44
+4 layers
+3 layers
+2 layers
+1 layer
+1.62
+1.36
+1.59
+2.22
+12.3
+6.44
+5.35
+14.1
+98.83
+99.40
+99.23
+97.28
+99.06
+99.24
+99.17
+98.86
+99.83
+99.85
+99.86
+99.80
+50.3
+19.8
+19.3
+20.3
+1.61
+1.53
+1.52
+1.49
+Table 8. Performance derived with different activation functions. CD, HD,
+NC, and SPE are presented in units of ×10 −4 , ×10 −3 , ×10 −2 , and ×10 −5
+respectively.
+(a) GT
+(b) 1 layer
+(c) 2 layers
+Sine
+ReLU
+SoftPlus
+(d) 3 layers
+(e) 4 layers
+Fig. 28. Number of the decoder layers for the shape updating task. Decoders
+with 2 or 3 hidden layers tend to exhibit the best visual effects.
+Training strategies. Two training strategies, i.e. training from
+scratch (Patch-Grid-TS) and training with a fixed, pretrained decoder (Patch-Grid), are analyzed in depth. As shown in Fig. 27, we
+plot the curves of the Chamfer Distance metric and visualize the
+intermediate mesh results of the two training strategies. We can see
+that Patch-Grid converges with 300 training iterations, faster than
+Patch-Grid-TS which requires around 500 iterations to achieve similar performance. Note that 300 and 500 training iterations amount to
+5 and 8 seconds, respectively. From the qualitative results, one can
+see that Patch-Grid-TS spends extra time in modeling the joinings of
+two or more patches (enclosed by red and black boxes in the lower
+part of Fig. 27).
+CD ↓
+23.50
+3.98
+1.00
+HD ↓
+24.74
+10.75
+2.47
+F-score ↑
+44.59
+93.59
+99.78
+IoU ↑
+86.28
+98.37
+99.61
+NC ↑
+98.59
+99.43
+99.83
+SFE ↓
+213.5
+36.2
+9.89
+Decoder depth. The upper block of Tab. 7 demonstrates that an
+MLP with a single hidden layer is already sufficient for accurately
+fitting the shape. While further increasing the number of MLP layers
+can marginally improve the fitting quality, it leads to longer training
+times. Throughout our shape fitting experiments, we report the
+results with a 1-layer MLP for simplicity.
+We also conducted another ablation study on the decoder’s depth
+for the shape editing task, as shown in the lower block of Tab. 7
+and Fig. 28. From both the quantitative and qualitative results, we
+observed that Considering the trade-off between reconstruction
+quality and efficiency, we chose a 2-layer MLP as the decoder for the
+experiments of the shape updating task. We consider this detailed
+analysis helpful for users to decide on the decoder’s depth based on
+their specific needs.
+Activation functions. Tab. 8 validates our choice of the SoftPlus
+activation function over ReLU or the Sine activation [Sitzmann et al.
+2020]. The network structure based on SoftPlus achieves the highest
+fitting accuracy. We also provide qualitative results for these three
+activation functions in Fig. 29 to support our design choice. We
+hypothesize that the artifacts observed with ReLU are due to the
+20 •
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+Patch-Grid
+GT
+Fig. 30. Limitation of Patch-Grid on fitting nearly parallel yet connected
+patches.
+property of ReLU as a piece-wise linear function, which may not be
+well-suited for our LNormal supervision. Meanwhile, the artifacts
+with Sine are likely caused by the mismatch between Sine activation
+and our extremely compact MLP structure (i.e. 1-layer MLP).
+6
+LIMITATION AND FUTURE WORKS
+The amount of sampling points used to train the network scales
+roughly linearly to the number of patches and sharp features. In
+our current implementation, we have generated the sample points
+in one pass before training, which takes significant CPU memory
+storage for a large number of patches. In our stress test, we cannot
+process shapes with more than 670 patches due to the CPU memory
+bottleneck. Future work may consider generating the sample points
+online along side the training iterations.
+In addition, Patch-Grid may fail to model thin features composed
+of two surface patches that are nearly parallel and spatially close
+at the same time, as shown in Fig. 30. This is because even small
+SDF fitting errors can result in inaccurate zero-level sets after CSG
+operations for nearly parallel patches, as illustrated in the zoomed-in
+region of Fig.30.
+Thirdly, Patch-Grid is unable to avoid the failure cases observed
+in NH-Rep in theory; similar failures may be observed in the merge
+cells that contain incomplete graphs at the maximum depth of the
+octree-based merge grid. However, we have examined all failure
+cases from the 100 shapes and found only one failure case due to
+this reason as shown in Fig. 31. Statistically, there are only 1.76%
+merge cells (36,860 out of more than 2 million merge cells among
+the pool of 100 shapes) that contain incomplete connected graphs,
+and only one failure case is observed. We attribute this robustness
+to the significantly reduced CSG operations in each merge cell as a
+result of utilizing the merge grid.
+Another limitation is that Patch-Grid requires a longer training
+time to fit free-form geometries accurately. In our future work, we
+will integrate the hash table/hierarchical feature volumes to model
+the details in the free-form geometries efficiently.
+Lastly, another future direction is to explore the potential of PatchGrid to support structure-level or semantic-level shape editing and
+shape manipulation due to its flexible representation with patchwise latent spaces.
+7
+CONCLUSION
+We have presented a novel implicit neural surface using a patchbased representation with a merge grid to enable a local training
+(a) GT
+(b) Patch-Grid
+(c) Ideal result
+Fig. 31. Limitation of Patch-Grid in the special case when a merge cell
+contains an incomplete adjacent graph. The first row shows the GT and
+extracted meshes with a zoom-in view of the artifact. The second row
+exemplifies the cause of this artifact with a 2D example. Ideally, a sharp
+turn of the learned SDF of patch 𝐴 in its natural extension is expected to
+avoid intersecting patch 𝐶’s zero-level set in this confined region. However,
+due to the tiny sizes of patches 𝐵 and 𝐶, our method fails to model the
+detailed feature, yielding the observed artifact in (b). Note that this is
+statistically rare; this is the only case caused by this type of failure in the
+pool of 100 shapes.
+and merging strategy. Patch-Grid performs CSG operations locally
+in merge grid cells to significantly improve the robustness of the
+patch-based representation, compared with the prior work [Guo
+et al. 2022] using a global approach. Moreover, Patch-Grid can handle
+geometric features that previous methods fail to reproduce, such
+as thin geometries or open surfaces. We evaluate Patch-Grid on
+various shapes to validate its superiority to existing works in terms
+of reconstruction quality, robustness, and efficiency.
+REFERENCES
+George Allen. 2021. nTopology’s Implicit Modeling Technology. https://ntopology.com/
+resources/whitepaper-implicit-modeling-technology/. Last accessed 2021-12-1.
+Nina Amenta and Marshall Bern. 1998. Surface reconstruction by Voronoi filtering. In
+Proceedings of the fourteenth annual symposium on Computational geometry. 39–48.
+Matan Atzmon and Yaron Lipman. 2020. SALD: Sign agnostic learning with derivatives.
+arXiv preprint arXiv:2006.05400 (2020).
+Bharat Lal Bhatnagar, Garvita Tiwari, Christian Theobalt, and Gerard Pons-Moll. 2019.
+Multi-Garment Net: Learning to Dress 3D People from Images. In IEEE International
+Conference on Computer Vision (ICCV). IEEE.
+Weikai Chen, Cheng Lin, Weiyang Li, and Bo Yang. 2022. 3PSDF: Three-Pole Signed
+Distance Function for Learning Surfaces With Arbitrary Topologies. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation •
+18522–18531.
+Zhiqin Chen and Hao Zhang. 2019. Learning Implicit Fields for Generative Shape
+Modeling. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR).
+Julian Chibane, Thiemo Alldieck, and Gerard Pons-Moll. 2020a.
+Implicit
+Functions in Feature Space for 3D Shape Reconstruction and Completion.
+arXiv:2003.01456 [cs.CV]
+Julian Chibane, Mohamad Aymen mir, and Gerard Pons-Moll. 2020b. Neural Unsigned
+Distance Fields for Implicit Function Learning. In Advances in Neural Information
+Processing Systems, H. Larochelle, M. Ranzato, R. Hadsell, M.F. Balcan, and H. Lin
+(Eds.), Vol. 33. Curran Associates, Inc., 21638–21652. https://proceedings.neurips.
+cc/paper/2020/file/f69e505b08403ad2298b9f262659929a-Paper.pdf
+Thomas Davies, Derek Nowrouzezahrai, and Alec Jacobson. 2020. On the Effectiveness
+of Weight-Encoded Neural Implicit 3D Shapes. https://doi.org/10.48550/ARXIV.
+2009.09808
+Yueqi Duan, Haidong Zhu, He Wang, Li Yi, Ram Nevatia, and Leonidas J. Guibas.
+2020. Curriculum DeepSDF. In Computer Vision – ECCV 2020, Andrea Vedaldi,
+Horst Bischof, Thomas Brox, and Jan-Michael Frahm (Eds.). Springer International
+Publishing, Cham, 51–67.
+Rizal Fathony, Anit Kumar Sahu, Devin Willmott, and J Zico Kolter. 2020. Multiplicative
+filter networks. In International Conference on Learning Representations.
+Kyle Genova, Forrester Cole, Avneesh Sud, Aaron Sarna, and Thomas Funkhouser.
+2020. Local Deep Implicit Functions for 3D Shape. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR).
+Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and Yaron Lipman. 2020. Implicit Geometric Regularization for Learning Shapes. In Proceedings of the 37th
+International Conference on Machine Learning (Proceedings of Machine Learning
+Research, Vol. 119), Hal Daumé III and Aarti Singh (Eds.). PMLR, 3789–3799. https:
+//proceedings.mlr.press/v119/gropp20a.html
+Hao-Xiang Guo, Yang Liu, Hao Pan, and Baining Guo. 2022. Implicit Conversion of
+Manifold B-Rep Solids by Neural Halfspace Representation. ACM Trans. Graph. 41,
+6, Article 276 (nov 2022), 15 pages. https://doi.org/10.1145/3550454.3555502
+Alec Jacobson, Daniele Panozzo, et al. 2018. libigl: A simple C++ geometry processing
+library. https://libigl.github.io/.
+Kacper Kania, Maciej Zięba, and Tomasz Kajdanowicz. 2020. UCSG-Net – Unsupervised
+Discovering of Constructive Solid Geometry Tree. arXiv:2006.09102 [cs.CV]
+Diederik P. Kingma and Jimmy Ba. 2015. Adam: A Method for Stochastic Optimization.
+In 3rd International Conference on Learning Representations, ICLR 2015, San Diego,
+CA, USA, May 7-9, 2015, Conference Track Proceedings, Yoshua Bengio and Yann
+LeCun (Eds.). http://arxiv.org/abs/1412.6980
+Sebastian Koch, Albert Matveev, Zhongshi Jiang, Francis Williams, Alexey Artemov,
+Evgeny Burnaev, Marc Alexa, Denis Zorin, and Daniele Panozzo. 2019. ABC: A Big
+CAD Model Dataset for Geometric Deep Learning. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR).
+Yijing Li and Jernej Barbič. 2018. Immersion of self-intersecting solids and surfaces.
+ACM Trans. Graph. 37, 4, Article 45 (jul 2018).
+Yangyan Li, Xiaokun Wu, Yiorgos Chrysathou, Andrei Sharf, Daniel Cohen-Or, and
+Niloy J. Mitra. 2011. GlobFit: Consistently Fitting Primitives by Discovering Global
+Relations. In ACM SIGGRAPH 2011 Papers (Vancouver, British Columbia, Canada)
+(SIGGRAPH ’11). Association for Computing Machinery, New York, NY, USA, Article
+52, 12 pages. https://doi.org/10.1145/1964921.1964947
+Guying Lin, Lei Yang, Yuan Liu, Congyi Zhang, Junhui Hou, Xiaogang Jin, Taku Komura,
+John Keyser, and Wenping Wang. 2024. On Optimal Sampling for Learning SDF
+Using MLPs Equipped with Positional Encoding. arXiv:2401.01391 [cs.CV]
+David B. Lindell, Dave Van Veen, Jeong Joon Park, and Gordon Wetzstein. 2022. BACON: Band-limited Coordinate Networks for Multiscale Scene Representation.
+arXiv:2112.04645 [cs.CV]
+Zoë Marschner, Silvia Sellán, Hsueh-Ti Derek Liu, and Alec Jacobson. 2023. Constructive
+Solid Geometry on Neural Signed Distance Fields. In SIGGRAPH Asia 2023 Conference
+Papers. 1–12.
+Julien NP Martel, David B Lindell, Connor Z Lin, Eric R Chan, Marco Monteiro, and
+Gordon Wetzstein. 2021. ACORN: Adaptive Coordinate Networks for Neural Scene
+Representation. arXiv preprint arXiv:2105.02788 (2021).
+Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas
+Geiger. 2019. Occupancy Networks: Learning 3D Reconstruction in Function Space.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR).
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. 2020. Nerf: Representing scenes as neural radiance fields
+for view synthesis. In European conference on computer vision. Springer, 405–421.
+Nathan Mitchell, Mridul Aanjaneya, Rajsekhar Setaluri, and Eftychios Sifakis. 2015. Nonmanifold level sets: A multivalued implicit surface representation with applications
+to self-collision processing. ACM Transactions on Graphics (TOG) 34, 6 (2015), 1–9.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+neural graphics primitives with a multiresolution hash encoding. ACM Transactions
+on Graphics (ToG) 41, 4 (2022), 1–15.
+21
+Liangliang Nan and Peter Wonka. 2017. PolyFit: Polygonal Surface Reconstruction
+From Point Clouds. In Proceedings of the IEEE International Conference on Computer
+Vision (ICCV).
+Yutaka Ohtake, Alexander Belyaev, Marc Alexa, Greg Turk, and Hans-Peter Seidel. 2005.
+Multi-level partition of unity implicits. In Acm Siggraph 2005 Courses. 173–es.
+Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. 2019. DeepSDF: Learning Continuous Signed Distance Functions for Shape
+Representation. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR).
+Alexander Pasko, Valery Adzhiev, Alexei Sourin, and Vladimir Savchenko. 1995. Function representation in geometric modeling: concepts, implementation and applications. The visual computer 11 (1995).
+Daxuan Ren, Jianmin Zheng, Jianfei Cai, Jiatong Li, Haiyong Jiang, Zhongang Cai,
+Junzhe Zhang, Liang Pan, Mingyuan Zhang, Haiyu Zhao, and Shuai Yi. 2021. CSGStump: A Learning Friendly CSG-Like Representation for Interpretable Shape Parsing. arXiv:2108.11305 [cs.CV]
+A.A.G. Requicha and H.B. Voelcker. 1977. Constructive Solid Geometry. Production
+Automation Project, College of Engineering and Applied Science, University of
+Rochester. https://books.google.com/books?id=kaAxnQEACAAJ
+Igor Santesteban, Miguel A. Otaduy, and Dan Casas. 2019. Learning-Based Animation
+of Clothing for Virtual Try-On. Computer Graphics Forum (Proc. Eurographics) (2019).
+https://doi.org/10.1111/cgf.13643
+Vishwanath Saragadam, Jasper Tan, Guha Balakrishnan, Richard G Baraniuk, and
+Ashok Veeraraghavan. 2022. Miner: Multiscale implicit neural representation. In
+European Conference on Computer Vision. Springer, 318–333.
+R. Schnabel, R. Wahl, and R. Klein. 2007. Efficient RANSAC for Point-Cloud Shape Detection. Computer Graphics Forum 26, 2 (2007), 214–226. https://doi.org/10.1111/j.14678659.2007.01016.x arXiv:https://onlinelibrary.wiley.com/doi/pdf/10.1111/j.14678659.2007.01016.x
+Lior Shapira, Ariel Shamir, and Daniel Cohen-Or. 2008. Consistent mesh partitioning
+and skeletonisation using the shape diameter function. The Visual Computer 24
+(2008), 249–259.
+Vadim Shapiro. 2007. Semi-analytic geometry with R-functions. Acta Numerica 16
+(2007).
+Gopal Sharma, Rishabh Goyal, Difan Liu, Evangelos Kalogerakis, and Subhransu
+Maji. 2018. CSGNet: Neural Shape Parser for Constructive Solid Geometry.
+arXiv:1712.08290 [cs.CV]
+Vincent Sitzmann, Julien Martel, Alexander Bergman, David Lindell, and Gordon Wetzstein. 2020. Implicit Neural Representations with Periodic Activation
+Functions. In Advances in Neural Information Processing Systems, H. Larochelle,
+M. Ranzato, R. Hadsell, M.F. Balcan, and H. Lin (Eds.), Vol. 33. Curran
+Associates, Inc., 7462–7473.
+https://proceedings.neurips.cc/paper/2020/file/
+53c04118df112c13a8c34b38343b9c10-Paper.pdf
+Towaki Takikawa, Joey Litalien, Kangxue Yin, Karsten Kreis, Charles Loop, Derek
+Nowrouzezahrai, Alec Jacobson, Morgan McGuire, and Sanja Fidler. 2021. Neural
+Geometric Level of Detail: Real-Time Rendering With Implicit 3D Shapes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). 11358–11367.
+Matthew Tancik, Pratul Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin
+Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan Barron, and Ren Ng.
+2020a. Fourier Features Let Networks Learn High Frequency Functions in Low
+Dimensional Domains. In Advances in Neural Information Processing Systems,
+H. Larochelle, M. Ranzato, R. Hadsell, M.F. Balcan, and H. Lin (Eds.), Vol. 33. Curran Associates, Inc., 7537–7547. https://proceedings.neurips.cc/paper/2020/file/
+55053683268957697aa39fba6f231c68-Paper.pdf
+Matthew Tancik, Pratul P Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan T Barron, and Ren Ng. 2020b.
+Fourier features let networks learn high frequency functions in low dimensional
+domains. arXiv preprint arXiv:2006.10739 (2020).
+Maxim Tatarchenko, Alexey Dosovitskiy, and Thomas Brox. 2017. Octree Generating
+Networks: Efficient Convolutional Architectures for High-resolution 3D Outputs.
+arXiv:1703.09438 [cs.CV]
+Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael Zollhöfer, Carsten Stoll,
+and Christian Theobalt. 2020. PatchNets: Patch-Based Generalizable Deep Implicit
+3D Shape Representations. In Computer Vision – ECCV 2020, Andrea Vedaldi, Horst
+Bischof, Thomas Brox, and Jan-Michael Frahm (Eds.). Springer International Publishing, Cham, 293–309.
+Greg Turk and James F O’brien. 2002. Modelling with implicit surfaces that interpolate.
+ACM Transactions on Graphics (TOG) 21, 4 (2002), 855–873.
+Peng-Shuai Wang, Yang Liu, and Xin Tong. 2022. Dual octree graph networks for
+learning adaptive volumetric shape representations. ACM Transactions on Graphics
+41, 4 (July 2022), 1–15. https://doi.org/10.1145/3528223.3530087
+Fenggen Yu, Qimin Chen, Maham Tanveer, Ali Mahdavi Amiri, and Hao Zhang. 2023.
+D2 CSG: Unsupervised Learning of Compact CSG Trees with Dual Complements
+and Dropouts. arXiv:2301.11497 [cs.CV]
+22 •
+Guying Lin, Lei Yang, Congyi Zhang, Hao Pan, Yuhan Ping, Guodong Wei, Taku Komura, John Keyser, and Wenping Wang
+Congyi Zhang, Mohamed Elgharib, Gereon Fox, Min Gu, Christian Theobalt, and
+Wenping Wang. 2022. An Implicit Parametric Morphable Dental Model. ACM Trans.
+Graph. 41, 6, Article 217 (nov 2022), 13 pages. https://doi.org/10.1145/3550454.
+3555469

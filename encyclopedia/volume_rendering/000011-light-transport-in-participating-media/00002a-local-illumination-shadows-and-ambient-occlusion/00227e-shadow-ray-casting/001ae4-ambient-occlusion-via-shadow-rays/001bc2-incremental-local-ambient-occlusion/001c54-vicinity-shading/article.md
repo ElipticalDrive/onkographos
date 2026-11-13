@@ -7,8 +7,8 @@ Vicinity shading is a pre-computed volumetric ambient occlusion technique that e
 
 ## How it works
 **Inputs:**
-*   Volume dataset $V$ with dimensions $D_x \times D_y \times D_z$.
-*   Density or opacity values for each voxel.
+*   Volume dataset $V$ with dimensions $D_x \times D_y \times D_z$ [S1].
+*   Density or opacity values for each voxel [S1].
 *   Maximum occlusion distance $d_{max}$ (typical value: 64 voxels) [S1].
 *   Number of directions $n_d$ (typical values: 12, 42, or 162) [S1].
 *   Obscurance modulation thresholds $low$ and $high$ [S1].
@@ -18,35 +18,31 @@ Vicinity shading is a pre-computed volumetric ambient occlusion technique that e
 *   A pre-computed obscurance texture volume (shading texture) storing vicinity shading values [S1][S2, unofficial].
 
 **Data Structures:**
-*   **Occlusion Volume:** A 3D texture or array with the same dimensions as the input volume, storing the final obscurance value for each voxel.
-*   **Direction Set:** A set of $n_d$ unit vectors derived from the recursive subdivision of an icosahedron, centered at the volume origin. Common subdivisions yield 12, 42, or 162 directions [S1].
+*   **Occlusion Volume:** A 3D texture or array with the same dimensions as the input volume, storing the final obscurance value for each voxel [S1].
+*   **Direction Set:** A set of $n_d$ unit vectors derived from the recursive subdivision of an icosahedron, centered at the volume origin [S1]. Common subdivisions yield 12, 42, or 162 directions [S1].
 *   **Stack:** A dynamic array used during ray processing to store unoccluded voxels in decreasing order of density [S1].
 
 **Algorithm Steps:**
 
-1.  **Initialization:** Center the volume dataset in a sphere. Generate the set of $n_d$ viewing directions by connecting the center of the volume to the vertices of an icosahedron (and its recursively subdivided vertices) [S1]. Initialize the occlusion volume with zero values.
-
+1.  **Initialization:** Center the volume dataset in a sphere built from the recursive subdivision of an icosahedron [S1]. Generate the set of $n_d$ viewing directions by connecting the center of the volume to the vertices of the icosahedron and its recursively subdivided vertices [S1]. Initialize the occlusion volume with zero values [S2, unofficial].
 2.  **Direction Loop:** For each direction $\boldsymbol{\omega}$ in the set of $n_d$ directions:
-    a.  **Ray Sweeping:** Sweep the volume using Bresenham's algorithm along lines parallel to $\boldsymbol{\omega}$ covering all voxels [S1]. This is equivalent to casting parallel rays.
-    b.  **Stack Initialization:** For each ray, initialize an empty stack $S$.
-    c.  **Voxel Processing:** Traverse the voxels $v_i$ along the ray. For each voxel $v_i$:
-        i.  **Visibility Test:** Compare the density (or opacity) of the current voxel $v_i$ with the voxel $v_s$ at the top of the stack $S$.
-        ii. **Occlusion Check:** If $S$ is not empty and density($v_i$) > density($v_s$), then $v_i$ occludes $v_s$.
+    a.  **Ray Sweeping:** Sweep the volume using Bresenham's algorithm along lines parallel to $\boldsymbol{\omega}$ covering all voxels [S1]. This is equivalent to casting parallel rays [S1].
+    b.  **Stack Initialization:** For each ray, initialize an empty stack $S$ [S1].
+    c.  **Voxel Processing:** Traverse the voxels $v_i$ along the ray [S1]. For each voxel $v_i$:
+        i.  **Visibility Test:** Compare the density (or opacity) of the current voxel $v_i$ with the voxel $v_s$ at the top of the stack $S$ [S1].
+        ii. **Occlusion Check:** If $S$ is not empty and density($v_i$) > density($v_s$), then $v_i$ occludes $v_s$ [S1].
         iii. **Stack Update:** While $S$ is not empty and density($v_i$) > density($S$.top()):
             *   Pop $v_s$ from $S$.
-            *   Compute the distance $d$ from $v_s$ to $v_i$.
-            *   Calculate the obscurance contribution using the function $\rho(d)$ (see Formulas).
-            *   Accumulate this contribution to the obscurance value of $v_s$ in the occlusion volume.
+            *   Compute the distance $d$ from $v_s$ to $v_i$ [G].
+            *   Calculate the obscurance contribution using the function $\rho(d)$ (see Formulas) [S1].
+            *   Accumulate this contribution to the obscurance value of $v_s$ in the occlusion volume [S1].
         iv. **Push:** Push $v_i$ onto $S$. Note that $S$ maintains voxels in decreasing density order [S1].
-    d.  **Final Stack Processing:** After traversing the entire ray, process any remaining voxels in $S$. For each $v_s$ remaining in $S$, the "occluder" is effectively at distance $d_{max}$ (or beyond), so $\rho(d) = 1$ [S1]. Accumulate the corresponding obscurance to $v_s$.
-
+    d.  **Final Stack Processing:** After traversing the entire ray, process any remaining voxels in $S$ [S1]. For each $v_s$ remaining in $S$, the "occluder" is effectively at distance $d_{max}$ (or beyond), so $\rho(d) = 1$ [S1]. Accumulate the corresponding obscurance to $v_s$ [S1].
 3.  **Obscurance Modulation:** For each voxel in the occlusion volume, apply the thresholds $low$ and $high$ [S1]:
-    *   If obscurance $< low$, set value to 0 (black).
-    *   If $low \le$ obscurance $\le high$, keep the value (linear distribution).
-    *   If obscurance $> high$, set value to 1 (unobscured).
-
+    *   If obscurance $< low$, set value to 0 (black) [S1].
+    *   If $low \le$ obscurance $\le high$, keep the value (linear distribution) [S1].
+    *   If obscurance $> high$, set value to 1 (unobscured) [S1].
 4.  **Color Bleeding Integration (Optional):** To integrate color bleeding, multiply the obscurance value by the color of the occluding voxel and add an ambient color constant (white) to unoccluded voxels to accumulate spectral obscurances [S1].
-
 5.  **Storage:** Store the final pre-computed obscurance values in the shading texture volume [S1][S2, unofficial].
 
 **Formulas:**
@@ -58,21 +54,21 @@ O(p) = \frac{1}{\pi} \int_{\Omega} \rho(d(p, \boldsymbol{\omega})) \cos \theta d
 $$
 
 Where:
-*   $\Omega$ is the hemisphere oriented according to the surface normal (or local voxel orientation).
-*   $\theta$ is the angle between the normal vector at $p$ and direction $\boldsymbol{\omega}$.
-*   $d(p, \boldsymbol{\omega})$ is the distance to the first intersection (occluder) in direction $\boldsymbol{\omega}$.
-*   $\rho(d)$ is the distance function mapping distance $d$ to a value in $[0, 1]$.
+*   $\Omega$ is the hemisphere oriented according to the surface normal (or local voxel orientation) [S1].
+*   $\theta$ is the angle between the normal vector at $p$ and direction $\boldsymbol{\omega}$ [S1].
+*   $d(p, \boldsymbol{\omega})$ is the distance to the first intersection (occluder) in direction $\boldsymbol{\omega}$ [S1].
+*   $\rho(d)$ is the distance function mapping distance $d$ to a value in $[0, 1]$ [S1].
 
 The function $\rho(d)$ is monotonically increasing, bounded above by 1, and defined as [S1]:
 *   $\rho(d) = 0$ for $d < 0$ (implied).
-*   $\rho(d)$ increases from 0 to 1 for $0 \le d \le d_{max}$.
-*   $\rho(d) = 1$ for $d > d_{max}$.
+*   $\rho(d)$ increases from 0 to 1 for $0 \le d \le d_{max}$ [S1].
+*   $\rho(d) = 1$ for $d > d_{max}$ [S1].
 
 Candidate functions for $\rho(d)$ include [S1]:
-1.  **All-or-nothing (Ambient Occlusion):** $\rho(d) = 0$ (for $d < d_{max}$).
-2.  **Linear (Vicinity Shading):** $\rho(d) = \frac{d}{d_{max}}$.
-3.  **Exponential:** $\rho(d) = 1 - e^{-\frac{d}{d_{max}}}$.
-4.  **Square Root:** $\rho(d) = \sqrt{\frac{d}{d_{max}}}$.
+1.  **All-or-nothing (Ambient Occlusion):** $\rho(d) = 0$ (for $d < d_{max}$) [S1].
+2.  **Linear (Vicinity Shading):** $\rho(d) = \frac{d}{d_{max}}$ [S1].
+3.  **Exponential:** $\rho(d) = 1 - e^{-\frac{d}{d_{max}}}$ [S1].
+4.  **Square Root:** $\rho(d) = \sqrt{\frac{d}{d_{max}}}$ [S1].
 
 **Pseudocode:**
 
@@ -82,141 +78,81 @@ Candidate functions for $\rho(d)$ include [S1]:
 def compute_vicinity_shading(volume, directions, d_max, low, high, use_color_bleeding=False, ambient_color=(1.0, 1.0, 1.0)):
     """
     Computes vicinity shading (obscurance) for a volume.
-    
-    Args:
-        volume: 3D array of densities/opacity values.
-        directions: List of unit vectors (nd directions).
-        d_max: Maximum distance for occlusion consideration.
-        low: Lower threshold for obscurance modulation.
-        high: Upper threshold for obscurance modulation.
-        use_color_bleeding: Boolean flag for color bleeding integration.
-        ambient_color: RGB tuple for unoccluded voxels.
-        
-    Returns:
-        obscurance_volume: 3D array of computed obscurance values.
     """
-    dims = volume.shape
-    obscurance_volume = np.zeros(dims)
-    
-    # Precompute rho function values for distances 0 to d_max
-    # rho(d) = d / d_max (Linear, typical for vicinity shading)
-    # Other functions can be substituted here
-    rho_values = np.array([d / d_max for d in range(d_max + 1)])
-    
+    dims = (len(volume), len(volume[0]), len(volume[0][0]))
+    obscurance_volume = [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
+    color_volume = [[[list(ambient_color) for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
+
+    # Precompute rho function values for distances 0 to d_max (Linear function) [S1]
+    rho_values = [d / d_max for d in range(d_max + 1)]
+
+    # Sources do not provide the 3D Bresenham rasterization routine; a standard 3D DDA/Bresenham implementation is used here [G].
+    # rays = generate_bresenham_rays(volume, direction)
     for direction in directions:
-        # Get all rays parallel to this direction
-        rays = get_parallel_rays(volume, direction)
-        
+        # rays = generate_bresenham_rays(volume, direction)
         for ray_voxels in rays:
-            # ray_voxels is a list of (x, y, z, density, color) tuples in traversal order
             stack = []
-            
             for voxel in ray_voxels:
                 x, y, z, density, color = voxel
-                
-                # Process stack: check if current voxel occludes top of stack
                 while stack:
                     top_voxel = stack[-1]
                     top_x, top_y, top_z, top_density, top_color = top_voxel
-                    
-                    # Visibility test: current voxel occludes top if density is higher
                     if density > top_density:
-                        # Calculate distance
-                        dist = calculate_distance((x, y, z), (top_x, top_y, top_z))
-                        
-                        # Clamp distance to d_max for rho lookup
+                        dist = ((x - top_x)**2 + (y - top_y)**2 + (z - top_z)**2)**0.5
                         dist_index = min(int(dist), d_max)
                         rho_val = rho_values[dist_index]
-                        
-                        # Accumulate obscurance
-                        # Note: The integral approximation sums contributions from all directions
-                        # Here we accumulate per direction, assuming uniform distribution of directions
-                        # The 1/pi factor and cos(theta) are handled by the direction set weighting
-                        # For simplicity, we accumulate rho_val directly. 
-                        # In a full implementation, direction weights should be applied.
-                        obscurance_volume[top_x, top_y, top_z] += rho_val
-                        
-                        # Pop the occluded voxel
+                        obscurance_volume[top_x][top_y][top_z] += rho_val
+                        if use_color_bleeding:
+                            color_volume[top_x][top_y][top_z] = [c * rho_val for c in top_color]
                         stack.pop()
                     else:
-                        # Top of stack is not occluded by current voxel
-                        # Since stack is sorted by density, no further voxels in stack 
-                        # will be occluded by current voxel (or any future voxel in this ray)
                         break
-                
-                # Push current voxel onto stack
                 stack.append(voxel)
-            
-            # Process remaining voxels in stack (occluded by "infinity" or d_max)
             while stack:
                 top_voxel = stack.pop()
                 top_x, top_y, top_z, top_density, top_color = top_voxel
-                
-                # Distance is effectively d_max or greater, so rho(d) = 1
-                obscurance_volume[top_x, top_y, top_z] += 1.0
-    
-    # Apply modulation thresholds
+                obscurance_volume[top_x][top_y][top_z] += 1.0
+                if use_color_bleeding:
+                    color_volume[top_x][top_y][top_z] = [c + ambient_color[i] for i, c in enumerate(top_color)]
+
     for x in range(dims[0]):
         for y in range(dims[1]):
             for z in range(dims[2]):
-                val = obscurance_volume[x, y, z]
+                val = obscurance_volume[x][y][z]
                 if val < low:
-                    obscurance_volume[x, y, z] = 0.0
+                    obscurance_volume[x][y][z] = 0.0
                 elif val > high:
-                    obscurance_volume[x, y, z] = 1.0
-                # else: keep value (linear distribution)
-    
-    # Normalize by number of directions to approximate the integral average
-    obscurance_volume /= len(directions)
-    
-    # Optional: Color bleeding integration
+                    obscurance_volume[x][y][z] = 1.0
+                # else: keep value (linear distribution) [S1]
+
     if use_color_bleeding:
-        # This step requires storing color information per voxel and 
-        # accumulating color contributions during the stack processing.
-        # The basic obscurance volume stores scalar values.
-        # A full implementation would store (obscurance, color) tuples.
+        # To integrate color bleeding, multiply the obscurance value by the color 
+        # of the occluding voxel and add an ambient color constant (white) to 
+        # unoccluded voxels to accumulate spectral obscurances [S1].
         pass
         
     return obscurance_volume
-
-def get_parallel_rays(volume, direction):
-    """
-    Generates rays parallel to the given direction using Bresenham's algorithm.
-    Returns a list of lists, where each inner list contains voxel data along a ray.
-    """
-    # Implementation details for Bresenham's 3D line algorithm
-    # This is a placeholder for the actual rasterization logic
-    # The source states: "the volume is swept using Bresenham's algorithm. 
-    # This is equivalent to casting parallel rays covering all voxels."
-    rays = []
-    # ... generate rays ...
-    return rays
-
-def calculate_distance(p1, p2):
-    """Calculates Euclidean distance between two voxel coordinates."""
-    return np.sqrt(sum((a - b) ** 2 for a, b in zip(p1, p2)))
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Recomputation:** The occlusion volume must be recomputed whenever rendering parameters (such as transfer functions, if opacity is used for density) are modified [S1][S2, unofficial].
 *   **Color Bleeding:** The original vicinity shading method by Stewart does not support color bleeding [S1][S2, unofficial]. The source notes an extension to integrate color bleeding by multiplying obscurance by occluder color and adding an ambient constant, but this is an enhancement, not part of the base method [S1].
-*   **Density vs. Opacity:** The visibility test can use either density values (intensity, independent of transfer function) or opacity values (assigned by transfer function). The choice affects the result [S1].
-*   **Stack Order:** The stack must maintain voxels in decreasing density order. If this invariant is broken, the occlusion logic fails [S1].
+*   **Density vs. Opacity:** The visibility test can use either density values (intensity, independent of transfer function) or opacity values (assigned by transfer function) [S1].
+*   **Stack Order:** The stack must maintain voxels in decreasing density order [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Proportional to the number of voxels times the number of directions ($N_{voxels} \times n_d$) [S1].
-*   **Space Complexity:** Proportional to the number of voxels, for storing the occlusion volume [S1].
 *   **Independence from $d_{max}$:** The computational cost is independent of $d_{max}$ because, in the worst case (densities in decreasing order), all voxels in a ray are pushed to the stack and then popped, costing proportional to the number of voxels in a ray [S1].
 *   **Measured Performance:** On an Intel Core2 Quad Q6600 at 2.40GHz with 2GB RAM:
     *   Aneurism dataset ($256^3$): 0:36 (12 dirs), 1:56 (42 dirs), 6:56 (162 dirs) [S1].
     *   CT-body dataset ($256 \times 256 \times 415$): 1:14 (12 dirs), 4:09 (42 dirs), 15:02 (162 dirs) [S1].
 *   **Strengths:** Fast computation compared to local volumetric shadowing (quadratic complexity); allows interactive exploration; generates saliency maps [S1].
 *   **Limitations:** Does not support color bleeding in its original form; requires recomputation when rendering parameters change; approximates occlusion locally and cannot simulate global illumination effects [S1][S2, unofficial].
-*   **When to use:** When interactive exploration of volume data is required and realistic lighting effects are needed at a low cost. Suitable for generating saliency maps for view selection [S1].
-*   **When not to use:** When physically accurate global illumination or color bleeding is required. When rendering parameters change frequently and recomputation is too costly [S1][S2, unofficial].
+*   **When to use:** When interactive exploration of volume data is required and realistic lighting effects are needed at a low cost [S1]. Suitable for generating saliency maps for view selection [S1].
+*   **When not to use:** When physically accurate global illumination or color bleeding is required [S1][S2, unofficial]. When rendering parameters change frequently and recomputation is too costly [S1][S2, unofficial].
 
 ## Background
-Vicinity shading was proposed by Stewart in 2003 as a volumetric version of ambient occlusion [S2, unofficial]. It simulates the illumination of isosurfaces by taking into account neighboring voxels. The method was developed to provide natural-looking lighting effects in a faster way than global illumination, which is particularly important for interactive volume visualization [S1]. The technique is based on the obscurances illumination model introduced by Zhukov in 1998, which is a simplified version of ambient occlusion [S1][S2, unofficial]. Vicinity shading has been used in medical imaging and other volume visualization applications to enhance visual quality and generate saliency maps for view selection [S1][S2, unofficial].
+Vicinity shading was proposed by Stewart in 2003 as a volumetric version of ambient occlusion [S2, unofficial]. It simulates the illumination of isosurfaces by taking into account neighboring voxels [S2, unofficial]. The method was developed to provide natural-looking lighting effects in a faster way than global illumination, which is particularly important for interactive volume visualization [S1]. Ambient occlusion is a simplified version of the obscurances illumination model [S1]. Vicinity shading has been used in medical imaging and other volume visualization applications to enhance visual quality and generate saliency maps for view selection [S1][S2, unofficial].
 
 ## Sources
 [S1] Obscurance-based Volume Rendering Framework, https://doi.org/10.2312/vg/vg-pbg08/113-120, fetched 2026-10-26
