@@ -1,162 +1,233 @@
 # Arrow Glyphs for Vector Field Visualization
+
 Also called: Arrow Glyphs, Arrow Plot, Glyph Arrows, Vector Glyphs as Arrows, Vector field arrow visualization
+
 ## Overview
-Arrow glyphs resolve the direction ambiguity inherent in line-based vector field visualizations by using arrow-shaped primitives that explicitly encode flow direction [S2, unofficial]. Unlike [Line Glyphs for Vector Field Visualization](2569-line-glyphs-for-vector-field-visualization.md), which suffer from orientation ambiguity, arrow glyphs use triangular faces to allow for 3D shading and clear directional cues [S2, unofficial]. This method is implemented entirely on the GPU to avoid CPU-GPU data transfer, resulting in performance approximately 2x faster than line glyphs (about 10 ms for typical scenes) due to the larger visual size of arrows allowing for lower sampling density [S2, unofficial].
+Arrow Glyphs is a visualization technique that resolves the direction ambiguity inherent in line-based vector field representations by rendering explicit arrow-shaped glyphs [S2, S2, unofficial]. It samples a vector field on a 2D grid (typically at a fixed coordinate) and renders each vector as a 3D cone-like shape centered at the sample point, scaled by magnitude and colored by magnitude [S3, S3, unofficial]. It sets itself apart from [Line Glyphs for Vector Field Visualization](2569-line-glyphs-for-vector-field-visualization.md) by providing unambiguous orientation cues through triangular faces that support shading, and from [Glyph-based Vector/Tensor Visualization](10535-glyph-based-vector-tensor-visualization.md) by focusing specifically on the geometric construction of directional arrows rather than general glyph placement strategies.
+
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- `vectorFieldTex`: A 3D texture or array storing vector data. Each texel is a `float4` where $(x, y, z)$ is the vector direction and $w$ is the magnitude [S2, S3, unofficial].
-- `position`: The 3D world position where the glyph is centered [S2, S3, unofficial].
-- `glyphsCount`: A `uint2` specifying the number of glyphs in the x and y dimensions of the sampling plane [S3, unofficial].
-- `worldSize`: A `float2` defining the physical size of the sampling plane [S3, unofficial].
-- `x`: A fixed coordinate defining the sampling plane's depth [S3, unofficial].
+*   `vectorFieldTex`: A 3D texture containing the vector field data, where each texel stores a 4-component vector `(vx, vy, vz, magnitude)` [S2, S2, unofficial][S3, S3, unofficial].
+*   `x`: The fixed x-coordinate defining the 2D plane on which glyphs are sampled [S3, S3, unofficial].
+*   `glyphsCount`: A 2D integer vector `(countX, countY)` specifying the number of arrows in the y and z directions [S2, S2, unofficial][S3, S3, unofficial].
+*   `worldSize`: A 2D float vector `(width, height)` defining the spatial extent of the glyph plane in world units [S3, S3, unofficial].
+*   `glyphLength`: A scalar scaling factor for the length of the arrow shaft [S3, S3, unofficial].
+*   `magnitudeCtfNormalizeMult`: A normalization factor for the color lookup table, typically `vectorMangitudeCtfLength / maxMagnitude` [S3, S3, unofficial].
+*   `vectorMangitudeCtfTex`: A 1D texture mapping magnitude values to colors [S3, S3, unofficial].
 
 **Outputs:**
-- `outVertices`: A buffer of `float3` with 9 vertices per glyph [S2, S3, unofficial].
-- `outFaces`: A buffer of `uint3` with 6 faces (triangles) per glyph [S2, S3, unofficial].
-- `outVertexNormals`: A buffer of `float3` with 9 normals per glyph [S2, S3, unofficial].
-- `outVertexColors`: A buffer of `float3` with 9 colors per glyph [S2, S3, unofficial].
+*   `outVertices`: A buffer of `float3` values, storing 9 vertices per arrow [S2, S2, unofficial][S3, S3, unofficial].
+*   `outFaces`: A buffer of `uint3` values, storing 6 triangle indices per arrow [S2, S2, unofficial][S3, S3, unofficial].
+*   `outVertexNormals`: A buffer of `float3` values, storing 9 normals per arrow [S2, S2, unofficial][S3, S3, unofficial].
+*   `outVertexColors`: A buffer of `float3` values, storing 9 colors per arrow [S3, S3, unofficial].
 
 ### Data Structures
-Each glyph consists of 9 vertices and 6 triangular faces [S2, unofficial]. The vertex layout is defined as follows [S2, unofficial]:
-- Vertices 0–4 form the arrowhead (cone) [S2, unofficial].
-- Vertices 5–8 form the arrow shaft (base) [S2, unofficial].
-- Vertex 0 is the tip [S2, unofficial].
-- Vertices 1, 2, 3, 4 are the base of the cone [S2, unofficial].
-- Vertices 5, 6, 7, 8 are the corners of the rectangular shaft base [S2, unofficial].
+Each arrow glyph consists of exactly 9 vertices and 6 triangular faces [S2, S2, unofficial][S3, S3, unofficial]. The vertices are indexed locally from `0` to `8` relative to the start of the arrow's block in the output buffers.
 
-### Algorithm
-1. **Sample Vector:** Read the vector field at the current position $(x, y, z)$ from `vectorFieldTex`. Let the result be `vector` ($x, y, z, w$) [S3, unofficial].
-2. **Compute Forward Axis:** Normalize the directional components to get the forward unit vector:
-   $$ \mathbf{f} = \text{normalize}(vector.xyz) $$
-   [S2, S3, unofficial]
-3. **Compute Perpendicular Axes:** Compute a perpendicular vector $\mathbf{x}$ to $\mathbf{f}$ using a helper function that returns a unit vector orthogonal to $\mathbf{f}$ [S2, unofficial]. Compute $\mathbf{y}$ as the cross product:
-   $$ \mathbf{y} = \text{normalize}(\mathbf{f} \times \mathbf{x}) $$
-   [S2, S3, unofficial]
-4. **Define Face Indices:** For a glyph with global vertex index `vertId`, define the 6 triangles:
-   - Face 0: $(v_0, v_1, v_2)$
-   - Face 1: $(v_0, v_2, v_3)$
-   - Face 2: $(v_0, v_3, v_4)$
-   - Face 3: $(v_0, v_4, v_1)$
-   - Face 4: $(v_5, v_6, v_7)$
-   - Face 5: $(v_5, v_7, v_8)$
-   [S2, S3, unofficial]
-5. **Assign Normals:**
-   - $n_0 = \mathbf{f}$ (Tip)
-   - $n_1 = \mathbf{x}$
-   - $n_2 = \mathbf{y}$
-   - $n_3 = -\mathbf{x}$
-   - $n_4 = -\mathbf{y}$
-   - $n_5 = -\mathbf{f}$ (Base center direction) [S2, unofficial]
-   - $n_6 = -\mathbf{f}$ [S2, unofficial]
-   - $n_7 = -\mathbf{f}$ [S2, unofficial]
-   - $n_8 = -\mathbf{f}$ [S2, unofficial]
-   [S2, S3, unofficial]
-6. **Scale Axes:** Scale the forward vector by the magnitude: $\mathbf{f}_{scaled} = \mathbf{f} \times vector.w$ [S2, unofficial]. (Note: implementations may apply additional scaling factors like `glyphLength` and normalization multipliers [S3, unofficial]). Scale the perpendicular axes by a fixed factor of 0.1: $\mathbf{x}_{scaled} = \mathbf{x} \times 0.1$, $\mathbf{y}_{scaled} = \mathbf{y} \times 0.1$ [S2, S3, unofficial].
-7. **Compute Vertex Positions:**
-   - $v_0 = \text{position} - \mathbf{f}_{scaled}$ (Tip) [S2, unofficial]
-   - $v_1 = \text{position} + \mathbf{x}_{scaled}$ [S2, unofficial]
-   - $v_2 = \text{position} + \mathbf{y}_{scaled}$ [S2, unofficial]
-   - $v_3 = \text{position} - \mathbf{x}_{scaled}$ [S2, unofficial]
-   - $v_4 = \text{position} - \mathbf{y}_{scaled}$ [S2, unofficial]
-   - $v_5 = \text{position} + \mathbf{x}_{scaled}$ [S2, unofficial]
-   - $v_6 = \text{position} + \mathbf{y}_{scaled}$ [S2, unofficial]
-   - $v_7 = \text{position} - \mathbf{x}_{scaled}$ [S2, unofficial]
-   - $v_8 = \text{position} - \mathbf{y}_{scaled}$ [S2, unofficial]
-   [S2, S3, unofficial]
-8. **Assign Color:** Sample the magnitude color lookup table using `vector.w` and assign the resulting RGB color to all 9 vertices [S2, S3, unofficial].
+*   **Vertices Layout:**
+    *   `v0`: Tip of the arrow.
+    *   `v1, v2, v3, v4`: Base vertices forming a square cross-section.
+    *   `v5, v6, v7, v8`: Base vertices (duplicate positions to `v1-v4` but with different normals/colors for flat shading) [S2, S2, unofficial][S3, S3, unofficial].
+*   **Faces Layout:**
+    *   `f0`: `(v0, v1, v2)`
+    *   `f1`: `(v0, v2, v3)`
+    *   `f2`: `(v0, v3, v4)`
+    *   `f3`: `(v0, v4, v1)`
+    *   `f4`: `(v5, v6, v7)`
+    *   `f5`: `(v5, v7, v8)` [S2, S2, unofficial][S3, S3, unofficial]
+
+### Steps
+1.  **Calculate Global Thread ID:** Compute the global thread ID `id` from the CUDA grid/block configuration [S3, S3, unofficial].
+2.  **Boundary Check:** Calculate `totalCount = glyphsCount.x * glyphsCount.y`. If `id >= totalCount`, terminate the kernel [S3, S3, unofficial].
+3.  **Grid Coordinates:** Compute column and row indices:
+    $$col = id \pmod{glyphsCount.x}$$
+    $$row = \lfloor id / glyphsCount.x \rfloor$$
+    [S3, S3, unofficial]
+4.  **Sample Position:** Calculate the 3D position of the arrow base:
+    $$position = (x, \ col \cdot \frac{worldSize.x}{glyphsCount.x}, \ row \cdot \frac{worldSize.y}{glyphsCount.y})$$
+    [S3, S3, unofficial]
+5.  **Vector Sampling:** Sample the vector field at the position. Apply coordinate space multiplication if necessary:
+    $$vector = tex3D(vectorFieldTex, position.x \cdot mult.x, position.y \cdot mult.y, position.z \cdot mult.z)$$
+    where `mult` maps world coordinates to texture coordinates [S3, S3, unofficial].
+6.  **Basis Vector Computation:**
+    *   Compute the forward axis (direction of flow):
+        $$forward = \text{normalize}(vector.xyz)$$
+    *   Compute a perpendicular axis `xAxis` using a helper function `findPerpendicular(forward)` which returns a unit vector orthogonal to `forward` [S2, S2, unofficial][S3, S3, unofficial].
+    *   Compute the second perpendicular axis:
+        $$yAxis = \text{normalize}(\text{cross}(forward, xAxis))$$
+    [S2, S2, unofficial][S3, S3, unofficial]
+7.  **Face Index Assignment:** For each arrow `id`, compute global indices:
+    $$faceId = id \cdot 6$$
+    $$vertexId = id \cdot 9$$
+    Assign the 6 faces to `outFaces` as defined in the Data Structures section [S2, S2, unofficial][S3, S3, unofficial].
+8.  **Normal Assignment:** Assign normals to the 9 vertices:
+    *   `outVertexNormals[vertexId + 0] = forward` (Tip)
+    *   `outVertexNormals[vertexId + 1] = xAxis`
+    *   `outVertexNormals[vertexId + 2] = yAxis`
+    *   `outVertexNormals[vertexId + 3] = -xAxis`
+    *   `outVertexNormals[vertexId + 4] = -yAxis`
+    *   `outVertexNormals[vertexId + 5] = -forward`
+    *   `outVertexNormals[vertexId + 6] = -forward`
+    *   `outVertexNormals[vertexId + 7] = -forward`
+    *   `outVertexNormals[vertexId + 8] = -forward`
+    [S2, S2, unofficial][S3, S3, unofficial]
+9.  **Scale Basis Vectors:**
+    *   Scale `forward` by the arrow length and magnitude:
+        $$forward = forward \cdot glyphLength \cdot vector.w \cdot magnitudeCtfNormalizeMult \cdot 0.5$$
+    *   Scale `xAxis` and `yAxis` by a fixed width factor (0.1) and length:
+        $$xAxis = xAxis \cdot glyphLength \cdot 0.1$$
+        $$yAxis = yAxis \cdot glyphLength \cdot 0.1$$
+    [S2, S2, unofficial][S3, S3, unofficial]
+10. **Vertex Position Computation:** Compute the 9 vertex positions relative to `position`. Note that `forward` was negated in step 8 for normals, so `position - forward` places the tip in the direction of the vector:
+    *   `outVertices[vertexId + 0] = position - forward` (Tip)
+    *   `outVertices[vertexId + 1] = position + xAxis`
+    *   `outVertices[vertexId + 2] = position + yAxis`
+    *   `outVertices[vertexId + 3] = position - xAxis`
+    *   `outVertices[vertexId + 4] = position - yAxis`
+    *   `outVertices[vertexId + 5] = position + xAxis`
+    *   `outVertices[vertexId + 6] = position + yAxis`
+    *   `outVertices[vertexId + 7] = position - xAxis`
+    *   `outVertices[vertexId + 8] = position - yAxis`
+    [S2, S2, unofficial]
+11. **Color Assignment:** Sample the color from the magnitude lookup table:
+    $$color = tex1D(vectorMangitudeCtfTex, vector.w \cdot magnitudeCtfNormalizeMult)$$
+    Assign this color to all 9 vertices of the arrow:
+    $$outVertexColors[vertexId + i] = color.xyz \quad \text{for } i \in [0, 8]$$
+    [S3, S3, unofficial]
+
+### Piecewise-Bilinear Interpolation (Alternative Sampling)
+In some implementations, the vector components at the arrow tail are computed using piecewise-bilinear interpolation of the four corner grid points [S1, S1, unofficial]. For a query point $(x, y)$ in the x-y plane, with lower-left grid point $(x_i, y_i)$ and grid widths $(dx, dy)$, the weights are:
+$$b_1 = \frac{(x_i + dx - x)(y_i + dy - y)}{dx \cdot dy}$$
+$$b_2 = \frac{(x_i - x)(y_i + dy - y)}{dx \cdot dy}$$
+$$b_3 = \frac{(x_i + dx - x)(y_i - y)}{dx \cdot dy}$$
+$$b_4 = \frac{(x_i - x)(y_i - y)}{dx \cdot dy}$$
+The interpolated value is the weighted sum of the corner values [S1, S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def find_perpendicular(v):
-    # [G] Standard robust method to find a unit vector orthogonal to v
-    if abs(v.x) < 0.9:
-        return normalize(cross(v, (1.0, 0.0, 0.0)))
-    else:
-        return normalize(cross(v, (0.0, 1.0, 0.0)))
+# Simplified CUDA-style kernel logic for Arrow Glyphs
+# Assumes helper functions: normalize(v), cross(a, b), findPerpendicular(v), tex3D(tex, x, y, z), tex1D(tex, t)
 
-def glyph_arrows_kernel(id, position, vector_field_tex, magnitude_lut):
-    # 1. Sample vector
-    # [S3, unofficial]
-    vector = vector_field_tex[position]  # float4: xyz direction, w magnitude
+def glyph_arrows_kernel(x_fixed, glyphs_count, world_size, vector_field_tex, magnitude_ctf_tex, glyph_length, mag_norm_mult):
+    # Global thread ID calculation would be handled by the runtime
+    # id = blockIdx.x * blockDim.x + threadIdx.x
+    
+    total_count = glyphs_count.x * glyphs_count.y
+    if id >= total_count:
+        return
 
-    # 2. Compute forward axis
-    forward = normalize(vector.xyz)
-
-    # 3. Compute perpendicular axes
-    x_axis = normalize(find_perpendicular(forward))
-    y_axis = normalize(cross(forward, x_axis))
-
-    # 4. Define face indices
-    vert_id = id * 9
+    col = id % glyphs_count.x
+    row = id // glyphs_count.x
+    
+    # Calculate position
+    pos_x = x_fixed
+    pos_y = col * (world_size.x / glyphs_count.x)
+    pos_z = row * (world_size.y / glyphs_count.y)
+    position = (pos_x, pos_y, pos_z)
+    
+    # Sample vector field
+    # Note: Source [S3, unofficial] applies coordinate space multiplication; Source [S2, unofficial] does not.
+    # We follow [S3, unofficial] for completeness, assuming mult is passed or derived.
+    # For simplicity, assuming direct sampling as in [S2, unofficial] if no mult is provided.
+    # Here we assume direct sampling for the core logic, as [S2, unofficial] is the primary reference for the kernel structure.
+    vector = tex3D(vector_field_tex, position.x, position.y, position.z)
+    
+    # Compute basis vectors
+    forward = normalize((vector.x, vector.y, vector.z))
+    xAxis = normalize(findPerpendicular(forward))
+    yAxis = normalize(cross(forward, xAxis))
+    
+    # Face indices
     face_id = id * 6
-    faces = [
-        (vert_id, vert_id + 1, vert_id + 2),
-        (vert_id, vert_id + 2, vert_id + 3),
-        (vert_id, vert_id + 3, vert_id + 4),
-        (vert_id, vert_id + 4, vert_id + 1),
-        (vert_id + 5, vert_id + 6, vert_id + 7),
-        (vert_id + 5, vert_id + 7, vert_id + 8)
-    ]
-
-    # 5. Assign normals
-    normals = [
-        forward,       # 0: Tip
-        x_axis,        # 1
-        y_axis,        # 2
-        -x_axis,       # 3
-        -y_axis,       # 4
-        -forward,      # 5: Base
-        -forward,      # 6
-        -forward,      # 7
-        -forward       # 8
-    ]
-
-    # 6. Scale axes
-    forward_scaled = forward * vector.w  # [S2, unofficial]
-    x_axis_scaled = x_axis * 0.1
-    y_axis_scaled = y_axis * 0.1
-
-    # 7. Compute vertex positions
-    vertices = [
-        position - forward_scaled, # 0: Tip
-        position + x_axis_scaled,  # 1
-        position + y_axis_scaled,  # 2
-        position - x_axis_scaled,  # 3
-        position - y_axis_scaled,  # 4
-        position + x_axis_scaled,  # 5
-        position + y_axis_scaled,  # 6
-        position - x_axis_scaled,  # 7
-        position - y_axis_scaled   # 8
-    ]
-
-    # 8. Assign color
-    # [S3, unofficial]
-    color = magnitude_lut[clamp(vector.w * 0.5, 0.0, 1.0)]
-    colors = [color] * 9
-
-    return vertices, faces, normals, colors
+    vert_id = id * 9
+    
+    out_faces[face_id] = (vert_id, vert_id + 1, vert_id + 2)
+    out_faces[face_id + 1] = (vert_id, vert_id + 2, vert_id + 3)
+    out_faces[face_id + 2] = (vert_id, vert_id + 3, vert_id + 4)
+    out_faces[face_id + 3] = (vert_id, vert_id + 4, vert_id + 1)
+    out_faces[face_id + 4] = (vert_id + 5, vert_id + 6, vert_id + 7)
+    out_faces[face_id + 5] = (vert_id + 5, vert_id + 7, vert_id + 8)
+    
+    # Normals
+    out_vertex_normals[vert_id] = forward
+    out_vertex_normals[vert_id + 1] = xAxis
+    out_vertex_normals[vert_id + 2] = yAxis
+    out_vertex_normals[vert_id + 3] = -xAxis
+    out_vertex_normals[vert_id + 4] = -yAxis
+    
+    # Negate forward for base normals
+    base_forward = -forward
+    
+    out_vertex_normals[vert_id + 5] = base_forward
+    out_vertex_normals[vert_id + 6] = base_forward
+    out_vertex_normals[vert_id + 7] = base_forward
+    out_vertex_normals[vert_id + 8] = base_forward
+    
+    # Scale vectors
+    # Source [S3, unofficial] includes glyphLength and mag_norm_mult in forward scaling
+    # Source [S2, unofficial] only uses vector.w for forward scaling
+    # Merging: use vector.w for direction magnitude, apply length scaling
+    forward_scaled = forward * vector.w * glyph_length * mag_norm_mult * 0.5
+    xAxis_scaled = xAxis * glyph_length * 0.1
+    yAxis_scaled = yAxis * glyph_length * 0.1
+    
+    # Vertex positions
+    # Note: position - forward_scaled places tip in direction of forward
+    out_vertices[vert_id] = position - forward_scaled
+    out_vertices[vert_id + 1] = position + xAxis_scaled
+    out_vertices[vert_id + 2] = position + yAxis_scaled
+    out_vertices[vert_id + 3] = position - xAxis_scaled
+    out_vertices[vert_id + 4] = position - yAxis_scaled
+    out_vertices[vert_id + 5] = position + xAxis_scaled
+    out_vertices[vert_id + 6] = position + yAxis_scaled
+    out_vertices[vert_id + 7] = position - xAxis_scaled
+    out_vertices[vert_id + 8] = position - yAxis_scaled
+    
+    # Colors
+    color = tex1D(magnitude_ctf_tex, vector.w * mag_norm_mult)
+    for i in range(9):
+        out_vertex_colors[vert_id + i] = (color.x, color.y, color.z)
 ```
 
 ### Parameters
-- **Head Width Scaling Factor:** 0.1. This scales the magnitude of the perpendicular axes ($\mathbf{x}$ and $\mathbf{y}$) to determine the width of the arrow head and shaft [S2, S3, unofficial].
-- **Glyph Length & Magnitude Normalization:** Some implementations multiply the forward vector by `glyphLength * vector.w * mangitudeCtfNormalizeMult * 0.5` and scale perpendicular axes by `glyphLength * 0.1` to control visual size and color mapping range [S3, unofficial].
-- **Minimum Density:** At least 2 arrows in each direction are recommended to avoid visual gaps [S1, unofficial].
+*   **Minimum Arrows:** At least 2 arrows in each direction are required to form a valid surface representation [S1, S1, unofficial].
+*   **Arrow Width Factor:** The base width of the arrow is scaled by a factor of 0.1 relative to the length [S2, S2, unofficial].
+*   **Fixed Coordinate:** The visualization is typically performed on a 2D slice at a fixed x-coordinate `x` [S3, S3, unofficial].
 
 ### Edge Cases and Pitfalls
-- **Zero Vector:** If the sampled vector magnitude is 0, the forward vector is undefined. The implementation must handle this by either skipping the glyph or defaulting to a neutral orientation [G].
-- **Perpendicular Vector Selection:** The `findPerpendicular` function must handle cases where the forward vector is parallel to standard basis vectors to avoid zero-length cross products [G].
-- **Precision & Memory:** Using shared VBOs avoids CPU-GPU transfer but requires careful memory management on the GPU to prevent overflow for large glyph counts [S2, unofficial].
-- **Boundary Conditions:** When sampling near domain edges, bilinear interpolation weights must be clamped to valid grid ranges to prevent out-of-bounds reads [S1, unofficial].
+*   **Zero Vector:** If the sampled vector magnitude is zero, `normalize` will fail or produce undefined results. A guard clause should handle zero vectors, typically by rendering a small sphere or skipping the glyph [G].
+*   **Precision:** Floating-point precision issues may arise when computing `findPerpendicular` for vectors aligned with the primary axes. The `findPerpendicular` function should use a robust method (e.g., comparing against the smallest component) to avoid degeneracy [G].
+*   **Boundary Conditions:** If the sample position falls outside the vector field texture bounds, `tex3D` should handle wrapping or clamping appropriately to avoid artifacts [G].
+
+## Subtopics
+
+### Line Glyphs for Vector Field Visualization
+Uses line segments instead of arrows. Simpler geometry but ambiguous direction. Choose when performance is critical and direction is less important than flow patterns. [Link](2569-line-glyphs-for-vector-field-visualization.md)
+
+### Interactive Glyph Placement for Tensor Fields
+Focuses on optimal placement of glyphs in tensor fields to avoid clutter. Choose for complex tensor data where automatic placement is insufficient. [Link](10455-interactive-glyph-placement-for-tensor-fields.md)
+
+### Uncertainty Visualization Using Glyphs
+Extends glyphs to represent uncertainty in vector/tensor data. Choose when data quality is variable or noisy. [Link](11143-uncertainty-visualization-using-glyphs.md)
+
+### Tensor Glyphs
+Uses ellipsoids or other shapes to represent tensor fields. Choose for stress/strain or diffusion data. [Link](12146-tensor-glyphs.md)
+
 ## Operating characteristics
-- **Time Complexity:** The kernel computes vertices, normals, and indices for all arrows in parallel [S2, unofficial]. The source notes that arrow glyphs are roughly 2x faster than line glyphs, taking about 10 ms for typical scenes [S2, unofficial]. This speedup is attributed to the larger visual size of arrows, which allows for a lower sampling density while maintaining visual clarity [S2, unofficial].
-- **Memory Complexity:** Requires storage for 9 vertices, 6 faces, 9 normals, and 9 colors per glyph [S2, unofficial]. All data is computed on the GPU, eliminating transfer overhead [S2, unofficial].
-- **Strengths:** Removes direction ambiguity; allows for 3D shading due to triangular faces; fast performance due to GPU-only computation and lower density requirements [S2, unofficial].
-- **Limitations:** More complex geometry than lines (9 vertices vs 2); requires careful handling of perpendicular vector generation and magnitude scaling [S2, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of glyphs. The computation is performed entirely on the GPU, avoiding CPU-GPU transfer overhead [S2, S2, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing vertices, faces, normals, and colors. Each glyph requires 9 vertices, 6 faces, 9 normals, and 9 colors [S2, S2, unofficial].
+*   **Performance:** Arrow glyphs are roughly 2x faster than line glyphs (approx. 10 ms for typical scenes) because fewer glyphs are needed due to their larger visual size [S2, S2, unofficial].
+*   **Strengths:** Unambiguous direction indication; supports shading for 3D depth perception; efficient GPU computation [S2, S2, unofficial].
+*   **Limitations:** Can become cluttered in dense vector fields; requires careful tuning of glyph density and size [S2, S2, unofficial].
+*   **When to Use:** When direction clarity is paramount and the vector field density is moderate.
+*   **When Not to Use:** In extremely dense fields where arrows overlap significantly, or when performance constraints are tighter than those for line glyphs.
+
 ## Background
-Arrow glyphs are a technique for visualizing 3D vector fields, introduced in the context of real-time visualization using CUDA [S2, unofficial]. The method was presented by Marek Fiser in an unofficial blog post detailing the implementation of vector field visualization techniques [S2, unofficial]. The approach builds on the limitations of line glyphs, specifically their ambiguity in direction, by introducing explicit directional cues through arrow geometry [S2, unofficial]. Earlier foundational work described adding arrow plots to active surfaces using piecewise-bilinear interpolation of corner grid points to compute arrow components [S1, unofficial].
+Arrow glyphs were introduced as a method to resolve the direction ambiguity of line-based vector field visualizations [S2, S2, unofficial]. The technique involves adding arrows to active surfaces in x, y, and z directions, with tails on surfaces and components computed via interpolation [S1, S1, unofficial]. The GPU-based implementation using CUDA allows for real-time visualization by computing all glyph geometry on the fly [S2, S2, unofficial]. It is commonly used in fluid dynamics and aerodynamics, such as visualizing wind flow near aircraft wings [S2, S2, unofficial][S3, S3, unofficial].
+
 ## Sources
 [S1] Visualization of Surfaces and 3D Vector Fields, https://digital.library.unt.edu/ark:/67531/metadc3235/?q=vector field volume rendering, fetched 2026-10-28 (unofficial)
 [S2] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)

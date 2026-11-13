@@ -1,0 +1,34 @@
+# Neural Network and Deep Learning Compression
+
+Also called: Deep Learning Compression, Autoencoder Compression, Sparse Coding Compression
+
+## Overview
+Neural Network and Deep Learning Compression applies machine learning models to reduce the storage and transmission costs of volumetric data by learning compact, data-driven representations. Unlike traditional methods that rely on fixed mathematical transforms (e.g., wavelets) or hand-crafted sparsity assumptions, these methods learn statistical regularities directly from the data distribution [S1][S2, unofficial]. This family encompasses dictionary learning techniques like Sparse Coding with K-SVD and deep architectures like Convolutional Autoencoders, which replace linear basis functions with non-linear feature hierarchies to achieve higher reconstruction fidelity at comparable bitrates [S1][S2, unofficial].
+
+## Shared principles
+The methods in this family share the following mechanism:
+
+1.  **Data-Driven Representation Learning:** Instead of using predefined bases (like DCT or Wavelets), the compression scheme learns a representation from the data itself. This involves training a model (dictionary or neural network) on a dataset of volume renderings or slices to capture the underlying statistical structure [S1][S2, unofficial].
+2.  **Encoding via Latent Space:** Input data is transformed into a lower-dimensional latent space. In sparse coding, this is a sparse coefficient vector representing the data as a linear combination of learned atoms. In autoencoders, this is a continuous latent code produced by the encoder network [S1][S2, unofficial].
+3.  **Non-Linear Reconstruction:** The decoder reconstructs the original data from the latent representation. Sparse coding uses a linear combination of dictionary atoms, while autoencoders use non-linear neural network layers (convolutions, upsampling, activations) to map the latent code back to the data space [S1][S2, unofficial].
+4.  **Optimization for Reconstruction Fidelity:** The training process minimizes a reconstruction error metric (e.g., Mean Squared Error or Cross-Entropy) between the input and the reconstructed output, ensuring the compressed representation preserves essential visual or structural details [S1][S2, unofficial].
+
+## Subtopics
+
+### [Sparse Coding (K-SVD)](1018-sparse-coding-k-svd.md)
+Sparse Coding with K-SVD compresses volume rendering data by learning an overcomplete dictionary from rendered images and representing image blocks as sparse linear combinations of dictionary atoms. It differs from prescribed basis methods (like DCT) by adapting the basis to the specific statistical properties of the volume rendering output, yielding higher reconstruction fidelity (PSNR) for the same or lower bitrates, particularly in scenarios involving missing data or high compression ratios. Choose this method when interpretability of the basis is desired or when dealing with missing data/inpainting tasks, as the sparse representation allows for robust recovery.
+
+### [Convolutional Autoencoder for Volume Compression](5718-convolutional-autoencoder-for-volume-compression.md)
+This method obtains a data-driven compact representation of multivariate time-varying volumetric data using a deep convolutional autoencoder network, enabling interactive rendering and navigation by decompressing the representation on the GPU. It solves the problem of storing and transmitting large scientific datasets by learning high-level hierarchical features that allow the compressed representation to fit in GPU memory, while the decoder reconstructs the volume on the fly. It differs from its parent, [Compression](4-compression.md), by replacing hand-crafted transforms (like wavelets) with learned non-linear feature hierarchies, achieving significantly lower reconstruction error (higher PSNR) at the same storage ratio. It is distinct from [Sparse structures](5-sparse-structures.md) and [Wavelet and Transform-based Compression](6879-wavelet-and-transform-based-compression.md) because it does not rely on fixed basis functions or sparsity assumptions, but rather on statistical regularities learned from the specific data distribution.
+
+### Auto-Encoder (ANN) Compression for Voxel Maps
+This variant applies Artificial Neural Networks (ANN) as auto-encoders for voxel-based mapping, specifically in the context of robotics and dense TSDF space mapping [S1].
+**Parameters:** The network architecture consists of 4096, 512, $d$, 512, 4096 nodes, where $d$ is the descriptor dimension. Sigmoid activation functions are used. Training employs batch gradient descent with a stopping criterion based on the change in reconstruction error on a validation set. The dataset is split into 400 batches of 500 samples each: 300 for training, 50 for testing, and 50 for validation. Implementation utilizes cuBLAS and Thrust libraries for GPU computation [S1].
+**Performance:** For an ANN with 128 latent dimensions (NN 128), the Mean Squared Error (MSE) reconstruction error is $45.66 \pm 4.25$, and the Mean Absolute Trajectory Error (ATE) is $0.13 \pm 0.20$ m [S1].
+**Comparison:** ANN encoders yield worse reconstruction fidelity than PCA encoders (e.g., PCA 128 MSE is $26.88 \pm 2.57$), but AE compression results in better pose estimation (lower ATE) than PCA [S1].
+
+## Background
+The application of neural networks to volume and voxel data compression has emerged as a response to the limitations of linear transforms in handling complex, non-stationary data distributions. Sparse coding, particularly the K-SVD algorithm, was adapted from image processing to volume rendering to exploit sparsity in the transformed domain [S2, unofficial]. Convolutional Autoencoders were introduced for volumetric data to enable on-the-fly decompression on GPUs, addressing the latency issues of traditional decoding methods [S1]. The use of ANNs for voxel map compression was explored in robotics applications, demonstrating trade-offs between reconstruction accuracy and downstream task performance (e.g., pose estimation) [S1].
+
+## Sources
+[S1] Compressed Voxel-Based Mapping Using Unsupervised Learning, https://doi.org/10.3390/robotics6030015, fetched 2026-10-26

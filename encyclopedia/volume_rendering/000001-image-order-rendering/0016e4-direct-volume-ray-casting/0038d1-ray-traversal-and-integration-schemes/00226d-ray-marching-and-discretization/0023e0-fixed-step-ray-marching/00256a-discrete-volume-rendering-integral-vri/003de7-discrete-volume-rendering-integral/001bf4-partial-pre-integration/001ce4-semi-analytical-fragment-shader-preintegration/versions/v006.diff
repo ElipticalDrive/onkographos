@@ -1,0 +1,145 @@
+--- v005.md
++++ v006.md
+@@ -1,16 +1,15 @@
+ # Semi-Analytical Fragment Shader Preintegration
+ 
+-Also called: Semi-analytical preintegration, Adaptive preintegration intervals
+ 
+ ## Overview
+-Semi-Analytical Fragment Shader Preintegration is a GPU-based rendering technique that improves the accuracy of discrete volume rendering integrals by adaptively subdividing the ray integration interval based on the local extrema of the underlying scalar and shading polynomials [S1]. Unlike fixed-step ray marching or static preintegration tables, this method computes the roots of the derivative of the signal and shading functions within the fragment's bounding box to define integration sub-intervals, ensuring that the piecewise-linear approximation of the transfer function error is minimized [S1]. It sets itself apart from its parent [Partial Pre-Integration](1148-partial-pre-integration.md) by dynamically determining the integration bounds per fragment rather than relying on a uniform or coarse subdivision, and from its sibling [Hybrid Volume and Isosurface Rendering with Partial Pre-Integration](1311-hybrid-volume-and-isosurface-rendering-with-partial-pre-inte.md) by focusing exclusively on the fragment-shader-side optimization of the volume integral without explicit isosurface hybridization.
++Semi-Analytical Fragment Shader Preintegration is a GPU-based rendering technique that improves the accuracy of discrete volume rendering integrals by adaptively subdividing the ray integration interval based on the local extrema of the underlying scalar and shading polynomials [S1]. The method computes the roots of the derivatives of the signal and shading functions within the fragment's bounding box to define integration sub-intervals, over which preintegration and shading interpolation are applied using front- and back-weighted tables [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin and direction (in object space), scalar field coefficients (cubic polynomial), shading coefficients (quadratic polynomial), and preintegration lookup tables.
+-*   **Output:** Accumulated color and opacity for the fragment.
++*   **Input:** Ray exit point, scalar field coefficients (cubic polynomial $a,b,c,d$), shading coefficients (quadratic polynomial $e,f,g$), and preintegration lookup tables [S1].
++*   **Output:** Accumulated color and opacity for the fragment [S1].
+ 
+ **Data Structures:**
+-*   **Preintegration Table:** A 256 × 256 × 32 RGBA texture where each component is 16-bit floating point [S1]. The dimensions correspond to the scalar values at the start and end of the interval ($s_1, s_2$) and the interval length ($l$). Logarithmic table access is used for the length dimension to provide greater precision at small lengths [S1].
++*   **Preintegration Table:** A 256 × 256 × 32 RGBA texture where each component is 16-bit floating point [S1]. The dimensions correspond to the scalar values at the start and end of the interval ($s_1, s_2$) and the interval length ($l$) [S1]. Logarithmic table access is used for the length dimension to provide greater precision at small lengths [S1].
+ *   **Offscreen Buffer:** A 16-bit floating point buffer used for intermediate blending to improve accuracy before copying to the front buffer [S1].
+ 
+@@ -22,7 +21,7 @@
+ 
+ **Algorithm Steps:**
+-1.  **Find Exit Point:** Compute the ray exit point of the current cell/patch [S1].
++1.  **Find Exit Point:** Compute the ray exit point of the current cell or patch [S1].
+ 2.  **Compute Coefficients:** Calculate $a,b,c,d$ for the scalar signal and $e,f,g$ for the shading factor [S1].
+-3.  **Initialize Extrema List:** Set $T = \emptyset$.
++3.  **Initialize Extrema List:** Set $T = \emptyset$ [S1].
+ 4.  **Find Scalar Extrema:**
+     *   If $a \neq 0$ and $b \neq 0$: Compute discriminant $\Delta = 4b^2 - 12ac$. Add roots of $s'(t)=0$ to $T$:
+@@ -34,18 +33,20 @@
+         $$ t = \frac{-f}{2e} $$
+ 6.  **Prune and Sort:**
+-    *   Remove any $t \in T$ such that $t \le 0$ or $t \ge 1$.
+-    *   Add boundary points $0$ and $1$ to $T$.
+-    *   Sort $T$ in ascending order.
++    *   Remove any $t \in T$ such that $t \le 0$ or $t \ge 1$ [S1].
++    *   Add boundary points $0$ and $1$ to $T$ [S1].
++    *   Sort $T$ in ascending order [S1].
+ 7.  **Adaptive Preintegration:**
+     *   For each consecutive pair $(t_1, t_2)$ in $T$:
+-        *   Reconstruct scalar values $s_1 = s(t_1)$ and $s_2 = s(t_2)$.
+-        *   Reconstruct shading values $l_1 = l(t_1)$ and $l_2 = l(t_2)$.
+-        *   Compute interval length $l = t_2 - t_1$.
++        *   Reconstruct scalar values $s_1 = s(t_1)$ and $s_2 = s(t_2)$ [S1].
++        *   Reconstruct shading values $l_1 = l(t_1)$ and $l_2 = l(t_2)$ [S1].
++        *   Compute interval length $l = t_2 - t_1$ [S1].
+         *   Fetch preintegration values from the front and back weighted tables using $(s_1, s_2, l)$ [S1].
+-        *   Combine the fetched values (accumulating color and opacity).
+-    *   The final fragment color is the result of this accumulation [S1].
++        *   Combine the fetched values and accumulate color and opacity using standard overcompositing [S1].
++    *   The final fragment color and opacity are the result of this accumulation [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def semi_analytical_preintegration(a, b, c, d, e, f, g):
+     # T stores the sorted integration boundaries
+@@ -73,5 +74,5 @@
+         T.append(t)
+ 
+-    # Prune points outside [0, 1]
++    # Prune points outside (0, 1)
+     T = [t for t in T if 0 < t < 1]
+ 
+@@ -81,5 +82,6 @@
+     T.sort()
+ 
+-    accumulated_color = (0.0, 0.0, 0.0)
++    # Initialize accumulation variables
++    accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_opacity = 0.0
+ 
+@@ -89,5 +91,5 @@
+         t2 = T[i+1]
+ 
+-        # Reconstruct scalar values
++        # Reconstruct scalar values using Horner's method
+         s1 = d + t1 * (c + t1 * (b + t1 * a))
+         s2 = d + t2 * (c + t2 * (b + t2 * a))
+@@ -100,23 +102,33 @@
+         length = t2 - t1
+ 
+-        # Fetch preintegration tables
+-        # Note: Logarithmic access for length is handled by the texture lookup function
++        # Fetch preintegration tables (logarithmic indexing for length handled internally)
+         front_val = fetch_preintegration_table(s1, s2, length, type='front')
+         back_val = fetch_preintegration_table(s1, s2, length, type='back')
+ 
+-        # Combine and accumulate
+-        # The exact combination logic follows the partial pre-integration model
+-        # where front/back weights are applied to the transfer function approximation
+-        accumulated_color, accumulated_opacity = accumulate(
+-            accumulated_color, accumulated_opacity,
+-            front_val, back_val, l1, l2
+-        )
++        # Standard overcompositing accumulation
++        # front_val and back_val are assumed to be (color_rgb, opacity) tuples
++        color_seg = front_val[0]
++        alpha_seg = front_val[1]
++        
++        accumulated_color[0] = accumulated_color[0] + (1.0 - accumulated_opacity) * color_seg[0]
++        accumulated_color[1] = accumulated_color[1] + (1.0 - accumulated_opacity) * color_seg[1]
++        accumulated_color[2] = accumulated_color[2] + (1.0 - accumulated_opacity) * color_seg[2]
++        accumulated_opacity = accumulated_opacity + (1.0 - accumulated_opacity) * alpha_seg
+ 
+     return accumulated_color, accumulated_opacity
++
++def fetch_preintegration_table(s1, s2, l, type):
++    # Standard 3D texture lookup with logarithmic length indexing
++    # Maps linear length l to a logarithmic index for the 32-entry dimension
++    idx_l = max(0, min(31, int(math.log2(max(l, 1e-6)) * scale_factor)))
++    idx_s1 = int(s1 * 255)
++    idx_s2 = int(s2 * 255)
++    # Returns RGBA value from the 256x256x32 texture
++    return texture_lookup(idx_s1, idx_s2, idx_l, type)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** Small interval lengths require high precision. The use of 16-bit floating point textures and logarithmic indexing for the length dimension mitigates precision loss at small $l$ [S1].
+-*   **Degenerate Polynomials:** If $a=0$ and $b=0$, the scalar function is linear, and no extrema exist within the interval (other than boundaries). The code handles $a=0, b \neq 0$ explicitly [S1].
++*   **Degenerate Polynomials:** If $a=0$ and $b=0$, the scalar function is linear, and no extrema exist within the interval (other than boundaries) [S1].
+ *   **Complex Roots:** If the discriminant $\Delta < 0$, there are no real extrema, and no points are added to $T$ from that polynomial [S1].
+ 
+@@ -127,12 +139,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The fragment shader performs a constant number of arithmetic operations to find roots and a number of texture fetches proportional to the number of extrema found (typically small, 2-4 intervals). This is more expensive per fragment than fixed-step marching but yields higher accuracy with fewer steps.
++*   **Time Complexity:** The fragment shader performs a constant number of arithmetic operations to find roots and a number of texture fetches proportional to the number of extrema found [S1].
+ *   **Memory Complexity:** Requires a 256 × 256 × 32 16-bit RGBA texture for the preintegration table [S1].
+ *   **Performance:** The method is implemented on the GPU using OpenGL [S1]. It uses a 16-bit floating point offscreen buffer for blending accuracy [S1]. Performance measurements are presented in the source but specific frame rates are not detailed in the provided notes [S1].
+-*   **Strengths:** Perspective-correct sorting of cells is ensured [S1]. High-quality rendering with adaptive accuracy.
+-*   **Limitations:** Requires computing polynomial coefficients and roots in the fragment shader, which can be computationally intensive if many extrema are present.
++*   **Strengths:** Perspective-correct sorting of cells is ensured [S1].
++*   **Limitations:** Requires computing polynomial coefficients and roots in the fragment shader, which can be computationally intensive if many extrema are present [S1].
+ 
+ ## Background
+-The method was implemented as part of a hybrid CPU-GPU Adaptive Mesh Refinement (AMR) volume rendering system [S1]. The CPU traverses a KD-tree of AMR patches back-to-front, sending indices to the GPU [S1]. The geometry shader instantiates faces, and the fragment shader performs the semi-analytical preintegration [S1]. The approach builds on the concept of Partial Pre-Integration [1148-partial-pre-integration.md] but adapts it for AMR data structures and fragment-shader execution [S1].
++The method was implemented as part of a hybrid CPU-GPU Adaptive Mesh Refinement (AMR) volume rendering system [S1]. The CPU traverses a KD-tree of AMR patches back-to-front, sending indices to the GPU [S1]. The geometry shader instantiates faces, and the fragment shader performs the semi-analytical preintegration [S1]. The approach builds on the concept of Partial Pre-Integration but adapts it for AMR data structures and fragment-shader execution [S1].
+ 
+ ## Sources

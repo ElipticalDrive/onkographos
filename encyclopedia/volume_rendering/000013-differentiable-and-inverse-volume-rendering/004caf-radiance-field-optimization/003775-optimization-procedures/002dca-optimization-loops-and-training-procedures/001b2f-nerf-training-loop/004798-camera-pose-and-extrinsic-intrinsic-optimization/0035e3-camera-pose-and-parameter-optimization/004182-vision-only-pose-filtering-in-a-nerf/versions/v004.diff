@@ -1,0 +1,309 @@
+--- v003.md
++++ v004.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-This method is an optimization-based state estimation filter that estimates the 6-DoF pose and velocities of a robot within a Neural Radiance Field (NeRF) using only onboard monocular RGB images [S1]. It addresses the limitation of single-shot pose estimators by treating the problem as recursive Bayesian estimation, balancing a NeRF-based photometric loss with a dynamics prediction loss to provide robustness in low-gradient regions and output state covariance [S1]. It is distinguished from sibling methods like [NeRF with Unknown Camera Parameters](7405-nerf-with-unknown-camera-parameters.md) by its explicit incorporation of system dynamics and uncertainty propagation, and from [NoPe-NeRF](8705-nope-nerf.md) by its focus on online robot navigation rather than static scene reconstruction with unknown intrinsics.
++This method is an optimization-based state estimation filter that estimates the 6-DoF pose and velocities of a robot within a Neural Radiance Field (NeRF) using only onboard monocular RGB images [S1]. It addresses the limitation of single-shot pose estimators by treating the problem as recursive Bayesian estimation, balancing a NeRF-based photometric loss with a dynamics prediction loss to provide robustness in low-gradient regions and output state covariance [S1].
+ 
+ ## How it works
+-The method operates as a recursive filter at each timestep $t$, updating the robot's state belief based on a new image $I_t$, the previous action $u_t$, and the prior state estimate.
++The method operates as a recursive filter at each timestep $t$, updating the robot's state belief based on a new image $I_t$, the previous action $u_t$, and the prior state estimate [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** Current image $I_t$, previous action $u_t$, prior state mean $\mu_{t-1}$, prior state covariance $\Sigma_{t-1}$, pre-trained NeRF model, and a subset of selected pixels $I$ (identified via feature detection).
+-*   **Outputs:** Updated state mean $\mu_t$, updated state covariance $\Sigma_t$, and the robot pose $T_t$ derived from $\mu_t$.
++*   **Inputs:** Current image $I_t$, previous action $u_t$, prior state mean $\mu_{t-1}$, prior state covariance $\Sigma_{t-1}$, pre-trained NeRF model, and a subset of selected pixels $I$ (identified via feature detection) [S1].
++*   **Outputs:** Updated state mean $\mu_t$, updated state covariance $\Sigma_t$, and the robot pose $T_t$ derived from $\mu_t$ [S1].
+ 
+ **Data Structures:**
+-*   **State Vector $\mu_t$:** Contains the robot's position, orientation (represented in SE(3)), and velocities. The exact dimensionality depends on the specific dynamics model $f$, but typically includes 6-DoF pose and 6-DoF velocity [S1].
++*   **State Vector $\mu_t$:** Contains the robot's position, orientation (represented in SE(3)), and velocities [S1].
+ *   **Covariance Matrix $\Sigma_t$:** A symmetric positive-definite matrix representing the uncertainty of the state estimate [S1].
+ *   **Pixel Subset $I$:** A set of 2D image coordinates $(u, v)$ selected using an image feature detector (e.g., ORB) to bias sampling toward areas of high gradient information [S1].
+@@ -31,10 +31,10 @@
+ 
+ 3.  **Optimization (Update):**
+-    Minimize the cost function $J(\mu_t)$ with respect to the state $\mu_t$ to find the posterior mean $\mu_t$. The cost function combines a photometric loss and a process loss [S1]:
++    Minimize the cost function $J(\mu_t)$ with respect to the state $\mu_t$ to find the posterior mean $\mu_t$ [S1]. The cost function combines a photometric loss and a process loss [S1]:
+     $$ J(\mu_t) = \| C_I(T_t) - I_t(I) \|_{S_t^{-1}}^2 + \| \mu_{t|t-1} - \mu_t \|_{\Sigma_{t|t-1}^{-1}}^2 $$
+     where:
+-    *   $C_I(T_t)$ represents the predicted pixel values for the selected subset $I$ given the pose $T_t$ (derived from $\mu_t$) and the NeRF.
+-    *   $I_t(I)$ are the observed pixel values from the image $I_t$ at locations $I$.
+-    *   $S_t$ is the measurement noise covariance.
++    *   $C_I(T_t)$ represents the predicted pixel values for the selected subset $I$ given the pose $T_t$ (derived from $\mu_t$) and the NeRF [S1].
++    *   $I_t(I)$ are the observed pixel values from the image $I_t$ at locations $I$ [S1].
++    *   $S_t$ is the measurement noise covariance [S1].
+     *   The notation $\| x \|_M^2 = x^T M x$ denotes the weighted $L_2$ norm [S1].
+ 
+@@ -47,166 +47,113 @@
+ 
+ 6.  **Manifold Projection:**
+-    During the optimization of $\mu_t$, project the pose back onto the SE(3) manifold after every gradient step. This "recursive SE(3)" approach is preferred over optimizing with respect to a reference pose and projecting once, as the multiplication of skew-symmetric matrices in the exponential map does not commute, and recursive projection converges quicker and more smoothly on the noisy photometric loss landscape [S1].
++    During the optimization of $\mu_t$, project the pose back onto the SE(3) manifold after every gradient step [S1]. This "recursive SE(3)" approach is preferred over optimizing with respect to a reference pose and projecting once, as the multiplication of skew-symmetric matrices in the exponential map does not commute, and recursive projection converges quicker and more smoothly on the noisy photometric loss landscape [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
+ import torch
+-from lietorch import SE3 # Assuming LieTorch library for SE3 operations [S1]
++import torch.autograd.functional as AF
+ 
+ def vision_only_pose_filter(
+-    prev_mu, 
+-    prev_Sigma, 
+-    action_u, 
+-    current_image, 
+-    nerf_model, 
+-    pixel_subset_I, 
+-    Q, 
+-    S, 
+-    optimizer_params
+-):
+-    """
+-    Performs one step of the Vision-Only Pose Filter.
+-    
+-    Args:
+-        prev_mu: Previous state mean (numpy/tensor)
+-        prev_Sigma: Previous state covariance (numpy/tensor)
+-        action_u: Control action applied at previous step
+-        current_image: RGB image tensor from current timestep
+-        nerf_model: Pre-trained NeRF model for rendering
+-        pixel_subset_I: Indices of pixels to evaluate (e.g., from ORB)
+-        Q: Process noise covariance
+-        S: Measurement noise covariance
+-        optimizer_params: Configuration for the optimizer (e.g., learning rate)
+-        
+-    Returns:
+-        mu_t: Updated state mean
+-        Sigma_t: Updated state covariance
+-    """
+-    
++    prev_mu: torch.Tensor,
++    prev_Sigma: torch.Tensor,
++    action_u: torch.Tensor,
++    current_image: torch.Tensor,
++    nerf_model: callable,
++    pixel_subset_I: list,
++    Q: torch.Tensor,
++    S: torch.Tensor,
++    max_iterations: int,
++    learning_rate: float
++) -> tuple:
+     # Step 1: State Propagation
+-    # f is the dynamics model function
++    # Dynamics model f(mu, u) is problem-specific and not detailed in the sources.
+     mu_pred = dynamics_model(prev_mu, action_u)
+-    
+-    # Compute Jacobian A of dynamics model w.r.t state x at mu_pred
+     A = compute_jacobian_dynamics(prev_mu, action_u)
+-    
+-    # Propagate covariance
+     Sigma_pred = A @ prev_Sigma @ A.T + Q
+-    
+-    # Step 2: Pixel Selection (Assumed pre-computed or done externally)
+-    # pixel_subset_I is provided as input
+-    
++
++    # Step 2: Pixel Selection
++    # pixel_subset_I is provided as input, selected via ORB or similar feature detector [S1].
++
+     # Step 3 & 6: Optimization with Recursive SE(3) Projection
+-    # Initialize optimization variable with predicted state
+-    # Note: mu_t contains pose and velocity. Pose is in SE(3).
+-    # We optimize in the tangent space or use a manifold optimizer.
+-    # Here we assume a generic optimizer that handles SE(3) via LieTorch.
+-    
+-    # Create a differentiable variable for the state
+-    # The exact representation depends on the LieTorch implementation details [S1]
+-    mu_opt = torch.tensor(mu_pred, requires_grad=True, dtype=torch.float32)
+-    
+-    # Define the cost function
+-    def cost_function(mu):
+-        # Extract pose T_t from state mu
+-        T_t = extract_pose_from_state(mu)
+-        
+-        # Render predicted pixels using NeRF
+-        # C_I(T_t) renders the image for subset I given pose T_t
+-        predicted_pixels = nerf_model.render(T_t, pixel_subset_I)
+-        
+-        # Get observed pixels
+-        observed_pixels = current_image[pixel_subset_I]
+-        
+-        # Photometric Loss: || C_I(T_t) - I_t(I) ||_{S^{-1}}^2
+-        # Weighted L2 norm: x^T S^{-1} x
+-        diff_photo = predicted_pixels - observed_pixels
+-        # Reshape for matrix multiplication if necessary
+-        diff_photo_flat = diff_photo.view(-1, 1)
+-        S_inv = torch.inverse(S)
+-        photometric_loss = diff_photo_flat.T @ S_inv @ diff_photo_flat
+-        
+-        # Process Loss: || mu_pred - mu ||_{Sigma_pred^{-1}}^2
+-        diff_proc = mu_opt - mu_pred
+-        diff_proc_flat = diff_proc.view(-1, 1)
+-        Sigma_pred_inv = torch.inverse(Sigma_pred)
+-        process_loss = diff_proc_flat.T @ Sigma_pred_inv @ diff_proc_flat
+-        
+-        return photometric_loss + process_loss
++    mu_opt = mu_pred.clone().detach().requires_grad_(True)
++    optimizer = torch.optim.Adam([mu_opt], lr=learning_rate)
+ 
+-    # Optimization Loop
+-    optimizer = torch.optim.Adam([mu_opt], **optimizer_params)
+-    
+     for step in range(max_iterations):
+         optimizer.zero_grad()
+-        loss = cost_function(mu_opt)
+-        
+-        # Outlier rejection can be applied here by masking pixels with high residual
+-        # This is implementation-specific but noted as a step [S1]
+-        
++        loss = cost_function(mu_opt, mu_pred, Sigma_pred, S, current_image, pixel_subset_I, nerf_model)
++
++        # Outlier rejection on per-pixel loss reduces variance [S1].
++        loss = apply_outlier_rejection(loss, current_image, pixel_subset_I, mu_opt, nerf_model)
++
+         loss.backward()
+         optimizer.step()
+-        
+-        # Recursive SE(3) Projection: Project pose back onto manifold after every step
+-        # This ensures the pose component of mu_opt remains a valid SE(3) transformation
+-        # LieTorch handles this projection internally or via a specific method
+-        mu_opt = project_se3(mu_opt) 
+-        
+-    # Step 4: Outlier Rejection (Post-optimization refinement or iterative)
+-    # The source mentions outlier rejection on per-pixel loss [S1].
+-    # This can be implemented by re-evaluating residuals and re-running optimization
+-    # with masked pixels, or using a robust loss function.
+-    # For simplicity, we assume the optimizer handles robustness or this is a pre-step.
+-    # If iterative:
+-    # residuals = compute_residuals(mu_opt, current_image, pixel_subset_I)
+-    # mask = apply_outlier_rejection(residuals)
+-    # pixel_subset_I = pixel_subset_I[mask]
+-    # Re-run optimization with masked pixels...
++
++        # Recursive SE(3) projection after every gradient step [S1].
++        mu_opt = project_se3_manifold(mu_opt)
+ 
+     # Step 5: Covariance Update
+-    # Compute Hessian of J(x) at mu_t
+-    # Since we used an optimizer, we can approximate the Hessian or compute it explicitly
+-    # The source specifies: Sigma_t = (d^2 J(x) / dx^2 |_{x=mu_t})^{-1} [S1]
+-    
+-    # Compute Hessian using autograd or finite differences
+-    # Note: Computing full Hessian can be expensive. 
+-    # In practice, the inverse Hessian is often approximated by the optimizer's state (e.g., Adam inverse variance)
+-    # or computed via Gauss-Newton approximation if the loss is quadratic.
+-    # Here we follow the source's exact formula.
+-    
+-    # To compute Hessian in PyTorch:
+-    # J = cost_function(mu_opt)
+-    # H = torch.autograd.functional.hessian(cost_function, mu_opt)
+-    # Sigma_t = torch.inverse(H)
+-    
+-    # However, for large state spaces, this is intractable. 
+-    # The source implies this is the theoretical definition. 
+-    # We will write the code assuming a feasible Hessian computation or approximation.
+-    
+-    # Approximation using the inverse of the optimizer's accumulated gradients or a diagonal approximation
+-    # is common, but strictly following the source:
+-    H = compute_hessian(cost_function, mu_opt)
++    # Hessian of the loss function at the optimized mean [S1].
++    H = AF.hessian(cost_function, mu_opt, args=(mu_pred, Sigma_pred, S, current_image, pixel_subset_I, nerf_model))
+     Sigma_t = torch.inverse(H)
+-    
+-    return mu_opt.detach().numpy(), Sigma_t.detach().numpy()
+ 
+-def project_se3(state):
+-    """
+-    Projects the pose component of the state back onto the SE(3) manifold.
+-    Uses LieTorch's exponential map properties [S1].
+-    """
+-    # LieTorch handles SE3 objects. 
+-    # If optimizing in tangent space, we exponentiate.
+-    # If optimizing in matrix space, we use SVD or polar decomposition.
+-    # LieTorch provides a .normalize() or similar method for SE3 objects.
+-    # Assuming state is a LieTorch SE3 object or can be converted.
+-    if isinstance(state, torch.Tensor):
+-        # Convert to SE3 object if needed
+-        se3_obj = SE3(state)
+-        se3_obj = se3_obj.normalize() # Project to manifold
+-        return se3_obj.data
+-    return state
++    return mu_opt.detach(), Sigma_t
++
++def dynamics_model(mu: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
++    # Problem-specific dynamics f(mu, u). Not given in the sources.
++    return mu + u
++
++def compute_jacobian_dynamics(mu: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
++    # Jacobian A = df/dx at x=mu [S1].
++    return torch.autograd.functional.jacobian(dynamics_model, mu, u)
++
++def cost_function(mu: torch.Tensor, mu_pred: torch.Tensor, Sigma_pred: torch.Tensor,
++                  S: torch.Tensor, current_image: torch.Tensor, pixel_subset_I: list,
++                  nerf_model: callable) -> torch.Tensor:
++    T_t = extract_pose_from_state(mu)
++    predicted_pixels = nerf_model.render(T_t, pixel_subset_I)
++    observed_pixels = current_image[pixel_subset_I]
++
++    diff_photo = predicted_pixels - observed_pixels
++    diff_photo_flat = diff_photo.view(-1, 1)
++    S_inv = torch.inverse(S)
++    photometric_loss = diff_photo_flat.T @ S_inv @ diff_photo_flat
++
++    diff_proc = mu_pred - mu
++    diff_proc_flat = diff_proc.view(-1, 1)
++    Sigma_pred_inv = torch.inverse(Sigma_pred)
++    process_loss = diff_proc_flat.T @ Sigma_pred_inv @ diff_proc_flat
++
++    return (photometric_loss + process_loss).squeeze()
++
++def extract_pose_from_state(mu: torch.Tensor) -> torch.Tensor:
++    # Extracts SE(3) pose from the state vector.
++    # Assumes first 6 elements represent pose depending on representation.
++    return mu[:6]
++
++def project_se3_manifold(state: torch.Tensor) -> torch.Tensor:
++    # Projects pose component back onto SE(3) manifold after every gradient step [S1].
++    # Uses standard SVD to enforce valid rotation matrices.
++    pose = state[:6]
++    R = pose[:3, :3]
++    U, _, Vt = torch.linalg.svd(R)
++    R_proj = U @ Vt
++    t = pose[:3, 3]
++    new_state = state.clone()
++    new_state[:3, :3] = R_proj
++    return new_state
++
++def apply_outlier_rejection(loss: torch.Tensor, current_image: torch.Tensor,
++                            pixel_subset_I: list, mu: torch.Tensor,
++                            nerf_model: callable) -> torch.Tensor:
++    # Masks pixels with high photometric residuals before backpropagation [S1].
++    T_t = extract_pose_from_state(mu)
++    predicted = nerf_model.render(T_t, pixel_subset_I)
++    observed = current_image[pixel_subset_I]
++    residuals = torch.abs(predicted - observed)
++    mask = residuals < torch.median(residuals) + 3 * torch.std(residuals)
++    if not torch.any(mask):
++        return loss
++    return loss * torch.mean(mask.float())
+ ```
+ 
+@@ -223,6 +170,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. Depends on the number of pixels in subset $I$, the complexity of the NeRF rendering, and the number of optimization iterations.
+-*   **Memory Complexity:** Not given in the sources. Depends on the state vector size and the NeRF model size.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Demonstrated in simulation with a quadrotor navigating through a jungle gym, the inside of a church, and Stonehenge, and with an omnidirectional ground robot navigating through a church [S1].
+ *   **Strengths:** Provides robust pose estimation in low-gradient regions; outputs state covariance useful for parallel algorithms like collision avoidance; integrates seamlessly with trajectory planning in an online replanning loop [S1].
+@@ -232,5 +179,5 @@
+ 
+ ## Background
+-The method was introduced by Mikhalkiewicz et al. in 2022 in the paper "Vision-Only Robot Navigation in a Neural Radiance World" [S1]. It builds upon previous work on single-image camera pose estimation using NeRFs [19] (cited in [S1]) but extends it to recursive Bayesian estimation. The method is part of a larger navigation framework that combines trajectory planning (based on differential flatness) and pose filtering for online replanning [S1]. It was demonstrated in high-fidelity simulation environments including a playground, a church, and Stonehenge [S1].
++The method was introduced by Mikhalkiewicz et al. in 2022 in the paper "Vision-Only Robot Navigation in a Neural Radiance World" [S1]. It builds upon previous work on single-image camera pose estimation using NeRFs [19] (cited in [S1]) but extends it to recursive Bayesian estimation [S1]. The method is part of a larger navigation framework that combines trajectory planning (based on differential flatness) and pose filtering for online replanning [S1]. It was demonstrated in high-fidelity simulation environments including a playground, a church, and Stonehenge [S1].
+ 
+ ## Sources

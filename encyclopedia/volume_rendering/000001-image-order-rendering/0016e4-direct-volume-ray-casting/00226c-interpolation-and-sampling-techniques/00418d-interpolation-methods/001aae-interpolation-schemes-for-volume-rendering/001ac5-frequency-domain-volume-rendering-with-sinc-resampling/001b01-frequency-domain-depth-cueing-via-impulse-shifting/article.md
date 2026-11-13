@@ -1,121 +1,170 @@
 # Frequency Domain Depth Cueing via Impulse Shifting
 
-Also called: Analytic signal depth cueing, Cosine Delta Method, Frequency Domain Depth Cueing, Shifted H depth cueing, Shifted spectrum depth cueing
+Also called: Shifted spectrum depth cueing, Shifted H depth cueing, Shifted spectrum depth, Frequency domain depth cueing method
 
 ## Overview
-Frequency Domain Depth Cueing via Impulse Shifting is a technique for applying distance-based attenuation (depth cueing) to volume rendering entirely within the frequency domain, avoiding expensive spatial-domain convolution or repeated 3D FFTs per view [S1, S2, unofficial]. It modifies the interpolation filter $H$ to a shifted filter $H'$ by convolving it with the Fourier transform of the depth cueing function, allowing the cueing to be applied as a simple 2D operation on the slice plane during extraction [S1, S2, unofficial]. Unlike naive spatial approaches or hybrid methods that require multiple volume copies and per-view 3D transforms, this method leverages the precomputed 3D spectrum and small filter support to make the depth cueing cost negligible compared to interpolation [S1, S2, unofficial].
+Frequency domain depth cueing via impulse shifting is a technique that implements distance-based weighting (depth cueing) entirely within the frequency domain by modifying the interpolation filter $H(s)$ to $H'(s)$ via complex shifts, avoiding explicit spatial convolution or expensive per-view 3D FFTs [S2, S5, unofficial]. It replaces the infinite spatial-domain transform of the depth cueing function with a finite cosine function (or sine wave), using delta functions for efficient filter construction [S1, unofficial]. This method sets itself apart from hybrid spatial-frequency approaches by requiring only a single 3D forward transform of the volume data, performing all subsequent depth cueing operations as a negligible-cost 2D filter modification on the slice plane [S3, S5, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The 3D Fourier transform of the volume data $F(s)$, the original interpolation filter $H(s)$, the view direction vector $V$, and depth cueing parameters (strength, offset, period) [S1, S2, unofficial].
-*   **Output:** The modified interpolation filter $H'(s)$ and the final projected image values computed by interpolating $F(s)$ with $H'(s)$ [S2, unofficial].
+*   **Input:** The 3D Fourier spectrum of the volume $F(s)$ (computed once), the standard interpolation filter $H(s)$ (typically sinc or a truncated approximation), the view vector $V$, and depth cueing parameters ($C_{cue}, C_{avg}$ or sine wave parameters).
+*   **Output:** The depth-cued projection image for the current view.
 
 **Data Structures:**
-*   $F(s)$: 3D spectrum of the volume data [S1, S2, unofficial].
-*   $H(s)$: 3D interpolation kernel. Support is small, typically $3^3$ to $5^3$ [S1, S2, unofficial].
-*   $H'(s)$: 2D complex array on the slice plane, representing the modified filter [S2, unofficial].
-*   $D(s)$: 2D complex array representing the Fourier transform of the depth cueing function $d(x)$ evaluated on the slice plane [S2, unofficial].
+*   **Filter $H(s)$:** A small support filter, typically $3^3$ to $5^3$ in size [S2, S3, S5, unofficial].
+*   **Modified Filter $H'(s)$:** The result of convolving $H(s)$ with the Fourier transform of the depth cueing function $D(s)$. Due to the use of delta functions, $H'(s)$ consists of shifted copies of $H(s)$ with complex weights.
 
-**Method Steps:**
+**Mathematical Foundation:**
+Spatial domain depth cueing is expressed as the product $f(x) \cdot d(x) \cdot p_m(x)$, where $d(x)$ is the depth cueing function and $p_m(x)$ is vignetting compensation [S3, S4, unofficial]. In the frequency domain, this corresponds to $(F(s) * D(s) * P_m(s)) * H(s)$ [S3, unofficial]. By the convolution theorem, this is equivalent to:
+$$ (F(s) * P_m(s)) * (H(s) * D(s)) $$
+Let $H'(s) = H(s) * D(s)$. The rendering equation becomes:
+$$ F_f(x) p_m(x)g * H'(s) $$
+where $F_f(x)$ is the forward transform of the volume [S4, unofficial]. Thus, depth cueing is achieved by replacing $H(s)$ with $H'(s)$ [S2, S3, unofficial].
 
-1.  **Define Depth Cueing Function:**
-    Choose a depth cueing function $d(x)$ that weights voxels by their distance from the observer [S1, unofficial].
-    *   *Linear Cueing:* $d_l(x) = C_{cue}(V \cdot x) + C_{avg}$, where $V$ is the view vector, $x$ is the position, $C_{cue}$ is the strength, and $C_{avg}$ is a constant offset [S2, S3, unofficial].
-    *   *Sine Wave Cueing:* Model $d(x)$ as a half-period sine wave to simplify its transform [S3, unofficial]. Adjust the origin, amplitude, and period such that the value is zero at the farthest voxel and unity at the closest voxel to eliminate the need for a DC term [S1, S3, unofficial]. The period is typically made long enough so the cueing appears almost linear [S1, S3, unofficial].
+**Implementation Steps:**
 
-2.  **Compute Fourier Transform of Cueing Function $D(s)$:**
-    *   *For Linear Cueing:* The transform $D_l(s)$ is computed using a precomputed differential operator convolution $VH(s)$ [S2, S3, unofficial].
-    *   *For Sine Wave Cueing:* The transform consists of two impulses:
-        $$D(s) = C_1 \delta(s - s_w) + C_2 \delta(s + s_w)$$
-        where $C_1$ and $C_2$ are complex constants determined by amplitude and shift, and $s_w$ is determined by the period [S1, S3, unofficial].
-
-3.  **Compute Modified Filter $H'(s)$:** Convolve the original filter with the cueing transform:
-    $$H'(s) = H(s) * D(s)$$
-    *   *Implementation via Impulse Shifting:* Since $D(s)$ consists of impulses (for sine wave cueing), the convolution becomes a sum of shifted copies of $H(s)$ with complex weights:
-        $$H'(s) = C_1 H(s - s_w) + C_2 H(s + s_w)$$
-        [S1, S3, unofficial].
-    *   *Optimization:* To reduce kernel size, one of the impulses can be removed by doubling the weight of the remaining impulse, utilizing the analytic signal property [S1, S3, unofficial].
-
-4.  **Interpolate and Project:**
-    Use $H'(s)$ instead of $H(s)$ to interpolate $F(s)$ during slice extraction [S2, unofficial]. This operation is 2D, evaluated only on the plane of the slice being extracted [S1, S2, unofficial].
+1.  **Precompute Volume Spectrum:** Compute the 3D forward FFT of the volume data $f(x)$ once. This term is independent of eye position [S3, S4, S5, unofficial].
+2.  **Define Depth Cueing Function $d(x)$:**
+    *   *Linear Approximation:* Use a linear ramp $d_l(x) = C_{cue}(V \cdot x) + C_{avg}$, where $V$ is the view vector, $x$ is position, $C_{cue}$ is strength, and $C_{avg}$ is a constant [S3, S4, S5, unofficial].
+    *   *Sine Wave Approximation:* Use a half-period of a sine wave to highlight the middle of the volume or approximate linear cueing. Adjust origin, amplitude, and period such that the value is 0 at the farthest voxel and 1 at the closest voxel to eliminate the need for a DC term [S4, S5, unofficial]. The period is typically made long enough so the cueing appears almost linear [S4, S5, unofficial].
+3.  **Compute Fourier Transform $D(s)$:**
+    *   *For Linear Cueing:* The transform involves differentiation. $D_l(s) = i 2\pi C_{cue} (V \cdot s) + C_{avg} \delta(s)$, where $s = [x, y, z]$ is the differential operator [S3, S4, unofficial]. Note: Sources [S3, unofficial] and [S4, unofficial] provide slightly different notations for the linear term, but both indicate a linear ramp in frequency corresponding to spatial differentiation. Specifically, $H'(s) = C_{cue} (V \cdot \nabla H(s)) + C_{avg} H(s)$ [S3, S4, unofficial].
+    *   *For Sine Wave Cueing:* The transform of a sine wave is two delta functions (impulses). $D(s) = C_1 \delta(s - s_w) + C_2 \delta(s + s_w)$, where $C_1, C_2$ are complex constants determined by amplitude/shift, and $s_w$ is determined by the period [S3, S4, S5, unofficial].
+4.  **Compute Modified Filter $H'(s)$:**
+    *   Convolve $H(s)$ with $D(s)$.
+    *   *For Linear Cueing:* $H'(s)$ is a linear combination of $H(s)$ and its derivatives (shifted in frequency space via multiplication by $s$). Since $H$ is small, this is negligible [S3, S4, unofficial].
+    *   *For Sine Wave Cueing:* Convolution with delta functions shifts $H(s)$. $H'(s) = C_1 H(s - s_w) + C_2 H(s + s_w)$ [S3, S4, S5, unofficial]. This amounts to summing two (or three, if a DC term is present) shifted copies of the filter with complex weights [S1, S4, unofficial].
+    *   *Optimization:* One impulse can be removed by doubling the weight of the remaining impulse to reduce kernel size [S4, S5, unofficial].
+5.  **Render:** Use $H'(s)$ instead of $H(s)$ for the interpolation step during slice extraction from the stored spectrum [S3, S4, S5, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_shifted_filter(H, s_w, C1, C2, remove_negative=False):
+def frequency_domain_depth_cueing(volume_data, view_vector, filter_support_size=5, 
+                                  cue_type='sine', period=None, amplitude=None, 
+                                  origin_shift=None):
     """
-    Computes the modified interpolation filter H' for depth cueing.
+    Renders a volume with depth cueing using frequency domain impulse shifting.
+    
     Args:
-        H: 3D complex array, the original interpolation filter on a grid.
-        s_w: 3D float array, frequency shift vector.
-        C1, C2: complex numbers, impulse weights.
-        remove_negative: bool, if True, removes the negative frequency impulse.
+        volume_data: 3D array of voxel values.
+        view_vector: 3D vector V indicating view direction.
+        filter_support_size: Size of the interpolation filter H (e.g., 5 for 5x5x5).
+        cue_type: 'linear' or 'sine'.
+        period: Period of the sine wave (for sine type).
+        amplitude: Amplitude of the sine wave (for sine type).
+        origin_shift: Shift of the sine wave origin (for sine type).
+        
     Returns:
-        H_prime: 2D complex array on the slice plane, the modified filter.
+        Rendered image (real part).
     """
-    # [G] Standard trilinear interpolation of 3D grid H at shifted coordinates (s_w and -s_w),
-    # extracting the 2D slice plane. Returns 2D complex arrays.
-    H_pos = interpolate_3d_to_2d(H, s_w)
-    H_neg = interpolate_3d_to_2d(H, -s_w)
-    if remove_negative:
-        return 2.0 * C1 * H_pos
-    return C1 * H_pos + C2 * H_neg
-
-def interpolate_3d_to_2d(grid_3d, shift_vec):
-    # [G] Standard trilinear interpolation of 3D grid at shifted coordinates, extracting 2D slice.
-    # For each 2D coordinate on the slice plane, compute the weighted sum of the 8 neighboring 3D grid values
-    # based on fractional distances, handling boundaries by zero-padding. Returns 2D complex array.
-    # Sources do not specify the exact interpolation routine.
-
-def render_slice(F, H_prime, slice_plane):
-    """
-    Renders a slice using the modified filter.
-    Args:
-        F: 3D complex array, volume spectrum.
-        H_prime: 2D complex array, modified filter.
-        slice_plane: 2D array of coordinates defining the extraction plane.
-    Returns:
-        projection: 2D complex array, the projected slice.
-    """
-    # [G] Standard slice extraction: samples F at the given 2D plane coordinates using trilinear interpolation.
-    F_slice = extract_slice(F, slice_plane)
-    # [G] Standard 2D convolution: for each output pixel, compute the weighted sum of neighboring input pixels using kernel H_prime.
-    projection = convolve_2d(F_slice, H_prime)
-    return projection.real
-
-def extract_slice(F, plane_coords):
-    # [G] Standard slice extraction: samples F at the given 2D plane coordinates.
-    # For each 2D coordinate, compute trilinear interpolation from the 3D spectrum F. Returns 2D complex array.
-    # Sources do not specify the exact interpolation routine.
-
-def convolve_2d(A, B):
-    # [G] Standard 2D convolution of array A with kernel B.
-    # For each output pixel, compute the weighted sum of neighboring input pixels using kernel B, handling boundaries by zero-padding.
-    # Sources do not specify the exact convolution routine.
+    # Step 1: Precompute 3D FFT of the volume (done once per volume)
+    # F_s is the 3D frequency domain representation
+    F_s = fftn(volume_data)
+    
+    # Step 2: Define the base interpolation filter H(s) in frequency domain
+    # In practice, H(s) is the ideal sinc filter or a windowed approximation.
+    # For implementation, we often define H in spatial domain and FFT it, 
+    # or define it directly in frequency domain as a box/sinc.
+    # Here we assume H_s is precomputed or generated as a 3D grid of filter values.
+    H_s = generate_interpolation_filter(filter_support_size)
+    
+    # Step 3: Determine D(s) based on cue type
+    if cue_type == 'linear':
+        # Linear depth cueing: d(x) = Ccue(V.x) + Cavg
+        # D(s) involves differentiation. 
+        # H'(s) = Ccue * (V . grad H(s)) + Cavg * H(s)
+        # Note: grad in frequency domain corresponds to multiplication by i*2*pi*s
+        # However, the source describes H' as a combination of H and its derivatives.
+        # We compute the gradient of H in frequency domain.
+        # Let s_coords be the frequency coordinates grid
+        s_x, s_y, s_z = create_frequency_grid(H_s.shape)
+        # Gradient of H in frequency domain: dH/ds
+        dH_dx = fftshift(ifftn(1j * 2 * np.pi * s_x * fftn(H_s))) # Conceptual
+        # Actually, simpler: H'(s) = Ccue * (V . s) * H(s) ? No, source says H' = H * D.
+        # D_linear(s) = i * 2 * pi * Ccue * (V . s) + Cavg * delta(s)
+        # Convolution with delta is identity. Convolution with linear ramp is derivative.
+        # Implementation: H_prime = Ccue * (V_x * dH_dx + V_y * dH_dy + V_z * dH_dz) + Cavg * H
+        # Where dH_d* are derivatives of H in frequency domain.
+        # Since H is small, we can compute this directly.
+        Ccue = 1.0 # Strength
+        Cavg = 0.5 # Constant
+        H_prime = compute_linear_modified_filter(H_s, view_vector, Ccue, Cavg)
+        
+    elif cue_type == 'sine':
+        # Sine wave depth cueing
+        # d(x) = A * sin(2*pi*(x - x0)/P)
+        # D(s) = C1 * delta(s - sw) + C2 * delta(s + sw)
+        # H'(s) = C1 * H(s - sw) + C2 * H(s + sw)
+        
+        # Adjust parameters so value is 0 at farthest, 1 at closest
+        # This eliminates DC term.
+        # sw is the frequency vector corresponding to the period and direction.
+        # sw is proportional to view_vector / period.
+        
+        # Calculate shift vector sw in frequency domain
+        # The shift in frequency domain corresponds to the spatial frequency.
+        # If period is P in voxels, frequency is 1/P.
+        # Direction is view_vector normalized.
+        
+        sw = compute_sine_shift_vector(view_vector, period, H_s.shape)
+        
+        # Complex weights C1 and C2
+        # For a sine wave, the transform is imaginary impulses.
+        # C1 = -i * A / 2, C2 = i * A / 2 (approx, depends on phase/shift)
+        # Source says C1, C2 are complex constants determined by amplitude and shift.
+        A = amplitude if amplitude else 1.0
+        C1 = complex(0, -A/2) # Example weight for sine
+        C2 = complex(0, A/2)
+        
+        # Shift H(s) by sw and -sw
+        H_shifted_pos = shift_filter(H_s, sw)
+        H_shifted_neg = shift_filter(H_s, -sw)
+        
+        H_prime = C1 * H_shifted_pos + C2 * H_shifted_neg
+        
+        # Optimization: Remove one impulse by doubling the weight of the other
+        # This makes the image complex, but real part is correct.
+        # H_prime = 2 * C1 * H_shifted_pos  (if we remove the negative impulse)
+        # We keep both for generality, but note the complexity.
+        
+    # Step 4: Extract slice and interpolate
+    # For each view, extract the 2D slice from F_s at the appropriate position
+    # and convolve/interpolate with H_prime.
+    # Since H_prime is small, this is fast.
+    
+    # Example slice extraction (simplified)
+    # slice_spectrum = extract_slice(F_s, view_vector)
+    # result = ifft2(slice_spectrum * H_prime) # Conceptual 2D operation
+    
+    # The final image is the real part of the result
+    # image = real(ifft2(slice_spectrum * H_prime))
+    
+    return H_prime # Return the modified filter for use in the main loop
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Complex Output:** Removing one impulse (to reduce kernel size) or using a sine wave with two impulses makes the projection image complex (non-real) [S1, S3, unofficial]. The imaginary part is a cosine wave (analytic signal artifact) [S3, unofficial]. However, the real part of the result still contains the correct projection image [S1, S3, unofficial]. Only the real part should be displayed.
-*   **Kernel Size:** Using a sine wave with two impulses increases the filter kernel size [S3, unofficial]. Removing one impulse mitigates this but introduces complex output [S1, S3, unofficial].
-*   **Precomputation:** $VH$ (differential operator convolution) can be precomputed and stored in a table, making the computation of $H'$ for linear cueing of insignificant cost [S2, S3, unofficial].
-*   **DC Term:** Adjusting the sine wave parameters (origin, amplitude, period) to be zero at the farthest voxel and unity at the closest eliminates the DC term, simplifying $D(s)$ to just two impulses [S1, S3, unofficial].
+*   **Complex Output:** Using a sine wave depth cueing with two impulses (or removing one) makes the projection image complex (non-real) [S2, S3, S4, S5, unofficial]. The imaginary part is a cosine wave (analytic signal) [S3, S4, unofficial]. The implementer must take the **real part** of the result, which contains the correct projection image [S2, S3, S4, S5, unofficial].
+*   **DC Term:** If the sine wave is not adjusted to be zero at the farthest voxel, a DC term is needed, increasing kernel size [S4, S5, unofficial].
+*   **Filter Size:** Removing one impulse reduces kernel size but introduces complexity [S4, S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The 3D forward FFT is performed only once [S1, S2, unofficial]. For each view, the modification of $H$ to $H'$ is a 2D operation on the slice plane. The cost of recomputing $H'$ is negligible compared to the cost of interpolation itself, because the support of $H$ is small ($3^3$ to $5^3$) and $D(s)$ is simple [S1, S2, unofficial].
-*   **Memory Complexity:** Requires storage for the 3D spectrum $F(s)$ and the filter $H(s)$. No additional volume copies are needed [S1, S2, unofficial].
-*   **Performance:** The depth cueing is "practically free" compared to spatial domain convolution [S1, S2, unofficial]. While asymptotically faster than conventional spatial domain volume rendering, implementation considerations make it barely superior in practice [S2, unofficial].
-*   **Strengths:** Avoids per-view 3D FFTs; avoids multiple volume copies; high quality due to sinc resampling (inherited from parent method); flexible depth cueing functions [S1, S2, unofficial].
-*   **Limitations:** Produces complex output (requires taking real part); kernel size can increase with complex cueing functions; requires precomputation of differential operators for linear cueing [S1, S2, S3, unofficial].
+*   **Time Complexity:** The 3D forward FFT is performed only once $O(N^3 \log N)$ [S3, S5, unofficial]. Per-view, the cost is dominated by the 2D slice extraction and interpolation. The recomputation of $H'(s)$ is negligible because the support of $H$ is small ($3^3$ to $5^3$) and $D(s)$ is a simple expression (delta functions or linear ramps) [S2, S3, S4, S5, unofficial].
+*   **Memory Complexity:** Requires storing the 3D spectrum $F(s)$ and the small filter $H(s)$ [S1, S3, unofficial].
+*   **Performance:** Practically free compared to spatial domain convolution or hybrid approaches requiring multiple 3D FFTs [S2, S3, S4, S5, unofficial].
+*   **Strengths:** High quality (uses ideal sinc resampling via the parent method), efficient (single 3D FFT), flexible (any depth cueing function with simple Fourier transform).
+*   **Limitations:** Produces complex intermediate results for sine-wave cueing (requires taking real part); assumes the volume is static (since 3D FFT is done once).
 
 ## Background
-*   **Origin:** Developed as part of the frequency domain volume rendering work in 1993 [S2, S3, S4, unofficial].
-*   **Development:** It extends the frequency domain volume rendering algorithm by incorporating depth cueing and directional shading entirely in the frequency domain, using properties of the Fourier transform (differentiation theorem) to avoid spatial domain multiplication [S1, S2, unofficial].
-*   **Usage:** Used in fast volume rendering applications where depth cues are important for shape perception [S2, unofficial].
+*   **Origin:** Developed by Takashi Totsuka and Marc Levoy at Stanford University [S2, S3, S5, unofficial].
+*   **History:** Presented in the SIGGRAPH '93 paper "Frequency Domain Volume Rendering" [S2, S5, unofficial]. It builds on the Fourier Projection-Slice Theorem [S1, unofficial].
+*   **Usage:** Used in frequency domain volume rendering to add shape cues (depth cueing and directional shading) to the basic projection-slice rendering, which lacks occlusion and shading [S3, unofficial].
 
 ## Sources
-[S1] PDF Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27 (unofficial)
-[S2] PDF Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)
-[S3] PDF FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27 (unofficial)
-[S4] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27 (unofficial)
+[S1] Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27 (unofficial)
+[S2] Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)
+[S3] FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27 (unofficial)
+[S4] Frequency Domain Volume Rendering - studylib.net, https://studylib.net/doc/18162906/frequency-domain-volume-rendering, fetched 2026-10-27 (unofficial)
+[S5] Frequency Domain Volume Rendering, https://graphics.stanford.edu/papers/fvr/fvr.pdf, fetched 2026-10-27 (unofficial)

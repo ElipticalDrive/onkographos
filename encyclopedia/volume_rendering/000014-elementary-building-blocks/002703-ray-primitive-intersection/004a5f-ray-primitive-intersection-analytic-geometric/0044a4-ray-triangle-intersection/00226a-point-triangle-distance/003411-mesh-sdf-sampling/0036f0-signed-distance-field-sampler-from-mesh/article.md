@@ -1,0 +1,65 @@
+# Signed Distance Field Sampler from Mesh
+
+Also called: createMeshInstanceSdfSampler
+
+## Overview
+This method constructs a callable signed distance field (SDF) sampler function from a `THREE.Mesh` instance, enabling ray-marching algorithms to query distances to complex geometry. It solves the problem of efficiently evaluating the shortest signed distance from arbitrary world-space coordinates to a triangle mesh surface, where negative values indicate interior points and positive values indicate exterior points [S1, unofficial]. It differs from generic geometry samplers by specifically handling the `THREE.Mesh` abstraction, including automatic world matrix updates, and delegates the core geometric computation to a lower-level geometry sampler [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `instance`: A `THREE.Mesh` object containing `geometry` (a `THREE.BufferGeometry`) and `matrixWorld`.
+
+**Outputs:**
+- A function `sdfSampler(x, y, z)` returning a `number` representing the signed distance in world units.
+
+**Data Structures:**
+- The method does not create persistent data structures itself; it relies on the internal structures of `THREE.BufferGeometry` (vertex positions, indices) accessed via the delegated sampler [S1, unofficial].
+
+**Steps:**
+1. **Validation:** Check if `instance` is an instance of `THREE.Mesh`. If not, throw an error with the message `'Expected a THREE.Mesh instance'` [S1, unofficial].
+2. **Matrix Update:** Call `instance.updateMatrixWorld(true)` to ensure the mesh's world transformation matrix is up-to-date with its parent hierarchy [S1, unofficial].
+3. **Delegation:** Invoke `createGeometrySdfSampler(instance.geometry, instance.matrixWorld)` to generate the actual distance query function [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def createMeshInstanceSdfSampler(instance):
+    # Step 1: Validation
+    if not isinstance(instance, THREE.Mesh):
+        raise Error("Expected a THREE.Mesh instance")
+    
+    # Step 2: Update World Matrix
+    # Ensures matrixWorld reflects current transforms and parents
+    instance.updateMatrixWorld(true)
+    
+    # Step 3: Delegate to Geometry Sampler
+    # The geometry sampler handles the actual triangle distance calculations
+    # using instance.geometry and instance.matrixWorld
+    return createGeometrySdfSampler(instance.geometry, instance.matrixWorld)
+```
+
+**Edge Cases and Pitfalls:**
+- **Invalid Input:** Passing a non-mesh object (e.g., `THREE.Group` or `THREE.Object3D`) will raise an error [S1, unofficial].
+- **Stale Transforms:** If `updateMatrixWorld` is not called, the sampler will use outdated world coordinates, leading to incorrect distance queries for animated or parented meshes [S1, unofficial].
+- **Empty Geometry:** If the mesh has no vertices or triangles, the delegated sampler may return undefined behavior or maximum distance values [G].
+
+## Subtopics
+
+### Surface Distance Query
+A general query pattern used to find the minimum distance from a point to any surface in a list of surfaces, optionally returning the closest surface object [S2, unofficial]. It initializes a minimum distance to `MAX_DISTANCE` (e.g., 2000f) and a closest surface to null, then iterates through each surface, updating the minimum if a closer distance is found [S2, unofficial]. This is useful for scenes with multiple distinct meshes where a single unified SDF is not available [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query relative to the sampler creation, but the underlying geometry sampler is $O(N)$ where $N$ is the number of triangles, unless accelerated by a bounding volume hierarchy (BVH) [G].
+- **Memory Complexity:** $O(1)$ additional memory for the sampler function itself; the geometry data is already in memory [G].
+- **Strengths:** Simple integration with Three.js scenes; handles world transforms automatically; provides signed distances for inside/outside detection [S1, unofficial].
+- **Limitations:** Performance degrades with high-poly meshes if no acceleration structure is used in the delegated sampler; not suitable for real-time rendering of very complex scenes without optimization [G].
+- **When to use:** When ray-marching against a single, moderately complex mesh in a Three.js environment [S1, unofficial].
+- **When not to use:** For scenes with many static meshes (use a unified voxel grid or BVH-based ray tracer) or when performance is critical for high-poly models [G].
+
+## Background
+This method originates from the `three.js-volume-renderer` project, an unofficial implementation of volume rendering techniques using Three.js [S1, unofficial]. It was designed to provide a convenient interface for ray-marching shaders to interact with standard Three.js geometry, bridging the gap between declarative scene graphs and procedural distance functions [S1, unofficial].
+
+## Sources
+[S1] three.js-volume-renderer, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)
+[S2] conradplake/ray-marching-shader, https://github.com/conradplake/ray-marching-shader, fetched 2026-10-27 (unofficial)

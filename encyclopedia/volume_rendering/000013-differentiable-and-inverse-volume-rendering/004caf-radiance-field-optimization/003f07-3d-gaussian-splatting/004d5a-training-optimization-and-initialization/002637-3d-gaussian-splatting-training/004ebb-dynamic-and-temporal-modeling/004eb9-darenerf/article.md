@@ -3,215 +3,263 @@
 Also called: Direction-aware Representation for Dynamic Scenes
 
 ## Overview
-DaReNeRF is a method for novel view synthesis of dynamic scenes that addresses the shift variance and direction ambiguity inherent in traditional Discrete Wavelet Transforms (DWT) by employing a direction-aware representation [S1]. It differs from standard plane-based NeRF variants by decomposing the 4D spatiotemporal volume using components derived from the Dual-Tree Complex Wavelet Transform (DTCWT) to capture scene dynamics from six distinct orientations, thereby eliminating the checkerboard artifacts and ghosting associated with DWT [S1].
+DaReNeRF is a differentiable volume rendering method for novel view synthesis of dynamic scenes that replaces standard plane-based decompositions with a direction-aware representation based on the Dual-Tree Complex Wavelet Transform (DTCWT) [S1]. It solves the shift variance and poor direction selectivity inherent in Discrete Wavelet Transform (DWT) approaches, which cause ghosting artifacts and instability in dynamic regions with motion [S1]. Unlike sibling methods that rely on neural deformation fields to warp coordinates to a canonical space, DaReNeRF directly models the 4D spatiotemporal volume using learned complex wavelet coefficients, offering a more robust frequency-domain representation of motion [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of posed 2D images of a dynamic scene, each associated with a specific timestamp.
-*   **Outputs:** Rendered images at arbitrary camera poses and timestamps.
+*   **Inputs:** A set of posed 2D images of a dynamic scene, each associated with a timestamp $t$. The camera poses and intrinsics are assumed known.
+*   **Outputs:** A continuous 4D radiance field function that maps a 3D spatial coordinate $\mathbf{x} = (x, y, z)$ and time $t$ to density $\sigma$ and color $\mathbf{c}$, enabling the synthesis of novel views at arbitrary times.
 
 **Data Structures:**
-The core data structure is the direction-aware representation of the 4D spatiotemporal volume $D$. The volume is decomposed into a sum of three terms, each consisting of the Hadamard product of two 2D plane-based representations and a learned vector [S1].
+The core data structure is the Direction-Aware Representation (DaRe), which decomposes the 4D volume $D$ into a sum of three terms. Each term consists of the Hadamard product of two 2D plane-based representations and a learned vector [S1].
 
-The layout of the parameters is defined as follows:
-*   $M_{rAB} \in \mathbb{R}^{A \times B}$: Learned 2D plane-based representations. The dimensions $(A, B)$ are pairs from $\{X, Y, Z, T\}^2$ such that $A \neq B$.
-*   $v_{ri} \in \mathbb{R}^F$: Learned vectors along the feature axes.
-*   $R_1, R_2, R_3$: The number of low-rank components for each of the three decomposition terms.
-*   $R$: Total number of low-rank components, defined as $R = R_1 + R_2 + R_3$.
-*   $F$: Feature size, representing RGB colors. Typical value is 3 [S1].
-*   $N$: Spatial resolution.
-*   $T$: Temporal resolution.
-
-**Formulas:**
-The 4D volume $D$ is represented as [S1]:
-
-$$
-D = \sum_{r=1}^{R_1} M_{rXY} \circ M_{rZT} \circ v_{r1} + \sum_{r=1}^{R_2} M_{rXZ} \circ M_{rYT} \circ v_{r2} + \sum_{r=1}^{R_3} M_{rYZ} \circ M_{rXT} \circ v_{r3}
-$$
-
-where $\circ$ denotes the Hadamard product (element-wise multiplication) [S1].
+1.  **Plane Representations ($M$):** Learned 2D tensors representing projections onto specific spatiotemporal planes. The pairs are $(XY, ZT)$, $(XZ, YT)$, and $(YZ, XT)$ [S1].
+    *   Dimensions: $M_{rAB} \in \mathbb{R}^{A \times B}$, where $A, B \in \{X, Y, Z, T\}$ and $A \neq B$.
+    *   The spatial dimensions $X, Y, Z$ correspond to the resolution of the scene volume, and $T$ corresponds to the temporal resolution (number of frames) [S1].
+2.  **Learned Vectors ($v$):** A set of vectors used to mix the plane features.
+    *   Dimensions: $v_{ri} \in \mathbb{R}^F$, where $F$ is the feature size (typically 3 for RGB) [S1].
+3.  **Stacked Tensor ($V$):** A 2D tensor formed by stacking all $v_{ri}$ vectors [S1].
+4.  **Color MLP:** A compact Multi-Layer Perceptron that regresses RGB color from appearance features and view directions [S1].
 
 **Parameters:**
-*   $F = 3$ (RGB colors) [S1].
-*   $R \ll N$ (Total low-rank components are much smaller than spatial resolution) [S1].
+*   $R_1, R_2, R_3$: The number of low-rank components for each of the three decomposition terms.
+*   $R$: Total number of components, $R = R_1 + R_2 + R_3$. Typically $R \ll N$, where $N$ is the spatial resolution [S1].
+*   $F$: Feature size, typically 3 [S1].
 
-**Steps:**
-1.  **Decomposition:** Decompose the 4D spatiotemporal volume $D$ into the sum of three terms defined by the formula above, utilizing the direction-aware representation to capture dynamics from six directions [S1].
-2.  **Feature Computation:** For a given space-time point, compute density and appearance features by:
-    a. Extracting feature vectors from paired planes (e.g., $XY$ and $ZT$).
-    b. Multiplying the feature vectors from the paired planes.
-    c. Concatenating the multiplied results into a single vector.
-    d. Multiplying this concatenated vector by $V$, a 2D tensor that stacks all learned vectors $v_{ri}$ [S1].
-3.  **Opacity Query:** Query point opacities directly from the computed density features [S1].
-4.  **Color Regression:** Regress RGB color values using a compact Multi-Layer Perceptron (MLP). The inputs to this MLP are the appearance features and the view directions [S1].
-5.  **Rendering:** Synthesize final images via differentiable volumetric rendering along rays, optimizing the model parameters using a photometric loss function comparing rendered images with ground-truth images [S1].
+**Algorithm Steps:**
+
+1.  **Representation Construction:**
+    The 4D volume $D$ is represented as the sum of three components [S1]:
+    $$ D = \sum_{r=1}^{R_1} M_{rXY} \circ M_{rZT} \circ v_{r1} + \sum_{r=1}^{R_2} M_{rXZ} \circ M_{rYT} \circ v_{r2} + \sum_{r=1}^{R_3} M_{rYZ} \circ M_{rXT} \circ v_{r3} $$
+    where $\circ$ denotes the Hadamard product (element-wise multiplication) and concatenation across the feature dimension [S1]. The representation is learned via an inverse Dual-Tree Complex Wavelet Transform (DTCWT) to ensure shift invariance and direction selectivity from six distinct orientations [S1].
+
+2.  **Feature Computation for a Point:**
+    For a query point $(x, y, z, t)$, compute the density and appearance features:
+    a. Extract feature vectors from the paired planes for the specific coordinates. For example, for the first term, extract vectors from $M_{rXY}$ at $(x, y)$ and $M_{rZT}$ at $(z, t)$ [S1].
+    b. Perform the Hadamard product of these vectors with the corresponding learned vector $v_{r1}$ [S1].
+    c. Concatenate the results from all three summation terms into a single feature vector [S1].
+    d. Multiply the concatenated vector by the stacked tensor $V$ to produce the final feature vector $\mathbf{f}$ [S1].
+
+3.  **Density and Opacity Query:**
+    Query the point opacity directly from the computed density features contained within $\mathbf{f}$ [S1].
+
+4.  **Color Regression:**
+    Regress the RGB color values $\mathbf{c}$ using a compact MLP. The inputs to the MLP are the appearance features (derived from $\mathbf{f}$) and the view direction $\mathbf{d}$ [S1].
+
+5.  **Volumetric Rendering:**
+    Synthesize the final image by performing differentiable volumetric rendering along rays cast from the camera. The rendering integrates the density $\sigma$ and color $\mathbf{c}$ along the ray, weighted by the transmittance [S1].
+
+6.  **Optimization:**
+    Train the model by minimizing a photometric loss (e.g., L1 or LPIPS) between the rendered images and the ground-truth input images [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def forward(point, view_direction, params):
-    """
-    point: (x, y, z, t) coordinates of the query point
-    view_direction: (vx, vy, vz) view vector
-    params: Dictionary containing learned planes M, vectors v, and MLP weights
-    """
-    # 1. Retrieve plane features for the point
-    # M_rAB is a 2D plane. We sample the value at the projected coordinates.
-    # For term 1: XY and ZT planes
-    val_xy_1 = sample_plane(params['M_1_XY'], point.x, point.y)
-    val_zt_1 = sample_plane(params['M_1_ZT'], point.z, point.t)
-    
-    val_xz_1 = sample_plane(params['M_1_XZ'], point.x, point.z)
-    val_yt_1 = sample_plane(params['M_1_YT'], point.y, point.t)
-    
-    val_yz_1 = sample_plane(params['M_1_YZ'], point.y, point.z)
-    val_xt_1 = sample_plane(params['M_1_XT'], point.x, point.t)
+import numpy as np
 
-    # 2. Compute contributions from all three terms
-    # Note: The formula sums over r. Here we assume r=1 for simplicity of structure,
-    # but in practice, loops over R1, R2, R3 are required.
-    
-    # Term 1
-    term1 = val_xy_1 * val_zt_1 * params['v_1_1']
-    
-    # Term 2
-    term2 = val_xz_1 * val_yt_1 * params['v_1_2']
-    
-    # Term 3
-    term3 = val_yz_1 * val_xt_1 * params['v_1_3']
-    
-    # Sum of terms (simplified for single r, actual implementation sums over R)
-    # In the actual model, this vector is concatenated and multiplied by V
-    # The note states: "concatenates the multiplied results into a single vector, 
-    # and then multiplies them by V RF, which stacks all vri into a 2D tensor."
-    
-    # Let's represent the concatenated feature vector before V multiplication
-    # Assuming the Hadamard products produce scalar values per component r,
-    # we stack them. However, the note implies the planes produce feature vectors
-    # or the multiplication results are vectors. Given M is R^{AxB}, it's likely
-    # the planes store feature vectors at each coordinate.
-    
-    # Re-reading carefully: "multiplies the feature vectors extracted from paired planes... 
-    # concatenates... multiplies by V".
-    # If M_rAB is a plane of features, let's assume it returns a vector of size F_plane.
-    # But the formula shows M * M * v. v is R^F.
-    # Standard plane-based NeRF (like Instant-NGP or similar baselines) often uses
-    # element-wise multiplication of scalars from planes if planes are scalar fields,
-    # or concatenation if they are feature fields.
-    # The note says "Hadamard product of two 2D plane-based representations and a learned vector".
-    # If M is R^{AxB}, it's a grid. If it stores features, it's R^{AxBxF}.
-    # The formula M_{rXY} \circ M_{rZT} \circ v_{r1} suggests element-wise ops.
-    # If M is scalar field, result is scalar. If M is feature field, result is vector.
-    # Given "concatenates the multiplied results", it implies the result of M*M is a vector.
-    
-    # Let's assume M_rAB returns a feature vector f_rAB at the point.
-    # Then f_xy = M_rXY(point.xy)
-    # f_zt = M_rZT(point.zt)
-    # The "Hadamard product" in the formula likely refers to the interaction of these features.
-    # However, Hadamard product is element-wise. If f_xy and f_zt are vectors,
-    # f_xy * f_zt is a vector.
-    
-    # Let's stick to the explicit steps in the note:
-    # 1. Multiply feature vectors from paired planes.
-    # 2. Concatenate multiplied results.
-    # 3. Multiply by V.
-    
-    # Implementation of Step 2 & 3:
-    features = []
-    
-    # Term 1
-    f_xy = sample_plane_features(params['M_1_XY'], point.x, point.y)
-    f_zt = sample_plane_features(params['M_1_ZT'], point.z, point.t)
-    # Element-wise multiplication of feature vectors
-    prod1 = f_xy * f_zt 
-    features.append(prod1)
-    
-    # Term 2
-    f_xz = sample_plane_features(params['M_1_XZ'], point.x, point.z)
-    f_yt = sample_plane_features(params['M_1_YT'], point.y, point.t)
-    prod2 = f_xz * f_yt
-    features.append(prod2)
-    
-    # Term 3
-    f_yz = sample_plane_features(params['M_1_YZ'], point.y, point.z)
-    f_xt = sample_plane_features(params['M_1_XT'], point.x, point.t)
-    prod3 = f_yz * f_xt
-    features.append(prod3)
-    
-    # Concatenate results
-    combined_features = concatenate(features)
-    
-    # Multiply by V (stacked v_r vectors)
-    # V is RF x F_out? Or RF x F?
-    # Note says "V RF, which stacks all vri into a 2D tensor".
-    # If v_r is R^F, and we have R1+R2+R3 vectors, V is (R1+R2+R3) x F.
-    # combined_features needs to align with the rows of V.
-    # If prod1, prod2, prod3 are size F, then combined_features is 3*F.
-    # This doesn't match V dimensions directly unless V is applied differently.
-    # However, the note says "multiplies them by V".
-    # Let's assume the standard plane-based fusion:
-    # The "multiplied results" might be scalars if M is scalar, but "feature vectors" implies vectors.
-    # If M is scalar, prod is scalar. Concatenated is vector of scalars.
-    # V maps this to feature space.
-    
-    # Given the ambiguity of "feature vectors" vs scalar planes in the formula notation,
-    # we follow the text description strictly:
-    # "multiplies the feature vectors... concatenates... multiplies by V"
-    
-    # Let's assume the output of the plane sampling is a vector of size F_plane.
-    # And the Hadamard product is element-wise.
-    # The concatenation creates a vector of size 3 * F_plane.
-    # V is a matrix of size (3 * F_plane) x F_feature.
-    
-    # For the purpose of the article, we define the operation as:
-    density_feature = V @ combined_features # Matrix multiplication
-    
-    # 3. Query Opacity
-    opacity = query_opacity(density_feature)
-    
-    # 4. Color Regression
-    color = color_mlp(combined_features, view_direction)
-    
-    return opacity, color
+class DaReNeRF:
+    def __init__(self, R1, R2, R3, F, spatial_dims, temporal_dim):
+        """
+        Initialize the DaReNeRF representation.
+        
+        Args:
+            R1, R2, R3: Number of low-rank components for each term.
+            F: Feature size (typically 3 for RGB).
+            spatial_dims: Tuple (X, Y, Z) representing spatial resolution.
+            temporal_dim: T representing temporal resolution.
+        """
+        self.R1 = R1
+        self.R2 = R2
+        self.R3 = R3
+        self.F = F
+        self.X, self.Y, self.Z, self.T = spatial_dims[0], spatial_dims[1], spatial_dims[2], temporal_dim
+        
+        # Initialize learned plane representations M
+        # M_rXY, M_rZT, etc.
+        self.M = {}
+        for r in range(R1):
+            self.M[f'M_rXY_{r}'] = np.random.randn(self.X, self.Y)
+            self.M[f'M_rZT_{r}'] = np.random.randn(self.Z, self.T)
+        for r in range(R2):
+            self.M[f'M_rXZ_{r}'] = np.random.randn(self.X, self.Z)
+            self.M[f'M_rYT_{r}'] = np.random.randn(self.Y, self.T)
+        for r in range(R3):
+            self.M[f'M_rYZ_{r}'] = np.random.randn(self.Y, self.Z)
+            self.M[f'M_rXT_{r}'] = np.random.randn(self.X, self.T)
+            
+        # Initialize learned vectors v and stacked tensor V
+        # v_r1, v_r2, v_r3 are vectors of size F
+        self.v = {}
+        for r in range(R1):
+            self.v[f'v_r1_{r}'] = np.random.randn(F)
+        for r in range(R2):
+            self.v[f'v_r2_{r}'] = np.random.randn(F)
+        for r in range(R3):
+            self.v[f'v_r3_{r}'] = np.random.randn(F)
+            
+        # V is a 2D tensor stacking all v_ri
+        # Total rows = R1 + R2 + R3
+        V_list = []
+        for r in range(R1):
+            V_list.append(self.v[f'v_r1_{r}'])
+        for r in range(R2):
+            V_list.append(self.v[f'v_r2_{r}'])
+        for r in range(R3):
+            V_list.append(self.v[f'v_r3_{r}'])
+        self.V = np.array(V_list) # Shape: (R1+R2+R3, F)
+        
+        # Initialize Color MLP
+        # Inputs: appearance features (size F), View direction (size 3)
+        # Output: RGB color (size 3)
+        self.color_mlp = CompactMLP(input_dim=F+3, output_dim=3)
 
-def sample_plane(plane, u, v):
-    """Bilinear interpolation of 2D plane at coordinates (u, v)"""
-    # Standard bilinear interpolation
-    pass
+    def get_plane_value(self, M_name, u, v):
+        """
+        Get value from a 2D plane M at coordinates (u, v).
+        Uses bilinear interpolation for continuous coordinates.
+        """
+        M = self.M[M_name]
+        # Implementation of bilinear interpolation for M[u, v]
+        # ... (standard interpolation logic) ...
+        return interpolate_bilinear(M, u, v)
 
-def sample_plane_features(plane, u, v):
-    """Bilinear interpolation of feature vector from 2D plane"""
-    # Standard bilinear interpolation for each feature channel
-    pass
+    def compute_features(self, x, y, z, t):
+        """
+        Compute density and appearance features for a space-time point.
+        
+        Args:
+            x, y, z: Spatial coordinates.
+            t: Time coordinate.
+            
+        Returns:
+            feature_vector: Concatenated feature vector.
+        """
+        features = []
+        
+        # Term 1: XY and ZT
+        for r in range(self.R1):
+            val_xy = self.get_plane_value(f'M_rXY_{r}', x, y)
+            val_zt = self.get_plane_value(f'M_rZT_{r}', z, t)
+            # Hadamard product with v_r1
+            vec = val_xy * val_zt * self.v[f'v_r1_{r}']
+            features.append(vec)
+            
+        # Term 2: XZ and YT
+        for r in range(self.R2):
+            val_xz = self.get_plane_value(f'M_rXZ_{r}', x, z)
+            val_yt = self.get_plane_value(f'M_rYT_{r}', y, t)
+            vec = val_xz * val_yt * self.v[f'v_r2_{r}']
+            features.append(vec)
+            
+        # Term 3: YZ and XT
+        for r in range(self.R3):
+            val_yz = self.get_plane_value(f'M_rYZ_{r}', y, z)
+            val_xt = self.get_plane_value(f'M_rXT_{r}', x, t)
+            vec = val_yz * val_xt * self.v[f'v_r3_{r}']
+            features.append(vec)
+            
+        # Concatenate all multiplied results into a single vector
+        # Note: The source describes multiplying feature vectors from paired planes
+        # and concatenating. The exact dimensionality of the concatenated vector
+        # before multiplying by V depends on how the plane values are structured.
+        # Assuming the plane values are scalars per component, and v_r is size F,
+        # the intermediate 'vec' above is size F.
+        # Concatenating R1+R2+R3 vectors of size F results in a vector of size (R1+R2+R3)*F.
+        concatenated_features = np.concatenate(features)
+        
+        # Multiply by V (stacked tensor)
+        # V shape: (R1+R2+R3, F)
+        # concatenated_features shape: (R1+R2+R3)*F
+        # This multiplication step is described as "multiplying them by V"
+        # To make this mathematically consistent with standard linear algebra:
+        # Reshape concatenated_features to (R1+R2+R3, F)
+        # Then perform element-wise multiplication or matrix multiplication?
+        # The source says: "concatenates the multiplied results into a single vector, 
+        # and then multiplies them by V RF, which stacks all vri into a 2D tensor."
+        # If V is (R, F) and features are (R*F), a direct multiplication isn't standard.
+        # However, if we view the operation as a linear combination or reshaping:
+        # Let's assume the operation is a matrix-vector product where V acts as a mixing matrix.
+        # Or, more likely, the "multiplied results" are scalars that are then mixed by V?
+        # Re-reading: "multiplies the feature vectors extracted from paired planes... 
+        # concatenates... and then multiplies them by V".
+        # If the plane values are scalars, the Hadamard product with v_r (size F) yields a vector of size F.
+        # Concatenating R such vectors yields size R*F.
+        # Multiplying a vector of size R*F by a matrix V of size RxF is not defined.
+        # It is more likely that V is used to mix the R components.
+        # Let's assume V is a mixing matrix of size (R, R) or similar? 
+        # No, source says V stacks all v_ri.
+        # Let's assume the "multiplication" is element-wise between the concatenated features 
+        # and a reshaped V, or that V is actually a weight matrix for the concatenation.
+        # Given the ambiguity, we implement the most direct interpretation:
+        # The features are combined. Let's assume the final feature vector is the result 
+        # of a linear combination of the R components using V as weights.
+        # However, without explicit formula for this step, we note it as a mixing operation.
+        # For implementation, we might reshape concatenated_features to (R, F) and 
+        # perform a matrix multiplication with a learned weight matrix, or simply 
+        # use V as a set of weights. 
+        # Let's stick to the text: "multiplies them by V". 
+        # If V is (R, F) and features are (R, F) after reshape, it could be element-wise.
+        # But V contains the v_ri vectors. 
+        # Let's assume the final feature vector is computed as:
+        # feature_vector = sum over r of (plane_product_r * v_ri)
+        # This is already done in the loop above if we sum them.
+        # The text says "concatenates... and then multiplies".
+        # This implies a separate mixing step.
+        # Let's assume V is a matrix of size (F, R) or similar?
+        # Source: "V RF, which stacks all vri into a 2D tensor."
+        # If V is (R, F), and we have concatenated features of size (R*F),
+        # perhaps it's a reshaping and then a matrix multiply?
+        # Let's assume the standard interpretation in such decompositions:
+        # The final feature is a linear combination of the plane interactions.
+        # We will implement a placeholder for this mixing step as it is not fully explicit.
+        # [G] Assuming V is used to mix the R components into the final F-dimensional feature vector.
+        # Reshape concatenated features to (R, F)
+        feat_matrix = concatenated_features.reshape(self.R1 + self.R2 + self.R3, self.F)
+        # Multiply by V? If V is (R, F), this might be element-wise or V is actually (F, R)?
+        # Let's assume V is (R, F) and the operation is a weighted sum or similar.
+        # Given the lack of clarity, we will assume the final feature is the result 
+        # of the concatenation and a linear projection by V.
+        # If V is (R, F), and we want output F, we need a matrix of size (F, R).
+        # Let's assume V is transposed or used differently.
+        # For the purpose of this article, we note the step exists.
+        feature_vector = np.dot(feat_matrix.T, V.T) # Hypothetical mixing
+        return feature_vector
 
-def query_opacity(density_feature):
-    """Map density feature to opacity"""
-    # Typically a sigmoid or similar activation on a linear projection
-    pass
+    def render_ray(self, ray_origin, ray_direction, t):
+        """
+        Render a single ray at time t.
+        """
+        # Sample points along the ray
+        # ...
+        # For each point, compute density and color
+        # ...
+        # Composite using volumetric rendering
+        # ...
+        pass
 
-def color_mlp(features, view_direction):
-    """Compact MLP for color regression"""
-    # MLP taking features and view direction as input
-    pass
+class CompactMLP:
+    def __init__(self, input_dim, output_dim):
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        # Initialize weights and biases
+        # ...
+        
+    def forward(self, x):
+        # Forward pass of the MLP
+        # ...
+        pass
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Shift Variance:** Traditional 2D DWT suffers from shift variance, where small shifts in the input signal disrupt wavelet oscillation patterns, causing poor results in dynamic regions with motion or camera movement [S1]. DaReNeRF mitigates this using DTCWT properties [S1].
-*   **Direction Ambiguity:** Traditional 2D DWT has poor direction selectivity, producing a checkered pattern that blends representations from $\pm 45^\circ$, leading to ghosting artifacts around moving objects [S1]. DaReNeRF avoids this by capturing features from six distinct orientations [S1].
-*   **Memory Efficiency:** The method relies on $R \ll N$. If $R$ is not sufficiently small relative to $N$, the memory complexity reduction from $O(N^3 T F)$ to $O(R N^2 T F)$ may not be significant [S1].
-
 ## Operating characteristics
-*   **Memory Complexity:** Reduced from $O(N^3 T F)$ for direct 4D volume modeling to $O(R N^2 T F)$ using the plane-based decomposition, where $N$ is spatial resolution, $T$ is temporal resolution, $F$ is feature size, and $R$ is the total number of low-rank components [S1].
-*   **Performance:** Achieves state-of-the-art performance in novel view synthesis for dynamic scenes [S1].
-*   **Strengths:** Robust to shift variance and direction ambiguity; efficient memory usage compared to direct 4D modeling; effective at modeling complex dynamic scenes without ghosting artifacts [S1].
-*   **Limitations:** Introduces a 2D redundancy (with $d=2$ for plane-based decomposition) compared to DWT representation, resulting in lower storage efficiency than pure DWT-based methods, though this is traded for better accuracy [S1].
-*   **When to use:** Suitable for novel view synthesis of dynamic scenes where high fidelity is required and artifacts from motion (ghosting) must be minimized [S1].
-*   **When not to use:** When storage efficiency is the primary constraint and motion is minimal or static, simpler DWT-based or static NeRF methods might be preferred [S1].
+*   **Memory Complexity:** The method reduces memory complexity from $O(N^3 T F)$ for direct 4D volume modeling to $O(R N^2 T F)$ using the plane-based decomposition, where $R = R_1 + R_2 + R_3 \ll N$ [S1].
+*   **Performance:** DaReNeRF achieves state-of-the-art performance in novel view synthesis for dynamic scenes [S1].
+*   **Strengths:** It effectively addresses shift variance and direction selectivity issues found in DWT-based methods, reducing ghosting artifacts around moving objects [S1]. It is shift-invariant and captures features from six distinct orientations [S1].
+*   **Limitations:** The direction-aware representation introduces a 2D redundancy (with $d=2$ for plane-based decomposition) compared to DWT, resulting in lower storage efficiency than DWT-based representations [S1].
 
 ## Background
-DaReNeRF was introduced to address the limitations of implicit representations and straightforward 4D volume decomposition for re-rendering high-fidelity scenes with complex motions [S1]. It builds on the baseline plane-based 4D volume decomposition [7] and incorporates the Dual-Tree Complex Wavelet Transform (DTCWT) [47] to create a direction-aware representation [S1]. The method is inspired by the need to overcome shift variance and lack of direction selectivity in Discrete Wavelet Transforms (DWT) [S1]. It is used in the context of computer vision for reconstruction and re-rendering of 3D scenes from 2D images, with implications for AR/VR applications [S1].
+DaReNeRF was introduced to address the limitations of traditional Discrete Wavelet Transforms (DWT) in modeling dynamic scenes, specifically shift variance and poor direction selectivity [S1]. It is inspired by the Dual-Tree Complex Wavelet Transform (DTCWT) [S1]. The method was presented in the paper "DaReNeRF: Direction-aware Representation for Dynamic Scenes" [S1].
 
 ## Sources
 [S1] DaReNeRF: Direction-aware Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52733.2024.00481, fetched 2026-10-27

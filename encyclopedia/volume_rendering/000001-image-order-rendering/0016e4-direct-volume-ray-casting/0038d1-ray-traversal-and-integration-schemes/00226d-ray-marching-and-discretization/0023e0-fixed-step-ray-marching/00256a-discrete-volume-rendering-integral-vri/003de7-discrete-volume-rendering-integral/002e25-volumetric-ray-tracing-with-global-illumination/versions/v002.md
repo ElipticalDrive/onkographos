@@ -1,0 +1,43 @@
+# Volumetric Ray Tracing with Global Illumination
+
+
+## Overview
+A rendering method for scenes containing both volumetric and geometric data that extends the standard ray tracing illumination equation to capture global illumination effects (shadows, reflections) and volume rendering effects (compositing, maximum-value projections) in a single image [S1, unofficial]. It differs from pure volume rendering methods by explicitly handling geometric intersections and recursive ray paths, and from pure geometric ray tracing by forcing volumetric intersections to occur at grid locations, which introduces aliasing artifacts that increase with recursion depth [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scene containing both geometric primitives and volumetric data (grids); a global illumination equation defining the light transport model [S1, unofficial].
+*   **Output:** A final pixel intensity value [S1, unofficial].
+
+**Data Structures:**
+*   **Intersection Results:** Standard intersection points (for geometry) and intersection segments (for volumes) [S1, unofficial].
+*   **Ray Tree:** A recursive structure of rays, where the "level" of a ray corresponds to its depth in the recursion [S1, unofficial].
+
+**Steps:**
+1.  **Sort Objects:** Sort all objects along the current ray according to distance and intersection classification (point vs. segment) before performing any intersection calculations [S1, unofficial].
+2.  **Calculate Intersections:** Perform intersection calculations. For volumetric data, the intersection is forced to occur at grid locations in the data [S1, unofficial].
+3.  **Evaluate Shader:** Pass the intersection results (points or segments) to a shader. The shader evaluates the intensity equation defined by the illumination model to determine the final pixel value [S1, unofficial].
+
+**Formulas:**
+The method extends the standard ray tracing illumination equation [S1, unofficial]. The specific mathematical formulation of the extended equation is not provided in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** Forcing volumetric intersections to occur at grid locations produces aliasing effects. These effects increase in severity as the level of the ray in the recursive ray tracing tree increases [S1, unofficial].
+
+## Subtopics
+
+### Volumetric Ray-Tracing (First Order)
+An approach using gradients to realize a volumetric ray-tracer supporting physically correct illumination, considering only first-order rays [S2]. It simulates mirror-like reflections by casting a ray and computing its deflection, performing an environment texture lookup [S2]. It simulates refraction by computing ray deflection [S2].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Captures realistic global effects (e.g., mirrors) and practical volume rendering effects (compositing, maximum-value projections) in a single image [S1, unofficial].
+*   **Limitations:** Aliasing effects increase with ray recursion depth due to grid-locked volumetric intersections [S1, unofficial].
+
+## Background
+The method was developed to create a useful global illumination model and efficient rendering technique for scenes containing both volumetric and geometric data [S1, unofficial]. It was motivated by the desire to include global effects in scientific applications, such as placing mirrors in the scene [S1, unofficial].
+
+## Sources
+[S1] Volumetric Ray Tracing, https://www.cs.drexel.edu/~david/Classes/Papers/p11-sobierajski.pdf, fetched 2026-10-28 (unofficial)
+[S2] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26

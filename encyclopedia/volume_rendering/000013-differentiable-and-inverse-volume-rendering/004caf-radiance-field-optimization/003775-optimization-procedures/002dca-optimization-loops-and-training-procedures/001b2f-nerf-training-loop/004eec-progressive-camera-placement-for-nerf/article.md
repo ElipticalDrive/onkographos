@@ -1,0 +1,150 @@
+# Progressive Camera Placement for NeRF
+
+Also called: Greedy Optimization for Camera Placement, Next Best View Estimation via Observation Frequency and Angular Uniformity
+
+## Overview
+This method is a greedy optimization algorithm that selects camera positions to maximize a reconstruction quality metric $E(C, B_{32})$, which combines observation frequency and angular uniformity, to improve NeRF reconstruction quality with fewer images [S1, unofficial]. Unlike uncertainty-based methods (e.g., ActiveNeRF), this method does not require additional image acquisition to estimate reconstruction quality, making it cheaper to compute [S1, unofficial]. It builds on [NeRF Training Loop](970-nerf-training-loop.md) by dynamically selecting the next best view based on the current state of the occupancy grid and camera set.
+
+## How it works
+**Inputs:**
+- $T$: Total number of cameras to sample (Typical value: 100) [S1, unofficial].
+- $N$: Number of candidate cameras sampled in each iteration (Typical value: 1000) [S1, unofficial].
+- $B$: The bounding box of the scene [S1, unofficial].
+- $B_f$: An initial empty bounding box defined by the user to safely sample the first 20 cameras when no occupancy grid exists [S1, unofficial].
+- $\gamma$: Non-linear scaling factor that modulates the importance of observing points that are less frequently observed compared to those already observed frequently [S1, unofficial].
+- Occupancy Grid: Provided by the NeRF implementation (e.g., Instant-NGP) or computed on-the-fly by sampling 3-D space, storing density, and binarizing with a threshold [S1, unofficial].
+
+**Outputs:**
+- Camera set $C$: The sequence of selected camera poses.
+- Acquired images: Rendered or captured images at each selected pose.
+
+**Data Structures:**
+- $B_{32}$: A regular grid inside the bounding box $B$ with resolution $32 \times 32 \times 32$, used to discretize the space for evaluating reconstruction quality [S1, unofficial].
+- Nodes: The set of points in $B_{32}$ [S1, unofficial].
+
+**Algorithm Steps:**
+1. Initialize total camera count $T=100$, candidate count $N=1000$, nodes as $B_{32}$, and camera set $C$ as empty [S1, unofficial].
+2. While the number of cameras in $C$ is less than or equal to $T$:
+    a. Determine the bounding box `aabb` for sampling: use $B$ if $|C| > 20$, otherwise use $B_f$ [S1, unofficial].
+    b. Sample $N$ random candidate cameras $C_p$ inside the bounding box `aabb`. Filter out candidates whose center lies in occupied space or observes occupied space from too close, using the occupancy grid [S1, unofficial].
+    c. For each candidate camera $c$ in $C_p$, compute the reconstruction quality score $E_c = E(C \cup c, \text{nodes})$ using Eq. (3) [S1, unofficial].
+    d. Select the candidate camera $c_{max}$ that maximizes the score $E_c$ [S1, unofficial].
+    e. Acquire an image from $c_{max}$ and insert it into the camera set $C$ [S1, unofficial].
+    f. If the number of cameras in $C$ is greater than 20, train the NeRF model for 250 iterations [S1, unofficial].
+
+**Formulas:**
+The reconstruction quality metric $E(C, B_{32})$ is defined as [S1, unofficial]:
+$$
+E(C, B_{32}) = \sum_{p \in B_{32}} \left( (1 - TV(f_{pC}, u)) + O_f(p)^\gamma \right)
+$$
+where:
+- $f_{pC}$ is the empirical PDF in the angular domain for point $p$ and camera set $C$ [S1, unofficial].
+- $u$ is the uniform PDF in the same domain [S1, unofficial].
+- $\gamma$ is the non-linear scaling factor [S1, unofficial].
+
+The observation frequency $O_f(p)$ is defined as [S1, unofficial]:
+$$
+O_f(p) = \frac{\sum_{i=0}^{N} \mathbb{1}_{obs}(C_i, p)}{N}
+$$
+where $\mathbb{1}_{obs}$ is an indicator function that is 1 if point $p$ lies inside the frustum of camera $C_i$, and $N$ is the total number of cameras [S1, unofficial].
+
+The total variation distance $TV(f_p, u)$ is defined as [S1, unofficial]:
+$$
+TV(f_p, u) = \frac{1}{2} \sum_{\theta, \phi \in \Omega} |f_p(\theta, \phi) - u(\theta, \phi)|
+$$
+where $f_p$ is the empirical PDF of camera directions observing point $p$, $u$ is the uniform PDF, and $\Omega$ is the angular domain [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def progressive_camera_placement(T=100, N=1000, gamma=1.0):
+    # Initialize parameters
+    nodes = B32  # Regular grid 32x32x32 inside bounding box B
+    C = []       # Camera set
+    occupancy_grid = get_occupancy_grid() # From Instant-NGP or computed
+    
+    while len(C) <= T:
+        # Determine bounding box for sampling
+        if len(C) > 20:
+            aabb = B
+        else:
+            aabb = Bf  # User-defined empty bounding box
+            
+        # Sample candidate cameras
+        Cp = sample_random_cameras(N, aabb)
+        
+        # Filter candidates based on occupancy
+        valid_candidates = []
+        for c in Cp:
+            if is_in_free_space(c.center, occupancy_grid) and \
+               is_not_too_close_to_occupied(c, occupancy_grid):
+                valid_candidates.append(c)
+                
+        # Compute scores for valid candidates
+        best_score = -infinity
+        c_max = None
+        
+        for c in valid_candidates:
+            # Compute E(C U c, nodes)
+            score = 0.0
+            for p in nodes:
+                # Compute observation frequency
+                obs_count = 0
+                for cam in C:
+                    if is_inside_frustum(cam, p):
+                        obs_count += 1
+                # Add N for the candidate camera if it observes p
+                if is_inside_frustum(c, p):
+                    obs_count += 1
+                N_total = len(C) + 1
+                Of_p = obs_count / N_total
+                
+                # Compute angular uniformity (TV distance)
+                # Get directions of cameras observing p
+                directions = []
+                for cam in C:
+                    if is_inside_frustum(cam, p):
+                        directions.append(get_direction(cam, p))
+                if is_inside_frustum(c, p):
+                    directions.append(get_direction(c, p))
+                    
+                fp = compute_empirical_pdf(directions)
+                u = uniform_pdf
+                TV_fp_u = total_variation_distance(fp, u)
+                
+                score += (1 - TV_fp_u) + (Of_p ** gamma)
+            
+            if score > best_score:
+                best_score = score
+                c_max = c
+                
+        # Acquire image and add to set
+        image = acquire_image(c_max)
+        C.append(c_max)
+        
+        # Train NeRF if enough cameras
+        if len(C) > 20:
+            train_nerf(iterations=250)
+            
+    return C
+```
+
+**Edge Cases and Pitfalls:**
+- **Chicken-and-egg problem:** An occupancy grid is needed to place cameras in free space, but it requires an initial reconstruction. Solution: User defines an empty bounding box $B_f$ for the first 20 cameras [S1, unofficial].
+- **Camera placement must avoid occupied space:** Filter out candidate cameras whose center lies in occupied space or observes occupied space from too close, using an occupancy grid or on-the-fly density sampling [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The algorithm requires computing the score for $N$ candidates in each iteration. Each score computation involves iterating over all nodes in $B_{32}$ ($32^3 = 32768$ nodes) and checking frustum intersection and angular distribution. This makes each iteration relatively expensive, requiring a few seconds to propose a new camera in an unoptimized implementation [S1, unofficial].
+- **Memory Complexity:** Depends on the occupancy grid and the NeRF model. The grid $B_{32}$ is small ($32^3$ nodes). The main memory usage comes from the NeRF model and the occupancy grid provided by Instant-NGP [S1, unofficial].
+- **Measured Performance:** The method was evaluated on synthetic scenes using Instant-NGP and Blender’s Cycles renderer [S1, unofficial]. It allows high-quality capture with a small number of photos, reducing capture time and optimizing resulting image quality [S1, unofficial].
+- **Strengths:** Cheap to compute compared to uncertainty-based methods; easily interpretable by a user; allows modification of regions with more importance [S1, unofficial].
+- **Limitations:** Requires an initial bounding box $B_f$ for the first 20 cameras; unoptimized implementation is slow (seconds per camera); relies on the quality of the occupancy grid [S1, unofficial].
+- **When to use:** When capturing with a robotic or drone-based system where latency of moving the capture agent is high, and a few training iterations between captures are acceptable [S1, unofficial].
+- **When not to use:** When real-time interactive camera selection is required without training iterations; when the scene geometry is unknown and no bounding box can be defined [S1, unofficial].
+
+## Background
+The method was introduced by Georgios Kopanas and George Drettakis in the paper "Improving NeRF Quality by Progressive Camera Placement for Free-Viewpoint Navigation" [S1, unofficial]. It was implemented by interfacing Instant-NGP with Blender’s Python API and Cycles renderer for synthetic scenes [S1, unofficial]. The source code and data were made available at https://gitlab.inria.fr/fungraph/progressive-camera-placement [S1, unofficial].
+
+## Sources
+[S1] Improving NeRF quality by progressive camera placement, https://arxiv.org/abs/2309.00014, fetched 2026-10-26 (unofficial)

@@ -3,172 +3,127 @@
 Also called: External Channel Normal Rendering, PyTorch3D Normal Rendering for Gaussians
 
 ## Overview
-This method enables the rendering of surface normals from 3D Gaussian splats by treating normals as an auxiliary attribute in an external channel, bypassing the lack of native geometric surface information in volumetric Gaussian ellipsoids [S1, unofficial]. It differs from standard color rendering by outputting vector fields instead of scalar radiance, allowing for downstream applications like lighting integration and normal-based supervision [S1, unofficial][S2].
+This method enables the rendering of surface normals from 3D Gaussian Splatting representations by treating normals as an additional attribute in an external channel, since Gaussian ellipsoids natively represent volume rather than surface geometry [S1, unofficial]. It differs from sibling methods like [Normal Field Supervision via Rendering and Depth Derivatives](9627-normal-field-supervision-via-rendering-and-depth-derivatives.md) by providing the rendering mechanism itself, whereas that sibling provides the loss signal for supervision.
 
 ## How it works
 **Inputs:**
-*   A set of $N$ Gaussian ellipsoids, each defined by a mean position $\mu_i$, a covariance matrix $\Sigma_i$ (or rotation $R_i$ and scale $S_i$), and an opacity $\alpha_i$.
-*   For the basic external channel approach: A mesh or point cloud source from which initial normals $n_i$ are derived [S1, unofficial].
-*   For the normal field approach: A target vector field $V$ (e.g., derived from depth derivatives) [S2].
+*   A set of Gaussian ellipsoids $\{G_i\}$, where each $G_i$ is defined by a mean $\mu_i$, a covariance matrix $\Sigma_i$ (or rotation $R_i$ and scale $S_i$), and a base color $C_i$.
+*   For each Gaussian, a surface normal vector $n_i \in \mathbb{R}^3$ with $\|n_i\|=1$. This normal is typically derived from the underlying mesh vertices if the Gaussians are initialized from a mesh [S1, unofficial].
+*   Camera parameters (view and projection matrices).
 
 **Outputs:**
-*   A rendered normal map image $C(x,y)$, where each pixel contains a 3D vector representing the surface normal at that location.
+*   A rendered normal map $N_{img}(u,v) \in \mathbb{R}^3$ per pixel $(u,v)$.
+*   Optionally, a rendered color map with lighting applied.
 
 **Data Structures:**
-*   **Gaussian Attributes:** Each Gaussian $i$ stores a normal vector $n_i \in \mathbb{R}^3$ (normalized to unit length). This is stored as an additional attribute alongside position, rotation, scale, and opacity.
-*   **Render Target:** An image buffer of size $W \times H \times 3$, initialized to zero.
+*   **Gaussian Attributes:** Each Gaussian $i$ stores a 3D vector attribute $A_i$ for the normal. In the implementation described in [S1, unofficial], this normal vector is encoded as an RGB color value for the vertex/Gaussian. Specifically, the normal components $(n_x, n_y, n_z)$ are mapped to the red, green, and blue channels respectively. Since normals range from $[-1, 1]$, they are typically mapped to $[0, 1]$ for storage in standard image formats or tensors if not using signed float textures.
+*   **Render Buffer:** An image buffer of size $H \times W \times 3$ to accumulate the interpolated normal values.
 
 **Steps:**
-
-1.  **Normal Initialization (External Channel Source):**
-    If using the external channel method [S1, unofficial], compute the surface normal $n_i$ for each Gaussian from a source mesh (e.g., using PyTorch3D). Assign this $n_i$ to the Gaussian's normal attribute.
-    *   *Note:* If the source is a point cloud, normals may be estimated via local PCA or omitted if only position is available [S1, unofficial].
-
-2.  **Normal Field Approximation (Alternative Formulation):**
-    If estimating the average normal field $\mathcal{N}$ from a vector field $V$, attribute a single value $N_i$ to each Gaussian to approximate the integral of the normal field along the ray [S2].
-    *   The contribution $V_i$ is proportional to the integral of the Gaussian density weighted by the vector field gradient:
-        $$ V_i \propto \int_{\mathbb{R}^3} G_i(x) \cdot \mathbf{1}_{n_i^T(x-\mu_i) \geq 0} \nabla \log(1 - G_i(x)) dx $$
-    *   Due to symmetry around $n_i$, $V_i \propto n_i$. Thus, the normalized vector field $N_i \sim n_i$ [S2].
-    *   In practice, this simplifies to rendering the plane normals $n_i$ directly [S2].
-
-3.  **Rasterization and Alpha Blending:**
-    Project the 3D Gaussians onto the 2D image plane. For each pixel $(x,y)$, collect all overlapping Gaussians sorted by depth (front-to-back).
-    *   Compute the 2D covariance $\Sigma_{2D}$ for each Gaussian using the Jacobian of the projection transformation [G].
-    *   Compute the 2D Gaussian density $G_i(x,y)$ at the pixel center.
-    *   Compute the transmittance $T_i$ and weight $w_i$:
-        $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j G_j(x,y)) $$
-        $$ w_i = \alpha_i G_i(x,y) T_i $$
-    *   Accumulate the normal vector $C(x,y)$:
-        $$ C(x,y) = \sum_{i=1}^{N} w_i n_i $$
-    *   Normalize the result:
-        $$ \hat{n}(x,y) = \frac{C(x,y)}{\|C(x,y)\| + \epsilon} $$
-    *   *Pitfall:* If $\|C(x,y)\| \approx 0$ (e.g., in empty space or between disjoint surfaces), the normal is undefined. Handle by setting to a default value (e.g., $(0,0,1)$) or leaving as zero [G].
-
-4.  **Lighting Integration (Optional):**
-    To apply lighting, treat the rendered normal map $\hat{n}(x,y)$ as input to a standard shading model [S1, unofficial].
-    *   Example: Use a diffuse lighting function (e.g., `PyTorch3D.renderer.lighting`) with a point light source $L$ and view direction $v$:
-        $$ I(x,y) = \text{diffuse}(\hat{n}(x,y), L, v) $$
-    *   This allows the integration of dynamic lighting into the Gaussian volume rendering pipeline [S1, unofficial].
+1.  **Normal Computation (Initialization):** If the Gaussians are derived from a mesh (e.g., from The Stanford 3D Scanning Repository), compute the surface normal $n_i$ for each vertex or Gaussian center using a library such as PyTorch3D [S1, unofficial].
+2.  **Attribute Assignment:** Assign the computed normal $n_i$ to the Gaussian $i$'s external channel. In the specific implementation cited, this is done by setting the Gaussian's "RGB" attribute to the normal vector components [S1, unofficial].
+3.  **Rendering (Alpha Blending):** Render the Gaussians using the standard volume rendering equation for the external channel. For a pixel $p$, the rendered normal $N_p$ is the alpha-blended average of the normals of all overlapping Gaussians sorted by depth:
+    $$ N_p = \frac{\sum_{i \in \text{sorted}} \alpha_i n_i \prod_{j < i} (1 - \alpha_j)}{\sum_{i \in \text{sorted}} \alpha_i \prod_{j < i} (1 - \alpha_j)} $$
+    where $\alpha_i$ is the opacity of Gaussian $i$ at pixel $p$. Note: The source [S1, unofficial] describes interpolating the RGB value (normals) into images, implying standard alpha compositing of the normal vectors.
+4.  **Lighting Integration (Optional):** To apply lighting, first render the surface normals into an image-like map as described in Step 3. Then, use a diffuse lighting function (e.g., `PyTorch3D.renderer.lighting`) to compute the brightness under a point light source using the rendered normals and a predefined light position [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
-import torch.nn.functional as F
+import pytorch3d.renderer as pr
+import pytorch3d.structures
 
-def render_normals(gaussians, camera, image_size):
+def render_normals_with_lighting(gaussians, camera, light_position):
     """
-    Render surface normals from Gaussian ellipsoids.
+    Render surface normals from Gaussians and apply diffuse lighting.
     
     Args:
-        gaussians: Dict containing:
-            - means: (N, 3) mean positions
-            - covs: (N, 3, 3) covariance matrices (or scales/rotations)
-            - opacities: (N,) scalar opacities
-            - normals: (N, 3) unit normal vectors n_i
-        camera: Camera object with projection matrix and intrinsics
-        image_size: Tuple (H, W)
+        gaussians: List of Gaussian objects. Each has .mean (3,), .covariance (3,3), 
+                   and .normal (3,) derived from mesh vertices.
+        camera: Camera object with get_world_to_view_transform and get_projection_transform.
+        light_position: (3,) tensor, position of the point light in world space.
         
     Returns:
-        normals_map: (H, W, 3) rendered normal vectors
+        normal_map: (H, W, 3) tensor of rendered normals.
+        lit_color: (H, W, 3) tensor of lit color.
     """
-    N = gaussians['means'].shape[0]
-    H, W = image_size
+    # 1. Prepare Gaussian attributes for rendering
+    # Convert Gaussians to a format compatible with the renderer
+    # Note: Standard Gaussian Splatting renderers are custom. 
+    # This pseudocode assumes a generic differentiable rasterizer that accepts 
+    # per-primitive attributes.
     
-    # 1. Project Gaussians to 2D
-    # Compute 2D covariance and screen-space positions
-    # This step involves projecting 3D means and transforming covariances
-    # using the camera extrinsics and intrinsics.
-    # Let's assume a helper function `project_gaussians` exists that returns:
-    # - centers_2d: (N, 2)
-    # - covs_2d: (N, 2, 2)
-    # - depths: (N,)
-    # - view_weights: (N,) (optional, for view-dependent effects, ignored here)
+    means_3d = torch.stack([g.mean for g in gaussians]) # (N, 3)
+    covariances = torch.stack([g.covariance for g in gaussians]) # (N, 3, 3)
+    normals = torch.stack([g.normal for g in gaussians]) # (N, 3)
     
-    centers_2d, covs_2d, depths, _ = project_gaussians(gaussians, camera)
+    # Map normals to [0, 1] range if the renderer expects unsigned bytes/floats
+    # Normal n in [-1, 1] -> color c in [0, 1]
+    normals_mapped = (normals + 1.0) / 2.0 
     
-    # 2. Sort Gaussians by depth (front-to-back)
-    sort_indices = torch.argsort(depths, dim=0)
-    centers_2d = centers_2d[sort_indices]
-    covs_2d = covs_2d[sort_indices]
-    opacities = gaussians['opacities'][sort_indices]
-    normals = gaussians['normals'][sort_indices]
+    # 2. Render the Normal Map
+    # Use a differentiable renderer (e.g., VoGE or custom GS rasterizer)
+    # The renderer treats 'normals_mapped' as the color/attribute to blend
+    normal_map = render_gaussian_volume(means_3d, covariances, normals_mapped, camera)
     
-    # 3. Rasterize
-    # Initialize accumulators
-    accumulated_normal = torch.zeros((H, W, 3), device=gaussians['means'].device)
-    accumulated_opacity = torch.zeros((H, W), device=gaussians['means'].device)
+    # 3. Apply Lighting
+    # Convert normal map back to [-1, 1] range for lighting calculation
+    normals_unmapped = normal_map * 2.0 - 1.0
     
-    # Iterate over Gaussians (front-to-back)
-    for i in range(N):
-        center = centers_2d[i] # (2,)
-        cov = covs_2d[i]       # (2, 2)
-        alpha = opacities[i]   # ()
-        n_i = normals[i]       # (3,)
-        
-        # Compute 2D Gaussian values at pixel centers
-        # Create a grid of pixel coordinates
-        y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-        coords = torch.stack([x.float(), y.float()], dim=-1) # (H, W, 2)
-        
-        # Compute Mahalanobis distance: -0.5 * (p - mu)^T Sigma^-1 (p - mu)
-        diff = coords - center.unsqueeze(0).unsqueeze(0) # (H, W, 2)
-        # Inverse covariance
-        cov_inv = torch.inverse(cov) # (2, 2)
-        # Quadratic form
-        dist = -0.5 * torch.sum(diff @ cov_inv * diff, dim=-1) # (H, W)
-        
-        # Gaussian density
-        # Normalization factor for 2D Gaussian: 1 / (2 * pi * sqrt(det(Sigma)))
-        det = torch.det(cov)
-        norm_factor = 1.0 / (2.0 * torch.pi * torch.sqrt(torch.clamp(det, min=1e-6)))
-        density = norm_factor * torch.exp(dist) # (H, W)
-        
-        # Weighted contribution
-        weight = alpha * density # (H, W)
-        
-        # Update accumulators
-        # Transmittance T_i = product(1 - alpha_j * density_j) for j < i
-        # We can update accumulated_opacity to track sum of weights
-        # T_i = 1 - accumulated_opacity
-        T = 1.0 - accumulated_opacity # (H, W)
-        
-        contribution = weight * T.unsqueeze(-1) # (H, W, 1)
-        
-        accumulated_normal += contribution * n_i.unsqueeze(0).unsqueeze(0) # (H, W, 3)
-        accumulated_opacity += weight * T # (H, W)
-        
-        # Early exit if fully opaque? Not strictly necessary for correctness but for speed.
-        # If accumulated_opacity >= 1 - epsilon, break.
-        
-    # Normalize normals
-    norm_length = torch.norm(accumulated_normal, dim=-1, keepdim=True) # (H, W, 1)
-    # Avoid division by zero
-    norm_length = torch.clamp(norm_length, min=1e-6)
-    normals_map = accumulated_normal / norm_length # (H, W, 3)
+    # Ensure normals are normalized (optional but recommended for lighting)
+    normals_unmapped = torch.nn.functional.normalize(normals_unmapped, dim=-1)
     
-    return normals_map
+    # Calculate diffuse lighting
+    # Light direction is from surface to light
+    # Assuming camera is at origin or known position, we need surface positions.
+    # For simplicity, assuming we have depth or can approximate surface position.
+    # If only normals are rendered, we might assume a flat surface or use depth.
+    # Here we assume we also render depth or have a way to get surface points.
+    # If not, lighting cannot be accurately computed without depth.
+    # However, the source [S1, unofficial] implies using PyTorch3D lighting function.
+    
+    # Example using PyTorch3D's lighting module if surface points were available:
+    # points = ... # (H, W, 3) surface points
+    # lights = pr.PointLights(location=[light_position], diffuse_color=[[1.0, 1.0, 1.0]])
+    # lit_color = lights.diffuse_shading(normals_unmapped, points)
+    
+    # Since the source specifically mentions rendering normals then using lighting,
+    # and VoGE is a volume renderer, the "lit color" might just be the normal map
+    # if no depth is available, or the lighting is applied to the base color 
+    # using the rendered normals.
+    
+    return normal_map, normals_unmapped # Lit color calculation requires depth/points
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Fuzziness:** The rendered normals may have slightly fuzzier boundaries compared to a mesh renderer because Gaussians are volumetric [S1, unofficial].
+*   **Normalization:** Normal vectors must be normalized before lighting calculations to avoid incorrect shading [S1, unofficial].
+*   **Coordinate Systems:** Ensure consistent coordinate systems between the mesh normal computation (PyTorch3D) and the rendering pipeline.
 
 ## Subtopics
 
 ### [Learnable Normals Parameterization](9615-learnable-normals-parameterization.md)
-A parameterization for learnable surface normals of Gaussians that uses a sign scalar and a direction vector to stabilize optimization and allow normal flipping without rotation [9615-learnable-normals-parameterization.md]. It sets apart from fixed normals by allowing the normals to be optimized during training, adapting to the geometry inferred from the data. Choose this when normals are not known a priori or when the initial mesh-based normals are inaccurate.
+A parameterization for learnable surface normals of Gaussians that uses a sign scalar and a direction vector to stabilize optimization and allow normal flipping without rotation. It solves the instability inherent in naive vector parameterization, where flipping a normal requires a 180-degree rotation that causes convergence to inaccurate local minima. It sets itself apart from sibling methods like [Normal Field Supervision via Rendering and Depth Derivatives](9627-normal-field-supervision-via-rendering-and-depth-derivatives.md) by explicitly modifying the Gaussian's internal attribute representation rather than relying on external gradient supervision.
 
 ### [Normal Field Supervision via Rendering and Depth Derivatives](9627-normal-field-supervision-via-rendering-and-depth-derivatives.md)
-The normal field $\mathcal{N}$ is supervised by enforcing consistency between rendered normal maps and the image-derivative of the depth [9627-normal-field-supervision-via-rendering-and-depth-derivatives.md]. It sets apart from external channel methods by deriving normals from the scene geometry (depth) rather than a source mesh. Choose this when depth information is available and a mesh source is not.
+This method supervises the learnable surface normal field of a 3D Gaussian Splatting representation by enforcing geometric consistency between the rendered normal maps and the spatial derivatives of the rendered depth map. While [Surface Normal Rendering via External Channel](2099-surface-normal-rendering-via-external-channel.md) provides the mechanism to render normals as an external attribute, this method provides the loss signal. It differs from sibling methods like [Learnable Normals Parameterization](9615-learnable-normals-parameterization.md) by relying on self-supervision from the scene's own depth geometry rather than external pseudo-normal targets or lighting priors.
+
+### Rendering Normal Field with Gaussians
+This variant focuses on approximating the integral of the normal field along the ray by attributing a single value $N_i$ per Gaussian [S2]. For a vector field $V$, it selects $V_i$ proportional to the integral of the i-th term of the sum multiplied by the normalized density of the Gaussian [S2]. Due to symmetry around $n_i$, $V_i \propto n_i$, and thus the normalized vector field $N_i \sim n_i$. This allows rendering plane normals $n_i$ with Gaussian splatting to estimate the average normal field value [S2]. The integral is defined as:
+$$ V_i \propto \int_{\mathbb{R}^3} G_i(x) \cdot \mathbf{1}_{n_i^T(x-\mu_i) \geq 0} \nabla \log(1 - G_i(x)) dx $$
+[S2]
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot H \cdot W)$ per frame if rasterizing naively per Gaussian, or $O(N + H \cdot W)$ with efficient rasterization (e.g., tile-based). The complexity is dominated by the number of Gaussians $N$ and image resolution $H \times W$.
-*   **Memory Complexity:** $O(N)$ to store Gaussian attributes (including normals) and $O(H \cdot W)$ for the output buffer.
-*   **Performance:** Rendering quality improves significantly with the number of Gaussians, though boundaries may be slightly fuzzier compared to mesh renderers [S1, unofficial].
-*   **Strengths:** Enables lighting integration and normal-based supervision for Gaussian splats, which lack native surface geometry.
-*   **Limitations:** Normals are an approximation; they do not represent true surface curvature or occlusion handling beyond alpha blending. Accuracy depends on the quality of the initial normal assignment or the depth derivative estimation.
+*   **Time Complexity:** Linear with respect to the number of Gaussians $N$ and pixels $P$, similar to standard Gaussian Splatting rendering $O(N \cdot P)$ or $O(N + P)$ depending on implementation details like spatial hashing.
+*   **Memory Complexity:** $O(N)$ to store the additional normal attribute per Gaussian.
+*   **Performance:** Rendering quality improves significantly with the number of Gaussians [S1, unofficial]. However, VoGE renderer gives slightly fuzzier boundaries compared to mesh renderers [S1, unofficial].
+*   **Strengths:** Enables lighting integration and normal-based supervision for Gaussian Splatting, which natively lacks surface information.
+*   **Limitations:** Normals are an approximation derived from the volumetric representation; boundaries are fuzzier than explicit mesh rendering.
 
 ## Background
-The method originates from the VoGE (Volume Gaussian Ellipsoids) renderer, which treats Gaussian ellipsoids as volumetric primitives [S1, unofficial]. Since Gaussian splats are inherently volumetric and do not define a surface, surface normals must be introduced externally. The approach was demonstrated using meshes from the Stanford 3D Scanning Repository (Bunny, Dragon, Armadillo) [S1, unofficial]. It leverages PyTorch3D for normal computation and lighting, integrating these into the Gaussian rendering pipeline [S1, unofficial].
+This method was introduced in the context of VoGE (Volume Gaussian Ellipsoids), a differentiable volume renderer using Gaussian ellipsoids for analysis-by-synthesis [S1, unofficial]. It was developed to bridge the gap between volumetric Gaussian representations and surface-based analysis tasks like lighting and normal supervision. The approach leverages PyTorch3D for normal computation and lighting [S1, unofficial].
 
 ## Sources
 [S1] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26 (unofficial)

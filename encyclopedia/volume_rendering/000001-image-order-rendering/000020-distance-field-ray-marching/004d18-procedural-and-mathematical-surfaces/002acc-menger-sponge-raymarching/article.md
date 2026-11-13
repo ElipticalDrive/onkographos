@@ -1,0 +1,172 @@
+# Menger Sponge Raymarching
+
+Also called: Menger Journey, Menger Tower, Menger sponge
+
+## Overview
+Menger Sponge Raymarching is a procedural distance-field technique that renders the Menger sponge fractal by iteratively applying a recursive distance function [S1, unofficial]. It distinguishes itself from general fractal raymarching by using a specific iterative modulo-based SDF construction that efficiently approximates the infinite-detail sponge geometry within a bounded volume, combined with a floor plane for grounding [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera position `prp`, view reference point `vrp`, up vector `vuv`, screen resolution `resolution`, and pixel coordinates.
+*   **Outputs:** Fragment color `gl_FragColor`.
+
+**Data Structures:**
+*   `vec2` return type for SDF functions: `.x` stores the signed distance, `.y` stores the material ID (0 for floor, 1 for sponge).
+*   `vec3` for positions and vectors.
+*   `float` for scalar values.
+
+**Parameters:**
+*   `maxd`: Maximum ray march depth, typically `100.0` [S1, unofficial].
+*   `epsilon` (`e`): Step size for normal calculation, typically `vec3(0.02, 0, 0)` [S1, unofficial].
+*   `box_size` (`b`): Base box dimensions, typically `vec3(4.0, 4.0, 4.0)` [S1, unofficial].
+*   `iterations`: Number of Menger iterations, typically `3` [S1, unofficial].
+*   `min_dist`: Hit threshold, typically `0.001` [S1, unofficial].
+
+**Algorithm:**
+
+1.  **Camera Setup:**
+    *   Calculate view direction `vpn = normalize(vrp - prp)`.
+    *   Calculate basis vectors `u = normalize(cross(vuv, vpn))` and `v = cross(vpn, u)`.
+    *   Calculate screen coordinate `scrCoord = vcv + vPos.x * u * aspect + vPos.y * v`, where `vcv = prp + vpn` and `aspect = resolution.x / resolution.y`.
+    *   Ray direction `scp = normalize(scrCoord - prp)`.
+
+2.  **Raymarching Loop:**
+    *   Initialize `f = 1.0` (accumulated distance) and `d = vec2(0.02, 0.0)` (current distance and material).
+    *   Loop up to 256 times:
+        *   If `abs(d.x) < 0.001` or `f > 100.0`, break.
+        *   `f += d.x`.
+        *   `p = prp + scp * f`.
+        *   `d = distance_to_obj(p)`.
+
+3.  **SDF Evaluation (`distance_to_obj`):**
+    *   Compute `floor_dist = obj_floor(p)`.
+    *   Compute `sponge_dist = obj_menger(p)`.
+    *   Return `obj_union(floor_dist, sponge_dist)`.
+
+4.  **Menger SDF (`obj_menger`):**
+    *   Initialize `d2 = obj_box(p)` and `s = 1.0`.
+    *   Loop `m` from 0 to 2 (3 iterations):
+        *   `a = mod(p * s, 2.0) - 1.0`.
+        *   `s *= 3.0`.
+        *   `r = 1.0 - 4.0 * abs(a)`.
+        *   `c = obj_cross(r) / s`.
+        *   `d2.x = max(d2.x, c.x)`.
+    *   Return `vec2(d2.x, 1.0)`.
+
+5.  **Cross SDF (`obj_cross`):**
+    *   Define `inf = 100.0`.
+    *   `da = obj_box_s(p, vec3(inf, 2.0, 2.0))`.
+    *   `db = obj_box_s(p.yzx, vec3(2.0, inf, 2.0))`.
+    *   `dc = obj_box_s(p.zxy, vec3(2.0, 2.0, inf))`.
+    *   Return `vec2(min(da.x, min(db.x, dc.x)), 1.0)`.
+
+6.  **Box SDF (`obj_box_s`):**
+    *   `di = abs(p) - b`.
+    *   `mc = max(di.x, max(di.y, di.z))`.
+    *   `d = min(mc, length(max(di, 0.0)))`.
+    *   Return `vec2(d, 1.0)`.
+
+7.  **Floor SDF (`obj_floor`):**
+    *   Return `vec2(p.y + 10.0, 0.0)`.
+
+8.  **Union (`obj_union`):**
+    *   If `obj0.x < obj1.x`, return `obj0`, else return `obj1`.
+
+9.  **Shading:**
+    *   If hit (`f < maxd`):
+        *   Compute normal `n` using central differences with `e = vec3(0.02, 0, 0)`.
+        *   `b = dot(n, normalize(prp - p))`.
+        *   Color `c` is `floor_color(p)` if material ID is 0, else `prim_c(p)`.
+        *   Final color: `(b * c + pow(b, 60.0)) * (1.0 - f * 0.01)`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def maxcomp(p):
+    return max(p[0], max(p[1], p[2]))
+
+def obj_box_s(p, b):
+    di = [abs(p[i]) - b[i] for i in range(3)]
+    mc = maxcomp(di)
+    d = min(mc, math.sqrt(sum(max(d, 0.0)**2 for d in di)))
+    return (d, 1.0)
+
+def obj_box(p):
+    b = [4.0, 4.0, 4.0]
+    return obj_box_s(p, b)
+
+def obj_cross(p):
+    inf = 100.0
+    da = obj_box_s(p, [inf, 2.0, 2.0])
+    db = obj_box_s([p[1], p[2], p[0]], [2.0, inf, 2.0])
+    dc = obj_box_s([p[2], p[0], p[1]], [2.0, 2.0, inf])
+    min_dist = min(da[0], min(db[0], dc[0]))
+    return (min_dist, 1.0)
+
+def obj_menger(p):
+    d2 = obj_box(p)
+    s = 1.0
+    for m in range(3):
+        a = [(p[i] * s) % 2.0 - 1.0 for i in range(3)]
+        s *= 3.0
+        r = [1.0 - 4.0 * abs(a[i]) for i in range(3)]
+        c = obj_cross(r)
+        d2 = (max(d2[0], c[0]), 1.0)
+    return d2
+
+def obj_floor(p):
+    return (p[1] + 10.0, 0.0)
+
+def obj_union(obj0, obj1):
+    if obj0[0] < obj1[0]:
+        return obj0
+    else:
+        return obj1
+
+def distance_to_obj(p):
+    return obj_union(obj_floor(p), obj_menger(p))
+
+def raymarch(prp, scp, maxd=100.0):
+    f = 1.0
+    d = (0.02, 0.0)
+    for i in range(256):
+        if abs(d[0]) < 0.001 or f > maxd:
+            break
+        f += d[0]
+        p = [prp[i] + scp[i] * f for i in range(3)]
+        d = distance_to_obj(p)
+    return f, d
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of raymarching steps and the number of Menger iterations (constant 3 in the reference implementation). Each step involves a constant number of arithmetic operations.
+*   **Memory Complexity:** Constant, $O(1)$, as no scene data structures are stored.
+*   **Performance:** The iterative modulo operations are computationally inexpensive but can cause driver instability on certain NVIDIA hardware (e.g., GeForce GTX 660 with driver R334.67) under Windows, leading to "lost connection" errors [S1, unofficial]. AMD hardware (e.g., Radeon R7) has been tested without issues [S1, unofficial].
+*   **Strengths:** Efficiently renders complex fractal geometry without explicit mesh data.
+*   **Limitations:** Fixed iteration count limits detail depth. Driver compatibility issues on specific NVIDIA hardware.
+
+## Background
+The technique was popularized by Inigo Quilez's articles on Menger sponges and was implemented in GLSL by Geeks3D in a 2014 code sample update [S1, unofficial]. It is used in real-time raymarching demos and shader art.
+
+## Subtopics
+
+### Menger Sponge Variations
+*   **What it is:** Alternative implementations of the Menger SDF, such as `obj_menger_simple`, which uses a single iteration of the cross operation instead of the full loop [S1, unofficial].
+*   **Difference:** Simpler but less detailed than the full iterative version.
+*   **When to choose:** For simpler fractal-like structures or performance-critical applications where full detail is not required.
+*   **Link:** [Menger Sponge Raymarching](52-menger-sponge-raymarching.md)
+
+### Floor Plane Integration
+*   **What it is:** The addition of a simple plane SDF (`obj_floor`) to the scene to provide a ground for the Menger sponge [S1, unofficial].
+*   **Difference:** Adds context and lighting reference to the floating fractal.
+*   **When to choose:** When a grounded scene is desired.
+*   **Link:** [Menger Sponge Raymarching](52-menger-sponge-raymarching.md)
+
+## Sources
+
+[S1] (GLSL) Menger Sponge, Raymarching Code Samples Updated, https://www.geeks3d.com/20140201/glsl-menger-sponge-raymarching-code-samples-updated/, fetched 2026-10-26 (unofficial)

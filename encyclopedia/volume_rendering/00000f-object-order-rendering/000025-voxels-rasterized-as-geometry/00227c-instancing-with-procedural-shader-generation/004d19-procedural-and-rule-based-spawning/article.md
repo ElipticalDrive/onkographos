@@ -1,29 +1,34 @@
 # Procedural and Rule-Based Spawning
 
-Also called: Voxel Instancing, Procedural Object Instancing
 
 ## Overview
-Procedural and Rule-Based Spawning is a method for automatically generating and placing 3D instances (such as grass, rocks, or trees) onto voxel terrain surfaces using procedural rules rather than manual placement. It solves the problem of efficiently populating large-scale environments with high-density natural features by decoupling instance generation from the static voxel chunk structure. It distinguishes itself from sibling methods like [Surface-based Instancing with Noise Modulation](1582-surface-based-instancing-with-noise-modulation.md) by integrating directly with the voxel terrain's LOD hierarchy and Signed Distance Field (SDF) data for surface alignment, and from [Procedural Particle Rendering](2926-procedural-particle-rendering.md) by supporting complex 3D geometry and scene instances rather than simple billboards.
+Procedural and Rule-Based Spawning is a family of techniques for populating voxel terrains with large numbers of objects (e.g., grass, rocks, trees) by evaluating spawn rules against terrain geometry rather than manual placement [S1]. It distinguishes itself from static instancing by integrating tightly with the voxel terrain's Level of Detail (LOD) system and Signed Distance Field (SDF) surface snapping, ensuring instances align with uneven terrain geometry automatically [S1].
 
 ## Shared principles
-The family operates on a library-driven model where spawn rules are defined in a `VoxelInstanceLibrary`. Each rule (`VoxelInstanceLibraryItem`) specifies an `lod_index` that maps the instance type to a specific terrain Level of Detail (LOD) chunk resolution. Spawning is driven by a procedural `generator` that evaluates conditions (e.g., noise thresholds) at candidate positions within eligible chunks.
+The family operates by evaluating spawn rules defined in a `VoxelInstanceLibrary` against eligible terrain chunks. The core mechanism involves:
 
-Key shared mechanisms include:
-1.  **LOD-Based Eligibility**: Instances are only spawned on chunks where `chunk.lod_level == item.lod_index`. This allows distant instances to use lower-resolution terrain data for faster generation.
-2.  **Surface Snapping via SDF**: To align instances to uneven terrain, the system queries the `VoxelGenerator` for Signed Distance Field (SDF) values. If `snap_to_generator_sdf_enabled` is true, the system interpolates between the candidate position and nearby samples to find the zero-crossing (surface). This is an interpolation approximation, not exact ray-casting.
-3.  **Normal Offset**: After snapping, the instance is displaced along the interpolated surface normal by `offset_along_normal` to prevent z-fighting or sinking into the mesh.
-4.  **Persistence**: Instances can be marked `persistent`. If enabled, their positions are saved to a `VoxelStream` (e.g., SQLite). Persistent instances retain their position across terrain edits, while non-persistent instances are regenerated when the terrain changes.
-5.  **Upward Alignment**: Instances are rotated to align with the terrain's upward direction. In 'Sphere mode', alignment is based on the local origin of the terrain (suitable for planets); otherwise, it uses a fixed world up vector.
+1.  **Chunk Eligibility**: The system iterates through loaded voxel chunks. For each item in the library, it checks if `chunk.lod_level == item.lod_index` [S1].
+2.  **Candidate Generation**: The item's `generator` evaluates conditions (e.g., noise thresholds) at candidate positions within eligible chunks [Parent].
+3.  **Surface Snapping (Optional)**:
+    *   If `snap_to_generator_sdf_enabled` is true, the system queries the `VoxelGenerator` for SDF values at the candidate position and nearby samples [S1].
+    *   It interpolates between samples to find the zero-crossing (surface) [S1].
+    *   *Pitfall*: This is an interpolation approximation, not exact ray-casting. It may fail or produce errors if the terrain is edited after generation, as the generator's cached data may not reflect recent changes [S1].
+4.  **Normal Offset**: The instance position is displaced along the interpolated surface normal by `offset_along_normal` [S1].
+5.  **Alignment**:
+    *   If `up_mode` is 'Sphere mode', instances are rotated to align with the local origin of the terrain (suitable for planets) [S1].
+    *   Otherwise, they align with a fixed world up vector [S1].
+6.  **Instance Creation**: Instances are created as either `MultiMesh` (high-performance, static) or `Scene` (dynamic, scriptable) types [S1].
+7.  **Persistence**: If `persistent` is true and a `VoxelStream` is active, the instance's ID and position are saved. Editing the terrain marks these instances as modified, preventing regeneration and saving their new positions [S1].
 
 ## Subtopics
 
 ### [Voxel Instancing System](12566-voxel-instancing-system.md)
-The Voxel Instancing System is a method for procedurally spawning numerous 3D objects (instances) onto a voxel terrain surface. It solves the problem of efficiently rendering natural features like grass, rocks, and trees by decoupling instance generation from the voxel chunk structure, allowing for high-density placement. It distinguishes itself from sibling methods like [Block LOD Instancing](12572-block-lod-instancing.md) by supporting two distinct instance types: highly optimized `Multimesh` instances for bulk rendering and flexible `Scene` instances for interactive objects, while utilizing a procedural generator with Signed Distance Field (SDF) snapping for surface alignment. See [Voxel Instancing System](12566-voxel-instancing-system.md).
+The Voxel Instancing System is a procedural spawning mechanism designed for natural environments, such as grass, rocks, trees, and semi-random foliage. It solves the problem of efficiently populating large voxel terrains with thousands of objects by leveraging GPU-accelerated `MultiMesh` rendering for high-performance bulk placement, while also supporting CPU-side `Scene` instances for complex, interactive entities. It distinguishes itself from general geometry instancing by integrating tightly with the voxel terrain's Level of Detail (LOD) system and Signed Distance Field (SDF) surface snapping, ensuring instances align with uneven terrain geometry without requiring manual placement. See [Voxel Instancing System](12566-voxel-instancing-system.md).
 
 ### [Block LOD Instancing](12572-block-lod-instancing.md)
-Block LOD Instancing is a method for placing procedural instances on voxel terrain by associating them with specific Level of Detail (LOD) chunks. It solves the problem of efficiently rendering large numbers of objects at varying distances by spawning them on lower-resolution meshes for distant areas and higher-resolution meshes for close ranges. It differs from [Voxel Instancing System](12566-voxel-instancing-system.md) by explicitly tying spawn eligibility to the terrain's LOD hierarchy rather than a uniform grid or fixed spatial partition. See [Block LOD Instancing](12572-block-lod-instancing.md).
+Block LOD Instancing is a procedural spawning method that determines instance eligibility and placement precision based on the voxel terrain's Level of Detail (LOD) hierarchy. It solves the performance-precision trade-off in large-scale terrain rendering by spawning distant, large-scale objects on low-resolution (high-index) chunks and local, detailed objects on high-resolution (low-index) chunks. It differs from standard instancing by tightly coupling the spawn range to the terrain's LOD structure, allowing for faster generation at distance at the cost of geometric precision near sharp terrain features. See [Block LOD Instancing](12572-block-lod-instancing.md).
 
-### Procedural Object Instancing
+#### Procedural Object Instancing
 **Definition**: Items spawn based on procedural rules via a built-in generator, rather than manual painting. The generator is accessed via the 'generator' property of `VoxelInstanceLibraryItem` [S1].
 **Pitfalls**:
 *   **Editor Editing**: Manual editing of instances in the editor is not supported. Only procedural generation defines spawn locations [S1].
@@ -31,7 +36,7 @@ Block LOD Instancing is a method for placing procedural instances on voxel terra
 *   **Streaming Events**: `VoxelInstancer` registers to parent block events to know when to spawn. This is not available to the script API of `VoxelLodTerrain` [S1].
 
 ## Background
-The method is implemented in the Voxel Tools plugin for the Godot Engine. It leverages the `VoxelInstancer` node, `VoxelInstanceLibrary`, and `VoxelGenerator` classes to manage instance lifecycle, generation rules, and terrain data access. The system relies on the terrain's ability to provide SDF data for surface snapping, requiring generators that support series generation (arbitrary floating-point queries).
+The Voxel Instancing System is part of the Voxel Tools suite for the Godot engine. It leverages Godot's `MultiMeshInstance` for performance and integrates with `VoxelGeneratorGraph` for SDF queries. The system was designed to handle the specific constraints of voxel terrain rendering, where geometry changes dynamically and LODs vary by distance. The persistent instance feature relies on `VoxelStreamSQLite` for data storage.
 
 ## Sources
 [S1] Instancing - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/instancing/, fetched 2026-10-27

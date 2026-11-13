@@ -3,62 +3,96 @@
 Also called: Gabor Transform
 
 ## Overview
-The Windowed Fourier Transform (WFT), also known as the Gabor Transform, addresses the lack of spatial localization inherent in the standard Fourier Transform. While the standard Fourier Transform provides a global frequency measure by integrating over the entire spatial domain, making it difficult to locate irregularities [S1, unofficial], the WFT uses a translated window function to cover the signal, allowing for the localization of these irregularities [S1, unofficial]. It builds on [Fourier Transform](2288-fourier-transform.md) by introducing spatial constraints to the frequency analysis.
+The Windowed Fourier Transform (WFT), also known as the Gabor Transform, addresses the lack of spatial localization inherent in the standard Fourier Transform [S1, unofficial]. While the standard Fourier Transform provides a measure of high-frequency irregularities over the entire spatial domain, it makes it difficult to determine the position of these irregularities [S1, unofficial]. The WFT solves this by using a translated window function within the Fourier integral, allowing for the localization of signal features across the domain [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A signal $f(x)$ belonging to $L^2(\mathbb{R})$ [S1, unofficial].
-*   **Output:** A 2D representation of the signal in the time-frequency (or space-frequency) domain, denoted as $G_f(u, \omega)$, where $u$ is the translation parameter and $\omega$ is the frequency parameter [S1, unofficial].
+**Inputs and Outputs**
+*   **Input:** A function $f(x) \in L^2(\mathbb{R})$ representing the signal or volume data.
+*   **Input:** A window function $g(x)$, typically a Gaussian or similar localized function.
+*   **Input:** Translation parameter $u$ (spatial position) and frequency parameter $w$.
+*   **Output:** The complex-valued transform coefficient $Gf(u, w)$.
 
-**Data Structures:**
-The output is typically stored as a 2D array or matrix where one axis represents the translation (position) and the other represents the frequency. The values are complex numbers representing the amplitude and phase of the signal component at that specific position and frequency.
+**Data Structures**
+The output is a 2D array (or 3D if considering time $t$ in $Gf(u, t, w)$) storing coefficients indexed by spatial position $u$ and frequency $w$.
 
-**Method:**
-1.  **Define the Window Function:** Select a window function $g(x)$ that is localized in space. The window is typically symmetric and decays to zero at its boundaries.
-2.  **Translate and Modulate:** For a specific position $u$ and frequency $\omega$, the window function is translated by $u$ and modulated by a complex exponential $e^{-i\omega x}$ [S1, unofficial].
-3.  **Compute the Integral:** The transform value at $(u, \omega)$ is computed by integrating the product of the signal $f(x)$, the translated window $g(x-u)$, and the complex exponential over the entire domain [S1, unofficial].
-
-**Formula:**
+**Formulas**
 The Windowed Fourier Transform of a function $f(x)$ is defined by [S1, unofficial]:
 
-$$ G_f(u, \omega) = \int_{-\infty}^{\infty} f(x) g(x - u) e^{-i\omega x} \, dx $$
+$$ Gf(u, w) = \int_{-\infty}^{\infty} f(x) g(x - u) e^{-iwx} dx $$
 
 Where:
-*   $G_f(u, \omega)$ is the WFT coefficient at translation $u$ and frequency $\omega$.
 *   $f(x)$ is the input signal.
-*   $g(x)$ is the window function.
-*   $u$ is the translation parameter (center of the window).
-*   $\omega$ is the frequency parameter.
-*   $i$ is the imaginary unit.
+*   $g(x - u)$ is the window function centered at position $u$.
+*   $e^{-iwx}$ is the complex exponential kernel.
+*   $u$ is the translation parameter (spatial location).
+*   $w$ is the frequency parameter.
 
-**Parameters:**
-*   **Window Function $g(x)$:** Common choices include Gaussian, Hanning, or Hamming windows. The choice affects the trade-off between spatial and frequency resolution.
-*   **Step Sizes:** In discrete implementations, step sizes for $u$ and $\omega$ determine the resolution of the output grid.
+**Steps**
+1.  Select a window function $g(x)$ with compact support or rapid decay (e.g., Gaussian).
+2.  For each desired spatial position $u$:
+    a. Shift the window to $g(x - u)$.
+    b. Multiply the input signal $f(x)$ by the shifted window $g(x - u)$.
+    c. Compute the Fourier Transform of the product $f(x)g(x - u)$ with respect to frequency $w$.
+3.  Store the resulting complex coefficient $Gf(u, w)$ for the specific $u$ and $w$.
+4.  Repeat for all $u$ and $w$ to cover the domain.
 
-**Edge Cases and Pitfalls:**
-*   **Boundary Effects:** If the signal is finite, the window may extend beyond the signal boundaries, requiring zero-padding or window adjustment.
-*   **Resolution Trade-off:** The width of the window function determines the trade-off between spatial and frequency resolution. A narrower window provides better spatial localization but poorer frequency resolution, and vice versa [S1, unofficial].
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def windowed_fourier_transform(f, g, u_values, w_values):
+    """
+    Computes the Windowed Fourier Transform (Gabor Transform).
+    
+    Args:
+        f: Array of input signal values f(x) at spatial points x.
+        g: Array of window function values g(x) at spatial points x.
+        u_values: Array of translation positions u.
+        w_values: Array of frequency values w.
+        
+    Returns:
+        Gf: 2D array of coefficients Gf(u, w).
+    """
+    # Assume x is defined on a grid corresponding to f and g
+    # x = np.linspace(x_min, x_max, len(f))
+    
+    Gf = np.zeros((len(u_values), len(w_values)), dtype=complex)
+    
+    for i, u in enumerate(u_values):
+        # Shift the window to position u
+        # g_shifted[x] = g[x - u]
+        # Note: In discrete implementation, this requires interpolation or array indexing
+        g_shifted = np.roll(g, int(u / dx)) if u is discrete step else interpolate_shift(g, u)
+        
+        # Multiply signal by shifted window
+        windowed_signal = f * g_shifted
+        
+        for j, w in enumerate(w_values):
+            # Compute Fourier component at frequency w
+            # Integral approximation: sum(windowed_signal * exp(-i*w*x) * dx)
+            kernel = np.exp(-1j * w * x)
+            Gf[i, j] = np.sum(windowed_signal * kernel) * dx
+            
+    return Gf
+```
+
+**Edge Cases and Pitfalls**
+*   **Boundary Effects:** The window function must decay to zero at its edges to minimize artifacts when the window moves near the boundaries of the signal domain [S1, unofficial].
+*   **Resolution Trade-off:** The width of the window $g(x)$ determines the trade-off between spatial and frequency resolution. A narrow window provides good spatial localization but poor frequency resolution, and vice versa [S1, unofficial].
 
 ## Subtopics
 
-### Aperture Apodization
-Aperture apodization is a technique used to suppress side lobe leakage and aperture diffraction artifacts that arise from sharp intensity edges of a rectangular aperture during numerical reconstruction, such as in holography [S2]. It works by smoothly bringing the aperture edges to zero, which prevents the side lobes that would otherwise be produced upon propagation [S2]. A common implementation uses a 1D Hanning window function defined as [S2]:
-
-$$ h_n(x) = \cos^2\left(\frac{\pi x}{2\alpha}\right) $$
-
-where $\alpha$ is the full width at half maximum (FWHM) [S2]. A potential limitation is a decrease in resolution due to the limited signal area after apodization [S2].
+### [Aperture Apodization](10803-aperture-apodization.md)
+A technique used in numerical holographic reconstruction to suppress side-lobe leakage and diffraction artifacts caused by sharp intensity edges of a rectangular synthetic aperture. It works by smoothly tapering the aperture edges to zero. It is applied after selecting a sub-region of the hologram to define a specific viewpoint.
 
 ## Operating characteristics
-*   **Time Complexity:** The direct computation of the WFT for all positions and frequencies is $O(N^2)$ for a signal of length $N$, similar to the standard Fourier Transform, but with an additional factor due to the windowing. Fast algorithms using the Fast Fourier Transform (FFT) can reduce this to $O(N \log N)$ if the window is fixed and the translation is uniform.
-*   **Memory Complexity:** $O(N \cdot M)$ where $N$ is the signal length and $M$ is the number of frequency bins, as the output is a 2D representation.
-*   **Strengths:** Provides simultaneous time (or space) and frequency information, allowing for the localization of signal features [S1, unofficial].
-*   **Limitations:** The choice of window function and its width involves a trade-off between spatial and frequency resolution (Heisenberg-Gabor limit). It is less efficient than the standard Fourier Transform for global frequency analysis.
-*   **When to Use:** When the signal is non-stationary and it is necessary to analyze how the frequency content changes over time or space [S1, unofficial].
-*   **When Not to Use:** When only global frequency information is needed, or when computational resources are severely limited and the signal is stationary.
+*   **Complexity:** The computational cost is $O(N \cdot M \cdot K \log K)$ or $O(N \cdot M \cdot K)$ depending on implementation, where $N$ is the number of spatial samples, $M$ is the number of translation positions $u$, and $K$ is the number of frequency samples $w$. This is significantly higher than the standard FFT.
+*   **Memory:** Requires storing the 2D (or 3D) coefficient array, which can be large for high-resolution spatial and frequency sampling.
+*   **Strengths:** Provides simultaneous time/space and frequency information, allowing for the localization of irregularities [S1, unofficial].
+*   **Limitations:** Higher computational cost than standard Fourier methods. Choice of window function affects results.
 
 ## Background
-The Windowed Fourier Transform was introduced by Dennis Gabor in the context of signal analysis [S1, unofficial]. Gabor proposed the use of a spatial window in the Fourier integral to localize the information provided by the Fourier transform, addressing the limitation that the standard Fourier transform covers the whole spatial domain and is not spatially localized [S1, unofficial]. This method has been applied in various fields, including volume rendering of multiresolution decomposed data [S1, unofficial] and computer-generated holography [S2].
+The Windowed Fourier Transform was defined by Gabor [15] (cited in [S1, unofficial]) to localize the information provided by the Fourier Transform. It is a classical theory for multiresolution decomposition [S1, unofficial]. It is used in direct rendering of multiresolution decomposed volume data [S1, unofficial].
 
 ## Sources
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
-[S2] Three-dimensional rendering of computer-generated holograms acquired from point-clouds on light field displays, https://doi.org/10.1117/12.2237581, fetched 2026-11-04

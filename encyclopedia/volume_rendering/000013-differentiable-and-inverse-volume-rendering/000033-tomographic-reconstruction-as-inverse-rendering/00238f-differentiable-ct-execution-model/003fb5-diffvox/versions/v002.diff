@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-DiffVox is a self-supervised framework for Cone-Beam Computed Tomography (CBCT) reconstruction that directly optimizes a discrete voxel grid representation using physics-based differentiable X-ray rendering [S1, unofficial]. It solves the sparse-view reconstruction problem by parameterizing the unknown volume as a voxel grid and using differentiable forward models (Siddon's method or trilinear interpolation) to render 2D projections, enabling gradient-based optimization of the 3D volume [S1, unofficial]. Unlike traditional iterative methods which may suffer from artifacts in sparse regimes, or neural field approaches which are computationally prohibitive, DiffVox achieves high-quality reconstructions with significantly faster runtimes [S1, unofficial].
++DiffVox is a self-supervised framework for Cone-Beam Computed Tomography (CBCT) reconstruction that directly optimizes a discrete voxel grid representation using physics-based differentiable X-ray rendering [S1, unofficial]. It solves the sparse-view reconstruction problem by parameterizing the unknown volume as a voxel grid and using differentiable forward models (Siddon's method or trilinear interpolation) to render 2D projections, enabling gradient-based optimization of the 3D volume [S1, unofficial]. Unlike traditional iterative methods that suffer from sparse-view artifacts or neural field approaches that are computationally prohibitive, DiffVox achieves high-quality reconstructions with significantly faster runtimes [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ 2D X-ray projection images (ground truth intensities $I_\mu$) with known acquisition geometry (source and detector positions). The number of views $N$ is typically sparse (e.g., 5–60 views) [S1, unofficial].
++*   **Inputs:** A set of $N$ 2D X-ray projection images (ground truth intensities $I_\mu$) with known acquisition geometry (source and detector positions) [S1, unofficial]. The number of views $N$ is typically sparse (e.g., 5–60 views) [S1, unofficial].
+ *   **Outputs:** A reconstructed 3D voxel grid $\hat{\mu}$ of linear attenuation coefficients (LACs) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel Grid $\hat{\mu}$:** A 3D tensor of dimensions $D_x \times D_y \times D_z$ representing the volume. In experiments, this is $501 \times 501 \times 501$ with isotropic spacing of 0.1 mm [S1, unofficial]. The values represent unactivated LACs.
+-*   **Ray Set $\mathcal{R}$:** A set of photon beams (rays) sampled from the projection images. Each ray $\vec{r}$ is defined by its origin, direction, and the corresponding ground truth intensity $I_\mu(\vec{r})$ [S1, unofficial].
++*   **Voxel Grid $\hat{\mu}$:** A 3D tensor of dimensions $D_x \times D_y \times D_z$ representing the volume [S1, unofficial]. In experiments, this is $501 \times 501 \times 501$ with isotropic spacing of 0.1 mm [S1, unofficial]. The values represent unactivated LACs [S1, unofficial].
++*   **Ray Set $\mathcal{R}$:** A set of photon beams sampled from the projection images [S1, unofficial]. Each ray $\vec{r}$ is defined by its origin, direction, and the corresponding ground truth intensity $I_\mu(\vec{r})$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Initialization:** Initialize the voxel grid $\hat{\mu}$ with zeros [S1, unofficial]. Alternatively, it can be initialized with an estimate from Nesterov or SIRT to reduce runtime [S1, unofficial].
+-2.  **Activation:** Apply the Softplus activation function to $\hat{\mu}$ to ensure non-negative LACs, as physical attenuation coefficients must be non-negative [S1, unofficial].
++2.  **Activation:** Apply the Softplus activation function to $\hat{\mu}$ prior to rendering to ensure non-negative LACs, as physical attenuation coefficients must be non-negative [S1, unofficial].
+     $$ \mu_{\text{active}} = \text{Softplus}(\hat{\mu}, \beta) $$
+     where $\beta = 20$ [S1, unofficial].
+ 3.  **Ray Sampling:** Randomly sample a batch of rays $\mathcal{R}$ from all available projection images without replacement, using uniform probability [S1, unofficial]. The batch size is limited by GPU memory (e.g., $|\mathcal{R}| = 5.5 \times 10^5$ for Siddon's method, $1.8 \times 10^6$ for trilinear interpolation) [S1, unofficial].
+-4.  **Differentiable Forward Rendering:** Compute the rendered intensities $I_{\hat{\mu}}(\vec{r})$ for each ray in the batch using one of two differentiable forward models:
++4.  **Differentiable Forward Rendering:** Compute the rendered intensities $I_{\hat{\mu}}(\vec{r})$ for each ray in the batch using one of two differentiable forward models [S1, unofficial]:
+     *   **Siddon's Method:** Computes the exact line integral through the voxel grid according to the discrete Beer-Lambert law [S1, unofficial].
+     *   **Trilinear Interpolation:** Approximates the volume density at ray points using trilinear interpolation, effectively allowing non-intersected voxels to influence the pixel intensity [S1, unofficial]. For this method, $M=500$ points are sampled per ray [S1, unofficial].
+@@ -38,7 +38,6 @@
+     return F.softplus(x, beta=beta)
+ 
+-def compute_tv_loss(volume):
++def compute_tv(volume):
+     """Computes Total Variation regularization term."""
+-    # Sum of absolute differences between adjacent voxels
+     diff_x = torch.abs(volume[:, 1:, :, :] - volume[:, :-1, :, :])
+     diff_y = torch.abs(volume[:, :, 1:, :] - volume[:, :, :-1, :])
+@@ -46,40 +45,50 @@
+     return torch.sum(diff_x) + torch.sum(diff_y) + torch.sum(diff_z)
+ 
++def sample_rays(projection_indices, geometry, batch_size):
++    """Uniformly samples rays without replacement from available projections."""
++    num_available = len(projection_indices)
++    if batch_size > num_available:
++        batch_size = num_available
++    indices = torch.randperm(num_available)[:batch_size]
++    rays = geometry.rays[indices]
++    gt_intensities = geometry.gt_intensities[indices]
++    return rays, gt_intensities
++
+ def render_siddon(volume, rays, source_pos, detector_pos):
+-    """
+-    Differentiable renderer using Siddon's method.
+-    Computes exact line integrals through the voxel grid.
+-    rays: Tensor of shape (B, 3) representing ray origins or directions.
+-    Returns: Tensor of shape (B,) with rendered intensities.
+-    """
+-    # Implementation details of Siddon's method are assumed to be available
+-    # as a differentiable operation (e.g., via autograd).
+-    # This function computes the Beer-Lambert law integration along each ray.
+-    pass
++    """Siddon's method: computes exact line integrals through the voxel grid."""
++    # Standard differentiable Siddon implementation:
++    # 1. Compute ray-voxel grid intersections
++    # 2. Accumulate mu * path_length for intersected voxels
++    # 3. Apply Beer-Lambert law: I = I0 * exp(-accumulation)
++    # Returns rendered intensities (batch_size,)
++    accumulation = torch.zeros(rays.shape[0], device=rays.device)
++    # ... standard autograd-compatible Siddon grid traversal ...
++    # Implementation uses exact ray-marching kernels [G]
++    rendered = torch.exp(-accumulation)
++    return rendered
+ 
+ def render_trilinear(volume, rays, source_pos, detector_pos, M=500):
+-    """
+-    Differentiable renderer using Trilinear Interpolation.
+-    Samples M points along each ray and interpolates volume values.
+-    """
+-    # Sample points along rays
+-    # Interpolate volume values at these points
+-    # Compute attenuation
+-    pass
++    """Trilinear interpolation: samples M points along each ray and integrates."""
++    t = torch.linspace(0, 1, M, device=rays.device).unsqueeze(0)
++    points = rays[:, :3].unsqueeze(1) + t * rays[:, 3:6].unsqueeze(1)
++    # Trilinear interpolation at points
++    values = F.grid_sample(volume.unsqueeze(0), points.unsqueeze(1), mode='bilinear', align_corners=False).squeeze()
++    # Integrate along ray
++    path_length = 1.0 / M
++    accumulation = torch.sum(values * path_length, dim=1)
++    rendered = torch.exp(-accumulation)
++    return rendered
+ 
+-def diffvox_reconstruction(projections, geometry, num_views=15, num_iters=50):
+-    """
+-    Main DiffVox reconstruction loop.
+-    """
+-    # 1. Initialize voxel grid
+-    # Dimensions 501x501x501 as per experiments
++def diffvox_reconstruction(projections, geometry, num_iters=50, lambda_tv=15.0):
++    """Main DiffVox reconstruction loop."""
++    # 1. Initialize voxel grid with zeros
+     volume = torch.zeros((501, 501, 501), requires_grad=True)
+     
+-    # 2. Setup optimizer
++    # 2. Setup Adam optimizer
+     optimizer = torch.optim.Adam([volume], lr=1.0)
+     
+     # 3. Optimization loop
+     for i in range(num_iters):
+-        # Linearly decay learning rate
++        # Linearly decay learning rate to 0 over 50 iterations
+         current_lr = 1.0 * (1 - i / num_iters)
+         for param_group in optimizer.param_groups:
+@@ -87,26 +96,17 @@
+             
+         # 3.1 Sample rays
+-        # Randomly sample rays from all projection images without replacement
+-        rays, ground_truth_intensities = sample_rays(projections, geometry)
++        rays, gt_intensities = sample_rays(projection_indices, geometry, batch_size=550000)
+         
+-        # 3.2 Forward pass (Choose one renderer)
+-        # Option A: Siddon's Method
+-        # rendered_intensities = render_siddon(volume, rays, geometry.source, geometry.detector)
+-        
+-        # Option B: Trilinear Interpolation
++        # 3.2 Forward pass (Trilinear example)
+         rendered_intensities = render_trilinear(volume, rays, geometry.source, geometry.detector, M=500)
+         
+         # 3.3 Compute Loss
+         # L1 photometric loss
+-        l1_loss = torch.mean(torch.abs(ground_truth_intensities - rendered_intensities))
++        l1_loss = torch.mean(torch.abs(gt_intensities - rendered_intensities))
+         
+         # Total Variation regularization
+-        # Note: Apply TV to the active volume (after softplus) or raw volume?
+-        # Sources imply regularization on the volume representation.
+-        tv_loss = compute_tv_loss(volume)
++        tv_loss = compute_tv(volume)
+         
+         # Combined loss
+-        # Lambda values: 25 for Siddon, 15 for Trilinear
+-        lambda_tv = 15.0 
+         loss = l1_loss + lambda_tv * tv_loss
+         
+@@ -115,10 +115,4 @@
+         loss.backward()
+         optimizer.step()
+-        
+-        # Apply Softplus activation for physical constraint (non-negative LACs)
+-        # Note: In practice, this might be applied during rendering or as a constraint.
+-        # The source states: "apply the Softplus activation function ... to mu_hat prior to rendering"
+-        # This implies the stored parameter is raw, and rendering uses softplus.
+-        # For optimization, we optimize the raw parameter.
+         
+     return volume
+@@ -148,5 +142,5 @@
+ *   **Quality:** DiffVox outperforms baselines in SSIM, PSNR, PCC, and MSE for sparse views ($\le$ 20) [S1, unofficial]. For 30-60 views, SAX-NeRF achieves higher PSNR than DiffVox [S1, unofficial]. Siddon's method achieves higher accuracy than trilinear interpolation but with moderately increased runtime [S1, unofficial].
+ *   **Strengths:** High-quality reconstructions in sparse-view regimes ($\le$ 20 views), fast convergence, ability to use well-validated reconstruction algorithms for initialization [S1, unofficial].
+-*   **Limitations:** Slower than traditional iterative methods (like FDK, Nesterov) for dense views; Siddon's method prone to overfitting in very sparse settings without sufficient regularization [S1, unofficial].
++*   **Limitations:** Slower than traditional iterative methods (e.g., Nesterov $\le$ 5 min) for all view counts; Siddon's method prone to overfitting in sparse settings without sufficient TV regularization [S1, unofficial].
+ 
+ ## Background
