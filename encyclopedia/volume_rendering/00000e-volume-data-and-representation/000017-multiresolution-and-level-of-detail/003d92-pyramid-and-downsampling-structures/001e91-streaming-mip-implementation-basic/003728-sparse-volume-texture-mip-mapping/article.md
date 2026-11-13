@@ -1,0 +1,91 @@
+# Sparse Volume Texture Mip Mapping
+
+Also called: SVT Mip Mapping
+
+## Overview
+Sparse Volume Texture (SVT) Mip Mapping provides level-of-detail (LOD) management for sparse volume data by allowing sample nodes to request specific resolution levels, similar to standard 2D texture sampling [S1]. It differs from its parent [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md) by explicitly exposing the `MipLevel` input pin on the sample node, but unlike [Conical MImP](7656-conical-mimp.md) or [Spread-space MIP chain with luminance weighting](9093-spread-space-mip-chain-with-luminance-weighting.md), it relies entirely on the engine's streaming system to load the requested level rather than computing or weighting the mip chain dynamically during sampling [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A Sparse Volume Texture asset containing pre-computed mip levels.
+*   **Input:** `MipLevel` integer pin on the `Sparse Volume Texture Sample` node.
+*   **Output:** Voxel value sampled at the specified LOD.
+
+**Data Structures:**
+The SVT asset stores compressed tiles for each mip level. The streaming system manages the loading of these tiles into VRAM based on camera distance and visibility, not the `MipLevel` pin value [S1].
+
+**Steps:**
+1.  The material or shader sets the `MipLevel` input pin on the `Sparse Volume Texture Sample` node to an integer $L \ge 0$ [S1].
+2.  The rendering engine checks if the tile data for mip level $L$ at the current sampling location has been streamed into VRAM [S1].
+3.  If the data is present, the texture sampler performs trilinear (or anisotropic) interpolation using the texels from mip level $L$ and its adjacent levels [S1].
+4.  If the data for level $L$ is **not** streamed in, sampling may fail or fall back to a lower-resolution available level, potentially causing visual popping or artifacts [S1].
+
+**Parameters:**
+*   `MipLevel`: The target LOD index. Must be $\le$ the maximum mip levels generated during asset import [S1].
+*   `r.SparseVolumeTexture.Streaming.NumPrefetchFrames`: Number of frames to prefetch when a frame is requested. Default is 3 [S1].
+*   `r.SparseVolumeTexture.Streaming.PrefetchMipLevelBias`: Bias applied to the mip level of prefetched frames. Prefetching occurs at increasingly higher mip levels (lower resolution) to anticipate movement [S1].
+
+**Pitfalls:**
+*   **Streaming Disconnect:** Setting the `MipLevel` pin does not trigger streaming. If the requested level is not already loaded, the sample will not automatically fetch it [S1].
+*   **Precision:** When handling very large datasets (e.g., $32k \times 32k \times 16k$), standard 32-bit signed integers (`int32`) for linear indexing can overflow. This requires modifying engine source code to use `uint32` or `int64` for indexing operations [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Conceptual representation of SVT Mip Sampling
+# Note: Actual streaming is handled by the engine, not this shader code.
+
+def sample_sparse_volume_texture(volume_texture, global_coord, mip_level):
+    """
+    Samples a sparse volume texture at a specific mip level.
+    
+    Args:
+        volume_texture: The SVT asset.
+        global_coord: float3 world or local coordinates.
+        mip_level: int, the desired LOD.
+        
+    Returns:
+        float4: Sampled color/value.
+    """
+    # 1. Validate mip level
+    if mip_level < 0 or mip_level >= volume_texture.max_mip_levels:
+        mip_level = 0  # [G] Fallback to base level if invalid
+        
+    # 2. Check if mip level is available in VRAM
+    # This check is implicit in the engine's streaming system.
+    # If the tile for this mip_level at global_coord is not loaded,
+    # the hardware sampler may return 0 or fall back to a loaded level.
+    if not volume_texture.is_mip_streamed_in(mip_level, global_coord):
+        # [G] In a real implementation, this might trigger a synchronous stall
+        # or return a fallback value. The engine documentation warns of failure.
+        return volume_texture.sample(global_coord, mip_level=0) 
+
+    # 3. Perform sampling
+    # The engine handles the coordinate transformation and interpolation
+    # for the specific mip level.
+    return volume_texture.sample(global_coord, mip_level=mip_level)
+```
+
+## Subtopics
+
+### Sparse Volume Texture with Heterogeneous Volumes
+This variant integrates SVT Mip Mapping with Heterogeneous Volume (HV) actors to render complex, multi-material datasets (e.g., geological layers) [S2, unofficial]. It supports sparse datasets up to $32k \times 32k \times 16k$ voxels, provided the compressed tile data (including MIP data and padding for interpolation) does not exceed 4 GiB [S2, unofficial]. To handle the large address space, the engine source code must be patched to replace `int32` linear indexing with `uint32` or `int64` to prevent overflow [S2, unofficial]. The sampling logic uses modified coordinates:
+$$ \text{LinearIndex} = X + Y \cdot \text{Dimensions}.X + Z \cdot \text{Dimensions}.X \cdot \text{Dimensions}.Y $$
+where `LinearIndex` is `uint32` [S2, unofficial]. This method is chosen when visual quality and large dataset support are prioritized over raw performance, as it achieves excellent visual quality but lower frame rates compared to simpler methods [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Sampling is $O(1)$ per voxel, but dependent on streaming latency. If the requested mip level is not in VRAM, performance degrades due to fallback or stalls [S1].
+*   **Memory Complexity:** Depends on the number of streamed mip levels. The total compressed tile data (including MIPs and padding) must fit within the limit (e.g., 4 GiB for the largest supported sparse dataset) [S2, unofficial].
+*   **Measured Performance:** On an RTX 3050, SVT with Heterogeneous Volumes achieves 18–22 FPS on $4096^3+$ data. On an RTX 5000, it achieves 10–12 FPS for the same data size [S2, unofficial].
+*   **Strengths:** High visual quality; supports extremely large datasets via sparsity; native LOD support via mip levels [S1][S2, unofficial].
+*   **Limitations:** Streaming is not driven by the sample node, leading to potential missing data if not prefetched correctly; integer overflow issues in default engine builds for large textures; lower FPS on high-resolution heterogeneous volumes compared to tiled ray marchers [S1][S2, unofficial].
+*   **When to use:** Real-time visualization of large, complex scientific datasets where visual fidelity is critical and hardware supports large VRAM allocations [S2, unofficial].
+*   **When not to use:** When strict performance is required on low-end hardware, or when the dataset is too large to fit the compressed tile limit [S2, unofficial].
+
+## Background
+Sparse Volume Textures were introduced in Unreal Engine 5 to enable real-time rendering of large voxel datasets [S1]. The mip mapping capability allows for LOD management similar to 2D textures [S1]. Research by GEOMAR (Helmholtz-Zentrum Hereon) demonstrated the viability of SVTs for scientific visualization in immersive environments like the ARENA2 dome, highlighting the need for source code modifications to handle large indexing spaces [S2, unofficial].
+
+## Sources
+[S1] Sparse Volume Textures in Unreal Engine | Unreal Engine 5.8 Documentation, https://dev.epicgames.com/documentation/en-us/unreal-engine/sparse-volume-textures-in-unreal-engine, fetched 2026-10-28
+[S2] 在虚幻引擎5中渲染大型体积数据集：一项调查, https://www.alphaxiv.org/zh/abs/2504.07485, fetched 2026-10-30 (unofficial)

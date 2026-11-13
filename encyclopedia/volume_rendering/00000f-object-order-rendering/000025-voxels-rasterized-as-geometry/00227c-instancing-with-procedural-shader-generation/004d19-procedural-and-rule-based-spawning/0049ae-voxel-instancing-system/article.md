@@ -3,206 +3,187 @@
 Also called: VoxelInstancer
 
 ## Overview
-The Voxel Instancing System is a procedural placement and rendering method designed for natural spawning of semi-random foliage, rocks, and trees within voxel terrains [S1]. It solves the performance bottleneck of rendering thousands of individual objects by batching them into GPU instanced `MultiMesh` buffers or managing them as standard scene nodes [S1]. It distinguishes itself from sibling methods like [Block LOD Instancing](12572-block-lod-instancing.md) by integrating tightly with the terrain's Level of Detail (LOD) system, allowing items to spawn on specific resolution chunks and switch mesh LODs based on distance ratios relative to the terrain's view distance [S1].
+The Voxel Instancing System is a method for procedurally spawning numerous 3D objects (instances) onto a voxel terrain surface. It solves the problem of efficiently rendering natural features like grass, rocks, and trees by decoupling instance generation from the voxel chunk structure, allowing for high-density placement. It distinguishes itself from sibling methods like [Block LOD Instancing](12572-block-lod-instancing.md) by supporting two distinct instance types: highly optimized `Multimesh` instances for bulk rendering and flexible `Scene` instances for interactive objects, while utilizing a procedural generator with Signed Distance Field (SDF) snapping for surface alignment.
 
 ## How it works
-The system operates by defining spawnable entities in a library, applying procedural rules to determine their locations, and rendering them using optimized geometry buffers.
 
 ### Inputs and Outputs
-*   **Inputs**: A `VoxelInstancer` node, a `VoxelInstanceLibrary` resource, a `VoxelGenerator` (for procedural placement), and a `VoxelStream` (for persistence).
-*   **Outputs**: Rendered voxel instances (grass, rocks, trees) positioned on the terrain surface.
+*   **Input**: A voxel terrain with an associated `VoxelGenerator` (must support series generation for SDF snapping, e.g., `VoxelGeneratorGraph`) and a `VoxelStream` (e.g., `VoxelStreamSQLite` for persistence).
+*   **Input**: A `VoxelInstanceLibrary` resource defining spawn rules, item types, and LOD configurations.
+*   **Input**: A `VoxelInstancer` node linked to the terrain and library.
+*   **Output**: A set of 3D instances positioned on the terrain surface, respecting LOD constraints and persistence rules.
 
 ### Data Structures
-The core data structure is the `VoxelInstanceLibrary`, which contains a list of `VoxelInstanceLibraryItem` objects [S1].
+
+**VoxelInstanceLibrary**
+A resource assigned to the `VoxelInstancer.library` property. It contains a list of `VoxelInstanceLibraryItem` objects.
 
 **VoxelInstanceLibraryItem**
-Each item defines a spawnable entity with the following fields [S1]:
-*   `lod_index` (int): Determines the terrain LOD at which the item spawns. Index 0 corresponds to high-resolution, close-range chunks; higher indices correspond to lower-resolution, distant chunks.
-*   `offset_along_normal` (float): Adjusts the instance's position along the surface normal to prevent sinking or floating.
-*   `snap_to_generator_sdf_enabled` (bool): Toggles Signed Distance Field (SDF) based surface snapping.
-*   `persistent` (bool): Indicates if the instance's position is saved to the voxel stream.
-*   `generator`: The procedural logic defining where instances spawn.
+Base class for spawn rules. Fields:
+*   `lod_index` (int): Determines the terrain chunk resolution level for spawning. `0` is high-res/close; higher indices are low-res/distant.
+*   `offset_along_normal` (float): Distance to offset the instance along the surface normal after snapping.
+*   `snap_to_generator_sdf_enabled` (bool): Toggle for SDF-based surface snapping.
+*   `persistent` (bool): If true, instance position/ID is saved to the stream and retained during terrain edits.
+*   `generator` (object): Procedural logic evaluating spawn conditions (e.g., noise thresholds).
 
 **VoxelInstanceLibraryMultiMeshItem**
-A specific item type for high-performance rendering [S1]:
+Inherits from `VoxelInstanceLibraryItem`. Fields:
 *   `mesh` (Mesh): LOD0 mesh.
 *   `lod1` (Mesh): LOD1 mesh.
 *   `lod2` (Mesh): LOD2 mesh.
 *   `lod3` (Mesh): LOD3 mesh.
-*   `mesh_lod_settings`: Configuration for switching distances.
+*   `mesh_lod_settings` (object): Contains ratios (0-1) relative to terrain LOD view distance to switch between meshes. Includes option to hide instances beyond max LOD distance.
 
 **VoxelInstanceLibrarySceneItem**
-A specific item type for flexible behavior [S1]:
-*   `scene` (PackedScene): The scene resource to instantiate. The root must be `Node3D` or a derivative.
+Inherits from `VoxelInstanceLibraryItem`. Fields:
+*   `scene` (PackedScene): The scene resource to instantiate. Root must be `Node3D`.
 
-### Procedural Placement Logic
-Instances are placed where procedural conditions (density, noise thresholds) defined in the `generator` property are met [S1]. The system uses a built-in generator by default [S1]. Manual editing of instance positions in the editor is not supported; locations are defined solely by procedural rules [S1].
+### Algorithm Steps
 
-### Surface Snapping
-If `snap_to_generator_sdf_enabled` is true, the system queries the voxel generator for SDF data to snap instances to the surface [S1].
-
-1.  **Requirement**: The generator must support series generation (querying arbitrary floating-point positions) [S1]. At the time of writing, only `VoxelGeneratorGraph` supports this [S1].
-2.  **Logic**: The system samples the SDF at the instance's projected position. If at least 2 nearby samples are available, it interpolates to snap the instance closer to the surface [S1].
-    *   Formula: The snapping is an interpolation approximation, not exact ray-casting [S1].
-3.  **Limitation**: Snapping does not work correctly if the terrain is modified; instances in edited areas will not regenerate unless set to `persistent` [S1].
-
-### Persistence
-If `persistent` is true, the instance ID and position are saved to the voxel stream [S1].
-*   If the terrain is edited, persistent instances in the modified block are saved rather than regenerated [S1].
-*   Non-persistent instances are regenerated [S1].
-*   **Constraint**: Only specific streams (e.g., `VoxelStreamSQLite`) support saving persistent instances [S1].
-
-### Rendering
-Items are rendered either as GPU-instanced `MultiMesh` buffers or as standard scene nodes [S1].
-
-**MultiMesh Rendering**
-*   Supports LOD switching based on distance ratios relative to the terrain LOD view distance [S1].
-*   Mesh LOD switching distances are defined as ratios (usually between 0 and 1) relative to the view distance of the corresponding terrain LOD [S1].
-*   Instances beyond the maximum distance of the last LOD can be hidden, though they are still generated [S1].
-
-**Scene Instance Rendering**
-*   Regular scene instances are created as children of the `VoxelInstancer` [S1].
-*   Allows for varied behavior (scripts, sounds, animations) but is significantly slower [S1].
+1.  **Library Initialization**: The `VoxelInstancer` loads the `VoxelInstanceLibrary`. For each `VoxelInstanceLibraryItem`, the system prepares the spawn logic. If the item is a `MultiMeshItem` derived from a scene, the scene is converted to a `MultiMesh` format at runtime or editor time [S1].
+2.  **Chunk Iteration**: The system iterates through active terrain chunks. For each chunk, it calculates the chunk's `lod_level`.
+3.  **Eligibility Check**: For each item in the library, the system checks if `chunk.lod_level == item.lod_index`. Only chunks matching the item's LOD index are eligible for spawning that item [S1, Parent].
+4.  **Candidate Generation**: The item's `generator` evaluates procedural conditions (e.g., density, noise) at candidate positions within the eligible chunk. Manual position editing is not supported; positions are defined solely by these rules [Parent].
+5.  **Surface Snapping (Optional)**: If `snap_to_generator_sdf_enabled` is true:
+    *   The system queries the `VoxelGenerator` for Signed Distance Field (SDF) values at the candidate position and nearby points.
+    *   **Requirement**: The generator must support series generation (arbitrary floating-point queries) [S1].
+    *   If at least 2 nearby samples are available, the system interpolates to find the zero-crossing (surface) and snaps the instance position closer to the surface. This is an interpolation approximation, not exact ray-casting [Parent].
+    *   *Pitfall*: Snapping may cause instances to "bury" or "float" far away if low-resolution meshes are active, as the SDF estimation may not align with the coarse mesh geometry [S1].
+6.  **Normal Offset**: The instance position is adjusted by `offset_along_normal` along the interpolated surface normal vector to compensate for mesh imprecision [Parent].
+7.  **Upward Alignment**: The instance rotation is aligned to the terrain's upward direction. If `VoxelInstancer.up_mode` is set to 'Sphere mode', alignment is based on the local origin of the terrain (suitable for planets) [S1].
+8.  **Persistence Handling**:
+    *   If `persistent` is true, the system checks the `VoxelStream`. If the instance ID exists in the stream for the current block, the saved position is used.
+    *   If the terrain block has been edited, persistent instances are retained; non-persistent instances are regenerated [Parent].
+    *   *Limitation*: If the terrain is modified, non-persistent instances in the edited area are regenerated. Persistent instances in edited areas are saved but do not regenerate their positions based on new terrain geometry unless explicitly handled by the stream logic [S1, Parent].
+9.  **Instance Creation**:
+    *   For `MultiMeshItem`: A `MultiMeshInstance` is created or updated with the calculated transform. Mesh LOD is selected based on distance ratios [S1].
+    *   For `SceneItem`: A new `Node3D` instance of the scene is created as a child of the `VoxelInstancer`.
 
 ### Pseudocode
-The following pseudocode illustrates the setup and placement logic for a MultiMesh item.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class VoxelInstancer:
-    def __init__(self, library: VoxelInstanceLibrary, generator: VoxelGenerator, stream: VoxelStream):
-        self.library = library
-        self.generator = generator
-        self.stream = stream
-        self.up_mode = "Local"  # Default to local origin alignment
-
-    def set_up_mode_sphere(self):
-        """Aligns items according to the local origin of the terrain (for planets)."""
-        self.up_mode = "Sphere"
-
-    def spawn_instances(self, chunk: VoxelChunk):
-        """
-        Procedurally places instances in a given voxel chunk.
-        """
-        for item in self.library.items:
-            # 1. Check LOD eligibility
-            if not self._is_lod_eligible(chunk, item.lod_index):
-                continue
-
-            # 2. Procedural Generation
-            # Uses the item's built-in or custom generator
-            positions = item.generator.generate_positions(chunk)
-
-            for pos in positions:
-                # 3. Surface Snapping (if enabled)
+def voxel_instancing_system(terrain, library, instancer):
+    """
+    Main loop for voxel instancing.
+    terrain: Object with get_active_chunks() and get_sdf(position)
+    library: VoxelInstanceLibrary containing list of items
+    instancer: VoxelInstancer node managing rendering
+    """
+    
+    # 1. Iterate through active terrain chunks
+    for chunk in terrain.get_active_chunks():
+        chunk_lod = chunk.lod_level
+        
+        # 2. Filter items eligible for this chunk's LOD
+        eligible_items = [item for item in library.items if item.lod_index == chunk_lod]
+        
+        for item in eligible_items:
+            
+            # 3. Procedural Generation
+            candidates = item.generator.evaluate(chunk.bounds)
+            
+            for candidate in candidates:
+                
+                # 4. Surface Snapping
+                final_position = candidate.position
+                final_normal = Vector3(0, 1, 0) # Default up
+                
                 if item.snap_to_generator_sdf_enabled:
-                    pos = self._snap_to_surface(pos, item)
-
-                # 4. Apply Offset
-                normal = self._get_surface_normal(pos)
-                final_pos = pos + normal * item.offset_along_normal
-
-                # 5. Persistence Check
-                if item.persistent:
-                    self._save_instance_to_stream(item.id, final_pos)
+                    # Query SDF at candidate and neighbors
+                    sdf_val = terrain.get_sdf(candidate.position)
+                    sdf_neighbors = [terrain.get_sdf(candidate.position + offset) for offset in NEIGHBOR_OFFSETS]
+                    
+                    # Interpolate to surface if enough samples
+                    if len(sdf_neighbors) >= 2:
+                        final_position = interpolate_surface(candidate.position, sdf_val, sdf_neighbors)
+                        final_normal = compute_normal(candidate.position, sdf_neighbors)
+                
+                # 5. Normal Offset
+                final_position += final_normal * item.offset_along_normal
+                
+                # 6. Upward Alignment
+                if instancer.up_mode == 'SPHERE':
+                    # Align to local terrain origin
+                    up_vector = -final_position.normalized()
                 else:
-                    self._render_instance(item, final_pos)
-
-    def _snap_to_surface(self, pos: Vector3, item: VoxelInstanceLibraryItem) -> Vector3:
-        """
-        Snaps position to surface using SDF interpolation.
-        Requires generator to support series generation.
-        """
-        # Sample SDF at projected position
-        sdf_val = self.generator.query_sdf(pos)
-        
-        # Get nearby samples for interpolation
-        samples = self.generator.query_sdf_series(pos, radius=1.0)
-        
-        if len(samples) >= 2:
-            # Interpolate to find surface intersection
-            # This is an approximation, not exact ray-casting
-            snapped_pos = self._interpolate_sdf_surface(pos, samples)
-            return snapped_pos
-        return pos
-
-    def _is_lod_eligible(self, chunk: VoxelChunk, lod_index: int) -> bool:
-        """
-        Checks if the chunk's resolution matches the item's LOD index.
-        Lower indices correspond to higher-resolution, closer chunks.
-        """
-        return chunk.lod_level == lod_index
-
-    def _get_surface_normal(self, pos: Vector3) -> Vector3:
-        """
-        Retrieves the surface normal at the given position.
-        """
-        return self.generator.get_normal(pos)
-
-    def _render_instance(self, item: VoxelInstanceLibraryItem, pos: Vector3):
-        """
-        Renders the instance using MultiMesh or Scene Node.
-        """
-        if isinstance(item, VoxelInstanceLibraryMultiMeshItem):
-            # Select LOD based on distance ratio relative to terrain LOD view distance
-            lod_mesh = self._select_lod_mesh(item, pos)
-            self._add_to_multimesh_buffer(lod_mesh, pos)
-        elif isinstance(item, VoxelInstanceLibrarySceneItem):
-            # Create scene instance as child of VoxelInstancer
-            scene_instance = item.scene.instantiate()
-            scene_instance.position = pos
-            self.add_child(scene_instance)
-
-    def _select_lod_mesh(self, item: VoxelInstanceLibraryMultiMeshItem, pos: Vector3) -> Mesh:
-        """
-        Selects the appropriate mesh LOD based on distance ratios.
-        Ratios are relative to the view distance of the corresponding terrain LOD.
-        """
-        distance = self._get_camera_distance(pos)
-        view_distance = self._get_terrain_lod_view_distance(item.lod_index)
-        
-        # Ratios are usually between 0 and 1
-        ratio = distance / view_distance
-        
-        if ratio < item.mesh_lod_settings.ratio_1:
-            return item.mesh
-        elif ratio < item.mesh_lod_settings.ratio_2:
-            return item.lod1
-        elif ratio < item.mesh_lod_settings.ratio_3:
-            return item.lod2
-        else:
-            return item.lod3
-
-    def _save_instance_to_stream(self, instance_id: int, pos: Vector3):
-        """
-        Saves instance ID and position to the voxel stream.
-        Only VoxelStreamSQLite supports this at time of writing.
-        """
-        self.stream.save_instance(instance_id, pos)
+                    up_vector = Vector3(0, 1, 0)
+                    
+                final_rotation = align_to_up(final_rotation, up_vector)
+                
+                # 7. Persistence Check
+                if item.persistent:
+                    saved_pos = instancer.stream.get_instance_position(item.id, chunk.id)
+                    if saved_pos is not None:
+                        final_position = saved_pos
+                        # Note: Does not regenerate position on edit, retains saved pos
+                    else:
+                        # New instance, save it
+                        instancer.stream.save_instance(item.id, chunk.id, final_position)
+                
+                # 8. Create/Update Instance
+                if item.type == 'MULTIMESH':
+                    mesh_lod = select_mesh_lod(item.meshes, final_position.distance_to(camera))
+                    instancer.update_multimesh_item(item.id, final_position, final_rotation, mesh_lod)
+                elif item.type == 'SCENE':
+                    instancer.create_scene_instance(item.scene, final_position, final_rotation)
 ```
 
+### Parameters and Typical Values
+*   `lod_index`: Integer. `0` for close/high-res, higher for distant/low-res.
+*   `offset_along_normal`: Float. Small positive value (e.g., 0.01-0.1) to prevent z-fighting or sinking.
+*   `up_mode`: Enum. 'Sphere mode' for planets, 'World Up' for flat terrain.
+*   `Mesh LOD Ratios`: Floats between 0 and 1, relative to terrain LOD view distance.
+
 ### Edge Cases and Pitfalls
-*   **Cyclic Reference Crash**: If a scene is added to the library and the library is loaded from that same scene, Godot crashes due to cyclic reference [S1].
-*   **Performance Issue**: Changing `MultiMesh.mesh` to a different LOD causes a performance issue, pending a PR merge into Godot [S1].
-*   **Snapping Limitations**: Snapping does not work correctly if the terrain is modified; instances in edited areas will not regenerate unless set to `persistent` [S1].
-*   **Burying/Floating**: Instances may tend to "bury" or "float" far away when their low-resolution mesh is active, since they get moved closer to the high-resolution surface [S1].
-*   **Scene Complexity**: Adding many complex scene instances can lead to a freeze or crash of Godot if the computer cannot handle the load [S1].
-*   **Stream Support**: Only `VoxelStreamSQLite` supports saving persistent instances at time of writing [S1].
-*   **Generator Support**: Only `VoxelGeneratorGraph` supports series generation required for SDF snapping at time of writing [S1].
+*   **Cyclic Reference Crash**: Loading a library from a scene that is also included in the library causes a crash [S1].
+*   **Performance Issue**: Changing `MultiMesh.mesh` to a different LOD causes performance issues until a specific PR is merged [S1].
+*   **Snapping Limitations**: SDF snapping requires a generator supporting series generation (e.g., `VoxelGeneratorGraph`). It does not work correctly if the terrain is modified, as estimations do not account for edits unless instances are persistent [S1, Parent].
+*   **Low-Res Artifacts**: Instances may appear buried or floating when low-resolution meshes are active due to SDF/mesh mismatch [S1].
+*   **Scene Instance Limits**: High numbers of `SceneItem` instances can cause freezes or crashes due to overhead. Default density is lower than multimesh [S1].
 
 ## Operating characteristics
-*   **Time Complexity**: MultiMesh rendering is extremely fast, allowing for thousands of instances [S1]. Scene instance rendering is much slower and should be tuned to low numbers [S1].
-*   **Memory Complexity**: MultiMesh buffers are memory efficient. Scene instances increase scene object count and memory usage [S1].
-*   **Measured Performance**: MultiMesh items can be extremely numerous [S1]. Scene instances can cause freeze/crash if too many complex instances are added [S1].
-*   **Scaling**: MultiMesh scales well with instance count. Scene instances do not scale well with complex scenes [S1].
-*   **Strengths**: High performance for natural spawning (grass, rocks, trees) [S1]. Integration with terrain LOD system [S1].
-*   **Limitations**: Not suited for complex man-made structures like houses or villages [S1]. Manual editing of instance positions is not supported [S1].
-*   **When to use**: Natural spawning, semi-random foliage, large-scale terrain decoration [S1].
-*   **When not to use**: Complex man-made structures, instances requiring manual placement, scenes with high complexity [S1].
+
+### Time and Memory Complexity
+*   **Time**: Proportional to the number of active chunks and the density of instances per chunk. Scene instances have significantly higher per-instance overhead than Multimesh instances [S1].
+*   **Memory**: Multimesh instances are memory-efficient, allowing extremely numerous objects. Scene instances consume more memory per instance due to full scene graph duplication [S1].
+
+### Measured Performance
+*   **Multimesh**: Can handle extremely numerous instances with optional collision. Suitable for large-scale natural spawning [S1].
+*   **Scene**: Slower. Recommended for low numbers. Complex scenes can lead to freeze/crash [S1].
+
+### Scaling
+*   Scales with terrain LOD. Higher LOD indices spawn on larger chunks, covering larger ranges but with lower detail [S1].
+*   Mesh LOD reduces vertex count over distance within visible meshes, offering an alternative to Visibility Ranges which requires duplicating data [S1].
+
+### Strengths and Limitations
+*   **Strengths**: High performance for natural features (grass, rocks). Flexible instance types (Multimesh vs Scene). Procedural generation with SDF snapping. Persistence support.
+*   **Limitations**: Not suited for complex man-made structures. Manual editing of instance positions is not supported. Snapping fails on edited terrain for non-persistent instances. Requires specific generator support for SDF.
+
+### When to Use
+*   Use for natural spawning (grass, rocks, trees, semi-random foliage) [S1].
+*   Use Multimesh for bulk, non-interactive objects.
+*   Use Scene instances for interactive objects (scripts, animations) where performance allows.
+
+### When Not to Use
+*   Do not use for complex man-made structures like houses or villages (unless scene instances are sparse and simple) [S1].
+*   Do not use if terrain editing is frequent and persistent instances are not desired, as snapping will be inaccurate [S1].
 
 ## Background
-The Voxel Instancing System is part of the Voxel Tools plugin for Godot [S1]. It was developed to address the lack of a built-in LOD system for instancing in Godot 3, with improvements continuing into Godot 4 [S1]. The system is primarily intended for natural spawning and is not suited for complex man-made structures [S1].
+
+### Origin
+The Voxel Instancing System is part of the Voxel Tools library for the Godot Engine. It was developed to address the lack of efficient instancing in Godot 3, leveraging Godot 4's automatic mesh LOD capabilities while providing finer control over mesh and material usage per LOD [S1].
+
+### History and Development
+*   Initially designed to support natural spawning on voxel terrains.
+*   Added support for `VoxelGeneratorGraph` to enable SDF snapping.
+*   Added `VoxelStreamSQLite` support for persistent instance saving.
+*   Development is ongoing, with API stability for custom generators noted as a future concern [S1].
+
+### Usage
+Primarily used in Godot-based voxel games for terrain decoration. It is integrated into the Godot editor via the `VoxelInstancer` node and `VoxelInstanceLibrary` resource [S1].
 
 ## Sources
+
 [S1] Instancing - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/instancing/, fetched 2026-10-27

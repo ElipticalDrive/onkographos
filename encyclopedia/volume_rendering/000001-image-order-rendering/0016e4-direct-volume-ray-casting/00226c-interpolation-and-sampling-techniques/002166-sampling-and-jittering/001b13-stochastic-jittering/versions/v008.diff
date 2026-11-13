@@ -1,0 +1,222 @@
+--- v007.md
++++ v008.md
+@@ -4,104 +4,156 @@
+ 
+ ## Overview
+-Stochastic jittering is a sampling technique in direct volume ray casting that perturbs sample positions along rays using random noise to mitigate banding and aliasing artifacts caused by regular, undersampled grid structures [S1, unofficial][S2, unofficial][S5][S6, unofficial]. It sets itself apart from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by breaking the periodicity of sample placement, and from [Multi-Sample Anti-Aliasing via Ray Distribution](1219-multi-sample-anti-aliasing-via-ray-distribution.md) by using a fixed, pre-computed noise texture rather than distributing rays across a pixel footprint, trading visible banding for less objectionable dither patterns [S5][S6, unofficial].
++Stochastic jittering is a sampling technique used in direct volume ray casting to mitigate banding and quantization artifacts caused by regular, uniformly spaced sample positions [S1, unofficial][S6, unofficial]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by perturbing sample locations with random offsets, transforming structured aliasing into less visually noticeable noise [S1, unofficial][S6, unofficial]. It is particularly effective when using low sample counts or nearest-neighbor interpolation, where regular grid patterns are most visible [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, base step size $\Delta t$, pixel coordinates $(u, v)$, noise texture $\mathcal{N}$, maximum noise factor $\alpha$ [S3, unofficial][S4, unofficial][S5].
+-*   **Output:** Perturbed sample positions $\mathbf{p}_n$ for $n=0, 1, \dots, N-1$ along the ray.
++**Inputs:**
++- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
++- Base step size $\Delta t$.
++- A pre-computed jitter texture (2D noise texture).
++- Pixel coordinates $(u, v)$ or screen-space position.
++- Maximum noise factor $\alpha$ (optional, controls jitter magnitude).
++
++**Outputs:**
++- Perturbed sample positions along the ray.
+ 
+ **Data Structures:**
+-*   **Noise Texture ($\mathcal{N}$):** A 2D texture storing noise values [S3, unofficial].
+-    *   **Format:** Typically single-channel (Red) [S3, unofficial].
+-    *   **Size:** $J \times J$ pixels. Typical value is $64 \times 64$ [S5].
+-    *   **Filtering:** `GL_NEAREST` (or equivalent) for both minification and magnification filters to preserve sharp noise patterns without interpolation [S3, unofficial].
+-    *   **Wrapping:** `GL_REPEAT` (or equivalent) for both S and T axes to allow seamless tiling [S3, unofficial].
+-    *   **Content:** Blue noise is preferred because it is intrinsically tileable and easier to blur out than white noise [S7, unofficial].
++- **Jitter Texture:** A 2D texture storing noise values.
++  - Dimensions: $N \times N$ (e.g., $64 \times 64$) [S5][S7, unofficial].
++  - Format: Single channel (e.g., Red) or grayscale [S4, unofficial].
++  - Filtering: `GL_NEAREST` (or equivalent) to preserve sharp noise patterns without interpolation [S3, unofficial].
++  - Wrapping: `GL_REPEAT` to allow seamless tiling [S3, unofficial].
++  - Source: Often blue noise for better perceptual quality [S7, unofficial].
++
++**Steps:**
++1. **Initialize Ray:** Start ray marching from the near plane or volume entry point. Let $t_{start}$ be the initial parameter along the ray [S6, unofficial].
++2. **Loop for Samples:** For each sample index $n = 0, 1, 2, \dots$:
++   a. **Compute Base Position:** Calculate the regular sample position:
++      $$ t_{base} = t_{start} + n \cdot \Delta t $$
++      $$ \mathbf{p}_{base} = \mathbf{o} + t_{base} \cdot \mathbf{d} $$
++   b. **Fetch Jitter Value:**
++      i. Compute texture coordinates from pixel coordinates:
++         $$ u_{tex} = u \pmod N $$
++         $$ v_{tex} = v \pmod N $$
++      ii. Sample the jitter texture to get a value $j \in [0, 1]$. If using blue noise, $j$ is drawn from a blue noise distribution [S7, unofficial].
++   c. **Apply Jitter:**
++      i. Scale the jitter by the step size and optionally by a maximum noise factor $\alpha$:
++         $$ \delta t = j \cdot \Delta t \cdot \alpha $$
++         If $\alpha$ is not used, $\delta t = j \cdot \Delta t$ [S4, unofficial][S5].
++      ii. Offset the sample position:
++          $$ t_{sample} = t_{base} + \delta t $$
++          $$ \mathbf{p}_{sample} = \mathbf{o} + t_{sample} \cdot \mathbf{d} $$
++      *Note:* Some implementations add the jitter to the start of the segment rather than the center, effectively picking a random point within the segment $[t_{base}, t_{base} + \Delta t]$ [S1, unofficial][S6, unofficial]. The formula $t_{sample} = t_{start} + (n + j) \cdot \Delta t$ achieves this [S6, unofficial].
++   d. **Sample Volume:** Trilinearly or nearest-neighbor sample the volume data at $\mathbf{p}_{sample}$ to get color and opacity.
++   e. **Composite:** Accumulate color and opacity using front-to-back or back-to-front compositing.
++   f. **Advance:** If the ray exits the volume or opacity threshold is reached, break. Otherwise, continue to next $n$.
+ 
+ **Parameters:**
+-*   **MaxNoiseFactor ($\alpha$):** Controls the maximum magnitude of the jitter offset. Typical value: $0.75$ [S5].
+-*   **JitterTexSize ($J$):** Dimensions of the noise texture. Typical value: $64$ [S5].
+-*   **RayStepSize ($\Delta t$):** The base step size used for scaling the jitter magnitude [S3, unofficial][S4, unofficial].
+-
+-**Algorithm:**
+-1.  **Pre-computation:** Load or generate a 2D noise texture $\mathcal{N}$ of size $J \times J$. Configure texture sampling to use nearest-neighbor filtering and repeat wrapping [S3, unofficial].
+-2.  **Ray Initialization:** Compute the base ray origin $\mathbf{o}$ and direction $\mathbf{d}$ for the current pixel [G].
+-3.  **Jitter Offset Calculation:** Compute texture coordinates $u_{tex} = (u \bmod J) / J$ and $v_{tex} = (v \bmod J) / J$. Sample the red channel of $\mathcal{N}$ to obtain a jitter value $j \in [0, 1]$ [S3, unofficial][S4, unofficial].
+-4.  **Sample Position Perturbation:** For each sample index $n$, calculate the nominal distance $t_n = t_0 + n \cdot \Delta t$. Offset the position by scaling the jitter value with the step size and maximum noise factor: $\mathbf{p}_n = \mathbf{o} + (t_n + \alpha \cdot \Delta t \cdot j) \cdot \mathbf{d}$ [S6, unofficial][S5]. This replaces the fixed midpoint placement $t_0 + \Delta t \cdot (n + 0.5)$ with a random position uniformly distributed within the segment [S6, unofficial].
+-5.  **Volume Sampling:** Sample the volume data at $\mathbf{p}_n$ and accumulate color and opacity using standard volume rendering integration (e.g., front-to-back compositing) [G].
++- **Jitter Texture Size ($N$):** Typical value: 64 [S5]. Larger sizes provide more unique noise patterns per frame but increase memory bandwidth [S8, book].
++- **Max Noise Factor ($\alpha$):** Typical value: 0.75 [S5]. Controls the maximum displacement relative to step size. A value of 1.0 allows jitter across the entire step [S1, unofficial].
++- **Noise Type:** Blue noise is preferred over white noise because it is tileable and easier to blur out, reducing visible dither patterns [S7, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_jittered_sample_positions(ray_origin, ray_dir, t0, num_samples, alpha, delta_t, J, pixel_uv, noise_sampler):
++def stochastic_jittered_ray_cast(ray_origin, ray_dir, volume_data, step_size, jitter_texture, pixel_uv, max_noise_factor=1.0):
+     """
+-    Computes sample positions along a ray with stochastic jittering.
++    Casts a ray through a volume using stochastic jittering to reduce banding.
+     
+     Args:
+-        ray_origin: vec3, origin of the ray
+-        ray_dir: vec3, normalized direction of the ray
+-        t0: float, start distance of the ray within the volume
+-        num_samples: int, number of samples to take
+-        alpha: float, maximum noise factor (e.g., 0.75)
+-        delta_t: float, base step size
+-        J: int, size of the noise texture
+-        pixel_uv: tuple(float, float), pixel coordinates (u, v)
+-        noise_sampler: callable(u, v) -> float, samples the pre-computed noise texture
++        ray_origin: vec3, origin of the ray.
++        ray_dir: vec3, normalized direction of the ray.
++        volume_data: function, samples volume at (x,y,z) returning (color, opacity).
++        step_size: float, base distance between samples.
++        jitter_texture: function, samples 2D noise texture at (u,v) returning float in [0,1].
++        pixel_uv: vec2, screen-space coordinates of the pixel.
++        max_noise_factor: float, multiplier for jitter magnitude (default 1.0).
+         
+     Returns:
+-        list of vec3, perturbed sample positions
++        vec4, final accumulated color with alpha.
+     """
+-    # 1. Compute texture coordinates from pixel coordinates
+-    u_tex = (pixel_uv[0] % J) / J
+-    v_tex = (pixel_uv[1] % J) / J
++    # Assume ray enters volume at t_near and exits at t_far
++    t_near = compute_ray_volume_intersection(ray_origin, ray_dir).t_near
++    t_far = compute_ray_volume_intersection(ray_origin, ray_dir).t_far
+     
+-    # 2. Sample noise texture for jitter value
+-    jitter_val = noise_sampler(u_tex, v_tex)
++    accumulated_color = vec4(0.0)
++    accumulated_opacity = 0.0
++    transmission = 1.0
+     
+-    positions = []
+-    for n in range(num_samples):
+-        # 3. Calculate nominal position
+-        t_nominal = t0 + n * delta_t
++    # Get jitter value based on pixel coordinates
++    # Use modulo to handle texture wrapping if needed, or assume texture is large enough
++    u = pixel_uv.x % jitter_texture.width
++    v = pixel_uv.y % jitter_texture.height
++    jitter_val = jitter_texture.sample(u, v)
++    
++    # Scale jitter by step size and max noise factor
++    jitter_offset = jitter_val * step_size * max_noise_factor
++    
++    t = t_near
++    sample_index = 0
++    
++    while t < t_far and transmission > 0.01: # Break threshold
++        # Calculate sample position with jitter
++        # Method 1: Offset from regular center position
++        # t_regular = t_near + step_size * (sample_index + 0.5)
++        # t_sample = t_regular + jitter_offset - (step_size * 0.5) # Adjust to keep within segment?
+         
+-        # 4. Apply jitter offset
+-        t_jittered = t_nominal + alpha * delta_t * jitter_val
++        # Method 2: Random point within segment [t, t + step_size]
++        # This is equivalent to t = t_near + step_size * (sample_index + rand())
++        t_sample = t_near + step_size * (sample_index + jitter_val)
+         
+-        # 5. Compute 3D position
+-        pos = ray_origin + t_jittered * ray_dir
+-        positions.append(pos)
++        sample_pos = ray_origin + t_sample * ray_dir
+         
+-    return positions
++        # Sample volume
++        color, opacity = volume_data(sample_pos)
++        
++        # Front-to-back compositing
++        alpha = opacity * transmission
++        accumulated_color += color * alpha
++        accumulated_opacity += alpha
++        transmission -= alpha
++        
++        sample_index += 1
++        t = t_near + sample_index * step_size # Advance base position
++        
++    return vec4(accumulated_color, accumulated_opacity)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision errors can accumulate if jitter offsets are very small relative to ray origin coordinates [G].
+-*   **Boundary Conditions:** Ensure noise texture coordinates are correctly wrapped to avoid edge artifacts [S3, unofficial].
+-*   **Artifact Transformation:** Jittering transforms banding artifacts into noise [S1, unofficial][S5]. Without refinement or sufficient sampling, isosurface rendering errors may still be present, though less visible [S5].
+-*   **Sampling Rate Dependency:** The benefit of jittering is significant at low sampling rates (e.g., 0.25, 0.5) but vanishes at higher sampling rates [S2, unofficial].
++- **Banding vs. Noise:** Jittering replaces visible banding artifacts with noise. While visually more pleasing, it introduces noise that may require further reduction techniques (e.g., temporal filtering) [S1, unofficial][S6, unofficial].
++- **Precision:** At high sampling rates, the benefit of jittering vanishes as the regular sampling is sufficient to capture volume details [S2, unofficial].
++- **Isosurface Errors:** Without refinement, isosurface rendering errors are inevitable if sample distance is not reduced; jittering makes these artifacts less visible but does not eliminate them [S5].
++- **Texture Bandwidth:** Using a large jitter texture can increase memory bandwidth requirements [S8, book].
+ 
+ ## Subtopics
+ 
+ ### [Slice Artifact Reduction](1628-slice-artifact-reduction.md)
+-Mitigates "wood grain" artifacts by jittering ray start positions and performing a local solidity check. It differs from standard ray casting by randomizing the initial ray origin along the viewing direction and verifying sampled voxels are truly part of the volume rather than edge artifacts. This method is particularly effective when using a low number of ray casting steps or when nearest-neighbor interpolation is employed.
++Slice Artifact Reduction is a stochastic sampling technique used in direct volume ray casting to mitigate "wood grain" artifacts—visible slice boundaries caused by regular ray start positions and discrete voxel grids. It differs from standard ray casting by randomizing the initial ray origin along the viewing direction and performing a localized "solidity check" to verify that a sampled voxel is truly part of the volume rather than an edge artifact. This method is particularly effective when using a low number of ray casting steps or when nearest-neighbor interpolation is employed, where regular sampling patterns are most visible.
+ 
+ ### [Temporal Filtering and Jittering](2762-temporal-filtering-and-jittering.md)
+-Combines sub-voxel depth jittering with temporal reprojection to smooth noise and improve perceived volume resolution without extra raymarching steps. It distinguishes itself from static spatial filters by leveraging motion vectors to blend frames, and from pure stochastic sampling methods by focusing on temporal accumulation rather than single-sample unbiased estimation.
++Temporal Filtering and Jittering is a technique that smooths out noise and improves perceived volume resolution without extra raymarching steps. It addresses spatial banding artifacts caused by coarse slice resolution by combining sub-voxel depth jittering with temporal reprojection. It distinguishes itself from static spatial filters by leveraging camera motion vectors to blend frames, and from pure spatial sampling methods by accumulating jittered samples over time to improve perceived resolution without additional raymarching steps.
++
++### [Random Jitter with Reprojection](2782-random-jitter-with-reprojection.md)
++Random Jitter with Reprojection is a technique to reduce banding artifacts caused by low sample counts in volume rendering by introducing stochastic jitter during ray marching and subsequently reducing the resulting noise via temporal accumulation. It distinguishes itself from pure spatial jittering methods by leveraging temporal coherence, projecting a pseudo-hit position from the current frame into the previous frame's screen space to blend the current result with a history buffer, thereby allowing for lower per-frame sample counts while maintaining visual stability.
++
++### [Ray Casting with Jittered Sampling](4151-ray-casting-with-jittered-sampling.md)
++Ray Casting with Jittered Sampling is a direct volume rendering technique that casts rays through a 3D voxel grid to accumulate color and opacity along the ray path. It distinguishes itself from uniform ray sampling by perturbing sample positions with a pre-computed jitter texture to break up regular grid patterns and reduce aliasing artifacts. Unlike stochastic methods, it uses deterministic offsets stored in a 2D texture rather than runtime random number generation [G].
+ 
+ ### Low-Resolution Stochastic Sampling
+-An extension where sampling occurs at a lower resolution to reduce texture bandwidth requirements, combined with varying the sample pattern with stochastic sampling to reduce regular pattern artifacts [S8, book].
++An extension where sampling occurs at a lower resolution to reduce texture bandwidth requirements, combined with varying the sample pattern with stochastic sampling to reduce regular pattern artifacts where sampling density is reduced [S8, book].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples [G]. The noise texture lookup is $O(1)$ [G].
+-*   **Memory Complexity:** Memory overhead is proportional to the noise texture size $J \times J$ [S5].
+-*   **Measured Performance:** Provides slight visual improvement at low sampling rates (0.25, 0.5) but the benefit vanishes with higher sampling rates [S2, unofficial].
+-*   **Strengths:** Reduces visible banding artifacts; simple to implement; low memory overhead [S5].
+-*   **Limitations:** Replaces banding with noise; noise can be reduced using quasi Monte-Carlo methods but basic implementation uses simple random/blue noise [S6, unofficial]; benefit diminishes at high sampling rates [S2, unofficial].
+-*   **When to Use:** When undersampling volumes for performance and banding artifacts are visible [S2, unofficial].
+-*   **When Not to Use:** When high sampling rates are feasible, or when strict deterministic results are required [S2, unofficial].
++- **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. Jittering adds negligible overhead (texture fetch and addition) compared to the volume sampling itself.
++- **Memory Complexity:** $O(N^2)$ for the jitter texture, where $N$ is the texture dimension (e.g., $64 \times 64$ floats = 16 KB) [S5].
++- **Measured Performance:** On typical hardware, jittering has minimal impact on frame rate. The benefit is visual quality rather than speed [S2, unofficial].
++- **Scaling:** The benefit of ray jittering vanishes with higher sampling rates (e.g., $s \ge 2.0$) [S2, unofficial]. It is most effective at low sampling rates (e.g., $s = 0.25, 0.5$) [S2, unofficial].
++- **Strengths:** Effectively reduces banding and wood-grain artifacts; simple to implement; works well with nearest-neighbor interpolation.
++- **Limitations:** Introduces noise; does not improve accuracy, only visual quality; ineffective at high sample counts.
++- **When to Use:** When using low sample counts, nearest-neighbor interpolation, or when banding artifacts are prominent.
++- **When Not to Use:** When high sample counts are available, or when noise is unacceptable without temporal filtering.
+ 
+ ## Background
+-Stochastic jittering originated as a technique to mitigate aliasing in volume rendering by introducing controlled noise to sample positions [S4, unofficial]. It is implemented in libraries such as VTK (as `SetNoise`) [S5] and used in various ray casting implementations [S2, unofficial][S3, unofficial]. Blue noise textures for this purpose are available from libraries like 'free-blue-noise-textures' by Calinou [S7, unofficial].
++Stochastic jittering originated as a technique to address quantization errors in volume rendering. It is implemented in libraries such as VTK (Visualization Toolkit) under the name "Noise" [S5]. The technique is widely used in real-time volume rendering to improve visual quality without significant performance cost [S1, unofficial][S6, unofficial]. Blue noise textures for jittering are commonly sourced from libraries like 'free-blue-noise-textures' [S7, unofficial].
+ 
+ ## Sources
+-[S1] "Volume Rendering for Developers" Group Read Part 1 [2023-03-30], https://www.youtube.com/watch?v=mZzMVD4LQvk, fetched 2026-10-26 (unofficial)
++[S1] "Volume Rendering for Developers" Group Read Part 1, https://www.youtube.com/watch?v=mZzMVD4LQvk, fetched 2026-10-26 (unofficial)
+ [S2] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
+ [S3] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,99 @@
+# FSDigger
+
+Also called: 2D Digger, Digger Tool, Volume Sculpting Digger
+
+## Overview
+FSDigger is a fragment shader implementation of the 2D Digger tool for real-time volume sculpting, designed to carve semi-spherical holes into a volume starting from the first surface intersection along the line of sight [S1]. Unlike the Eraser tool which removes voxels through the entire depth of the volume, FSDigger limits removal to a depth determined by the cursor radius and viewing geometry, effectively creating a "dug" cavity rather than a tunnel [S1]. It builds on [Voxel Edit Brush Operations — Place/Carve/Fill/Paint, Real-time Voxel Editing, VoxelEdit](12596-voxel-edit-brush-operations-place-carve-fill-paint-real-time.md) by injecting specific carving logic into the fragment shader pipeline.
+
+## How it works
+**Inputs and Outputs:**
+The shader operates on a fragment shader stage.
+*   **Input:** `v2f` struct containing `Tex0` (float2, semantic TEXCOORD0) [S1].
+*   **Uniforms:**
+    *   `SculptMap`: `sampler3D` at TEXUNIT0. Stores the current voxel state (alpha channel represents occupancy/depth mask) [S1].
+    *   `VolumeTex`: `sampler3D` at TEXUNIT1. Stores the original volume data (color/alpha) [S1].
+    *   `P`: `float4` at C0. `P.xyz` is the 3D point representing the brush center in world/clip space, and `P.a` is the tool radius $r$ [S1].
+    *   `PolygonCoord`: `sampler2D` at TEXUNIT1 (Note: Source lists TEXUNIT1 for both VolumeTex and PolygonCoord; implementation must resolve texture unit conflict, typically VolumeTex is TEXUNIT1 and PolygonCoord is TEXUNIT2 or similar, but we follow source structure where `PolygonCoord` is sampled to get `texCoord`) [S1].
+*   **Output:** `Col` (float4, semantic COLOR0). The resulting color and alpha for the fragment [S1].
+
+**Data Structures:**
+*   `SculptMap`: A 3D texture where the alpha channel `Col.a` acts as a mask. The value represents the remaining depth or occupancy. A value of 0 implies the voxel is removed [S1].
+*   `P`: A uniform vector defining the brush. `P.a` is the radius $r$ [S1].
+
+**Algorithm Steps:**
+1.  **Texture Sampling:** Sample the `PolygonCoord` texture using `v2f.Tex0` to obtain the 3D texture coordinates `texCoord` for the current fragment [S1].
+    $$ \text{texCoord} = \text{tex2D}(\text{PolygonCoord}, \text{v2f.Tex0}) $$
+2.  **Current State Retrieval:** Sample the `SculptMap` texture at `texCoord` to get the current voxel state `Col` [S1].
+    $$ \text{Col} = \text{tex3D}(\text{SculptMap}, \text{texCoord}) $$
+3.  **Distance Calculation:** Calculate the 3D Euclidean distance $D$ between the brush center point $P$ (homogeneous coordinate $w=1$) and the current fragment position `texCoord`, normalized by the tool radius $r$ ($P.a$) [S1].
+    $$ D = \frac{\text{distance}(\text{float4}(P.xyz, 1), \text{texCoord})}{P.a} $$
+    *Note: The source code snippet for FSDigger uses `distance(float4(P.xyz,1), texCoord) / P.a` [S1].*
+4.  **Mask Update:** If the calculated distance $D$ is less than the current alpha value `Col.a`, update `Col.a` to $D$. This effectively carves out the voxel if the distance is within the brush radius, reducing the alpha mask [S1].
+    $$ \text{if } (D < \text{Col.a}) \quad \text{Col.a} = D $$
+5.  **Color Combination:** Combine the original volume color with the sculpted mask. The output color `Col.rgb` is taken from `VolumeTex`, and the output alpha is the original volume alpha multiplied by the floor of the updated mask alpha (ensuring binary occupancy or stepped depth) [S1].
+    $$ \text{volume\_voxel} = \text{tex3D}(\text{VolumeTex}, \text{v2f.Tex0}) $$
+    $$ \text{Col.rgb} = \text{volume\_voxel.rgb} $$
+    $$ \text{Col.a} = \text{volume\_voxel.a} \times \lfloor \text{Col.a} \rfloor $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# FSDragment Shader Implementation
+# Inputs: v2f.Tex0 (float2), Uniforms: SculptMap (sampler3D), VolumeTex (sampler3D), P (float4), PolygonCoord (sampler2D)
+# Output: Col (float4)
+
+def fsdigger(v2f_Tex0, SculptMap, VolumeTex, P, PolygonCoord):
+    # Step 1: Get 3D texture coordinates from 2D screen coordinates
+    texCoord = tex2D(PolygonCoord, v2f_Tex0)
+    
+    # Step 2: Sample current sculpt map state
+    Col = tex3D(SculptMap, texCoord)
+    
+    # Step 3: Calculate normalized 3D Euclidean distance from brush center P to fragment
+    # P.xyz is the 3D point, P.a is the radius r
+    # We treat P as a homogeneous point (w=1) for distance calculation
+    P_homogeneous = float4(P.xyz, 1.0)
+    D = distance(P_homogeneous, texCoord) / P.a
+    
+    # Step 4: Update alpha mask if within brush radius
+    # This carves the voxel by reducing its alpha value to the distance
+    if D < Col.a:
+        Col.a = D
+        
+    # Step 5: Sample original volume data
+    volume_voxel = tex3D(VolumeTex, v2f_Tex0)
+    
+    # Step 6: Combine color and final alpha
+    # Color comes from original volume
+    Col.rgb = volume_voxel.rgb
+    # Alpha is original volume alpha * floor of sculpt mask alpha
+    # floor() ensures binary removal (0 or 1) or stepped depth depending on interpretation
+    Col.a = volume_voxel.a * floor(Col.a)
+    
+    return Col
+```
+
+**Parameters:**
+*   `P.a` (Radius $r$): The radius of the digging tool. The depth of the dig is constrained by this radius and viewing geometry [S1].
+*   `P.xyz`: The 3D position of the brush center. For the 2D Digger, this is projected onto the volume surface along the line of sight [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Semi-spherical Constraint:** The selection region is a semi-sphere constrained by viewing parameters. Its size varies according to the cursor radius and the position is determined by the intersection of the line of sight and the volume surface [S1].
+*   **Depth Calculation:** The depth of the dig is not uniform; it is calculated based on the cursor radius $r$, the surface distance $d_s$, and the view plane distance $d_v$ to the point of view, as given by Equation 1 in the source [S1]:
+    $$ \text{depth} = \frac{d_s \cdot r}{d_v} $$
+    However, the shader implementation uses a direct Euclidean distance check normalized by radius, which approximates this geometric constraint in screen space [S1].
+*   **Texture Unit Conflict:** The source lists `VolumeTex` and `PolygonCoord` both at `TEXUNIT1`. In implementation, these must be assigned to distinct texture units [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per fragment. The shader performs a constant number of texture samples and arithmetic operations.
+*   **Memory Complexity:** $O(1)$ additional memory per fragment. The state is stored in the `SculptMap` texture.
+*   **Performance:** Real-time performance is achieved by leveraging the GPU fragment shader pipeline. The method avoids iterating over all voxels in the volume, instead processing only the fragments corresponding to the proxy geometry planes [S1].
+*   **Strengths:** Efficient real-time sculpting; intuitive 2D interaction for 3D volume modification; creates natural-looking dug holes [S1].
+*   **Limitations:** The digging depth is constrained by the viewing geometry and cursor radius, which may not provide precise control over the exact depth of the hole in world units [S1]. The semi-spherical shape may not be suitable for all sculpting needs (e.g., flat-bottomed holes) [S1].
+
+## Background
+FSDigger originates from the "Volume sculpting based on geometric tools" paper by [S1] (2009). It is part of a suite of tools including Eraser, Clipper, and Combiner, designed for interactive volume editing. The 2D Digger tool was introduced to address the need for digging holes in volumes without erasing the entire path along the line of sight, which is the behavior of the Eraser tool [S1]. The implementation uses a fragment shader (Cg) to inject the carving logic into the rendering pipeline, using a 3D texture mask (`SculptMap`) to track the sculpted state [S1].
+
+## Sources
+[S1] Volume sculpting based on geometric tools, https://doi.org/10.1007/bf03194498, fetched 2026-10-26

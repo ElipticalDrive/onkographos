@@ -1,53 +1,52 @@
 # Gradient Computation and Back-Propagation
 
-Also called: Backward Pass, Differentiable Rendering Gradients
+Also called: Differentiable Volume Rendering Back-Propagation, Gradient Flow in Gaussian Splatting
 
 ## Overview
-Gradient Computation and Back-Propagation provides the mathematical and algorithmic foundation for optimizing 3D Gaussian Splatting parameters by computing the derivatives of a loss function with respect to Gaussian attributes (position, scale, rotation, opacity, color, and skew). It solves the problem of efficiently propagating error signals from rendered pixel colors (or physical signals like Time-of-Flight) back to the 3D scene representation. It sets itself apart from sibling methods by defining the core differentiable chain rule for the splatting rasterizer, while specialized siblings extend this to non-standard signal models (ToF), semantic features, or memory-constrained environments.
+This method computes the gradients of a loss function with respect to the learnable parameters of 3D Gaussians (position, scale, rotation, opacity, color, and feature embeddings) by applying the chain rule through the differentiable volume rendering equation. It solves the problem of optimizing radiance fields from 2D image observations by providing the necessary gradient signals for optimizers like Adam. What sets this family apart is the specific handling of the alpha-compositing accumulation and the projection Jacobian, which allows gradients to flow from pixel space back to 3D parameter space efficiently. It builds on [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) and [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md).
 
 ## Shared principles
-The family shares the fundamental differentiable volume rendering equation and the back-to-front compositing order. For a pixel $\mathbf{x}$, the rendered color $\mathbf{C}(\mathbf{x})$ is computed as [S1, unofficial]:
+The core mechanism relies on the differentiable nature of the alpha-compositing equation and the 2D Gaussian projection.
 
+**Rendering Equation:**
+The rendered color $\mathbf{C}$ at pixel $(x,y)$ is:
 $$
-\mathbf{C}(\mathbf{x}) = \sum_{k=0}^{N-1} T_k(\mathbf{x}) \alpha_k(\mathbf{x}) \mathbf{c}_k
+\mathbf{C}(x,y) = \sum_{k=1}^{N} \mathbf{c}_k \alpha_k(x,y) T_k(x,y)
 $$
+where $T_k(x,y) = \prod_{j=1}^{k-1} (1 - \alpha_j(x,y))$ is the transmittance, $\alpha_k(x,y)$ is the projected opacity, and $\mathbf{c}_k$ is the color. Gaussians are sorted back-to-front.
 
-where $N$ is the number of Gaussians sorted back-to-front, $\alpha_k(\mathbf{x})$ is the opacity of the $k$-th Gaussian at $\mathbf{x}$, $\mathbf{c}_k$ is its color, and $T_k(\mathbf{x})$ is the transmittance up to Gaussian $k$:
+**Gradient Accumulation Strategy:**
+To optimize memory and throughput, gradients are often accumulated directly into packed buffers (e.g., `half2` buffers for two-channel groups) using atomic operations during the rasterization pass, followed by a post-pass to unpack to legacy arrays [S1, unofficial]. This design omits block-local reductions to align with accuracy-throughput goals [S1, unofficial].
 
+**Chain Rule Application:**
+Gradients flow from the loss $L$ to the rendered image $\mathbf{C}$, then to the opacity $\alpha_k$ and color $\mathbf{c}_k$, and finally to the 3D parameters via the projection Jacobian.
 $$
-T_k(\mathbf{x}) = \prod_{j=0}^{k-1} (1 - \alpha_j(\mathbf{x}))
+\frac{\partial L}{\partial \theta} = \sum_{x,y} \frac{\partial L}{\partial \mathbf{C}(x,y)} \frac{\partial \mathbf{C}(x,y)}{\partial \alpha_k} \frac{\partial \alpha_k}{\partial \theta} + \frac{\partial L}{\partial \mathbf{C}(x,y)} \frac{\partial \mathbf{C}(x,y)}{\partial \mathbf{c}_k} \frac{\partial \mathbf{c}_k}{\partial \theta}
 $$
-
-The gradient of the loss $L$ with respect to a parameter $\theta$ of the $k$-th Gaussian is computed via the chain rule:
-
-$$
-\frac{\partial L}{\partial \theta_k} = \frac{\partial L}{\partial \mathbf{C}(\mathbf{x})} \cdot \frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k} \cdot \frac{\partial \alpha_k}{\partial \theta_k} + \frac{\partial L}{\partial \mathbf{C}(\mathbf{x})} \cdot \frac{\partial \mathbf{C}(\mathbf{x})}{\partial \mathbf{c}_k} \cdot \frac{\partial \mathbf{c}_k}{\partial \theta_k} + \dots
-$$
-
-The term $\frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k}$ depends on the transmittance and the accumulated color from subsequent Gaussians. The term $\frac{\partial \alpha_k}{\partial \theta_k}$ depends on the 2D Gaussian density function and its Jacobian with respect to the 3D parameters. Implementation typically involves a tile-and-bin CUDA pipeline where gradients are accumulated per-pixel into packed buffers [S1, unofficial].
+The term $\frac{\partial \mathbf{C}}{\partial \alpha_k}$ is computed recursively from back-to-front.
 
 ## Subtopics
 
 ### [ToF Gradient Computation for Gaussian Splatting](9733-tof-gradient-computation-for-gaussian-splatting.md)
-Computes gradients for Time-of-Flight (ToF) signals where the rendered quantity is a quad pixel signal $\mathbf{q}(\mathbf{x})$ rather than linear color. It differs from standard RGB rendering by introducing a recursive accumulation term $\text{acc}_k^q$ that accounts for squared transmittance factors $(1-\alpha_{k+1})^2$ inherent in ToF signal integration. Choose this method when training on ToF data.
+Computes gradients for Time-of-Flight (ToF) quad pixel signals. It extends standard 3DGS by introducing squared transmittance terms ($T_k^2$) in the recursive accumulation for opacity gradients, distinguishing it from the linear accumulation used for RGB color. Choose this when training on ToF data.
 
 ### [Gradient-Weighted Feature Back-Projection](9769-gradient-weighted-feature-back-projection.md)
-A training-free method for aggregating 2D feature embeddings into 3D Gaussians. It uses the opacity-transmittance product $\alpha_k T_k$ as a back-projection weight to assign semantic features without auxiliary neural networks. Choose this for semantic segmentation or feature-rich reconstruction without iterative feature field optimization.
+A training-free method for assigning 2D feature embeddings to pre-trained 3D Gaussians. It uses the gradient of the rendered color with respect to the Gaussian's color ($\frac{\partial \mathbf{C}}{\partial \mathbf{c}_k} = \alpha_k T_k$) as a weight to back-project 2D features from training views into 3D. Choose this for feature field rendering without distillation or explicit feature field optimization.
 
 ### [SNS Backward Pass with Intermediate Variable Q](10040-sns-backward-pass-with-intermediate-variable-q.md)
-Computes gradients for Skew-Normal Splatting (SNS) by introducing an intermediate variable $Q = ARS$ to decouple rotation and scale dependencies in the 2D density function. It differs from standard 3DGS by evaluating shared auxiliary algebraic terms during rendering to enable closed-form gradients for skew and covariance parameters. Choose this when using the SNS representation.
+Computes gradients for 3D Skew-Normal Splatting (SNS) by decoupling rotation and scale via an intermediate variable $Q = ARS$. It avoids the high complexity of directly differentiating coupled $R$ and $S$ parameters by evaluating shared auxiliary algebraic terms during rendering and using closed-form expressions for preprocessing. Choose this when using Skew-Normal distributions for better shape representation.
 
 ### [Specular-Aware Gradient Gating](13432-specular-aware-gradient-gating.md)
-Suppresses specular artifacts in semi-transparent scenes by modulating the gradients of the transmission color component using a local variance-based gating factor. It operates exclusively on the backward pass, stopping gradients in high-variance (specular) regions. Choose this for rendering transparent objects with specular highlights.
+Suppresses specular artifacts in semi-transparent volume rendering by modulating the gradient flow of the transmission color component using a local variance-based gating factor. The forward pass remains visually identical to the original model. Choose this when training on scenes with significant specular highlights and transparency.
 
 ### [Deferred Back-propagation](13506-deferred-back-propagation.md)
-A memory-efficient technique for optimizing radiance fields using full-resolution image losses (e.g., VGG style loss). It decouples loss computation from the differentiable rendering pass by caching full-resolution gradients and re-rendering small patches. Choose this when GPU memory is insufficient for full-resolution differentiable rendering.
+A memory-efficient technique for optimizing radiance fields using full-resolution image losses (e.g., VGG style losses) that require global context. It decouples the forward render from gradient computation, accumulating gradients in a patch-wise fashion to allow full-resolution optimization with a GPU memory footprint equivalent to a single small patch. Choose this when standard sparse sampling is insufficient for CNN-based losses.
 
 ### Backward Pass in Half Precision
-A gradient computation method using half-precision (FP16) arithmetic to optimize the accuracy-throughput trade-off. It omits block-local reductions, accumulating per-parameter gradients directly into packed `half2` buffers via `half2` atomicAdd over two-channel gradient groups, followed by a lightweight post pass that unpacks to legacy FP16 arrays [S1, unofficial]. The gradient of image $I$ w.r.t. primitive position $x_i$ is calculated as $\frac{\partial I(x,y)}{\partial x_i} = \frac{\partial I(x,y)}{\partial M_i(x,y)} \left( \frac{\partial M_i(x,y)}{\partial u} \frac{\partial u}{\partial x_i} + \frac{\partial M_i(x,y)}{\partial v} \frac{\partial v}{\partial x_i} \right)$, where $M_i$ is the primitive mask and $u,v$ are local coordinates [S1, unofficial]. This differs from standard implementations by using half precision and omitting block-local reductions [S1, unofficial].
+A gradient computation method using half-precision (FP16) arithmetic to optimize accuracy-throughput trade-off, omitting block-local reductions [S1, unofficial]. It calculates $\frac{\partial I}{\partial M_i}$ using Eqs. (3, 4, 5), $\frac{\partial M_i}{\partial u}$ using Eq. (2) and bilinear interpolation, and geometric derivatives from Eq. (1) [S1, unofficial]. The gradient of image $I$ w.r.t. primitive position $x_i$ is $\frac{\partial I(x,y)}{\partial x_i} = \frac{\partial I(x,y)}{\partial M_i(x,y)} \left( \frac{\partial M_i(x,y)}{\partial u} \frac{\partial u}{\partial x_i} + \frac{\partial M_i(x,y)}{\partial v} \frac{\partial v}{\partial x_i} \right)$, where $M_i$ is the primitive mask and $u,v$ are local coordinates [S1, unofficial]. It differs from standard implementations by using half precision and omitting block-local reductions [S1, unofficial].
 
 ## Background
-The standard differentiable volume rendering chain rule for 3D Gaussian Splatting was introduced in the original 3DGS paper [Kerbl et al., 2023]. The specific implementation details of tile-and-bin CUDA pipelines and half-precision accumulation are described in [DiffBMP](https://doi.org/10.48550/arXiv.2602.22625) [S1, unofficial]. Extensions to ToF [S1, unofficial], semantic features [S1, unofficial], and Skew-Normal distributions [S1, unofficial] have been developed to address specific domain requirements.
+The foundational differentiable volume rendering approach for 3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1, unofficial]. The specific implementation details regarding half-precision accumulation and bitmap primitive gradients are described in *DiffBMP: Differentiable Rendering with Bitmap Primitives* [S1, unofficial]. The method has since been extended to handle various signal types (ToF), feature fields, and advanced probability distributions (SNS).
 
 ## Sources
 [S1] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

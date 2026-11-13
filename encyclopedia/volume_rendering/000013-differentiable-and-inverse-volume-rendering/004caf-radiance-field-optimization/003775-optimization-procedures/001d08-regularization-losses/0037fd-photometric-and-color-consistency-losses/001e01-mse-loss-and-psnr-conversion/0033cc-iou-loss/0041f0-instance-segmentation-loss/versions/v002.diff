@@ -1,0 +1,287 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Instance Segmentation Loss trains the instance branch $\Theta_i$ of a radiance field using multi-view consistent 2D instance segmentation maps, while keeping the density $\Theta_\sigma$ and color $\Theta_c$ branches fixed [S1]. It distinguishes itself from sibling methods by explicitly optimizing for per-instance class probabilities rather than just binary occupancy or appearance, addressing the fragmentation caused by inconsistent 2D masks across views [S1]. It builds on [IoU Loss](7110-iou-loss.md) by providing the probabilistic supervision signal required for differentiable instance field training.
++Instance Segmentation Loss trains the instance branch $\Theta_i$ of a radiance field using multi-view consistent 2D instance segmentation maps, while keeping the density $\Theta_\sigma$ and color $\Theta_c$ branches fixed [S1]. It distinguishes itself from sibling methods by explicitly optimizing for per-instance class probabilities rather than just binary occupancy or appearance, addressing the fragmentation caused by inconsistent 2D masks across views [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Pre-trained density network $\Theta_\sigma$ and color network $\Theta_c$ (frozen); instance network $\Theta_i$ (trainable); a set of multi-view 2D instance segmentation maps; camera poses and intrinsics.
+-*   **Outputs:** Updated instance network parameters $\Theta_i$; rendered instance logits $\hat{I}(r)$, depth $\hat{D}(r)$, and color $\hat{C}(r)$ for rays $r$.
++*   **Inputs:** Pre-trained density network $\Theta_\sigma$ and color network $\Theta_c$ (frozen); instance network $\Theta_i$ (trainable); a set of multi-view 2D instance segmentation maps; camera poses and intrinsics [S1].
++*   **Outputs:** Updated instance network parameters $\Theta_i$; rendered instance logits $\hat{I}(r)$, depth $\hat{D}(r)$, and color $\hat{C}(r)$ for rays $r$ [S1].
+ 
+ **Data Structures:**
+@@ -21,10 +21,10 @@
+     $$ \hat{C}(r) = \sum_{k=1}^{K} \hat{T}(t_k) \alpha(\sigma(t_k) \delta_k) c(t_k) $$
+     Where:
+-    *   $\delta_k = t_{k+1} - t_k$ is the distance between samples.
+-    *   $\alpha(x) = 1 - \exp(-x)$ is the transmittance approximation.
++    *   $\delta_k = t_{k+1} - t_k$ is the distance between samples [S1].
++    *   $\alpha(x) = 1 - \exp(-x)$ is the transmittance approximation [S1].
+     *   $\hat{T}(t_k) = \exp\left(-\sum_{a=1}^{k-1} \sigma(t_a) \delta_a\right)$ is the accumulated transmittance up to sample $k$ [S1].
+-    *   $i(t_k)$ is the raw instance logit output by $\Theta_i$ at $t_k$.
+-    *   $c(t_k)$ is the color output by $\Theta_c$ at $t_k$.
+-    *   $\sigma(t_k)$ is the density output by $\Theta_\sigma$ at $t_k$.
++    *   $i(t_k)$ is the raw instance logit output by $\Theta_i$ at $t_k$ [S1].
++    *   $c(t_k)$ is the color output by $\Theta_c$ at $t_k$ [S1].
++    *   $\sigma(t_k)$ is the density output by $\Theta_\sigma$ at $t_k$ [S1].
+ 
+ 2.  **Probability Prediction:** The volume prediction $\hat{p}_l(r)$ for instance class $l$ is obtained by applying softmax to the accumulated logits $\hat{I}(r)$ [S1]:
+@@ -52,28 +52,22 @@
+ 
+ **Pitfalls:**
+-*   **Inconsistency:** 2D segmentation maps from existing models are not 3D geometry-consistent across views, leading to fragmented segmentation if trained directly [S1]. This is mitigated by $L_r$ and 2D mask refinement.
++*   **Inconsistency:** 2D segmentation maps from existing models are not 3D geometry-consistent across views, leading to fragmented segmentation if trained directly [S1]. This is mitigated by $L_r$ and 2D mask refinement [S1].
+ *   **Precision:** The depth similarity weights $\delta_w$ rely on the pre-trained density branch's depth $\hat{D}$. Errors in $\hat{D}$ may propagate to incorrect smoothing weights [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_instance_loss(
+-    rays, 
+-    gt_instance_probs, 
+-    model_sigma, 
+-    model_color, 
+-    model_instance, 
+-    lambda_inst=1.0
+-):
++import math
++
++def compute_instance_loss(rays, gt_instance_probs, model_sigma, model_color, model_instance, lambda_inst=1.0):
+     """
+     Computes the total loss for Instance Segmentation Loss.
+     
+     Args:
+-        rays: List of Ray objects, each containing origin o, direction d, 
+-              and a list of K sample points t_k.
+-        gt_instance_probs: Tensor of shape (num_rays, num_classes), 
+-                           ground truth probabilities p_l(r).
+-        model_sigma: Frozen density network.
+-        model_color: Frozen color network.
+-        model_instance: Trainable instance network.
++        rays: List of dicts with keys 'positions' (K,), 'directions' (3,), 
++              'gt_color' (3,), 'i' (int), 'j' (int), 'H' (int), 'W' (int).
++        gt_instance_probs: List of lists/arrays of shape (num_classes,).
++        model_sigma: Frozen density network returning scalar per position.
++        model_color: Frozen color network returning vector per position/direction.
++        model_instance: Trainable instance network returning vector per position/direction.
+         lambda_inst: Hyperparameter lambda.
+         
+@@ -81,155 +75,75 @@
+         total_loss: Scalar loss value.
+     """
+-    device = rays[0].origin.device
+     num_rays = len(rays)
+-    num_classes = gt_instance_probs.shape[1]
++    num_classes = len(gt_instance_probs[0])
+     
+-    # Accumulators for losses
++    rendered_instance_logits = [None] * num_rays
++    rendered_depths = [0.0] * num_rays
+     loss_p_sum = 0.0
+     loss_i_sum = 0.0
+-    loss_r_sum = 0.0
+-    
+-    # Storage for rendered depth and instance logits for regularization
+-    # Shape: (num_rays, num_classes)
+-    rendered_instance_logits = torch.zeros((num_rays, num_classes), device=device)
+-    rendered_depths = torch.zeros(num_rays, device=device)
+-    rendered_colors = torch.zeros((num_rays, 3), device=device)
+     
+     for r_idx, ray in enumerate(rays):
+-        t_k = ray.t_k # Shape (K,)
+-        delta_k = torch.diff(t_k, prepend=t_k[0]) # Approximation if t_0 is start, but usually t_{k+1}-t_k. 
+-        # Note: Source defines delta_k = t_{k+1} - t_k. We assume t_k includes endpoints or handles K points.
+-        # Standard implementation: delta_k = t[1:] - t[:-1] if K samples. 
+-        # Let's assume t_k has length K, and we need K deltas. 
+-        # If t_k are centers, we need boundaries. Source implies simple quadrature.
+-        # We will assume t_k are sample points and delta_k is provided or computed from boundaries.
+-        # For simplicity, assuming delta_k is available or t_k are boundaries.
+-        # Re-reading source: "select K quadrature points {tk}". 
+-        # Formula uses delta_k. Usually delta_k is interval length.
+-        # Let's assume ray provides delta_k.
+-        delta_k = ray.delta_k # Shape (K,)
++        t_k = ray['positions']
++        K = len(t_k)
++        delta_k = [t_k[k+1] - t_k[k] for k in range(K-1)] + [t_k[-1] - t_k[-2]]
+         
+-        # 1. Compute Density and Transmittance
+-        sigma_vals = model_sigma(ray.positions) # Shape (K, 1)
+-        alpha_vals = 1.0 - torch.exp(-sigma_vals * delta_k) # Shape (K, 1)
++        sigma_vals = model_sigma(ray['positions'])
++        alpha_vals = [1.0 - math.exp(-s * d) for s, d in zip(sigma_vals, delta_k)]
+         
+-        # T_hat(t_k) = exp(-sum_{a=1}^{k-1} sigma(t_a) delta_a)
+-        # T_hat(1) = 1.0
+-        # T_hat(k) = T_hat(k-1) * (1 - alpha(k-1))
+-        T_hat = torch.ones_like(alpha_vals[:, 0]) # Shape (K,)
+-        for k in range(1, len(t_k)):
+-            T_hat[k] = T_hat[k-1] * (1.0 - alpha_vals[k-1, 0])
++        T_hat = [1.0] * K
++        for k in range(1, K):
++            T_hat[k] = T_hat[k-1] * (1.0 - alpha_vals[k-1])
+             
+-        # 2. Accumulate Color, Depth, Instance Logits
+-        c_vals = model_color(ray.positions, ray.directions) # Shape (K, 3)
+-        i_vals = model_instance(ray.positions, ray.directions) # Shape (K, num_classes)
++        c_vals = model_color(ray['positions'], ray['directions'])
++        i_vals = model_instance(ray['positions'], ray['directions'])
+         
+-        weights = T_hat * alpha_vals[:, 0] # Shape (K,)
++        weights = [T_hat[k] * alpha_vals[k] for k in range(K)]
+         
+-        # Color
+-        color = torch.sum(weights.unsqueeze(1) * c_vals, dim=0) # Shape (3,)
++        color = sum(w * c for w, c in zip(weights, c_vals))
++        depth = sum(w * t for w, t in zip(weights, t_k))
++        inst_logits = [sum(w * i for w, i in zip(weights, i_vals_k)) for i_vals_k in zip(*i_vals)]
+         
+-        # Depth
+-        depth = torch.sum(weights * t_k, dim=0) # Scalar
+-        
+-        # Instance Logits
+-        inst_logits = torch.sum(weights.unsqueeze(1) * i_vals, dim=0) # Shape (num_classes,)
+-        
+-        # Store for regularization
+         rendered_instance_logits[r_idx] = inst_logits
+         rendered_depths[r_idx] = depth
+-        rendered_colors[r_idx] = color
+         
+-        # 3. Compute Appearance Loss (MSE)
+-        # Assuming gt_color is available in ray or passed separately. 
+-        # Source defines Lp = 1/2 |C_hat - C|^2.
+-        # We need gt_color for this ray.
+-        gt_color = ray.gt_color # Shape (3,)
+-        loss_p_sum += 0.5 * torch.sum((color - gt_color) ** 2)
++        gt_color = ray['gt_color']
++        loss_p_sum += 0.5 * sum((c - g)**2 for c, g in zip(color, gt_color))
+         
+-        # 4. Compute Instance Probability
+-        # Softmax over instance logits
+-        inst_probs = torch.softmax(inst_logits, dim=0) # Shape (num_classes,)
++        inst_probs = [math.exp(l) for l in inst_logits]
++        prob_sum = sum(inst_probs)
++        inst_probs = [p / prob_sum for p in inst_probs]
+         
+-        # 5. Compute Instance Loss (Cross Entropy)
+-        # L_i = - sum p_l log p_hat_l
+-        # Note: Source uses p_l(r) as ground truth probability.
+-        gt_probs = gt_instance_probs[r_idx] # Shape (num_classes,)
+-        # Clip for numerical stability
+-        inst_probs_clipped = torch.clamp(inst_probs, min=1e-7, max=1.0)
+-        loss_i_sum += -torch.sum(gt_probs * torch.log(inst_probs_clipped))
++        gt_probs = gt_instance_probs[r_idx]
++        loss_i_sum += -sum(g * math.log(max(p, 1e-7)) for g, p in zip(gt_probs, inst_probs))
+         
+-    # 6. Compute Regularization Loss
+-    # L_r involves adjacent pixels. Rays must be ordered by image coordinates (i, j).
+-    # We assume rays are sorted or we map them to a grid.
+-    # For this pseudocode, we assume we have a grid structure or we iterate over pixel neighbors.
+-    # Since rays are a flat list, we need to know (i,j) for each ray.
+-    # Let's assume rays have attributes i, j.
++    # Regularization Loss
++    grid = {}
++    for r_idx, ray in enumerate(rays):
++        key = (ray['i'], ray['j'])
++        grid[key] = (rendered_instance_logits[r_idx], rendered_depths[r_idx])
++        
++    H, W = rays[0]['H'], rays[0]['W']
++    logits_grid = [[grid.get((h, w), ([0.0]*num_classes, 0.0))[0] for w in range(W)] for h in range(H)]
++    depth_grid = [[grid.get((h, w), ([0.0]*num_classes, 0.0))[1] for w in range(W)] for h in range(H)]
+     
+-    # We need to group rays by image or assume a specific ordering.
+-    # To keep it self-contained, we assume we can access neighbors.
+-    # A robust implementation would sort rays by (i, j).
++    delta_w_h = [[math.exp(-(depth_grid[h][w] - depth_grid[h][w+1])**2) for w in range(W-1)] for h in range(H)]
++    delta_w_v = [[math.exp(-(depth_grid[h][w] - depth_grid[h+1][w])**2) for w in range(W)] for h in range(H-1)]
+     
+-    # Sort rays by (i, j)
+-    sorted_indices = sorted(range(num_rays), key=lambda k: (rays[k].i, rays[k].j))
+-    sorted_rays = [rays[k] for k in sorted_indices]
+-    sorted_logits = rendered_instance_logits[sorted_indices]
+-    sorted_depths = rendered_depths[sorted_indices]
++    sum_w_h = sum(sum(row) for row in delta_w_h)
++    sum_w_v = sum(sum(row) for row in delta_w_v)
+     
+-    # Get image dimensions H, W
+-    H = sorted_rays[0].H
+-    W = sorted_rays[0].W
++    w_h = [[d / sum_w_h for d in row] for row in delta_w_h]
++    w_v = [[d / sum_w_v for d in row] for row in delta_w_v]
+     
+-    # Reshape to grid
+-    logits_grid = sorted_logits.reshape(H, W, num_classes)
+-    depth_grid = sorted_depths.reshape(H, W)
+-    
+-    # Calculate weights based on depth similarity
+-    # w_{i,j} for horizontal neighbor (i, j+1)
+-    # delta_w(i,j) = exp(-(D(i,j) - D(i,j+1))^2)
+-    
+-    # Horizontal differences
+-    depth_diff_h = depth_grid[:, :-1, None] - depth_grid[:, 1:, None] # (H, W-1, 1)
+-    delta_w_h = torch.exp(-depth_diff_h ** 2) # (H, W-1, 1)
+-    
+-    # Vertical differences
+-    depth_diff_v = depth_grid[:-1, :, None] - depth_grid[1:, :, None] # (H-1, W, 1)
+-    delta_w_v = torch.exp(-depth_diff_v ** 2) # (H-1, W, 1)
+-    
+-    # Normalize weights
+-    # Sum over all rays in R
+-    sum_delta_w_h = torch.sum(delta_w_h)
+-    sum_delta_w_v = torch.sum(delta_w_v)
+-    
+-    w_h = delta_w_h / sum_delta_w_h # (H, W-1, 1)
+-    w_v = delta_w_v / sum_delta_w_v # (H-1, W, 1)
+-    
+-    # Compute squared differences of instance logits
+-    # Horizontal: I(i,j) - I(i,j+1)
+-    logits_diff_h = logits_grid[:, :-1, :] - logits_grid[:, 1:, :] # (H, W-1, C)
+-    loss_h = torch.sum(logits_diff_h ** 2 * w_h)
+-    
+-    # Vertical: I(i,j) - I(i+1,j)
+-    logits_diff_v = logits_grid[:-1, :, :] - logits_grid[1:, :, :] # (H-1, W, C)
+-    loss_v = torch.sum(logits_diff_v ** 2 * w_v)
++    loss_h = sum(sum((logits_grid[h][w][l] - logits_grid[h][w+1][l])**2 * w_h[h][w] for l in range(num_classes)) for h in range(H) for w in range(W-1))
++    loss_v = sum(sum((logits_grid[h][w][l] - logits_grid[h+1][w][l])**2 * w_v[h][w] for l in range(num_classes)) for h in range(H-1) for w in range(W))
+     
+     loss_r_sum = loss_h + loss_v
+     
+-    # Normalize losses
+-    # L_i normalization: 1/(|R||L|)
+     loss_i = loss_i_sum / (num_rays * num_classes)
+-    
+-    # L_r normalization: 1/(|R||L|)
+-    # Note: Source sums over R and L. Our grid sum covers all pixels.
+-    # The number of terms in L_r sum is |R| * L.
+     loss_r = loss_r_sum / (num_rays * num_classes)
+-    
+-    # Appearance loss normalization: 1/(2|R|)
+     loss_p = loss_p_sum / (2 * num_rays)
+     
+-    # Total Loss
+-    total_loss = loss_p + lambda_inst * loss_i
+-    
+-    return total_loss
++    return loss_p + lambda_inst * loss_i
+ ```
+ 
+@@ -240,14 +154,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training involves two stages: radiance field training (30k iterations) and instance field training (25k + 20k iterations) [S1]. The regularization loss adds overhead for depth similarity calculations.
++*   **Time Complexity:** Training involves two stages: radiance field training (30k iterations) and instance field training (25k + 20k iterations) [S1].
+ *   **Memory Complexity:** Requires storing instance logits for all sample points along rays. The instance branch uses a separate hash grid $H_i$ [S1].
+ *   **Performance:** Achieves mIoU of 43.0 and PQ of 32.4 on the 3D-FRONT dataset, outperforming Semantic-NeRF (mIoU 35.0) and DM-NeRF (mIoU 11.3) [S1].
+ *   **Strengths:** Enables 3D instance segmentation without ground-truth 3D masks at test time; leverages multi-view consistency [S1].
+-*   **Limitations:** Relies on pre-trained 2D segmentation models which may be inconsistent; requires careful tuning of $\lambda$ and depth similarity weights [S1].
+-*   **When to use:** When 3D instance segmentation is required from multi-view images and 3D ground truth is unavailable.
+-*   **When not to use:** When real-time inference is critical due to the complexity of the instance branch and refinement step.
++*   **Limitations:** Relies on pre-trained 2D segmentation models that may lack 3D geometry consistency across views [S1].
+ 
+ ## Background
+-Originated in the "Instance Neural Radiance Field" paper by the authors of [S1], presented at ICCV 2023. It extends NeRF-RPN and NeRF-RCNN by introducing an explicit instance branch $\Theta_i$ and training it with multi-view consistent 2D instance segmentation maps [S1]. It addresses the limitation of previous methods that could not easily generalize to instance segmentation without 3D ground truth [S1].
++Introduced in the Instance Neural Radiance Field paper [S1], extending NeRF-RPN and NeRF-RCNN by introducing an explicit instance branch $\Theta_i$ trained with multi-view consistent 2D instance segmentation maps [S1].
+ 
+ ## Sources

@@ -3,134 +3,212 @@
 Also called: FragmentSdfShaderPatch, Voxel Carving via Shader Patching
 
 ## Overview
-This method implements real-time voxel carving in a browser-based 3D Gaussian Splatting (3DGS) renderer by injecting a discrete voxel occupancy mask into the fragment shader via a shader patching hook [S1, unofficial]. It solves the problem of crisp, axis-aligned removal of splats using a `discard` instruction, avoiding the performance penalty of per-fragment analytic SDF evaluations or per-splat geometric tests [S1, unofficial]. Unlike parent methods that may rely on sparse structures or offline processing, this approach uses a dense 3D texture sized to the voxel grid, enabling O(1) per-fragment lookup regardless of the number of carved cells [S1, unofficial].
+This method implements real-time voxel editing on an unbounded voxel grid by injecting a binary occupancy mask into a fragment shader via shader patching. It solves the problem of performing crisp, axis-aligned carve operations on volumetric data (specifically 3D Gaussian Splatting) without modifying the underlying geometry or splat primitives. Unlike standard eraser tools that remove voxels through the entire depth of the volume, this approach limits removal to a specific spatial region defined by a 3D texture mask, enabling efficient, GPU-accelerated sculpting.
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** A 3DGS scene rendered by a framework supporting `Material.onBeforeCompile` (e.g., Spark 2.0) [S1, unofficial].
-- **Input:** Voxel grid parameters: origin, size, and counts ($N_x, N_y, N_z$) [S1, unofficial].
-- **Input:** Brush operations (Carve/Uncarve) triggered by user interaction [S1, unofficial].
-- **Output:** Modified fragment shader code that samples a `sampler3D` mask to determine pixel visibility [S1, unofficial].
-- **Output:** Updated `Data3DTexture` backing the mask [S1, unofficial].
+The method operates by maintaining a 3D texture (`uCarveMask`) that stores the binary state of each voxel cell (carved or uncarved). This texture is sampled in the fragment shader to discard fragments that fall within carved regions. The system manages the state of these carves using a key-value store and updates the shader uniforms dynamically.
 
-**Data Structures:**
-1.  **Voxel Mask Texture (`uCarveMask`):** A `Data3DTexture` (or `Uint8Array`-backed 3D texture) with dimensions $N_x \times N_y \times N_z$. Each voxel is 1 byte (0 or 255).
-2.  **Patch State:**
-    -   `patch.count`: Integer tracking the number of active carved voxels.
-    -   `union AABB`: `vec3 uCarveBoundsMin`, `vec3 uCarveBoundsMax` defining the bounding box of all carved voxels.
-    -   `tex.version`: Texture version counter to trigger GPU updates.
+### Inputs and Outputs
+*   **Input:** World-space coordinates of the brush center, brush radius, and current voxel grid parameters (origin, size, counts).
+*   **Output:** Modified fragment shader pipeline that discards pixels corresponding to carved voxels.
 
-**Uniforms Injected into Fragment Shader:**
--   `sampler3D uCarveMask`: The occupancy mask.
--   `vec3 uVoxelOrigin`: World-space origin of the voxel grid.
--   `float uVoxelSizeInv`: Inverse of the voxel size ($1/s$).
--   `vec3 uVoxelCountsInv`: Inverse of grid dimensions ($1/N_x, 1/N_y, 1/N_z$).
--   `vec3 uCarveBoundsMin`: Minimum corner of the union AABB.
--   `vec3 uCarveBoundsMax`: Maximum corner of the union AABB.
--   `int uCarveCount`: Number of active carved voxels (used for debugging or fallback logic).
+### Data Structures
+1.  **Carve Mask Texture (`uCarveMask`):**
+    *   Type: `sampler3D` (specifically `Data3DTexture` or `Uint8Array` backing).
+    *   Layout: 1 byte per voxel. Value `255` indicates a carved voxel; `0` indicates an uncarved (solid) voxel.
+    *   Dimensions: `voxel_counts.x * voxel_counts.y * voxel_counts.z`.
+2.  **Carve State Map:**
+    *   A dictionary mapping unique keys to voxel indices `(i, j, k)`.
+    *   Used to track active carves for `uncarve` operations.
+3.  **Uniforms Injected into Fragment Shader:**
+    *   `sampler3D uCarveMask`: The occupancy texture.
+    *   `vec3 uVoxelOrigin`: World-space origin of the voxel grid.
+    *   `float uVoxelSizeInv`: Inverse of the voxel size (for coordinate conversion).
+    *   `vec3 uVoxelCountsInv`: Inverse of the voxel counts (for normalization).
+    *   `vec3 uCarveBoundsMin`: Minimum world-space coordinates of the union of all active carves.
+    *   `vec3 uCarveBoundsMax`: Maximum world-space coordinates of the union of all active carves.
+    *   `int uCarveCount`: Number of active carves.
+4.  **Uniforms Injected into Vertex Shader:**
+    *   `mat4 uClipToLocal`: Transformation matrix from clip space to local voxel space.
+    *   `out vec3 vWorldPos`: Output world position of the vertex.
 
-**Uniforms Injected into Vertex Shader:**
--   `mat4 uClipToLocal`: Transformation matrix from clip space to local voxel space.
--   `out vec3 vWorldPos`: Output world position of the vertex.
+### Numbered Steps
 
-**Numbered Steps:**
+1.  **Carve Operation (`carve(key, i, j, k)`):**
+    *   Validate that `key` is not already in the Carve State Map.
+    *   Validate that indices `i, j, k` are within the grid bounds `[0, counts-1]`. If out of bounds, return false and write nothing [S1, unofficial].
+    *   Calculate the linear index in the 3D texture: `idx = 1 + 2*w + 3*w*h` (where `w, h` are dimensions derived from `i, j, k` and grid layout; specifically, for a 3D array flattened to 1D, `idx = i + j * width + k * width * height`). *Note: The source formula `1 + 2*w + 3*w*h` appears to be a specific linearization for a particular data layout or a typo for standard row-major indexing. Standard 3D indexing is `i + j * dim_x + k * dim_x * dim_y`. We assume standard row-major for implementation unless the specific `w,h` mapping is defined.*
+    *   Set the texel at `idx` in `uCarveMask` to `255`.
+    *   Increment `patch.count`.
+    *   Update the union AABB (`uCarveBoundsMin`, `uCarveBoundsMax`) to include the voxel center (`voxel_origin + (i+0.5)*size, ...`).
+    *   Increment `tex.version` to trigger a texture update.
 
-1.  **Initialization:**
-    -   Create `uCarveMask` with dimensions $N_x \times N_y \times N_z$. Initialize all bytes to 0.
-    -   Initialize `patch.count = 0`.
-    -   Initialize `uCarveBoundsMin` to $(\infty, \infty, \infty)$ and `uCarveBoundsMax` to $(-\infty, -\infty, -\infty)$.
-    -   Set `tex.version = 0`.
+2.  **Uncarve Operation (`uncarve(key)`):**
+    *   Validate that `key` exists in the Carve State Map.
+    *   Retrieve the stored indices `(i, j, k)`.
+    *   Set the texel at the corresponding linear index in `uCarveMask` to `0`.
+    *   Decrement `patch.count`.
+    *   Update the union AABB by recomputing the min/max over all remaining active carves.
+    *   Increment `tex.version`.
 
-2.  **Carve Operation (`carve(key, i, j, k)`):**
-    -   **Validation:** Check if $(i, j, k)$ is within bounds $[0, N_x-1] \times [0, N_y-1] \times [0, N_z-1]$. If not, return [S1, unofficial].
-    -   **Check Duplicate:** If the texel at linear index $L$ is already 255, return [S1, unofficial].
-    -   **Update Mask:** Set texel at linear index $L$ to 255.
-        -   Linear index formula: $L = i + j \cdot N_x + k \cdot N_x \cdot N_y$ [S1, unofficial].
-    -   **Update State:**
-        -   `patch.count++`.
-        -   Update `union AABB`:
-            -   $v_{min} = \min(uCarveBoundsMin, \text{voxel center})$
-            -   $v_{max} = \max(uCarveBoundsMax, \text{voxel center})$
-            -   Voxel center in world space: $C = uVoxelOrigin + (i+0.5, j+0.5, k+0.5) \cdot s$, where $s$ is voxel size.
-        -   `tex.version++`.
-        -   Trigger texture update: `texture.needsUpdate = true` [S1, unofficial].
+3.  **Shader Compilation (`compile(shader)`):**
+    *   Inject fragment shader code containing a single texture lookup: `float isCarved = texture(uCarveMask, texCoord).r;`.
+    *   Gate the lookup on a union AABB check: if the fragment's world position is outside `uCarveBoundsMin` and `uCarveBoundsMax`, skip the texture sample entirely (early-out) [S1, unofficial].
+    *   Move world-position computation to the vertex shader using `uClipToLocal` to transform clip-space coordinates to world/local space.
+    *   If the fragment is carved (`isCarved > 0.5`), execute `discard` to remove the pixel.
 
-3.  **Uncarve Operation (`uncarve(key)`):**
-    -   **Validation:** Check if key exists in the active set. If not, return [S1, unofficial].
-    -   **Retrieve Indices:** Get $(i, j, k)$ from key.
-    -   **Update Mask:** Set texel at linear index $L$ to 0.
-    -   **Update State:**
-        -   `patch.count--`.
-        -   Update `union AABB`: Recompute min/max over all remaining active voxels (or maintain a more complex structure; sources imply recomputation or simple update) [S1, unofficial].
-        -   `tex.version++`.
-        -   Trigger texture update: `texture.needsUpdate = true` [S1, unofficial].
+### Formulas
+*   **Voxel Index to World Position:**
+    $$ P_{world} = P_{origin} + (P_{index} + 0.5) \times S_{voxel} $$
+    Where $P_{origin}$ is `uVoxelOrigin`, $P_{index}$ is the integer voxel coordinate, and $S_{voxel}$ is the voxel size.
+*   **Linear Index in 3D Texture (Row-Major):**
+    $$ idx = i + j \times W + k \times W \times H $$
+    Where $W$ is the width (x-dimension count) and $H$ is the height (y-dimension count). *Note: The source mentions `1 + 2*w + 3*w*h` which is ambiguous. Standard implementation uses the formula above.*
+*   **AABB Check:**
+    $$ \text{if } (P_{world}.x < uCarveBoundsMin.x \lor P_{world}.x > uCarveBoundsMax.x \lor \dots) \text{ skip texture lookup} $$
 
-4.  **Shader Compilation (`compile(shader)`):**
-    -   Inject vertex shader code:
-        ```glsl
-        uniform mat4 uClipToLocal;
-        out vec3 vWorldPos;
-        void main() {
-            // Standard projection logic...
-            vWorldPos = (uClipToLocal * vec4(position, 1.0)).xyz;
-        }
-        ```
-    -   Inject fragment shader code:
-        ```glsl
+### Parameters
+*   `uVoxelOrigin`: World-space origin of the voxel grid.
+*   `uVoxelSizeInv`: Inverse voxel size for coordinate normalization.
+*   `uVoxelCountsInv`: Inverse voxel counts for normalization.
+*   `uCarveBoundsMin/Max`: Bounding box of all active carves.
+*   `uCarveCount`: Number of active carves.
+
+### Edge Cases and Pitfalls
+*   **Out-of-Bounds Indices:** Clamped safely by returning false and writing nothing [S1, unofficial].
+*   **Missing Anchors:** Throws if expected fragment anchors are missing in the shader [S1, unofficial].
+*   **Shader Fragility:** Anchor-based string injection is fragile to upstream changes in the rendering engine (e.g., Spark) [S1, unofficial].
+*   **Carve Capacity:** Limited by the voxel grid size ($counts.x \cdot counts.y \cdot counts.z$ bytes). No per-session cap on number of carves, but memory scales cubically with resolution [S1, unofficial].
+*   **2DGS Interaction:** Carves while 2DGS is enabled may mis-mask due to different `vNdc` assignment forms [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class VoxelEditBrush:
+    def __init__(self, voxel_counts, voxel_origin, voxel_size):
+        self.voxel_counts = voxel_counts
+        self.voxel_origin = voxel_origin
+        self.voxel_size = voxel_size
+        self.voxel_size_inv = 1.0 / voxel_size
+        self.voxel_counts_inv = 1.0 / voxel_counts
+        self.carve_mask = Uint8Array(voxel_counts.x * voxel_counts.y * voxel_counts.z)
+        self.carve_map = {}  # key -> (i, j, k)
+        self.carve_count = 0
+        self.bounds_min = vec3(inf)
+        self.bounds_max = vec3(-inf)
+        self.tex_version = 0
+
+    def linear_index(self, i, j, k):
+        # Standard row-major 3D indexing
+        return i + j * self.voxel_counts.x + k * self.voxel_counts.x * self.voxel_counts.y
+
+    def update_bounds(self, i, j, k, is_add):
+        # Calculate voxel center in world space
+        center = self.voxel_origin + vec3(i + 0.5, j + 0.5, k + 0.5) * self.voxel_size
+        if is_add:
+            self.bounds_min = min(self.bounds_min, center - vec3(0.5) * self.voxel_size)
+            self.bounds_max = max(self.bounds_max, center + vec3(0.5) * self.voxel_size)
+        else:
+            # Recompute bounds from all active carves
+            self.bounds_min = vec3(inf)
+            self.bounds_max = vec3(-inf)
+            for key, (ci, cj, ck) in self.carve_map.items():
+                c_center = self.voxel_origin + vec3(ci + 0.5, cj + 0.5, ck + 0.5) * self.voxel_size
+                self.bounds_min = min(self.bounds_min, c_center - vec3(0.5) * self.voxel_size)
+                self.bounds_max = max(self.bounds_max, c_center + vec3(0.5) * self.voxel_size)
+
+    def carve(self, key, i, j, k):
+        if key in self.carve_map:
+            return False
+        if not (0 <= i < self.voxel_counts.x and 0 <= j < self.voxel_counts.y and 0 <= k < self.voxel_counts.z):
+            return False  # Clamp out-of-grid safely
+        
+        idx = self.linear_index(i, j, k)
+        self.carve_mask[idx] = 255
+        self.carve_map[key] = (i, j, k)
+        self.carve_count += 1
+        self.update_bounds(i, j, k, True)
+        self.tex_version += 1
+        return True
+
+    def uncarve(self, key):
+        if key not in self.carve_map:
+            return False
+        
+        i, j, k = self.carve_map.pop(key)
+        idx = self.linear_index(i, j, k)
+        self.carve_mask[idx] = 0
+        self.carve_count -= 1
+        self.update_bounds(i, j, k, False)
+        self.tex_version += 1
+        return True
+
+    def compile_shader(self, shader_source):
+        # Inject uniforms and logic
+        uniforms = """
         uniform sampler3D uCarveMask;
         uniform vec3 uVoxelOrigin;
         uniform float uVoxelSizeInv;
         uniform vec3 uVoxelCountsInv;
         uniform vec3 uCarveBoundsMin;
         uniform vec3 uCarveBoundsMax;
-
-        in vec3 vWorldPos;
-
+        uniform int uCarveCount;
+        uniform mat4 uClipToLocal;
+        """
+        vertex_injection = """
+        out vec3 vWorldPos;
         void main() {
-            // Early-out: Check if world position is outside union AABB
+            vec4 clipPos = gl_Position;
+            vec4 localPos = uClipToLocal * clipPos;
+            vWorldPos = localPos.xyz;
+        }
+        """
+        fragment_injection = """
+        in vec3 vWorldPos;
+        void main() {
+            // Early-out if outside union AABB
             if (vWorldPos.x < uCarveBoundsMin.x || vWorldPos.x > uCarveBoundsMax.x ||
                 vWorldPos.y < uCarveBoundsMin.y || vWorldPos.y > uCarveBoundsMax.y ||
                 vWorldPos.z < uCarveBoundsMin.z || vWorldPos.z > uCarveBoundsMax.z) {
-                // Continue rendering
-            } else {
-                // Map world position to voxel coordinates
-                vec3 voxelCoord = (vWorldPos - uVoxelOrigin) * uVoxelSizeInv;
-                // Clamp to [0, 1] for texture lookup
-                voxelCoord = clamp(voxelCoord, 0.0, 1.0);
-                
-                // Sample mask
-                float mask = texture(uCarveMask, voxelCoord).r;
-                if (mask > 0.5) {
-                    discard; // Carved voxel
-                }
+                return;
             }
-            // Continue with standard 3DGS fragment processing
+            
+            // Convert world pos to voxel coordinates
+            vec3 voxelCoord = (vWorldPos - uVoxelOrigin) * uVoxelSizeInv - 0.5;
+            voxelCoord = clamp(voxelCoord, vec3(0.0), uVoxelCountsInv - 1.0);
+            
+            // Sample mask
+            float isCarved = texture(uCarveMask, voxelCoord).r;
+            if (isCarved > 0.5) {
+                discard;
+            }
         }
-        ```
-    -   **Anchor Check:** Verify that the shader patching hook finds the expected anchor strings in the original shader source. If missing, throw an error [S1, unofficial].
+        """
+        # Inject into shader source
+        shader_source = shader_source.replace("// VoxelEditUniforms", uniforms)
+        shader_source = shader_source.replace("// VoxelEditVertex", vertex_injection)
+        shader_source = shader_source.replace("// VoxelEditFragment", fragment_injection)
+        return shader_source
+```
 
-**Parameters:**
--   **Voxel Resolution ($N$):** Default 64 ($64^3 = 262,144$ cells) [S1, unofficial].
--   **Voxel Size ($s$):** Determined by scene bounds and $N$.
--   **Brush Radius:** World-space spherical radius defining the set of voxels to modify per interaction [S1, unofficial].
+## Subtopics
 
-**Edge Cases and Pitfalls:**
--   **Out-of-Bounds Indices:** Clamp or reject indices outside $[0, N-1]$ to prevent texture access errors [S1, unofficial].
--   **Missing Anchors:** If the upstream shader changes, the string injection may fail. A CI guard hashes the shader region to detect changes [S1, unofficial].
--   **2DGS Interference:** Carving while 2D Gaussian Splatting is enabled may cause incorrect masking due to different vertex output assignments [S1, unofficial].
--   **Performance:** Fragment cost is O(1) per fragment, independent of `uCarveCount` [S1, unofficial]. However, texture upload cost scales with the number of changed voxels.
+### [FSDigger](13678-fsdigger.md)
+FSDigger is a fragment shader implementation of the 2D Digger tool for real-time volume sculpting, designed to carve semi-spherical holes into a volume starting from the first surface intersection along the line of sight. Unlike the Eraser tool which removes voxels through the entire depth of the volume, FSDigger limits removal to a depth determined by the cursor radius and viewing geometry, effectively creating a "dug" cavity rather than a tunnel. It builds on [Voxel Edit Brush Operations — Place/Carve/Fill/Paint, Real-time Voxel Editing, VoxelEdit](12596-voxel-edit-brush-operations-place-carve-fill-paint-real-time.md) by injecting specific carving logic into the fragment shader pipeline.
 
 ## Operating characteristics
--   **Time Complexity:** O(1) per fragment for the carve test, regardless of the number of carved voxels [S1, unofficial]. Carve/Uncarve operations are O(1) per voxel, with AABB recomputation potentially O(K) where K is the number of active voxels (though sources suggest simple updates) [S1, unofficial].
--   **Memory Complexity:** O($N_x \cdot N_y \cdot N_z$) bytes for the mask texture. For $N=64$, this is 256 KB [S1, unofficial].
--   **Measured Performance:** ~4 splat counts per frame instead of ~pixels per frame for carving logic, leveraging GPU parallelism [S1, unofficial].
--   **Strengths:** Crisp, axis-aligned carving; real-time performance; simple implementation via shader patching.
--   **Limitations:** Memory usage scales cubically with resolution; fragile to upstream shader changes; limited to binary (carved/not carved) states; no per-session carve count cap other than grid size [S1, unofficial].
--   **When to Use:** Real-time editing of 3DGS scenes in the browser where crisp, voxel-based removal is required.
--   **When Not to Use:** When smooth, sub-voxel carving is needed; when memory is extremely constrained; when the renderer does not support shader patching hooks.
+*   **Time Complexity:** O(1) per fragment for the mask lookup, regardless of the number of carves [S1, unofficial]. The AABB check is also O(1).
+*   **Memory Complexity:** O(N) where N is the total number of voxels in the grid ($counts.x \cdot counts.y \cdot counts.z$). At default resolution (64^3), this is 262 KB [S1, unofficial].
+*   **Performance:** ~4 × splat count / frame instead of ~pixels / frame for carving logic [S1, unofficial].
+*   **Strengths:** Crisp, axis-aligned carving; efficient GPU-based discard; no need to modify underlying geometry.
+*   **Limitations:** Memory scales cubically with resolution; fragile to shader engine changes; limited to binary (carved/uncarved) states.
+*   **When to Use:** Real-time voxel sculpting in web-based 3DGS viewers where crisp, axis-aligned cuts are required.
+*   **When Not to Use:** When smooth, continuous SDF-based carving is needed, or when memory constraints prevent storing a full 3D texture.
 
 ## Background
-Originating from the `splatcarve` project by stevekwon211 (2024–2026), this method leverages the `Material.onBeforeCompile` hook introduced in Spark 2.0 [S1, unofficial]. It is the first public open-source demonstration of applying a voxel-cell-resolution `discard` mask to a live 3DGS rasterizer in a web browser [S1, unofficial]. Prior art includes analytic SDF-based selection (e.g., Santos & Soares, SVR 2025), but those target modulation effects rather than crisp removal [S1, unofficial]. The class names `FragmentSdfShaderPatch` are vestigial, as the method uses a discrete binary mask, not a continuous SDF [S1, unofficial].
+The method was introduced by stevekwon211 in the `splatcarve` project [S1, unofficial]. It leverages the `Material.onBeforeCompile` hook from Spark 2.0 to inject a voxel-cell-resolution occupancy mask into the fragment stage of a 3D Gaussian Splatting rasterizer. It is described as the first public open-source browser-based 3DGS demo to apply this technique for crisp, axis-aligned `discard`-based carves [S1, unofficial]. The closest prior art, Santos & Soares (SVR 2025), targets modulation effects inside an SDF region rather than crisp removal [S1, unofficial].
 
 ## Sources
 [S1] stevekwon211/splatcarve, https://github.com/stevekwon211/splatcarve, fetched 2026-10-27 (unofficial)

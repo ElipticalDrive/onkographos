@@ -1,0 +1,239 @@
+# PlanarNeRF
+
+Also called: PlanarNeRF-S, PlanarNeRF-SS
+
+## Overview
+PlanarNeRF is an online learning framework for detecting dense 3D planar primitives from monocular RGB and depth sequences [S1]. It combines plane segmentation rendering, an efficient plane fitting module, and a global memory bank to learn plane primitives in an online fashion using neural field representation, appearance, and geometry knowledge [S1]. It distinguishes itself from standard NeRF training loops by explicitly modeling planar instances via a dedicated rendering branch and maintaining a global memory bank for consistent plane tracking across views [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Monocular RGB image sequence and corresponding depth image sequence [S1]. Optional 2D plane instance segmentation annotations for the supervised mode (PlanarNeRF-S) [S1].
+*   **Outputs:** Reconstructed 3D planar primitives (plane parameters), plane instance segmentation labels, and standard NeRF outputs (color, depth) [S1].
+
+**Data Structures:**
+1.  **Neural Fields:**
+    *   **SDF MLP:** Predicts Signed Distance Function (SDF) values $s_i$ at sampled points [S1].
+    *   **Color MLP:** Predicts color $c_i$ [S1].
+    *   **Plane MLP:** Predicts plane classification probability vector $p_i$ [S1].
+    *   **Input to MLPs:** A combination of a one-blob encoded 3D coordinate and a learned SDF feature vector [S1].
+2.  **Global Memory Bank:** A list of stored plane parameter vectors $p_{bank} = [n, d]^T$, where $n$ is the normal vector and $d$ is the offset [S1].
+
+**Parameters:**
+*   $\tau_{dist}$: Distance threshold for plane similarity. Typical value: 0.1 [S1].
+*   $\psi$: Exponential Moving Average (EMA) coefficient. Typical value: 0.999 [S1].
+*   $M$: Number of sampled points along a ray. Typical value: 768 [S1].
+*   $tr$: Predefined truncation threshold for SDF [S1].
+
+**Rendering Equations:**
+The weight $w_i$ for a sampled point $i$ is computed based on the SDF value $s_i$ and truncation threshold $tr$:
+$$ w_i = \frac{s_i - tr}{\sigma(s_i) - tr} $$
+where $\sigma(\cdot)$ is the sigmoid function [S1].
+
+Color rendering:
+$$ C(R) = \frac{\sum_{i=1}^M w_i c_i(R(t), v)}{\sum_{i=1}^M w_i} $$
+where $c_i$ is the color of the sampled point [S1].
+
+Depth rendering:
+$$ D(R) = \frac{\sum_{i=1}^M w_i d_{pi}(R(t), v)}{\sum_{i=1}^M w_i} $$
+where $d_{pi}$ is the depth of the sampled point along the ray [S1].
+
+Plane rendering:
+$$ P(R) = \frac{\sum_{i=1}^M w_i p_i(R(t), v)}{\sum_{i=1}^M w_i} $$
+where $p_i$ is the plane classification probability vector of the sampled point [S1].
+
+**Algorithm Steps:**
+
+1.  **Sampling:** Sample $M$ points along each ray [S1].
+2.  **Feature Extraction:** For each sampled point, compute the one-blob encoded 3D coordinate and retrieve the learned SDF feature vector [S1].
+3.  **MLP Forward Pass:**
+    *   Input the combined features to the SDF, Color, and Plane MLPs [S1].
+    *   Obtain SDF value $s_i$, color $c_i$, and plane probability vector $p_i$ for each point [S1].
+4.  **Gradient Blocking:** During backpropagation, block gradients from the plane branch to the SDF branch to prevent negative impacts on geometry learning [S1].
+5.  **Plane Instance Tracking (Global Memory Bank):**
+    *   **Self-Supervised Mode (PlanarNeRF-SS):** Use RANSAC on a highly sparse set of sampled points in each iteration to estimate local plane instances [S1].
+    *   **Similarity Check:** For a new plane parameter vector $p_{new}$, compute similarity to each existing bank vector $p_{bank}$ using the points-to-plane distance metric [S1]:
+        $$ \text{dist}(p_1, p_2) = 1 - \frac{1}{n} \sum_{j=1}^n \frac{n_{x1} x_j + n_{y1} y_j + n_{z1} z_j - d_1}{\sqrt{(n_x)^2 + (n_y)^2 + (n_z)^2}} $$
+        where $p_1 = [n_1, d_1]^T$ represents the plane, and $PO_2 = \{p_j\}$ are points belonging to the other plane instance $p_2$ [S1].
+    *   **Update or Add:**
+        *   If $\text{dist}(p_{new}, p_{bank}) < \tau_{dist}$, return the index of $p_{bank}$ as the label for the sampled points belonging to $p_{new}$ [S1].
+        *   Update the bank's plane parameters using EMA: $p_{bank} = \psi p_{new} + (1 - \psi) p_{bank}$ [S1]. Note: Before EMA update, ensure offset values satisfy $d \ge 0$ [S1].
+        *   If no similar plane is found, add $p_{new}$ to the bank [S1].
+    *   **Supervised Mode (PlanarNeRF-S):** Use provided 2D plane annotations to generate labels $y_c = \mathbb{1}\{c=k\}$ [S1].
+6.  **Loss Computation:** Compute losses for color, depth, and plane rendering based on the rendered outputs and ground truth (or generated labels) [S1].
+7.  **Optimization:** Update network parameters [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+def compute_weight(sdf_value, truncation_threshold):
+    """
+    Compute weight w_i based on SDF value s_i and truncation threshold tr.
+    """
+    s = sdf_value
+    tr = truncation_threshold
+    # Formula: w_i = (s_i - tr) / (sigma(s_i) - tr)
+    # Note: Implementation must handle potential division by zero if sigma(s_i) == tr
+    sigma_s = sigmoid(s)
+    denominator = sigma_s - tr
+    if np.isclose(denominator, 0):
+        return 0.0
+    return (s - tr) / denominator
+
+def points_to_plane_distance(plane_params, points):
+    """
+    Compute similarity between a plane and a set of points.
+    plane_params: [n_x, n_y, n_z, d]
+    points: Nx3 array of points [x, y, z]
+    """
+    n_x, n_y, n_z, d = plane_params
+    # Normalization factor for the plane normal
+    norm = np.sqrt(n_x**2 + n_y**2 + n_z**2)
+    if norm == 0:
+        return 1.0 # Avoid division by zero
+    
+    # Distance from each point to the plane
+    # dist_p = (n_x * x + n_y * y + n_z * z - d) / norm
+    distances = (n_x * points[:, 0] + n_y * points[:, 1] + n_z * points[:, 2] - d) / norm
+    
+    # Similarity measure: 1 - mean(distance)
+    # Note: The source formula sums the signed distances. 
+    # If points are on one side, this works. If mixed, mean might be near 0.
+    # The source Eq 7 is: 1 - (1/n) * sum( (n.x + ... - d) / sqrt(...) )
+    mean_dist = np.mean(distances)
+    return 1.0 - mean_dist
+
+def update_memory_bank(new_plane_params, bank, threshold, ema_coeff):
+    """
+    Check similarity against bank, update or add.
+    new_plane_params: [n_x, n_y, n_z, d]
+    bank: List of plane parameters [n_x, n_y, n_z, d]
+    threshold: tau_dist
+    ema_coeff: psi
+    Returns: (index, updated_bank)
+    """
+    best_idx = -1
+    min_dist = threshold + 1
+    
+    for i, bank_plane in enumerate(bank):
+        # For distance calculation, we need points belonging to the bank plane.
+        # In a real implementation, 'points' would be the sampled points 
+        # that were classified as belonging to the new plane or derived from RANSAC.
+        # Here we assume 'points' is passed or derived externally.
+        # For the sake of this pseudocode, we assume 'points' is available 
+        # from the RANSAC step or previous classification.
+        # Since the function signature doesn't include points, we assume 
+        # the caller handles point retrieval or 'points' is a global/context variable.
+        # To make it self-contained, we'll assume 'points' is passed.
+        pass 
+    
+    # Re-defining for self-containment with points
+    # This function is called inside the loop over rays/samples.
+    pass
+
+def planarnerf_step(rgb, depth, bank, threshold=0.1, ema_coeff=0.999, num_samples=768, truncation_threshold=0.01):
+    """
+    Single training step for PlanarNeRF.
+    """
+    # 1. Sample points along rays
+    # Assume rays are generated from camera pose and image grid
+    rays = generate_rays(rgb.shape)
+    sampled_points = sample_along_rays(rays, num_samples)
+    
+    # 2. Forward pass through MLPs
+    # Inputs: one-blob encoded 3D coords + SDF feature vector
+    # Note: SDF feature vector requires previous SDF predictions or initialization
+    sdf_values, colors, plane_probs = forward_mlp(sampled_points)
+    
+    # 3. Compute weights
+    weights = np.array([compute_weight(s, truncation_threshold) for s in sdf_values])
+    
+    # 4. Render Color, Depth, Plane
+    # Color
+    color_rendered = np.sum(weights * colors, axis=0) / np.sum(weights)
+    # Depth
+    depth_rendered = np.sum(weights * sampled_points[:, 2], axis=0) / np.sum(weights) # Assuming z is depth
+    # Plane
+    plane_rendered = np.sum(weights * plane_probs, axis=0) / np.sum(weights)
+    
+    # 5. Plane Instance Tracking (Global Memory Bank)
+    # In PlanarNeRF-SS, use RANSAC on sparse points to get new plane params
+    # In PlanarNeRF-S, use annotations
+    
+    new_plane_params = estimate_plane_from_ransac(sampled_points, depth) # Placeholder for RANSAC logic
+    
+    # Check similarity
+    best_idx = -1
+    min_dist = threshold + 1
+    
+    for i, bank_plane in enumerate(bank):
+        # Get points belonging to the new plane instance for distance calc
+        # This requires knowing which points belong to the new plane.
+        # In the source, points PO2 are those belonging to the other plane.
+        # Here, we compare new_plane to bank_plane.
+        # We need points belonging to new_plane to calculate dist(p_new, p_bank)?
+        # Eq 7: dist(p1, p2) uses points belonging to p2 (PO2) and plane p1.
+        # So we need points belonging to the bank plane.
+        # This implies the bank must store points or the points must be classified.
+        # The source says: "return the index of p_bank ... as the index annotation for the sampled points 
+        # belonging to the plane instance p_new".
+        # This implies we classify points based on similarity to bank.
+        
+        # Let's assume we have points belonging to the bank plane 'i'
+        points_for_bank_plane = get_points_for_plane(bank_plane, sampled_points)
+        
+        dist = points_to_plane_distance(new_plane_params, points_for_bank_plane)
+        if dist < min_dist:
+            min_dist = dist
+            best_idx = i
+            
+    if best_idx != -1:
+        # Update bank with EMA
+        bank[best_idx] = ema_coeff * new_plane_params + (1 - ema_coeff) * bank[best_idx]
+        # Ensure offset >= 0
+        if bank[best_idx][3] < 0:
+            bank[best_idx][3] = 0
+        labels = best_idx
+    else:
+        # Add new plane to bank
+        bank.append(new_plane_params)
+        labels = len(bank) - 1
+        
+    # 6. Compute Losses
+    # Color Loss
+    color_loss = loss_function(color_rendered, rgb)
+    # Depth Loss
+    depth_loss = loss_function(depth_rendered, depth)
+    # Plane Loss
+    # Use labels to create one-hot target
+    plane_target = one_hot(labels, len(bank))
+    plane_loss = loss_function(plane_rendered, plane_target)
+    
+    total_loss = color_loss + depth_loss + plane_loss
+    
+    # 7. Backpropagation
+    # Block gradients from plane branch to SDF branch
+    backward_pass(total_loss, block_plane_to_sdf=True)
+    
+    return bank, total_loss
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training time is slower than pure inference of offline-trained models. SDF and color rendering takes around 180ms per step; self-supervised plane estimation and plane rendering learning takes around 148ms per step [S1].
+*   **Memory Complexity:** Low GPU memory consumption compared to other baselines like PlanarRecon [S1].
+*   **Strengths:** Maintains high-quality performance across diverse indoor rooms; generates plane instance segmentation highly close to ground truth in supervised mode; high-standard segmentation quality in self-supervised mode without annotations [S1].
+*   **Limitations:** Slower than offline inference methods; sensitive to noise if incorrect similarity measures are used [S1].
+*   **When to use:** Online 3D plane detection from monocular RGB-D sequences where consistent plane tracking and instance segmentation are required [S1].
+*   **When not to use:** When offline inference speed is critical and pre-trained models are acceptable [S1].
+
+## Background
+PlanarNeRF was introduced by Zheng Chen et al. in 2024/2025 [S1]. It builds on the neural radiance field (NeRF) representation to enhance 3D plane detection with concurrent appearance and geometry knowledge [S1]. It addresses the limitation of prior methods that were restricted to 2D segment recovery or simplifying 3D structures [S1]. The method is evaluated on ScanNetv2, Replica, and Synthetic scenes from NeuralRGBD datasets [S1].
+
+## Sources
+[S1] PlanarNeRF: Online Learning of Planar Primitives with Neural Radiance Fields, https://doi.org/10.1109/icra55743.2025.11128604, fetched 2026-10-29

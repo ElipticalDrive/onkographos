@@ -3,54 +3,83 @@
 Also called: vzTMTagShader
 
 ## Overview
-The Tagging Shader performs volumetric tagging by using a second volume as a 3D stencil buffer to selectively render data from a primary volume. It solves the problem of masking arbitrary regions within a dataset without modifying the original source data. Unlike methods that alter the volume texture by setting opacity to zero, this approach keeps the original data intact at the cost of storing an additional 3D texture in memory [S1].
+The Tagging Shader performs volumetric tagging by using a second volume as a 3D stencil buffer to selectively render voxels from a primary data volume [S1]. It solves the problem of masking out arbitrary regions in a dataset without modifying the original volume data [S1]. Unlike [Simple Shader (3D Texture Mapping)](12431-simple-shader-3d-texture-mapping.md), which renders the entire volume, this method introduces a binary decision layer that discards voxels based on a separate tag texture [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input 1:** `volume` (`vzParameterVolumeTexture`): The primary 3D texture containing the actual volumetric data.
-*   **Input 2:** `tag` (`vzParameterVolumeTexture`): The secondary 3D texture acting as the stencil/mask. It must be perfectly overlapping with the `volume` texture.
-*   **Input 3:** `lookup_table` (`vzParameterLookupTable`): The transfer function used for color and opacity mapping.
-*   **Output:** The rendered image where voxels are either visible or masked out based on the tag volume.
+*   **Input 1:** `volume` (vzParameterVolumeTexture): The primary 3D texture containing the actual volumetric data (e.g., density, opacity).
+*   **Input 2:** `tag` (vzParameterVolumeTexture): A 3D texture acting as the stencil buffer. It must be perfectly overlapping with the `volume` texture.
+*   **Input 3:** `lookup_table` (vzParameterLookupTable): The transfer function used for color and opacity mapping of the volume data.
+*   **Output:** A rendered image where voxels are visible only if their corresponding tag value permits it.
 
 **Data Structures:**
-The method relies on two 3D textures of identical dimensions.
-*   `volume`: Standard 3D texture format.
-*   `tag`: Ideally requires 1 bit per texel, but hardware constraints typically enforce at least 1 byte per texel [S1].
+*   **Volume Texture:** Standard 3D texture format. Dimensions and internal format depend on the hardware implementation [S1].
+*   **Tag Texture:** Ideally requires 1 bit per texel [S1]. However, most graphics hardware allocates at least 1 byte per texel [S1]. The values are binary thresholds.
 
 **Algorithm Steps:**
-1.  For each fragment corresponding to a voxel position $(x, y, z)$, sample the value $V_{tag}$ from the `tag` texture.
-2.  Compare $V_{tag}$ against the threshold $0.5$.
-3.  If $V_{tag} > 0.5$:
-    *   Sample the value $V_{vol}$ from the `volume` texture.
-    *   Apply the `lookup_table` to $V_{vol}$ to determine color and opacity.
-    *   Render the fragment.
-4.  If $V_{tag} \le 0.5$:
-    *   Mask out the fragment (discard or render with zero opacity).
+1.  For each fragment being rendered, sample the `tag` texture at the current 3D coordinate to obtain the tag value $T$.
+2.  Compare $T$ against the threshold $0.5$:
+    *   If $T > 0.5$, proceed to render the corresponding texel from the `volume` texture.
+    *   If $T \le 0.5$, mask out the fragment (discard it) [S1].
+3.  If the fragment is not masked out, sample the `volume` texture at the same coordinate to retrieve the data value $V$.
+4.  Apply the `lookup_table` to $V$ to determine the final color and opacity.
+5.  Composite the result into the framebuffer.
 
-**Implementation Details:**
-The implementation is system-dependent [S1].
-*   **GPU Support:** On systems supporting `ARB_fragment_program` or `ATI_fragment_shader` OpenGL extensions, the tagging is performed in the fragment shader using the logic above [S1].
-*   **Legacy Support:** On systems lacking these extensions, the shader uses the OpenGL stencil buffer to implement the tagging algorithm. The application must ensure the appropriate visual configuration is selected to support stencil operations [S1].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Pitfalls:**
-*   **Memory Overhead:** The `tag` volume consumes additional texture memory. Since most graphics hardware uses at least one byte per texel for the tag volume, the memory cost is significant compared to the theoretical 1-bit requirement [S1].
-*   **Stencil Buffer Requirements:** When falling back to stencil buffer implementation, the rendering context must be configured with a stencil buffer. Failure to do so will result in incorrect rendering or errors [S1].
+```python
+def vzTMTagShader(volume_tex, tag_tex, lookup_table, coord_3d):
+    """
+    Renders a voxel if its tag value is greater than 0.5.
+    
+    Args:
+        volume_tex: 3D texture object for volume data.
+        tag_tex: 3D texture object for tagging/stencil.
+        lookup_table: Transfer function object.
+        coord_3d: 3D coordinate (x, y, z) in texture space.
+        
+    Returns:
+        Color and opacity, or None if masked out.
+    """
+    # Step 1: Sample the tag texture
+    tag_value = tag_tex.sample(coord_3d)
+    
+    # Step 2: Check threshold
+    if tag_value <= 0.5:
+        # Mask out the fragment
+        return None
+    
+    # Step 3: Sample the volume data
+    volume_value = volume_tex.sample(coord_3d)
+    
+    # Step 4: Apply lookup table
+    color, opacity = lookup_table.apply(volume_value)
+    
+    # Step 5: Return result
+    return (color, opacity)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hardware Precision:** On systems lacking `ARB_fragment_program` or `ATI_fragment_shader` OpenGL extensions, the shader falls back to using the hardware stencil buffer [S1]. In this case, the application must ensure the appropriate visual is selected to handle stencil operations correctly [S1].
+*   **Memory Overhead:** The tag volume requires additional texture memory. Since hardware typically uses at least 1 byte per texel for the tag, this incurs a significant memory cost compared to a theoretical 1-bit implementation [S1].
+*   **Alignment:** The `tag` and `volume` textures must be perfectly overlapping in spatial coordinates; misalignment results in incorrect masking [S1].
 
 ## Subtopics
 
 ### [Mask-based Voxel Filtering](13669-mask-based-voxel-filtering.md)
-A fragment shader that combines the original volume dataset with a texture mask (SculptMap) to discard voxels marked for removal during visualization.
+A fragment shader that combines an original volume dataset with a texture mask to discard voxels or insert new material. It serves as the final composition stage in a volume sculpting pipeline. Unlike the Tagging Shader, which acts as a 3D stencil buffer to tag voxels, this shader performs the actual visual filtering and material replacement during the drawing phase.
 
 ## Operating characteristics
-*   **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, due to the storage of an additional 3D texture for the tag volume [S1].
-*   **Performance:** Rendering performance is comparable to standard volume rendering, with the added cost of sampling the tag texture. The stencil buffer fallback may incur additional overhead depending on the hardware and driver implementation [S1].
-*   **Strengths:** Preserves the integrity of the original volume data; allows dynamic masking without pre-processing or data modification [S1].
-*   **Limitations:** Increased memory usage; dependency on specific OpenGL extensions or stencil buffer support for correct operation on all hardware [S1].
-*   **When to use:** When the user needs to visualize subsets of a volume dataset without permanently altering the source data or when dynamic masking is required.
-*   **When not to use:** When memory is constrained and the tag volume cannot be afforded, or when the original data can be pre-processed to remove unwanted regions.
+*   **Time Complexity:** Linear with respect to the number of voxels rendered, plus the overhead of sampling the additional tag texture.
+*   **Memory Complexity:** Requires storage for two 3D textures: the volume data and the tag data. The tag data typically consumes at least 1 byte per voxel, regardless of its binary nature [S1].
+*   **Strengths:** Avoids modifying the original volume data, allowing the same dataset to be used with different masks [S1].
+*   **Limitations:** Higher memory usage due to the second 3D texture. Dependent on specific OpenGL extensions for optimal performance; falls back to stencil buffer on older hardware, which may have performance or configuration constraints [S1].
+*   **When to use:** When dynamic masking of volume regions is required without altering the source data.
+*   **When not to use:** When memory is constrained, or when the masking pattern is static and can be baked into the volume data itself (by setting opacity to zero) [S1].
 
 ## Background
-The Tagging Shader (`vzTMTagShader`) is part of the SGI OpenGL Volumizer library, specifically available in versions prior to OpenGL Volumizer 2.1 [S1]. It is designed to work with the `TMRenderAction` and utilizes the standard shader parameter interface for volume textures and lookup tables [S1]. The method addresses the need for flexible visualization tools in scientific and medical imaging where users often need to isolate specific anatomical or structural regions without losing access to the full dataset.
+The Tagging Shader (`vzTMTagShader`) is part of the SGI OpenGL Volumizer library, specifically associated with the Texture Mapping Render Action (TMRenderAction) [S1]. It was available in versions prior to OpenGL Volumizer 2.1 [S1]. The method leverages the concept of a 3D stencil buffer to achieve volumetric masking, a technique adapted from 2D stencil buffering in standard rasterization.
 
 ## Sources
 [S1] Chapter 4. Texture Mapping Render Action, https://techpubs.jurassic.nl/library/manuals/4000/007-4389-010/sgi_html/ch04.html, fetched 2026-10-27

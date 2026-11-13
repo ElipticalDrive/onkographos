@@ -1,0 +1,438 @@
+NeRF — All Variants Cheat Sheet
+NeRF — All Variants Cheat Sheet
+Updated July 2026 with 2025–2026 SOTA additions — new entries marked ★. Algorithm names link to their papers (arXiv / project page).
+July 2026 · Updated Edition
+Contents
+The big picture: what NeRF is and why it mattered
+Volume rendering: the math
+Positional encoding and frequency tricks
+Hierarchical and importance sampling
+Anti-aliasing and multi-scale
+Fast NeRFs (training and rendering)
+Surface and geometry: SDF-based NeRFs
+Generative NeRF: 3D-aware GANs and diffusion-NeRFs
+Dynamic NeRF (4D)
+Inverse rendering and relighting
+Pose, calibration, and sparse-view tricks
+Large-scale, outdoor, and AV NeRFs
+NeRFs for humans, avatars, and bodies
+NeRF for robotics and 3D perception
+Editable NeRFs
+Engineering: codebases, formats, hyperparameters
+Evaluation, benchmarks, and metrics
+Failure modes and pitfalls
+Comparisons: NeRF vs. 3DGS vs. SDF vs. mesh
+Pipelines and reference recipes
+2026 frontier: what's new and what's open
+Appendix A: 25 things every principal must know about NeRF
+Appendix B: decision tree — which NeRF variant?
+Appendix C: year-by-year milestones
+1. The big picture: what NeRF is and why it mattered
+NeRF represents a scene as a single MLP \(f_\theta(\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)\) that maps a 3D position \(\mathbf{x} \in \mathbb{R}^3\) and a viewing direction \(\mathbf{d} \in S^2\) to an emitted color \(\mathbf{c} \in \mathbb{R}^3\) and a volumetric density \(\sigma \ge 0\). Rendering uses the classical volume rendering integral along rays cast from the camera. There is no explicit geometry — geometry emerges from where \(\sigma\) is high after photometric optimization on multi-view images.
+Aspect
+Vanilla NeRF (2020)
+Modern descendants
+Representation
+MLP, implicit
+MLP + feature grids / hashes
+Train time on a scene
+1–2 days on a V100
+5 sec (Instant-NGP) – 30 min (Zip-NeRF)
+Render speed (1080p)
+0.05–0.3 FPS
+30–200 FPS (KiloNeRF, MERF, BakedSDF, Mip-NeRF 360 + acc.)
+Quality (Mip-NeRF 360 PSNR)
+25.4 (NeRF)
+28.5+ (Zip-NeRF)
+Editability
+very hard
+moderate (with grids / SDFs)
+Dynamic scenes
+no
+yes (D-NeRF, HyperNeRF, K-Planes, NSFF)
+Generative
+no
+yes (EG3D, Magic3D, 3D-aware GANs, diffusion-NeRF)
+Key
+NeRF's three innovations: (i) volume rendering as a differentiable scene-encoding mechanism, (ii) positional encoding to overcome MLP spectral bias, (iii) hierarchical sampling (coarse + fine MLPs).
+Every later variant changed exactly which of these to keep, replace, or augment.
+2. Volume rendering: the math
+2.1 Continuous form
+For ray \(\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}\) with near/far bounds \([t_n, t_f]\):
+\[C(\mathbf{r}) = \int_{t_n}^{t_f} T(t)\, \sigma(\mathbf{r}(t))\, \mathbf{c}(\mathbf{r}(t), \mathbf{d})\, dt, \quad T(t) = \exp\!\left( -\int_{t_n}^{t} \sigma(\mathbf{r}(s))\, ds \right).\]
+\(T(t)\) is the transmittance: the probability that a photon survives from \(t_n\) to \(t\).
+2.2 Discretized (numerical) form
+Sample \(N\) depths \(\{t_i\}\) along the ray, with \(\delta_i = t_{i+1} - t_i\):
+\[C(\mathbf{r}) = \sum_{i=1}^{N} T_i\, (1 - \exp(-\sigma_i \delta_i))\, \mathbf{c}_i, \quad T_i = \exp\!\left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right).\]
+The factor \((1 - e^{-\sigma_i \delta_i})\) is the per-sample alpha \(\alpha_i\); the weight is \(w_i = T_i \alpha_i\).
+2.3 Estimated depth and accumulated alpha
+\[\hat{z}(\mathbf{r}) = \sum_i w_i\, t_i\]
+\[\mathrm{Acc}(\mathbf{r}) = \sum_i w_i.\]
+\(\mathrm{Acc} < 1\) indicates a transparent (or sky) ray; \(\mathrm{Acc} \to 1\) a fully opaque ray.
+2.4 Loss
+\[\mathcal{L} = \sum_{\mathbf{r}} \left\| \hat{C}(\mathbf{r}) - C^\star(\mathbf{r}) \right\|_2^2\]
+averaged over a random batch of rays (typically 1024–4096 per step).
+Watch out
+The discretization assumes piecewise-constant density between samples. With too few samples or poor stratified placement, you get aliased silhouettes and blurry texture. Mip-NeRF, Zip-NeRF, and Tri-MipRF all attack this with cone tracing or analytic prefiltering.
+3. Positional encoding and frequency tricks
+3.1 Sinusoidal positional encoding (PE)
+\[\gamma(p) = \left( \sin(2^0 \pi p), \cos(2^0 \pi p), \ldots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p) \right).\]
+Vanilla NeRF: \(L = 10\) for \(\mathbf{x}\), \(L = 4\) for \(\mathbf{d}\). Without PE, the MLP collapses to a blurred mean image (spectral bias of ReLU MLPs).
+3.2 Integrated PE (IPE) of Mip-NeRF
+Mip-NeRF replaces a single point with a Gaussian blob and computes the expected encoding, \(\mathbb{E}_{\mathbf{x} \sim \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})}[\gamma(\mathbf{x})]\), in closed form for sinusoids:
+\[\mathbb{E}[\sin(2^l \pi x)] = \exp\!\left( -\tfrac{1}{2}(2^l \pi)^2 \sigma_x^2 \right) \sin(2^l \pi \mu_x).\]
+This naturally low-pass filters high-frequency PE bands as cone diameter increases, removing aliasing.
+3.3 Random Fourier features (RFF)
+\(\gamma(\mathbf{x}) = (\cos(2\pi B\mathbf{x}), \sin(2\pi B\mathbf{x}))\) with \(B \sim \mathcal{N}(0, \sigma^2 I)\). Tancik et al. showed isotropic Gaussian frequencies match or beat axis-aligned PE, and the bandwidth \(\sigma\) controls smoothness.
+3.4 Hash and tri-plane encodings
+Multiresolution hash grid (Instant-NGP, Müller et al., SIGGRAPH'22): trainable feature table per resolution level \(L \in \{1, \ldots, 16\}\), looked up via a spatial hash, trilinearly interpolated, and concatenated. The MLP becomes tiny (2 layers, 64-wide) since most capacity is in the table.
+Tri-plane / k-planes / TensoRF: factorize \(\mathbf{x} \to f(\mathbf{x})\) into 2D / 1D tensor planes. TensoRF: VM (vector–matrix) decomposition. k-Planes: 6 planes for 4D (space-time). Tri-plane: 3 axis-aligned 2D planes (used by EG3D, GET3D).
+DVGO / Plenoxels: dense voxel grid with trilinear interpolation; SH-only color (no MLP).
+Key
+The shift from "MLP everywhere" to "mostly-grid + tiny MLP" is the single biggest reason NeRF training dropped from days to seconds. Instant-NGP's hash idea trades a small probability of collision (which the MLP resolves) for \(\sim\!50\times\) faster training.
+4. Hierarchical and importance sampling
+Vanilla NeRF uses two MLPs: a coarse model that predicts a piece-wise constant CDF along each ray, then resamples 128 fine samples from this CDF. Modern variants:
+Proposal networks (Mip-NeRF 360): a small density network proposes a PDF; the main network is queried only at well-placed samples. 256 proposal + 64 NeRF samples is typical.
+Online stratified sampling with rejection: skip empty bins via an occupancy grid (Instant-NGP, NerfAcc).
+Anti-aliased proposal (Zip-NeRF): cone-tracing into a hash grid via a multi-sample Gaussian; sums are anti-aliased.
+Disparity / inverse-depth sampling (NDC) for forward-facing scenes.
+Contraction (Mip-NeRF 360): map \(\mathbf{x} \to \frac{\mathbf{x}}{\|\mathbf{x}\|}\left(2 - \frac{1}{\|\mathbf{x}\|}\right)\) so the unbounded background fits in a finite box.
+5. Anti-aliasing and multi-scale
+Mip-NeRF (Barron et al., ICCV'21): cone-tracing + IPE; eliminates jaggies when zooming.
+Mip-NeRF 360: extends to unbounded scenes via contraction; proposal MLP; hat-shaped charge-back loss; the de-facto NVS benchmark.
+Zip-NeRF (Barron et al., ICCV'23): combines Mip-NeRF 360 anti-aliasing with hash-grid encodings via multi-sampled IPE; SOTA quality.
+Tri-MipRF: tri-mipmap of a tri-plane to anti-alias.
+Multiscale 3DGS / Mip-Splatting (analogous on the GS side).
+Nerfbusters: cleans up aliased floaters with a 3D denoiser.
+6. Fast NeRFs (training and rendering)
+6.1 Fast training
+Method
+Trick
+Train time on a single scene
+Instant-NGP
+multires hash grid + tiny MLP
+5 s – 5 min
+Plenoxels
+sparse voxel grid, no MLP
+11 min
+DVGO
+dense voxel + post-MLP color
+15 min
+TensoRF
+VM tensor decomposition
+30 min
+K-Planes
+6 plane factors (4D)
+30 min
+Zip-NeRF
+hash grid + cone-traced IPE
+30 min
+Nerfacto (Nerfstudio)
+default production pipeline
+5–30 min
+6.2 Fast rendering
+KiloNeRF: split the scene into 1000s of tiny MLPs that fit in a thread-block.
+SNeRG / Plenoctrees / Bake-NeRF: bake the trained NeRF into a sparse voxel octree with SH for view-dependent terms.
+MERF / SMERF: memory-efficient NeRF representation for streaming.
+BakedSDF: convert NeRF to mesh + neural deferred shading.
+Re-NeRF / Adaptive shells: skip empty space; render at high FPS.
+NerfAcc library: occupancy grid + cuda samplers, gives \(5\text{–}20\times\) inference speedup.
+Mobile-NeRF: convert to textured polygons compatible with WebGL.
+7. Surface and geometry: SDF-based NeRFs
+The vanilla density field \(\sigma\) has fuzzy surfaces. Replace it with a signed-distance field (SDF) \(s(\mathbf{x})\) and convert to density via a learned mapping.
+NeuS (Wang et al., NeurIPS'21): \(\sigma = \alpha \cdot \Phi'(s)\), where \(\Phi\) is a logistic CDF; gives sharp surfaces and unbiased depth estimates.
+VolSDF: Laplacian transform \(\sigma = \alpha \cdot \mathrm{softplus}(-s/\beta)\) at zero-crossing.
+UniSurf: combines surface and volume rendering.
+HF-NeuS / Geo-NeuS: high-frequency surface details.
+NeuS2 / NeuralAngelo (NVIDIA, CVPR'23): Instant-NGP hash + NeuS; gives extremely detailed mesh from a few images.
+BakedSDF: bake NeuS-like field into a Marching-Cubes mesh + texture.
+NeuralWarp / D-NeuS: combine multi-view stereo with NeuS.
+Key
+Recipe. Surface reconstruction baseline (2026): Neuralangelo for fine-detail mesh from many views, or BakedSDF for a small mobile-friendly mesh + shader. For object-centric: SDF-based methods (NeuS, VolSDF). For cityscale: Block-NeRF or hierarchical 3DGS.
+8. Generative NeRF: 3D-aware GANs and diffusion-NeRFs
+3D-aware GANs (StyleGAN \(\to\) tri-plane \(\to\) NeRF). \(\pi\)-GAN (Chan et al., CVPR'21): NeRF generator with FiLM-modulated MLP. GIRAFFE: composing per-object NeRFs. EG3D (Chan et al., CVPR'22): tri-plane representation + 2D StyleGAN super-resolver; state-of-the-art portrait 3D generation. GRAM / GRAF / StyleNeRF: alternative formulations. GET3D / GANcraft / GRAM-HD: textured 3D objects.
+Score-distillation for text-to-3D (NeRF backbone)
+DreamFusion (Poole et al., ICLR'23): the Score Distillation Sampling (SDS) loss optimizes a NeRF with gradients from a frozen 2D text-to-image diffusion model. Magic3D: coarse NeRF \(\to\) fine textured mesh.
+ProlificDreamer (VSD): variational score distillation; sharper. Latent-NeRF: SDS in latent space. Fantasia3D / Magic123 / SJC / NFSD.
+3D diffusion / feed-forward 3D generators
+LRM (Large Reconstruction Model): feed-forward image \(\to\) tri-plane NeRF or splat. Zero-1-to-3 / Zero123++: diffuse novel views from one image; chain into 3D. One-2-3-45 / SyncDreamer: multi-view consistency with diffusion. Wonder3D / Era3D / V3D / Stable Video 3D: video diffusion for consistent multi-view. Trellis / Hunyuan3D-2: 2025 SOTA image \(\to\) 3D producing PBR mesh / 3DGS.
+9. Dynamic NeRF (4D)
+D-NeRF: scene + time as 4D MLP; deforms a canonical NeRF.
+Nerfies / HyperNeRF: hyper-dimensional deformation field for casual capture.
+NSFF (Neural Scene Flow Fields): optical flow priors for dynamic regions.
+NR-NeRF: non-rigid deformation MLP.
+TiNeuVox: time-conditioned voxel grid.
+K-Planes / Tensor4D: 6-plane factorization of 4D.
+HumanNeRF / Vid2Avatar: pose-conditioned canonical body NeRF.
+DynIBaR: dynamic image-based rendering with NeRF backbone.
+Robust Dynamic NeRF (NSFF v2): handles casual phone video with priors.
+Forward warping with depth + flow priors: combine VGG-T / DUSt3R / VGGT depth and CoTracker-style flow with a deformation NeRF.
+Watch out
+Truly monocular dynamic NeRF is under-constrained. Without depth or flow priors, the optimizer can "cheat" by changing geometry every frame to match colors, producing wobbling artifacts. Always add monocular depth (Marigold, Depth-Anything-v2), flow (CoTracker), and rigidity priors.
+10. Inverse rendering and relighting
+Decompose into BRDF + lights
+NeRD (Boss et al., ICCV'21): per-point BRDF + spherical Gaussians lights. NeRFactor: factor into albedo, BRDF, normal, lighting; supports relighting. PhySG: spherical-Gaussian environment map + GGX BRDF. NeRO: handles glossy/specular reflections via split-sum. TensoIR: TensoRF backbone for inverse rendering. Neural-PBIR: physics-based inverse rendering pipeline. Ref-NeRF (Verbin et al., CVPR'22): re-parameterize view direction by reflection direction; sharper specularities. NVDiffRec: end-to-end mesh + materials + lights jointly.
+One-light-at-a-time / OLAT
+Relightable Neural Field: capture under known lighting variations; learn a relightable BRDF. Neural Reflectance Fields: learns reflectance per voxel. R3DG (3DGS-side analog) does the GS version of this.
+Key
+Recipe. Relightable scene from photos: (1) capture with varying / known lighting; (2) train Ref-NeRF or NeRO with explicit normal estimation; (3) bake BRDF + environment; (4) export to a real-time deferred-shading renderer (BakedSDF or 3DGS-IR).
+11. Pose, calibration, and sparse-view tricks
+NeRF-- (Wang et al.): joint optimization of camera intrinsics/extrinsics and NeRF.
+BARF: gradually anneal positional encoding from low to high frequency to stabilize pose+NeRF joint training.
+GARF / SCNeRF / L2G-NeRF: pose-free training variants.
+InstantNeRF / iNeRF: fast pose recovery against a trained NeRF.
+DiffPoseNet / PoseDiffusion: diffusion-based pose estimators replacing COLMAP.
+Dust3R / MASt3R / VGGT: feed-forward dense correspondence + pose; widely used to initialize NeRF training without COLMAP.
+RegNeRF / DietNeRF / FreeNeRF / SinNeRF: regularizers for sparse-view (3–6 images).
+PixelNeRF / IBRNet / MVSNeRF / GeoNeRF: feed-forward NeRF conditioned on a few images.
+NerfDiff / GenNeRF: diffusion priors as regularizers for novel views.
+12. Large-scale, outdoor, and AV NeRFs
+Block-NeRF (Tancik et al., CVPR'22): partition city blocks; per-block NeRF + appearance embedding; merge for street-level.
+Mega-NeRF: aerial / drone capture with multi-resolution.
+BungeeNeRF: zoom-out from satellite to street level.
+Urban NeRF: city scale with LiDAR depth supervision.
+Nerfacto-big / Nerfstudio big-scene pipelines.
+StreetSurf / S-NeRF / EmerNeRF / NeuRAD / OmniRe: AV simulation; explicit dynamics for actors.
+StreetGaussians is the GS counterpart and now dominates production AV sim.
+13. NeRFs for humans, avatars, and bodies
+HumanNeRF / Vid2Avatar / SelfRecon / NeuMan / TAVA: pose-driven canonical NeRF.
+Neural Body / Animatable NeRF: SMPL pose-conditioned body NeRF.
+NeRFace / MoFaNeRF / RigNeRF: face / head NeRFs.
+HeadNeRF / IM Avatar / FLAME-NeRF: parametric face conditioning.
+RodinHD / PanoHead: full-head 3D-aware generators.
+Neural Strands: hair as filaments inside a NeRF.
+Codec Avatars (Meta): production-grade volumetric avatars (now mostly GS-based).
+14. NeRF for robotics and 3D perception
+NeRF-SLAM / iMAP / NICE-SLAM / Co-SLAM / Vox-Fusion / Point-SLAM: NeRF-based mapping and tracking.
+LERF / Distilled Feature Fields / N3F / LSeg-NeRF / Feature-NeRF: distill 2D foundation features (CLIP, DINO, SAM) into a 3D field for open-vocabulary 3D queries.
+3D Scene Graph + NeRF: structured queries for navigation and manipulation.
+NeRF for grasping: differentiable rendering for grasp prediction with sim-to-real.
+ASE / RoboNeRF / NeRF in the Real World and similar embodied uses.
+15. Editable NeRFs
+NeRF-Editing / NeRF-In (boolean / region edits via mesh proxies).
+Instruct-NeRF2NeRF: Instruct-Pix2Pix iteratively re-renders training views.
+ED-NeRF / DreamEditor: text-driven local editing.
+ClipNeRF: CLIP-guided semantic editing.
+PaletteNeRF / CoNeRF: factor the field into editable layers / latent palettes.
+LERF + SAM: localize an object by CLIP query, then edit.
+16. Engineering: codebases, formats, hyperparameters
+16.1 Reference codebases
+nerf (Mildenhall et al., TF1): the original.
+nerf-pytorch (Yen-Chen Lin): canonical PyTorch port.
+Nerfstudio (Tancik et al.): production-grade Nerfacto, multiple methods, viewer, exporters.
+Instant-NGP (NVIDIA): C++/CUDA, fastest train, great viewer.
+tiny-cuda-nn: hash-grid + small MLPs in CUDA, library used by many.
+NerfAcc: PyTorch accelerators (occupancy grid, samplers).
+Kaolin Wisp: NVIDIA neural-field library.
+SDFStudio: SDF-based methods on top of nerfstudio.
+volsdf, neus, neuralangelo: SDF reference implementations.
+16.2 File / data formats
+Camera JSON: transforms.json (Instant-NGP / Nerfstudio): per-image \(4\times4\) poses, intrinsics, distortion, file paths.
+LLFF poses_bounds.npy (forward-facing).
+COLMAP cameras.bin / images.bin / points3D.bin.
+Nerfacto exports: ply (point cloud), mesh (obj/glb), grid (snapshot).
+Instant-NGP snapshot: msgpack with hash grid + MLP weights.
+16.3 Default hyperparameters by family
+Family
+Optimizer / LR
+Notes
+Vanilla NeRF
+Adam, 5e−4 → 5e−5
+200–400k iters, 1024 rays/batch
+Instant-NGP
+Adam, 1e−2 → 1e−4
+20k iters, occupancy grid
+Mip-NeRF / 360
+Adam, 1e−3 → 1e−4
+250k iters; proposal MLP
+Zip-NeRF
+Adam, 1e−2 → 1e−4
+25k iters; cone-IPE samples
+NeuS / NeuralAngelo
+Adam, 5e−4 → 1e−5
+150k iters; eikonal loss
+Nerfacto
+Adam, 1e−2 → 1e−4
+30k iters by default
+DreamFusion
+(SDS) Adam, 5e−4
+10k iters with classifier-free guidance
+Key
+Recipe. Production NeRF baseline (2026): Nerfacto in Nerfstudio for casual capture; for geometry, switch to NeuralAngelo or BakedSDF; for quality SOTA, Zip-NeRF; for speed, Instant-NGP; for editing, GS or LERF + SAM. NeRF is no longer the default for NVS — 3DGS is — but remains best for dense-mesh recovery, relighting, and inverse rendering.
+17. Evaluation, benchmarks, and metrics
+17.1 Standard datasets
+NeRF Synthetic (8 toy objects, \(800\times800\)).
+LLFF (8 forward-facing scenes).
+Mip-NeRF 360 (9 unbounded scenes; the modern NVS benchmark).
+Tanks & Temples (Truck, Train, Advanced subset).
+Deep Blending (2 indoor).
+ScanNet / Replica / 7-Scenes for indoor SLAM evaluation.
+DTU for object-centric geometry.
+KITTI / Waymo / nuScenes for AV scenes.
+17.2 Metrics
+Image: PSNR, SSIM, LPIPS.
+Geometry: Chamfer distance, F-score, normal consistency.
+Speed: train time, inference FPS, memory.
+Generative: FID, KID, CLIP score, user studies.
+17.3 Approximate Mip-NeRF 360 PSNR landmarks
+NeRF (vanilla, 2020): 25.4. Mip-NeRF: 26.0. Mip-NeRF 360: 27.7. Instant-NGP: 25.6 (fast). TensoRF: 26.9.
+K-Planes: 27.2. Zip-NeRF: 28.5+. 3DGS: 27.4. Mip-Splatting: 27.7. Scaffold-GS: 27.9. (Numbers are averaged across the 9 360-scenes; expect \(\pm 0.5\) dB depending on details.)
+Watch out
+Test-set PSNR can be "trained on the test set" if the training/test split is sloppy. For honest comparison, use the standard splits, never tune on test, and always report SSIM + LPIPS along with PSNR. Inference speed and memory often matter more than 0.3 dB.
+18. Failure modes and pitfalls
+Watch out
+Pitfall catalog:
+Floaters from view-overfitting. Fix with proposal MLPs, distortion loss (Mip-NeRF 360), or Nerfbusters.
+Aliasing from point sampling. Fix with cone tracing (Mip-NeRF, Zip-NeRF) or Tri-MipRF.
+Background bleed in unbounded scenes. Fix with Mip-NeRF 360 contraction.
+Pose error (especially from SfM on textureless scenes). Fix with BARF / NeRF-- / bundle-adjusting NeRFs / Dust3R initialization.
+Slow training of vanilla NeRF. Fix with hash grids, proposal networks, occupancy grids.
+Surface fuzziness: vanilla density gives blurry surfaces. Use NeuS / VolSDF.
+Specular reflections: PE-only direction can't capture sharp highlights. Use Ref-NeRF or NeRO with reflection re-parameterization.
+Dynamic over-fitting: cheating geometry to match colors per frame. Add depth/flow priors (Marigold, Depth-Anything-v2, CoTracker) and rigidity losses.
+Uneven exposure / white balance between input images. Use per-image appearance embeddings (NeRF-W / Block-NeRF).
+Sparse views: under-constrained. Use RegNeRF / FreeNeRF / NerfDiff.
+Training divergence with hash grids: aggressive LR + hash collisions. Use cosine warm-up, clip gradients, occupancy grid skip.
+Mesh extraction artifacts: marching cubes on \(\sigma\) gives bumpy surfaces; use SDF variant first.
+19. Comparisons: NeRF vs. 3DGS vs. SDF vs. mesh
+Property
+NeRF (Mip-NeRF / Zip-NeRF)
+3DGS / Mip-Splatting
+SDF / mesh
+Training time
+5–40 min (modern)
+5–40 min
+similar
+Render speed
+1–30 FPS
+100–300 FPS
+GPU-rasterized, 60+ FPS
+Editability
+poor
+good (move primitives)
+best (manual / DCC)
+Mesh extraction
+via SDF variant
+via 2DGS / SuGaR
+native
+Relighting
+best (NeRO, Ref-NeRF)
+emerging (relightable 3DG)
+easiest with shaders
+Dynamic / 4D
+D-NeRF, K-Planes
+4DGS, Spacetime Gaussians
+rigged mesh
+Compression
+MERF, Mobile-NeRF
+LightGaussian, SOG
+geometry/texture LoD
+Sparse-view feed-forward
+PixelNeRF, IBRNet, GeoNeRF, MVSNeRF
+pixelSplat, MVSplat, NoPoSplat
+traditional MVS
+Generative
+SOTA: DreamFusion, ProlificDreamer, EG3D, LRM (NeRF-based)
+DreamGaussian, GaussianDreamer, Trellis
+NVDiffRec, GET3D
+Key
+When to use NeRF in 2026: relightable inverse rendering, sharp specular reflections, dense mesh extraction (NeuralAngelo / BakedSDF), feed-forward LRMs, generative 3D via SDS. When to use 3DGS: real-time NVS, editing, AV simulation, on-device rendering. When to use both: generative pipelines that consume NeRF intermediates and rasterize via splats.
+20. Pipelines and reference recipes
+Key
+Recipe. Phone capture \(\to\) web-quality NeRF: take 100–300 images, run COLMAP for poses, train Nerfacto in Nerfstudio (15 min), export to mesh (ns-export poisson) or to Mobile-NeRF for browser playback. For higher quality use Zip-NeRF.
+Key
+Recipe. Object capture for mesh: 50–150 images on a turntable, NeuralAngelo (30 min on a 3090), extract dense mesh, bake albedo and PBR via texture re-projection.
+Key
+Recipe. Sparse-view NeRF (3–6 images): run DUSt3R / MASt3R / VGGT for poses + sparse depth, then RegNeRF / FreeNeRF or feed-forward MVSNeRF / pixelNeRF / NerfDiff. Skip COLMAP entirely.
+Key
+Recipe. Inverse rendering for relightable asset: capture under known lighting variations, train Ref-NeRF + NeRO with explicit normal estimation, decompose into albedo / roughness / metallic / normal, bake into a mesh shader.
+Key
+Recipe. Text-to-3D NeRF (research / prototyping): ProlificDreamer (VSD) or Magic3D coarse-to-fine, then bake to GS or mesh for production use.
+Key
+Recipe. NeRF-SLAM: for room-scale RGB-D, NICE-SLAM or Co-SLAM; for large indoor, SplaTAM (GS-based) is faster and more editable in 2026.
+21. 2026 frontier: what's new and what's open
+Foundation feed-forward NeRFs / LRMs: image- or video-conditioned 3D generators trained on internet-scale data (LRM, Wonder3D, Stable Video 3D, V3D, Trellis-style).
+Hybrid NeRF + GS: NeRF for geometry / relightability, GS for rendering speed.
+Diffusion-based NeRF priors: 3D-consistent diffusion models that emit NeRF / tri-plane / GS in a forward pass.
+4D world-model NeRFs: time-conditioned generators producing physically-plausible rollouts.
+Relightable BRDF NeRFs at scale: solving rendering equations with neural radiance caches; Ref-NeRF and NeRO descendants.
+Implicit + explicit hybrids: hash grids + tri-planes + sparse voxels combined for best of both.
+NeRF in foundation models for embodied AI: LERF-style distilled features at the scale of vision foundation models.
+Open problems: monocular dynamic NeRF without priors; reflective / refractive scenes; inverse rendering from in-the-wild capture; controllable / disentangled editing; on-device inference at <10 ms latency.
+★ 2026 SOTA update — NeRF-side / reflections
+NeRF-Casting: Ray-traces reflected cones through the radiance field plus a small decoder network to produce photorealistic, view-consistent specular reflections in real-world unbounded scenes. From the Barron/Verbin Google group; the strongest pure-NeRF answer to shiny surfaces and a successor to Ref-NeRF.
+★ 2026 SOTA update — NeRF-side / large-scale
+NeRF-XL: Principled multi-GPU distribution of a single NeRF (mathematically equivalent to the single-GPU case) rather than stitching independent blocks. First to reveal multi-GPU scaling laws for NeRF; trained on MatrixCity (258K images, 25 km²). Keeps NeRF relevant for city-scale capacity.
+★ 2026 SOTA update — NeRF/3DGS convergence
+EVER: Ray-traced exact volume rendering of ellipsoid primitives at ~30 FPS 720p on an RTX 4090. No popping or view-dependent-density artifacts of 3DGS, sharpest real-time results on the Zip-NeRF dataset, and supports defocus/fisheye. A canonical example of the NeRF (exact volume rendering) and Gaussian (explicit primitives) convergence.
+★ 2026 SOTA update — NeRF-side / surface reconstruction
+UniSDF: Blends camera-view and reflected-view color parameterizations in 3D on a coarse-to-fine multi-resolution grid, yielding geometrically accurate surfaces on reflective and large unbounded scenes (DTU, Shiny Blender, Mip-NeRF 360, Ref-NeRF real). Latest SDF-based reconstruction frontier.
+★ 2026 SOTA update — NeRF-side / anti-aliasing
+Rip-NeRF: Projects anisotropic conical frustums onto the faces of Platonic solids and queries a learnable Ripmap encoding, characterizing anisotropic areas that isotropic hash/mip encodings miss. Advances the Mip-/Zip-/Tri-Mip anti-aliasing line.
+★ 2026 SOTA update — Feed-forward / Gaussian-NeRF hybrid
+GS-LRM: Transformer LRM that predicts per-pixel 3D Gaussians from 2–4 posed images in ~0.23 s on one A100, extending the NeRF-era LRM feed-forward paradigm to scene-scale reconstruction and to the Gaussian output representation. Marks the feed-forward pipeline's shift from NeRF/tri-plane to splats.
+★ 2026 SOTA update — Feed-forward / dynamic (4D)
+DGS-LRM: First feed-forward model predicting deformable 3D Gaussians from a monocular posed video of an arbitrary dynamic scene, giving real-time generalizable 4D reconstruction with novel-view rendering, geometry, and 3D scene-flow. Directly succeeds optimization-based dynamic NeRF (D-NeRF/NSFF/HyperNeRF) with a foundation-model feed-forward approach.
+★ 2026 SOTA update — Feed-forward / wide-coverage reconstruction
+Long-LRM++: Long-sequence feed-forward reconstruction (up to 64 input views at 950×540) using a semi-explicit feature-Gaussian representation to fix Long-LRM blur while keeping real-time (14 FPS) rendering. Represents the 2025–2026 frontier of instant, full-scene, wide-coverage 3D reconstruction that has largely supplanted per-scene NeRF optimization.
+22. Appendix A: 25 things every principal must know about NeRF
+NeRF is a continuous 5D function \(f_\theta(\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)\) with classical volume rendering.
+Discretized rendering: \(C = \sum_i T_i (1 - e^{-\sigma_i \delta_i})\, \mathbf{c}_i\).
+Vanilla NeRF uses sinusoidal positional encoding (\(L = 10\) for \(\mathbf{x}\), \(L = 4\) for \(\mathbf{d}\)).
+Hierarchical sampling (coarse + fine MLPs) was the original importance-sampling trick.
+Mip-NeRF replaces points with cones; Integrated PE anti-aliases naturally.
+Mip-NeRF 360 contraction maps unbounded scenes onto a finite ball; proposal MLP speeds up sampling.
+Zip-NeRF combines Mip-NeRF 360 with hash grids via multi-sample IPE; current quality SOTA.
+Instant-NGP uses a multiresolution hash grid and a tiny MLP; train in seconds.
+Plenoxels / DVGO show MLPs aren't strictly required for NeRF-quality NVS.
+TensoRF, k-Planes, tri-planes are tensor-factorized alternatives.
+NeuS / VolSDF / NeuralAngelo replace density with SDF for sharp surfaces; use eikonal loss.
+Ref-NeRF re-parameterizes view direction for accurate specularities.
+NeRO splits diffuse + specular with reflection direction; great for glossy.
+KiloNeRF / SNeRG / PlenOctrees / MERF bake fast renderers.
+BakedSDF converts to mesh + neural shader for mobile.
+D-NeRF / Nerfies / HyperNeRF / NSFF / K-Planes handle dynamic scenes.
+NeRF-W and Block-NeRF use per-image appearance embeddings for in-the-wild scenes.
+Block-NeRF / Mega-NeRF / BungeeNeRF scale to city / aerial.
+DreamFusion uses Score Distillation Sampling (SDS) on a frozen 2D diffusion model.
+EG3D uses tri-planes + StyleGAN super-resolver; foundational 3D-aware GAN.
+LRM / Zero-1-to-3 / Wonder3D / Trellis are feed-forward 3D generators.
+LERF distills CLIP features into a 3D field for open-vocabulary 3D queries.
+Instruct-NeRF2NeRF iteratively re-renders training views with InstructPix2Pix for editing.
+Production NeRF stack: Nerfstudio (Nerfacto + Zip-NeRF + NeuS / NeuralAngelo + LERF) + Instant-NGP for speed.
+In 2026, GS replaced NeRF for real-time NVS; NeRF still owns relighting, mesh extraction, generative 3D, and hybrid pipelines.
+23. Appendix B: decision tree — which NeRF variant?
+Goal: photoreal NVS, room-scale. Zip-NeRF or Mip-NeRF 360.
+Goal: fastest NeRF training. Instant-NGP or Nerfacto.
+Goal: dense / sharp mesh. NeuralAngelo, BakedSDF, or NeuS / VolSDF.
+Goal: glossy / specular. Ref-NeRF or NeRO.
+Goal: relightable scene. NeRO, NeRD, NeRFactor, TensoIR.
+Goal: dynamic from multi-camera. K-Planes, D-NeRF, HyperNeRF.
+Goal: dynamic from monocular. NSFF / Robust Dynamic NeRF + DUSt3R/Marigold/CoTracker priors.
+Goal: avatars / humans. HumanNeRF / Vid2Avatar / NeRFace / RigNeRF.
+Goal: sparse-view feed-forward. PixelNeRF / MVSNeRF / IBRNet / pixelSplat (GS).
+Goal: text-to-3D. ProlificDreamer / Magic3D / Latent-NeRF / Trellis (GS).
+Goal: city-scale. Block-NeRF / Mega-NeRF / BungeeNeRF / NeuRAD.
+Goal: SLAM. NICE-SLAM / Co-SLAM (NeRF) or SplaTAM (GS).
+Goal: editing. Instruct-NeRF2NeRF / DreamEditor or LERF + SAM.
+Goal: on-device / mobile. Mobile-NeRF / MERF / BakedSDF.
+Goal: pose-free. BARF / GARF / NeRF-- / Dust3R-initialized Nerfacto.
+24. Appendix C: year-by-year milestones
+Year
+Milestones
+2020
+NeRF (Mildenhall et al., ECCV best paper), NSVF, Plenoxels-precursor, NeuralVolumes.
+2021
+Mip-NeRF, NeRF in the Wild (NeRF-W), Plenoxels, KiloNeRF, NeRD, NeuS, VolSDF, NeRFactor, BARF, Nerfies, HyperNeRF, NSFF, GIRAFFE.
+2022
+Mip-NeRF 360, Instant-NGP, TensoRF, Plenoctrees, PixelNeRF, Block-NeRF, EG3D, Ref-NeRF, BakedSDF, Mobile-NeRF, GET3D, GANcraft, NeRF--.
+2023
+Zip-NeRF, NeuralAngelo, K-Planes, Tensor4D, NerfStudio launches, DreamFusion, Latent-NeRF, ProlificDreamer (VSD), Magic3D, Zero-1-to-3, RealFusion, SJC, LRM, Nerfacto, NerfAcc; 3DGS arrives in August (SIGGRAPH'23) and disrupts the NVS landscape.
+2024
+MERF / SMERF, NeRO, TensoIR, Wonder3D, Era3D, V3D, Stable Video 3D, NerfDiff, FreeNeRF, RegNeRF, LERF+SAM, GS dominates real-time NVS, NeRF retains generative + relighting + mesh extraction.
+2025
+Foundation feed-forward 3D generators (LRM v2, Trellis, Hunyuan3D-2); hybrid NeRF+GS pipelines; relightable BRDF at scale (Ref-NeRF descendants).
+2026
+4D foundation models (NeRF and GS combined), on-device feed-forward 3D, world-model rollouts in the AV / robotics simulators built around NeRF and GS as the universal scene language.
+Key
+The NeRF arc (\(2020 \to 2026\)) introduced volume-rendering MLPs; 2021–2022 solved aliasing, speed, surfaces, dynamics, and 3D-aware GANs; 2023 delivered SOTA quality (Zip-NeRF, NeuralAngelo) just as 3DGS arrived; 2024–2026 repositioned NeRF as the accuracy-first 3D representation — relighting, dense mesh, generative pipelines, hybrids — while 3DGS owns real-time NVS.

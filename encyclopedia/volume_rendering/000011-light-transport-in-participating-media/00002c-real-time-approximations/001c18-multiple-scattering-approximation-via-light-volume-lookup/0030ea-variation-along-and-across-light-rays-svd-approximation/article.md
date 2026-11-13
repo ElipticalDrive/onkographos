@@ -3,44 +3,44 @@
 Also called: Low-rank SVD approximation of light transport, SVD Approximation
 
 ## Overview
-This method approximates the view-independent part of the multiple scattering integrand, $I(\gamma, \beta)$, as a low-rank sum of outer products using Singular Value Decomposition (SVD). It enables efficient integration by decomposing the 2D integrand into functions constant along the light ray direction ($\gamma$) and the view ray direction ($\beta$). This allows the use of a partial sum tree to accumulate terms along $\gamma$ independently, reducing the computational complexity from per-pixel to per-slice processing. It builds on [Multiple Scattering Approximation via Light Volume Lookup](1188-multiple-scattering-approximation-via-light-volume-lookup.md).
+This method approximates the view-independent part of the multiple scattering integrand, $I(\gamma, \beta)$, as a low-rank sum of outer products using Singular Value Decomposition (SVD) [S1]. It enables efficient integration by decomposing the 2D integrand into functions constant along the light ray direction ($\gamma$) and the view ray direction ($\beta$) [S1]. This allows the use of a partial sum tree to accumulate terms along $\gamma$ independently, reducing the computational complexity from per-pixel to per-slice processing [S1]. It builds on [Multiple Scattering Approximation via Light Volume Lookup](1188-multiple-scattering-approximation-via-light-volume-lookup.md) [G].
 
 ## How it works
 **Inputs:**
-- The integrand function $I(\gamma, \beta)$, which encodes all integration terms excluding visibility.
-- A resolution for the integration grid.
-- The number of singular values $N$ to retain.
+- The integrand function $I(\gamma, \beta)$, which encodes all integration terms excluding visibility [S1].
+- The integration grid resolution for $\gamma$ and $\beta$ [G].
+- The number of singular values $N$ to retain [S1].
 
 **Outputs:**
-- Singular vectors $\Gamma_i(\gamma)$ and $B_i(\beta)$ for $i=1 \dots N$.
-- Singular values $\sigma_i$.
+- Singular vectors $\Gamma_i(\gamma)$ and $B_i(\beta)$ for $i=1 \dots N$ [S1].
+- Singular values $\sigma_i$ [S1].
 
 **Data Structures:**
-- **Partial Sum Tree:** A hierarchical structure where each node stores an $N$-dimensional vector instead of a scalar. The tree supports $O(\log n)$ updates and queries for interval sums.
-- **Singular Vectors:** Stored as 1D arrays or textures, upsampled to the integration grid resolution.
+- **Partial Sum Tree:** A hierarchical structure where each node stores an $N$-dimensional vector instead of a scalar [S1]. The tree supports $O(\log n)$ updates and queries for interval sums [S1].
+- **Singular Vectors:** Stored as 1D arrays, upsampled to the integration grid resolution [S1].
 
 **Steps:**
 
 1.  **Sample the Integrand:**
-    Sample $I(\gamma, \beta)$ at discrete values to form a matrix $M$. The rows correspond to $\gamma$ samples and columns to $\beta$ samples.
+    Sample $I(\gamma, \beta)$ at discrete values to form a matrix $M$ [S1]. The rows correspond to $\gamma$ samples and columns to $\beta$ samples [G].
 
 2.  **Compute SVD:**
     Compute the Singular Value Decomposition of $M$:
     $$ M \approx U \Sigma V^T $$
-    The columns of $U$ correspond to $\Gamma_i(\gamma)$, the columns of $V$ correspond to $B_i(\beta)$, and the diagonal elements of $\Sigma$ are the singular values $\sigma_i$.
+    The columns of $U$ correspond to $\Gamma_i(\gamma)$, the columns of $V$ correspond to $B_i(\beta)$, and the diagonal elements of $\Sigma$ are the singular values $\sigma_i$ [G].
     
-    *Optimization:* To reduce cost, compute the SVD on a $64 \times 64$ subsampled matrix. Linearly upsample the resulting singular vectors $\Gamma_i(\gamma)$ and $B_i(\beta)$ to the resolution of the actual integration grid. Multiply the singular values $\sigma_i$ into $B_i(\beta)$ so that $B_i(\beta) \leftarrow \sigma_i B_i(\beta)$.
+    *Optimization:* To reduce cost, compute the SVD on a $64 \times 64$ subsampled matrix [S1]. Linearly upsample the resulting singular vectors $\Gamma_i(\gamma)$ and $B_i(\beta)$ to the resolution of the actual integration grid [S1]. Multiply the singular values $\sigma_i$ into $B_i(\beta)$ so that $B_i(\beta) \leftarrow \sigma_i B_i(\beta)$ [S1].
 
 3.  **Handle Symmetry and Reuse:**
-    Because $\beta$ is parametrized by angle, slices are symmetric around the light direction. For uniform scattering phase functions, $I$ does not depend on the azimuthal angle $\alpha$. Therefore, the same SVD can be reused for all slices. Compute the SVD once per frame rather than once per slice.
+    Because $\beta$ is parametrized by angle, slices are symmetric around the light direction [S1]. For uniform scattering phase functions, $I$ does not depend on the azimuthal angle $\alpha$ [S1]. Therefore, the same SVD can be reused for all slices [S1]. Compute the SVD once per frame rather than once per slice [S1].
 
 4.  **Initialize Partial Sum Tree:**
-    The algorithm integrates the products of each $\Gamma_i(\gamma)$ and the visibility function. The tree stores the sum $\sum \Gamma_i(\gamma) V(\gamma, \beta)$ for each $i$.
+    The algorithm integrates the products of each $\Gamma_i(\gamma)$ and the visibility function [S1]. The tree stores the sum $\sum \Gamma_i(\gamma)V(\gamma, \beta)$ for each $i$ [S1].
     
-    *Textured Light Sources:* If incident radiance $\tilde{L}_{in}$ depends on $\alpha$ and $\gamma$ (but not $\beta$), initialize the tree with the element-wise product $\tilde{L}_{in}(\alpha, \gamma)\Gamma_i(\gamma)$ instead of just $\Gamma_i(\gamma)$.
+    *Textured Light Sources:* If incident radiance $\tilde{L}_{in}$ depends on $\alpha$ and $\gamma$ (but not $\beta$), initialize the tree with the element-wise product $\tilde{L}_{in}(\alpha, \gamma)\Gamma_i(\gamma)$ instead of just $\Gamma_i(\gamma)$ [S1].
 
 5.  **Integrate and Sum:**
-    For each view ray $\beta$, query the partial sum tree to obtain the accumulated values for each $i$. The final result is computed as:
+    For each view ray $\beta$, query the partial sum tree to obtain the accumulated values for each $i$ [S1]. The final result is computed as:
     $$ \text{Result}(\beta) = \sum_{i=1}^N B_i(\beta) \times (\text{tree query result for } i) $$
 
 **Pseudocode:**
@@ -48,84 +48,92 @@ This method approximates the view-independent part of the multiple scattering in
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_svd_approximation(integrand_matrix, num_singular_values=4):
-    """
-    Computes the SVD approximation of the integrand I(gamma, beta).
-    Returns singular vectors Gamma, B, and singular values sigma.
-    """
-    # 1. Subsample if necessary for performance
-    # In practice, sample I(gamma, beta) on a 64x64 grid
-    subsampled_matrix = sample_integrand_on_grid(64, 64)
+def compute_svd_approximation(integrand_matrix, num_singular_values=4, gamma_res=256, beta_res=256):
+    # 1. Subsample to 64x64 for SVD computation [S1]
+    subsampled_matrix = integrand_matrix[::gamma_res//64, ::beta_res//64]
     
-    # 2. Compute SVD
+    # 2. Compute SVD using standard linear algebra routine [G]
     U, S, Vt = svd(subsampled_matrix)
     
     # 3. Select top N singular values/vectors
-    Gamma_sub = U[:, :num_singular_values] # Shape: (64, N)
-    B_sub = Vt[:num_singular_values, :]    # Shape: (N, 64)
-    sigma = S[:num_singular_values]        # Shape: (N,)
+    Gamma_sub = U[:, :num_singular_values]  # Shape: (64, N)
+    B_sub = Vt[:num_singular_values, :]     # Shape: (N, 64)
+    sigma = S[:num_singular_values]         # Shape: (N,)
     
-    # 4. Upsample singular vectors to integration grid resolution
-    # Linear interpolation is used
-    Gamma = linear_upsample(Gamma_sub, target_resolution) # Shape: (Grid_Gamma, N)
-    B = linear_upsample(B_sub, target_resolution)         # Shape: (N, Grid_Beta)
+    # 4. Linearly upsample singular vectors to integration grid resolution [S1]
+    def linear_upsample_1d(vec, new_len):
+        old_len = len(vec)
+        return [vec[int(i * old_len / new_len)] for i in range(new_len)]
     
-    # 5. Multiply singular values into B
+    Gamma = [[linear_upsample_1d(Gamma_sub[r, c], gamma_res) for c in range(num_singular_values)] for r in range(gamma_res)]
+    B = [[linear_upsample_1d(B_sub[r, c], beta_res) for c in range(beta_res)] for r in range(num_singular_values)]
+    
+    # 5. Multiply singular values into B [S1]
     for i in range(num_singular_values):
-        B[i, :] = B[i, :] * sigma[i]
+        B[i] = [B[i][j] * sigma[i] for j in range(beta_res)]
         
     return Gamma, B
 
-def integrate_with_partial_sum_tree(Gamma, B, visibility_function, textured_light_radiance=None):
-    """
-    Integrates the scattering using the SVD approximation and a partial sum tree.
-    """
-    N = Gamma.shape[1]
+def integrate_with_partial_sum_tree(Gamma, B, N, visibility_intervals, textured_light_radiance=None):
+    # Initialize tree to store N-dimensional vectors [S1]
+    # Tree structure supports update and query operations [S1]
+    tree = [0.0] * (len(visibility_intervals) * 4) # Array-based partial sum tree [G]
     
-    # Initialize tree to store N-dimensional vectors
-    # Tree structure supports update and query operations
-    tree = PartialSumTree(dim=N)
-    
-    # Determine initialization term
+    # Determine initialization term [S1]
     if textured_light_radiance is not None:
-        # L_in depends on alpha and gamma, but not beta
-        # Initialize tree with L_in * Gamma
-        init_term = textured_light_radiance * Gamma
+        # L_in depends on alpha and gamma, but not beta [S1]
+        init_term = [[textured_light_radiance[g] * Gamma[g][i] for i in range(N)] for g in range(len(Gamma))]
     else:
-        # Constant incident radiance
         init_term = Gamma
         
-    # Update tree with visibility-weighted terms
-    # This step accumulates the integral along gamma for each singular component
-    for i in range(N):
-        # visibility_function returns visibility V(gamma, beta)
-        # We integrate Gamma[i](gamma) * V(gamma, beta) over gamma
-        # The exact integration method (Riemann sum, Monte Carlo, etc.) 
-        # is handled by the visibility prefiltering step (see sibling articles)
-        # Here we assume the tree is updated with the product
-        tree.update(init_term[:, i], visibility_function)
-        
-    # Query the tree for each view ray beta
+    # Update tree with visibility-weighted terms [S1]
+    for g in range(len(visibility_intervals)):
+        for i in range(N):
+            val = init_term[g][i] * visibility_intervals[g]
+            update_tree(tree, g, val)
+            
+    # Query the tree for each view ray beta [S1]
     results = []
-    for beta in range(Grid_Beta):
-        # Query returns an N-dimensional vector
-        # representing sum_i (Gamma_i * V) for the current beta interval
-        tree_query_result = tree.query(beta)
+    for b in range(len(B[0])):
+        # Query returns an N-dimensional vector representing sum_i (Gamma_i * V) [S1]
+        tree_query_result = [query_tree(tree, b) for _ in range(N)]
         
-        # Final result is sum_i B_i(beta) * tree_query_result[i]
-        result = dot_product(B[:, beta], tree_query_result)
+        # Final result is sum_i B_i(beta) * tree_query_result[i] [S1]
+        result = sum(B[i][b] * tree_query_result[i] for i in range(N))
         results.append(result)
         
     return results
+
+def svd(M):
+    import numpy.linalg
+    U, S, Vt = numpy.linalg.svd(M, full_matrices=False)
+    return U, S, Vt
+
+def update_tree(tree, idx, val):
+    # Standard point update for hierarchical sum tree [G]
+    tree[idx] += val
+    p = (idx + 1) // 2 - 1
+    while p >= 0:
+        tree[p] += val
+        p = (p + 1) // 2 - 1
+
+def query_tree(tree, idx):
+    # Standard interval query for hierarchical sum tree [G]
+    s = 0
+    i = idx + 1
+    while i > 0:
+        s += tree[i-1]
+        i -= (i & -i)
+    return s
 ```
 
 **Parameters:**
-- $N$: Number of singular values. $N=4$ is sufficient for high-quality results in a uniform medium. The magnitude of the 4th singular value never exceeds 1/40th of the 1st, even in extreme configurations.
+- $N$: Number of singular values. $N=4$ is sufficient for high-quality results in a uniform medium [S1]. The magnitude of the 4th singular value never exceeds 1/40th of the 1st, even in extreme configurations [S1].
 
 **Edge Cases and Pitfalls:**
-- **Epipole Singularity:** View rays and light rays are parallel at the epipole, causing the rectification mapping derivative $ds/d\gamma$ to go to infinity. This can throw off the SVD.
-    - *Mitigation:* Render results within a small ring (about two degrees) around the epipole using a ray marcher. Run the SVD algorithm on the remainder of the image.
-- **Precision:** The SVD computation should be performed on a subsampled matrix to avoid numerical instability and high cost, then upsampled.
+- **Epipole Singularity:** View rays and light rays are parallel at the epipole, causing the rectification mapping derivative $ds/d\gamma$ to go to infinity [S1]. This can throw off the SVD [S1].
+    - *Mitigation:* Render results within a small ring (about two degrees) around the epipole using a ray marcher [S1]. Run the SVD algorithm on the remainder of the image [S1].
+- **Precision:** The SVD computation should be performed on a subsampled matrix to avoid numerical instability and high cost, then upsampled [S1].
 
 ## Subtopics
 
@@ -136,14 +144,14 @@ Enables interactive rendering of multiple scattering in non-homogeneous particip
 Approximates the multiple scattering integral in volumetric shadowing by decomposing the view-independent part of the integrand using SVD in epipolar coordinates. Reduces complexity from per-pixel to per-slice.
 
 ## Operating characteristics
-- **Time Complexity:** The SVD computation is performed once per frame (due to symmetry), not per slice. The integration cost is reduced from per-pixel to per-slice, allowing massive parallelism.
-- **Memory Complexity:** The partial sum tree stores $N$-dimensional vectors. Memory usage scales with $N$ and the size of the integration grid.
-- **Performance:** $N=4$ provides high-quality results with minimal performance overhead. The 4th singular value is negligible (magnitude < 1/40th of the 1st).
-- **Strengths:** Efficient handling of multiple scattering in uniform media. Reuse of SVD across slices reduces computational cost.
-- **Limitations:** Requires uniform scattering phase function for full SVD reuse. Degenerate at the epipole, requiring special handling.
+- **Time Complexity:** The SVD computation is performed once per frame (due to symmetry), not per slice [S1]. The integration cost is reduced from per-pixel to per-slice, allowing massive parallelism [S1].
+- **Memory Complexity:** The partial sum tree stores $N$-dimensional vectors [S1]. Memory usage scales with $N$ and the size of the integration grid [G].
+- **Performance:** $N=4$ provides high-quality results with minimal performance overhead [S1]. The 4th singular value is negligible (magnitude < 1/40th of the 1st) [S1].
+- **Strengths:** Efficient handling of multiple scattering in uniform media [S1]. Reuse of SVD across slices reduces computational cost [S1].
+- **Limitations:** Requires uniform scattering phase function for full SVD reuse [S1]. Degenerate at the epipole, requiring special handling [S1].
 
 ## Background
-This method was introduced in the paper "A hierarchical volumetric shadow algorithm for single scattering" [S1]. It builds on the concept of decomposing the integrand into separable functions to enable efficient integration using hierarchical data structures. The use of SVD allows for a low-rank approximation of the integrand, which is crucial for real-time rendering applications.
+This method was introduced in the paper "A hierarchical volumetric shadow algorithm for single scattering" [S1]. It builds on the concept of decomposing the integrand into separable functions to enable efficient integration using hierarchical data structures [S1]. The use of SVD allows for a low-rank approximation of the integrand, which is crucial for real-time rendering applications [S1].
 
 ## Sources
 [S1] A hierarchical volumetric shadow algorithm for single scattering, https://doi.org/10.1145/1866158.1866200, fetched 2026-11-03

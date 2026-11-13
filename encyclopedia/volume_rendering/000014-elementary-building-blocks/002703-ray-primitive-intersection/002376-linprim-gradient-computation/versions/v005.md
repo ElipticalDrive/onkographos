@@ -1,0 +1,109 @@
+# LinPrim Gradient Computation
+
+Also called: Backpropagation through ray space intersection, Gradient propagation for LinPrim
+
+## Overview
+LinPrim Gradient Computation computes the gradients of intersection depths $\mathbf{i}$ with respect to the ray-space triangle corners $\mathbf{v}^{\text{ray}}$ to enable differentiable rendering of linear primitives [S1]. It differs from standard 3D Gaussian Splatting (3DGS) optimization by backpropagating gradients through a linear primitive rasterizer (MTIA) rather than a Gaussian splatting kernel, requiring specific handling of ray-space to world-space transformations and rotation parameter updates [S1]. It builds on [Ray-primitive intersection](769-ray-primitive-intersection.md) to compute the necessary gradients for intersection depths [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $\mathbf{v}_0^{\text{ray}}, \mathbf{v}_1^{\text{ray}}, \mathbf{v}_2^{\text{ray}}$: The three corners of the triangle in ray space, each a 3D vector $(x, y, z)$ [S1].
+    *   $\mathbf{r}$: The pixel ray coordinates in ray space, a 2D vector $(r_x, r_y)$ [S1].
+    *   $d$: The determinant of the triangle projection in ray space [S1].
+    *   $u, v$: The barycentric coordinates of the intersection point relative to the triangle corners [S1].
+    *   $\mathbf{i}_1, \mathbf{i}_2$: The near and far intersection depths of the ray with the primitive [S1].
+    *   $\alpha$: The opacity parameter of the primitive [S1].
+    *   $\sigma(\cdot)$: The sigmoid function [G].
+    *   $\frac{\partial L}{\partial o}$: The incoming gradient of the loss with respect to the final opacity $o$ [G].
+*   **Outputs:**
+    *   $\frac{\partial L}{\partial \mathbf{v}_k^{\text{ray}}}$: The gradient of the loss with respect to each ray-space corner $\mathbf{v}_k^{\text{ray}}$ for $k \in \{0, 1, 2\}$ [S1].
+
+**Data Structures**
+The method operates on standard 3D vectors and scalars [S1]. The barycentric coordinates $u$ and $v$ are scalars [S1]. The determinant $d$ is a scalar [S1]. The ray coordinates $\mathbf{r}$ are 2D vectors [S1]. The corners $\mathbf{v}_k^{\text{ray}}$ are 3D vectors [S1]. Bit packing details are Not given in the sources.
+
+**Steps**
+
+1.  **Compute Opacity Gradient:**
+    Calculate the gradient of the loss with respect to the intersection depths $\mathbf{i}_1$ and $\mathbf{i}_2$ using the opacity formula:
+    $$ o(\mathbf{i}_1, \mathbf{i}_2) = 1 - \exp(-\sigma(\alpha) \cdot (\mathbf{i}_2 - \mathbf{i}_1)) $$ [S1].
+    Let $\frac{\partial L}{\partial o}$ be the incoming gradient [G]. The gradient with respect to the depth difference $\Delta \mathbf{i} = \mathbf{i}_2 - \mathbf{i}_1$ is:
+    $$ \frac{\partial L}{\partial \Delta \mathbf{i}} = \frac{\partial L}{\partial o} \cdot \sigma(\alpha) \cdot \exp(-\sigma(\alpha) \cdot \Delta \mathbf{i}) $$ [G].
+    Distribute this gradient to $\mathbf{i}_1$ and $\mathbf{i}_2$:
+    $$ \frac{\partial L}{\partial \mathbf{i}_1} = -\frac{\partial L}{\partial \Delta \mathbf{i}}, \quad \frac{\partial L}{\partial \mathbf{i}_2} = \frac{\partial L}{\partial \Delta \mathbf{i}} $$ [G].
+
+2.  **Compute Barycentric Coordinate Derivatives:**
+    Calculate the derivatives of the barycentric coordinates $u$ and $v$ with respect to the ray-space corners [S1]. Barycentric coordinates are invariant to depth, so they have only two non-zero components (x and y) [S1]. For corner $\mathbf{v}_0^{\text{ray}}$:
+    $$ \frac{\partial u}{\partial \mathbf{v}_0^{\text{ray}}} = \frac{1}{d} \left( \begin{pmatrix} \mathbf{v}_{2,y}^{\text{ray}} - \mathbf{r}_y \\ \mathbf{r}_x - \mathbf{v}_{2,x}^{\text{ray}} \end{pmatrix} - u \begin{pmatrix} \mathbf{v}_{2,y}^{\text{ray}} - \mathbf{v}_{1,y}^{\text{ray}} \\ \mathbf{v}_{1,x}^{\text{ray}} - \mathbf{v}_{2,x}^{\text{ray}} \end{pmatrix} \right) $$
+    $$ \frac{\partial v}{\partial \mathbf{v}_0^{\text{ray}}} = \frac{1}{d} \left( \begin{pmatrix} \mathbf{r}_y - \mathbf{v}_{1,y}^{\text{ray}} \\ \mathbf{v}_{1,x}^{\text{ray}} - \mathbf{r}_x \end{pmatrix} - v \begin{pmatrix} \mathbf{v}_{2,y}^{\text{ray}} - \mathbf{v}_{1,y}^{\text{ray}} \\ \mathbf{v}_{1,x}^{\text{ray}} - \mathbf{v}_{2,x}^{\text{ray}} \end{pmatrix} \right) $$ [S1].
+    The derivatives for $\mathbf{v}_1^{\text{ray}}$ and $\mathbf{v}_2^{\text{ray}}$ are analogous, derived by symmetry or by applying the same formula with indices permuted [S1].
+
+3.  **Compute Intersection Depth Gradients w.r.t. Corners:**
+    Calculate the gradient of the intersection depth $\mathbf{i}$ with respect to each ray-space corner $\mathbf{v}_k^{\text{ray}}$ [S1]. The gradient $\frac{\partial \mathbf{i}}{\partial \mathbf{v}_k^{\text{ray}}}$ is a 3D vector [S1].
+
+    For corner $\mathbf{v}_0^{\text{ray}}$:
+    $$ \frac{\partial \mathbf{i}}{\partial \mathbf{v}_0^{\text{ray}}} = \begin{pmatrix} -\left( \frac{\partial u}{\partial \mathbf{v}_{0,y}^{\text{ray}}} + \frac{\partial v}{\partial \mathbf{v}_{0,x}^{\text{ray}}} \right) \cdot \mathbf{v}_{0,z}^{\text{ray}} + \frac{\partial u}{\partial \mathbf{v}_{0,x}^{\text{ray}}} \cdot \mathbf{v}_{1,z}^{\text{ray}} + \frac{\partial v}{\partial \mathbf{v}_{0,x}^{\text{ray}}} \cdot \mathbf{v}_{2,z}^{\text{ray}} \\ - \left( \frac{\partial u}{\partial \mathbf{v}_{0,y}^{\text{ray}}} + \frac{\partial v}{\partial \mathbf{v}_{0,y}^{\text{ray}}} \right) \cdot \mathbf{v}_{0,z}^{\text{ray}} + \frac{\partial u}{\partial \mathbf{v}_{0,y}^{\text{ray}}} \cdot \mathbf{v}_{1,z}^{\text{ray}} + \frac{\partial v}{\partial \mathbf{v}_{0,y}^{\text{ray}}} \cdot \mathbf{v}_{2,z}^{\text{ray}} \\ 1 - u - v \end{pmatrix} $$ [S1].
+
+    For corner $\mathbf{v}_1^{\text{ray}}$:
+    $$ \frac{\partial \mathbf{i}}{\partial \mathbf{v}_1^{\text{ray}}} = \begin{pmatrix} -\left( \frac{\partial u}{\partial \mathbf{v}_{1,x}^{\text{ray}}} + \frac{\partial v}{\partial \mathbf{v}_{1,x}^{\text{ray}}} \right) \cdot \mathbf{v}_{0,z}^{\text{ray}} + \frac{\partial u}{\partial \mathbf{v}_{1,x}^{\text{ray}}} \cdot \mathbf{v}_{1,z}^{\text{ray}} + \frac{\partial v}{\partial \mathbf{v}_{1,x}^{\text{ray}}} \cdot \mathbf{v}_{2,z}^{\text{ray}} \\ - \left( \frac{\partial u}{\partial \mathbf{v}_{1,y}^{\text{ray}}} + \frac{\partial v}{\partial \mathbf{v}_{1,y}^{\text{ray}}} \right) \cdot \mathbf{v}_{0,z}^{\text{ray}} + \frac{\partial u}{\partial \mathbf{v}_{1,y}^{\text{ray}}} \cdot \mathbf{v}_{1,z}^{\text{ray}} + \frac{\partial v}{\partial \mathbf{v}_{1,y}^{\text{ray}}} \cdot \mathbf{v}_{2,z}^{\text{ray}} \\ u \end{pmatrix} $$
+    *Note: The source text contains typos in indices for $\mathbf{v}_1$ and $\mathbf{v}_2$ (e.g., $\partial u / \partial \mathbf{v}_{1,x}$ appearing twice, $v_y$ used instead of $v$) [S1]. The source formula for $\mathbf{v}_1$ and $\mathbf{v}_2$ is incomplete in the source text, showing only two rows [S1]. Implementers must infer the third component [G]. Based on the linear combination $\mathbf{p} = (1-u-v)\mathbf{v}_0 + u\mathbf{v}_1 + v\mathbf{v}_2$ and $\mathbf{i}$ being the z-coordinate of $\mathbf{p}$ in ray space, the z-component for $\mathbf{v}_1$ is $u$ and for $\mathbf{v}_2$ is $v$ [G]. The x and y components follow the symmetric pattern of $\mathbf{v}_0$ with permuted indices [S1].*
+
+    For corner $\mathbf{v}_2^{\text{ray}}$:
+    $$ \frac{\partial \mathbf{i}}{\partial \mathbf{v}_2^{\text{ray}}} = \begin{pmatrix} -\left( \frac{\partial u}{\partial \mathbf{v}_{2,x}^{\text{ray}}} + \frac{\partial v}{\partial \mathbf{v}_{2,x}^{\text{ray}}} \right) \cdot \mathbf{v}_{0,z}^{\text{ray}} + \frac{\partial u}{\partial \mathbf{v}_{2,x}^{\text{ray}}} \cdot \mathbf{v}_{1,z}^{\text{ray}} + \frac{\partial v}{\partial \mathbf{v}_{2,x}^{\text{ray}}} \cdot \mathbf{v}_{2,z}^{\text{ray}} \\ - \left( \frac{\partial u}{\partial \mathbf{v}_{2,y}^{\text{ray}}} + \frac{\partial v}{\partial \mathbf{v}_{2,y}^{\text{ray}}} \right) \cdot \mathbf{v}_{0,z}^{\text{ray}} + \frac{\partial u}{\partial \mathbf{v}_{2,y}^{\text{ray}}} \cdot \mathbf{v}_{1,z}^{\text{ray}} + \frac{\partial v}{\partial \mathbf{v}_{2,y}^{\text{ray}}} \cdot \mathbf{v}_{2,z}^{\text{ray}} \\ v \end{pmatrix} $$
+    *Note: The source uses $v_y$ in partial derivatives, likely a typo for $v$ [S1]. The third component is $v$ based on symmetry with $\mathbf{v}_0$ [G].*
+
+4.  **Aggregate Gradients:**
+    Multiply the gradient of the loss with respect to the intersection depth $\frac{\partial L}{\partial \mathbf{i}}$ by the gradient of the intersection depth with respect to the corner $\frac{\partial \mathbf{i}}{\partial \mathbf{v}_k^{\text{ray}}}$ to get the gradient of the loss with respect to the corner:
+    $$ \frac{\partial L}{\partial \mathbf{v}_k^{\text{ray}}} = \frac{\partial L}{\partial \mathbf{i}} \cdot \frac{\partial \mathbf{i}}{\partial \mathbf{v}_k^{\text{ray}}} $$ [S1].
+    This is a scalar-vector multiplication since $\frac{\partial L}{\partial \mathbf{i}}$ is a scalar [G].
+
+5.  **Transform Gradients to World Space:**
+    Gradient flow towards the ray space center follows the same process as to that of the corners [S1]. Undoing ray space and view-space transformations is straightforward as they are matrix multiplications [S1]. Transform the gradients from ray space to view space, and then from view space to world space using the inverse of the transformation matrices used in the forward pass [G].
+
+6.  **Propagate to Primitive Parameters:**
+    Once the gradients have been mapped back into world space, propagate each corner's gradient into the primitive's distance and rotation parameters [S1].
+
+**Parameters**
+*   **Color learning rate:** $2.5 \times 10^{-3}$ [S1].
+*   **SH Coefficients learning rate:** $1.25 \times 10^{-4}$ [S1].
+*   **Opacity learning rate:** $2.5 \times 10^{-2}$ [S1].
+*   **Rotation learning rate:** $1 \times 10^{-3}$ [S1].
+*   **Distance learning rate:** $2.6 \times 10^{-4}$, scaled by the maximum distance between a known camera pose and the mean camera pose to ensure consistent behavior in scale-ambiguous settings [S1].
+*   **2D filter kernel size:** $0.1$. For octahedra, the ray space vector is moved by half that amount ($0.05$), as the adjustment is mirrored on both sides [S1].
+
+**Edge Cases and Pitfalls**
+*   **Octahedron Negation:** For octahedra, vertices are in positive or negative directions from the center. The gradient onto the actual ray space feature can be negated. This negation is omitted in the provided formulas for readability but must be applied in implementation [S1].
+*   **Density Normalization:** Do not propagate gradients through the density normalization factor [S1].
+*   **Source Typos:** The source text contains typos in indices for $\mathbf{v}_1$ and $\mathbf{v}_2$ (e.g., $\partial u / \partial \mathbf{v}_{1,x}$ appearing twice, $v_y$ used instead of $v$) [S1]. Implementers should derive analogous formulas for $\mathbf{v}_1$ and $\mathbf{v}_2$ based on symmetry or correct the typos [S1].
+*   **Missing Z-Components:** The source formula for $\mathbf{v}_1$ and $\mathbf{v}_2$ is incomplete, showing only two rows [S1]. Implementers must infer the third component based on symmetry with $\mathbf{v}_0$ [G]. Assuming $\mathbf{i}$ is the z-coordinate of the intersection point in ray space, the third component for $\mathbf{v}_1$ is $u$ and for $\mathbf{v}_2$ is $v$ [G].
+
+## Subtopics
+
+### [LinPrim Optimization](3492-linprim-optimization.md)
+LinPrim Optimization is the training procedure for Linear Primitives, using differentiable rendering to adjust primitive attributes (center, covariance, opacity, color) by backpropagating gradients from a composite L1 and SSIM loss through the entire rendering pipeline. It distinguishes itself from standard Gaussian Splatting by explicitly handling the backpropagation through the Linear Primitive Intersection Algorithm (MTIA) and preprocessing steps, including specific handling for ray-space to world-space transformation and adaptive learning rates based on scene scale. Choose it when training linear primitives for differentiable volumetric rendering.
+
+## Operating characteristics
+**Time and Memory Complexity**
+The method involves computing barycentric coordinates and their derivatives, which are constant time operations per triangle. The transformation to world space is also constant time. The overall complexity is linear with respect to the number of primitives [G].
+
+**Measured Performance**
+On ScanNet++ scene 39f36da05b (rendered on an RTX 3090), the average rendering time with the ray space approximation is 15.87ms, with rasterization taking 14.60ms. Removing the ray space approximation increases the rendering time to 29.15ms, with rasterization increasing to 28.34ms [S1]. This increase comes solely from the rasterization step [S1].
+
+**Scaling**
+The method scales linearly with the number of primitives. The ray space approximation significantly improves performance by reducing rasterization time [S1].
+
+**Strengths and Limitations**
+*   **Strengths:** Enables differentiable rendering of linear primitives. The ray space approximation provides a significant speedup [S1].
+*   **Limitations:** The method is sensitive to initialization. Removing the ray space approximation increases rendering time significantly [S1]. The method struggles with certain classes like Storage Cabinet and Computer Tower compared to 3DGS [S1].
+
+**When to Use**
+Use this method when differentiable rendering of linear primitives is required and performance is a concern, allowing the use of the ray space approximation [S1].
+
+**When Not to Use**
+Do not use if high accuracy on complex geometry is required and performance constraints are loose, as removing the ray space approximation improves quality but at a high computational cost [S1].
+
+## Background
+LinPrim Gradient Computation is part of the LinPrim method for differentiable volumetric rendering, which uses linear primitives (triangles) instead of Gaussians [S1]. The method was introduced in the paper "LinPrim: Linear Primitives for Differentiable Volumetric Rendering" [S1]. The gradient computation is designed to work with the MTIA rasterizer [S1]. The method is evaluated on ScanNet++ and Mip-NeRF 360 datasets [S1].
+
+## Sources
+[S1] LinPrim: Linear Primitives for Differentiable Volumetric Rendering, https://arxiv.org/abs/2501.16312, fetched 2026-10-26

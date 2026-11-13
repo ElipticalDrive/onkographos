@@ -1,76 +1,97 @@
 # Third Order Elimination (Scaling)
-Also called: Scaling, SCALING
+
+Also called: Scaling, PSR Scaling
 
 ## Overview
-Third Order Elimination (Scaling) is a quadratic interpolation method for implicit functions that eliminates the third-order coefficient ($a_3$) from a cubic polynomial by scaling the input derivatives [S1]. It solves the problem of approximating a smooth surface from discrete voxel data and derivative estimates while reducing the computational complexity of cubic Hermite interpolation [S1]. It is distinguished from its sibling [B-spline Field Interpolation](11066-b-spline-field-interpolation.md) by its specific algebraic constraint of nullifying the cubic term via derivative scaling, and from [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md) by its derivation from a cubic base rather than a direct quadratic fit [S1].
+Third Order Elimination (Scaling) is a quadratic interpolation method that derives a second-order polynomial from a cubic Hermite basis by scaling the input derivatives to force the third-order coefficient ($a_3$) to zero [S1]. It solves the problem of approximating a smooth field with $C^1$ continuity while reducing computational complexity from cubic to quadratic, specifically for cases where the underlying function is locally linear or where derivative cancellation is rare [S1]. It differs from [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md) and [Least-Squares Derivatives](11066-b-spline-field-interpolation.md) by using a multiplicative scaling factor rather than an additive offset or least-squares minimization [S1].
 
 ## How it works
 **Inputs:**
-*   $v_0, v_1$: Function values at grid indices $t=0$ and $t=1$.
-*   $d_0, d_1$: Derivative estimates at $t=0$ and $t=1$.
+*   $v_0, v_1$: Scalar values at grid nodes $t=0$ and $t=1$.
+*   $d_0, d_1$: Derivatives (gradients projected onto the axis) at $t=0$ and $t=1$.
 
 **Outputs:**
 *   Quadratic polynomial coefficients $a_0, a_1, a_2$ for $p(t) = a_0 + a_1 t + a_2 t^2$.
 
 **Data Structures:**
-*   Scalar values $v_0, v_1, d_0, d_1$.
-*   Coefficients $a_0, a_1, a_2$.
+*   No specific layout required beyond standard scalar storage for values and derivatives.
 
 **Steps:**
-1.  Set $a_0 = v_0$ [S1].
-2.  Calculate the scaling factor $s$ using the formula:
+1.  Compute the scaling factor $s$ using the values and derivatives:
     $$ s = \frac{2v_1 - 2v_0}{d_0 + d_1} $$
-    [S1]
-3.  Calculate $a_1$ using the scaled derivative:
-    $$ a_1 = s \cdot d_0 $$
-    [S1]
-4.  Calculate $a_2$ using the value constraint $a_0 + a_1 + a_2 = v_1$:
-    $$ a_2 = v_1 - a_0 - a_1 $$
-    [S1]
+2.  Scale the derivatives to obtain effective derivatives $d'_0$ and $d'_1$:
+    $$ d'_0 = s \cdot d_0 $$
+    $$ d'_1 = s \cdot d_1 $$
+3.  Determine the quadratic coefficients based on the value constraints and scaled derivatives. The method ensures $p(0)=v_0$, $p(1)=v_1$, and the cubic term vanishes. The coefficients are derived from the condition that the third-order term in the cubic Hermite expansion is eliminated by this scaling [S1].
+    *   $a_0 = v_0$
+    *   $a_1 = d'_0$
+    *   $a_2 = \frac{v_1 - v_0 - d'_0}{1}$ (Derived from $p(1) = a_0 + a_1 + a_2 = v_1$)
+    *   *Note:* The source explicitly defines the scaling step and the instability condition but implies the resulting quadratic form by stating the cubic term vanishes. The standard quadratic Hermite form with scaled derivatives is used.
 
 **Pitfalls:**
-*   **Instability:** The solution becomes numerically unstable if $d_0 + d_1 \approx 0$ (derivatives cancel each other out) [S1].
-*   **Context:** This instability is less likely to cause issues for indicator functions with steep gradients where partial derivatives are unlikely to have opposite signs [S1].
+*   **Instability:** The solution becomes unstable if $d_0 + d_1 \approx 0$ (derivatives cancel each other out) [S1]. This occurs when the gradient changes sign or is near zero in a way that sums to zero.
+*   **Context Dependency:** The instability is less problematic for functions like the indicator function in PSR, which have steep gradients and unlikely opposite signs in partial derivatives [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def third_order_elimination_scaling(v0, v1, d0, d1):
-    # Step 1: Set a0
+    """
+    Computes quadratic interpolation coefficients using Third Order Elimination (Scaling).
+    
+    Args:
+        v0 (float): Value at t=0.
+        v1 (float): Value at t=1.
+        d0 (float): Derivative at t=0.
+        d1 (float): Derivative at t=1.
+        
+    Returns:
+        tuple: (a0, a1, a2) coefficients for p(t) = a0 + a1*t + a2*t^2
+    """
+    # Step 1: Compute scaling factor
+    denominator = d0 + d1
+    
+    # Guard against division by zero or near-zero
+    if abs(denominator) < 1e-9:
+        # Fallback to linear interpolation or handle error
+        # [G] Standard practice is to clamp or use linear if derivative sum is zero
+        # However, source notes this is unstable. We return None or handle externally.
+        return None 
+
+    s = (2.0 * v1 - 2.0 * v0) / denominator
+    
+    # Step 2: Scale derivatives
+    d0_scaled = s * d0
+    # d1_scaled = s * d1 # Not explicitly needed for quadratic coeff calculation if using boundary conditions
+    
+    # Step 3: Compute quadratic coefficients
+    # p(0) = a0 = v0
     a0 = v0
     
-    # Step 2: Calculate scaling factor s
-    # Pitfall: Check for division by zero or near-zero denominator
-    denom = d0 + d1
-    if abs(denom) < 1e-9:
-        # Fallback or error handling for unstable case [G]
-        # Not specified in source; typically clamp or use linear interpolation [G]
-        pass 
-    s = (2 * v1 - 2 * v0) / denom
+    # p'(0) = a1 = d0_scaled
+    a1 = d0_scaled
     
-    # Step 3: Calculate a1
-    a1 = s * d0
-    
-    # Step 4: Calculate a2
+    # p(1) = a0 + a1 + a2 = v1  => a2 = v1 - a0 - a1
     a2 = v1 - a0 - a1
     
-    return a0, a1, a2
+    return (a0, a1, a2)
 ```
 
 ## Subtopics
 
 ### Third Order Elimination (Offset)
-A quadratic method obtained by adding an offset $o$ to derivatives to eliminate the third order coefficient $a_3$ [S1]. It sets $a_3=0$ via the constraint $2v_0 - 2v_1 + (d_0 + o) + (d_1 + o) = 0$ [S1]. The offset is calculated as $o = (2v_1 - 2v_0 - d_0 - d_1) / 2$ [S1]. This solution is equivalent to the Least-Squares Derivatives method (equation 11 in [S1]) [S1].
+A quadratic method obtained by adding an offset $o$ to derivatives to eliminate the third order coefficient $a_3$ [S1]. It solves $2v_0 - 2v_1 + (d_0 + o) + (d_1 + o) = 0$, yielding $o = (2v_1 - 2v_0 - d_0 - d_1) / 2$ [S1]. This solution is equivalent to the Least-Squares Derivatives method (equation 11 in [S1]) [S1]. It avoids the division instability of Scaling when $d_0 + d_1 \approx 0$ but may introduce different bias characteristics [S1].
 
 ## Operating characteristics
-*   **Complexity:** Constant time $O(1)$ per sample, requiring only basic arithmetic operations [S1].
+*   **Complexity:** $O(1)$ arithmetic operations. Slightly more expensive than linear interpolation due to the division and scaling, but cheaper than full cubic Hermite evaluation.
+*   **Memory:** Requires storage of values and derivatives at grid nodes.
+*   **Strengths:** Reduces polynomial degree from 3 to 2, simplifying evaluation. Effective for functions with steep gradients where derivative cancellation is rare (e.g., indicator functions in PSR) [S1].
+*   **Limitations:** Numerically unstable when $d_0 + d_1 \approx 0$ [S1]. Not suitable for general-purpose interpolation where derivative signs may vary arbitrarily without fallback mechanisms.
 *   **Performance:** Implemented in the PSR code for interpolating the indicator function [S1].
-*   **Strengths:** Reduces cubic interpolation to quadratic, potentially simplifying hardware implementation or reducing evaluation cost [S1].
-*   **Limitations:** Numerical instability when derivatives sum to near zero [S1].
 
 ## Background
-The method is described in the context of accurate isosurface interpolation using Hermite data [S1]. It is one of several algebraic surface interpolation techniques compared against linear interpolation and least-squares derivatives [S1].
+Originated in the context of accurate isosurface interpolation with Hermite data [S1]. It is part of a family of methods comparing linear, quadratic, and cubic interpolations for implicit surfaces [S1]. The method is specifically noted as being implemented in the PSR (Presumably "Piecewise Smooth Reconstruction" or similar context from the source) code [S1].
 
 ## Sources
 [S1] Accurate Isosurface Interpolation with Hermite Data, https://ieeexplore.ieee.org/document/7335492/, fetched 2026-11-05

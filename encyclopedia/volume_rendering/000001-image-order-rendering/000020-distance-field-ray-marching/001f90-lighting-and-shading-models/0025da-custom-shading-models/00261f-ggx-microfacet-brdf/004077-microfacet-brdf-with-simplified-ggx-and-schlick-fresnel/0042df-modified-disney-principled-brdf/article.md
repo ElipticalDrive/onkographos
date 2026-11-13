@@ -3,79 +3,82 @@
 Also called: ABSDF Base Material, Base Material Model
 
 ## Overview
-A simplified material model based on the Disney Principled BRDF, modified specifically to enable efficient aggregation in the Aggregated Bidirectional Surface Distribution Function (ABSDF) framework [S1, unofficial]. It solves the problem of rendering complex, orientation-varying microfacet materials in large-scale scenes by reducing the original model's complexity to a form that supports analytical factorization of diffuse and specular components [S1, unofficial]. Unlike the full Disney model, it omits sheen and clearcoat lobes and uses a Lambertian diffuse term, enabling real-time performance via precomputed tables and separable integrals [S1, unofficial].
+A simplified material model based on the Disney Principled BRDF [Burley 2012], modified specifically to enable efficient Aggregated Bidirectional Scattering Distribution Function (ABSDF) factorization [S1, unofficial]. It solves the problem of rendering heterogeneous materials with varying roughness and orientation by stripping the original model down to its core diffuse and specular components, allowing for separable integral approximations. It is distinguished from its parent, [Microfacet BRDF with Simplified GGX and Schlick Fresnel](10259-microfacet-brdf-with-simplified-ggx-and-schlick-fresnel.md), by explicitly adopting a Lambertian diffuse term and omitting sheen/clearcoat lobes to facilitate the statistical aggregation required for ABSDF [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Incoming light direction $\omega_i$.
-- Outgoing view direction $\omega_o$.
-- Surface normal $n$.
-- Material parameters: roughness $\alpha$, base color $\beta_c$, metallic $\beta_m$, specular intensity $\beta_s$. These parameters can be spatially varying [S1, unofficial].
-
-**Outputs:**
-- Radiance $L$ or reflectance $f_r(\omega_i, \omega_o)$.
+**Inputs and Outputs:**
+*   **Inputs:** Incident direction $\omega_i$, outgoing direction $\omega_o$, surface normal $n$, half vector $\omega_h = \frac{\omega_i + \omega_o}{\|\omega_i + \omega_o\|}$, and spatially-varying material parameters $\beta_B = (\alpha, \beta_c, \beta_m, \beta_s)$.
+    *   $\alpha$: Roughness.
+    *   $\beta_c$: Base color (diffuse albedo).
+    *   $\beta_m$: Metallic factor.
+    *   $\beta_s$: Specular intensity (dielectric reflectance).
+*   **Output:** Bidirectional Reflectance Distribution Function (BRDF) value $f_{disney}(\omega_i, \omega_o)$.
 
 **Data Structures:**
-- Material parameter tuple $\beta_B = (\alpha, \beta_c, \beta_m, \beta_s)$ [S1, unofficial].
-- Half vector $\omega_h = \frac{\omega_i + \omega_o}{\|\omega_i + \omega_o\|}$ [S1, unofficial].
-
-**Steps:**
-1. Compute the half vector $\omega_h$ from $\omega_i$ and $\omega_o$.
-2. Calculate the diffuse component $f_d$ using the Lambertian model scaled by material parameters.
-3. Calculate the specular component $f_s$ using the microfacet model with GGX distribution, Schlick Fresnel, and Smith shadowing-masking.
-4. Sum the components: $f_{disney} = f_d + f_s$.
+The model assumes a double-sided surface. Parameters $\beta_c, \beta_m, \beta_s$ are treated as scalar fields or constants per material instance. In the context of ABSDF, these are treated as random variables with joint probability density functions (PDFs) $p(\beta_c, \beta_m)$ and normal distribution $p_N(n)$ [S1, unofficial].
 
 **Formulas:**
-The total reflectance is:
+The total BRDF is the sum of diffuse and specular components:
 $$ f_{disney}(\omega_i, \omega_o) = f_d(\omega_i, \omega_o) + f_s(\omega_i, \omega_o) $$
 
-The diffuse component is:
-$$ f_d(\omega_i, \omega_o) = \frac{(1 - \beta_m)\beta_c}{\pi} $$
-where $\beta_c$ is the base color and $\beta_m$ is the metallic parameter [S1, unofficial].
+1.  **Diffuse Component ($f_d$):**
+    Uses a Lambertian model scaled by the base color and a non-metallic factor:
+    $$ f_d(\omega_i, \omega_o) = \frac{(1 - \beta_m)\beta_c}{\pi} $$
+    [S1, unofficial]
 
-The specular component is:
-$$ f_s(\omega_i, \omega_o) = \frac{D(\omega_h; \alpha)G(\omega_i, \omega_o; \alpha)}{4|n \cdot \omega_o||n \cdot \omega_i|} \left( \beta_m F(\omega_h, \omega_o; \beta_c) + (1 - \beta_m)F(\omega_h, \omega_o; \beta_s) \right) $$
-where:
-- $D(\omega_h; \alpha)$ is the Trowbridge-Reitz (GGX) Normal Distribution Function (NDF) [S1, unofficial].
-- $G(\omega_i, \omega_o; \alpha)$ is the shadowing-masking function [S1, unofficial].
-- $F(\omega_h, \omega_o; r_0)$ is the Schlick Fresnel reflectance [S1, unofficial].
+2.  **Specular Component ($f_s$):**
+    Combines metallic and dielectric Fresnel reflections using the microfacet model:
+    $$ f_s(\omega_i, \omega_o) = \frac{D(\omega_h; \alpha)G(\omega_i, \omega_o; \alpha)}{4|n \cdot \omega_o||n \cdot \omega_i|} \left[ \beta_m F(\omega_h, \omega_o; \beta_c) + (1 - \beta_m)F(\omega_h, \omega_o; \beta_s) \right] $$
+    [S1, unofficial]
 
-The Schlick Fresnel function is defined as:
-$$ F(\omega_h, \omega_o; r_0) = r_0 (1 - F_c) + F_c $$
-$$ F_c = (1 - |\omega_h \cdot \omega_o|)^5 $$
-where $r_0$ is the normal incidence reflectance. For the metallic lobe, $r_0 = \beta_c$. For the dielectric (non-metallic) lobe, $r_0 = \beta_s$ [S1, unofficial].
+    *   **Microfacet Distribution ($D$):** Trowbridge-Reitz (GGX) distribution $D(\omega_h; \alpha)$ [S1, unofficial].
+    *   **Shadowing-Masking ($G$):** Smith masking-shadowing function $G(\omega_i, \omega_o; \alpha)$ [S1, unofficial].
+    *   **Fresnel ($F$):** Schlick Fresnel approximation:
+        $$ F(\omega_h, \omega_o; r_0) = r_0(1 - F_c) + F_c $$
+        $$ F_c = (1 - |\omega_h \cdot \omega_o|)^5 $$
+        where $r_0$ is the normal incidence reflectance. For the metallic lobe, $r_0 = \beta_c$. For the dielectric lobe, $r_0 = \beta_s$ [S1, unofficial].
 
-**Parameters:**
-- $\alpha$: Roughness.
-- $\beta_c$: Base color (used for diffuse albedo and metallic $r_0$).
-- $\beta_m$: Metallic (0 to 1).
-- $\beta_s$: Specular intensity (dielectric $r_0$) [S1, unofficial].
+**Steps:**
+1.  Compute the half vector $\omega_h$.
+2.  Evaluate the dot products $n \cdot \omega_i$, $n \cdot \omega_o$, and $\omega_h \cdot \omega_o$.
+3.  Calculate the Schlick Fresnel term $F_c$ using the dot product $\omega_h \cdot \omega_o$.
+4.  Calculate the Fresnel reflectance $F$ for both the metallic ($r_0 = \beta_c$) and dielectric ($r_0 = \beta_s$) cases.
+5.  Evaluate the GGX distribution $D$ and Smith geometry function $G$ using roughness $\alpha$.
+6.  Compute the specular term $f_s$ by blending the metallic and dielectric Fresnel terms weighted by $\beta_m$ and $(1-\beta_m)$.
+7.  Compute the diffuse term $f_d$ using $\beta_c$ and $\beta_m$.
+8.  Sum $f_d$ and $f_s$ to get the final BRDF.
 
 **Edge Cases and Pitfalls:**
-- The model assumes double-sided surfaces [S1, unofficial].
-- The diffuse term uses a simple Lambertian model, omitting the original Disney empirical retro-reflection term [S1, unofficial].
-- Sheen and clearcoat lobes are omitted [S1, unofficial].
+*   **Double-Sided Assumption:** The model assumes the surface is double-sided, meaning the BRDF is evaluated regardless of the sign of $n \cdot \omega_i$ or $n \cdot \omega_o$ in the aggregation context, though standard microfacet terms usually require valid visibility [S1, unofficial].
+*   **Parameter Correlation:** The factorization assumes $\beta_c$ and $\beta_m$ are orientation-independent in the base case, but the method extends to orientation-varying parameters via moment-based approximations [S1, unofficial].
 
 ## Subtopics
 
 ### [Specular ABSDF Factorization](10872-specular-absdf-factorization.md)
-Specular ABSDF Factorization is the specular component of the Aggregated Bidirectional Surface Distribution Function (ABSDF) [10860-modified-disney-principled-brdf.md], designed to efficiently render complex, orientation-varying microfacet materials in large-scale scenes. It solves the problem of integrating the specular BRDF over a distribution of surface orientations and material parameters by factorizing the integral into separable terms: a precomputable convolution of the Normal Distribution Function (NDF) and a runtime-evaluated moment term. Unlike [Phys3DGS BRDF Function](11071-phys3dgs-brdf-function.md), which may rely on different aggregation strategies, this method explicitly handles the coupling between Fresnel terms, roughness, and microfacet geometry through a split of the integral into "clear coat" and "base" contributions, allowing for real-time performance via precomputed tables.
+Specular ABSDF Factorization is a method for aggregating the specular component of the ABSDF [10872-specular-absdf-factorization.md]. It solves the problem of efficiently rendering heterogeneous materials with varying roughness and orientation by factorizing the complex integral of the microfacet BRDF into separable terms involving Fresnel mix, microfacet distribution, and shadowing-masking. It is distinguished from its sibling, [Phys3DGS BRDF Function](11071-phys3dgs-brdf-function.md), by explicitly handling the statistical aggregation of roughness parameters via moment-based approximation rather than a direct physical simulation.
 
 ### [Phys3DGS BRDF Function](11071-phys3dgs-brdf-function.md)
-A physically-based BRDF function consisting of a diffuse and a specular component, using roughness remapping and a correlated Smith masking-shadowing function.
+A physically-based Bidirectional Reflectance Distribution Function (BRDF) used in 3D Gaussian Splatting for inverse rendering, consisting of a diffuse component and a specular component based on the GGX microfacet model with a correlated Smith masking-shadowing function. It differs from its parent, the Modified Disney Principled BRDF, by employing a specific roughness remapping ($\alpha = r^2$) and a correlated Smith geometry function rather than the separable Schlick-GGX approximation, aiming for higher physical accuracy in the context of Gaussian splatting optimization.
 
 ### Diffuse ABSDF Factorization
-The diffuse component of the ABSDF factorization. It assumes $\beta_c$ and $\beta_m$ are orientation-independent initially, splitting the integral into a parameter expectation term and a geometric term. The parameter integral is represented by means and second-order moments: $\int_{[0,1]^2} (1 - \beta_m)\beta_c p(\beta_c, \beta_m) d\beta_c d\beta_m = E[\beta_c] - E[\beta_m \beta_c]$ [S1, unofficial]. The geometric integral $\int_{S^2} \langle n \cdot \omega_i \rangle \langle n \cdot \omega_o \rangle p_N(n) dn$ is approximated by fitting the clamped dot product function with a Spherical Gaussian (SG), reducing the problem to the convolution between an SG and an SGGX [S1, unofficial].
+A method for factoring the diffuse component of the ABSDF [S1, unofficial]. It solves the problem of integrating the Lambertian diffuse term over spatially varying material parameters and surface normals. The diffuse integral is split into a parameter expectation term and a geometric term approximated by Spherical Gaussians (SG). The parameter integral is computed as $E[\beta_c] - E[\beta_m \beta_c]$, while the geometric integral $\int_{S^2} \langle n \cdot \omega_i \rangle \langle n \cdot \omega_o \rangle p_N(n) dn$ is approximated by fitting the clamped dot product product to a single SG with amplitude $c$ and concentration $\kappa$, reducing the problem to an SG-SGGX convolution [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the evaluation of GGX NDF, Smith G, and Schlick Fresnel. For ABSDF, precomputed tables and convolutions allow for efficient runtime evaluation [S1, unofficial].
-- **Memory Complexity:** Requires storage for material parameters $\beta_B$ and potentially precomputed tables for ABSDF factorization [S1, unofficial].
-- **Strengths:** Simplified from the full Disney model, enabling analytical factorization for large-scale scene aggregation. Supports spatially varying parameters [S1, unofficial].
-- **Limitations:** Omits sheen and clearcoat, limiting appearance range compared to the full Disney model. Lambertian diffuse may not capture complex subsurface or retro-reflection effects [S1, unofficial].
-- **When to use:** When rendering large-scale scenes with orientation-varying materials where performance is critical and the full Disney model's complexity is unnecessary or prohibitive for aggregation [S1, unofficial].
+**Time and Memory Complexity:**
+The base evaluation is $O(1)$ per sample. The ABSDF factorization reduces the complexity of rendering heterogeneous materials by replacing expensive Monte Carlo integration over parameter distributions with closed-form moment calculations and SG convolutions [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** High compatibility with existing production assets (Disney BRDF); enables efficient LOD rendering and aggregation of heterogeneous materials; simplified diffuse term allows for analytical integration [S1, unofficial].
+*   **Limitations:** Omits sheen and clearcoat, limiting appearance range for certain materials (e.g., hair, glossy plastics); Lambertian diffuse is less accurate for non-Lambertian surfaces compared to the original Disney model [S1, unofficial].
+
+**When to Use:**
+Use when rendering heterogeneous materials in a Level-of-Detail (LOD) framework where efficient aggregation of spatially varying parameters is required [S1, unofficial].
+
+**When Not to Use:**
+Do not use if high-fidelity sheen or clearcoat effects are required, or if the surface exhibits strong non-Lambertian diffuse behavior that cannot be approximated by a simple albedo scaling [S1, unofficial].
 
 ## Background
-Originated in the context of the Aggregated Bidirectional Surface Distribution Function (ABSDF) for level-of-detail rendering [S1, unofficial]. It is based on the Disney Principled BRDF [Burley 2012], which is one of the most commonly used models in production [S1, unofficial]. The modifications were made to preserve the core features of the Disney model while enabling efficient factorization for the ABSDF framework [S1, unofficial].
+The Modified Disney Principled BRDF originates from the work on "Efficient Scene Appearance Aggregation for Level-of-Detail Rendering" [S1, unofficial]. It was developed to support the widest applicability for ABSDF by targeting the Disney Principled BRDF [Burley 2012], one of the most common models in production. The modifications (Lambertian diffuse, no sheen/clearcoat, double-sided) were made to facilitate the mathematical factorization required for efficient aggregation [S1, unofficial].
 
 ## Sources
 [S1] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)

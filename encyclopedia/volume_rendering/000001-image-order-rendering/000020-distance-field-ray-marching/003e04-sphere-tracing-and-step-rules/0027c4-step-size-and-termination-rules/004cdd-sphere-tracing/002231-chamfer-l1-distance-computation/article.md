@@ -1,124 +1,134 @@
 # Chamfer-L1 Distance Computation
-
+Also called: Distance-Aided Ray Marching
 
 ## Overview
-Chamfer-L1 Distance Computation evaluates geometric fidelity between a predicted Signed Distance Function (SDF) and a ground-truth mesh by measuring average nearest-neighbor distances between sampled surface points [S1]. It serves as a post-processing evaluation metric rather than a ray-marching step-size rule, distinguishing it from sibling methods like [Cone Intersection](1553-cone-intersection.md) that optimize traversal [G].
+Chamfer-L1 Distance Computation is a method for estimating the Chamfer distance between two 3D shapes (typically a predicted Signed Distance Field and a ground-truth mesh) by using sphere tracing to sample surface points. It solves the problem of efficiently generating a dense, uniform set of surface samples for metric evaluation without relying on mesh extraction algorithms like Marching Cubes, which introduce discretization errors. It sets itself apart from standard Chamfer distance implementations by using ray tracing to sample the implicit surface directly, ensuring samples lie exactly on the predicted SDF surface rather than an approximated polygonal mesh.
 
 ## How it works
-**Inputs:** Predicted SDF field $S(\mathbf{x})$, ground-truth mesh $M$, bounding volume $B$, target sample count $N = 2^{17} = 131,072$ [S1].
-**Outputs:** Scalar Chamfer distance value [S1].
-**Data Structures:** Point sets $P_{\text{pred}}$ and $P_{\text{gt}}$ storing 3D coordinates [G].
+The method generates a set of points on the surface of a predicted Signed Distance Function (SDF) by casting rays from random positions within a bounding volume and using sphere tracing to find the surface intersection. These points are then compared to a ground-truth representation (typically a mesh) using the Chamfer distance metric.
+
+**Inputs:**
+- Predicted SDF function $SDF(\mathbf{p})$.
+- Ground-truth mesh $M$.
+- Bounding volume $B$ (typically a cube or sphere enclosing the object).
+- Target number of samples $N$ (e.g., $2^{17} = 131,072$).
+
+**Outputs:**
+- A set of 3D points $\mathcal{P}_{pred}$ sampled from the predicted SDF surface.
+- The Chamfer distance value between $\mathcal{P}_{pred}$ and $M$.
+
+**Data Structures:**
+- Point Cloud: A list of 3D coordinates $(x, y, z)$.
+- Ray: Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (unit vector).
 
 **Steps:**
-1. Uniformly sample $N$ points $\mathbf{x}_i$ within the bounding volume $B$ [S1].
-2. Assign each $\mathbf{x}_i$ a random spherical direction $\mathbf{d}_i$ uniformly distributed on the unit sphere [S1].
-3. Trace a ray $\mathbf{r}_i(t) = \mathbf{x}_i + t \cdot \mathbf{d}_i$ using sphere tracing on $S$ [S1].
-4. Collect intersection points where $S(\mathbf{p}) \approx 0$ into $P_{\text{pred}}$ [G].
-5. Repeat sampling until the minimum required number of surface points is obtained, using the same stopping criterion as defined in the parent context (A.4) [S1].
-6. Sample points $P_{\text{gt}}$ from the ground-truth mesh $M$ (e.g., via Marching Cubes extraction or direct implicit sampling) [S1].
-7. Compute the Chamfer distance between $P_{\text{pred}}$ and $P_{\text{gt}}$ using the implementation provided by PyTorch3D [S1].
-
-**Formulas:**
-The Chamfer distance is computed as the mean of the nearest-neighbor distances in both directions:
-$$D_{\text{Chamfer}} = \frac{1}{|P_{\text{pred}}|} \sum_{p \in P_{\text{pred}}} \min_{q \in P_{\text{gt}}} \|p - q\|_2 + \frac{1}{|P_{\text{gt}}|} \sum_{q \in P_{\text{gt}}} \min_{p \in P_{\text{pred}}} \|q - p\|_2 \quad [G]$$
+1. **Ray Generation:** Uniformly sample $N$ points $\mathbf{o}_i$ within the bounding volume $B$. For each point, generate a random unit direction vector $\mathbf{d}_i$ (uniformly distributed on the sphere).
+2. **Sphere Tracing:** For each ray $(\mathbf{o}_i, \mathbf{d}_i)$, perform sphere tracing to find the intersection with the SDF surface.
+   - Initialize $t = 0$.
+   - Loop:
+     - Evaluate $d = SDF(\mathbf{o}_i + t \mathbf{d}_i)$.
+     - If $d < \epsilon$ (convergence threshold), record point $\mathbf{p} = \mathbf{o}_i + t \mathbf{d}_i$ and stop.
+     - Else, $t \leftarrow t + d$.
+     - If $t > t_{max}$ (max step limit), discard ray.
+3. **Sampling Continuation:** If the number of collected surface points is less than $N$, repeat steps 1-2 with new random rays until the minimum number of points is obtained.
+4. **Distance Calculation:** Compute the Chamfer distance between the collected points $\mathcal{P}_{pred}$ and the ground-truth mesh $M$. The Chamfer distance is defined as:
+   $$
+   D_{Chamfer}(\mathcal{P}_{pred}, M) = \frac{1}{|\mathcal{P}_{pred}|} \sum_{p \in \mathcal{P}_{pred}} \min_{m \in M} \|p - m\|^2 + \frac{1}{|M|} \sum_{m \in M} \min_{p \in \mathcal{P}_{pred}} \|m - p\|^2
+   $$
+   Note: The source specifies using the Chamfer distance as implemented in PyTorch3D [S1].
 
 **Parameters:**
-$N = 131,072$ initial samples in $B$ [S1]. Stopping criterion matches parent method A.4 [S1].
+- $N = 131,072$ (standard sample count used in the source).
+- $\epsilon$: Convergence threshold for sphere tracing (Not given in the sources).
+- $t_{max}$: Maximum ray length (Not given in the sources).
 
-**Edge Cases:**
-Mesh extraction via Marching Cubes introduces additional error compared to sampling the true implicit SDF directly [S1]. If the predicted SDF fails to capture the surface, intersection points may be sparse or undefined [G].
+**Edge Cases and Pitfalls:**
+- **Ray Misses:** Rays may not intersect the surface if the SDF is not well-defined or if the ray direction is unfavorable. The method handles this by discarding such rays and generating new ones until $N$ samples are reached [S1].
+- **SDF Accuracy:** The quality of the samples depends on the accuracy of the predicted SDF. Errors in the SDF lead to errors in the sampled points [S1].
+- **Performance:** Sphere tracing can be slow for complex SDFs. The method assumes the SDF evaluation is efficient enough to support $N$ ray traces.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import random
+import numpy as np
 
-def compute_chamfer_l1(sdf_fn, mesh_vertices, mesh_faces, bounding_volume, num_samples=131072):
-    # 1. Sample points in bounding volume B
-    min_coords, max_coords = bounding_volume
-    samples = [[random.uniform(min_coords[i], max_coords[i]) for i in range(3)] for _ in range(num_samples)]
+def chamfer_l1_distance_computation(predicted_sdf, ground_truth_mesh, bounding_volume, num_samples=131072):
+    """
+    Computes Chamfer distance by sampling predicted SDF surface via sphere tracing.
     
-    # 2. Trace rays using sphere tracing to find surface intersections
+    Args:
+        predicted_sdf: Function SDF(p) -> float
+        ground_truth_mesh: Object with method closest_point(p) -> float
+        bounding_volume: Object with method sample_point() -> np.array
+        num_samples: int, target number of surface points
+        
+    Returns:
+        float: Chamfer distance
+    """
     predicted_points = []
-    for x0 in samples:
-        # Random spherical direction
-        d = [random.gauss(0, 1) for _ in range(3)]
-        norm = math.sqrt(sum(v*v for v in d))
-        d = [v/norm for v in d]
+    
+    while len(predicted_points) < num_samples:
+        # Generate random ray
+        origin = bounding_volume.sample_point()
+        direction = np.random.normal(0, 1, 3)
+        direction = direction / np.linalg.norm(direction)
         
-        # Sphere tracing loop
+        # Sphere tracing
         t = 0.0
-        for _ in range(100):
-            pos = [x0[i] + t * d[i] for i in range(3)]
-            dist = sdf_fn(pos)
-            if abs(dist) < 1e-4:
-                predicted_points.append(pos)
-                break
-            t += dist
-            if t > 10.0:
-                break
-                
-    # 3. Sample ground truth mesh surface
-    gt_points = sample_mesh_surface(mesh_vertices, mesh_faces, num_samples)
-    
-    # 4. Compute Chamfer Distance (brute-force nearest neighbor)
-    def nearest_dist(p, points):
-        return min(math.sqrt(sum((p[i]-q[i])**2 for i in range(3))) for q in points)
+        max_steps = 1000
+        step_size_threshold = 1e-4
+        max_ray_length = 10.0
         
-    pred_to_gt = sum(nearest_dist(p, gt_points) for p in predicted_points) / len(predicted_points)
-    gt_to_pred = sum(nearest_dist(q, predicted_points) for q in gt_points) / len(gt_points)
-    
-    return pred_to_gt + gt_to_pred
-
-def sample_mesh_surface(vertices, faces, num_samples):
-    areas = []
-    for f in faces:
-        v0, v1, v2 = [vertices[v] for v in f]
-        cross = [
-            (v1[1]-v0[1])*(v2[2]-v0[2]) - (v1[2]-v0[2])*(v2[1]-v0[1]),
-            (v1[2]-v0[2])*(v2[0]-v0[0]) - (v1[0]-v0[0])*(v2[2]-v0[2]),
-            (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0])
-        ]
-        areas.append(0.5 * math.sqrt(sum(c*c for c in cross)))
-    total_area = sum(areas)
-    probs = [a/total_area for a in areas]
-    
-    selected_faces = []
-    for _ in range(num_samples):
-        r = random.random()
-        cumulative = 0.0
-        for i, p in enumerate(probs):
-            cumulative += p
-            if r <= cumulative:
-                selected_faces.append(faces[i])
+        for _ in range(max_steps):
+            point = origin + t * direction
+            dist = predicted_sdf(point)
+            
+            if dist < step_size_threshold:
+                predicted_points.append(point)
                 break
+            elif t + dist > max_ray_length:
+                break
+            else:
+                t += dist
                 
-    pts = []
-    for f in selected_faces:
-        v0, v1, v2 = [vertices[v] for v in f]
-        u = random.random()
-        v = random.random()
-        if u + v > 1:
-            u = 1 - u
-            v = 1 - v
-        pts.append([
-            (1 - u - v) * v0[0] + u * v1[0] + v * v2[0],
-            (1 - u - v) * v0[1] + u * v1[1] + v * v2[1],
-            (1 - u - v) * v0[2] + u * v1[2] + v * v2[2]
-        ])
-    return pts
+    predicted_points = np.array(predicted_points)
+    
+    # Compute Chamfer distance using PyTorch3D-like logic
+    # Note: Actual implementation would use PyTorch3D's chamfer_distance function
+    # This is a placeholder for the distance calculation step
+    chamfer_dist = compute_chamfer_distance(predicted_points, ground_truth_mesh)
+    
+    return chamfer_dist
+
+def compute_chamfer_distance(points, mesh):
+    """
+    Placeholder for PyTorch3D chamfer_distance implementation.
+    Computes bidirectional nearest neighbor distances.
+    """
+    # In practice, this would use torch.cdist and torch.min
+    # For the purpose of this article, we assume this function exists
+    # and correctly implements the formula defined in the Overview.
+    raise NotImplementedError("Use PyTorch3D's chamfer_distance function")
 ```
 
 ## Subtopics
-[Sphere Assisted Raymarching](4497-sphere-assisted-raymarching.md): Accelerates ray traversal in voxel grids by storing the largest empty sphere radius per voxel, decoupling shape from color and allowing large steps through empty space. It differs from this method by using exact Euclidean distances for step sizing rather than L1 approximations, and serves as a traversal optimization rather than a post-processing metric [G].
+
+### [Sphere Assisted Raymarching](4497-sphere-assisted-raymarching.md)
+Sphere Assisted Raymarching is a technique for accelerating ray traversal in voxel grids by storing the radius of the largest empty sphere centered at each voxel in a separate shape texture. This decouples shape information from color information. The technique allows rays to take large steps through empty space, significantly reducing the number of voxel lookups compared to plane marching. It sets itself apart from its parent method by using the exact Euclidean distance (sphere radius) rather than an L1 approximation to determine step sizes, providing tighter bounds on empty space [G].
 
 ## Operating characteristics
-Sampling complexity is $O(N \cdot S)$ where $N=131,072$ and $S$ is the average sphere tracing steps [G]. Distance computation is $O(|P_{\text{pred}}| \cdot |P_{\text{gt}}|)$ for brute-force nearest neighbor [G]. The method provides a direct geometric fidelity metric for implicit surface evaluation [S1]. Ground-truth sampling via Marching Cubes introduces extraction error compared to direct implicit sampling [S1]. It does not inherently measure normal alignment, which requires separate Normal-L2 evaluation [S1].
+- **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of rays and $K$ is the average number of sphere tracing steps per ray.
+- **Memory Complexity:** $O(N)$ to store the sampled points.
+- **Performance:** The method is computationally expensive due to the large number of sphere tracing operations required to generate $N$ samples. However, it provides high-quality surface samples for metric evaluation.
+- **Strengths:** Avoids mesh extraction errors; provides uniform surface sampling; compatible with implicit representations.
+- **Limitations:** Slow for large $N$; requires efficient SDF evaluation; sensitive to SDF accuracy.
+- **When to use:** When evaluating the quality of predicted SDFs against ground-truth meshes without introducing discretization errors from mesh extraction.
+- **When not to use:** When real-time rendering is required; when the SDF is not available or is too expensive to evaluate.
 
 ## Background
-The method was introduced in the Neural Geometric Level of Detail paper to evaluate the accuracy of predicted SDFs against ground-truth meshes in neural rendering pipelines [S1]. It leverages the Chamfer distance implementation from PyTorch3D for metric computation [S1].
+The method was introduced in the context of neural implicit representations, specifically in the paper "Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes" [S1]. It was used to evaluate the geometric accuracy of predicted SDFs by sampling the surface directly via sphere tracing, avoiding the errors associated with Marching Cubes. The term "Distance-Aided Ray Marching" is a general term for techniques that use distance fields to guide ray marching, as described in early ray casting tutorials [S2, unofficial].
 
 ## Sources
 [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
+[S2] http://www.hugi.scene.org/online/hugi37/hugi%2037%20-%20coding%20adok%20on%20ray%20casting,%20ray%20tracing,%20ray%20marching%20and%20the%20like.htm, http://www.hugi.scene.org/online/hugi37/hugi%2037%20-%20coding%20adok%20on%20ray%20casting,%20ray%20tracing,%20ray%20marching%20and%20the%20like.htm, fetched 2026-10-26 (unofficial)

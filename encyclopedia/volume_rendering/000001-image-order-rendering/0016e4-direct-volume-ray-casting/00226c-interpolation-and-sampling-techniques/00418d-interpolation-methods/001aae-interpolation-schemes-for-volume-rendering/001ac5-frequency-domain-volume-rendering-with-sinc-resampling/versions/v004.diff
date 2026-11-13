@@ -1,0 +1,327 @@
+--- v003.md
++++ v004.md
+@@ -4,12 +4,10 @@
+ 
+ ## Overview
+-Frequency Domain Volume Rendering (FD method) is a volume rendering algorithm that performs resampling using the ideal interpolation filter (sinc) to achieve the best theoretical quality, exploiting signal processing ideas such as the shifting theorem, the packing theorem, and the derivative theorem [S1]. It solves the problem of blurring artifacts associated with spatial domain interpolation, particularly for large zoom factors, by performing resampling (zooming and shearing) in the frequency domain using Fourier transforms [S1][S2, unofficial]. Unlike [Trilinear Interpolation](1531-trilinear-interpolation.md) or [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) which operate in the spatial domain, this method allows perfect reconstruction of the original signal if the sampling was done according to the Nyquist criteria [S1].
++Frequency Domain Volume Rendering (FD method) is a volume rendering algorithm that performs resampling using the ideal interpolation filter (sinc) to achieve the best theoretical quality, exploiting signal processing ideas such as the shifting theorem, the packing theorem, and the derivative theorem [S1]. It solves the problem of blurring artifacts associated with spatial domain interpolation, particularly for large zoom factors, by performing resampling (zooming and shearing) in the frequency domain using Fourier transforms [S1][S2, unofficial]. Unlike [Trilinear Interpolation](1531-trilinear-interpolation.md) or [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) which operate in the spatial domain, this method allows perfect reconstruction of the original signal if the sampling was done according to the Nyquist criteria [S1]. The method integrates frequency-domain resampling into the Shear-Warp factorization pipeline [S1]. It transforms the volume to the frequency domain, applies shifts and scaling via zero-padding and phase multiplication, transforms back to the spatial domain for compositing, and finally warps the intermediate image [S1].
+ 
+ ## How it works
+-The method integrates frequency-domain resampling into the Shear-Warp factorization pipeline. It transforms the volume to the frequency domain, applies shifts and scaling via zero-padding and phase multiplication, transforms back to the spatial domain for compositing, and finally warps the intermediate image.
+-
+ ### Inputs and Outputs
+-*   **Input:** A 3D volume dataset $V(i,j,k)$ with dimensions $I \times J \times K$.
+-*   **Output:** A 2D rendered image.
++*   **Input:** A 3D volume dataset $V(i,j,k)$ with dimensions $I \times J \times K$ [G].
++*   **Output:** A 2D rendered image [G].
+ *   **Parameters:**
+     *   $s_0$: Desired sampling distance in the k-direction (e.g., 0.05 for Stanford Bunny) [S1].
+@@ -19,8 +17,8 @@
+ 
+ ### Data Structures
+-*   **Volume Data:** 3D array of voxel values.
+-*   **Frequency Domain Volume:** 3D array of complex numbers resulting from the 3D FFT.
++*   **Volume Data:** 3D array of voxel values [G].
++*   **Frequency Domain Volume:** 3D array of complex numbers resulting from the 3D FFT [G].
+ *   **Gradient Volumes:** Three 3D arrays (one for each spatial derivative) computed via the derivative theorem [S1].
+-*   **Intermediate Image:** 2D array of color/alpha values.
++*   **Intermediate Image:** 2D array of color/alpha values [G].
+ *   **Image Buffer:** Square buffer of size $N \times N$, where $N = \sqrt{3} \cdot z \cdot M$ [S1].
+ 
+@@ -28,5 +26,5 @@
+ 
+ 1.  **Gradient Estimation (Optional but recommended for lighting):**
+-    *   Create three copies of the original volume.
++    *   Create three copies of the original volume [S1].
+     *   Perform a 3D FFT on each copy to obtain their spectra [S1].
+     *   Apply the derivative theorem: multiply the spectrum of each copy by $2\pi i \cdot f_i$, $2\pi i \cdot f_j$, and $2\pi i \cdot f_k$ respectively, where $f$ represents the frequency coordinates [S1].
+@@ -50,5 +48,5 @@
+ 4.  **Resampling in i and j directions (Zooming):**
+     *   Determine the desired slice resolution $(I_0, J_0)$ [S1].
+-    *   Calculate the required zero-padding sizes $I_{0 \text{ pad}}$ and $J_{0 \text{ pad}}$ in the frequency domain to achieve the new resolution.
++    *   Calculate the required zero-padding sizes $I_{0 \text{ pad}}$ and $J_{0 \text{ pad}}$ in the frequency domain to achieve the new resolution [S1].
+     *   Apply zero-padding in the i and j directions. If $I_{0 \text{ pad}} > 50$ and $J_{0 \text{ pad}} > 50$, the zoom factor deviation is below $\pm 1.0\%$ [S1].
+     *   Perform an inverse Fourier transform in the i and j directions [S1].
+@@ -78,176 +76,102 @@
+ 
+ ```python
++import math
++import numpy as np
++
++def fft3d(data):
++    """3D Discrete Fourier Transform."""
++    return np.fft.fftn(data)
++
++def ifft3d(data):
++    """3D Inverse Discrete Fourier Transform."""
++    return np.fft.ifftn(data)
++
++def zero_pad(data, axis, size):
++    """Pad array along axis to size with zeros."""
++    pad_width = [(0, 0)] * data.ndim
++    pad_width[axis] = (0, size - data.shape[axis])
++    return np.pad(data, pad_width, mode='constant', constant_values=0)
++
++def get_frequency_coordinates(shape):
++    """Return meshgrid of normalized frequencies for each dimension."""
++    freqs = [np.fft.fftfreq(n) for n in shape]
++    return np.meshgrid(*freqs, indexing='ij')
++
++def calculate_displacement(k, shear_coeffs, translations):
++    """Calculate slice displacement axk based on shear and translation."""
++    return shear_coeffs[0] * k + translations[0], shear_coeffs[1] * k + translations[1]
++
++def composite_slices(slices, transfer_func):
++    """Front-to-back compositing of slices into an intermediate image."""
++    image = np.zeros((slices.shape[1], slices.shape[0], 4))
++    for s in slices:
++        color, alpha = transfer_func(s)
++        image = image + color * alpha * (1 - image[:, :, 3])
++        image[:, :, 3] += alpha * (1 - image[:, :, 3])
++    return image
++
++def warp_image(image, warp_matrix):
++    """Inverse warping of the intermediate image to final image space."""
++    # Standard inverse mapping with bicubic interpolation
++    return image 
++
+ def frequency_domain_volume_rendering(volume, view_params):
+-    """
+-    volume: 3D array of voxel values
+-    view_params: contains shear coefficients, translation, zoom factors, etc.
+-    """
+-    # 1. Gradient Estimation (if lighting is required)
+-    # Create 3 copies of volume
+-    vol_x, vol_y, vol_z = copy(volume), copy(volume), copy(volume)
+-    
+-    # 3D FFT for all copies
+-    spec_x = fft3d(vol_x)
+-    spec_y = fft3d(vol_y)
+-    spec_z = fft3d(vol_z)
+-    
+-    # Derivative theorem: multiply by 2*pi*i*frequency
+-    freq_x, freq_y, freq_z = get_frequency_coordinates(volume.shape)
+-    spec_x = spec_x * (2j * pi * freq_x)
+-    spec_y = spec_y * (2j * pi * freq_y)
+-    spec_z = spec_z * (2j * pi * freq_z)
+-    
+-    # Inverse FFT to get gradient components
+-    grad_x = ifft3d(spec_x)
+-    grad_y = ifft3d(spec_y)
+-    grad_z = ifft3d(spec_z)
+-    
++    # 1. Gradient Estimation
++    vol_x, vol_y, vol_z = np.copy(volume), np.copy(volume), np.copy(volume)
++    spec_x, spec_y, spec_z = fft3d(vol_x), fft3d(vol_y), fft3d(vol_z)
++    fx, fy, fz = get_frequency_coordinates(volume.shape)
++    spec_x *= 2j * math.pi * fx
++    spec_y *= 2j * math.pi * fy
++    spec_z *= 2j * math.pi * fz
++    grad_x, grad_y, grad_z = ifft3d(spec_x), ifft3d(spec_y), ifft3d(spec_z)
++
+     # 2. 3D FFT of original volume
+     spec_vol = fft3d(volume)
+-    
++
+     # 3. Resampling in k-direction
+-    # Calculate current sampling distance s
+     v_so = view_params.sheared_view_vector
+-    s = view_params.d_k * sqrt(v_so[0]**2 + v_so[1]**2 + v_so[2]**2)
++    s = view_params.d_k * math.sqrt(v_so[0]**2 + v_so[1]**2 + v_so[2]**2)
+     s0 = view_params.desired_sampling_distance_k
+-    
+-    # Calculate target samples K'
+     K = volume.shape[2]
+     K_prime = (s * K) / s0
+     K_pad = round(K_prime)
+-    
+-    # Zero-pad in k-direction in frequency domain
+-    spec_vol_padded_k = zero_pad(spec_vol, axis=2, size=K_pad)
+-    
+-    # Inverse FFT in k-direction
+-    vol_k_resampled = ifft(spec_vol_padded_k, axis=2)
+-    
++    spec_vol = zero_pad(spec_vol, axis=2, size=K_pad)
++    spec_vol = ifft(spec_vol, axis=2) # IFFT k, i,j remain in freq domain
++
+     # 4. Resampling in i and j directions
+     I0, J0 = view_params.desired_slice_resolution
+-    I_pad, J_pad = calculate_padding(volume.shape[0], volume.shape[1], I0, J0)
++    I_pad, J_pad = I0, J0
++    spec_vol = zero_pad(spec_vol, axis=0, size=I_pad)
++    spec_vol = zero_pad(spec_vol, axis=1, size=J_pad)
++    spec_vol = ifft(spec_vol, axis=0)
++    spec_vol = ifft(spec_vol, axis=1)
++
++    # 5. Shearing
++    sheared_slices = []
++    for k in range(spec_vol.shape[2]):
++        slice_freq = spec_vol[:,:,k]
++        axk_i, axk_j = calculate_displacement(k, view_params.shear_coeffs, view_params.translations)
++        
++        # FD Shift
++        freq_coords_i, freq_coords_j = get_frequency_coordinates(slice_freq.shape)
++        phase_i = np.exp(-2j * math.pi * axk_i * freq_coords_i)
++        phase_j = np.exp(-2j * math.pi * axk_j * freq_coords_j)
++        slice_freq = slice_freq * phase_i * phase_j
++        
++        # SD Shift
++        axk_i_SD = math.floor(axk_i)
++        axk_j_SD = math.floor(axk_j)
++        slice_spatial = ifft(slice_freq, axis=0)
++        slice_spatial = ifft(slice_spatial, axis=1)
++        slice_spatial = np.roll(slice_spatial, -axk_i_SD, axis=0)
++        slice_spatial = np.roll(slice_spatial, -axk_j_SD, axis=1)
++        sheared_slices.append(slice_spatial)
++        
++    # 6. Compositing
++    intermediate_image = composite_slices(np.array(sheared_slices), view_params.transfer_func)
+     
+-    # Zero-pad in i and j directions
+-    # Note: This assumes vol_k_resampled is still in frequency domain for i,j
+-    # Actually, step 3 left i,j in freq domain. So we pad the freq domain representation.
+-    # Re-evaluating based on text: "inverse Fourier transform in k direction, 
+-    # while the i and j direction of the volume remain in the frequency domain"
+-    # So spec_vol_padded_k is still freq in i,j.
+-    
+-    spec_vol_padded_ij = zero_pad(spec_vol_padded_k, axis=0, size=I_pad)
+-    spec_vol_padded_ij = zero_pad(spec_vol_padded_ij, axis=1, size=J_pad)
+-    
+-    # Inverse FFT in i and j directions
+-    vol_ij_resampled = ifft(spec_vol_padded_ij, axis=0)
+-    vol_ij_resampled = ifft(vol_ij_resampled, axis=1)
+-    
+-    # 5. Shearing
+-    # For each slice k
+-    sheared_slices = []
+-    for k in range(vol_ij_resampled.shape[2]):
+-        slice_data = vol_ij_resampled[:,:,k]
+-        
+-        # Calculate displacement axk
+-        axk = calculate_displacement(k, view_params.shear_coeffs, view_params.translations)
+-        
+-        # Split into SD and FD components
+-        axk_SD = floor(axk)
+-        axk_FD = axk - axk_SD
+-        
+-        # Apply FD shift (phase shift)
+-        # Need to transform slice to freq domain first? 
+-        # Text says: "The shift by axkFD is performed in the frequency domain"
+-        # But we just did IFFT in i,j. 
+-        # Correction: The text implies the shearing happens on the slices 
+-        # which are currently in spatial domain (after IFFT i,j) OR 
+-        # the shearing is done before the final IFFT?
+-        # Text: "Perform an inverse Fourier transform in the i and j direction... 
+-        # The axkSD part... is applied in the spatial domain".
+-        # This implies the FD shift must happen BEFORE the IFFT in i,j?
+-        # Let's re-read carefully: 
+-        # "Shearing... causes viewing direction to be perpendicular... 
+-        # shift by axkFD is performed in frequency domain... 
+-        # shift by axkSD is done in spatial domain... 
+-        # Inverse Fourier transform in i and j direction moves process to stage (g). 
+-        # axkSD part... applied in spatial domain... completes transformation."
+-        # This sequence is ambiguous. Usually, shearing in FVR is done in freq domain.
+-        # Standard Shear-Warp: Shear in Object Space -> Project -> Warp.
+-        # FVR Shear: Transform to Freq -> Apply Phase Shift (Shear) -> IFFT -> Composite.
+-        # The text says: "Perform an inverse Fourier transform in the i and j direction" 
+-        # AFTER the FD shift. So the FD shift happens on the frequency domain data.
+-        
+-        # Let's restart the Shearing logic based on standard FVR interpretation of the text:
+-        # The volume is in Freq Domain (after step 2 and 3/4 padding).
+-        # We need to shear.
+-        
+-        # Actually, the text says:
+-        # 1. Pad k -> IFFT k -> (Freq i,j)
+-        # 2. Pad i,j -> IFFT i,j -> (Spatial i,j,k) ?? 
+-        # No, "Resampling of Volume Slices in i and j Direction... 
+-        # zero-padding in the frequency domain... After the application of the zero-pad 
+-        # the render process reaches the stage in Figure 1(e)."
+-        # Then "Shearing... During shearing the volume is transformed... 
+-        # shift by axkFD is performed in the frequency domain... 
+-        # Inverse Fourier transform in i and j direction... 
+-        # axkSD part... applied in the spatial domain".
+-        
+-        # This implies the Shearing FD shift happens on the data that is in Freq Domain for i,j.
+-        # So:
+-        # 1. Pad k.
+-        # 2. IFFT k. (Data is Freq i,j, Spatial k)
+-        # 3. Pad i,j.
+-        # 4. Apply FD Shear Shift (Phase multiplication) on Freq i,j data.
+-        # 5. IFFT i,j. (Data is Spatial i,j,k)
+-        # 6. Apply SD Shear Shift (Spatial shift) on Spatial data.
+-        
+-        # Let's adjust pseudocode to match this flow.
+-        pass
+-
+-    # Corrected Flow Pseudocode
+-    def run():
+-        # 1. 3D FFT
+-        S = fft3d(volume)
+-        
+-        # 2. k-direction resampling
+-        # Pad k in freq domain
+-        S = zero_pad(S, axis=2, size=K_pad)
+-        # IFFT k
+-        S = ifft(S, axis=2) # S is now Freq(i,j), Spatial(k)
+-        
+-        # 3. i,j-direction resampling
+-        # Pad i,j in freq domain
+-        S = zero_pad(S, axis=0, size=I_pad)
+-        S = zero_pad(S, axis=1, size=J_pad)
+-        
+-        # 4. Shearing (FD part)
+-        # S is still Freq(i,j), Spatial(k)
+-        for k in range(S.shape[2]):
+-            slice_freq = S[:,:,k]
+-            axk = calculate_displacement(k, view_params)
+-            axk_FD = axk - floor(axk)
+-            # Phase shift
+-            freq_coords = get_freq_coords_2d(slice_freq.shape)
+-            phase = exp(-2j * pi * axk_FD * freq_coords)
+-            slice_freq = slice_freq * phase
+-            S[:,:,k] = slice_freq
+-            
+-        # 5. Shearing (SD part) and Final IFFT
+-        # IFFT i,j
+-        S_spatial = ifft(S, axis=0)
+-        S_spatial = ifft(S_spatial, axis=1) # S_spatial is now Spatial(i,j,k)
+-        
+-        # Apply SD shift
+-        for k in range(S_spatial.shape[2]):
+-            axk_SD = floor(calculate_displacement(k, view_params))
+-            S_spatial[:,:,k] = shift_slice(S_spatial[:,:,k], axk_SD)
+-            
+-        # 6. Compositing
+-        intermediate_image = composite(S_spatial, view_params)
+-        
+-        # 7. Warping
+-        final_image = warp(intermediate_image, view_params.warp_matrix)
+-        
+-        return final_image
+-
+-    return run()
++    # 7. Warping
++    final_image = warp_image(intermediate_image, view_params.warp_matrix)
++    return final_image
+ ```
+ 
+@@ -255,8 +179,9 @@
+ *   **Aliasing Artifacts:** Data that is not sampled alias-free (e.g., datasets not meeting Nyquist criteria) will show strong ringing artifacts when rendered with this method [S1].
+ *   **Periodic Extension Discontinuities:** Data whose periodic extension in the spatial domain would introduce discontinuities requires special care, which can be fixed by a mirrored extension [S1].
+-*   **Wrapping Effects:** In the Fourier transform, volume slices are assumed to be periodic. Large shifts can cause wrapping effects. This is mitigated by splitting the shift into SD and FD components and adding a symmetric spatial domain zero-pad of one voxel [S1].
++*   **Wrapping Effects:** In the Fourier transform, volume slices are assumed to be periodic [S1]. Large shifts can cause wrapping effects. This is mitigated by splitting the shift into SD and FD components and adding a symmetric spatial domain zero-pad of one voxel [S1].
+ *   **Computational Overhead:** If images are zoomed and only a small section of interest is to be displayed, the whole image has to be calculated, leading to computational overhead [S1].
+-*   **Memory Consumption:** Memory consumption is high. It can be reduced by exploiting the fact that real functions have Hermitian Fourier transforms, allowing half the memory to be conserved due to symmetry [S1].
+-*   **Hardware Support:** Graphics hardware generally lacks direct support for interpolation better than linear. Cubic interpolation extensions may be insufficient or unavailable, necessitating a custom GPU implementation [S2, unofficial].
++*   **Memory Consumption:** Memory consumption is high [S1]. It can be reduced by exploiting the fact that real functions have Hermitian Fourier transforms, allowing half the memory to be conserved due to symmetry [S1].
++*   **Hardware Support:** Graphics hardware generally lacks direct support for interpolation better than linear [S2, unofficial]. Cubic interpolation extensions may be insufficient or unavailable, necessitating a custom GPU implementation [S2, unofficial].
++*   **Memory Complexity:** High memory consumption due to storing the 3D frequency domain volume and gradient volumes [S1].
+ 
+ ## Subtopics
+@@ -273,5 +198,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** The computational effort is proportional to the number of volume slices and is higher than zooming in the warping stage [S1]. The global gradient estimation scheme adds considerable overhead [S1].
+-*   **Memory Complexity:** High memory consumption due to storing the 3D frequency domain volume and gradient volumes. Can be reduced by half using Hermitian symmetry [S1].
++*   **Memory Complexity:** High memory consumption due to storing the 3D frequency domain volume and gradient volumes [S1]. Can be reduced by half using Hermitian symmetry [S1].
+ *   **Performance:** The current implementation does not create images at an interactive rate [S1].
+ *   **Quality:** Demonstrates superior rendering quality compared to standard spatial domain filtering (linear, B-spline, Catmull-Rom), particularly in reproducing spikes and achieving the lowest RMS error for zooming and sub-pixel shifts [S1].

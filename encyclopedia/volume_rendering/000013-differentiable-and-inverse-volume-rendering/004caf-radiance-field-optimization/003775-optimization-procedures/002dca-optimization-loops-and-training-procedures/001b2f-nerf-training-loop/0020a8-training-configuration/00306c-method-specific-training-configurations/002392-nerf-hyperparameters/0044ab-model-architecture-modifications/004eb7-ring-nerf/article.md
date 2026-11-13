@@ -1,0 +1,199 @@
+# RING-NeRF
+
+Also called: Residual Implicit Neural Grids
+
+## Overview
+RING-NeRF is a neural architecture for 3D scene reconstruction designed to handle unconstrained robotic data, specifically addressing robustness gaps caused by varying observation distances and sparse viewpoints [S1, unofficial]. It bridges these gaps through two structural inductive biases: a continuous multi-scale representation and a strictly enforced invariance of the latent space across spatial and scale domains [S1, unofficial]. Unlike LOD-aware latent space methods (e.g., PyNeRF, Zip-NeRF) that require supervision of every used LOD and prevent different observation distances between train and novel views, RING-NeRF decouples LOD from the decoder through an LOD-invariant latent space, allowing natural adaptation to varying observation distances without supervising multiple LODs [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of localized frames (RGB images and camera poses).
+*   **Outputs:** A continuous 3D representation capable of rendering novel views, supporting dynamic resolution extension and spatial increments [S1, unofficial].
+
+**Data Structures:**
+*   **Hierarchical Grid:** A multi-scale representation consisting of a hierarchy of latent feature grids $\delta^N$.
+    *   **Layout:** The resolution of the $N$-th feature grid is defined as $g^N b$, where $b$ is the base resolution of the grid $\delta^0$ and $g$ is the growth factor [S1, unofficial].
+    *   **Recursive Definition:** The mapping function at level $N$ is defined using a recursive refinement process: $G_0 = \delta^0$, and $G^N = S(G^{N-1}) + \delta^N$, where $S$ is a subdivision scheme that increases resolution via tri-linear interpolation [S1, unofficial].
+    *   **Virtual Grids:** The method utilizes a "virtual grid" of continuous LOD $L \in \mathbb{R}^+$, which is not explicitly stored in memory but whose elements are computed from other grids [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Scene Contraction:**
+    Map the infinite scene volume into a bounded one to support large, unbounded scene reconstruction. The contraction function uses the $L_\infty$ norm to bound the position to a cube rather than a sphere [S1, unofficial]:
+    $$
+    \text{contract}(\mathbf{x}) = \begin{cases} 
+    \mathbf{x} & \text{if } \|\mathbf{x}\|_\infty \le 1 \\
+    \frac{1}{\|\mathbf{x}\|_\infty} \left(2 - \frac{1}{\|\mathbf{x}\|_\infty}\right) \mathbf{x} & \text{if } \|\mathbf{x}\|_\infty > 1
+    \end{cases}
+    $$
+    [S1, unofficial]
+
+2.  **Distance-Aware Forward Mapping (Cone Casting):**
+    To avoid aliasing artifacts when the observation distance varies, the method assigns to each sample a latent feature whose LOD is inversely proportional to the sample-camera distance [S1, unofficial].
+    
+    *   **Volume Calculation:** Compute the volume of the sample's location in contracted space, $V_{\text{contract}} = V_{\text{det}}(J(\mathbf{x}))$, where $J(\mathbf{x})$ is the Jacobian of the contraction function [S1, unofficial].
+    *   **LOD Calculation:** Determine the continuous LOD $L$ by finding a virtual grid of resolution $g^L b$ whose cell volume equals the computed volume. For $\|\mathbf{x}\|_\infty > 1$, the explicit LOD calculation is:
+        $$
+        L = -\frac{\log(d_c b) + 2\log\left(2 - \frac{1}{\|\mathbf{x}\|_\infty}\right) - 4\log(\|\mathbf{x}\|_\infty)}{\log(g)}
+        $$
+        where $d_c$ is the distance in contracted space [S1, unofficial].
+    *   **Feature Aggregation:** Compute a distance-dependent weighted sum of the features from the grid hierarchy based on the determined LOD $L$ [S1, unofficial].
+
+3.  **Decoder Processing:**
+    *   **Normalization:** Pass the final feature from the multiresolution combination into a normalization layer to improve convergence stability [S1, unofficial].
+    *   **Random Fourier Features:** Project the feature into a higher dimension space using a sinus filter $y = \sin(W\mathbf{x})$ with $W$ as a learnable linear matrix (without bias) to express high frequencies [S1, unofficial].
+    *   **Linear Projection:** Transform the filter output into density (or SDF) and one color feature using a linear layer [S1, unofficial].
+    *   **Radiance Prediction:** Concatenate the color feature with the view direction encoded into Spherical Harmonics, then feed this into a 3-layer MLP to predict radiance [S1, unofficial].
+    *   **SDF Handling (Optional):** If using SDF output, convert the output to density with a NEUS-like approach before volume rendering [S1, unofficial].
+
+4.  **Continuous Coarse-to-Fine Reconstruction:**
+    Execute a continuous coarse-to-fine reconstruction process to improve convergence and stability, especially in challenging setups such as few viewpoints or no scene-specific initialization for SDF reconstruction [S1, unofficial]. This involves optimizing progressively the different LOD of the representation, from coarse levels to the most precise ones [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def contract(x, norm='linf'):
+    """
+    Contracts infinite scene volume to bounded space.
+    Uses L-infinity norm to bound position to a cube.
+    """
+    if norm == 'linf':
+        norm_val = np.max(np.abs(x), axis=-1, keepdims=True)
+    else:
+        norm_val = np.linalg.norm(x, axis=-1, keepdims=True)
+        
+    # Avoid division by zero
+    norm_val = np.maximum(norm_val, 1e-8)
+    
+    inside = norm_val <= 1.0
+    outside = ~inside
+    
+    x_contracted = np.zeros_like(x)
+    x_contracted[inside] = x[inside]
+    
+    # For outside: (1/||x||) * (2 - 1/||x||) * x
+    # Note: The source formula is (1/||x||_inf) * (2 - 1/||x||_inf) * x
+    # Wait, source says: (1/||x||_inf) * (2 - 1/||x||_inf) * x ??
+    # Let's re-read carefully: "contract(x) = (1/||x||_inf) * (2 - 1/||x||_inf) * x"
+    # Actually, standard Mip-NeRF contraction is often (2 - 1/||x||) * x / ||x|| ?
+    # Source text: "contract(x) = ... if ||x|| > 1: (1/||x||_inf) * (2 - 1/||x||_inf) * x"
+    # Let's stick strictly to the source formula provided in [S1, unofficial].
+    
+    inv_norm = 1.0 / norm_val[outside]
+    factor = inv_norm * (2.0 - inv_norm)
+    x_contracted[outside] = x[outside] * factor
+    
+    return x_contracted
+
+def compute_lod(x, b, g, d_c):
+    """
+    Computes the continuous Level of Detail (LOD) for a sample.
+    x: 3D point in world space
+    b: base resolution
+    g: growth factor
+    d_c: distance in contracted space
+    """
+    norm_val = np.max(np.abs(x), axis=-1, keepdims=True)
+    norm_val = np.maximum(norm_val, 1e-8)
+    
+    # Jacobian determinant part for ||x|| > 1
+    # Formula: log(dc*b) + 2*log(2 - 1/||x||) - 4*log(||x||)
+    # Note: The source formula for L has a negative sign in front.
+    
+    if np.any(norm_val > 1.0):
+        outside = norm_val > 1.0
+        inv_norm = 1.0 / norm_val[outside]
+        
+        term1 = np.log(d_c[outside] * b)
+        term2 = 2.0 * np.log(2.0 - inv_norm)
+        term3 = 4.0 * np.log(norm_val[outside])
+        
+        numerator = term1 + term2 - term3
+        lod_outside = -numerator / np.log(g)
+        
+        lod = np.zeros_like(norm_val)
+        lod[outside] = lod_outside
+        
+        # For ||x|| <= 1, the source implies L depends on distance but not contraction function.
+        # The formula provided is only for ||x|| > 1.
+        # For ||x|| <= 1, standard Mip-NeRF LOD is -log(d_c * b) / log(g).
+        inside = ~outside
+        lod_inside = -np.log(d_c[inside] * b) / np.log(g)
+        lod[inside] = lod_inside
+        
+        return lod
+    else:
+        # All inside
+        lod = -np.log(d_c * b) / np.log(g)
+        return lod
+
+def get_feature_at_lod(lod, grids, b, g):
+    """
+    Computes the weighted sum of features from the grid hierarchy based on continuous LOD.
+    grids: List of grid features [delta_0, delta_1, ...]
+    """
+    # This is a conceptual placeholder for the weighted sum implementation.
+    # In practice, this involves interpolating from the discrete grids to the continuous LOD.
+    # The source states: "use the determined LOD to compute a distance-dependent weighted sum 
+    # of the features from the grid hierarchy".
+    pass
+
+def decode_feature(feature, view_direction):
+    """
+    Decodes the aggregated feature into density/SDF and radiance.
+    """
+    # 1. Normalization
+    feature = normalize(feature)
+    
+    # 2. Random Fourier Features (Sinus filter)
+    # y = sin(Wx)
+    # W is a learnable linear matrix (without bias)
+    feature = np.sin(np.dot(feature, W))
+    
+    # 3. Linear layer to density/SDF and color feature
+    density_or_sdf, color_feature = linear_layer(feature)
+    
+    # 4. SDF to Density (if SDF mode)
+    if use_sdf:
+        density = neus_convert_to_density(density_or_sdf)
+    else:
+        density = density_or_sdf
+        
+    # 5. Spherical Harmonics encoding of view direction
+    sh_encoding = spherical_harmonics_encode(view_direction)
+    
+    # 6. MLP for radiance
+    radiance_input = np.concatenate([color_feature, sh_encoding], axis=-1)
+    radiance = mlp_3_layer(radiance_input)
+    
+    return density, radiance
+```
+
+**Parameters:**
+*   $b$: The base resolution of the grid $\delta^0$. Not given in the sources.
+*   $g$: The growth factor for the grid resolution hierarchy. Not given in the sources.
+*   $W$: A learnable linear matrix (without bias) for the Random Fourier Feature mapping. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing Artifacts:** Standard NeRF assumes constant distance and does not account for the increasing volume covered by a pixel with respect to distance, leading to aliasing artifacts and over-contrasted images when observation distance varies [S1, unofficial]. RING-NeRF mitigates this via cone casting and LOD-invariant latent space [S1, unofficial].
+*   **SDF Initialization:** SDF-based Neural Fields are extremely sensitive to parameters' initialization, often requiring scene-specific initialization (sphere for outdoor, inverted sphere for indoor), making them unable to adapt automatically to any scene [S1, unofficial]. RING-NeRF improves stability through coarse-to-fine optimization [S1, unofficial].
+*   **Resolution Extensibility:** Classic architectures like vanilla NeRF and I-NGP cannot dynamically increase resolution during reconstruction because the number of layers (vanilla) or grids (I-NGP) cannot increase [S1, unofficial]. RING-NeRF supports dynamic resolution extension [S1, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In multi-scale evaluation (training on full-resolution, evaluating on 1/2, 1/4, 1/8 resolution), RING-NeRF achieved state-of-the-art quantitative results and was the fastest anti-aliasing method [S1, unofficial]. Computation times are equivalent to the mono-scale setup [S1, unofficial].
+*   **Scaling:** Supports dynamic adaptive resolution and spatial increments, paving the way for truly extensible reconstruction in unbounded environments [S1, unofficial].
+*   **Strengths:** Robust to varying observation distances, few-view reconstruction, and initialization-free SDF reconstruction without requiring complex task-specific supervision [S1, unofficial]. Decouples LOD from the decoder, avoiding heavy computation typical of volume-integrating methods [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to Use:** Suitable for embodied AI agents to build and maintain accurate 3D models for perception, navigation, and interaction in real-world environments [S1, unofficial].
+
+## Background
+RING-NeRF was introduced to address the challenges of 3D map reconstruction in real-world settings, particularly for embodied AI agents operating in unconstrained environments with varying observation distances and sparse viewpoints [S1, unofficial]. It builds on the classic NeRF inverse rendering pipeline but rethinks grid-based models to introduce inductive biases for continuous multi-scale representation and latent space invariance [S1, unofficial]. The method is designed to be simple, easy to implement, and generic enough to be coupled with other specific solutions [S1, unofficial].
+
+## Sources
+[S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
