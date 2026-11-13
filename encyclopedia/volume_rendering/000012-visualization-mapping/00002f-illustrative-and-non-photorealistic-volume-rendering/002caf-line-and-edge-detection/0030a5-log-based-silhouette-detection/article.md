@@ -3,115 +3,114 @@
 Also called: Laplacian of Gaussian edge detection
 
 ## Overview
-LOG-based Silhouette Detection is a volumetric edge detection technique used to identify silhouette voxels for rendering sketch-like curves, replacing a more exhaustive 3x3x3 subspace search to improve performance [S1]. It identifies boundaries based on local volumetric properties (gradient magnitude and Laplacian of Gaussian values) combined with view-dependent orientation, allowing for the generation of silhouette lines that highlight geometric structures without the computational cost of neighborhood subspace analysis [S1].
+LOG-based Silhouette Detection is a volumetric edge detection technique used to identify silhouette voxels for rendering sketch-like curves in non-photorealistic volume rendering [S1]. It solves the performance bottleneck of exhaustive spatial searches by replacing them with a precomputed Laplacian of Gaussian (LOG) filter and simple thresholding [S1]. It sets itself apart from siblings like [Line Illustration Detection](772-line-illustration-detection.md) by specifically targeting silhouette boundaries to prevent advection particles from crossing geometric edges, thereby preserving surface topology [S1][S2, unofficial].
 
 ## How it works
-The method operates in two phases: a preprocessing phase to compute scalar field derivatives and a rendering phase to detect silhouette voxels and generate line primitives.
+**Inputs:**
+- A scalar volume dataset $V$.
+- Camera view vector $\vec{E}$ (eye vector).
+- Three user-controllable thresholds: $T_{hLOG}$, $T_{heye}$, and $T_{hgrad}$ [S1].
 
-**Inputs and Outputs**
-*   **Input:** A volumetric dataset $V$ where each voxel $i$ has a scalar value $V_i$.
-*   **Input:** A view direction vector $\vec{E}$ (eye vector) for the current camera position.
-*   **Output:** A set of line segments representing silhouette curves.
+**Outputs:**
+- A set of line segments representing silhouette curves, drawn through the centers of detected silhouette voxels [S1].
 
-**Data Structures**
-*   **Precomputed LOG Field:** A 3D array of the same dimensions as $V$, storing the Laplacian of Gaussian value $\text{LOG}(V_i)$ for each voxel.
-*   **Gradient Field:** A 3D array of 3D vectors storing the gradient $\nabla V_i$ for each voxel.
+**Data Structures:**
+- Precomputed LOG volume: A 3D array of the same dimensions as $V$, storing the LOG value for each voxel [S1].
+- Gradient volume: A 3D array storing the gradient vector $\nabla \vec{V_i}$ for each voxel [S1].
 
-**Preprocessing Step**
-1.  Compute the gradient $\nabla V_i$ for each voxel using finite differences.
-2.  Compute the Laplacian of Gaussian $\text{LOG}(V_i)$ for each voxel. This involves convolving the volume with a Gaussian kernel and then applying the Laplacian operator, or equivalently, convolving with the Laplacian of a Gaussian kernel [S1].
+**Preprocessing:**
+1. Compute the Laplacian of Gaussian (LOG) value for each voxel in the volume dataset [S1].
+2. Compute the gradient $\nabla \vec{V_i}$ for each voxel [S1].
 
-**Rendering Step**
+**Rendering Steps:**
 For each voxel $i$ in the volume:
-1.  Retrieve the voxel value $V_i$, the precomputed $\text{LOG}(V_i)$, the gradient $\nabla V_i$, and the view vector $\vec{E}$.
-2.  Evaluate the three silhouette criteria simultaneously:
-    *   **Criterion 1 (LOG Threshold):** Check if the product of the voxel value and the LOG value is below a threshold:
-        $$ V_i \cdot \text{LOG}(V_i) < T_{hLOG} $$
-    *   **Criterion 2 (View Alignment):** Check if the dot product of the eye vector and the gradient is below a threshold:
-        $$ (\vec{E} \cdot \nabla V_i) < T_{heye} $$
-    *   **Criterion 3 (Gradient Magnitude):** Check if the magnitude of the gradient exceeds a threshold:
-        $$ \|\nabla V_i\| > T_{hgrad} $$
-3.  If all three criteria are satisfied, the voxel is classified as a silhouette voxel.
-4.  Draw a line segment through the center of the voxel. The direction of the line segment is determined by the cross product of the gradient and the eye vector:
-    $$ \vec{D} = \nabla V_i \times \vec{E} $$
-    The line is rendered along this direction $\vec{D}$ [S1].
+1. Calculate the LOG value product: $P_{LOG} = V_i \times \text{LOG}(V_i)$ [S1].
+2. Calculate the gradient magnitude: $M_{grad} = \|\nabla \vec{V_i}\|$ [S1].
+3. Calculate the dot product with the eye vector: $D_{eye} = \vec{E} \cdot \nabla \vec{V_i}$ [S1].
+4. Check if the voxel satisfies all three criteria simultaneously [S1]:
+   - $V_i \times \text{LOG}(V_i) < T_{hLOG}$
+   - $\vec{E} \cdot \nabla \vec{V_i} < T_{heye}$
+   - $\|\nabla \vec{V_i}\| > T_{hgrad}$
+5. If all criteria are met, draw a line segment through the center of the voxel in the direction of $\nabla \vec{V_i} \times \vec{E}$ [S1].
 
-**Parameters**
-*   $T_{hLOG}$: Threshold for the LOG value product. User-controllable [S1].
-*   $T_{heye}$: Threshold for the dot product of the eye vector and gradient. User-controllable [S1].
-*   $T_{hgrad}$: Threshold for the gradient magnitude. User-controllable [S1].
+**Parameters:**
+- $T_{hLOG}$: Threshold for the LOG value product [S1].
+- $T_{heye}$: Threshold for the dot product of the eye vector and gradient [S1].
+- $T_{hgrad}$: Threshold for the gradient magnitude [S1].
 
-**Pseudocode**
+**Edge Cases and Pitfalls:**
+- The method relies on precomputed values; if the volume changes, preprocessing must be repeated [S1].
+- The direction of the drawn line segment is determined by the cross product of the gradient and the eye vector, which may result in degenerate lines if the gradient is parallel to the eye vector [S1].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_silhouette_curves(volume, view_vector, t_hlog, t_heye, t_hgrad):
+def preprocess_volume(volume):
     """
-    Renders silhouette curves for a volume using LOG-based detection.
-    
-    Args:
-        volume: 3D array of voxel values V_i.
-        view_vector: 3D vector E (eye/view direction).
-        t_hlog: Threshold for V_i * LOG(V_i).
-        t_heye: Threshold for E . grad(V_i).
-        t_hgrad: Threshold for ||grad(V_i)||.
-        
+    Precompute LOG and gradient values for the volume.
+    volume: 3D array of voxel values.
     Returns:
-        List of line segments (start_point, direction_vector).
+        log_volume: 3D array of LOG values.
+        gradient_volume: 3D array of gradient vectors.
     """
-    # Precompute gradients and LOG values
-    # Note: In a real implementation, these would be precomputed in a preprocessing step.
-    gradients = compute_gradients(volume)
-    log_values = compute_laplacian_of_gaussian(volume)
+    # Compute LOG values
+    # Note: The exact LOG kernel size and implementation details are not specified in the source.
+    # [G] A standard 3x3x3 Laplacian of Gaussian kernel is typically used.
+    log_volume = apply_log_filter(volume)
     
-    silhouette_lines = []
+    # Compute gradients
+    # [G] Central differences are a standard method for gradient computation.
+    gradient_volume = compute_gradients(volume)
     
-    for i in range(volume.shape[0]):
-        for j in range(volume.shape[1]):
-            for k in range(volume.shape[2]):
+    return log_volume, gradient_volume
+
+def detect_and_render_silhouettes(volume, log_volume, gradient_volume, eye_vector, 
+                                  t_hlog, t_hey, t_hgrad):
+    """
+    Detect silhouette voxels and render line segments.
+    volume: 3D array of voxel values.
+    log_volume: 3D array of precomputed LOG values.
+    gradient_volume: 3D array of precomputed gradient vectors.
+    eye_vector: 3D vector representing the view direction.
+    t_hlog, t_hey, t_hgrad: User-controllable thresholds.
+    Returns:
+        segments: List of line segments (start_point, end_point, direction).
+    """
+    segments = []
+    dimensions = volume.shape
+    
+    for i in range(dimensions[0]):
+        for j in range(dimensions[1]):
+            for k in range(dimensions[2]):
                 v_i = volume[i, j, k]
-                log_v_i = log_values[i, j, k]
-                grad_v_i = gradients[i, j, k]
+                log_v_i = log_volume[i, j, k]
+                grad_v_i = gradient_volume[i, j, k]
                 
-                # Criterion 1: V_i * LOG(V_i) < T_hLOG
-                if not (v_i * log_v_i < t_hlog):
-                    continue
+                # Criterion 1: LOG value product
+                criterion_1 = (v_i * log_v_i) < t_hlog
                 
-                # Criterion 2: (E . grad(V_i)) < T_heye
-                dot_product = dot(view_vector, grad_v_i)
-                if not (dot_product < t_heye):
-                    continue
+                # Criterion 2: Dot product with eye vector
+                dot_product = dot(eye_vector, grad_v_i)
+                criterion_2 = dot_product < t_hey
                 
-                # Criterion 3: ||grad(V_i)|| > T_hgrad
+                # Criterion 3: Gradient magnitude
                 grad_magnitude = magnitude(grad_v_i)
-                if not (grad_magnitude > t_hgrad):
-                    continue
+                criterion_3 = grad_magnitude > t_hgrad
                 
-                # All criteria met: voxel is a silhouette voxel
-                # Direction of line segment: grad(V_i) x E
-                line_direction = cross(grad_v_i, view_vector)
-                
-                # Line segment through the center of the voxel
-                voxel_center = get_voxel_center(i, j, k)
-                silhouette_lines.append((voxel_center, line_direction))
-                
-    return silhouette_lines
-
-def compute_gradients(volume):
-    """Computes gradient using central finite differences."""
-    # Implementation details for gradient computation [G]
-    pass
-
-def compute_laplacian_of_gaussian(volume):
-    """Computes Laplacian of Gaussian using convolution."""
-    # Implementation details for LOG computation [G]
-    pass
+                # Check all criteria
+                if criterion_1 and criterion_2 and criterion_3:
+                    # Direction of the line segment
+                    direction = cross(grad_v_i, eye_vector)
+                    
+                    # Draw line segment through the center of the voxel
+                    # [G] The exact length of the segment is not specified.
+                    # [G] The center of the voxel is assumed to be (i, j, k).
+                    center = (i, j, k)
+                    segments.append((center, direction))
+                    
+    return segments
 ```
-
-**Edge Cases and Pitfalls**
-*   **Precision:** Floating-point precision in gradient and LOG calculations can affect threshold sensitivity.
-*   **Boundary Conditions:** Gradient and LOG computations at volume boundaries require handling of missing neighbors (e.g., clamping or zero-padding) [G].
-*   **Degenerate Input:** Voxels with zero gradient magnitude will fail Criterion 3 and be ignored, which is correct for flat regions but may miss subtle edges if thresholds are too high.
 
 ## Subtopics
 
@@ -119,14 +118,17 @@ def compute_laplacian_of_gaussian(volume):
 This method detects object silhouettes in image space to prevent advection particles from flowing across geometric boundaries, which would otherwise render the surface's geometry and topology unrecognizable. It replaces exhaustive 3x3x3 subspace searches used in parent methods by applying a discrete Laplacian filter to depth values followed by thresholding.
 
 ## Operating characteristics
-*   **Time Complexity:** The preprocessing step (gradient and LOG computation) is $O(N)$ where $N$ is the number of voxels. The rendering step is also $O(N)$ per frame, as it involves a single pass over the volume with constant-time checks per voxel. This is significantly faster than the exhaustive 3x3x3 subspace search, which involves more complex neighborhood analysis [S1].
-*   **Memory Complexity:** Requires storing the original volume, the gradient field, and the LOG field, resulting in $O(N)$ memory usage [S1].
-*   **Performance:** On a dual processor Intel Xeon 2.00 GHz computer with a Geforce 3 Ti 500 display card, interactive rendering of reasonably-sized volume datasets is possible. The total number of point primitives ranges from 5,000 to 2,000,000, with silhouette curves ranging from 1,000 to 300,000. Frame rates of 20 to 30 frames per second were achieved [S1]. Preprocessing time varies from seconds to a minute depending on dataset size [S1].
-*   **Strengths:** Provides virtually identical results to the exhaustive 3x3x3 subspace search but is much faster to calculate per frame because it simplifies boundary computation [S1]. Effectively highlights structures, such as bones in medical volumes [S1].
-*   **Limitations:** Performance can be improved by further reducing cache exchange and floating-point operations [S1]. The quality of the silhouette detection depends heavily on the choice of thresholds $T_{hLOG}$, $T_{heye}$, and $T_{hgrad}$ [S1].
+- **Performance:** The LOG technique provides virtually identical results to the exhaustive 3x3x3 subspace search but is much faster to calculate per frame because it simplifies boundary computation [S1].
+- **Frame Rates:** Interactive rendering is possible, with frame rates of 20 to 30 frames per second on modern PCs (Intel Xeon 2.00 GHz, Geforce 3 Ti 500) [S1].
+- **Data Volume:** The total number of point primitives in a typical dataset ranges from 5,000 to 2,000,000, and silhouette curves range from 1,000 to 300,000 [S1].
+- **Preprocessing Time:** Varies from seconds to a minute depending on dataset size [S1].
+- **Strengths:** Significantly improves image quality by highlighting structures, especially bones in medical datasets [S1].
+- **Limitations:** Performance can be improved by further reducing cache exchange and floating-point operations [S1].
 
 ## Background
-LOG-based Silhouette Detection was introduced in the context of non-photorealistic volume rendering using stippling techniques [S1]. It was developed as an alternative to more exhaustive search methods to improve performance while maintaining visual quality in sketch-like volume rendering [S1]. The technique is particularly useful for highlighting geometric structures in volumetric data, such as bones in medical datasets [S1].
+- **Origin:** The method was introduced in the paper "Non-Photorealistic Volume Rendering Using Stippling Techniques" [S1].
+- **Purpose:** It was developed to address the performance bottleneck of exhaustive spatial searches in non-photorealistic volume rendering, specifically for sketch-like silhouette curves [S1].
+- **Application:** It is used in stipple rendering systems to enhance the visual clarity of volumetric data, such as bonsai trees and aneurysm volumes [S1].
 
 ## Sources
-[S1] PDF Non-Photorealistic Volume Rendering Using Stippling Techniques, https://www.csee.umbc.edu/~rheingan/pubs/vis_stipple.pdf, fetched 2026-10-27
+[S1] Non-Photorealistic Volume Rendering Using Stippling Techniques, https://www.csee.umbc.edu/~rheingan/pubs/vis_stipple.pdf, fetched 2026-10-27

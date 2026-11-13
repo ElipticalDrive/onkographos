@@ -3,97 +3,107 @@
 Also called: FBM Application Pipeline, FBM Integration Techniques
 
 ## Overview
-FBM Combinations refers to the integration of Fractal Brownian Motion (FBM) noise fields with rendering techniques such as raymarching, lighting models, and color mapping to produce complex volumetric or surface appearances. It distinguishes itself from raw noise generation by focusing on the *application* of the scalar field—specifically how density, normals, and color are derived from layered noise samples for use in raymarched scenes. It builds on [Noise Field Generator](1302-noise-field-generator.md) by taking its output and applying intersection, shading, and compositing logic.
+FBM Combinations integrates Fractal Brownian Motion (FBM) noise fields with rendering techniques such as raymarching, lighting models, and color mapping to produce complex volumetric or surface appearances [S1]. It distinguishes itself from raw noise generation by focusing on the application of the scalar field—specifically how density, normals, and color are derived from layered noise samples for use in raymarched scenes [S1]. It builds on [Noise Field Generator](1302-noise-field-generator.md) by taking its output and applying intersection, shading, and compositing logic [G].
 
 ## How it works
 **Inputs:**
-- A 3D position vector $\mathbf{p}$ (world or local space).
-- FBM parameters: octaves $N$, lacunarity $L$, gain $G$.
-- Raymarching parameters: max steps, step size function, termination threshold.
-- Lighting parameters: light direction $\mathbf{l}$, eye direction $\mathbf{e}$.
+- A 3D position vector $\mathbf{p}$ (world or local space) [G].
+- FBM parameters: octaves $N$, lacunarity $L$, gain $G$ [G].
+- Raymarching parameters: max steps, step size function, termination threshold [S1].
+- Lighting parameters: light direction $\mathbf{l}$, eye direction $\mathbf{e}$ [S1].
 
 **Outputs:**
-- Raymarched distance or density value.
-- Shaded color with normals and lighting.
+- Raymarched distance or density value [S1].
+- Shaded color with normals and lighting [S1].
 
 **Data Structures:**
-- No complex structures; primarily scalar accumulators and vectors.
+- No complex structures; primarily scalar accumulators and vectors [G].
 
 **Steps:**
 
-1. **FBM Evaluation:** Compute the base FBM value $f(\mathbf{p})$ using layered Simplex noise.
+1. **FBM Evaluation:** Compute the base FBM value $f(\mathbf{p})$ using layered noise [G].
    $$ f(\mathbf{p}) = \sum_{i=0}^{N-1} G^i \cdot \text{noise}(L^i \cdot \mathbf{p}) $$
-   [G] Standard Simplex noise implementation is assumed.
-
-2. **Raymarching Intersection:** Use $f(\mathbf{p})$ as a density or height field to determine ray termination.
+2. **Raymarching Intersection:** Use $f(\mathbf{p})$ as a density or height field to determine ray termination [S1].
    - Adaptive step size: $dt = \max(0.05, 0.02 \cdot t)$, where $t$ is current ray distance [S1].
    - Early termination: If accumulated alpha/density $> 0.99$, break loop [S1].
-   - LOD selection: Octave count can vary by distance: $oct = 5 - \lfloor \log_2(1.0 + t \cdot 0.5) \rfloor$ [S1].
-
-3. **Normal Calculation:** Approximate surface normals using finite differences.
-   - Directional derivative (1 sample) or full gradient (3 samples) [S1].
+   - LOD selection: Octave count varies by distance: $oct = 5 - \lfloor \log_2(1.0 + t \cdot 0.5) \rfloor$ [S1].
+3. **Normal Calculation:** Approximate surface normals using a directional derivative (1 sample) instead of a full gradient [S1].
    - Formula: $\mathbf{n} = \text{normalize}(\text{vec3}(f(\mathbf{p} + \epsilon \mathbf{x}) - f(\mathbf{p}), \epsilon, f(\mathbf{p} + \epsilon \mathbf{y}) - f(\mathbf{p})))$ [S1].
-   - $\epsilon$ is a small offset.
-
-4. **Lighting:** Apply lighting model using $\mathbf{n}$ and light direction $\mathbf{l}$.
+   - $\epsilon$ is a small offset [G].
+4. **Lighting:** Apply lighting model using $\mathbf{n}$ and light direction $\mathbf{l}$ [S1].
    - Volumetric lighting: Approximate illumination by density difference along light direction [S1].
-
-5. **Color Mapping:** Map noise values to RGB using power curves.
+5. **Color Mapping:** Map noise values to RGB using power curves [S1].
    - Example (flame): $\text{color} = \text{vec3}(1.5c, 1.5c^3, c^6)$ [S1].
    - Example (inverse): $\text{color} = \text{vec3}(k)/r \cdot z$ [S1].
-
-6. **Fresnel (Optional):** For water surfaces, blend based on view angle.
+6. **Fresnel (Optional):** For water surfaces, blend based on view angle [S1].
    - $\text{fresnel} = \text{pow}(1.0 - \text{dot}(\mathbf{n}, -\mathbf{e}), 3.0)$ [S1].
-
 7. **Multi-layer Compositing:** Combine shape (low freq), ridged (mid freq), and color (high freq) layers [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def noise(p):
+    # Minimal procedural noise for self-containment
+    return math.sin(p[0] * 12.9898 + p[1] * 78.233 + p[2] * 45.164)
+
+def fbm(p, octaves):
+    val = 0.0
+    amp = 1.0
+    freq = 1.0
+    for _ in range(octaves):
+        val += amp * noise((p[0]*freq, p[1]*freq, p[2]*freq))
+        amp *= 0.5
+        freq *= 2.0
+    return val
+
+def vec3(x, y, z):
+    return (x, y, z)
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def normalize(v):
+    mag = math.sqrt(dot(v, v))
+    return (v[0]/mag, v[1]/mag, v[2]/mag) if mag > 1e-8 else (0.0, 0.0, 0.0)
+
+def mix(a, b, t):
+    return (a[0] + t*(b[0]-a[0]), a[1] + t*(b[1]-a[1]), a[2] + t*(b[2]-a[2]))
+
 def fbm_combinations(p, ray_origin, ray_direction, max_steps=100):
-    # 1. Raymarching loop
     t = 0.0
     accumulated_density = 0.0
-    for i in range(max_steps):
-        # Adaptive step size
+    noise_val = 0.0
+    for _ in range(max_steps):
         dt = max(0.05, 0.02 * t)
-        pos = ray_origin + ray_direction * t
-        
-        # 2. FBM Evaluation
-        # LOD selection based on distance
-        oct = 5 - int(log2(1.0 + t * 0.5))
-        noise_val = fbm(pos, octaves=oct)
-        
-        # Accumulate density
+        pos = (ray_origin[0] + ray_direction[0]*t, ray_origin[1] + ray_direction[1]*t, ray_origin[2] + ray_direction[2]*t)
+        octaves = 5 - int(math.log2(1.0 + t * 0.5))
+        noise_val = fbm(pos, octaves)
         accumulated_density += noise_val * dt
-        
-        # Early termination
         if accumulated_density > 0.99:
             break
-        
         t += dt
-    
-    # 3. Normal Calculation (Finite Difference)
+
     eps = 0.01
-    n_x = fbm(pos + vec3(eps, 0, 0)) - fbm(pos - vec3(eps, 0, 0))
-    n_y = fbm(pos + vec3(0, eps, 0)) - fbm(pos - vec3(0, eps, 0))
-    n_z = fbm(pos + vec3(0, 0, eps)) - fbm(pos - vec3(0, 0, eps))
-    normal = normalize(vec3(n_x, n_y, n_z))
-    
-    # 4. Lighting
-    light_dir = normalize(vec3(1, 1, 0))
+    ex = (eps, 0.0, 0.0)
+    ey = (0.0, eps, 0.0)
+    n_x = fbm((pos[0]+ex[0], pos[1]+ex[1], pos[2]+ex[2])) - fbm(pos)
+    n_y = fbm((pos[0]+ey[0], pos[1]+ey[1], pos[2]+ey[2])) - fbm(pos)
+    normal = normalize(vec3(n_x, eps, n_y))
+
+    light_dir = normalize(vec3(1.0, 1.0, 0.0))
     diffuse = max(dot(normal, light_dir), 0.0)
-    
-    # 5. Color Mapping
+
     c = noise_val
-    color = vec3(1.5 * c, 1.5 * c**3, c**6) # Flame example
-    
-    # 6. Fresnel (if water)
-    eye_dir = -ray_direction
-    fresnel = pow(1.0 - dot(normal, normalize(eye_dir)), 3.0)
-    color = mix(color, vec3(0.5, 0.8, 1.0), fresnel)
-    
+    color = vec3(1.5 * c, 1.5 * c**3, c**6)
+
+    eye_dir = normalize(vec3(-ray_direction[0], -ray_direction[1], -ray_direction[2]))
+    fresnel = (1.0 - dot(normal, normalize(vec3(-eye_dir[0], -eye_dir[1], -eye_dir[2])))) ** 3.0
+    water_color = vec3(0.5, 0.8, 1.0)
+    color = mix(color, water_color, fresnel)
+
     return color, accumulated_density
 ```
 
@@ -103,15 +113,15 @@ def fbm_combinations(p, ray_origin, ray_direction, max_steps=100):
 Synthesizes volumetric-like textures from 2D UVs using tiled cell indexing and multiplicative masks. Choose when rendering 2D surfaces with depth-like appearance.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot S)$, where $N$ is octaves and $S$ is raymarch steps. Adaptive step size and LOD reduce effective $S$ and $N$ at distance.
-- **Memory Complexity:** $O(1)$ for procedural noise; no texture storage required.
-- **Strengths:** High detail at multiple scales; flexible shading and color mapping; no texture memory overhead.
-- **Limitations:** Computationally expensive per pixel due to raymarching and multiple noise evaluations; sensitive to step size and $\epsilon$ for normals.
-- **When to use:** Real-time procedural terrain, ocean, or cloud rendering where texture memory is limited or dynamic detail is needed.
-- **When not to use:** Static scenes where precomputed textures are more efficient; high-performance requirements with many rays.
+- **Time Complexity:** $O(N \cdot S)$, where $N$ is octaves and $S$ is raymarch steps [G]. Adaptive step size and LOD reduce effective $S$ and $N$ at distance [S1].
+- **Memory Complexity:** $O(1)$ for procedural noise; no texture storage required [G].
+- **Strengths:** High detail at multiple scales; flexible shading and color mapping; no texture memory overhead [G].
+- **Limitations:** Computationally expensive per pixel due to raymarching and multiple noise evaluations; sensitive to step size and $\epsilon$ for normals [G].
+- **When to use:** Real-time procedural terrain, ocean, or cloud rendering where texture memory is limited or dynamic detail is needed [S1].
+- **When not to use:** Static scenes where precomputed textures are more efficient; high-performance requirements with many rays [G].
 
 ## Background
-Originated from procedural noise techniques in computer graphics, popularized by Ken Perlin and others. FBM combinations are widely used in real-time shaders for terrain, water, and volumetric effects. The specific techniques cited (adaptive step, directional derivatives, power curve color mapping) are common in shader development communities [S1].
+Originated from procedural noise techniques in computer graphics, popularized by Ken Perlin and others [G]. FBM combinations are widely used in real-time shaders for terrain, water, and volumetric effects [S1]. The specific techniques cited (adaptive step, directional derivatives, power curve color mapping) are common in shader development communities [S1].
 
 ## Sources
 [S1] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27

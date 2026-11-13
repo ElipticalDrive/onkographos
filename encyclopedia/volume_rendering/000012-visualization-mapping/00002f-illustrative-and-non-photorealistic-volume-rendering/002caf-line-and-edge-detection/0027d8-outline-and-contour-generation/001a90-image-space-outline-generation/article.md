@@ -3,73 +3,109 @@
 Also called: Edge extraction from depth/normal maps, Hertzmann's outline generation, Outline Post Processing
 
 ## Overview
-Image Space Outline Generation is a post-processing technique that renders outlines by extracting edges from depth or normal maps, leveraging the observation that depth differences are minimal between adjacent pixels of a single object but large between objects, and normals vary smoothly across a single surface but show discontinuity between surfaces [S1, unofficial]. It differs from analytical methods by operating directly on pixel buffers, making it faster and simpler to implement, though it relies on the depth buffer which may lack the geometric precision of surface-based NPR [S1, unofficial][S2, unofficial].
+Image Space Outline Generation is a post-processing technique that renders non-photorealistic outlines by detecting discontinuities in screen-space depth or normal buffers [S1, S2, unofficial]. It solves the problem of defining object boundaries in volume rendering without the computational overhead of analytical geometry processing [S1, unofficial]. Unlike sibling methods that compute contours from volumetric gradients or topological features, this method relies on simple pixel-wise comparisons of existing rasterization buffers, making it significantly faster and easier to implement [S1, unofficial].
 
 ## How it works
-**Inputs:** Depth buffer (Z-buffer), Normal buffer (optional), Edge detection parameters (kernel size, thresholds).
-**Outputs:** Binary edge mask or stylized outline texture.
+**Inputs:**
+*   Depth buffer (Z-buffer) containing the depth value $d(x,y)$ for each pixel $(x,y)$.
+*   Normal buffer (optional) containing the surface normal vector $\mathbf{n}(x,y)$ for each pixel.
+*   Threshold parameters for edge detection (e.g., depth difference $\Delta d_{th}$, normal angle $\theta_{th}$).
+
+**Outputs:**
+*   Binary edge map or stylized outline image.
 
 **Data Structures:**
-- `DepthBuffer`: 2D array of floating-point depth values ($z$).
-- `NormalBuffer`: 2D array of 3D normalized vectors ($\vec{n}$).
-- `EdgeMask`: 2D array of boolean or float values indicating edge presence.
+*   The depth and normal buffers are typically stored as 2D arrays. Depth is often 16-bit or 32-bit floating point. Normals are often stored as 3-component vectors, possibly quantized to 8-bit integers per component for memory efficiency [S2, unofficial].
 
 **Steps:**
-1. **Depth Edge Extraction:**
-   - For each pixel $(x, y)$, compute the gradient of the depth buffer using a Sobel filter or similar edge detection kernel [S1, unofficial].
-   - Let $D(x, y)$ be the depth value at $(x, y)$.
-   - Compute horizontal gradient $G_x$ and vertical gradient $G_y$:
-     $$ G_x = D(x+1, y) - D(x-1, y) $$
-     $$ G_y = D(x, y+1) - D(x, y-1) $$
-   - Compute magnitude $M_d$:
-     $$ M_d = \sqrt{G_x^2 + G_y^2} $$
-   - If $M_d > T_d$ (threshold), mark $(x, y)$ as a depth edge. Depth edges reflect C0 discontinuities [S1, unofficial].
+1.  **Depth Edge Extraction:** Iterate over each pixel $(x,y)$ and its neighbors (typically 4-connected or 8-connected). Calculate the absolute difference in depth values. If the difference exceeds a threshold, mark the pixel as an edge.
+    $$ E_d(x,y) = \begin{cases} 1 & \text{if } |d(x,y) - d(x',y')| > \Delta d_{th} \\ 0 & \text{otherwise} \end{cases} $$
+    where $(x',y')$ is a neighbor pixel [S1, unofficial].
+2.  **Normal Edge Extraction (Optional):** Calculate the dot product between the normal at $(x,y)$ and its neighbors. If the angle between normals exceeds a threshold, mark the pixel as an edge. This detects C1 discontinuities (surface orientation changes) [S1, unofficial].
+    $$ E_n(x,y) = \begin{cases} 1 & \text{if } \arccos(\mathbf{n}(x,y) \cdot \mathbf{n}(x',y')) > \theta_{th} \\ 0 & \text{otherwise} \end{cases} $$
+3.  **Combination:** Combine depth and normal edge maps to capture all perceptually significant silhouettes. Depth edges capture C0 discontinuities (occlusion boundaries), while normal edges capture C1 discontinuities (creases or sharp corners) [S1, unofficial].
+    $$ E_{final}(x,y) = E_d(x,y) \lor E_n(x,y) $$
+4.  **Filtering (Optional):** Apply a filter such as the Sobel operator to the depth or normal buffers before thresholding to enhance edge detection and reduce noise [S1, unofficial].
+5.  **Rendering:** Render the edge map as a line primitive or overlay it on the final image. For stylized lines, analytical curves may be fitted to the pixel lists, though this is computationally expensive [S1, unofficial].
 
-2. **Normal Edge Extraction (Optional):**
-   - For each pixel $(x, y)$, compute the gradient of the normal buffer [S1, unofficial].
-   - Let $\vec{N}(x, y)$ be the normal vector at $(x, y)$.
-   - Compute horizontal gradient $\vec{G}_x$ and vertical gradient $\vec{G}_y$:
-     $$ \vec{G}_x = \vec{N}(x+1, y) - \vec{N}(x-1, y) $$
-     $$ \vec{G}_y = \vec{N}(x, y+1) - \vec{N}(x, y-1) $$
-   - Compute magnitude $M_n$:
-     $$ M_n = \|\vec{G}_x\| + \|\vec{G}_y\| $$
-   - If $M_n > T_n$ (threshold), mark $(x, y)$ as a normal edge. Normal edges reflect C1 discontinuities [S1, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-3. **Combination:**
-   - Combine depth and normal edges using logical OR:
-     $$ \text{Edge}(x, y) = \text{DepthEdge}(x, y) \lor \text{NormalEdge}(x, y) $$
-   - This yields all perceptually significant silhouettes [S1, unofficial].
-
-4. **Post-Processing (Optional):**
-   - For stylized lines, calculate analytical curves from the detected edge map, as detected edges only exist as lists of pixels [S1, unofficial].
-   - Apply scan conversion algorithms to map parametric curves to screen pixels [S1, unofficial].
+```python
+def generate_outlines(depth_buffer, normal_buffer=None, depth_threshold=0.01, normal_threshold=0.5):
+    """
+    Generate outlines from depth and normal buffers.
+    
+    Args:
+        depth_buffer: 2D array of depth values.
+        normal_buffer: 2D array of normal vectors (optional).
+        depth_threshold: Minimum depth difference to be considered an edge.
+        normal_threshold: Minimum angle difference (cosine) to be considered an edge.
+        
+    Returns:
+        edge_map: 2D binary array of edge pixels.
+    """
+    height, width = depth_buffer.shape
+    edge_map = np.zeros((height, width), dtype=bool)
+    
+    # Define neighbor offsets (4-connected)
+    offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    
+    for y in range(height):
+        for x in range(width):
+            is_edge = False
+            
+            # Check depth discontinuities (C0)
+            for dy, dx in offsets:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < height and 0 <= nx < width:
+                    if abs(depth_buffer[y, x] - depth_buffer[ny, nx]) > depth_threshold:
+                        is_edge = True
+                        break
+            
+            # Check normal discontinuities (C1) if normal buffer is provided
+            if not is_edge and normal_buffer is not None:
+                for dy, dx in offsets:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width:
+                        # Calculate dot product
+                        dot_product = np.dot(normal_buffer[y, x], normal_buffer[ny, nx])
+                        # Clamp to [-1, 1] to avoid numerical errors
+                        dot_product = np.clip(dot_product, -1.0, 1.0)
+                        if dot_product < normal_threshold:
+                            is_edge = True
+                            break
+            
+            edge_map[y, x] = is_edge
+            
+    return edge_map
+```
 
 **Parameters:**
-- $T_d$: Depth threshold. Not given in the sources.
-- $T_n$: Normal threshold. Not given in the sources.
-- Kernel size: Typically 3x3 for Sobel [S1, unofficial].
+*   `depth_threshold`: Typically small, e.g., 0.01 to 0.1 in normalized device coordinates, depending on scene scale [S1, unofficial].
+*   `normal_threshold`: Cosine of the angle threshold, e.g., 0.5 for 60 degrees [S1, unofficial].
 
 **Edge Cases:**
-- Precision issues in depth buffer may cause false edges in flat regions.
-- Discontinuities at object boundaries may be missed if thresholds are too high.
-- [G] Ensure depth buffer is in linear space if non-linear depth values are used.
+*   **Precision:** Depth buffer precision can cause false edges in distant scenes or true edges in close-up scenes. [G] Use logarithmic depth buffers or higher precision formats if necessary.
+*   **Boundaries:** Pixels at the image border have fewer neighbors. Handle by ignoring out-of-bounds neighbors or padding the buffer.
+*   **Noise:** Depth and normal buffers may contain noise from rasterization or volume rendering. Filtering (e.g., Sobel, Gaussian) is recommended [S1, unofficial].
 
 ## Subtopics
 
 ### [Close-Up Image Depth Map Generation](13992-close-up-image-depth-map-generation.md)
-A method to generate a Close-Up Image Depth Map (CGDM) for images lacking a single vanishing point or containing multiple convergence points, relying on occlusion cues and local edge histograms to infer depth. It differs from perspective view methods by using local edge density rather than global geometric projection, where regions with fewer edges are interpreted as farther away.
+A method to generate a Cumulative Gradient Depth Map (CGDM) for close-up images (defined as scenes with no or multiple vanishing points) by leveraging occlusion cues and local edge histograms. It distinguishes itself from [Perspective View Depth Map Generation](14031-perspective-view-depth-map-generation.md) by relying on local edge density rather than global geometric convergence, and from [Distant View Depth Map Generation](#distant-view-depth-map-generation) by handling moderate-distance scenes with perspective distortion rather than infinite-distance horizons.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves a single pass over the depth/normal buffers with constant-time kernel operations.
-- **Memory Complexity:** $O(N)$ for storing the edge mask.
-- **Performance:** Pixel-based methods are generally faster and simpler to implement than analytical methods [S1, unofficial].
-- **Strengths:** Simple implementation, fast execution, works well with depth buffers [S2, unofficial].
-- **Limitations:** Relies on depth buffer precision, may produce jagged edges, lacks geometric continuity [S1, unofficial].
-- **When to use:** When performance is critical and high-quality analytical edges are not required [S1, unofficial].
-- **When not to use:** When precise geometric outlines are needed or when depth buffer is unavailable [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves a single pass over the buffer with constant-time neighbor checks.
+*   **Memory Complexity:** $O(N)$ for storing the edge map, plus the cost of the depth and normal buffers.
+*   **Performance:** Very fast and simple to implement, suitable for real-time applications [S1, S2, unofficial].
+*   **Strengths:** Simplicity, speed, independence from geometry complexity [S1, unofficial].
+*   **Limitations:** Quality depends on buffer resolution and precision; may produce jagged edges; does not provide analytical curve data for stylization without additional processing [S1, unofficial].
+*   **When to use:** Real-time NPR, simple outline effects, when performance is critical [S1, S2, unofficial].
+*   **When not to use:** When high-quality analytical curves are required, or when depth/normal buffers are unavailable or unreliable [S1, unofficial].
 
 ## Background
-Originating from Hertzmann's survey of image space outline generation algorithms [S1, unofficial], this method has been widely adopted in real-time graphics for its simplicity. It is commonly used in post-processing passes to add outlines to rendered scenes [S2, unofficial].
+The method was surveyed by Hertzmann [Her99] and is based on the observation that depth and normal discontinuities correspond to perceptual edges [S1, unofficial]. It is widely used in post-processing pipelines for NPR [S2, unofficial].
 
 ## Sources
 [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)

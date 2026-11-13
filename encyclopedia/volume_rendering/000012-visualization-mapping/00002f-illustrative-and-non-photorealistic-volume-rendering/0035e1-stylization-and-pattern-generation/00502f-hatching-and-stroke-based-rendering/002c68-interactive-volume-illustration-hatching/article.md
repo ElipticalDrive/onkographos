@@ -1,0 +1,197 @@
+# Interactive Volume Illustration (Hatching)
+
+Also called: Hatching, Object space hatching, Stroke-based volume rendering, Two-Pass Hatching Rendering
+
+## Overview
+Interactive Volume Illustration (Hatching) is an object-space technique for illustrating volumetric data by simulating free-hand line art (hatching) using hardware-assisted volume and line rendering [S2, unofficial]. It solves the problem of conveying shape and spatial relationships in 3D volumes by tracing hatches as polylines over implicit surfaces along either a fixed direction or a smoothed principal curvature direction [S1]. Unlike surface-based NPR methods where features are well-defined, this method determines feature areas through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2, S4, unofficial]. It sets itself apart from its siblings by explicitly combining line-strip primitives with direct volume rendering (DVR) in a two-pass pipeline, using data-driven seed point selection to minimize memory and generation time [S2, unofficial].
+
+## How it works
+The method operates in two main phases: stroke generation (preprocessing/seed placement) and rendering (two passes).
+
+### Inputs and Outputs
+*   **Inputs:** 3D scalar volume data $V$, transfer function (for volume rendering), light direction $L$, view direction $V_{dir}$, user-defined fixed direction $\vec{s}_T$, smoothing weight $w_T$, flatness threshold $\epsilon$, cross-hatch angle threshold.
+*   **Outputs:** Final image combining hatching strokes and volumetric data.
+
+### Data Structures
+1.  **Volume Data:** 3D texture map or scalar grid.
+2.  **Gradient/Normal Map:** Precomputed or on-the-fly gradients $\nabla f$ used to derive surface normals $\vec{N}$ and principal curvatures.
+3.  **Seed Points:** A set of 3D positions $\{p_j\}$ representing iso-surfaces. Generated via data-driven selection to ensure optimal representation [S2, unofficial].
+4.  **Stroke Buffer:** Stores line-strip primitives. Memory usage is at most one-eighth of the volume data set size [S2, unofficial].
+
+### Step 1: Curvature Estimation and Smoothing
+To guide hatches, principal curvature directions are computed. Direct tracing along raw principal curvature directions yields messy results when the main direction is not robustly defined [S1]. Therefore, the field is smoothed.
+
+1.  **Reconstruct Derivatives:** Use fast cubic B-spline filtering (Sigg and Hadwiger [SH05]) to reconstruct partial derivatives from volume data [S1].
+2.  **Compute Principal Curvatures:** Calculate principal curvature magnitudes $\kappa_1, \kappa_2$ and shape index $s$ for each particle $p_j$ [S1].
+    $$ s = \frac{2}{\pi} \arctan \left( \frac{\kappa_1 + \kappa_2}{\kappa_2 - \kappa_1} \right) $$
+    where $\kappa_1 \ge \kappa_2$ and $|\kappa_1| + |\kappa_2| > 0$ [S1].
+3.  **Compute Surface Reliability:** Determine if the local curvature is suitable for hatching [S1]:
+    $$ \rho(\kappa_1, \kappa_2) = \begin{cases} 0 & \text{if } |\kappa_1| < \epsilon \text{ and } |\kappa_2| < \epsilon \\ 1 - |2(|s| - 1/2)| & \text{otherwise} \end{cases} $$
+    Here $\epsilon$ defines which nearly flat surfaces are considered flat [S1].
+4.  **Smooth Direction Field:** Compute the smoothed direction $\vec{s}_i$ for a particle $p_i$ by averaging the main principal curvature directions $\vec{\kappa}_{1j}$ of neighboring particles $p_j$ [S1]:
+    $$ \vec{s}_i = w_T \frac{\sum_j \rho_j \vec{\kappa}_{1j}}{\sum_j \rho_j} + (1 - w_T) \vec{s}_T $$
+    The trace reliability weight $w_T$ is determined by averaging the surface reliability of all neighboring particles:
+    $$ w_T = \frac{\sum_j \rho_j}{\sum_j 1} $$
+    This smoothing is executed on the GPU, estimating curvature information of neighboring particles on the fly [S1].
+
+### Step 2: Stroke Generation (Object Space)
+1.  **Seed Placement:** Select seed points at run time to represent iso-surfaces, ensuring an optimal number of points [S2, unofficial].
+2.  **Trace Hatches:** In a geometry shader, use particle positions as seed points. Determine vertices connecting hatch segments by projecting the smoothed direction $\vec{s}_i$ to the tangent plane [S1].
+3.  **Store Strokes:** Represent hatches as line-strip primitives. These can be pre-computed since the approach is not view-dependent [S1].
+
+### Step 3: Rendering (Two Passes)
+**Pass 1: Render Hatching Strokes**
+1.  Fetch line-strips from the texture buffer [S1].
+2.  **Anisotropic Shading:** Illuminate using stored gradients. Apply anisotropic shading model for lines [S2, unofficial].
+3.  **Front/Back Facing:** Determine orientation using surface normal $\vec{N}$ and view vector $\vec{V}$. Calculate two 2D lookup textures (varying diffuse/specular color). Interpolate color contributions based on $\vec{N} \cdot \vec{V}$ in the per-fragment shader [S2, unofficial].
+4.  **Cross-Hatches:** For each seed, compute $\vec{N} \cdot \vec{L}$. If the angle is above a constant, generate an additional stroke along the minimal curvature direction. Cross-hatches are shorter than initial strokes [S2, unofficial].
+5.  **Depth Test:** Enable depth test and update depth buffer. Render transparent volume structures in back-to-front order without changing OpenGL state [S2, unofficial].
+
+**Pass 2: Render Volumetric Data**
+1.  Render the volumetric data set using 3D texture maps (Direct Volume Rendering) [S2, unofficial].
+2.  **Alpha/Depth Test:** Use alpha-test and depth-test during re-sampling to render only texture samples closest to the viewpoint and above/below a threshold [S2, unofficial].
+3.  **Hatch Visibility:** To ensure only hatches in front of the iso-surface remain visible for opaque rendering, write white color to the frame buffer after rendering hatches, then render volume with alpha/depth test [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing: Curvature and Smoothing
+def compute_smoothed_direction(particles, neighbors, s_T, epsilon):
+    smoothed_directions = []
+    for p_i in particles:
+        sum_reliability = 0
+        sum_weighted_curvature = vec3(0, 0, 0)
+        neighbor_count = 0
+        
+        for p_j in neighbors(p_i):
+            # Compute principal curvatures k1, k2 from volume derivatives
+            k1, k2 = compute_principal_curvatures(p_j)
+            
+            # Compute shape index s
+            if abs(k1) + abs(k2) > 0:
+                s = (2.0 / PI) * atan((k1 + k2) / (k2 - k1))
+            else:
+                s = 0
+            
+            # Compute surface reliability rho
+            if abs(k1) < epsilon and abs(k2) < epsilon:
+                rho = 0
+            else:
+                rho = 1.0 - abs(2.0 * (abs(s) - 0.5))
+            
+            # Get main principal curvature direction k1_vec
+            k1_vec = get_principal_curvature_direction(p_j, k1)
+            
+            sum_reliability += rho
+            sum_weighted_curvature += rho * k1_vec
+            neighbor_count += 1
+            
+        # Compute trace reliability weight w_T
+        if neighbor_count > 0:
+            w_T = sum_reliability / neighbor_count
+        else:
+            w_T = 0.0
+            
+        # Compute smoothed direction
+        if sum_reliability > 0:
+            avg_curvature = sum_weighted_curvature / sum_reliability
+            # Normalize avg_curvature to get unit vector
+            avg_curvature = normalize(avg_curvature)
+            direction = w_T * avg_curvature + (1.0 - w_T) * s_T
+        else:
+            direction = s_T
+            
+        smoothed_directions.append(direction)
+    return smoothed_directions
+
+# Stroke Generation
+def generate_strokes(seeds, smoothed_directions, max_segments=10):
+    line_strips = []
+    for seed, direction in zip(seeds, smoothed_directions):
+        strip = [seed]
+        current_pos = seed
+        current_dir = project_to_tangent_plane(direction, current_pos)
+        
+        for _ in range(max_segments):
+            # Trace along direction
+            next_pos = current_pos + current_dir * segment_length
+            strip.append(next_pos)
+            current_pos = next_pos
+            # Update direction based on smoothed field at new position
+            # (Simplified: assume direction is constant or interpolated)
+            current_dir = project_to_tangent_plane(smoothed_directions[find_nearest_particle(current_pos)], current_pos)
+            
+        line_strips.append(strip)
+    return line_strips
+
+# Rendering Pass 1: Hatching
+def render_hatching(line_strips, normals, view_vector, light_direction):
+    for strip in line_strips:
+        for segment in strip:
+            normal = normals[segment]
+            
+            # Anisotropic shading
+            diffuse_specular = lookup_anisotropic_shading(normal, view_vector, light_direction)
+            
+            # Cross-hatch logic
+            if dot(normal, light_direction) > threshold:
+                cross_dir = get_minimal_curvature_direction(segment)
+                # Generate shorter cross-hatch stroke
+                generate_cross_hatch(segment, cross_dir)
+                
+            # Front/Back facing color
+            if dot(normal, view_vector) > 0:
+                color = front_facing_color
+            else:
+                color = back_facing_color
+                
+            draw_line_segment(segment, color, diffuse_specular)
+            
+    # Write white to frame buffer to keep hatches in front of iso-surface
+    write_white_to_framebuffer()
+
+# Rendering Pass 2: Volume
+def render_volume(volume_data, threshold):
+    # Back-to-front rendering
+    for sample in volume_data.back_to_front():
+        if sample.value > threshold:
+            alpha = transfer_function(sample.value)
+            if alpha > 0:
+                # Depth test ensures only closest samples are rendered
+                if depth_test_pass(sample.position):
+                    draw_volume_sample(sample, alpha)
+```
+
+### Parameters and Typical Values
+*   **$\epsilon$:** Parameter defining which nearly flat surfaces are considered flat. Not given in the sources.
+*   **$w_T$:** Smoothing weight. Not given in the sources.
+*   **Viewport Resolution:** 600x600 pixels [S2, unofficial].
+*   **Strokes per Example:** 20K to 50K strokes generated [S2, unofficial].
+*   **Average Line Segments:** 10 line segments per stroke [S2, unofficial].
+*   **Memory Usage:** At most one eighth of the memory consumed by the volume data set is required to store the selected strokes [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Messy Results:** Directly tracing along principal curvature directions yields messy results when the main direction is not robustly defined [S1]. Smoothing is required.
+*   **Hatch Visibility:** To ensure only hatches in front of the iso-surface remain visible for opaque rendering, write white color into the frame buffer after rendering hatches, then render volume with alpha/depth test [S2, unofficial].
+*   **Intersections:** Long hatch strokes might lead to intersections [S1].
+
+## Subtopics
+
+### Object-space hatching lines
+A non-photorealistic technique combining line drawings with direct volume rendering (DVR) by placing hatching lines along principal curvature directions of structures before compositing with the volume model [S3, unofficial]. It involves identifying structures of interest, computing principal curvature directions, generating hatching lines aligned with these directions in object space, and combining them with the direct volume rendering of the volume model [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Preprocessing time is significant for large datasets (1.3 minutes for a $256^3$ volume dataset, including curvature estimation and octree construction) [S2, unofficial]. Seed placement takes between 0.5 and 4 seconds [S2, unofficial].
+*   **Memory Complexity:** Memory usage is at most one-eighth of the volume data set size to store selected strokes [S2, unofficial].
+*   **Performance:** Rendering performance is 4 to 8 fps for various datasets (engine block, hydrogen molecule, iron protein, aneurysm, human foot, human skull) on a 600x600 viewport [S2, unofficial]. Toon shader performance is about 7 fps [S2, unofficial].
+*   **Strengths:** Interactive, hardware-assisted, minimizes memory and generation time via data-driven seed point selection, effectively conveys shape and spatial correlations [S2, unofficial].
+*   **Limitations:** Preprocessing time can be high for very large datasets; direct curvature tracing can be messy without smoothing [S1].
+
+## Background
+The method was presented by R.F.P. van Pelt, A. Vilanova, and H.M.M. van de Wetering in 2008 [S1]. It builds on the work of Sigg and Hadwiger [SH05] for fast cubic B-spline filtering and anisotropic shading models for lines [S2, unofficial]. The shape index was introduced by Koenderink and Van Doorn [KvD92] [S1]. The technique is part of the broader field of interactive non-photorealistic volume rendering, aiming to bring NPR techniques and real-time 3D graphics to the visualization community [S2, unofficial].
+
+## Sources
+[S1] GPU-based Particle Systems for Illustrative Volume Rendering, https://doi.org/10.2312/vg/vg-pbg08/089-096, fetched 2026-10-26
+[S2] Interactive volume illustration, https://openalex.org/W2147354080, fetched 2026-10-27 (unofficial)
+[S3] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)

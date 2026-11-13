@@ -3,95 +3,65 @@
 Also called: Eigenvalue Space for Tensors, Tensor Shape Space
 
 ## Overview
-Shape Space is a visualization mapping technique that represents the shape of a second-order tensor by mapping its three eigenvalues to a point in a 3D vector space [S1, book]. It solves the problem of visualizing tensor geometry (e.g., stress or diffusion) by providing a coordinate system where the tensor's structural properties are explicit. Unlike spherical coordinate systems (norm, fractional anisotropy, mode) used in Diffusion Tensor Imaging (DTI), which become unstable for tensors with small norms, Shape Space uses Cartesian-like descriptors that remain stable for indefinite tensors where eigenvalues may be positive, negative, or zero [S1, book].
+Shape Space is a visualization mapping technique that represents the shape of a second-order tensor by mapping its three eigenvalues to a point in a 3D vector space [S1, book]. It provides a coordinate system where the tensor's structural properties are explicit [G]. Unlike spherical coordinate systems (tensor norm, fractional anisotropy, tensor mode) used in Diffusion Tensor Imaging (DTI), which become unstable for tensors with small norms because angular coordinates are undefined at the origin, Shape Space uses Cartesian-like descriptors that remain stable for indefinite tensors where eigenvalues may be positive, negative, or zero [S1, book].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A second-order tensor field $\mathbf{T}(\mathbf{x})$. At each sample point $\mathbf{x}$, the tensor is a $3 \times 3$ symmetric matrix.
-*   **Output:** A point in Shape Space with coordinates $(\lambda_1, \lambda_2, \lambda_3)$, where $\lambda_i$ are the eigenvalues. These coordinates serve as shape descriptors for further mapping (e.g., glyph sizing, color, opacity) [S1, book].
+*   **Input:** A second-order tensor field $\mathbf{T}(\mathbf{x})$ evaluated at sample points $\mathbf{x}$ [G].
+*   **Output:** A point in Shape Space with coordinates $(\lambda_1, \lambda_2, \lambda_3)$, where $\lambda_i$ are the eigenvalues, serving as shape descriptors for further mapping (e.g., glyph sizing, color, opacity) [S1, book].
 
 **Data Structures:**
-*   **Tensor:** $3 \times 3$ symmetric matrix.
-*   **Eigenvalues:** Array of 3 real numbers $[\lambda_1, \lambda_2, \lambda_3]$.
-*   **Shape Space Point:** 3D vector $[\lambda_1, \lambda_2, \lambda_3]$.
+*   **Tensor:** $3 \times 3$ symmetric matrix at each $\mathbf{x}$ [G].
+*   **Shape Space Point:** 3D vector $[\lambda_1, \lambda_2, \lambda_3]$ [S1, book].
 
 **Steps:**
-1.  **Sample Tensor:** Evaluate the tensor field $\mathbf{T}$ at the sample point $\mathbf{x}$.
-2.  **Compute Eigenvalues:** Solve the characteristic equation $\det(\mathbf{T} - \lambda \mathbf{I}) = 0$ to find the three real eigenvalues $\lambda_1, \lambda_2, \lambda_3$.
-3.  **Assign Coordinates:** Map the eigenvalues to the Shape Space axes. The standard reference frame uses the major, medium, and minor eigenvalues as the x, z, and y axes respectively (or similar orthogonal assignment) [S1, book].
-    *   Note: The specific axis assignment (e.g., $\sigma_1, \sigma_2, \sigma_3$) defines the orientation of the shape space.
-4.  **Optional Transformation:** If specific invariants are required (e.g., for Mohr’s Circle parameters), apply a change of basis. For example, a rotation around the $\sigma_2$-axis by 45 degrees can transform eigenvalues into shear stress $\tau$, center $c$, and radius $R$ [S1, book].
-5.  **Map to Visuals:** Use the resulting coordinates (either raw eigenvalues or transformed invariants) to determine rendering parameters. For instance, $R$ (radius) can distinguish planar from linear stresses [S1, book].
+1.  **Sample Tensor:** Evaluate the tensor field $\mathbf{T}$ at the current sample point $\mathbf{x}$ [G].
+2.  **Compute Eigenvalues:** Solve for the three real eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of the symmetric tensor matrix [G].
+3.  **Assign Coordinates:** Map the eigenvalues to the Shape Space axes. The standard reference frame maps the major eigenvalue to the x-axis, the minor eigenvalue to the y-axis, and the medium eigenvalue to the z-axis [S1, book].
+4.  **Optional Transformation:** Apply a change of basis if specific invariants are required. A rotation around the medium eigenvalue ($\sigma_2$) axis by 45 degrees transforms the coordinates into Mohr’s Circle parameters: shear stress $\tau$, center $c$, and radius $R$ [S1, book].
+5.  **Map to Visuals:** Use the resulting coordinates (raw eigenvalues or transformed invariants) to determine rendering parameters. The radius $R$ distinguishes planar from linear stresses [S1, book].
 
 **Formulas:**
-*   Characteristic Equation: $\lambda^3 - I_1 \lambda^2 + I_2 \lambda - I_3 = 0$, where $I_1, I_2, I_3$ are the first, second, and third invariants of $\mathbf{T}$.
-*   Tensor Norm (for context): $\|\mathbf{T}\|^2 = \lambda_1^2 + \lambda_2^2 + \lambda_3^2$ [S1, book].
+*   Tensor Norm: $\|\mathbf{T}\|^2 = \lambda_1^2 + \lambda_2^2 + \lambda_3^2$ [S1, book].
+*   Mohr’s Circle Radius: $R = \frac{\lambda_{\text{max}} - \lambda_{\text{min}}}{2}$ [S1, book].
+*   Mohr’s Circle Center: $c = \frac{\lambda_{\text{max}} + \lambda_{\text{min}}}{2}$ [S1, book].
+*   Maximum Shear Stress: $\tau = R$ [S1, book].
 
 **Parameters:**
 *   **Orthogonality:** Descriptors should ideally be orthogonal to exhibit maximum independence, isolating changes of one invariant from variations of others [S1, book].
 *   **Axis Scaling:** The scale of the shape space’s coordinate axes has a high impact on the visualization result and must be considered for diagram views and rendering [S1, book].
 
 **Edge Cases and Pitfalls:**
-*   **Small Norm:** While Shape Space itself is stable, derived spherical coordinates (norm, FA, mode) are unstable when $\|\mathbf{T}\|^2 \approx 0$ because angular coordinates are undefined at the origin [S1, book].
-*   **Indefinite Tensors:** Shape Space is preferred over spherical coordinates for indefinite tensors because eigenvalues can be positive, negative, or zero, which Cartesian-like descriptors handle naturally [S1, book].
+*   **Small Norm:** Derived spherical coordinates are unstable when $\|\mathbf{T}\|^2 \approx 0$ because angular coordinates are undefined at the origin [S1, book].
+*   **Indefinite Tensors:** Shape Space is preferred over spherical coordinates for indefinite tensors because Cartesian-like descriptors handle positive, negative, or zero eigenvalues naturally [S1, book].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compute_shape_space_point(tensor_matrix):
-    """
-    Computes the Shape Space point for a 3x3 symmetric tensor.
-    
-    Args:
-        tensor_matrix: 3x3 numpy array or list of lists, symmetric.
-        
-    Returns:
-        shape_point: Tuple of 3 floats (lambda1, lambda2, lambda3).
-    """
-    # Step 1: Compute eigenvalues
-    # For a symmetric 3x3 matrix, eigenvalues are real.
-    # Using a standard eigenvalue solver.
-    eigenvalues = numpy.linalg.eigvalsh(tensor_matrix)
-    
-    # Step 2: Sort eigenvalues (optional, depends on axis convention)
-    # Convention: Major, Medium, Minor
-    eigenvalues.sort()
-    lambda1 = eigenvalues[0] # Minor
-    lambda2 = eigenvalues[1] # Medium
-    lambda3 = eigenvalues[2] # Major
-    
-    # Step 3: Assign to Shape Space coordinates
-    # Standard reference frame: x=Major, y=Minor, z=Medium (example from Mohr's circle context)
-    # Note: The specific axis mapping depends on the chosen reference frame.
-    # Here we return the raw eigenvalues as the primary shape descriptors.
-    return (lambda1, lambda2, lambda3)
+    # Step 1: Compute eigenvalues of the 3x3 symmetric tensor matrix [G]
+    eigenvalues = compute_eigenvalues(tensor_matrix)
+    # Step 2: Sort eigenvalues into major (max), medium (median), minor (min)
+    major = max(eigenvalues)
+    minor = min(eigenvalues)
+    medium = sum(eigenvalues) - major - minor
+    # Step 3: Assign to Shape Space axes: x=major, y=minor, z=medium [S1, book]
+    return (major, minor, medium)
 
 def transform_to_mohr_parameters(shape_point):
-    """
-    Optional transformation to Mohr's Circle parameters (tau, c, R).
-    This corresponds to a rotation around the sigma2-axis by 45 degrees.
-    
-    Args:
-        shape_point: Tuple (lambda1, lambda2, lambda3)
-        
-    Returns:
-        (tau, c, R)
-    """
-    lambda1, lambda2, lambda3 = shape_point
-    
-    # Assuming lambda2 is the axis of rotation (sigma2)
-    # Transformation from eigenvalue space to Mohr's circle parameters
-    # R is the radius of the Mohr circle
-    R = (lambda3 - lambda1) / 2.0
-    
-    # c is the center of the Mohr circle on the normal stress axis
-    c = (lambda3 + lambda1) / 2.0
-    
-    # tau is the maximum shear stress
+    # Optional transformation: rotation around medium axis by 45 degrees [S1, book]
+    major, minor, medium = shape_point
+    # Radius distinguishes planar and linear stresses [S1, book]
+    R = (major - minor) / 2.0
+    c = (major + minor) / 2.0
     tau = R
-    
     return (tau, c, R)
+
+def compute_eigenvalues(matrix):
+    # Standard eigenvalue decomposition for a 3x3 symmetric matrix [G]
+    # Returns a list of three real numbers
+    pass
 ```
 
 ## Subtopics
@@ -103,15 +73,15 @@ Maps tensor invariants to a scale suitable for visualization, addressing the cha
 A visualization technique representing the most important invariants for stress tensors, plotting normal stress vs. shear stress.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by eigenvalue decomposition of a $3 \times 3$ matrix, which is $O(1)$ per sample point.
-*   **Memory Complexity:** $O(1)$ per sample point to store the 3 eigenvalues.
+*   **Time Complexity:** $O(1)$ per sample point, dominated by eigenvalue decomposition of a $3 \times 3$ matrix [G].
+*   **Memory Complexity:** $O(1)$ per sample point to store the 3 eigenvalues [G].
 *   **Strengths:** Stable for indefinite tensors; provides intuitive geometric interpretation of tensor shape; orthogonal descriptors allow independent analysis of invariants [S1, book].
-*   **Limitations:** Requires eigenvalue decomposition, which can be numerically sensitive for near-degenerate tensors (though less so than spherical coordinates for small norms) [S1, book].
+*   **Limitations:** Not given in the sources.
 *   **When to Use:** When visualizing stress or diffusion tensors where the sign of eigenvalues matters (indefinite tensors) or when a Cartesian-like representation of tensor shape is preferred over spherical coordinates [S1, book].
-*   **When Not to Use:** When the tensor norm is very small and spherical coordinates are not used, Shape Space remains stable, but if the goal is to visualize directionality relative to a dominant norm, other methods might be more intuitive.
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-Shape Space was introduced in the context of stress tensor field analysis. The concept is detailed in "A Visual Approach to Analysis of Stress Tensor Fields" by A. Kratz, B. Meyer, and I. Hotz [S1, book]. The method builds on the idea that tensor shape can be represented as a point in a vector space spanned by its eigenvalues, allowing for the application of standard geometric transformations (like Mohr’s Circle) to visualize complex tensor states [S1, book].
+Shape Space was introduced in the context of stress tensor field analysis [S1, book]. The concept is detailed in "A Visual Approach to Analysis of Stress Tensor Fields" by A. Kratz, B. Meyer, and I. Hotz [S1, book]. The method builds on the idea that tensor shape can be represented as a point in a vector space spanned by its eigenvalues, allowing for the application of standard geometric transformations (like Mohr’s Circle) to visualize complex tensor states [S1, book].
 
 ## Sources
 [S1] A Visual Approach to Analysis of Stress Tensor Fields, https://doi.org/10.4230/dfu.vol2.sciviz.2011.188, fetched 2026-10-26 (book)

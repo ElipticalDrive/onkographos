@@ -3,101 +3,149 @@
 Also called: Suggestive contours
 
 ## Overview
-Suggestive contour extraction identifies surface locations where radial curvature is zero but increasing towards the viewer, complementing standard geometric contours to enhance shape perception [S1]. Unlike standard contours which mark the silhouette of the object relative to the camera, suggestive contours reveal the "hidden" curvature of the surface, particularly on convex regions, providing a more complete line drawing of the volume's form [S1].
+Suggestive contour extraction identifies surface locations where radial curvature is zero but increasing towards the viewer, complementing standard object contours to enhance shape perception in non-photorealistic volume rendering [S1]. Unlike standard contours which mark visible boundaries, suggestive contours reveal hidden or occluded geometry, such as the rims of indentations, by detecting where the surface is about to curve towards the camera [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A volumetric scalar field $\phi$, an isovalue $\tau$ defining the isosurface $\phi - \tau = 0$, and a camera view vector $\mathbf{v}$.
-*   **Output:** A set of line segments representing the suggestive contours on the isosurface.
+**Inputs:** A scalar volume field $\phi$, an isovalue $\tau$ defining the isosurface $\phi - \tau = 0$, and a view vector $\mathbf{v}$ for each sample point.
+**Outputs:** A set of line segments representing the suggestive contours.
 
 **Data Structures:**
-*   **Voxel Grid:** The scalar field $\phi$ is stored in a 3D grid.
-*   **Normal/Gradient:** Computed numerically on demand using finite differences over a local neighborhood [S1]. Precomputing is possible but increases memory usage by 4x [S1].
+The method operates on a 3D grid of voxels. For each voxel $(i, j, k)$, the following values are required or computed:
+*   $\phi(i, j, k)$: Scalar value.
+*   $\mathbf{n}(i, j, k)$: Unit-length surface normal, computed as $\mathbf{n} = -\nabla \phi / \|\nabla \phi\|$.
+*   $\mathbf{v}(i, j, k)$: View vector pointing from the surface point to the camera.
+*   $s(i, j, k)$: Radial curvature proxy, defined below.
 
 **Formulas:**
 The radial curvature function $s$ is defined as:
 $$ s(i, j, k) = \nabla \hat{\mathbf{n}}(i, j, k) \cdot \mathbf{v}(i, j, k) \cdot \mathbf{v}(i, j, k) $$
-where $\hat{\mathbf{n}}$ is the unit-length normal vector and $\mathbf{v}$ is the view vector [S1]. The sign of $s$ corresponds to the sign of the radial curvature [S1].
+where $\hat{\mathbf{n}}$ is the unit-length normal and $\mathbf{v}$ is the view vector. The sign of $s$ corresponds to the sign of the radial curvature [S1].
 
-**Parameters:**
-*   $\varepsilon$: A small positive threshold used to filter spurious zero crossings caused by noise [S1].
+The directional derivative of $s$ towards the viewer, denoted $D_s$, is computed numerically.
 
-**Steps:**
-1.  **Extract Zero Set:** Identify surface locations where $s(i, j, k) = 0$. This is the zero set of the radial curvature function [S1].
-2.  **Frontface Test:** For front-facing surfaces (where the normal points towards the camera), check that the directional derivative of $s$ towards the viewer is positive. In practice, compare the derivative to the threshold: $D_s > \varepsilon$ [S1].
-3.  **Backface Test:** For back-facing surfaces, negate the sign of the derivative test to maintain analogous lines to those found on frontfaces. Check that $D_s < -\varepsilon$ [S1].
-4.  **Filtering:** Discard segments that do not meet the threshold criteria to avoid noise-induced artifacts [S1].
-5.  **Interior Contour Detection (Optional):** Test for interior contours (e.g., bottom of indentations) which are never visible from outside. These are identified by testing if $s < 0$ once a segment has been extracted [S1]. These can be omitted or stylized based on visibility and length [S1].
+**Algorithm Steps:**
+1.  **Sample Selection:** Identify candidate points on the isosurface. This is typically done via random probing or gradient descent from previous frame seeds [S1].
+2.  **Zero-Crossing Detection:** Locate points where $s(i, j, k) \approx 0$. These are the locations where radial curvature is zero.
+3.  **Derivative Test (Frontfaces):** For points where the surface normal $\mathbf{n}$ points towards the camera (frontfacing), check if the directional derivative of $s$ towards the viewer is positive. In practice, compare $D_s$ to a small positive threshold $\epsilon$:
+    $$ D_s > \epsilon $$
+    This filters out spurious zero crossings caused by noise [S1].
+4.  **Derivative Test (Backfaces):** For points where the surface normal $\mathbf{n}$ points away from the camera (backfacing), negate the sign of the derivative test to maintain analogous lines to frontfacing contours:
+    $$ D_s < -\epsilon $$
+    Note: Previous work assumed opaque surfaces and did not address backfacing suggestive contours [S1].
+5.  **Interior Contour Filtering (Optional):** To omit contours that are never visible from outside the surface (e.g., the bottom of an indentation), test if $s < 0$ for extracted segments. If $s < 0$, the segment is an interior contour and may be omitted [S1].
+6.  **Line Generation:** Connect valid points into line segments or strips.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extract_suggestive_contours(volume, isovalue, view_vector, epsilon):
+def extract_suggestive_contours(volume, isovalue, view_direction, epsilon=1e-6):
     """
-    Extracts suggestive contours from a volumetric dataset.
+    Extracts suggestive contours from a volume dataset.
     
     Args:
         volume: 3D array of scalar values.
-        isovalue: The threshold value for the isosurface.
-        view_vector: 3D vector pointing from surface to camera.
-        epsilon: Threshold for derivative test to filter noise.
+        isovalue: Threshold for isosurface extraction.
+        view_direction: 3D vector pointing from object to camera.
+        epsilon: Threshold for derivative test.
         
     Returns:
-        List of line segments.
+        List of line segments (pairs of 3D points).
     """
     segments = []
+    # 1. Identify points near the isosurface
+    # In practice, this involves marching cubes or ray casting to find
+    # surface points p where |volume(p) - isovalue| < tolerance.
+    surface_points = find_isosurface_points(volume, isovalue)
     
-    # Iterate through voxels to find isosurface points
-    for i, j, k in volume.indices():
-        if is_on_isosurface(volume[i, j, k], isovalue):
-            # Compute normal and gradient numerically on demand
-            normal = compute_normal(volume, i, j, k)
-            grad_normal = compute_gradient_of_normal(volume, i, j, k)
+    for p in surface_points:
+        # 2. Compute normal and view vector at point p
+        # Normal is negative gradient of volume
+        grad_phi = compute_gradient(volume, p)
+        n_hat = normalize(-grad_phi)
+        
+        # View vector v points from surface to camera
+        # Assuming camera is at origin or known position, v = camera_pos - p
+        v = normalize(view_direction) 
+        
+        # 3. Compute radial curvature proxy s
+        # s = (grad(n_hat) . v) . v
+        # Note: grad(n_hat) is the Jacobian of the normal field.
+        # In discrete implementation, this is often approximated or 
+        # s is computed via finite differences of the normal field along v.
+        s = compute_radial_curvature_proxy(volume, p, n_hat, v)
+        
+        # 4. Check for zero crossing (radial curvature ~ 0)
+        if abs(s) < tolerance:
+            # 5. Compute directional derivative of s towards viewer (Ds)
+            Ds = compute_derivative_of_s(volume, p, v)
             
-            # Calculate radial curvature function s
-            # s = grad_normal . view_vector . view_vector
-            s = dot(grad_normal, dot_product(view_vector, view_vector))
-            
-            # Check if s is approximately zero (within a small tolerance for zero crossing)
-            if abs(s) < ZERO_TOLERANCE:
-                # Compute derivative of s towards viewer
-                ds = compute_derivative_of_s(volume, i, j, k, view_vector)
-                
-                # Determine if front or back facing
-                is_front_facing = dot(normal, view_vector) > 0
-                
-                if is_front_facing:
-                    # Frontface: derivative must be positive and above threshold
-                    if ds > epsilon:
-                        segments.append(create_segment(i, j, k))
-                else:
-                    # Backface: derivative must be negative and below negative threshold
-                    if ds < -epsilon:
-                        segments.append(create_segment(i, j, k))
-                        
-    return segments
+            # 6. Apply derivative test based on facing
+            if dot(n_hat, v) > 0:
+                # Frontfacing: Ds > epsilon
+                if Ds > epsilon:
+                    segments.append(p)
+            else:
+                # Backfacing: Ds < -epsilon
+                if Ds < -epsilon:
+                    segments.append(p)
+                    
+    # 7. Connect points into segments
+    return connect_points_into_segments(segments)
+
+def compute_radial_curvature_proxy(volume, p, n_hat, v):
+    """
+    Computes s = grad(n_hat) . v . v.
+    This requires the gradient of the normal vector field.
+    """
+    # Numerical approximation of grad(n_hat)
+    # This is computationally expensive if done naively.
+    # Often approximated using finite differences of n_hat.
+    # [G] Implementation detail: Compute n_hat at p and neighbors along v.
+    # s approx (n_hat(p + delta*v) - n_hat(p - delta*v)) / (2*delta) . v
+    delta = 1.0
+    n_plus = compute_normal(volume, p + delta * v)
+    n_minus = compute_normal(volume, p - delta * v)
+    grad_n_dot_v = (n_plus - n_minus) / (2 * delta)
+    return dot(grad_n_dot_v, v)
+
+def compute_derivative_of_s(volume, p, v):
+    """
+    Computes the directional derivative of s towards the viewer.
+    """
+    # Similar to above, compute s at p and neighbors along v
+    delta = 1.0
+    s_plus = compute_radial_curvature_proxy(volume, p + delta * v, 
+                                            compute_normal(volume, p + delta * v), v)
+    s_minus = compute_radial_curvature_proxy(volume, p - delta * v, 
+                                             compute_normal(volume, p - delta * v), v)
+    return (s_plus - s_minus) / (2 * delta)
 ```
 
+**Parameters:**
+*   $\epsilon$: Small positive threshold for derivative test. Typical value not specified in sources, but described as "small" [S1].
+*   Tolerance: For zero-crossing detection of $s$. Not given in the sources.
+
 **Edge Cases and Pitfalls:**
-*   **Noise:** Spurious zero crossings can occur due to numerical noise. The threshold $\varepsilon$ is critical for filtering these [S1].
-*   **Backfacing Contours:** Previous work assumed opaque surfaces and did not address backfacing suggestive contours. Correct implementation requires negating the derivative test for backfaces [S1].
-*   **Interior Contours:** Contours at the bottom of indentations have negative radial curvature and are never visible from the outside. These can be detected by testing $s < 0$ and optionally omitted [S1].
-*   **Performance:** Computing normals and gradients numerically on demand is less efficient than precomputing, which would cost 4x memory [S1].
+*   **Noise:** Spurious zero crossings in $s$ due to noise are filtered by the $D_s > \epsilon$ test [S1].
+*   **Backfaces:** Standard contour methods often ignore backfaces. Suggestive contours require explicit handling of backfacing normals by negating the derivative test [S1].
+*   **Interior Contours:** Contours at the bottom of indentations have negative radial curvature ($s < 0$) and are never visible from outside. These can be detected and omitted if desired [S1].
+*   **Performance:** Computing normals and gradients via finite differences on demand is less efficient than precomputing, which would increase memory usage by 4x [S1].
 
 ## Subtopics
 
 ### Interior Contour Detection
-A method to detect and omit 'interior' contours (those never visible from outside the surface, e.g., bottom of an indentation) by testing for negative radial curvature [S1]. Once a segment is extracted, it is tested to see if $s < 0$. If so, it is identified as an interior contour and can be omitted or stylized [S1]. Normals and gradients are computed numerically on demand using finite differences, which is less efficient than precomputing (which would cost 4x memory) [S1].
+A method to detect and omit 'interior' contours (those never visible from outside the surface, e.g., bottom of an indentation) by testing for negative radial curvature [S1]. It is chosen when the goal is to simplify the line drawing by removing hidden geometry details. The test involves checking if $s < 0$ for an extracted segment [S1]. A pitfall is that normals and gradients are computed numerically on demand using finite differences, which is less efficient than precomputing (which would cost 4x memory) [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of voxels and the efficiency of gradient computation. Randomized probing with temporal coherence can accelerate the search for new contours [S1].
-*   **Memory Complexity:** Numerical computation on demand is memory efficient. Precomputing normals increases memory usage by 4x [S1].
-*   **Strengths:** Complements standard contours to produce more effective renderings of shape, revealing hidden curvature [S1].
-*   **Limitations:** Numerical computation of gradients can be noisy and less efficient than precomputed methods [S1].
+*   **Time Complexity:** Depends on the sampling strategy. Random probing and gradient descent are used to locate seeds [S1]. The cost of computing normals and gradients via finite differences is significant; precomputing would improve runtime but increase memory.
+*   **Memory Complexity:** If normals are computed on demand, memory usage is low. Precomputing normals increases memory usage by 4x [S1].
+*   **Performance:** In tests on a skull dataset, checking $64n$ points took 416 msec/frame, while checking $n$ points took 110 msec/frame, showing that fewer probes reduce cost but may miss contours [S1]. Temporal coherence (retaining previous frame contours) accelerates detection [S1].
+*   **Strengths:** Complements standard contours by revealing hidden shape features, improving perceptual clarity of complex shapes [S1].
+*   **Limitations:** Requires careful handling of backfaces and noise filtering. Numerical computation of derivatives can be noisy and expensive [S1].
 
 ## Background
-Suggestive contours were introduced by DeCarlo et al. [2003] to complement standard contours in line drawings [S1]. The method builds on the concept of radial curvature, where contours are defined as surface locations where radial curvature is zero [S1]. The specific implementation described here extends the original work to handle backfacing surfaces and interior contours [S1].
+Suggestive contours were introduced by DeCarlo et al. [2003] to complement standard contours in line drawings, producing more effective renderings of shape [S1]. The original work assumed opaque surfaces and did not address backfacing suggestive contours [S1]. The method is based on the observation that radial curvature is zero at the boundary between convex and concave regions, and a positive derivative towards the viewer indicates a region curving towards the camera [S1]. Interior contours, which have negative radial curvature, were later discussed as a refinement to omit hidden details [S1].
 
 ## Sources
 [S1] Line drawings from volume data, https://doi.org/10.1145/1073204.1073222, fetched 2026-10-28

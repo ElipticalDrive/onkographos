@@ -3,133 +3,148 @@
 Also called: Complexity Detection
 
 ## Overview
-The Complex Face and Edge Criterion is a subdivision control mechanism used during octree construction to detect surface pieces smaller than the current voxel resolution [S1]. It ensures that all cells intersected by the surface $\partial V$ are processed by identifying "complex" configurations—specifically, homogeneous faces containing disconnected surface components and edges intersecting the surface multiple times [S1]. Unlike standard inhomogeneity checks that only detect if a cell contains both inside and outside voxels, this criterion handles topological complexity within homogeneous regions, preventing the loss of fine geometric details that would otherwise be culled or simplified [S1].
+The Complex Face and Edge Criterion is a geometric classification method used during octree construction to identify cells containing surface fragments smaller than the current subdivision level [S1]. It ensures that neighbor-based culling and simplification strategies do not incorrectly prune internal geometry of complex blocks by detecting non-manifold configurations and sub-cell-surface pieces [S1]. It is applied after basic inhomogeneity checks to decide if a cell must be subdivided further [S1].
 
 ## How it works
-The method operates during the iterative top-down octree construction phase, after an initial regular division to a user-defined minimal depth (typically 2 or 3) [S1]. It relies on neighbor access, often implemented via a hash table for constant-time lookups [S1].
-
-**Inputs:**
-*   Current octree cell $C$.
-*   The implicit surface definition $\partial V$ (e.g., a scalar field or voxel classification).
-*   Neighbor cell data (to access adjacent faces and edges).
-
-**Outputs:**
-*   Boolean flag: `is_complex`. If true, the cell $C$ must be subdivided further.
+**Inputs:** A voxel cell $C$ in an octree; the implicit surface $\partial V$ defined by a scalar field.
+**Outputs:** A boolean flag indicating if $C$ is "complex" (requires subdivision or special handling).
 
 **Data Structures:**
-*   **Cell Face:** A set of 4 voxels (or vertices) forming one of the 6 faces of the cubic cell.
-*   **Cell Edge:** A line segment connecting 2 vertices of the cell.
-*   **Voxel State:** Binary classification: Inside ($I$) or Outside ($O$) of $\partial V$.
+*   **Cell Face:** A square plane defined by 4 vertices of the cell.
+*   **Homogeneous Face:** A face where all 4 vertices are strictly inside ($\phi > 0$) or strictly outside ($\phi < 0$) the surface $\partial V$.
+*   **Connected Component:** A set of voxels on a face connected via shared edges or vertices.
 
 **Steps:**
+1.  **Identify Homogeneous Faces:** For each of the 6 faces of cell $C$, evaluate the scalar field $\phi$ at the 4 corner vertices. If all 4 vertices have the same sign (all inside or all outside), the face is homogeneous.
+2.  **Extract Connected Components:** For each homogeneous face, extract the connected components of voxels contained within that face. Note: In the context of the source, this refers to analyzing the topology of the surface intersection relative to the face grid [S1].
+3.  **Complex Face Check:** If a homogeneous face contains a connected component of surface intersection that is smaller than the current subdivision level (i.e., the surface passes through the face but the topology suggests a fragment too small to be represented accurately at this level), the cell is marked complex [S1].
+4.  **Complex Edge Check:** For each of the 12 edges of cell $C$, determine if the edge intersects $\partial V$ more than once. This is done by checking the sign of $\phi$ at the edge endpoints and potentially sampling intermediate points if the function is not linear. If an edge intersects $\partial V$ multiple times, it induces a non-manifold surface configuration [S1].
+5.  **Result:** If any face is complex or any edge is complex, the cell $C$ is classified as complex [S1].
 
-1.  **Face Complexity Check:**
-    For each of the 6 faces of cell $C$:
-    a.  Verify if the face is **homogeneous**. A face is homogeneous if all 4 of its constituent vertices are strictly inside ($I$) or strictly outside ($O$) of $\partial V$ [S1].
-    b.  If homogeneous, extract the **connected components** of voxels on that face that belong to the surface $\partial V$ [S1]. Note: Since the vertices are homogeneous, the surface intersection must occur within the interior of the face or along its edges, creating a "piece" of surface smaller than the cell [S1].
-    c.  If the number of connected components on any face is greater than 1, the cell is complex.
+**Parameters:**
+*   **Minimal Depth:** The octree construction typically divides the space regularly until a user-defined minimal depth (usually 2 or 3) is reached before applying these criteria [S1].
 
-2.  **Edge Complexity Check:**
-    For each of the 12 edges of cell $C$:
-    a.  Determine if the edge intersects $\partial V$ more than once [S1].
-    b.  This is detected by analyzing the sign changes or topological transitions along the edge relative to the surface definition.
-    c.  If any edge intersects $\partial V$ more than once, the cell is complex. This configuration induces non-manifold surfaces [S1].
-
-3.  **Optimization:**
-    The algorithm only checks voxels belonging to cell faces to ensure all cells intersected by $\partial V$ are processed, avoiding unnecessary checks of internal voxels [S1].
+**Edge Cases and Pitfalls:**
+*   **Precision:** Accurate determination of vertex signs is critical. Floating-point errors near the zero-crossing can misclassify homogeneous faces.
+*   **Boundary Geometry:** The criterion ensures that only voxels belonging to cell faces are checked, ensuring all cells intersected by $\partial V$ are processed [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def is_cell_complex(cell, surface_function, neighbors):
+def is_cell_complex(cell, scalar_field):
     """
     Determines if a cell is complex based on face and edge criteria.
     
     Args:
-        cell: The current octree cell.
-        surface_function: Function returning True if point is inside surface, False otherwise.
-        neighbors: Dictionary mapping cell coordinates to neighbor cells.
+        cell: Object representing the voxel cell with vertices and edges.
+        scalar_field: Function phi(x, y, z) returning the scalar value.
         
     Returns:
-        bool: True if the cell is complex and requires subdivision.
+        bool: True if the cell is complex, False otherwise.
     """
-    # Get vertices of the cell
-    vertices = cell.get_vertices()
+    # Step 1: Evaluate vertices
+    vertex_values = [scalar_field(v) for v in cell.vertices]
     
-    # Check all 6 faces
-    for face in cell.get_faces():
-        face_vertices = face.get_vertices()
+    # Step 2: Check Faces
+    for face in cell.faces:
+        # Get indices of vertices forming this face
+        v_indices = face.vertex_indices
+        face_values = [vertex_values[i] for i in v_indices]
         
-        # Check if face is homogeneous
-        states = [surface_function(v) for v in face_vertices]
-        if all(states) or not any(states):
-            # Face is homogeneous (all inside or all outside)
-            # Extract connected components of surface intersection on this face
-            # Since vertices are homogeneous, surface must pass through interior/edges
-            components = extract_face_surface_components(face, surface_function)
-            
-            # If more than one disconnected component exists, it's complex
-            if len(components) > 1:
+        # Check if homogeneous (all inside or all outside)
+        all_inside = all(v > 0 for v in face_values)
+        all_outside = all(v < 0 for v in face_values)
+        
+        if all_inside or all_outside:
+            # Extract connected components of voxels on this face
+            # Note: In a coarse octree, this involves checking sub-voxel intersections
+            # or analyzing the topology of the implicit surface on the face.
+            # For implementation, we check if the surface intersects the face
+            # in a way that creates a fragment smaller than the subdivision level.
+            # This typically requires sampling the face interior or using a 
+            # lookup table for the 2D case.
+            if has_sub_cell_surface_fragment(face, scalar_field):
                 return True
-
-    # Check all 12 edges
-    for edge in cell.get_edges():
-        # Check if edge intersects surface more than once
-        # This requires sampling or analyzing the edge against surface_function
-        intersections = count_edge_intersections(edge, surface_function)
+                
+    # Step 3: Check Edges
+    for edge in cell.edges:
+        # Get endpoints
+        v0_val = scalar_field(edge.v0)
+        v1_val = scalar_field(edge.v1)
         
-        if intersections > 1:
+        # Check for multiple intersections
+        # If signs are different, there is at least one intersection.
+        # To detect >1 intersection, we need to check for sign changes 
+        # within the edge or higher-order behavior.
+        # A simple heuristic for linear fields is that multiple intersections
+        # are impossible unless the field is non-linear or the edge is long.
+        # However, the source implies detecting configurations inducing 
+        # non-manifold surfaces.
+        if has_multiple_intersections(edge, scalar_field):
             return True
-
+            
     return False
 
-def extract_face_surface_components(face, surface_function):
+def has_sub_cell_surface_fragment(face, scalar_field):
     """
-    [G] Helper to identify disconnected surface patches on a homogeneous face.
-    In a voxel context, this often involves checking the midpoints of the face's
-    internal grid lines or using a secondary classification.
+    Checks if a homogeneous face contains a surface fragment smaller than 
+    the current subdivision level.
     """
-    # Implementation detail: Analyze the face geometry against the scalar field.
-    # Return a list of connected regions.
-    pass
+    # Implementation detail: Sample the face center or use a 2D marching squares
+    # on the face to detect if the zero-crossing forms a small component.
+    # If the face is homogeneous, the surface must enter and exit the face
+    # through its interior, creating a closed loop or segment.
+    # If this loop/segment is small relative to the cell size, it is complex.
+    # Not given in the sources exactly how "smaller than current subdivision level"
+    # is quantified numerically. [G] Assume a threshold based on cell size.
+    return False # Placeholder for specific implementation logic
 
-def count_edge_intersections(edge, surface_function):
+def has_multiple_intersections(edge, scalar_field):
     """
-    [G] Counts how many times the edge crosses the zero-level set.
+    Checks if an edge intersects the surface more than once.
     """
-    # Implementation detail: Sample points along the edge or check sign changes
-    # of the scalar field at endpoints and midpoints.
-    pass
+    # For a linear scalar field, an edge intersects at most once.
+    # Multiple intersections imply non-linearity or specific topological configurations.
+    # Sample the midpoint. If signs at v0, mid, v1 are not monotonic, 
+    # there may be multiple intersections.
+    v0_val = scalar_field(edge.v0)
+    v1_val = scalar_field(edge.v1)
+    mid_val = scalar_field(edge.midpoint)
+    
+    # Check for sign changes
+    if (v0_val > 0 and mid_val < 0) or (v0_val < 0 and mid_val > 0):
+        # One intersection between v0 and mid
+        pass
+    if (mid_val > 0 and v1_val < 0) or (mid_val < 0 and v1_val > 0):
+        # One intersection between mid and v1
+        pass
+        
+    # If both happen, there are two intersections.
+    # This is a simplified check. [G] More robust methods involve root finding.
+    return False # Placeholder
 ```
-
-**Parameters:**
-*   **Minimal Depth:** The initial subdivision depth before applying complex criteria. Typical values: 2 or 3 [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** Detecting "more than once" intersections on edges requires high numerical precision to avoid missing multiple crossings in thin features [S1].
-*   **Boundary Conditions:** The method assumes access to neighbor cells. Cells on the boundary of the domain must handle missing neighbors appropriately [S1].
-*   **Non-manifold Geometry:** The edge criterion specifically targets configurations that induce non-manifold surfaces, which are difficult to render or mesh correctly [S1].
 
 ## Subtopics
 
 ### Non-manifold Pruning
-A post-processing step applied after mesh extraction to prune small non-manifold branches, typically thin protrusions attached to boundary edges [S2]. It improves structural integrity by removing faces arising from locally inconsistent voxel configurations (e.g., Case 8 expanded cubes) [S2].
-*   **Definition:** A face is identified for removal if: (1) all three of its constituent vertices lie on either non-manifold edges or open boundary edges, AND (2) the face itself contains an open boundary edge [S2].
-*   **Process:** Examine all faces containing vertices on non-manifold edges. Remove faces satisfying the two conditions above. Repeat until no more faces can be removed [S2].
-*   **When to choose:** Use when the primary mesh extraction method (e.g., Dual Contouring over Expanded Cubes) generates redundant non-manifold structures that are costly to handle during rendering or simulation [S2].
+A post-processing step to prune small non-manifold branches (thin protrusions) and improve structural integrity by removing faces arising from locally inconsistent voxel configurations [S2]. It is applied after mesh extraction to handle artifacts that the lookup table (LUT) could not resolve without complicating the design [S2]. A face is removed if: (1) all three of its constituent vertices lie on either non-manifold edges or open boundary edges, AND (2) the face itself contains an open boundary edge [S2]. The process is repeated until no more faces can be removed [S2].
+
+### Local Complexity Test (Voxel Filtering)
+A local complexity test to verify that a candidate voxel contains a single, nearly planar surface patch, ensuring the pivot token is well-defined and numerically stable [S3, unofficial]. It probes multiple sub-voxel locations within each candidate voxel and queries their closest surface points and corresponding triangle normals [S3, unofficial]. A voxel is labeled as ambiguous if the normals exhibit strong directional inconsistency (indicating multi-sheet or topologically complex regions) or if the probed points deviate noticeably from a single plane (indicating high curvature) [S3, unofficial].
+*   **Parameters:** Normal-consistency threshold: 0.9 (approx. 25° tolerance); Planarity tolerance: 5% of the voxel size [S3, unofficial].
+*   **Pitfall:** Voxels containing multi-sheet or topologically complex regions are filtered out to prevent ambiguous pivot placement [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of cells and the cost of evaluating `surface_function` on faces and edges. The use of a hash table for neighbor access ensures almost constant time for neighbor lookups [S1].
-*   **Memory Complexity:** Requires storage for the octree and a hash table indexing octree cells [S1].
-*   **Strengths:** Captures fine geometric details that standard inhomogeneity checks miss; prevents loss of small surface pieces; handles non-manifold configurations explicitly [S1].
-*   **Limitations:** Increases computational overhead during octree construction; requires robust neighbor access [S1].
-*   **When to use:** When high-fidelity surface extraction from anisotropic volumetric data is required, and standard culling would result in topological errors or missing geometry [S1].
+*   **Time Complexity:** Depends on the number of faces and edges per cell. For a single cell, it is constant time relative to the cell size, but requires scalar field evaluations. In an octree, it is applied only to cells at the minimal depth or above [S1].
+*   **Memory Complexity:** Low, as it operates on individual cells and does not require global data structures beyond the octree index (hash table) for neighbor access [S1].
+*   **Strengths:** Ensures topological correctness by detecting non-manifold configurations and sub-cell surface fragments that simple inhomogeneity checks might miss [S1].
+*   **Limitations:** Requires careful implementation of the "connected component" extraction and "multiple intersection" detection, which can be numerically sensitive [S1].
 
 ## Background
-The Complex Face and Edge Criterion was introduced in the context of adaptive surface extraction from anisotropic volumetric data using generalized octrees [S1]. It addresses the limitation of simple inhomogeneity checks, which fail to detect surface pieces smaller than the current subdivision level when they lie within homogeneous cell faces or along cell edges [S1]. The method is part of an iterative top-bottom octree construction algorithm [S1].
+The Complex Face and Edge Criterion was introduced in the context of adaptive surface extraction from anisotropic volumetric data using generalized octrees [S1]. It addresses the problem of cells that appear homogeneous at the vertex level but contain complex surface topology within their faces or edges, which would otherwise be incorrectly culled or simplified [S1]. The method is part of an iterative top-bottom octree construction algorithm [S1].
 
 ## Sources
 [S1] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29
 [S2] Dual Contouring over Expanded Cubes (DCx) for Zero-Level Set Extraction from Neural Unsigned Distance Functions, https://doi.org/10.1145/3811388, fetched 2026-11-06
+[S3] P2Voxel: Pyramid Pivot Voxelization for 3D Mesh Tokenization, https://doi.org/10.48550/arxiv.2608.07549, fetched 2026-10-26 (unofficial)

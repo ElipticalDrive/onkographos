@@ -1,0 +1,1784 @@
+P2Voxel: Pyramid Pivot Voxelization for
+3D Mesh Tokenization
+Zhenhong Sun∗
+Australian National University
+Canberra, Australia
+zhenhong.sun@anu.edu.au
+arXiv:2608.07549v1 [cs.CV] 1 Aug 2026
+Xibin Song†
+Vertex Lab
+Shanghai, China
+song.sducg@gmail.com
+Haozhe Liu∗
+Vertex Lab
+Shanghai, China
+l1583729854@gmail.com
+Yifu Wang
+Vertex Lab
+Shanghai, China
+1fwang927@gmail.com
+Senbo Wang
+Vertex Lab
+Shanghai, China
+wsb pro@live.com
+Huadong Mo
+University of New South Wales
+Canberra, Australia
+huadong.mo@unsw.edu.au
+Daoyi Dong†
+Hongdong Li
+University of Technology Sydney
+Australian National University
+Sydney, Australia
+daoyidong@gmail.com
+Canberra, Australia
+hongdong.li@anu.edu.au
+Pan Ji
+Vertex Lab
+Shanghai, China
+peterji530@gmail.com
+Abstract
+Triangle meshes provide explicit and accurate surface geometry, yet their irregular topology connectivity makes 3D mesh tokenization a geometric sampling problem: how to sample and organize geometric evidence into compact, structured and
+learnable tokens. Beyond field-centric volumetric sampling and edge-intersection
+surface sampling, we retarget mesh tokenization as local surface evidence sampling: identifying the minimal geometric evidence inside each active voxel that is
+sufficient for deterministic surface recovery. To this end, we introduce P2Voxel,
+a pyramid pivot voxelization framework for compact and reconstruction-aware
+mesh tokenization. P2Voxel is built on three key innovations. Under the Local Planarity assumption, Pivot Voxelization represents each active voxel with a
+surface pivot and an orientation sign, providing minimal local evidence that can
+induce the corner values required for deterministic reconstruction. Under the Spatial Complexity assumption, Pyramid Pivot Voxelization exploits the spatial nonuniformity of real surfaces by allocating finer pivot tokens to geometrically complex regions while keeping smooth regions coarse and compact. Under the Block
+Reconstructability assumption, a Pyramid VAE learns compact multi-resolution
+latent codes over locally reconstructable pivot blocks, avoiding the need to model
+the entire high-resolution voxelized shape as a dense global field. Together, these
+designs convert meshes into compact, structured, and learnable pyramid pivot tokens, enabling efficient mesh reconstruction for downstream 3D tasks. Project
+page are released at here.
+1
+Introduction
+Triangle meshes are the standard representation for 3D surfaces in graphics and geometry processing [1, 2, 3], as they provide explicit and editable geometry for rendering, simulation, and down∗ Equal Contribution. Work done during an internship at Vertex Lab.
+† Corresponding authors.
+Preprint.
+stream manipulation [4, 5, 6]. Yet their irregular connectivity makes them poorly suited as direct
+inputs or targets for modern 3D representation learning and generative models [7, 8, 9], which favor
+compact, structured, and learnable tokens. This leads to the problem of 3D mesh tokenization: representing a complex surface by a finite set of geometric units that can be compressed, predicted, or
+generated. Rather than viewing tokenization as merely discretizing a shape, we view it as a problem
+of selecting the geometric evidence that should be preserved. Voxelization offers a natural spatial
+organization for such evidence by assigning local surface information to grid cells. The central
+challenge is therefore to design cell-wise tokens that are compact and regular, while still containing
+sufficient local surface evidence for deterministic high-quality mesh reconstruction.
+Existing mesh tokenization methods can be viewed through the type of geometric evidence they preserve, including occupancy values [10], point samples [11], implicit fields [12, 13], signed distance
+fields (SDF) [14], and contouring constraints [15]. For deterministic mesh reconstruction, gridbased SDFs and Dual Contouring represent two influential paradigms. Grid SDF methods [14, 16]
+store signed distances on spatial grids and extract surfaces through isosurface reconstruction, termed
+as field-centric volumetric sampling. Although this sampling produces regular tokens, it encodes a
+two-dimensional surface indirectly through scalar samples in 3D space, requiring redundant storage
+for near-surface points even in sparse variants [17, 18]. Dual Contouring [15] follows an edgeintersection surface sampling paradigm, using edge crossings and Hermite normals as boundarylevel constraints or reconstruction rules that guide subsequent dual-vertex placement. However, from
+a tokenization perspective, these edge-intersection samples are tied to sign-changing grid edges and
+mainly provide reconstruction cues for dual-vertex estimation, rather than defining a fixed and compact cell-wise token for the local surface patch itself. We therefore ask whether mesh tokenization
+can move beyond volumetric field samples and edge-tied Hermite evidence, and instead represent
+each active voxel by the minimal local surface evidence required for deterministic reconstruction.
+Beyond field-centric volumetric sampling and edge-intersection surface sampling, we try to formulate mesh tokenization as local surface evidence sampling: identifying the minimal geometric
+evidence inside each active voxel that is sufficient for deterministic surface recovery. Our first observation is local planarity: at sufficiently high resolution, the surface patch inside a small active
+voxel can be approximated by a local plane. This observation is closely aligned with Marching
+Cubes [19, 20], where the surface topology and edge intersections within a voxel are determined by
+the signed scalar values at its corner vertices. However, if the local surface patch is approximated
+by a plane, these corner signs and distances can be derived from the plane geometry rather than
+stored independently. This motivates our Pivot Voxelization, where each surface-intersecting voxel
+is encoded by a pivot point on the surface and an orientation sign, which together define the local
+plane and induce the corner values required by Sparse Marching Cubes. Our second observation
+is spatial complexity: real surfaces are highly non-uniform, with smooth regions that can be represented coarsely and sharp features, thin structures, or high-curvature details that require finer spatial
+support. This motivates Pyramid Pivot Voxelization, which keeps each pivot token simple while
+adaptively allocating finer pivot voxels only to geometrically complex regions. Our third observation
+is block reconstructability: mesh recovery does not require learning the entire high-resolution voxelized shape as one monolithic object, because each pyramid block contains sufficient local surface
+evidence for deterministic reconstruction within its spatial extent. This motivates our Pyramid VAE,
+which learns compact multi-resolution latent codes over pyramid pivot blocks instead of consuming
+a dense global field. Together, these components form P2Voxel, a flexible framework that converts
+meshes into compact, structured, and learnable pivot tokens for scalable 3D mesh reconstruction.
+The main contributions of this paper are summarized as follows:
+• We formulate mesh tokenization as local surface evidence sampling and propose Pivot Voxelization, where a surface pivot and an orientation sign compactly represent the mesh.
+• We introduce Pyramid Pivot Voxelization, which exploits spatial complexity by adaptively refining geometrically complex regions while keeping each pivot token simple and reconstructible.
+• We then propose a Pyramid VAE based on block reconstructability, learning compact multiresolution latent codes over locally pyramid pivot blocks for scalable mesh reconstruction.
+2
+Mesh (Explicit Vertices & Faces)
+SDF (Signed Distance Function)
+Dual Contouring
+Pivot Voxel
+P𝐢𝐯𝐨𝐭 Points
+Dual Vertices
+Surface Samples
+Vertices
++
+-
++
+Faces
+Ground Truth Surface
+Near-Surface
+Uniform Volume
+12 Edge Intersect Flags
++
+Norm Sign +/-
+Figure 1: Geometry Sampling for Mesh Tokenization. (a) Meshes are explicit but irregular. (b)
+Grid SDFs use field-centric volumetric sampling by storing signed distance values. (c) Dual Contouring uses edge-intersection surface sampling with edge crossings and Hermite constraints. (d)
+Our Pivot Voxel uses local surface evidence sampling, with a pivot point and orientation sign.
+2
+Related Work
+Explicit 3D Representations for Generation. Explicit representations, such as point clouds and
+meshes, are naturally discrete, making them intuitive candidates for Transformer tokenization.
+Point-based methods like Point-E [11] and Shap-E [21] generate sparse point clouds efficiently,
+but lack topological connectivity and often require post-processing such as Poisson reconstruction,
+which may fail on thin structures or sharp edges. Direct mesh generation methods, such as PolyGen [22] and MeshGPT [23], predict vertices and faces directly, but the combinatorial complexity of
+arbitrary mesh topology often limits them to specific categories or low-complexity shapes. Building
+on MeshAnything [24], MeshAnything V2 [25] introduces Adjacent Mesh Tokenization (AMT) to
+reuse vertices across faces and shorten mesh sequences, while BPT [26] further improves scalability
+through block-wise indexing and patch aggregation for higher-resolution mesh generation.
+Implicit and Hybrid Representations. Implicit representations, such as Neural Radiance Fields
+(NeRF) [12] and Signed Distance Fields (SDF) [14], model geometry as continuous neural fields,
+while set-based approaches such as VecSet [7] represent shapes as collections of surface elements.
+Recent generative models like TRELLIS [8] and DORA [27] further employ structured latent codes,
+such as SLAT, to encode high-fidelity geometry. However, these methods usually rely on heavy
+neural decoders, typically MLPs, to extract explicit surfaces, introducing inference latency and often
+over-smoothing high-frequency details. Hybrid representations, such as FlexiCubes [28] and Deep
+Marching Tetrahedra (DMTet) [29], bridge implicit and explicit representations, but still require
+extensive volumetric sampling beyond the actual surface to maintain field continuity.
+Sparse and Explicit Representations. Sparse data structures, such as Octrees [17] and Hash Grids
+[18], are standard techniques for compressing voxel data. In geometry processing, Dual Contouring
+(DC) [15] allows for sharp feature preservation by storing a single vertex per active voxel. However,
+maintaining valid topology in these frameworks often requires dense structural overhead. Notable
+recent generative approaches, such as FaithC [30] and TRELLIS 2 [9], achieve high fidelity but rely
+on explicit edge-state encoding: they typically necessitate recording the intersection status across
+all 12 edges of a voxel to fully resolve topological ambiguities. This requirement increases the
+information density per token, diverting representational capacity toward structural bookkeeping.
+3
+Methodology
+Problem Statement. Triangle meshes are standard in graphics and geometry processing for their
+explicit and accurate surface description, but their irregular connectivity and non-uniform complexity make them poorly suited for compact tokenization in representation learning. A central problem
+in geometric representation learning is to convert a surface mesh M into a compact and structured
+representation T that can be efficiently modeled while still allowing the accurate recovery of the
+original geometry. An ideal representation should be (i) token-efficient with as few elements as possible, (ii) structured and easy to learn, and (iii) recoverable by standard geometric reconstruction
+operators (e.g., Marching Cubes [19]). Formally, given a watertight mesh M, we seek a token set
+T and a deterministic decoder D such that
+M̂ = D(T ),
+|T | is minimized subject to M̂ ≈ M.
+3
+(1)
+"
+𝓢
+Ideal Plane
+𝐯𝟒
+Voxel Size h
+Pivot
+Voxelization
+Voxel
+Watertight Mesh ℳ
+Pivot Tokens
+𝐩𝒏 , 𝑠𝒏 𝑵
+𝒏"𝟏
+"
+Reconstructed Mesh ℳ
+Sparse
+Marching Cube
+𝐠, 𝐝𝜹 𝑵
+𝒏"𝟏
+𝐯𝟕
+𝑑,
+𝐩 + 0.5
++ 0.5 ℎ
+ℎ
+𝐜−𝐩
+𝐧=𝑠
+𝐜−𝐩 !
+𝐜 = −0.5 +
+𝐜
+𝐯𝟔
+𝐩
+𝐯𝟎
+𝐯𝟑
+1. Pivot Token: {𝐩, 𝑠} & h
+𝑑-
+𝑠
+h
+Convert
+Distances
+Surface
+𝐯𝟓
+𝓢
+" = {(𝐱 − 𝐩)⊺ 𝐧 = 0}
+2. Ideal Plane: 𝓢
+𝐯𝟏
+𝐯" = 𝐜 + 𝛅 − 0.5 ℎ, 𝛅 ∈ {0, 1}#
+𝐠=
+𝐜 + 0.5
+ℎ
+𝐯𝟐 Vertices
+𝑠 = sgn(sdf 𝐜 )
+3. Vertices Distance: 𝐝0 = (𝐯0 − 𝐩)⊺ 𝐧
+Figure 2: Pivot Voxelization. We voxelize a watertight mesh M with voxel size h and represent
+each active voxel by a pivot token {p, s}, where p is the pivot point and s = sgn(sdf(c)) indicates
+the inside/outside orientation. An ideal plane Ŝ can evaluate vertex distances dδ for Sparse-MC.
+To this end, we propose P2Voxel, a voxelization-based tokenization framework that converts a watertight mesh M into a compact and structured token set T , while enabling accurate reconstruction
+with standard geometry operators. P2Voxel contains three key components: Pivot Voxelization for
+sampling local surface evidence within active voxels, Pyramid Pivot Voxelization for adaptive multiresolution token allocation, and a Pyramid VAE for learning compact latents over pivot blocks.
+3.1
+Pivot Voxelization
+Assumption 1 (Local Planarity). At sufficiently high resolution, each surface-intersecting
+voxel contains only a small local surface, which can be approximated by an ideal plane.
+Sparse Marching Cubes (Sparse-MC) [19, 20, 31] reconstructs watertight surfaces by extracting the
+zero-level set from signed distance values at the eight corners of surface-intersecting (active) voxels.
+These corner values jointly encode the topology and geometry of the enclosed surface patch S. As
+the voxelization resolution increases (i.e., h → 0), S becomes asymptotically locally planar. We
+therefore adopt Assumption 1 (Local Planarity) and approximate the geometry within each active
+voxel by an ideal plane Ŝ, which induces a consistent set of corner distances.
+A plane in R3 is uniquely determined by a point and a normal direction. Given the voxelization
+prior, we encode each active voxel by a compact pivot token {p, s}, where p ∈ R3 is a pivot point
+on the local surface patch and s ∈ {−1, +1} is a binary inside/outside orientation cue. Concretely,
+p is obtained by projecting the voxel center c onto the mesh, i.e., the closest intersection point on
+M, and s is given by the center SDF sign, s = sgn(sdf(c)).
+Conversely, given {p, s} and voxel size h, we recover the voxel center c by snapping p to its
+containing voxel, then compute the oriented normal n and ideal plane Ŝ:
+
+
+
+c = − 12 + p+0.5
++ 0.5 h.
+(2)
+h
+Then the oriented normal and the induced ideal plane are given by
+
+c−p
+n=s
+,
+Ŝ = x ∈ R3 (x − p)⊤ n = 0 .
+∥c − p∥2
+(3)
+With (p, n), the eight voxel corners and their plane-induced signed distances are computed as:
+vδ = c + (δ − 0.5) h,
+δ ∈ {0, 1}3 ,
+(4)
+and the signed distance at each corner is given by the plane SDF
+dδ = SDF(vδ ) = (vδ − p)⊤ n.
+(5)
+The eight samples {dδ } provide the per-voxel corner SDF values. Since a grid vertex is shared
+by neighboring voxels, independently predicted corner values may be inconsistent. We therefore
+enforce a vertex-consistent scalar field by averaging predictions from incident active voxels Ωv :
+1 X
+(v − pi )⊤ ni ,
+(6)
+D(v) =
+|Ωv |
+i∈Ωv
+4
+Dense Voxelization
+4
+8
+16
+32
+𝑩×𝟒
+𝑩×𝟖
+𝑩×𝟏𝟔
+𝑩×𝟑𝟐
+Block Size 𝑩
+Pyramid Allocation
+Block-wise
+Score 𝐒𝑩
+Sparse Voxelization
+Geometric
+Sensing
+16
+32
+Filtering
+𝐩
+𝐜 𝑠
+Pyramid Pivot
+Tokens
+Resolution Lifting
+All vertices:
+{𝐯"# }&
+#$%
+#
+𝓢
+Vertices Distance:
+{𝐝"! } = ({𝐯!" } − 𝐩)⊺ 𝐧
+𝐠, 𝐝𝜹 𝑵
+𝒏$𝟏
+Grids & Distances
+.
+Reconstructed Mesh ℳ
+8
+Sampling Map 𝐌
+𝑩×𝟑𝟐
+Sparse
+Marching Cube
+4
+𝐩𝒏 , 𝑠𝒏 𝑵
+𝒏$𝟏
+Figure 3: Pyramid Pivot Voxelization. We compute a block-wise score sB over macro-blocks of
+size B to allocate adaptive sampling levels {4, 8, 16, 32}, producing a pyramid sampling map M.
+After filtering and resolution lifting, pyramid pivot tokens recover high-quality mesh.
+where (pi , ni ) denotes the pivot token parameters of the i-th voxel. Sparse-MC is then applied
+to the unified field D(·), ensuring shared corner values across adjacent voxels and producing a
+seamless watertight reconstruction M̂. In summary, the pivot token provides a minimal encoding
+for stable distance evaluation and deterministic reconstruction. We discuss the feasibility conditions
+and practical constraints of pivot construction in Appendix A.
+3.2
+Pyramid Pivot Voxelization
+Assumption 2 (Spatial Complexity). Geometric information density is non-uniform: highfrequency details are concentrated around high-curvature, sharp, or thin structures, where finegrained sampling is necessary, while coarse blocks suffice elsewhere.
+Under (Local Planarity), each active voxel admits a compact pivot representation, but this typically
+requires a sufficiently high resolution. Although a 5123 grid can capture the overall geometry with
+high fidelity, it remains inefficient due to redundant sampling in smooth regions. Assumption 2
+(Spatial Complexity) motivates adaptive sampling with a block-wise pyramid strategy: fine-grained
+resolution is allocated only to high-frequency regions, while coarser blocks represent smooth areas.
+Pyramid Sampling Map. We partition the normalized space [−0.5, 0.5]3 into a macro-block grid
+B ∈ ZB×B×B with block size 1/B, and assign each block g a complexity score SB (g). Surface
+samples x are mapped to blocks by g(x) = ⌊(x + 0.5) B⌋ , and curvature- and normal-based cues
+are aggregated as
+
+ p
+SB (g) = c̄(g) + λvar σc (g) + λgrad ∥∇c̄(g)∥ + λn η̄(g) · N (g),
+(7)
+where c̄ is the mean curvature magnitude, σc is curvature variation, ∥∇c̄∥ captures spatial curvature
+change, η̄ measures local normal deviation, and N (g) is the number of surface samples in the block.
+We discretize SB into an allocation map
+M : g 7→ r ∈ R = {rmin , . . . , rmax },
+(8)
+where R is a predefined set of sampling resolutions with quantile-based binning over blocks, and
+M is restricted to surface-intersecting blocks, with missing active blocks filled by resolution rmin .
+Pyramid Sampling. Given M : g 7→ r, we perform pivot voxelization with hr = 1/r, producing
+n
+oNr
+Tr = τn(r)
+,
+τ (r) = {p(r) , s(r) },
+(9)
+n=1
+where p(r) ∈ R3 is the pivot point and s(r) ∈ {−1, +1} is the orientation sign. According to M,
+for each active macro-block g, tokens from resolution r = M(g) form the final pyramid set
+o
+[ n
+Tpyr =
+τ (M(g)) τ lies in block g .
+(10)
+g∈Bactive
+5
+32
+3D CNN
+E1
+𝑩×𝟑𝟐
+𝑩×𝟏𝟔
+𝟏𝟔𝟑
+8
+𝑩×𝟖
+𝟖𝟑
+4
+Pyramid Pivot Tokens
+𝐩𝒏 , 𝑠𝒏 𝑵
+𝒏"𝟏
+𝟑𝟐𝟑
+𝟑𝟐
+16
+Pivot Tokens
+3D CNN
+D1
+𝟑
+𝑩×𝟒
+𝟒𝟑
+3D CNN
+E2
+3D CNN
+E3
+3D CNN
+E4
+Sampling Map 𝐌
+𝐙=
+𝐳𝑵
+!"𝟏
+𝐳 = {𝛍, 𝛔}
+Pyramid Latent
+3D CNN
+D3
+3D CNN
+D3
+3D CNN
+D4
+Multi-resolution Cube Tokens
+𝟏𝟔𝟑
+𝟖𝟑
+𝟒𝟑
+Pivot Tokens
+Figure 4: Block-wise Pyramid VAE. Given pivot tokens at adaptive sampling levels {4, 8, 16, 32},
+the encoder aggregates multi-resolution block features into a compact pyramid latent code, then
+reconstructs pivot tokens with the guidance of the sampling map M.
+Although constructing {Tr }r∈R is not a single-pass adaptive implementation, it is practical because
+closest-point queries and triangle normals are provided by optimized C++ backends [32].
+Pyramid Resolution Lifting. Given Tpyr over multiple resolutions R, we lift all tokens to the
+maximum resolution rmax = max(R) with voxel size hmax = 1/rmax for a unified Sparse-MC
+reconstruction. For each token τ (r) = {p(r) , s(r) } ∈ Tpyr , we recover its induced plane Ŝ (r) =
+3
+(p(r) , n(r) ), subdivide the original voxel into (rmax /r) fine voxels, and evaluate their corner SDF
+samples to populate the sparse high-resolution field:
+Vmax = {vk }K
+k=1 ,
+together with their corner-distance vectors
+n
+oK
+Dmax = d(vk )
+,
+k=1
+vk ∈ {0, . . . , rmax − 1}3 ,
+(11)
+
+
+d(vk ) = dδ (vk ) δ∈{0,1}3 ∈ R8 ,
+(12)
+where each component is given by
+dδ (vk ) = vk,δ − p(r)
+⊤ (r)
+n .
+(13)
+Finally, Sparse-MC is applied to (Vmax , Dmax ) to reconstruct the sparse watertight mesh M̂.
+3.3
+Pyramid VAE
+Assumption 3 (Block Reconstructability). Surface reconstruction is locally composable: each
+pyramid block can recover its local surface patch from its pivot tokens, and the full mesh can be
+obtained by enforcing consistent corner values across neighboring blocks.
+A straightforward strategy is to learn pivot tokens by decoding the entire shape on a dense global
+voxel grid. However, this quickly becomes prohibitive at high resolutions: even a minimal pivot field
+with three pivot coordinates and one orientation sign per voxel requires approximately 2.0 GiB and
+16.0 GiB of FP32 memory at 5123 and 10243 resolutions, respectively. In 3D CNN-based models,
+the actual training cost is much larger due to multi-channel feature maps, activations, gradients, and
+optimizer states. Thus, directly learning a global high-resolution voxel field is memory-inefficient
+and difficult to scale, even with sparse convolutional techniques [33].
+Based on Assumption 3, we instead design a Pyramid VAE. The key idea is that pivot tokens are
+locally reconstructable: each block contains sufficient surface evidence to recover its local patch
+through the induced plane and Sparse-MC corner values. Thus, the model does not need to encode
+the entire high-resolution shape as a monolithic dense tensor. Instead, we organize pyramid pivot
+tokens into multi-resolution block tensors according to the pyramid sampling map M, where each
+level corresponds to a sampling resolution such as {4, 8, 16, 32} within macro-blocks of size B.
+The encoder uses hierarchical 3D CNN branches to aggregate block-wise geometric features from
+coarse to fine levels and maps them into a shared pyramid latent representation
+z = {zn }N
+n=1 ,
+z ∼ qϕ (z | Tpyr , M),
+6
+Hy3D
+0.10
+4.5
+2.120
+2.118
+3.5
+3.0
+128
+2.5
+2.0
+1.5 4
+10
+CDL2
+CDL1
+4.0
+256
+512
+1024
+Lower is better
+105
+106
+Sampling Number (Log Scale)
+Trellis 2
+64
+FaithC
+Pivot-512
+0.012
+Pyr-1024
+7
+0.011
+6
+3.340
+0.06
+0.010
+5
+3.338
+128
+0.02
+Lower is better
+104
+105
+256
+512
+1024
+128
+4
+3
+Sampling Number (Log Scale)
+512
+105
+256
+0.4
+128
+0.487
+0.3
+0.486
+1024 0.2
+106
+Sampling Number (Log Scale)
+1024
+512
+0.5
+Lower is better
+104
+106
+256
+Pivot Resolution
+Higher is better
+0.6
+3.342
+0.08
+0.04
+Pyr-512
+64
+F-score
+Vecset
+EMD
+Dora
+64
+64
+104
+0.485
+105
+106
+Sampling Number (Log Scale)
+Figure 5: Efficiency vs. quality trade-off for Table 1. We report Chamfer Distance (L1 /L2 ),
+EMD, and F-score on ABO, using the number of sampling primitives in log scale as a proxy for
+storage and computational cost. Our methods (red diamonds) achieve better Pareto efficiency than
+SDF-based methods (blue circles) and Dual Contouring methods (green squares). Notably, Pivot512 reaches reconstruction quality comparable to FaithC with fewer active voxels.
+where M provides the spatial allocation of sampling resolutions and Tpyr provides the corresponding local surface evidence. The decoder mirrors this hierarchy to reconstruct pivot-token grids at
+multiple resolutions. After decoding, the predicted blocks are filtered, lifted to the maximum grid,
+and stitched through shared corner-value consistency for Sparse-MC reconstruction.
+The pyramid representation separates where to allocate resolution from what surface evidence to
+store. It only adds a lightweight sampling map M, which guides each active macro-block to reconstruct at its assigned resolution and can reduce to standard Pivot Voxelization when all blocks use
+the finest level. For generation, M can be learned as a coarse layout prior, while pivot tokens model
+local geometry, naturally supporting a coarse-to-fine generative process.
+4
+Experiments
+4.1
+Implementation Details
+Baselines. We benchmark P2Voxel against representative baselines covering two mainstream
+paradigms: (i) SDF-based sampling, including Vecset [7], Dora [27], and Hunyuan3D-2.1 [34];
+and (ii) Dual Contouring, represented by FaithC [30] and TRELLIS 2 [9]. Our comparison focuses
+strictly on sampling strategy and surface reconstruction quality, explicitly excluding downstream
+generative components (e.g., VAE tokenization or diffusion). To ensure fairness, we standardize
+that all methods sample SDFs from identical watertight meshes and reconstruct using a neural implicit network [35], which is detailed in Appendix B.
+Datasets and Metrics. We evaluate on three disjoint test sets (∼400 shapes each) sampled from
+ABO [36], Objaverse [37], and an in-the-wild (Wild) collection. All shapes are preprocessed into
+watertight ground-truth surfaces using Dora’s pipeline (UDF-to-SDF followed by Marching Cubes)
+to ensure topological consistency. Quantitative metrics include Chamfer Distance (L1/L2), Earth
+Mover’s Distance (EMD) [38], and F-score [39] (τ = 0.002).
+Setups. We configure two voxelization strategies: a single-resolution baseline Pivot-512 and our
+hierarchical Pyramid-R approach with Rmax = 32. We employ a 3-level hierarchy {128, 256, 512}
+with sampling allocation ratios of [0.85, 0.10, 0.05] for Pyramid-512, while extending to a 4-level
+hierarchy {128, 256, 512, 1024} with ratios [0.50, 0.35, 0.12, 0.03] for Pyramid-1024. Unless otherwise stated, hyperparameters are fixed at λvar = 0.5, λgrad = 0.3, and n = 3.0. All experiments
+are conducted on a server with an AMD EPYC 7543 32-Core Processor and eight NVIDIA RTX
+4090 GPUs (24GB VRAM). Detailed descriptions and runtime are provided in Appendix B.
+4.2
+Main Results
+Quantitative Evaluation of P2Voxel. Table 1 summarizes reconstruction quality at 512 resolution
+on ABO, Objaverse, and Wild using CDL1/CDL2, EMD, and F-score (τ = 0.002). Overall, our
+P2Voxel (Dim 4) achieves a strong efficiency-fidelity balance, outperforming SDF-based baselines
+while remaining competitive with dual contouring methods that use substantially larger voxel di7
+Table 1: Quantitative evaluation of geometry reconstruction quality. We report Chamfer Distance (CDL1/CDL2), Earth Mover’s Distance (EMD), and F-score (τ = 0.002) on ABO, Objaverse, and Wild datasets at 512 resolution (1024 Results in Appendix). We evaluate our three
+configurations: Pivot-512 (single-scale 512) against hierarchical Pyramid-512 (128/256/512)
+and Pyramid-1024 (128/256/512/1024). Considering voxel dimension capacity and reconstruction fidelity, P-Voxel (Dim 4) achieves efficient performance, outperforming baselines and rivaling
+heavy-weight representations (e.g., FaithC with Dim 18). Bold indicates the best performance, and
+underlined denotes the second best. Qualitative results are provided in Figure 12 of Appendix E.
+Dataset
+Metrics
+Voxel
+Dim
+ABO
+SDF
+Dual Contouring
+Ours
+Dora
+Vecset
+Hy3D
+Trellis 2
+FaithC
+1
+1
+1
+7
+18
+4
+4
+4
+Num ↓
+731,072 500,000 624,640
+CDL1 ↓
+2.1858
+2.2699 2.4972
+CDL2 ↓
+0.0121
+0.0145 0.0188
+EMD ↓
+3.4081
+3.4962 3.7561
+F-score ↑ 0.4654
+0.4387 0.3843
+908,296
+2.1205
+0.0110
+3.3425
+0.4866
+820,445
+2.1175
+0.0110
+3.3388
+0.4869
+880,134
+2.1166
+0.0110
+3.3364
+0.4889
+385,151
+2.1583
+0.0114
+3.3907
+0.4747
+135,736
+2.3045
+0.0134
+3.6001
+0.4292
+Num ↓
+731,072 500,000 624,640
+CDL1 ↓
+2.1798
+2.3196 3.2233
+Objaverse CDL2 ↓
+0.0122
+0.0153 0.0842
+EMD ↓
+3.3885
+3.5664 4.8408
+F-score ↑ 0.4866
+0.4442 0.3679
+787,174
+2.0218
+0.0104
+3.1973
+0.5357
+710,859
+2.0240
+0.0105
+3.2025
+0.5357
+762,776
+2.0362
+0.0105
+3.2096
+0.5311
+358,357
+2.1578
+0.0124
+3.4889
+0.5059
+106,814
+2.4546
+0.0172
+4.1371
+0.4330
+416,054
+1.4525
+0.0055
+2.4976
+0.7552
+380,769
+1.4514
+0.0055
+2.4949
+0.7546
+403,306
+1.5090
+0.0058
+2.5602
+0.7370
+234,999
+1.6680
+0.0072
+2.8753
+0.6827
+72,862
+1.8972
+0.0098
+3.4419
+0.5997
+Num ↓
+CDL1 ↓
+CDL2 ↓
+EMD ↓
+F-score ↑
+Wild
+731,072 500,000 624,640
+1.7899
+1.9798 2.3475
+0.0089 0.0114 0.0184
+2.9302 3.2289 3.8451
+0.6324 0.5766 0.4895
+Pivot-512 Pyramid-1024
+Pyramid-512
+Table 2: Quantitative evaluation of geometry reconstruction quality of PyramidVAE. We report
+Chamfer Distance (CDL1/CDL2), Earth Mover’s Distance (EMD), and F-score (τ = 0.002) on
+ABO, Objaverse, and Wild datasets at 512 resolution. Bold indicates the best performance, and
+underlined denotes the second best. Qualitative results are provided in Figure 13 of Appendix E.
+Dataset
+SDF
+Metrics
+Dora
+Vecset
+DC
+Hunyuan3D
+Ours
+Trellis 2 Pivot-512 Pyramid-512
+CDL1 ↓ 2.2585 3.4681
+CDL2 ↓ 0.0138 0.0404
+EMD ↓
+3.4906 4.8132
+F-score ↑ 0.4475 0.3125
+2.5242
+0.0355
+3.9635
+0.4108
+2.1741
+0.0116
+3.3969
+0.4725
+2.1908
+0.0116
+3.4202
+0.4606
+2.7853
+0.0231
+4.2214
+0.3594
+CDL1 ↓ 2.3785 3.0965
+CDL2 ↓ 0.0159 0.0299
+Objaverse
+EMD ↓
+3.6592 4.4018
+F-score ↑ 0.4487 0.3345
+2.8737
+0.0671
+4.6346
+0.4028
+2.1071
+0.0114
+3.2889
+0.5134
+2.1019
+0.0112
+3.2926
+0.5077
+2.6990
+0.0218
+4.3712
+0.3951
+CDL1 ↓ 1.9505
+CDL2 ↓ 0.0116
+EMD ↓
+3.1651
+F-score ↑ 0.5879
+2.2502
+0.0233
+3.7488
+0.5238
+1.7363
+0.0070
+2.8409
+0.7100
+1.6202
+0.0068
+2.6872
+0.6885
+2.3525
+0.0175
+4.0763
+0.4968
+ABO
+Wild
+3.0526
+0.0280
+4.1121
+0.2427
+mensions (e.g., FaithC with Dim 18). On ABO, Pivot-512 provides the best overall reconstruction
+quality among our variants, and Pyramid-1024 reduces the sampling count by over 2× (385k vs.
+880k) with only a small reduction in accuracy. On Objaverse and Wild, our method maintains
+stable performance across metrics, while Pyramid-512 achieves the most aggressive compression
+(around 6.5× fewer samples) at the expense of reduced reconstruction fidelity, highlighting the importance of hierarchical lifting for preserving fine details. Figure 5 analyzes the efficiency-quality
+trade-off on the ABO dataset. The x-axis denotes the number of sampling primitives (log scale),
+serving as a proxy for storage and computation costs. Overall, our methods (red diamonds) consistently achieve better Pareto efficiency than SDF-based sampling baselines (blue circles) and dual
+contouring methods (green squares). In particular, Pivot-512 outperforms naı̈ve resolution scaling
+(dashed line), achieving high reconstruction fidelity while using fewer active voxels.
+8
+Table 3: Ablation study on pivot sampling resolution (ranging from 64 to 1024) using the ABO
+dataset. TopoC and HighCurv represent the percentage of samples suffering from topological complexity errors and high-curvature artifacts, respectively. All indicates the overall percentage of samples exhibiting any of the aforementioned defects. The results demonstrate that increasing the pivot
+sampling resolution mitigates both types of geometric artifacts.
+Resolution
+64
+128
+256
+512
+1024
+Num
+12,856
+52,944
+217,834
+880,134
+3,524,752
+CDL1↓ CDL2↓
+EMD↓
+F-score↑ TopoC (%)
+4.8159
+2.6730
+2.3806
+2.1166
+1.6463
+7.2071
+4.1791
+3.6894
+3.3364
+2.2793
+0.1937
+0.3651
+0.4299
+0.4889
+0.6139
+0.1003
+0.0205
+0.0151
+0.0110
+0.0072
+14.85
+7.82
+3.42
+0.63
+0.22
+HighCurv (%)
+All (%)
+17.39
+10.17
+5.27
+1.86
+0.87
+19.09
+10.69
+5.50
+1.89
+0.89
+Quantitative Evaluation of PyramidVAE. Table 2 shows that Pivot-512 achieves the best or
+second-best results on most metrics across ABO, Objaverse, and Wild, demonstrating the effectiveness of compact Dim 4 pivot tokens for preserving local surface evidence. Compared
+with SDF-based baselines, it consistently improves reconstruction accuracy and remains competitive with the DC-based TRELLIS 2, even outperforming it on Objaverse CDL1/CDL2 and Wild
+CDL1/CDL2/EMD. It is worth noting that the Pyramid VAE is trained only on the ABO training
+split with limited data, without using Objaverse or Wild for training. Under this setting, the VAEcompressed Pyramid-512 inevitably sacrifices some reconstruction fidelity compared with direct
+Pivot-512, but still provides a compact multi-resolution latent representation with cross-dataset generalization potential for downstream token-based learning and generation.
+4.3
+Ablation Study and Analysis
+Local Plannarity Analysis. As provided in Appendix A, Figure 7 visualizes the artifact ratio distribution from Table 3, including TopoC, HighCurv, and their union (All). As the resolution increases
+from 64 to 1024, all three ratios consistently decrease, indicating that higher-resolution pivot sampling effectively mitigates both topological complexity and high-curvature defects. Notably, the
+reduction becomes less pronounced beyond 512, suggesting that 512 offers a practical trade-off
+between artifact suppression and sampling cost.
+Resolution Evaluation. Table 3 presents an ablation study on pivot sampling resolution (64→1024)
+on ABO. Increasing resolution consistently improves reconstruction quality: CDL1/CDL2 decrease
+from 4.8159/0.1003 to 1.6463/0.0072, EMD drops from 7.2071 to 2.2793, and F-score rises from
+0.1937 to 0.6139. Meanwhile, artifact rates are greatly reduced, with TopoC and HighCurv decreasing from 14.85%/17.39% to 0.22%/0.87%, and overall defects (All) dropping from 19.09% to
+0.89%. Notably, the marginal gains diminish at higher resolutions (e.g., 512→1024), making 512 a
+practical trade-off between reconstruction fidelity and sampling cost.
+Allocation Evaluation. Table 4 quantiTable 4: Ablation study on sampling cutting ratios
+fies how the sampling-map cut ratios control
+at 512 resolution. We evaluate four configurations
+the sampling budget at maximum resolution
+over levels {128, 256, 512}: S1= [0.85, 0.12, 0.03],
+(R=512) under four threshold settings (S1–
+S2= [0.85, 0.10, 0.05], S3= [0.80, 0.10, 0.10], and
+S4). Relaxing the thresholds activates more
+S4= [0.70, 0.20, 0.10]. Lower thresholds activate
+fine voxels (116,992 → 207,885), yielding
+more voxels and improve reconstruction quality.
+consistent quality gains (CDL1: 2.3154 →
+2.2229; F-score: 0.4234 → 0.4547). FigConfig. Num CDL1↓ CDL2↓ EMD↓ F-score↑
+ure 10 further visualizes the induced blockS1
+116,992 2.3154 0.0134 3.6121 0.4234
+level distribution at R=512: increasing the
+S2
+135,736 2.3045 0.0134 3.6001 0.4292
+budget converts more fine blocks from inS3
+189,783 2.2533 0.0126 3.5270 0.4437
+active to active and raises per-block samS4
+207,885 2.2229 0.0122 3.4801 0.4547
+ple counts, while most blocks remain sparse.
+This suggests that additional primitives are
+selectively allocated to geometrically demanding regions, such as thin structures and high-curvature
+boundaries, rather than uniformly inflating all areas. Overall, the sampling map provides a simple
+9
+control knob to trade efficiency for fidelity by modulating the number of active voxels and sampled
+primitives under uniform cut-ratio settings. Statistics are provided in Figure 10 of Appendix C.2.
+5
+Conclusion
+We propose P2Voxel, a compact mesh tokenization framework that reformulates voxel-based mesh
+representation as local surface evidence sampling. By encoding each active voxel with a pivot
+point and an orientation sign, P2Voxel replaces dense SDF storage with a minimal Dim 4 descriptor
+that can induce the corner values required for deterministic Sparse Marching Cubes reconstruction. Built on local planarity and spatial complexity assumptions, the pyramid pivot representation
+adaptively allocates finer tokens to geometrically complex regions while keeping smooth regions
+coarse, achieving a better balance between reconstruction fidelity and token efficiency. Experiments
+on ABO, Objaverse, and Wild show that P2Voxel provides competitive reconstruction quality with
+substantially fewer primitives than representative SDF- and contouring-based baselines. By turning
+dense mesh geometry into compact, locally reconstructable pyramid pivot blocks, P2Voxel provides
+a concrete token space for learning-based 3D representation. Future work will further explore its
+use in latent modeling and diffusion-based shape generation.
+References
+[1] J. D. Foley, Computer graphics: principles and practice, vol. 12110. Addison-Wesley Professional, 1996.
+[2] P. Shirley, M. Ashikhmin, and S. Marschner, Fundamentals of computer graphics. AK Peters/CRC Press, 2009.
+[3] G. Yang, S. Belongie, B. Hariharan, and V. Koltun, “Geometry processing with neural fields,”
+Advances in Neural Information Processing Systems, vol. 34, pp. 22483–22497, 2021.
+[4] T. Akenine-Moller, E. Haines, and N. Hoffman, Real-time rendering. AK Peters/crc Press,
+2019.
+[5] T. Saito and T. Takahashi, “Comprehensible rendering of 3-d shapes,” in Proceedings of the
+17th annual conference on Computer graphics and interactive techniques, pp. 197–206, 1990.
+[6] R. Zangi, “Water confined to a slab geometry: a review of recent computer simulation studies,”
+Journal of Physics: Condensed Matter, vol. 16, no. 45, p. S5371, 2004.
+[7] B. Zhang, J. Tang, M. Niessner, and P. Wonka, “3dshape2vecset: A 3d shape representation
+for neural fields and generative diffusion models,” ACM Transactions On Graphics (TOG),
+vol. 42, no. 4, pp. 1–16, 2023.
+[8] J. Xiang, Z. Lv, S. Xu, Y. Deng, R. Wang, B. Zhang, D. Chen, X. Tong, and J. Yang, “Structured
+3d latents for scalable and versatile 3d generation,” in Proceedings of the Computer Vision and
+Pattern Recognition Conference, pp. 21469–21480, 2025.
+[9] J. Xiang, X. Chen, S. Xu, R. Wang, Z. Lv, Y. Deng, H. Zhu, Y. Dong, H. Zhao, N. J. Yuan, et al.,
+“Native and compact structured latents for 3d generation,” arXiv preprint arXiv:2512.14692,
+2025.
+[10] Z. Wu, S. Song, A. Khosla, F. Yu, L. Zhang, X. Tang, and J. Xiao, “3d shapenets: A deep
+representation for volumetric shapes,” in Proceedings of the IEEE conference on computer
+vision and pattern recognition, pp. 1912–1920, 2015.
+[11] A. Nichol, H. Jun, P. Dhariwal, P. Mishkin, and M. Chen, “Point-e: A system for generating
+3d point clouds from complex prompts,” arXiv preprint arXiv:2212.08751, 2022.
+[12] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “Nerf:
+Representing scenes as neural radiance fields for view synthesis,” Communications of the ACM,
+vol. 65, no. 1, pp. 99–106, 2021.
+[13] K. Gao, Y. Gao, H. He, D. Lu, L. Xu, and J. Li, “Nerf: Neural radiance field in 3d vision, a
+comprehensive review,” arXiv preprint arXiv:2210.00379, 2022.
+[14] H. Oleynikova, A. Millane, Z. Taylor, E. Galceran, J. Nieto, and R. Siegwart, “Signed distance
+fields: A natural representation for both mapping and planning,” in RSS 2016 workshop: geometry and beyond-representations, physics, and scene understanding for robotics, University
+of Michigan, 2016.
+10
+[15] T. Ju, F. Losasso, S. Schaefer, and J. Warren, “Dual contouring of hermite data,” in Proceedings
+of the 29th annual conference on Computer graphics and interactive techniques, pp. 339–346,
+2002.
+[16] M. W. Jones, J. A. Baerentzen, and M. Sramek, “3d distance fields: A survey of techniques
+and applications,” IEEE Transactions on visualization and Computer Graphics, vol. 12, no. 4,
+pp. 581–599, 2006.
+[17] K. Deng, H.-T. D. Liu, Y. Zhu, X. Sun, C. Shang, K. S. Bhat, D. Ramanan, J.-Y. Zhu,
+M. Agrawala, and T. Zhou, “Efficient autoregressive shape generation via octree-based adaptive tokenization,” in Proceedings of the IEEE/CVF International Conference on Computer
+Vision, pp. 11685–11696, 2025.
+[18] T. Ju, F. Losasso, S. Schaefer, and J. Warren, “Dual contouring of hermite data,” in Proceedings
+of the 29th annual conference on Computer graphics and interactive techniques, pp. 339–346,
+2002.
+[19] W. E. Lorensen and H. E. Cline, “Marching cubes: A high resolution 3d surface construction
+algorithm,” in Seminal graphics: pioneering efforts that shaped the field, pp. 347–353, 1998.
+[20] C. Dyken, G. Ziegler, C. Theobalt, and H.-P. Seidel, “High-speed marching cubes using
+histopyramids,” in Computer Graphics Forum, vol. 27, pp. 2028–2039, Wiley Online Library,
+2008.
+[21] H. Jun and A. Nichol, “Shap-e: Generating conditional 3d implicit functions,” arXiv preprint
+arXiv:2305.02463, 2023.
+[22] C. Nash, Y. Ganin, S. A. Eslami, and P. Battaglia, “Polygen: An autoregressive generative model of 3d meshes,” in International conference on machine learning, pp. 7220–7229,
+PMLR, 2020.
+[23] Y. Siddiqui, A. Alliegro, A. Artemov, T. Tommasi, D. Sirigatti, V. Rosov, A. Dai, and
+M. Nießner, “Meshgpt: Generating triangle meshes with decoder-only transformers,” in Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pp. 19615–
+19625, 2024.
+[24] Y. Chen, T. He, D. Huang, W. Ye, S. Chen, J. Tang, X. Chen, Z. Cai, L. Yang, G. Yu, et al., “Meshanything: Artist-created mesh generation with autoregressive transformers,” arXiv preprint
+arXiv:2406.10163, 2024.
+[25] Y. Chen, Y. Wang, Y. Luo, Z. Wang, Z. Chen, J. Zhu, C. Zhang, and G. Lin, “Meshanything
+v2: Artist-created mesh generation with adjacent mesh tokenization,” in Proceedings of the
+IEEE/CVF International Conference on Computer Vision (ICCV), pp. 13922–13931, October
+2025.
+[26] H. Weng, Z. Zhao, B. Lei, X. Yang, J. Liu, Z. Lai, Z. Chen, Y. Liu, J. Jiang, C. Guo, et al.,
+“Scaling mesh generation via compressive tokenization,” in Proceedings of the Computer Vision and Pattern Recognition Conference, pp. 11093–11103, 2025.
+[27] R. Chen, J. Zhang, Y. Liang, G. Luo, W. Li, J. Liu, X. Li, X. Long, J. Feng, and P. Tan, “Dora:
+Sampling and benchmarking for 3d shape variational auto-encoders,” in Proceedings of the
+Computer Vision and Pattern Recognition Conference, pp. 16251–16261, 2025.
+[28] R. Zhao, Z. Wang, Y. Wang, Z. Zhou, and J. Zhu, “Flexidreamer: single image-to-3d generation
+with flexicubes,” arXiv preprint arXiv:2404.00987, 2024.
+[29] T. Shen, J. Gao, K. Yin, M.-Y. Liu, and S. Fidler, “Deep marching tetrahedra: a hybrid representation for high-resolution 3d shape synthesis,” Advances in Neural Information Processing
+Systems, vol. 34, pp. 6087–6101, 2021.
+[30] Y. Luo, X. He, C. Pan, Y. Chen, J. Wu, Y. Li, W. Ouyang, Y. Hu, G. Yang, and C. Yap, “Faithful contouring: Near-lossless 3d voxel representation free from iso-surface,” arXiv preprint
+arXiv:2511.04029, 2025.
+[31] J. Tang, “cubvh: A cuda mesh bvh acceleration toolkit.” https://github.com/ashawkey/
+cubvh, 2022.
+[32] Q.-Y. Zhou, J. Park, and V. Koltun, “Open3d: A modern library for 3d data processing,” arXiv
+preprint arXiv:1801.09847, 2018.
+11
+[33] B. Graham, M. Engelcke, and L. Van Der Maaten, “3d semantic segmentation with submanifold sparse convolutional networks,” in Proceedings of the IEEE conference on computer vision
+and pattern recognition, pp. 9224–9232, 2018.
+[34] Z. Zhao, Z. Lai, Q. Lin, Y. Zhao, H. Liu, S. Yang, Y. Feng, M. Yang, S. Zhang, X. Yang, et al.,
+“Hunyuan3d 2.0: Scaling diffusion models for high resolution textured 3d assets generation,”
+arXiv preprint arXiv:2501.12202, 2025.
+[35] V. Sitzmann, J. Martel, A. Bergman, D. Lindell, and G. Wetzstein, “Implicit neural representations with periodic activation functions,” Advances in neural information processing systems,
+vol. 33, pp. 7462–7473, 2020.
+[36] J. Collins, S. Goel, K. Deng, A. Luthra, L. Xu, E. Gundogdu, X. Zhang, T. F. Y. Vicente,
+T. Dideriksen, H. Arora, et al., “Abo: Dataset and benchmarks for real-world 3d object understanding,” in Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pp. 21126–21136, 2022.
+[37] M. Deitke, D. Schwenk, J. Salvador, L. Weihs, O. Michel, E. VanderBilt, L. Schmidt,
+K. Ehsani, A. Kembhavi, and A. Farhadi, “Objaverse: A universe of annotated 3d objects,”
+in Proceedings of the IEEE/CVF conference on computer vision and pattern recognition,
+pp. 13142–13153, 2023.
+[38] Y. Rubner, C. Tomasi, and L. J. Guibas, “The earth mover’s distance as a metric for image
+retrieval,” International journal of computer vision, vol. 40, no. 2, pp. 99–121, 2000.
+[39] J. Sturm, N. Engelhard, F. Endres, W. Burgard, and D. Cremers, “A benchmark for the evaluation of rgb-d slam systems,” in 2012 IEEE/RSJ international conference on intelligent robots
+and systems, pp. 573–580, IEEE, 2012.
+[40] M. K. Ozkan, A. M. Tekalp, and M. I. Sezan, “Pocs-based restoration of space-varying blurred
+images,” IEEE Transactions on Image Processing, vol. 3, no. 4, pp. 450–454, 1994.
+[41] H. Fan, H. Su, and L. J. Guibas, “A point set generation network for 3d object reconstruction
+from a single image,” in Proceedings of the IEEE conference on computer vision and pattern
+recognition, pp. 605–613, 2017.
+12
+Sample Ratio
+Res 64
+Res 128
+Res 256
+Res 512
+1.0
+1.0
+1.0
+0.5
+0.5
+0.5
+0.20
+0.15
+0.10
+0.05
+0.00
+0.20
+0.15
+0.10
+0.05
+0.00
+0.20
+0.15
+0.10
+0.05
+0.00
+0 5 5 1010 1515 2020 2525 30
+TopoC (%)
+0 5 5 1010 1515 2020 2525 30
+HighCurv (%)
+Res 1024
+0 5 5 1010 1515 2020 2525 30
+All (%)
+Figure 7: Artifact ratio distribution across pivot sampling resolutions for Table 3. We visualize the percentage of samples affected by topological complexity (TopoC), high-curvature artifacts
+(HighCurv), and their union (All) under different pivot sampling resolutions (64–1024) on ABO. Artifact ratios consistently decrease as resolution increases, while improvements beyond 512 become
+less pronounced, suggesting 512 as a practical trade-off between robustness and sampling cost.
+A
+Pivot Feasibility within a Voxel
+Sufficient Resolution. Assumption 1 is only valid when the voxel size is sufficiently small such
+that each active voxel contains a single and nearly planar surface patch. To ensure this, we perform a local complexity test by probing multiple sub-voxel locations within each candidate voxel
+and querying their closest surface points and corresponding triangle normals. A voxel is labeled as
+ambiguous if the normals exhibit strong directional inconsistency (suggesting multi-sheet or topologically complex regions) or if the probed points deviate noticeably from a single plane (indicating
+high curvature). In our implementation, we use a normal-consistency threshold of 0.9 (approximately a 25◦ tolerance) for the topological check and a planarity tolerance of 5% of the voxel size
+for high curvature, which provides a conservative filter for valid locally planar voxels, where Figure
+6 demonstrates the trends of scaling voxelization resolution.
+Topology Complex
+High Curvature
+All
+10
+Ratio (%)
+Pivot Feasibility within a Voxel. To make the pivot
+token well-defined and numerically stable, the pivot
+point must lie strictly inside its associated voxel (otherwise, the voxel index recovered from p becomes
+ambiguous), and it should not collapse to the voxel
+center c (otherwise, the normal direction becomes illconditioned). Given an initial pivot estimate on the
+plane, we refine it by solving a constrained closestpoint problem via alternating projections (projection
+onto convex sets, POCS [40]): we first project c onto
+the plane, then alternately enforce in-voxel feasibility (by clamping to the voxel bounds with a small
+ϵ margin) and on-plane feasibility (by re-projecting
+onto the plane) for a few iterations, and finally apply
+a hard in-voxel constraint to guarantee that the stored
+pivot remains inside the voxel.
+5
+0
+64
+128
+256
+512
+1024
+2048
+Resolution
+Figure 6: Scale effect of mesh in Figure 2.
+The ratios of topology-complex and highcurvature regions decrease with increasing
+resolution, especially beyond r ≥ 1024.
+Please also refer to Table 3 and Figure 7.
+Artifact Ratio Distribution across Resolutions. We analyze the effect of pivot sampling resolution
+on reconstruction robustness using ABO. For resolutions from 64 to 1024, we report the percentage
+of samples affected by topological complexity (TopoC), high-curvature artifacts (HighCurv), and
+their union (All). The artifact ratios decrease consistently as resolution increases, showing that finer
+pivot sampling better captures challenging local geometry. However, the gains become marginal
+beyond resolution 512, suggesting that 512 provides a practical balance between robustness and
+sampling cost. Accordingly, we use 512 as the default maximum resolution in our experiments.
+13
+Table 5: Average runtime breakdown of pyramid voxelization at resolutions 512 and 1024. Values
+are averaged across ABO, Objaverse, and Wild datasets. Note that the reported times measure the
+end-to-end execution in Python, explicitly including the overall I/O (read/write) overhead.
+Resolution
+512
+1024
+Sampling
+Pyramid
+Resolution Sparse MC
+map
+Voxelization
+Lifting
+RTX 4090
+8.39 s
+8.98 s
+5.96 s
+14.55 s
+0.01 s
+0.08 s
+0.60 s
+2.34 s
+Table 6: Runtime benchmark for training and inference. Training speed is measured under r7 =
+400,000 and reported as wall-clock time per 1,000 steps, estimated total training time, and peak
+VRAM. Inference speed is reported as end-to-end reconstruction time per shape and peak VRAM.
+Setting
+GPU
+Block Batch Size
+Measured Runtime
+Estimated Total Time
+Peak VRAM
+Train
+RTX 4090
+32
+4m36s / 1,000 steps
+12.8 days
+12,299 MiB
+Inference
+RTX 4090
+–
+1.69 s / shape
+–
+4,119 MiB
+B
+Implementation Details
+Baselines. We benchmark P2Voxel against representative baselines from two mainstream geometry
+discretization paradigms: SDF-based sampling methods, including 3DShape2VecSet (VecSet) [7],
+DORA [27], and Hunyuan3D-2.1 [34]; and Dual Contouring-based methods, including FaithC [30]
+and TRELLIS 2 [9]. Our evaluation focuses on the geometry discretization stage, namely the sampling strategy and its resulting surface reconstruction fidelity, while excluding downstream generative components such as VAE tokenization, latent modeling, or diffusion synthesis. For a controlled
+comparison, all SDF-based baselines sample or downsample points from the same watertight input mesh and reconstruct surfaces using the same neural implicit representation [35], so that performance differences mainly reflect the effect of the sampling strategy rather than reconstructionnetwork variations.
+Datasets and Metrics. We conduct experiments on three disjoint test sets, each containing approximately 400 shapes. The ABO dataset [36] contains product models from a catalog of over 147k
+items and 7,953 artist-designed meshes. The Objaverse dataset [37] is sampled from a large-scale
+repository of over 800k 3D assets, covering diverse categories such as animals, humans, vehicles,
+and everyday objects. The Wild dataset includes challenging internet-collected shapes with noisy
+geometry, irregular sampling artifacts, and complex topology. All shapes are converted into watertight reference surfaces using DORA’s UDF-to-SDF pipeline, followed by Marching Cubes and
+largest connected component extraction. This provides consistent ground-truth surfaces for evaluation while reducing ambiguity from disconnected fragments and non-manifold artifacts. We evaluate
+reconstruction quality using complementary geometric metrics. Chamfer Distance under L1 and L2
+norms (CDL1 and CDL2) [41] measures bidirectional nearest-neighbor discrepancy between reconstructed and reference point sets. Earth Mover’s Distance (EMD) [38] captures global distribution
+mismatch and structural distortion. We also report F-score [39] at a threshold of 0.002, which balances precision and recall to indicate reconstruction completeness and surface correctness.
+Setups. We evaluate two voxelization configurations to study the trade-off between reconstruction
+fidelity and token efficiency: a single-resolution baseline Pivot-512 and our hierarchical PyramidR strategy with Rmax = 32. In Pivot-512, we perform pivot-based voxelization at a fixed resolution of 5123 , serving as a strong single-scale reference. For the hierarchical setting, we instantiate
+two variants that progressively lift coarse pivot tokens to finer resolutions. Pyramid-512 adopts a
+3-level hierarchy {128, 256, 512} with allocation ratios [0.85, 0.10, 0.05], prioritizing coarse coverage while reserving fine samples for structurally informative regions. Pyramid-1024 extends this
+to a 4-level hierarchy {128, 256, 512, 1024} with allocation ratios [0.50, 0.35, 0.12, 0.03], enabling
+higher-resolution reconstruction with limited fine-scale sampling and sufficient mid-scale support.
+Unless otherwise specified, we keep all scoring hyperparameters fixed across datasets and baselines,
+setting λvar = 0.5, λgrad = 0.3, and n = 3.0, which control curvature variance, curvature gradient
+magnitude, and normal deviation in the block-level importance score, respectively. All experiments
+14
+Vecset
+3.2
+Hy3D
+Trellis 2
+FaithC
+0.08
+2.8
+2.6
+2.4
+2.2
+2.0
+EMD
+0.06
+CDL2
+CDL1
+3.0
+0.04
+0.02
+Lower is better
+Lower is better
+2 × 105 3 × 1054 × 105 6 × 105
+105
+2 × 105 3 × 1054 × 105 6 × 105
+105
+Sampling Number (Log Scale)
+4.75
+4.50
+4.25
+4.00
+3.75
+3.50
+3.25
+Pivot-512
+Lower is better
+Pyr-512
+Higher is better
+0.525
+0.500
+0.475
+0.450
+0.425
+0.400
+0.375
+2 × 105 3 × 1054 × 105 6 × 105
+105
+Sampling Number (Log Scale)
+Pyr-1024
+F-score
+Dora
+2 × 105 3 × 1054 × 105 6 × 105
+105
+Sampling Number (Log Scale)
+Sampling Number (Log Scale)
+Figure 8: Efficiency vs. quality trade-off analysis for Table 1. We report Chamfer Distance
+(L1 /L2 ), Earth Mover’s Distance (EMD), and F-score on Objaverse datasets. The x-axis represents the number of sampling primitives (log scale), serving as a proxy for storage and computational
+cost. Red diamonds (Ours) demonstrate superior Pareto efficiency compared to SDF-based methods
+(blue circles) and Dual Contouring methods (green squares).
+Vecset
+Hy3D
+Trellis 2
+FaithC
+0.016
+2.0
+0.014
+1.8
+EMD
+2.2
+CDL2
+CDL1
+0.018
+0.012
+0.010
+0.008
+1.6
+Lower is better
+105
+Sampling Number (Log Scale)
+0.006
+Lower is better
+105
+3.8
+3.6
+3.4
+3.2
+3.0
+2.8
+2.6
+Pivot-512
+0.75
+Pyr-512
+Higher is better
+0.70
+0.65
+0.60
+0.55
+Lower is better
+105
+Sampling Number (Log Scale)
+Pyr-1024
+F-score
+Dora
+Sampling Number (Log Scale)
+0.50
+105
+Sampling Number (Log Scale)
+Figure 9: Efficiency vs. quality trade-off analysis for Table 1. We report Chamfer Distance
+(L1 /L2 ), Earth Mover’s Distance (EMD), and F-score on Wild datasets. The x-axis represents the
+number of sampling primitives (log scale), serving as a proxy for storage and computational cost.
+Red diamonds (Ours) demonstrate superior Pareto efficiency compared to SDF-based methods (blue
+circles) and Dual Contouring methods (green squares).
+are conducted on a workstation equipped with an AMD EPYC 7543 32-Core Processor and eight
+NVIDIA RTX 4090 GPUs with 24GB VRAM, under identical hardware and implementation settings for fair comparison.
+Runtime Breakdown. Table 5 summarizes the average end-to-end runtime of our pyramid voxelization pipeline at resolutions 512 and 1024, decomposed into four stages. The sampling map
+construction dominates the preprocessing cost and remains relatively stable across resolutions
+(8.39s→8.98s), while pyramid voxelization increases notably with resolution (5.96s→14.55s) due
+to the higher-density token generation and accumulation. In contrast, resolution lifting is lightweight
+in both settings (0.01s and 0.08s), indicating that multi-scale refinement introduces negligible overhead compared to voxelization itself. Finally, the sparse Marching Cubes stage scales with output
+resolution (0.60s→2.34s) and is the only component accelerated by the CuBVH CUDA implementation [31] on RTX 4090; all other stages are executed in Python and include I/O overhead. This
+suggests substantial room for further optimization by migrating the sampling and voxelization stages
+to GPU kernels and reducing Python-side bottlenecks.
+C
+More Experimental Results
+C.1
+More Visualization of Efficiency-quality for Table 1
+Figs. 8 and 9 analyze the efficiency-quality trade-off using CDL1/CDL2, EMD, and F-score, where
+the x-axis denotes the number of sampling primitives (log scale) as a proxy for storage and computation costs. Across ABO, Objaverse, and Wild, our methods (red diamonds) consistently exhibit
+strong Pareto efficiency compared to SDF-based sampling baselines (blue circles) and dual contouring methods (green squares). In particular, Pivot-512 achieves competitive reconstruction fidelity
+while requiring substantially fewer active voxels, demonstrating an effective balance between sampling budget and surface quality.
+15
+Ratio (within each resolution)
+R=128
+R=256
+R=512
+1.75
+1.50
+1.25
+R=128
+R=256
+R=512
+1.75
+1.50
+1.50
+1.25
+S1
+Total Voxels: 116,992
+1.00
+0.75
+0.75
+0.50
+0.25
+0.25
+200
+400
+600
+Sampling Blocks
+800
+1000
+0.00
+0
+200
+400
+600
+Sampling Blocks
+800
+1.25
+0.75
+0.50
+0
+1.50
+S3
+Total Voxels: 189,783
+1.00
+0.25
+1000
+0.00
+R=128
+R=256
+R=512
+1.75
+1.25
+S2
+Total Voxels: 135,736
+1.00
+0.50
+0.00
+R=128
+R=256
+R=512
+1.75
+S4
+Total Voxels: 207,885
+1.00
+0.75
+0.50
+0.25
+0
+200
+400
+600
+Sampling Blocks
+800
+1000
+0.00
+0
+200
+400
+600
+Sampling Blocks
+800
+1000
+Figure 10: Visualization of sampling-map induced block activation (focus on R=512) for Table 4.
+We visualize how different sampling cut ratios redistribute the sampling budget across blocks. At
+the maximum resolution (R=512), increasing the total number of sampled primitives consistently
+activates more fine blocks and increases their per-block sample counts, resulting in clear qualitative
+improvements in reconstruction. This supports adaptive, region-dependent sampling allocation.
+Table 7: Quantitative evaluation of geometry reconstruction quality. We report Chamfer Distance (CDL1/CDL2), Earth Mover’s Distance (EMD), and F-score (τ = 0.002) on ABO, Objaverse,
+and Wild datasets at watertight 1024 resolution. We evaluate our Pivot (single-scale 512) configurations. Considering the trade-off between voxel dimension capacity and reconstruction fidelity,
+our P2Voxel method (Dim 4) achieves the most efficient performance. Results are sorted by method
+category. Bold indicates the best performance, and underlined denotes the second best.
+C.2
+Dataset
+Dora
+Vecset
+Faithc
+TRELLIS.2
+Hy3D
+Ours-Pivot
+CDL1 ↓
+ABO
+Objaverse
+Wild
+2.3144
+2.3599
+1.9001
+2.4034
+2.5113
+2.1017
+2.1679
+2.0615
+1.6637
+2.1606
+2.0534
+1.6515
+2.3303
+2.4324
+2.0115
+2.1440
+2.0091
+1.5304
+CDL2 ↓
+ABO
+Objaverse
+Wild
+0.0139
+0.0162
+0.0103
+0.0167
+0.0203
+0.0132
+0.0115
+0.0108
+0.0073
+0.0116
+0.0107
+0.0072
+0.0151
+0.0180
+0.0117
+0.0113
+0.0103
+0.0061
+EMD ↓
+ABO
+Objaverse
+Wild
+3.5541
+3.7049
+3.3108
+3.6460
+3.8994
+3.6483
+3.3838
+3.2250
+2.7409
+3.3765
+3.2121
+2.7314
+3.5992
+3.7182
+3.4402
+3.3589
+3.1674
+2.5593
+F-score ↑
+ABO
+Objaverse
+Wild1
+0.4338
+0.4514
+0.5961
+0.4089
+0.4121
+0.5435
+0.4713
+0.5171
+0.6581
+0.4759
+0.5199
+0.6631
+0.4211
+0.4249
+0.5760
+0.4796
+0.5345
+0.7171
+Block Activation Distribution of Table 4.
+Figure 10 visualizes how the sampling map redistributes the sampling budget across pyramid blocks
+at the maximum resolution (R=512) Table 4. As the cut ratio is relaxed, more fine-resolution
+blocks become active, and the number of sampled primitives within active blocks also increases.
+Importantly, the distribution remains highly sparse: most blocks still contain only a small number
+of samples, while additional budget is concentrated in selected regions. This indicates that the
+sampling map does not uniformly densify the entire shape, but instead expands fine-level coverage in
+geometrically demanding areas, showing the effectiveness of region-dependent sampling allocation.
+C.3
+Higher Watertight Resolution
+Table 7 reports reconstruction results on ABO, Objaverse, and Wild when the watertight groundtruth surfaces are generated at a higher resolution of 1024. Compared with our main results under
+the default watertight setting, we observe that increasing the watertight resolution leads to only
+minor numerical variations across all metrics, indicating that our evaluation is not sensitive to the
+specific watertight extraction resolution. Under this stricter setting, our Pivot-1024 (Dim 4) remains
+consistently competitive, achieving strong CDL1/CDL2 and EMD with the highest or near-highest
+F-score across datasets. Overall, these results suggest that the reported performance trends are
+stable and that further increasing the watertight resolution has limited impact on the comparative
+conclusions.
+16
+Table 8: Architectural details of the Pyramid VAE encoder. The encoder starts from the input
+branch corresponding to the selected pyramid resolution R ∈ {32, 16, 8} and progressively maps
+the token grid to a 43 latent grid. Each ResBlock3D uses LayerNorm, SiLU activation, and 3 × 3 × 3
+convolutions.
+Stage
+Input-32
+E1
+Input-16
+E2
+Input-8
+E3
+Input-4
+E4
+Middle
+Posterior Head
+D
+Input Resolution
+3
+32
+323
+163
+163
+83
+83
+43
+43
+43
+43
+Output Resolution
+3
+32
+163
+163
+83
+83
+43
+43
+43
+43
+43
+Block
+Conv3D(4, 32, 3)
+[ResBlock3D(32, 32)] × 2, Down(32, 64)
+Conv3D(4, 64, 3)
+[ResBlock3D(64, 64)] × 2, Down(64, 128)
+Conv3D(4, 128, 3)
+[ResBlock3D(128, 128)] × 2, Down(128, 256)
+Conv3D(4, 256, 3)
+[ResBlock3D(256, 256)] × 2
+[ResBlock3D(256, 256)] × 2
+LayerNorm, SiLU, Conv3D(256, 2Cz , 3)
+Details of Pyramid VAE
+Pyramid representation and architecture. We train the Pyramid VAE on the ABO training split
+using pyramid pivot tokens extracted from watertight meshes voxelized at a global resolution of
+5123 . Each local block has a maximum resolution of Rmax = 32, and the model is trained over
+three pyramid stages R = {32, 16, 8}. Each input token contains four channels, including a relative
+3D pivot coordinate and a discrete sign value, while the decoder predicts three coordinate channels
+and three sign logits for the classes {−1, 0, +1}. The encoder uses hierarchical 3D convolutional
+stages with channel widths [32, 64, 128, 256], and the decoder mirrors this structure with widths
+[512, 256, 128, 64]. Each stage contains two residual blocks, the bottleneck also contains two residual blocks, and layer normalization is used throughout the network. The latent code has Cz = 16
+channels, with the encoder predicting both posterior mean and log-variance.
+Multi-stage training and optimization. Instead of optimizing all pyramid stages simultaneously,
+we randomly sample one stage at each iteration according to the weighted distribution w32 : w16 :
+w8 = 5 : 3 : 2, corresponding to probabilities 0.5, 0.3, and 0.2. This strategy emphasizes the finest
+stage while still exposing the model to coarser pyramid levels. When distributed training is used, the
+selected stage is synchronized across processes. The model is trained end-to-end with AdamW, using
+an initial learning rate of 5 × 10−6 and cosine annealing over 500 epochs. Training is performed in
+FP32 precision with gradient clipping at norm 1.0, a block batch size of 64, a mini-batch size of 2,
+and a fixed random seed of 1234.
+Objective and validation. The Pyramid VAE is trained with a reconstruction-aware objective that
+supervises both pivot coordinates and orientation signs. Given a target token xi = (pi , si ) and
+decoder prediction x̂i = (p̂i , ℓ̂i ), the final objective is
+L = λxyz Lxyz + λempty Lempty + λsign Lsign + λKL LKL ,
+where
+λxyz = 1.0,
+λempty = 0.01,
+λsign = 0.5,
+λKL = 10−4 .
+Here, Lxyz is an ℓ1 coordinate reconstruction loss applied only to occupied voxels, encouraging
+accurate local pivot prediction. Lempty penalizes non-zero coordinate predictions in empty voxels,
+preventing spurious surface evidence in inactive regions. Lsign is a weighted three-class crossentropy loss for the sign labels {−1, 0, +1}, with class weights (1.0, 0.25, 1.0) to balance occupied
+and empty states. LKL regularizes the latent posterior toward a standard Gaussian prior, enabling
+compact VAE-style latent modeling. Validation is performed every 5 epochs using sampled validation batches, with both overall and per-stage metrics recorded; full reconstruction validation is
+optional and disabled in the reported configuration for memory efficiency.
+17
+Table 9: Architectural details of the Pyramid VAE decoder. The decoder maps the latent grid with
+Cz = 16 channels to multi-resolution token predictions. Each output head predicts six channels,
+corresponding to three relative coordinate channels and three sign logits.
+Stage
+Input Resolution
+Output Resolution
+Block
+Latent Input
+Middle
+D4
+Head-4
+D3
+Head-8
+D2
+Head-16
+D1
+Head-32
+3
+3
+Conv3D(Cz , 512, 3)
+[ResBlock3D(512, 512)] × 2
+[ResBlock3D(512, 512)] × 2
+LayerNorm, SiLU, Conv3D(512, 6, 3)
+Up(512, 256), [ResBlock3D(256, 256)] × 2
+LayerNorm, SiLU, Conv3D(256, 6, 3)
+Up(256, 128), [ResBlock3D(128, 128)] × 2
+LayerNorm, SiLU, Conv3D(128, 6, 3)
+Up(128, 64), [ResBlock3D(64, 64)] × 2
+LayerNorm, SiLU, Conv3D(64, 6, 3)
+4
+43
+43
+43
+43
+83
+83
+163
+163
+323
+4
+43
+43
+43
+83
+83
+163
+163
+323
+323
+Table 10: Training hyperparameters of the Pyramid VAE.
+Hyperparameter
+Value
+Dataset
+Representation
+Global resolution
+Maximum block resolution Rmax
+Training stages
+Stage sampling weights
+Input channels
+Output channels
+Latent channels Cz
+Encoder channels
+Decoder channels
+Residual blocks per stage
+Middle residual blocks
+Normalization
+Batch size
+Block batch size
+Optimizer
+Learning rate
+Epochs
+Gradient clipping
+Precision
+Mixed precision
+KL weight
+Sign CE weight
+Sign CE class weights
+XYZ loss weight
+Empty-space loss weight
+SDF cosine loss weight
+Validation interval
+Checkpoint interval
+Maximum kept checkpoints
+Random seed
+18
+ABO
+Pyramid tokens
+5123
+32
+{32, 16, 8}
+{5.0, 3.0, 2.0}
+4
+6
+16
+[32, 64, 128, 256]
+[512, 256, 128, 64]
+2
+2
+LayerNorm
+2
+64
+AdamW
+5 × 10−6
+500
+1.0
+FP32
+Disabled
+10−4
+0.5
+[1.0, 0.25, 1.0]
+1.0
+0.01
+0
+5 epochs
+20,000 steps
+10
+1234
+Figure 11: We visualize some pyramid token allocations across resolutions in Figure 12, where
+red/blue/green/cyan denote R=512/256/128, respectively. Lower-resolution tokens predominantly
+cover smooth and slowly varying regions, while higher-resolution tokens concentrate around silhouettes, sharp boundaries, and transition areas, demonstrating effective multi-scale budget allocation.
+E
+Qualitative Visualization
+We provide qualitative visualizations to further illustrate the behavior and reconstruction quality of
+P2Voxel. Figure 11 visualizes the pyramid sampling maps, showing how tokens are allocated across
+different resolutions according to local geometric complexity. Figure 12 compares mesh reconstruction results before VAE tokenization, focusing on the effectiveness of the pivot voxelization and
+pyramid sampling strategy itself. Figure 13 further presents reconstruction results after VAE compression, demonstrating that the compact pyramid latent representation preserves the main surface
+structure while supporting token-efficient learning. Together, these visualizations show that P2Voxel
+allocates high-resolution tokens to geometrically informative regions and maintains high-quality reconstruction under both direct and VAE-compressed settings.
+F
+Discussion
+Future Work. P2Voxel provides a compact and reconstruction-aware token space by converting
+dense mesh geometry into locally reconstructable pyramid pivot blocks. In this work, we mainly
+focus on geometry tokenization, deterministic reconstruction, and VAE-based compression, leaving
+full generative modeling as a natural next step. The pyramid sampling map can serve as a coarse spatial layout, while local pivot tokens describe fine-grained surface evidence within selected blocks,
+suggesting a coarse-to-fine pipeline that first predicts resolution allocation and then generates local pivot evidence. Another promising direction is to learn the sampling map directly from data.
+Although the current allocation strategy based on geometric scoring and fixed cut ratios already
+provides an effective efficiency–fidelity trade-off, a learned allocation module may better adapt the
+token budget to different object categories, surface complexity, and downstream tasks. Finally,
+more efficient CUDA-based kernels and parallel reconstruction procedures could make P2Voxel
+more suitable for large-scale 3D asset processing and real-time applications.
+Social Impact. P2Voxel may have positive impact by reducing the storage, memory, and computational cost of high-resolution 3D geometry representation, benefiting applications such as 3D asset
+compression, digital content creation, simulation, robotics, virtual environments, and learning-based
+shape generation. By lowering the cost of representing detailed mesh geometry, the method may also
+make 3D learning pipelines more accessible to researchers and creators with limited computational
+resources. At the same time, more efficient 3D tokenization can make large-scale 3D asset synthesis and editing easier, especially when integrated into generative pipelines. Therefore, practical
+deployment should respect data provenance, copyright and licensing constraints of 3D assets, and
+responsible use of generated content. The present work focuses on geometry representation and reconstruction, and does not involve private data, human subjects, or high-risk deployment scenarios.
+19
+ABO× �
+Objaverse × �
+Wild × �
+Ground
+Truth
+Dora
+Vecset
+Hy3D
+Trellis 2
+Faithc
+Pivot
+Pyramid
+Figure 12: Visualization results across different methods. All comparisons are conducted purely
+at the mesh reconstruction level, without VAE tokenization or diffusion-based generation. With
+sufficiently dense sampling, all methods produce plausible reconstructions. Our P2Voxel achieves
+comparable quality with fewer active voxels (smaller token budget), and its minimal Dim 4 representation further benefits downstream token-based learning.
+20
+ABO× �
+Objaverse × �
+Wild × �
+Ground
+Truth
+Dora
+Vecset
+Hy3D
+Trellis 2
+Pivot
+Pyramid
+Figure 13: Visualization results of VAE across different methods. All comparisons are conducted purely at the mesh reconstruction level, without VAE tokenization or diffusion-based generation. With sufficiently dense sampling, all methods produce plausible reconstructions. Our P2Voxel
+achieves comparable quality with fewer active voxels (smaller token budget), and its minimal Dim 4
+representation further benefits downstream token-based learning.
+21

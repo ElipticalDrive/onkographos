@@ -1,12 +1,12 @@
 # Voxel Face and Geometry Generation
 
-Also called: Voxel Meshing, Blocky Surface Extraction
+Also called: Voxel Face Meshing, Blocky Surface Extraction
 
 ## Overview
-Voxel Face and Geometry Generation is the family of algorithms that convert discrete 3D voxel grids into polygonal triangle meshes. It solves the problem of rendering large, blocky volumes efficiently by culling internal faces between adjacent solid voxels, thereby reducing vertex count and draw calls compared to naive voxel rendering [S1, S9, unofficial]. Unlike smooth surface extraction methods like Marching Cubes, this family produces a blocky, axis-aligned aesthetic suitable for voxel-art styles [S1, unofficial][S8]. It differs from smooth extraction by emitting axis-aligned quads or triangles at voxel boundaries rather than interpolating geometry through the volume [S1, unofficial].
+Voxel Face and Geometry Generation is a family of surface extraction algorithms that convert a discrete 3D voxel grid (occupancy or density field) into a triangular mesh by emitting geometry only for voxel faces exposed to empty space or chunk boundaries [S1, S3, S5, unofficial]. It solves the problem of rendering large voxel worlds efficiently by culling internal faces between adjacent solid voxels, thereby reducing vertex count and draw calls compared to naive voxel rendering [S1, S9, unofficial]. Unlike smooth surface extraction methods like Marching Cubes, this method produces a blocky, axis-aligned aesthetic suitable for voxel-art styles [S1, unofficial][S8]. It differs from [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by focusing on simple neighbor-based face culling rather than combining multiple voxel sets via boolean operations [S1, unofficial].
 
 ## Shared principles
-All methods in this family operate on a 3D occupancy grid or density field. The core mechanism involves iterating through voxels and determining which faces are "exposed" to empty space or a chunk boundary.
+The family operates on a 3D occupancy grid or density field. The core mechanism involves iterating through voxels and determining which faces are "exposed" to empty space or a chunk boundary.
 
 1.  **Neighbor Check:** For each solid voxel, the algorithm checks its 6 immediate neighbors (±X, ±Y, ±Z) [S1, S9, unofficial].
     *   If a neighbor is empty (Air, density below threshold, or `visible=false`), the face is exposed [S1, S5, unofficial].
@@ -50,7 +50,7 @@ Voxel Face Mesh Generation is a surface extraction algorithm that constructs a t
 - [S3, unofficial] This process generates duplicate line segments (exactly 2x), which are not filtered out.
 
 ## Background
-Voxel meshing originated with the rise of voxel-based games and modeling tools. Early implementations often rendered voxels as individual cubes, leading to performance bottlenecks. The shift to face culling and mesh generation allowed for the rendering of large voxel worlds. The specific techniques described here, such as boolean voxel meshing and self-bootstrap geometry generation, have been developed in various open-source projects and research papers to optimize rendering performance and visual quality for blocky aesthetics [S1, unofficial][S2][S3, unofficial].
+The concept of extracting meshes from voxel grids by culling internal faces is foundational to voxel-based games like Minecraft, where efficiency is critical for rendering large worlds [S1, S9, unofficial]. The specific implementation details, such as padding grids to handle boundaries and using lookup tables for texture atlas UVs, are standard practices in engine development [S2, S7, unofficial]. The "Self-bootstrap" variant originates from the Strivec paper, which uses coarse geometry for pruning rather than final rendering [S2]. The "Voxel Outline" technique is described in Fogleman's voxel rendering blog, focusing on aesthetic line art generation [S3, unofficial].
 
 ## Sources
 [S1] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)

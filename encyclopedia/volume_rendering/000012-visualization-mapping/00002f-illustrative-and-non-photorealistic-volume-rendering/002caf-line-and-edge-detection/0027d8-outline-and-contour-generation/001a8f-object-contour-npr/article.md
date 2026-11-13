@@ -3,126 +3,114 @@
 Also called: Csébfalvi's contour method, GPU-based contour tracing, Geometry shader contour rendering, Gradient-based contour visualization, View-Dependent Contour Generation
 
 ## Overview
-Object Contour NPR generates view-dependent line primitives that demarcate areas where an object's surface turns away from the viewer [S1]. Unlike surface-based NPR, this method operates on volumetric data by identifying regions of high gradient magnitude to estimate physical boundaries without predefined classification functions or voxel intensity values [S2, unofficial]. It distinguishes itself from sibling methods by utilizing a geometry shader to trace line-strips directly to the screen from selected particles, rather than recording strokes to a texture buffer [S1].
+Object Contour NPR generates view-dependent line primitives that demarcate areas where an object's surface turns away from the viewer, conveying shape through boundary emphasis [S1]. Unlike hatches, which are often pre-rendered to texture buffers, these contours are traced and rendered directly to the screen in real-time [S1]. It differs from direct volume rendering by relying solely on gradient magnitude and viewing angle rather than voxel intensity values, allowing for faster parameter tuning [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset $V$, a viewing direction vector $\vec{v}$, and a user-defined distance threshold $d_{thresh}$ defining the neighborhood around the contour [S1][G].
-*   **Output:** A set of line-strips rendered directly to the screen [S1].
+*   **Input:** A 3D scalar volume dataset $V$, a viewing direction vector $\vec{v}$, and a user-defined distance threshold $d_{thresh}$ defining the neighborhood around the contour.
+*   **Output:** A set of line strips rendered directly to the screen buffer.
 
 **Data Structures:**
-1.  **Volume Grid:** A 3D array of scalar values representing the dataset [G].
-2.  **Particle Set:** A collection of 3D points distributed within the volume, each storing its position and precomputed gradient information [S1][G].
-3.  **Line-Strip Buffer:** A vertex buffer containing the generated line segments for the geometry shader [S1][G].
+*   **Particle Set:** A collection of point primitives. Each particle $P_i$ stores its 3D position $(x, y, z)$ in the volume.
+*   **Gradient Field:** A 3D vector field $\nabla V$ computed via 4D linear regression [S2, unofficial].
 
-**Gradient Estimation:**
-The method relies heavily on gradient accuracy, making conventional central difference estimation insufficient due to its narrow voxel neighborhood [S2, unofficial]. Instead, a 4D linear regression method computes the gradient $\nabla V$ at each particle position to provide a robust estimation of local surface orientation [S2, unofficial].
+**Steps:**
+1.  **Gradient Estimation:** Compute the gradient $\nabla V$ at every voxel. Conventional central difference is insufficient due to narrow neighborhood reliance; use 4D linear regression for accuracy [S2, unofficial].
+2.  **Particle Selection:** Identify particles within the user-defined distance $d_{thresh}$ from the implicit contour surface. The contour is implicitly defined by the condition where the surface turns away from the viewer, characterized by locally high gradient values [S1][S2, unofficial].
+3.  **Primitive Transformation:** Treat selected particles as point primitives. Pass them to a geometry shader [S1].
+4.  **Contour Tracing:** The geometry shader traces along the contour direction, transforming point primitives into line strips that resemble contour segments [S1]. The trace direction and constant-width measure are adopted from the VolumeFlies framework [S1].
+5.  **Rendering:** Render the generated line strips directly to the screen. Do not record them to a texture buffer [S1].
+6.  **Color/Opacity Assignment:** For each voxel/pixel, determine color and opacity based only on the gradient magnitude $|\nabla V|$ and the angle $\theta$ between the viewing direction $\vec{v}$ and the gradient vector $\nabla V$ [S2, unofficial].
 
-**Algorithm Steps:**
-1.  **Particle Selection:** Iterate through the particle set. For each particle $p$ at position $\vec{p}$, compute the gradient $\nabla V(\vec{p})$. Select particles within the user-defined distance $d_{thresh}$ from the implicit contour surface [S1].
-2.  **View-Dependent Filtering:** Calculate the angle $\theta$ between the viewing direction $\vec{v}$ and the gradient vector $\nabla V(\vec{p})$. Contours correspond to areas where the surface turns away from the viewer, which is determined by the angular relationship between $\vec{v}$ and the surface normal derived from $\nabla V$ [S1][G].
-3.  **Line-Strip Generation (Geometry Shader):** Treat the selected particles as point primitives. Pass these points to a geometry shader, which traces along the contour direction using a curvature-dependent measure $\tau$ adopted from the VolumeFlies framework [S1]. The shader transforms the points into line-strips resembling contour parts [S1].
-4.  **Rendering:** Render the generated line-strips directly to the screen, bypassing texture buffers used for other styles like hatches [S1].
+**Formulas:**
+*   **Contour Condition:** The contour exists where the gradient magnitude is high and the surface normal turns away from the view.
+*   **Viewing Angle:** $\cos \theta = \frac{\nabla V \cdot \vec{v}}{|\nabla V| |\vec{v}|}$ [S2, unofficial].
+*   **VolumeFlies Measure:** The original framework uses a curvature-dependent measure $\tau$ with a threshold for constant-width contours [S1].
+
+**Parameters:**
+*   $d_{thresh}$: User-defined distance from the contour for selecting particles [S1].
+*   Gradient estimation method: 4D linear regression [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Accuracy:** Using conventional central difference leads to inaccurate contours because it only considers a narrow voxel neighborhood [S2, unofficial].
+*   **Performance:** Adding multiple particle sets for combined styles incurs a performance cost that may lead to loss of interactivity [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def generate_object_contours(volume, particles, view_direction, distance_threshold):
-    """
-    Generates object contours for volume rendering.
-    Args:
-        volume: 3D list of scalar values.
-        particles: List of 3D tuples (x, y, z).
-        view_direction: Normalized 3D tuple representing camera view.
-        distance_threshold: Float, max distance from contour to select particle.
-    Returns:
-        list of line_strips: List of lists of 3D tuples forming line segments.
-    """
-    line_strips = []
-    selected_particles = []
+def render_object_contours(volume, view_direction, distance_threshold):
+    # Step 1: Compute gradients using 4D linear regression
+    # Central difference is explicitly avoided [S2, unofficial]
+    gradients = compute_gradient_4d_linear_regression(volume)
     
-    # Step 1 & 2: Select particles based on gradient and distance
-    for p in particles:
-        gradient = compute_gradient_4d(volume, p)
-        if is_near_contour(p, gradient, view_direction, distance_threshold):
-            selected_particles.append(p)
+    # Step 2: Select particles near contours
+    # Contours are areas where surface turns away from viewer [S1]
+    # This implies high gradient magnitude and specific view-angle relationship
+    particles = []
+    for voxel in volume:
+        grad = gradients[voxel]
+        mag = magnitude(grad)
+        # Implicit contour detection based on gradient and view angle [S2, unofficial]
+        if is_near_contour(voxel, grad, view_direction, distance_threshold):
+            particles.append(voxel.position)
             
-    # Step 3: Trace contours (simulating geometry shader output)
-    traces = trace_contours(selected_particles)
+    # Step 3 & 4: Geometry Shader Processing
+    # Transform points to line strips [S1]
+    line_strips = geometry_shader_trace(particles, gradients)
     
-    for trace in traces:
-        line_strips.append(trace)
-        
-    return line_strips
+    # Step 5: Render directly to screen [S1]
+    # No texture buffer recording
+    render_to_screen(line_strips)
+    
+    # Step 6: Color/Opacity based on gradient and angle [S2, unofficial]
+    for strip in line_strips:
+        for point in strip:
+            grad = gradients[point]
+            angle_cos = dot(grad, view_direction) / (magnitude(grad) * magnitude(view_direction))
+            color = map_gradient_and_angle(magnitude(grad), angle_cos)
+            set_point_color(point, color)
 
-def compute_gradient_4d(volume, point):
-    # 4D linear regression fits a plane to local (x,y,z,value) data [S2, unofficial]
-    # Solves least-squares for plane normal, which equals the gradient [G].
-    # Standard implementation uses a 3x3x3 neighborhood stencil.
-    X = []
-    Y = []
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for dz in (-1, 0, 1):
-                nx, ny, nz = point[0]+dx, point[1]+dy, point[2]+dz
-                if 0 <= nx < len(volume) and 0 <= ny < len(volume[0]) and 0 <= nz < len(volume[0][0]):
-                    X.append([nx, ny, nz, 1.0])
-                    Y.append(volume[nx][ny][nz])
-    A = [[sum(X[i][k]*X[i][j] for k in range(4)) for j in range(4)] for i in range(4)]
-    b = [sum(X[i][k]*Y[i] for k in range(4)) for i in range(4)]
-    beta = solve_linear_system(A, b)
-    return [beta[0], beta[1], beta[2]]
-
-def solve_linear_system(A, b):
-    n = len(A)
-    for i in range(n):
-        pivot = A[i][i]
-        for j in range(n):
-            A[i][j] /= pivot
-        b[i] /= pivot
-        for k in range(n):
-            if k != i:
-                factor = A[k][i]
-                for j in range(n):
-                    A[k][j] -= factor * A[i][j]
-                b[k] -= factor * b[i]
-    return b
-
-def is_near_contour(p, gradient, view_direction, threshold):
-    """Determines if a particle is near the object contour [S1][G]."""
-    normal = normalize(gradient)
-    dot_product = sum(v * n for v, n in zip(view_direction, normal))
-    # Contours occur where surface turns away from viewer (dot_product < 0)
-    # and gradient magnitude is high. Threshold controls selection radius.
-    return dot_product < 0 and abs(dot_product) > 0.5
-
-def trace_contours(selected_particles):
-    # Groups particles into connected components and orders them by curvature measure tau [S1]
-    # Standard connected-component labeling and path tracing [G].
-    return [[p] for p in selected_particles]
+def is_near_contour(position, gradient, view_dir, threshold):
+    # Placeholder for specific contour proximity logic
+    # Based on VolumeFlies curvature measure tau [S1]
+    # and high gradient values [S2, unofficial]
+    pass
 ```
 
-**Parameters:**
-*   **Distance Threshold ($d_{thresh}$):** User-defined distance from the contour for selecting particles [S1].
-*   **Gradient Estimation Method:** Must use 4D linear regression; central difference is inaccurate [S2, unofficial].
+## Subtopics
 
-**Edge Cases and Pitfalls:**
-*   **Gradient Inaccuracy:** Using conventional central difference for gradient estimation leads to inaccurate results because it only considers a narrow voxel neighborhood [S2, unofficial].
-*   **Performance Cost:** Adding multiple particle sets for different styles increases performance cost, potentially leading to loss of interactivity [S1].
+### Image Space Outline Generation
+Generates outlines in image space rather than volume space. Choose when volume traversal is too expensive. [Image Space Outline Generation](788-image-space-outline-generation.md)
+
+### Lasso Contour Rendering
+Uses lasso-style strokes. Choose for artistic, hand-drawn aesthetics. [Lasso Contour Rendering](1855-lasso-contour-rendering.md)
+
+### Curvature-Controlled Style Contours
+Controls contour style via curvature. Choose when curvature detail is critical. [Curvature-Controlled Style Contours](5350-curvature-controlled-style-contours.md)
+
+### Silhouette Rendering
+Renders only the silhouette edge. Choose for simple boundary definition. [Silhouette Rendering](7959-silhouette-rendering.md)
+
+### Topological Landscape
+Maps topology to height. Choose for topological feature emphasis. [Topological Landscape](8481-topological-landscape.md)
+
+### Boundary Enhancement Volume Style
+Enhances boundaries with volume style. Choose for integrated volume-edge look. [Boundary Enhancement Volume Style](10863-boundary-enhancement-volume-style.md)
+
+### Suggestive Contour Extraction
+Extracts suggestive contours. Choose for hidden surface hints. [Suggestive Contour Extraction](13101-suggestive-contour-extraction.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of particles for selection, plus the cost of gradient computation (4D regression is more expensive than central difference) and line tracing [S1][S2, unofficial].
-*   **Memory Complexity:** Proportional to the number of particles and the size of the volume for gradient storage [G].
-*   **Strengths:** Fast tuning because it has no direct dependence on voxel intensity values [S2, unofficial]. It provides a rough estimation of physical boundaries without predefined classification functions [S2, unofficial].
-*   **Limitations:** Enormous reliance on accurate gradient reconstruction [S2, unofficial]. Performance degrades with multiple particle sets [S1].
-*   **When to use:** When rapid visualization of object boundaries is needed without the overhead of isosurface extraction or complex classification [S2, unofficial].
-*   **When not to use:** When high precision in gradient estimation is critical and computational resources for 4D regression are limited, or when static, view-independent contours are preferred [G].
+*   **Time Complexity:** Depends on the number of particles and the cost of 4D linear regression gradient estimation. Interactivity is maintained for single particle sets but degrades with multiple sets [S1].
+*   **Memory Complexity:** Requires storage for the volume, gradient field, and particle set.
+*   **Strengths:** Fast parameter tuning due to independence from voxel intensity values [S2, unofficial]. View-dependent accuracy [S1].
+*   **Limitations:** High reliance on accurate gradient reconstruction [S2, unofficial]. Performance loss with multiple particle sets [S1].
+*   **When to use:** When real-time, view-dependent boundary emphasis is needed and voxel intensity is not the primary data source.
+*   **When not to use:** When voxel intensity-based classification is required or when pre-rendered hatches are sufficient.
 
 ## Background
-Object Contour NPR was presented by Csébfalvi et al. in 2001 [S2, unofficial]. It was adopted from the VolumeFlies framework [BVvW07], which introduced constant-width contours using a threshold on a curvature-dependent measure $\tau$ [S1]. The method is part of the broader field of illustrative volume rendering, which seeks to enhance perceptual clarity through non-photorealistic edge representation [S2, unofficial].
+Object Contour NPR was presented by Csébfalvi et al. in 2001 [S2, unofficial]. It was adopted from the VolumeFlies framework [BVvW07], which introduced constant-width contours using a threshold on a curvature-dependent measure $\tau$ [S1]. The method is part of the broader field of illustrative volume rendering, aiming to enhance perceptual clarity through non-photorealistic edge representation [G].
 
 ## Sources
 [S1] GPU-based Particle Systems for Illustrative Volume Rendering, https://doi.org/10.2312/vg/vg-pbg08/089-096, fetched 2026-10-26

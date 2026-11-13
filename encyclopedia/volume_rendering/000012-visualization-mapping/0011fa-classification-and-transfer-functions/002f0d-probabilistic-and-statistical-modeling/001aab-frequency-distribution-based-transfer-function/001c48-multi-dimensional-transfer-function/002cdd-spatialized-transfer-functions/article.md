@@ -18,12 +18,12 @@ STF is a one- or more-dimensional transfer function where spatial information is
     *   $\{p_i\}_{i=1}^n$: The normalized 3D positions of the $n$ contributing voxels.
 
 **Outputs:**
-1.  Transfer Function $F(s,t)$ mapping $(s,t)$ to Color (Emission) and Opacity.
+1.  Transfer Function $F(s,t)$ mapping $(s,t)$ to Color (Emission) and Opacity [S1].
 
 ### Data Structures
-The histogram entry $H(s,t)$ stores spatial statistics for the voxels mapping to that bin.
-*   **Barycenter** $b(s,t)$: The centroid of the spatial positions.
-*   **Spatial Variance** $v(s,t)$: The average distance of voxels from the barycenter.
+The histogram entry $H(s,t)$ stores spatial statistics for the voxels mapping to that bin [S1].
+*   **Barycenter** $b(s,t)$: The centroid of the spatial positions [S1].
+*   **Spatial Variance** $v(s,t)$: The average distance of voxels from the barycenter [S1].
 
 ### Preprocessing
 For each histogram entry $H(s,t)$ with $n$ contributing voxels, compute the barycenter and spatial variance once per volume [S1].
@@ -42,7 +42,7 @@ $$ F_\alpha(s,t) = t^{c_\alpha} $$
 where $c_\alpha > 0$ is a constant defining global opacity [S1].
 
 ### Classification and Color Assignment
-The color is derived from spatial proximity in the histogram. The goal is to assign the same color to all entries in the transfer function which map to almost the same position in the volume domain [S1].
+The color is derived from spatial proximity in the histogram [S1]. The goal is to assign the same color to all entries in the transfer function which map to almost the same position in the volume domain [S1].
 
 1.  **Spatial Correspondence Norm**: Define a norm $N(T, T_0)$ to determine if a tuple $T$ belongs to the same feature as a reference tuple $T_0$ [S1]:
 
@@ -63,29 +63,33 @@ The color is derived from spatial proximity in the histogram. The goal is to ass
 5.  **Iteration**: Repeat the classification and color assignment for remaining unclassified entries until all histogram entries are classified [S1].
 
 ### Interactive Exploration
-Users can point and click into the histogram to select a specific class. The emission of all remaining classes is set to zero to highlight the selected feature [S1].
+Users can point and click into the histogram to select a specific class [S1]. The emission of all remaining classes is set to zero to highlight the selected feature [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import random
+
 def compute_spatial_statistics(histogram):
     """
     Preprocessing step: Compute barycenter and variance for each histogram bin.
-    histogram: List of bins, each bin is an object with:
-        - n: int, count of voxels
+    histogram: List of bin objects, each with:
+        - s: float, normalized scalar
+        - t: float, normalized gradient
+        - n: int, voxel count
         - positions: list of 3D vectors (normalized), length n
     Returns: List of bins with added fields barycenter (vec3) and variance (float).
     """
     for bin in histogram:
         if bin.n == 0:
-            bin.barycenter = (0, 0, 0)
+            bin.barycenter = (0.0, 0.0, 0.0)
             bin.variance = 0.0
             continue
         
         # Compute barycenter
-        sum_pos = (0, 0, 0)
+        sum_pos = (0.0, 0.0, 0.0)
         for p in bin.positions:
             sum_pos = (sum_pos[0] + p[0], sum_pos[1] + p[1], sum_pos[2] + p[2])
         bin.barycenter = (sum_pos[0] / bin.n, sum_pos[1] / bin.n, sum_pos[2] / bin.n)
@@ -116,18 +120,14 @@ def spatialize_transfer_function(histogram, feature_radius, global_opacity_const
     classified_indices = set()
     
     # Sort bins by count to find initial reference tuple with highest count
-    # Note: histogram indices are preserved to track original (s,t)
     indexed_bins = [(i, bin) for i, bin in enumerate(histogram)]
     indexed_bins.sort(key=lambda x: x[1].n, reverse=True)
-    
-    current_ref_index = -1
     
     for i, bin in indexed_bins:
         if i in classified_indices:
             continue
             
         # Start new group with this bin as reference
-        current_ref_index = i
         current_ref_bin = bin
         group_indices = [i]
         
@@ -150,14 +150,13 @@ def spatialize_transfer_function(histogram, feature_radius, global_opacity_const
                 group_indices.append(j)
         
         # Assign unique random color to the group
-        # In implementation, use a random number generator for RGB
-        color = generate_random_color()
+        color = (random.random(), random.random(), random.random())
         
         # Process group members
         for idx in group_indices:
             bin = histogram[idx]
-            s = bin.s # Normalized scalar
-            t = bin.t # Normalized gradient
+            s = bin.s
+            t = bin.t
             
             # Opacity: F_alpha(s,t) = t^c_alpha
             opacity = t ** global_opacity_const
@@ -171,15 +170,10 @@ def spatialize_transfer_function(histogram, feature_radius, global_opacity_const
             classified_indices.add(idx)
             
     return transfer_function
-
-def generate_random_color():
-    """Returns a random RGB tuple with values in [0, 1]."""
-    import random
-    return (random.random(), random.random(), random.random())
 ```
 
 ### Parameters
-*   **Feature radius $r$**: Controls the spatial extent of feature grouping in the histogram. It acts as the threshold for the spatial correspondence norm $N(T, T_0)$ [S1]. Typical values are between 0.05 and 0.25 [S1]. Interactive adjustment allows separation of features [S1].
+*   **Feature radius $r$**: Controls the spatial extent of feature grouping in the histogram [S1]. It acts as the threshold for the spatial correspondence norm $N(T, T_0)$ [S1]. Typical values are between 0.05 and 0.25 [S1]. Interactive adjustment allows separation of features [S1].
 *   **Global opacity $c_\alpha$**: A manual parameter chosen for each dataset to control overall transparency [S1].
 *   **Global emission $c_\epsilon$**: A manual parameter chosen for each dataset to control overall brightness/emission [S1].
 
@@ -194,7 +188,7 @@ def generate_random_color():
 A segmentation method where objects with the same characteristics are selected in the STF, characterized by non-zero opacity, and then segmented by spatial connectivity (region growing) [S1]. It is extremely fast, requiring only one lookup into the 2D opacity map per voxel [S1]. Steps: 1) Select objects in the STF to set their opacity entries to non-zero. 2) Perform region growing on voxels with non-zero opacity to break down objects into individual components based on spatial connectivity. 3) Assign a unique random tag to each detected segment to determine its hue value. 4) Select a segment in the render view by clicking on its hue value [S1].
 
 ### Pseudo-Shading
-A technique to enhance feature discrimination by simulating a head-light appearance. It darkens object silhouettes by attenuating emission at low scalar values, making accumulated opacity predominant [S1]. Steps: 1) Determine the scalar range for each class in the transfer function. 2) Attenuate the emission of each class using a linear ramp over its determined scalar range, decreasing emission for the lowest occurring scalar values. 3) For selected classes, attenuate emission linearly to create a shaded appearance [S1].
+A technique to enhance feature discrimination by simulating a head-light appearance [S1]. It darkens object silhouettes by attenuating emission at low scalar values, making accumulated opacity predominant [S1]. Steps: 1) Determine the scalar range for each class in the transfer function. 2) Attenuate the emission of each class using a linear ramp over its determined scalar range, decreasing emission for the lowest occurring scalar values. 3) For selected classes, attenuate emission linearly to create a shaded appearance [S1].
 
 ## Operating characteristics
 *   **Time Complexity**: The update time is well below 0.25 seconds on a PC with AMD Athlon 1GHz and NVIDIA GeForceFX 5800 Ultra, including redraw [S1]. This is because only transfer function entries are reclassified, not all voxels [S1].

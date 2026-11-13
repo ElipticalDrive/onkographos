@@ -1,117 +1,126 @@
 # Fourier Features Mapping
 
-Also called: FFM, Feature Mapping (Fourier Feature Mapping), Fourier Features, Random Fourier Feature Mapping
+Also called: Fourier Features, FFM
 
 ## Overview
-Fourier Features Mapping (FFM) is a preprocessing technique that transforms low-dimensional input coordinates into a higher-dimensional space using sinusoidal functions, enabling fully-connected MLPs to learn high-frequency details that are otherwise inaccessible due to spectral bias [S1][S3, unofficial]. It sets itself apart from geometric approaches (like octrees or grid subdomains) by decoupling the neural network architecture from the spatial representation structure, allowing the same MLP to converge rapidly on sharp edges and fine textures without requiring architectural changes [S1][S3, unofficial].
+Fourier Features Mapping (FFM) is a preprocessing technique that transforms low-dimensional input coordinates into a higher-dimensional space using sinusoidal functions to overcome the spectral bias of vanilla Multi-Layer Perceptrons (MLPs) [S1, S3][S4, unofficial]. It enables the network to learn high-frequency details early and fast by transforming the effective Neural Tangent Kernel (NTK) into a stationary kernel with a tunable bandwidth [S2, S4, unofficial]. Unlike isotropic methods that treat all coordinates equally, variants like Anisotropic Random Fourier Features Mapping allow independent smoothing control for each dimension [S1].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A coordinate vector $\boldsymbol{v} \in \mathbb{R}^d$ (typically $d=3$ for spatial coordinates or $d=4$ for space-time).
-- Output: A feature vector $\boldsymbol{z} \in \mathbb{R}^{2m}$, where $m$ is the number of sinusoid pairs.
+*   **Input:** A $d$-dimensional coordinate vector $\mathbf{v} \in \mathbb{R}^d$ (e.g., 3D spatial coordinates or 5D spatial-angular coordinates).
+*   **Output:** A $2m$-dimensional feature vector $\gamma(\mathbf{v}) \in \mathbb{R}^{2m}$, where $m$ is the number of sinusoid pairs [S4, unofficial].
 
 **Data Structures:**
-- Random Matrix $B$: A matrix of shape $m \times d$. The entries $B_{ij}$ are sampled independently from a Gaussian distribution $\mathcal{N}(0, \sigma^2)$ [S3, unofficial].
-- Amplitude Scalars $a_j$: A vector of length $m$. In the basic implementation, these are often set to 1, but they can be tuned [S3, unofficial].
+*   **Random Matrix $B$:** A matrix of shape $m \times d$ containing random frequencies. The elements are drawn from a Gaussian distribution $\mathcal{N}(0, \sigma^2)$ [S4, unofficial].
+*   **Phase Offsets $\mathbf{b}$:** A vector of $m$ random phase shifts, where each $b_i \in [0, 2\pi)$ [S3].
+*   **Amplitude Scalars $\mathbf{a}$:** A vector of $m$ amplitude scalars, typically set to $\sqrt{2/m}$ or $1/\sqrt{m}$ depending on the specific normalization convention [S3][S4, unofficial].
 
 **Parameters:**
-- $m$: The number of sinusoid pairs (half the output dimension). Not given in the sources.
-- $\sigma$: The standard deviation of the Gaussian distribution used to sample $B$. Identified as the most important hyperparameter in the mapping [S3, unofficial].
-- $d$: The dimensionality of the input coordinate space [S3, unofficial].
+*   **$\sigma$ (Variance):** The variance of the Gaussian distribution used to sample the random matrix $B$. This is identified as the most important hyperparameter in the mapping [S4, unofficial].
+*   **$\alpha$ (Bandwidth/Smoothing):** The reciprocal of the standard deviation of the frequencies. It controls the reconstruction bandwidth [S3]. Note: $\sigma$ and $\alpha$ are inversely related; a small $\sigma$ (high frequency spread) corresponds to a small $\alpha$ (low smoothing).
+*   **$m$ (Dimensionality):** The number of sinusoid pairs. The output dimension is $2m$ [S4, unofficial].
 
-**Steps:**
-1. Sample the random matrix $B \in \mathbb{R}^{m \times d}$ from $\mathcal{N}(0, \sigma^2)$ [S3, unofficial].
-2. Compute the linear projection $\boldsymbol{u} = 2\pi B \boldsymbol{v}$ [S3, unofficial].
-3. Apply sinusoidal activation to each component of $\boldsymbol{u}$ to form the feature vector $\boldsymbol{z}$ [S3, unofficial].
-
-**Formula:**
-The mapping $\gamma(\boldsymbol{v})$ is defined as [S3, unofficial]:
+**Formulas:**
+The mapping projects the input coordinates onto the surface of a hypersphere using sinusoids. The basic form is [S4, unofficial]:
 
 $$
-\gamma(\boldsymbol{v}) = \begin{bmatrix} a_1 \cos(2\pi \boldsymbol{b}_1^T \boldsymbol{v}) \\ a_1 \sin(2\pi \boldsymbol{b}_1^T \boldsymbol{v}) \\ \vdots \\ a_m \cos(2\pi \boldsymbol{b}_m^T \boldsymbol{v}) \\ a_m \sin(2\pi \boldsymbol{b}_m^T \boldsymbol{v}) \end{bmatrix}
+\gamma(\mathbf{v}) = \begin{bmatrix} a_1 \cos(2\pi \mathbf{b}_1^T \mathbf{v}) \\ a_1 \sin(2\pi \mathbf{b}_1^T \mathbf{v}) \\ \vdots \\ a_m \cos(2\pi \mathbf{b}_m^T \mathbf{v}) \\ a_m \sin(2\pi \mathbf{b}_m^T \mathbf{v}) \end{bmatrix}
 $$
 
-where $\boldsymbol{b}_j$ is the $j$-th row of $B$, and $a_j$ is the amplitude scalar for the $j$-th pair [S3, unofficial].
+Where $\mathbf{b}_j$ is the $j$-th row of the random matrix $B$ (or a frequency vector), and $a_j$ is the amplitude scalar [S4, unofficial].
 
-In matrix notation, this can be written as [S3, unofficial]:
+Alternatively, using the phase offset formulation [S3]:
 
 $$
-\gamma(\boldsymbol{v}) = \begin{bmatrix} \cos(2\pi B \boldsymbol{v}) \\ \sin(2\pi B \boldsymbol{v}) \end{bmatrix}
+\phi(\mathbf{x}) := \sqrt{\frac{2}{m}} [\cos(\mathbf{w}_1^T \mathbf{x} + b_1), \dots, \cos(\mathbf{w}_m^T \mathbf{x} + b_m)]
 $$
 
-assuming $a_j=1$ for all $j$ [S3, unofficial].
+Where $\mathbf{w}_i$ components are drawn from a univariate normal distribution and $b_i \in [0, 2\pi)$ [S3].
+
+The asymptotic behavior of the kernel induced by this mapping is given by Bochner's theorem [S3]:
+
+$$
+\lim_{m \to \infty} \phi(\mathbf{x})\phi(\mathbf{x}_0)^T = \exp\left(-\frac{\|\mathbf{x} - \mathbf{x}_0\|^2}{2\alpha^2}\right)
+$$
+
+Where $\alpha$ is the reciprocal of the standard deviation of frequencies in $\phi(\mathbf{x})$ [S3].
+
+**Numbered Steps:**
+1.  **Initialize Random Matrix:** Sample a matrix $B \in \mathbb{R}^{m \times d}$ from a Gaussian distribution $\mathcal{N}(0, \sigma^2)$ [S4, unofficial].
+2.  **Sample Phases (Optional):** If using the phase-offset formulation, sample $b_i \sim \text{Uniform}[0, 2\pi)$ for $i=1 \dots m$ [S3].
+3.  **Compute Dot Products:** For input $\mathbf{v}$, compute the dot products $\mathbf{B}\mathbf{v}$ (or $\mathbf{w}_i^T \mathbf{x}$) [S4, unofficial][S3].
+4.  **Apply Sinusoids:** Compute the cosine and sine of $2\pi$ times the dot products (plus phase if applicable) [S4, unofficial][S3].
+5.  **Scale:** Multiply by the amplitude scalar $a_j$ (e.g., $\sqrt{2/m}$) [S4, unofficial][S3].
+6.  **Concatenate:** Concatenate the resulting cosine and sine components to form the final feature vector $\gamma(\mathbf{v})$ [S4, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def fourier_feature_mapping(v, B, a=None):
+def fourier_feature_mapping(v, m, sigma):
     """
-    Applies Fourier Feature Mapping to input coordinates v.
+    Transforms input coordinates v into Fourier features.
     
     Args:
-        v: Input coordinate vector of shape (d,) or (batch_size, d).
-        B: Random matrix of shape (m, d) sampled from N(0, sigma^2).
-        a: Amplitude scalars of shape (m,). If None, defaults to ones.
+        v: Input coordinate vector of shape (d,)
+        m: Number of sinusoid pairs
+        sigma: Standard deviation of the Gaussian distribution for sampling B
         
     Returns:
-        z: Transformed feature vector of shape (2*m,) or (batch_size, 2*m).
+        gamma_v: Transformed feature vector of shape (2*m,)
     """
-    if a is None:
-        a = np.ones(B.shape[0])
+    d = v.shape[0]
     
-    # Linear projection: 2 * pi * B @ v
-    # v shape: (d,) or (batch, d)
-    # B shape: (m, d)
-    # u shape: (m,) or (batch, m)
-    u = 2 * np.pi * np.dot(B, v.T) if v.ndim == 1 else 2 * np.pi * np.dot(B, v)
+    # Step 1: Initialize Random Matrix B
+    # Sample from N(0, sigma^2)
+    B = np.random.normal(0, sigma, size=(m, d))
     
-    # Apply sinusoids
-    # cos_u shape: (m,) or (batch, m)
-    cos_u = np.cos(u)
-    sin_u = np.sin(u)
+    # Step 2 & 3: Compute Dot Products
+    # Compute 2 * pi * B @ v
+    # Shape: (m,)
+    dot_products = 2 * np.pi * (B @ v)
     
-    # Scale by amplitudes
-    # a shape: (m,)
-    cos_scaled = cos_u * a
-    sin_scaled = sin_u * a
+    # Step 4 & 5: Apply Sinusoids and Scale
+    # Amplitude scaling factor
+    a = np.sqrt(2.0 / m)
     
-    # Concatenate along the last axis
-    z = np.concatenate([cos_scaled, sin_scaled], axis=-1)
+    cos_features = a * np.cos(dot_products)
+    sin_features = a * np.sin(dot_products)
     
-    return z
+    # Step 6: Concatenate
+    gamma_v = np.concatenate([cos_features, sin_features])
+    
+    return gamma_v
 ```
 
 **Edge Cases and Pitfalls:**
-- Without FFM, reconstructing sharp edges or high-frequency details requires impractically long training times (e.g., months on a server) due to the slow convergence of small eigenvalues in the Neural Tangent Kernel (NTK) [S3, unofficial].
-- The variance $\sigma$ is the most critical hyperparameter; incorrect values can lead to poor frequency coverage [S3, unofficial].
-- The mapping assumes inputs are normalized or scaled appropriately relative to the frequencies in $B$ [S3, unofficial].
+*   **Spectral Bias:** Without FFM, the eigenvalues of the NTK for standard MLPs with ReLU activations decrease rapidly, causing high-frequency components to be learned very slowly, resulting in no sharp edges [S4, unofficial].
+*   **Bandwidth Selection:** The choice of $\sigma$ (or $\alpha$) is critical. A small $\alpha$ (high frequency) causes high output variance, resulting in noisy artifacts and spiky (under-smoothed) estimates. A large $\alpha$ introduces high bias, leading to over-smoothed predictions and loss of high-frequency details [S3].
+*   **Grid Search:** Finding the optimal bandwidth often requires a time-consuming grid-search scheme, leading to inefficient training overload [S3].
+*   **Isotropy Limitation:** Standard FFM uses a single global bandwidth, which treats all input dimensions equally. This fails to handle signals with heterogeneous frequency characteristics across dimensions (e.g., high spatial variation but low angular variation), leading to imbalanced regression [S1, S3].
 
 ## Subtopics
 
-### Neural Hash Encoding
-A sparse, learnable alternative to random Fourier features that maps coordinates to a hash table of embeddings, offering higher efficiency for large scenes [S1].
-
-### Positional Encoding
-A deterministic variant of Fourier features using fixed sinusoids at powers of two, commonly used in Transformers and early NeRF implementations [S1].
-
-### One-Blob Encoding
-A technique using localized basis functions to handle high-frequency details, proposed as another alternative to spectral bias [S1].
+### [Anisotropic Random Fourier Features Mapping](14318-anisotropic-random-fourier-features-mapping.md)
+Uses multiple bandwidths (one per dimension) to handle heterogeneous frequency characteristics, preventing the loss of high-frequency details in specific dimensions that occurs with isotropic FFM. Choose when input dimensions have significantly different smoothness requirements (e.g., spatial vs. angular).
 
 ## Operating characteristics
-- **Time Complexity**: The mapping itself is $O(m \cdot d)$ per coordinate, which is negligible compared to the MLP evaluation [S3, unofficial].
-- **Memory Complexity**: Requires storing the random matrix $B$ of size $m \times d$ [S3, unofficial].
-- **Performance**: Enables MLPs to learn high-frequency details early and fast, achieving results in minutes or hours that would otherwise take months [S3, unofficial].
-- **Strengths**: Decouples network design from spatial representation; simple to implement; effective for low-dimensional regression tasks [S2, S3, unofficial].
-- **Limitations**: Requires careful tuning of $\sigma$; random features may not be optimal for all specific frequency bands compared to learned encodings [S2, S3, unofficial].
+*   **Time Complexity:** The mapping itself is $O(m \cdot d)$ per sample, which is negligible compared to the MLP evaluation. However, selecting the optimal bandwidth $\sigma$ via grid search can be computationally expensive [S3].
+*   **Memory Complexity:** The random matrix $B$ requires $O(m \cdot d)$ memory. This is typically small compared to the MLP weights.
+*   **Performance:** Enables MLPs to learn high-frequency details "early and fast," avoiding training times that could otherwise take months on standard hardware [S4, unofficial].
+*   **Strengths:** Decouples neural network design from geometric structures (like VDB trees), allowing flexibility in feature mapping choices [S1]. Makes the NTK stationary, improving convergence [S4, unofficial].
+*   **Limitations:** Suffers from spectral bias if not used. Requires careful tuning of the bandwidth parameter. Isotropic versions fail on signals with imbalanced dimensional characteristics [S3].
 
 ## Background
-Fourier Features Mapping was introduced by Tancik et al. in 2020 for implicit neural representations [S3, unofficial]. It is based on the random Fourier feature mapping originally proposed by Rahimi & Recht in 2007 [S3, unofficial]. The method addresses the spectral bias of vanilla MLPs, which tend to fail to capture high-frequency details even with deep and wide networks [S1]. It has been widely adopted in Neural Fields for applications such as image super-resolution, denoising, inpainting, video generation, and 3D content rendering [S3, unofficial].
+*   **Origin:** Introduced by Tancik et al. (2020) for implicit neural representations [S1][S4, unofficial].
+*   **History:** Based on the random Fourier feature mapping originally proposed by Rahimi & Recht (2007) [S4, unofficial].
+*   **Development:** Initially proposed to overcome the spectral bias of vanilla MLPs, which fail to capture high-frequency details even with deep and wide networks [S1]. It was shown that passing inputs through FFM transforms the effective NTK into a stationary kernel [S2, S4, unofficial].
+*   **Usage:** Applied in Neural Fields / Implicit Neural Representations to condition MLPs on spatial coordinates. Used for image superresolution, denoising, inpainting, video generation, and 3D content rendering [S4, unofficial]. Also used in frameworks like NeuralVDB to decouple network design from VDB tree structure [S1].
 
 ## Sources
 [S1] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks, https://www.emergentmind.com/papers/2208.04448, fetched 2026-10-27
 [S2] Generalizing Neural Radiance Fields - BAIR Commons, https://bcommons.berkeley.edu/generalizing-neural-radiance-fields, fetched 2026-10-28 (unofficial)
-[S3] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)
+[S3] Anisotropic Fourier Features for Neural Image-Based Rendering and Relighting, https://ojs.aaai.org/index.php/AAAI/article/download/20223/19982, fetched 2026-10-29
+[S4] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)

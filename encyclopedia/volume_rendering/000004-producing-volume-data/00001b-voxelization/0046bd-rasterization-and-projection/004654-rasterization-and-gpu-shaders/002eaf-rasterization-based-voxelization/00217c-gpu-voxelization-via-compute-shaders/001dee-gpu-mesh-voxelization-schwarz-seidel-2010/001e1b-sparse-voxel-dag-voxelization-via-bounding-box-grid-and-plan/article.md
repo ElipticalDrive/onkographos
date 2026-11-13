@@ -1,201 +1,228 @@
 # Sparse Voxel DAG Voxelization via Bounding Box Grid and Plane Projections
 
-Also called: Morton-coded Voxel Filling, Triangle Voxelization with XY/ZX/YZ Projection Tests
+Also called: Morton-coded Voxel Filling, Schwarz & Seidel Voxelization, Triangle Voxelization with XY/ZX/YZ Projection Tests
 
 ## Overview
-This method voxelizes a triangle mesh into a Sparse Voxel DAG by rasterizing triangles into a Morton-coded voxel subgrid [S1, unofficial]. It iterates over a 2D grid (XY) within a triangle's bounding box, determines the Z-range of voxels intersecting the triangle plane, and fills only those voxels that pass containment tests in the XY, ZX, and YZ projections [S1, unofficial].
+This method voxelizes a triangle mesh into a Sparse Voxel Octree (SVO) or DAG by iterating over a 2D grid (XY) within a triangle's bounding box, determining the Z-range of voxels intersecting the triangle plane, and filling only those voxels that pass containment tests in the XY, ZX, and YZ projections [S2, unofficial]. It is adapted for Morton-code-based subgrids, serving as the core rasterization step within the Sparse Voxel DAG Voxelization via Bounding Box Grid and Plane Projections framework [S1, unofficial]. It sets itself apart from siblings like [Surface Voxelization](1683-surface-voxelization.md) by using explicit plane projection tests rather than ray casting or SDFs, and from [GPU Mesh Voxelization via Plane/Projection Tests](6744-gpu-mesh-voxelization-via-plane-projection-tests.md) by its specific integration with Morton-coded sparse subgrids and side-array sparseness optimization [S2, unofficial].
 
 ## How it works
-**Inputs:**
-- A triangle $t$ with vertices $v_0, v_1, v_2$ and associated colors $c_0, c_1, c_2$ [S1, unofficial].
-- A global bounding box grid $p\_bbox\_grid$ defining the voxelization domain $[min[Z], max[Z]]$ in Z [S1, unofficial].
-- A partition bounding box grid $t\_bbox\_grid$ defining the current subgrid range $[min[X], max[X]]$ and $[min[Y], max[Y]]$ [S1, unofficial].
-- `unitlength`: The size of a single voxel in world units [S1, unofficial].
-- `morton_start`: An offset added to the Morton index to map it to the correct position in the voxels array [S1, unofficial].
-- `voxels`: A sparse array or bitfield where `EMPTY_VOXEL` indicates an unoccupied cell [S1, unofficial].
-- `voxel_data`: A list to store non-binary voxel information (optional, for binary voxelization this step is skipped) [S1, unofficial].
-
-**Outputs:**
-- Updated `voxels` array with filled entries [S1, unofficial].
-- Updated `voxel_data` list (if non-binary) [S1, unofficial].
-- `nfilled`: Count of newly filled voxels [S1, unofficial].
+**Inputs:** A triangle mesh (vertices $v_0, v_1, v_2$ with optional colors), a global grid bounding box $p\_bbox\_grid$, a voxel size (unitlength), a Morton code offset ($morton\_start$), and a sparseness limit.
+**Outputs:** A sparse voxel structure where occupied cells are marked, optionally storing payload data (normal, color).
 
 **Data Structures:**
-- `VoxelData`: Struct containing `morton` (`uint_fast64_t`), `color` (`vec3`), and `normal` (`vec3`) [S1, unofficial]. Total size is `sizeof(uint_fast64_t) + 2 * (3 * sizeof(float))` [S1, unofficial].
-- `AABox`: Axis-aligned bounding box defined by `min` and `max` vectors [S1, unofficial].
+*   `VoxelData`: Struct containing `morton` (uint_fast64_t), `color` (vec3), `normal` (vec3). Total size: $8 + 3 \times 4 + 3 \times 4 = 32$ bytes [S2, unofficial].
+*   `voxels`: A boolean or index array indexed by `morton_index - morton_start`. Initialized to `EMPTY_VOXEL` [S1, unofficial].
+*   `voxel_data`: A dynamic array of `VoxelData` for non-binary voxelization [S1, unofficial].
+
+**Steps:**
+
+1.  **Initialization:**
+    *   Initialize `voxels` array for the range `(morton_end - morton_start)` to `EMPTY_VOXEL` [S1, unofficial].
+    *   Clear `voxel_data` vector [S1, unofficial].
+    *   Compute `data_max_items` for sparseness optimization:
+        $$ data\_max\_items = \frac{(morton\_end - morton\_start) \times sizeof(char) \times sparseness\_limit}{sizeof(VoxelData)} $$
+        [S1, unofficial].
+    *   Decode `morton_start` and `morton_end - 1` to compute the partition bounding box in grid coordinates $(x_{min}, y_{min}, z_{min})$ to $(x_{max}, y_{max}, z_{max})$ [S1, unofficial]. Note: The code flips the input order (0,1,2 vs 2,1,0) compared to the Huang method [S1, unofficial].
+
+2.  **Triangle Pre-computation:**
+    *   Compute triangle edges: $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$ [S1, unofficial].
+    *   Compute normal: $n = \text{normalize}(\text{cross}(e_0, e_1))$ [S1, unofficial].
+    *   Compute critical point $c$: For each axis $i \in \{X, Y, Z\}$, if $n[i] > 0$, set $c[i] = \text{unitlength}$, else $c[i] = 0$ [S1, unofficial].
+    *   Compute distances: $d_1 = \text{dot}(n, c - v_0)$, $d_2 = \text{dot}(n, (\delta_p - c) - v_0)$, where $\delta_p = (\text{unitlength}, \text{unitlength}, \text{unitlength})$ [S1, unofficial].
+    *   Compute XY projection test properties:
+        *   2D normals: $n_{xy\_e0} = (-e_0[Y], e_0[X])$, etc. [S1, unofficial].
+        *   If $n[Z] < 0$, negate these normals [S1, unofficial].
+        *   Distances: $d_{xy\_ei}$ using dot products and max terms [S1, unofficial].
+    *   Compute YZ projection test properties:
+        *   2D normals: $n_{yz\_e0} = (-e_0[Z], e_0[Y])$, etc. [S1, unofficial].
+        *   If $n[X] < 0$, negate these normals [S1, unofficial].
+        *   Distances: $d_{yz\_ei}$ [S1, unofficial].
+    *   Compute ZX projection test properties:
+        *   2D normals: $n_{zx\_ei} = (-e_i[X], e_i[Z])$ [S2, unofficial].
+        *   If $n[Y] < 0$, negate these normals [S2, unofficial].
+        *   Distances: $d_{xz\_ei} = -1.0 \times \text{dot}(n_{zx\_ei}, (t.v_i[Z], t.v_i[X])) + \max(0.0, \text{unitlength} \times n_{zx\_ei}[0]) + \max(0.0, \text{unitlength} \times n_{zx\_ei}[1])$ [S2, unofficial].
+
+3.  **Iteration over XY Grid:**
+    *   Iterate $x$ from $t\_bbox\_grid.min[X]$ to $t\_bbox\_grid.max[X]$ [S2, unofficial].
+    *   Iterate $y$ from $t\_bbox\_grid.min[Y]$ to $t\_bbox\_grid.max[Y]$ [S2, unofficial].
+    *   Calculate 2D position: $p_{xy} = (x \times \text{unitlength}, y \times \text{unitlength})$ [S2, unofficial].
+    *   **XY Containment Test:** For each edge $i \in \{0, 1, 2\}$, if $(n_{xy\_ei} \cdot p_{xy}) + d_{xy\_ei} < 0.0$, continue to next voxel [S2, unofficial].
+
+4.  **Z-Range Calculation:**
+    *   Determine min/max corners in XY plane: $min\_corner = p_{xy}$, $max\_corner = p_{xy} + (\text{unitlength}, \text{unitlength})$ [S2, unofficial].
+    *   Swap components of $min\_corner$ and $max\_corner$ if $n[X]$ or $n[Y]$ are negative to ensure correct projection bounds [S2, unofficial].
+    *   Calculate world Z coordinates using the plane equation $n[X]x + n[Y]y + n[Z]z + d = 0$:
+        $$ z_{min\_world} = \frac{n[X] \times min\_corner[0] + n[Y] \times min\_corner[1] + d}{-1.0 \times n[Z]} $$
+        $$ z_{max\_world} = \frac{n[X] \times max\_corner[0] + n[Y] \times max\_corner[1] + d}{-1.0 \times n[Z]} $$
+        [S2, unofficial].
+    *   Convert to voxel indices: $z_{min} = z_{min\_world} / \text{unitlength}$, $z_{max} = z_{max\_world} / \text{unitlength}$ [S2, unofficial].
+    *   Clamp $z_{min}$ and $z_{max}$ to $[p\_bbox\_grid.min[Z], p\_bbox\_grid.max[Z]]$ [S2, unofficial].
+
+5.  **Iteration over Z and Projection Tests:**
+    *   Iterate $z$ from $z_{min}$ to $z_{max}$ [S2, unofficial].
+    *   Calculate Morton index: $index = \text{mortonEncode\_LUT}(z, y, x)$ [S2, unofficial].
+    *   If `voxels[index - morton_start]` is not `EMPTY_VOXEL`, continue [S2, unofficial].
+    *   **YZ Projection Test:** Calculate $p_{yz} = (y \times \text{unitlength}, z \times \text{unitlength})$. If $(n_{yz\_ei} \cdot p_{yz}) + d_{yz\_ei} < 0.0$ for any edge, continue [S2, unofficial].
+    *   **ZX Projection Test:** Calculate $p_{zx} = (z \times \text{unitlength}, x \times \text{unitlength})$. If $(n_{zx\_ei} \cdot p_{zx}) + d_{xz\_ei} < 0.0$ for any edge, continue [S2, unofficial].
+    *   **Mark Voxel:**
+        *   If BINARY: `voxels[index - morton_start] = true` [S2, unofficial].
+        *   If NON-BINARY: Push `VoxelData(t.normal, average3Vec(t.v0_color, t.v1_color, t.v2_color))` to `voxel_data`, set `voxels[index - morton_start] = voxel_data.size() - 1` [S2, unofficial].
+        *   Increment `nfilled` [S2, unofficial].
+
+6.  **Sparseness Check:**
+    *   If `use_data` is true and `voxel_data.size() > data_max_items`, set `use_data = false` and revert to slower method (e.g., binary or no payload) [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-EMPTY_VOXEL = 0
-FILLED = 1
-BINARY_VOXELIZATION = True  # Set to False for non-binary mode
+def voxelize_triangle(t, morton_start, morton_end, grid_bbox, unitlength, sparseness_limit, use_data):
+    # 1. Initialization
+    voxels = [EMPTY_VOXEL] * (morton_end - morton_start)
+    voxel_data = []
+    data_max_items = ((morton_end - morton_start) * sizeof(char) * sparseness_limit) / sizeof(VoxelData)
+    
+    # Decode morton bounds to get partition bbox (simplified)
+    # bbox_grid_min, bbox_grid_max = decode_morton_bounds(morton_start, morton_end - 1)
+    
+    # 2. Triangle Pre-computation
+    e0 = t.v1 - t.v0
+    e1 = t.v2 - t.v1
+    e2 = t.v0 - t.v2
+    n = normalize(cross(e0, e1))
+    
+    # Critical point
+    c = vec3(0.0)
+    for axis in [X, Y, Z]:
+        if n[axis] > 0:
+            c[axis] = unitlength
+            
+    delta_p = vec3(unitlength)
+    d1 = dot(n, c - t.v0)
+    d2 = dot(n, (delta_p - c) - t.v0)
+    
+    # XY Projection Tests
+    n_xy_e0 = vec2(-e0[Y], e0[X])
+    n_xy_e1 = vec2(-e1[Y], e1[X])
+    n_xy_e2 = vec2(-e2[Y], e2[X])
+    if n[Z] < 0:
+        n_xy_e0 = -n_xy_e0
+        n_xy_e1 = -n_xy_e1
+        n_xy_e2 = -n_xy_e2
+    # d_xy_ei calculation omitted for brevity, see S1/S2 notes
+    
+    # YZ Projection Tests
+    n_yz_e0 = vec2(-e0[Z], e0[Y])
+    n_yz_e1 = vec2(-e1[Z], e1[Y])
+    n_yz_e2 = vec2(-e2[Z], e2[Y])
+    if n[X] < 0:
+        n_yz_e0 = -n_yz_e0
+        n_yz_e1 = -n_yz_e1
+        n_yz_e2 = -n_yz_e2
+    # d_yz_ei calculation omitted for brevity, see S1/S2 notes
+        
+    # ZX Projection Tests
+    n_zx_e0 = vec2(-e0[X], e0[Z])
+    n_zx_e1 = vec2(-e1[X], e1[Z])
+    n_zx_e2 = vec2(-e2[X], e2[Z])
+    if n[Y] < 0:
+        n_zx_e0 = -n_zx_e0
+        n_zx_e1 = -n_zx_e1
+        n_zx_e2 = -n_zx_e2
+    # d_xz_ei calculation omitted for brevity, see S2 notes
 
-def voxelize_triangle(t, t_bbox_grid, p_bbox_grid, unitlength, morton_start, voxels, voxel_data, nfilled):
-    # 1. Iterate over the 2D XY grid within the triangle's bounding box
-    for x in range(t_bbox_grid.min[0], t_bbox_grid.max[0] + 1):
-        for y in range(t_bbox_grid.min[1], t_bbox_grid.max[1] + 1):
+    # 3. Iterate XY
+    for x in range(bbox_grid_min[X], bbox_grid_max[X] + 1):
+        for y in range(bbox_grid_min[Y], bbox_grid_max[Y] + 1):
+            p_xy = vec2(x * unitlength, y * unitlength)
             
-            # 2. Calculate 2D position in world space
-            p_xy = (x * unitlength, y * unitlength)
-            
-            # 3. XY Plane Containment Test
-            inside_xy = True
-            for i in range(3):
-                v_curr = t.vertices[i]
-                v_next = t.vertices[(i + 1) % 3]
-                e = (v_next[0] - v_curr[0], v_next[1] - v_curr[1])
-                n_xy = (-e[1], e[0])
-                d_xy = - (n_xy[0] * v_curr[0] + n_xy[1] * v_curr[1])
-                if (n_xy[0] * p_xy[0] + n_xy[1] * p_xy[1]) + d_xy < 0.0:
-                    inside_xy = False
-                    break
-            if not inside_xy:
+            # XY Containment
+            if (dot(n_xy_e0, p_xy) + d_xy_e0 < 0.0) or \
+               (dot(n_xy_e1, p_xy) + d_xy_e1 < 0.0) or \
+               (dot(n_xy_e2, p_xy) + d_xy_e2 < 0.0):
                 continue
-
-            # 4. Determine min and max corners in XY plane for the current voxel
-            min_corner = (p_xy[0], p_xy[1], 0.0)
-            max_corner = (p_xy[0] + unitlength, p_xy[1] + unitlength, 0.0)
+                
+            # 4. Z-Range
+            min_corner = p_xy
+            max_corner = p_xy + vec2(unitlength)
             
-            # 5. Swap min/max components if triangle normal components are negative
-            if t.normal[0] < 0:
+            # Swap if normal components negative (simplified logic)
+            if n[X] < 0:
                 min_corner[0], max_corner[0] = max_corner[0], min_corner[0]
-            if t.normal[1] < 0:
+            if n[Y] < 0:
                 min_corner[1], max_corner[1] = max_corner[1], min_corner[1]
+                
+            # Plane equation intersection
+            # d is triangle plane constant: dot(n, v0) + d = 0 => d = -dot(n, v0)
+            tri_d = -dot(n, t.v0)
             
-            # 6. Calculate world Z coordinates for min and max corners using plane equation
-            # Plane equation: n[X]*x + n[Y]*y + n[Z]*z + d = 0
-            denom = -1.0 * t.normal[2]
-            if abs(denom) < 1e-9:
-                continue  # Skip degenerate case where triangle is parallel to XY plane [S1, unofficial]
+            z_min_world = (n[X] * min_corner[0] + n[Y] * min_corner[1] + tri_d) / (-1.0 * n[Z])
+            z_max_world = (n[X] * max_corner[0] + n[Y] * max_corner[1] + tri_d) / (-1.0 * n[Z])
             
-            z_min_world = (t.normal[0] * min_corner[0] + t.normal[1] * min_corner[1] + t.plane_d) / denom
-            z_max_world = (t.normal[0] * max_corner[0] + t.normal[1] * max_corner[1] + t.plane_d) / denom
-            
-            # 7. Convert world Z to voxel indices
             z_min = int(z_min_world / unitlength)
             z_max = int(z_max_world / unitlength)
             
-            # 8. Clamp z_min and z_max to global bounding box grid Z range
-            # Fixed: Source code bug clamped z_max using z_min as lower bound; both must be clamped correctly [S1, unofficial]
-            z_min = clamp(z_min, p_bbox_grid.min[2], p_bbox_grid.max[2])
-            z_max = clamp(z_max, p_bbox_grid.min[2], p_bbox_grid.max[2])
+            # Clamp to global grid Z
+            z_min = clamp(z_min, grid_bbox.min[Z], grid_bbox.max[Z])
+            z_max = clamp(z_max, grid_bbox.min[Z], grid_bbox.max[Z])
             
-            # 9. Handle case where z_min == z_max
-            if z_min == z_max:
-                index = morton_encode(z_min, y, x)
-                if voxels[index - morton_start] != EMPTY_VOXEL:
-                    continue
-                voxels[index - morton_start] = FILLED
-                nfilled += 1
-                if not BINARY_VOXELIZATION:
-                    avg_color = (t.v0_color + t.v1_color + t.v2_color) / 3.0
-                    voxel_data.append(VoxelData(morton=index, color=avg_color, normal=t.normal))
-                continue
-
-            # 10. Setup ZX Plane Projection Tests
-            n_zx_ei = []
-            d_xz_ei = []
-            for i in range(3):
-                v_curr = t.vertices[i]
-                v_next = t.vertices[(i + 1) % 3]
-                e = (v_next[0] - v_curr[0], v_next[1] - v_curr[1], v_next[2] - v_curr[2])
-                n_zx = (-e[0], e[2])
-                if t.normal[1] < 0:
-                    n_zx = (-n_zx[0], -n_zx[1])
-                n_zx_ei.append(n_zx)
-                d_xz = -1.0 * (n_zx[0] * v_curr[2] + n_zx[1] * v_curr[0])
-                d_xz += max(0.0, unitlength * n_zx[0])
-                d_xz += max(0.0, unitlength * n_zx[1])
-                d_xz_ei.append(d_xz)
-
-            # 11. Setup YZ Plane Projection Tests
-            n_yz_ei = []
-            d_yz_ei = []
-            for i in range(3):
-                v_curr = t.vertices[i]
-                v_next = t.vertices[(i + 1) % 3]
-                e = (v_next[0] - v_curr[0], v_next[1] - v_curr[1], v_next[2] - v_curr[2])
-                n_yz = (-e[2], e[1])
-                if t.normal[0] < 0:
-                    n_yz = (-n_yz[0], -n_yz[1])
-                n_yz_ei.append(n_yz)
-                d_yz = -1.0 * (n_yz[0] * v_curr[1] + n_yz[1] * v_curr[2])
-                d_yz += max(0.0, unitlength * n_yz[0])
-                d_yz += max(0.0, unitlength * n_yz[1])
-                d_yz_ei.append(d_yz)
-
-            # 12. Iterate over Z range
+            # 5. Iterate Z
             for z in range(z_min, z_max + 1):
                 index = morton_encode(z, y, x)
                 if voxels[index - morton_start] != EMPTY_VOXEL:
                     continue
-                
-                # 13. YZ Projection Test
-                p_yz = (y * unitlength, z * unitlength)
-                inside_yz = True
-                for i in range(3):
-                    if (n_yz_ei[i][0] * p_yz[0] + n_yz_ei[i][1] * p_yz[1]) + d_yz_ei[i] < 0.0:
-                        inside_yz = False
-                        break
-                if not inside_yz:
+                    
+                p_yz = vec2(y * unitlength, z * unitlength)
+                if (dot(n_yz_e0, p_yz) + d_yz_e0 < 0.0) or \
+                   (dot(n_yz_e1, p_yz) + d_yz_e1 < 0.0) or \
+                   (dot(n_yz_e2, p_yz) + d_yz_e2 < 0.0):
                     continue
-                
-                # 14. ZX Projection Test
-                p_zx = (z * unitlength, x * unitlength)
-                inside_zx = True
-                for i in range(3):
-                    if (n_zx_ei[i][0] * p_zx[0] + n_zx_ei[i][1] * p_zx[1]) + d_xz_ei[i] < 0.0:
-                        inside_zx = False
-                        break
-                if not inside_zx:
+                    
+                p_zx = vec2(z * unitlength, x * unitlength)
+                if (dot(n_zx_e0, p_zx) + d_xz_e0 < 0.0) or \
+                   (dot(n_zx_e1, p_zx) + d_xz_e1 < 0.0) or \
+                   (dot(n_zx_e2, p_zx) + d_xz_e2 < 0.0):
                     continue
+                    
+                # Mark Voxel
+                voxels[index - morton_start] = True # Binary for simplicity
+                # If non-binary:
+                # voxel_data.append(VoxelData(index, t.normal, average(t.v0_color, t.v1_color, t.v2_color)))
+                # voxels[index - morton_start] = voxel_data.size() - 1
                 
-                # 15. Mark voxel as filled
-                voxels[index - morton_start] = FILLED
-                nfilled += 1
-                if not BINARY_VOXELIZATION:
-                    avg_color = (t.v0_color + t.v1_color + t.v2_color) / 3.0
-                    voxel_data.append(VoxelData(morton=index, color=avg_color, normal=t.normal))
-
-def morton_encode(z, y, x):
-    # [G] Standard 3D Morton code bit-interleaving
-    m = 0
-    for i in range(32):
-        m |= (x & (1 << i)) << (2 * i)
-        m |= (y & (1 << i)) << (2 * i + 1)
-        m |= (z & (1 << i)) << (2 * i + 2)
-    return m
-
-def clamp(val, min_val, max_val):
-    return max(min_val, min(val, max_val))
+                if use_data and len(voxel_data) > data_max_items:
+                    use_data = False
+                    
+    return voxels, voxel_data
 ```
 
 **Parameters:**
-- `unitlength`: The size of a single voxel in world units [S1, unofficial].
-- `morton_start`: An offset added to the Morton index to map it to the correct position in the voxels array [S1, unofficial].
+*   `unitlength`: Voxel size in world units [S2, unofficial].
+*   `morton_start`: Offset for Morton index mapping [S2, unofficial].
+*   `sparseness_limit`: Float estimating max data array size; if exceeded, `use_data` is disabled [S1, unofficial].
+*   `use_data`: Boolean flag for sparse data array usage [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero:** The calculation of $z_{min\_world}$ and $z_{max\_world}$ involves division by $-n[Z]$ [S1, unofficial]. If $n[Z]$ is zero, the triangle is parallel to the XY plane, resulting in infinity or NaN [S1, unofficial].
-- **Clamping Bug:** The source code contains a bug where $z_{max}$ is clamped using $z_{min}$ as the lower bound argument: `clampval<int>(z_min, p_bbox_grid.min[Z], p_bbox_grid.max[Z])` [S1, unofficial]. The intent is to clamp both $z_{min}$ and $z_{max}$ to the grid bounds, so the correct call should be `clampval<int>(z_max, p_bbox_grid.min[Z], p_bbox_grid.max[Z])` [S1, unofficial].
-- **Winding and Normal Orientation:** The flipping of edge normals in ZX and YZ projections depends on the sign of the triangle's normal components ($n[Y]$ and $n[X]$) [S1, unofficial]. Incorrect handling leads to false negatives in containment tests [S1, unofficial].
+*   **Division by Zero:** The Z-range calculation divides by $-1.0 \times n[Z]$. If $n[Z] = 0$ (triangle parallel to XY plane), this results in infinity or NaN [S2, unofficial].
+*   **Clamping Bug:** The reference code contains a bug where $z_{max}$ is clamped using $z_{min}$ as the lower bound argument: `clampval<int>(z_min, ...)` instead of `clampval<int>(z_max, ...)` [S2, unofficial].
+*   **Morton Order:** The code flips the input order (0,1,2 vs 2,1,0) compared to the Huang method, which must be accounted for when decoding Morton codes [S1, unofficial].
 
 ## Subtopics
 
 ### [Huang et al. Voxelization Method](1684-huang-et-al-voxelization-method.md)
-This method voxelizes a triangle mesh into a Sparse Voxel DAG by rasterizing triangles into a Morton-coded voxel subgrid using a three-stage overlap test consisting of vertex spheres, edge cylinders, and a plane-barycentric check. It differs from its parent method by operating on a pre-partitioned Morton subgrid range rather than iterating a 2D grid with projection containment tests, allowing for out-of-core processing of large meshes.
+Tests grid cells for overlap with a triangle using spheres at vertices, cylinders on edges, and a plane test for the triangle interior. It is adapted for morton-code-based subgrids. Choose this when a simpler geometric overlap test is preferred over explicit projection culling, though it serves as the conceptual basis for the projection tests in the parent method.
 
 ## Operating characteristics
-- **Time Complexity:** The complexity is proportional to the number of voxels in the triangle's bounding box in the XY plane, multiplied by the depth of the triangle in the Z direction [S1, unofficial]. For each voxel, a constant number of plane tests are performed [S1, unofficial].
-- **Memory Complexity:** Depends on the number of filled voxels and the size of the `VoxelData` structure if non-binary voxelization is used [S1, unofficial]. The sparse nature of the DAG allows for efficient storage of empty space [S1, unofficial].
-- **Strengths:** Optimized for sparse voxel grids using Morton codes [S1, unofficial]. Explicit projection tests in XY, ZX, and YZ planes provide robust culling [S1, unofficial]. Suitable for out-of-core processing when combined with partitioning [S1, unofficial].
-- **Limitations:** Degenerate cases (parallel triangles) require special handling [S1, unofficial]. Potential for bugs in clamping and normal orientation if not carefully implemented [S1, unofficial].
-- **When to Use:** When voxelizing large triangle meshes into a sparse structure where memory efficiency is critical and out-of-core processing is beneficial [S1, unofficial].
-- **When Not to Use:** For dense voxelizations or when signed distance fields/ray casting are more appropriate for the downstream application [S1, unofficial].
+*   **Time Complexity:** Proportional to the number of voxels in the triangle's bounding box, reduced by projection tests. Worst case $O(BB\_size)$, best case $O(1)$ if culling is effective.
+*   **Memory Complexity:** Sparse. Uses Morton codes to index into a flat array, with a side-array for payload data. Memory usage depends on `sparseness_limit` and the number of filled voxels [S1, unofficial].
+*   **Performance:** Optimized for sparse voxel grids using Morton codes. The explicit projection tests are faster than ray casting for dense grids but require careful handling of edge cases [S2, unofficial].
+*   **Strengths:** Efficient for sparse structures, integrates well with out-of-core SVO building [S1, unofficial].
+*   **Limitations:** Fails for triangles parallel to projection planes (e.g., $n[Z]=0$ for XY test) without special handling [S2, unofficial].
 
 ## Background
-This method is part of the implementation for "High Resolution Sparse Voxel DAGs" by Zheng et al., as seen in the GitHub repository [leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs](https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs) [S1, unofficial]. It builds on the concepts of GPU mesh voxelization and extends them with Morton coding and partitioning for scalability [S1, unofficial].
+This method is part of the out-of-core SVO building pipeline described in the `ooc_svo_builder` repository [S1, unofficial]. It builds on the Huang et al. voxelization method [S1, S2, unofficial] and is adapted for Morton-coded subgrids. It is used in the generation of Sparse Voxel Octrees (SVOs) from triangle meshes, particularly for large-scale geometry [S1, unofficial]. The specific implementation details are found in the `INF584-High_Resolution_Sparse_Voxel_DAGs` repository [S2, unofficial].
 
 ## Sources
-[S1] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)
+[S1] Forceflow/ooc_svo_builder, https://github.com/Forceflow/ooc_svo_builder, fetched 2026-10-26 (unofficial)
+[S2] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)

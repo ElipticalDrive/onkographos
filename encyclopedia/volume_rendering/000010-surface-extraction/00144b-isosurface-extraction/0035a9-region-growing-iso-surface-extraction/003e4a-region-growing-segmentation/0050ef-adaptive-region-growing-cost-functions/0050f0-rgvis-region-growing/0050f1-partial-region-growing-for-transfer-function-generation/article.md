@@ -1,0 +1,156 @@
+# Partial Region Growing for Transfer Function Generation
+
+Also called: Derived Transfer Function, Partial Growing
+
+## Overview
+Partial Region Growing for Transfer Function Generation is a method to construct a 2D transfer function (classifier) for volume visualization by performing region growing on only a subset of the volume or a small subset of regions [S1, unofficial]. It solves the problem of high computational cost associated with full region growing during the exploration stage of volume visualization [S1, unofficial]. It sets itself apart from its parent method, RGVis Region Growing, by limiting the growth extent to achieve interactive speeds while still capturing enough statistical information to define a robust classifier for the overall features [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset, a seed region or subset of the volume, and a growth limit (percentage of full growth).
+*   **Output:** A 2D transfer function (classifier) defined in the space of voxel values and gradient magnitudes, along with associated opacity and color maps.
+
+**Data Structures:**
+*   **Voxel Data:** 3D grid of scalar values.
+*   **Gradient Magnitudes:** Computed per voxel.
+*   **2D Scatterplot/Histogram:** Axes are voxel value ($v$) and gradient magnitude ($g$).
+*   **K-d Tree:** Used for partitioning the histogram region if the alternative classifier generation method is chosen.
+
+**Parameters:**
+*   **Growth Extent:** The percentage of the full region growing result to use. Typical values are 20-40% [S1, unofficial].
+*   **Threshold:** A pre-selected value for discarding noise in the alternative classifier generation [S1, unofficial].
+
+**Steps:**
+
+1.  **Perform Partial Region Growing:**
+    Execute region growing starting from seed points, but stop after a specified percentage (e.g., 20-40%) of the voxels that would be included in a full region growing run have been visited [S1, unofficial]. Let $R_{partial}$ be the set of voxels in this partial result.
+
+2.  **Compute Statistics:**
+    For all voxels $v_i \in R_{partial}$, compute the mean and standard deviation for both the voxel value and the gradient magnitude:
+    $$ \mu_v = \frac{1}{N} \sum_{i=1}^{N} v_i, \quad \sigma_v = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (v_i - \mu_v)^2} $$
+    $$ \mu_g = \frac{1}{N} \sum_{i=1}^{N} g_i, \quad \sigma_g = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (g_i - \mu_g)^2} $$
+    where $N$ is the number of voxels in $R_{partial}$, $v_i$ is the voxel value, and $g_i$ is the gradient magnitude [S1, unofficial].
+
+3.  **Generate Classifier (Method A: Rectangular):**
+    Construct a rectangular region in the 2D scatterplot of voxel value vs. gradient magnitude.
+    *   Center coordinates: $(\mu_v, \mu_g)$ [S1, unofficial].
+    *   Region size (width/height): Defined by $\sigma_v$ and $\sigma_g$ [S1, unofficial].
+    This rectangle serves as the classifier [S1, unofficial].
+
+4.  **Generate Classifier (Method B: K-d Tree Partitioning) [Optional]:**
+    If a more robust classifier is needed:
+    a. Partition the histogram region defined by the bounds of $R_{partial}$ using a k-d tree [S1, unofficial].
+    b. For each leaf node, sort the data points by their voxel values [S1, unofficial].
+    c. Construct a local classifier for each leaf node using only data points with values over a pre-selected threshold. Discard other voxels as noise [S1, unofficial].
+    d. Recursively merge local classifiers by traversing the k-d tree. Merge two classifiers if the new combined classifier contains most data points and has an area similar to or less than the sum of the areas of the original two classifiers [S1, unofficial].
+
+5.  **Assign Rendering Properties:**
+    Assign an opacity map and a color map to the generated classifier. The opacity map can be constructed from the feature's histogram data or using predefined functions such as linear or Gaussian functions [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def partial_region_growing_transfer_function(volume, seeds, growth_percentage):
+    """
+    volume: 3D array of voxel values
+    seeds: list of initial seed coordinates
+    growth_percentage: float between 0 and 1 (e.g., 0.2 for 20%)
+    """
+    # Step 1: Perform partial region growing
+    # Note: The specific connectivity and stopping criteria for the underlying
+    # region grower are assumed to be implemented in the parent RGVis method.
+    # We assume a function that returns the set of grown voxels.
+    # To simulate "partial" growth, we limit the number of iterations or voxels
+    # based on the estimated full growth size.
+    
+    # Estimate full growth size or run until limit is hit
+    # For implementation, one might run full grow, then sample, or run partial grow directly.
+    # Here we assume a partial grow function exists that respects a count limit.
+    estimated_full_size = estimate_full_grow_size(volume, seeds)
+    target_size = int(estimated_full_size * growth_percentage)
+    
+    grown_voxels = run_region_grow(volume, seeds, max_voxels=target_size)
+    
+    if not grown_voxels:
+        return None
+
+    # Step 2: Compute statistics
+    values = [volume[v] for v in grown_voxels]
+    gradients = [compute_gradient_magnitude(volume, v) for v in grown_voxels]
+    
+    mu_v = mean(values)
+    sigma_v = std(values)
+    mu_g = mean(gradients)
+    sigma_g = std(gradients)
+    
+    # Step 3: Generate Rectangular Classifier
+    classifier_rect = {
+        'center_v': mu_v,
+        'center_g': mu_g,
+        'width_v': sigma_v,
+        'width_g': sigma_g
+    }
+    
+    # Step 5: Assign Opacity/Color Maps
+    # Example: Gaussian opacity based on distance from center in 2D space
+    def opacity_map(v, g):
+        dist_sq = ((v - mu_v) / sigma_v)**2 + ((g - mu_g) / sigma_g)**2
+        return exp(-0.5 * dist_sq)
+        
+    return classifier_rect, opacity_map
+
+def estimate_full_grow_size(volume, seeds):
+    """
+    [G] Placeholder for the actual full region growing logic.
+    In practice, this might be a quick run with loose thresholds or a heuristic.
+    """
+    # For the purpose of this article, we assume this function exists
+    # as part of the RGVis parent method.
+    pass
+
+def compute_gradient_magnitude(volume, voxel):
+    """
+    [G] Computes gradient magnitude using central differences.
+    """
+    x, y, z = voxel
+    # Handle boundaries with zero padding or clamping
+    dx = volume[x+1, y, z] - volume[x-1, y, z] if x+1 < volume.shape[0] and x-1 >= 0 else 0
+    dy = volume[x, y+1, z] - volume[x, y-1, z] if y+1 < volume.shape[1] and y-1 >= 0 else 0
+    dz = volume[x, y, z+1] - volume[x, y, z-1] if z+1 < volume.shape[2] and z-1 >= 0 else 0
+    return sqrt(dx*dx + dy*dy + dz*dz)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Standard deviation calculations can be sensitive to outliers if the partial region includes noisy voxels. The K-d tree method helps mitigate this by discarding low-value points [S1, unofficial].
+*   **Boundaries:** Gradient computation at volume boundaries requires handling (e.g., zero padding) [G].
+*   **Degenerate Input:** If the partial region is too small or empty, statistics cannot be computed. A minimum seed count or fallback to user-defined parameters is needed [G].
+
+## Subtopics
+
+### RGVis Region Growing
+The parent method that performs full region growing for interactive visualization. Partial region growing is a variant used when full growth is too slow. [RGVis Region Growing](14368-rgvis-region-growing.md)
+
+### K-d Tree Partitioning
+A technique used within the alternative classifier generation method to partition the 2D histogram space for more robust classifier construction.
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than full region growing. On a 1.8GHz Pentium 4, partial growing (20%) took under 0.2 seconds, while full growing took 2.8-8.1 seconds depending on the dataset [S1, unofficial].
+*   **Memory Complexity:** Proportional to the size of the partial region, which is 20-40% of the full region [S1, unofficial].
+*   **Measured Performance:**
+    *   Confocal Microscopy ganglion (55x512x512): Full=5.7s, Partial=0.022s [S1, unofficial].
+    *   MRA head vasculature (125x250x250): Full=7.2s, Partial=0.028s [S1, unofficial].
+    *   MRI head (128^3): Full=2.8s, Partial=0.34s [S1, unofficial].
+    *   MRI Chest (256^3): Full=8.1s, Partial=0.12s [S1, unofficial].
+*   **Scaling:** Performance scales with the volume size and the chosen growth percentage.
+*   **Strengths:** Enables interactive exploration of features by providing a quick approximation of the transfer function. 20-40% growth is often sufficient for a visually indistinguishable result from full growth [S1, unofficial].
+*   **Limitations:** The derived transfer function may be less accurate than one derived from full segmentation, especially in noisy data. The quality depends on the seed selection and the growth percentage [S1, unofficial].
+*   **When to use:** During the exploration stage of volume visualization where speed is critical.
+*   **When not to use:** When high-precision segmentation is required for final analysis or when the feature is very small and might be missed by a partial grow [S1, unofficial].
+
+## Background
+The method was introduced in the context of RGVis (Region Growing Based Visualization Techniques) for volume visualization [S1, unofficial]. It was developed to address the high computational cost of region growing during the interactive exploration phase. The technique allows users to quickly browse features of interest by deriving a transfer function from a partial region, which is then used to visualize the overall features in the data [S1, unofficial].
+
+## Sources
+[S1] RGVis: Region Growing Based Visualization Techniques for Volume Visualization, https://escholarship.org/uc/item/3td71868, fetched 2026-11-03 (unofficial)

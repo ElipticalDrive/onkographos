@@ -1,0 +1,304 @@
+# Visual Complexity (VC) Algorithm
+
+
+## Overview
+The Visual Complexity (VC) algorithm is a non-photorealistic volume rendering technique that simulates the local visual variations found in hand-painted artworks to enhance aesthetic judgment and detail perception [S1]. Unlike Interpretational Complexity (IC), which establishes global trends across the volume, VC focuses on local variations in stroke properties such as color, thickness, and contour to create a dense, textured appearance [S1]. It differs from [Interactive Volume Illustration (Hatching)](5272-interactive-volume-illustration-hatching.md) by employing a single-region, full-coverage painting strategy with varied stroke geometries rather than structured hatching lines, and from [Fast Paint Texture](14343-fast-paint-texture.md) by integrating embossing as a post-processing lighting effect on 2D stroke textures rather than a primary geometric modeling step.
+
+## How it works
+The VC algorithm operates by placing all data elements into a single region $S_0$ and applying a painting algorithm with full coverage to generate a list of strokes [S1]. The process involves determining stroke properties from data samples, constructing geometric representations (straight or curved), applying texturing and embossing, and finally rendering the strokes with specific visual variations [S1].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Data set with scalar/vector attributes (e.g., color $A_i$, size $A_i$, orientation $A_j$, contrast $A_k$).
+    *   Region definition $S_0$ containing all data elements.
+    *   Target coverage $V_k$ (typically 1.0 for full coverage in $S_0$).
+    *   Constants: $c$ (aspect ratio multiplier), $c_1, c_2$ (specific aspect ratios), $t$ (threshold), $\delta$ (color difference threshold), $w$ (base width).
+*   **Outputs**:
+    *   A list of strokes, where each stroke is defined by its geometry (control points or quads), color, texture, and embossing height map.
+
+### Data Structures
+*   **Stroke**:
+    *   `center`: 2D position $(x, y)$ in screen space.
+    *   `orientation`: Angle $\theta$.
+    *   `color`: RGB tuple $(R, G, B)$.
+    *   `width`: $w$.
+    *   `length`: $l$.
+    *   `geometry`: Either a list of 4 Bézier control points $(A, B, C, D)$ or a list of 3 quadrilaterals $(q_1, q, q_2)$.
+    *   `texture`: Reference to a scanned hand-painted stroke texture.
+    *   `height`: Scalar value for embossing.
+
+### Steps
+
+#### 1. Stroke Placement and Property Determination
+The algorithm uses the **Common Painting Algorithm** to populate region $S_0$ [S1].
+1.  Initialize coverage $c = 0$.
+2.  While $c < V_k$:
+    a.  Randomly pick an unpainted position $p$ within $S_0$.
+    b.  Identify the data element $e_i$ associated with $p$.
+    c.  Map $e_i$ attributes to stroke properties:
+        *   **Color**: Derived from attribute $A_i$ (e.g., scalar value mapped to RGB).
+        *   **Orientation**: Derived from attribute $A_j$ (e.g., gradient direction).
+        *   **Size**: Derived from attribute $A_i$ (or a separate size attribute).
+    d.  Create a new stroke $s$ centered at $p$ with the determined properties.
+    e.  Scan convert $s$ to determine its pixel footprint.
+    f.  Compute `outside`: amount of $s$ falling outside $S_0$.
+    g.  Compute `overlap`: amount of $s$ overlapping existing strokes.
+    h.  If `outside` or `overlap` are too large:
+        *   Shrink $s$ (reduce width/length) until it fits or cannot be shrunk further.
+    i.  If $s$ fits:
+        *   Add $s$ to the stroke list.
+        *   Update $c$ by adding the area of $s$ to the covered area.
+
+#### 2. Stroke Geometry Construction
+Strokes are rendered as either straight segments or Bézier curves based on local orientation variation [S1].
+
+**A. Orientation and Control Points**
+1.  Sample the data attribute mapped to orientation at the stroke center $s_0$ to get orientation $\theta_0$.
+2.  Rotate the stroke by $\theta_0$.
+3.  Sample the orientation attribute at two points $s_1$ and $s_2$, located at distance $14w$ from the ends of the stroke (where $w$ is the stroke width).
+4.  Compute orientations $\theta_1$ and $\theta_2$ from samples $s_1$ and $s_2$.
+5.  Define Bézier control points $A, B, C, D$:
+    *   Segment $BC$ has orientation $\theta_0$.
+    *   Segment $AB$ has orientation $\theta_1$.
+    *   Segment $CD$ has orientation $\theta_2$.
+    *   *Note*: The exact positions of $A, B, C, D$ are derived from the stroke geometry such that the curve approximates the orientation changes. The curve lies in the convex hull of these points.
+6.  Calculate distances $d_1$ and $d_2$ (implied as deviations or lengths related to the orientation change).
+7.  If $\max(d_1, d_2)$ is large, render the stroke as a Bézier curve. Otherwise, render as straight segments.
+
+**B. Varied Stroke Aspect Ratio**
+The ratio of length $l$ to width $w$ is varied based on data attributes [S1]:
+1.  **Majority of strokes**:
+    *   Width $w$ is determined by attribute $A_i$ (size).
+    *   Length $l = c \cdot w$, where $c$ is a positive constant (typically $c > 1$).
+2.  **Minority of strokes** (controlled by attribute $A_j$, where $j \neq i$):
+    *   If $A_j < t$ (threshold):
+        *   $w$ is based on $A_i$.
+        *   $l = 4w$ (i.e., $c=4$).
+    *   Else if $A_j < t + \frac{\max(A_j) - t}{2}$:
+        *   $w$ is set to a constant value.
+        *   $l = c_1 \cdot w$ with $c_1 < 1$ (stroke is wider than long).
+    *   Else:
+        *   $w$ is set to a small constant value.
+        *   $l = c_2 \cdot w$ with $c_2 \gg c$ (stroke is much longer than wide).
+
+#### 3. Variegation (Local Color Variation)
+To simulate the uneven distribution of paint, each stroke is drawn as three quadrilaterals: $q_1$, $q$, and $q_2$ [S1].
+1.  Sample the center color $C = (R, G, B)$ from the data attribute.
+2.  Generate varied colors $C_1 = (R_1, G_1, B_1)$ and $C_2 = (R_2, G_2, B_2)$ by adding small random offsets to $C$'s RGB values.
+3.  Generate varied widths $w_1$ and $w_2$ such that $0 \le w_1, w_2 < \frac{w}{8}$.
+4.  Draw central quad $q$:
+    *   Centered at $s_0$.
+    *   Width $w - (w_1 + w_2)$.
+    *   Color $C$.
+5.  Draw quad $q_1$:
+    *   Adjacent to $q$.
+    *   Width $w_1$.
+    *   Color $C_1$.
+6.  Draw quad $q_2$:
+    *   Opposite to $q_1$ relative to $q$.
+    *   Width $w_2$.
+    *   Color $C_2$.
+
+#### 4. Contrast Strokes
+A subset of strokes is enhanced to increase visual contrast [S1].
+1.  Select a contrast property: luminance, luminance+orientation, or color.
+2.  Identify attribute $A_k$ (where $k \neq i, j$) mapped to contrast.
+3.  Select 10% of strokes with $A_k$ values above a preset threshold.
+4.  Apply variation:
+    *   **Luminance**: Shift the stroke's luminance by a constant.
+    *   **Luminance + Orientation**: Shift luminance and reset orientation to $-\theta$.
+    *   **Color**: Assign color values from a small interval around the original color $C$.
+
+#### 5. Flank Color Texturing
+Strokes are textured based on the color variation at their flanks (edges) [S1].
+1.  Sample flank colors at positions $14w$ from the center along the stroke's perpendicular axis: $F_1 = (R_1, G_1, B_1)$ and $F_2 = (R_2, G_2, B_2)$.
+2.  Compute color difference $\Delta = \Delta R^2 + \Delta B^2 + \Delta G^2$ (where $\Delta R = R_1 - R_2$, etc.).
+3.  If $\Delta \le \delta$ (small positive constant):
+    *   Texture the stroke with a complete outline but no center vein.
+4.  Else:
+    *   Render the stroke as two quads colored $F_1$ and $F_2$.
+    *   Texture with a complete outline and a center vein.
+
+#### 6. Embossed Strokes (Fast Paint Texture)
+Simulate paint thickness and shadows using Hertzmann’s fast paint texture technique [S1].
+1.  Assign a height map $h(x, y)$ to each stroke.
+2.  Generate an overall height field for the image by combining individual stroke height maps.
+3.  The height map value at $(x, y)$ is the sum of the stroke's texture height and a weight representing the number of overlapping strokes at $(x, y)$.
+4.  Apply lighting and shadows to the height field to simulate undulations.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def visual_complexity_algorithm(data_set, region_S0, target_coverage_Vk):
+    """
+    Generates a list of strokes for the Visual Complexity algorithm.
+    """
+    stroke_list = []
+    covered_area = 0
+    total_area_S0 = area(region_S0)
+    
+    # Common Painting Algorithm Loop
+    while covered_area < target_coverage_Vk * total_area_S0:
+        # 1. Pick position
+        p = random_unpainted_position(region_S0)
+        
+        # 2. Identify data element
+        e_i = get_data_element_at(p, data_set)
+        
+        # 3. Determine properties
+        # Attributes: A_i (color/size), A_j (orientation/aspect), A_k (contrast)
+        base_color = map_attribute_to_color(e_i.A_i)
+        base_orientation = map_attribute_to_angle(e_i.A_j)
+        base_width = map_attribute_to_width(e_i.A_i)
+        
+        # 4. Create Stroke Object
+        stroke = Stroke(center=p, color=base_color, orientation=base_orientation, width=base_width)
+        
+        # 5. Scan Convert and Check Fit
+        # Simulate scan conversion to get pixel footprint
+        footprint = scan_convert(stroke)
+        outside_area = area(footprint & ~region_S0)
+        overlap_area = area(footprint & existing_strokes_footprints)
+        
+        # Shrink if necessary
+        while (outside_area > THRESHOLD_OUTSIDE or overlap_area > THRESHOLD_OVERLAP) and stroke.width > MIN_WIDTH:
+            stroke.shrink()
+            footprint = scan_convert(stroke)
+            outside_area = area(footprint & ~region_S0)
+            overlap_area = area(footprint & existing_strokes_footprints)
+            
+        if outside_area <= THRESHOLD_OUTSIDE and overlap_area <= THRESHOLD_OVERLAP:
+            # 6. Construct Geometry
+            construct_stroke_geometry(stroke, e_i)
+            
+            # 7. Apply Variegation
+            apply_variegation(stroke)
+            
+            # 8. Apply Contrast if selected
+            if is_contrast_stroke(e_i.A_k):
+                apply_contrast(stroke, e_i.A_k)
+                
+            # 9. Apply Flank Texturing
+            apply_flank_texturing(stroke, e_i)
+            
+            # 10. Add to list
+            stroke_list.append(stroke)
+            covered_area += area(footprint)
+            
+    return stroke_list
+
+def construct_stroke_geometry(stroke, data_element):
+    """
+    Determines if stroke is straight or curved and sets aspect ratio.
+    """
+    s0 = stroke.center
+    theta_0 = map_attribute_to_angle(data_element.A_j)
+    
+    # Rotate stroke by theta_0
+    stroke.rotate(theta_0)
+    
+    # Sample flank orientations
+    # s1 and s2 are 14*w from the ends
+    s1 = get_point_along_stroke(stroke, -14 * stroke.width)
+    s2 = get_point_along_stroke(stroke, 14 * stroke.width)
+    
+    theta_1 = map_attribute_to_angle(get_data_at(s1).A_j)
+    theta_2 = map_attribute_to_angle(get_data_at(s2).A_j)
+    
+    # Determine control points A, B, C, D
+    # BC has orientation theta_0
+    # AB has orientation theta_1
+    # CD has orientation theta_2
+    A, B, C, D = compute_bezier_control_points(stroke, theta_0, theta_1, theta_2)
+    
+    # Check if curve is needed
+    d1 = distance(A, B) # Or deviation metric
+    d2 = distance(C, D) # Or deviation metric
+    
+    if max(d1, d2) > CURVE_THRESHOLD:
+        stroke.geometry = BezierCurve(A, B, C, D)
+    else:
+        stroke.geometry = StraightSegment(stroke.center, stroke.width, stroke.length)
+        
+    # Varied Aspect Ratio
+    A_j_val = data_element.A_j
+    A_i_val = data_element.A_i
+    t = THRESHOLD_ASPECT
+    
+    if A_j_val < t:
+        stroke.width = map_attribute_to_width(A_i_val)
+        stroke.length = 4 * stroke.width
+    elif A_j_val < t + (max(A_j) - t) / 2:
+        stroke.width = CONSTANT_WIDTH
+        stroke.length = c1 * stroke.width # c1 < 1
+    else:
+        stroke.width = SMALL_CONSTANT_WIDTH
+        stroke.length = c2 * stroke.width # c2 >> c
+
+def apply_variegation(stroke):
+    """
+    Draws stroke as three quadrilaterals q1, q, q2.
+    """
+    C = stroke.color
+    w = stroke.width
+    l = stroke.length
+    
+    # Vary colors
+    C1 = vary_color(C, small_random_offset)
+    C2 = vary_color(C, small_random_offset)
+    
+    # Vary widths
+    w1 = random_uniform(0, w / 8)
+    w2 = random_uniform(0, w / 8)
+    
+    # Draw q (center)
+    q = Quad(center=stroke.center, width=w - (w1 + w2), length=l, color=C)
+    
+    # Draw q1 (side)
+    q1 = Quad(center=offset_center(stroke.center, w1/2), width=w1, length=l, color=C1)
+    
+    # Draw q2 (opposite side)
+    q2 = Quad(center=offset_center(stroke.center, -w2/2), width=w2, length=l, color=C2)
+    
+    stroke.quads = [q1, q, q2]
+
+def apply_flank_texturing(stroke, data_element):
+    """
+    Determines texture based on flank color difference.
+    """
+    # Sample flank colors at 14w from center
+    F1 = get_data_at(get_point_along_stroke(stroke, -14 * stroke.width)).color
+    F2 = get_data_at(get_point_along_stroke(stroke, 14 * stroke.width)).color
+    
+    delta_R = F1.R - F2.R
+    delta_G = F1.G - F2.G
+    delta_B = F1.B - F2.B
+    delta = delta_R**2 + delta_G**2 + delta_B**2
+    
+    if delta <= DELTA_THRESHOLD:
+        stroke.texture = TEXTURE_OUTLINE_NO_VEIN
+    else:
+        stroke.texture = TEXTURE_OUTLINE_WITH_VEIN
+        # Render as two quads colored F1 and F2
+        stroke.quads = [Quad(color=F1), Quad(color=F2)]
+```
+
+## Subtopics
+
+### Common Painting Algorithm
+An algorithm used by IC, ID, and VC to lay strokes in a random manner within a region $S_k$ while controlling coverage percentage $c$ [S1]. It randomly picks unpainted positions, determines stroke properties from data samples, and accepts/rejects strokes based on overlap and boundary constraints [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The painting loop runs until coverage $V_k$ is met. The number of strokes is proportional to the area of $S_k$ divided by the average stroke area. Each stroke requires sampling and geometric computation.
+*   **Memory Complexity**: Linear in the number of strokes, storing geometry, color, and texture references.
+*   **Performance**: The use of 2D textured quads and Bézier curves is computationally cheaper than full 3D mesh modeling. Embossing adds a lighting pass but avoids expensive 3D geometry.
+*   **Strengths**: Produces aesthetically pleasing, hand-painted look; handles local data variations well; efficient compared to 3D NPR.
+*   **Limitations**: Coverage control can be slow if strokes are large or regions are complex; requires pre-scanned textures; not physically based.
+
+## Background
+The Visual Complexity algorithm was introduced by [Engaging viewers through nonphotorealistic visualizations](https://doi.org/10.1145/1274871.1274886) [S1]. It is part of a family of volume illustration techniques that use painting metaphors to visualize data. The method draws inspiration from psychological studies on aesthetics and complexity, aiming to enhance viewer engagement through local visual variations rather than global trends.
+
+## Sources
+[S1] Engaging viewers through nonphotorealistic visualizations, https://doi.org/10.1145/1274871.1274886, fetched 2026-10-28

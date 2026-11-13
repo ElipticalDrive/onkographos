@@ -1,105 +1,117 @@
 # Volume Rendering Integral
 
-Also called: Expected Color Equation, NeRF Formulation, Radiance Field Rendering Equation, Volumetric Rendering Integral (NeRF Formulation)
+Also called: Expected Color Equation, Light Extinction Model, NeRF Formulation, Radiance Field Rendering Equation, Volumetric Rendering Integral (NeRF Formulation)
 
 ## Overview
-The Volume Rendering Integral computes the expected color observed along a ray passing through a participating medium by integrating the product of transmittance, extinction, and emitted color over the ray's path [S1, unofficial]. It differs from sibling models like the [Absorption-only model](839-absorption-only-model.md) or [Emission-only Model](1016-emission-only-model.md) by simultaneously accounting for both the attenuation of background light and the addition of volumetric emission, providing a complete probabilistic description of light transport in non-vacuum media [S1, unofficial].
+The Volume Rendering Integral computes the expected color $C$ received at a point on the image plane from a ray direction $\mathbf{r}$, assuming a low-albedo (single scattering) scenario where light scatters at most once before leaving the volume [S2, unofficial]. It differs from its siblings by serving as the fundamental mathematical definition for full volume rendering, explicitly modeling the probabilistic accumulation of emitted and scattered light along a ray path [S2, unofficial]. Unlike the [Absorption-only model](839-absorption-only-model.md) which ignores emission, or the [Emission-only Model](1016-emission-only-model.md) which ignores attenuation, this integral combines both extinction and source terms into a single differentiable expectation [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\boldsymbol{\omega}$ (unit vector), and a set of $n$ sample points along the ray with positions $t_i$, densities $\sigma_i$, and colors $c_i$.
-*   **Output:** Expected color $C$ (a vector quantity).
+*   **Input:** Ray origin $\mathbf{o}$, direction $\mathbf{d}$, ray length $L$, volume density field $\sigma(\mathbf{p})$, and color/emission field $\mathbf{c}(\mathbf{p})$ (or light contribution $C_\lambda(\mathbf{p})$) [S1, S2, unofficial].
+*   **Output:** Expected color $\mathbf{C}$ (or $I_\lambda$) at the image plane [S1, S2, unofficial].
 
 **Data Structures**
-The method assumes a discretized ray divided into $n$ segments. For each segment $i$:
-*   $t_i, t_{i+1}$: Start and end distances along the ray.
-*   $\delta_i = t_{i+1} - t_i$: Segment length.
-*   $\sigma_i$: Extinction coefficient (assumed constant within the segment).
-*   $c_i$: Emissive color (assumed constant within the segment).
-
-**Steps**
-1.  **Discretize the Ray:** Split the ray path from $t_1$ to $t_{n+1}$ into $n$ segments with lengths $\delta_i = t_{i+1} - t_i$ [S1, unofficial].
-2.  **Assume Piecewise Constant Properties:** Assume density $\sigma$ and color $c$ are constant within each interval $i$, denoted as $\sigma_i$ and $c_i$ [S1, unofficial].
-3.  **Compute Segment Transmittance:** Calculate the transmittance $\alpha_i$ contributed by segment $i$. This represents the probability that light is absorbed or scattered out of the ray within that segment [S1, unofficial]:
-    $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
-4.  **Compute Cumulative Transmittance:** Calculate the transmittance $T_i$ from the camera to the start of segment $i$. This is the probability that no interaction occurred in all previous segments $j < i$ [S1, unofficial]:
-    $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
-    Note: $T_1 = 1$.
-5.  **Compute Expected Color:** Sum the contributions of all segments. The contribution of segment $i$ is the product of the cumulative transmittance $T_i$, the segment's absorption probability $\alpha_i$, and its color $c_i$ [S1, unofficial]:
-    $$ C \approx \sum_{i=1}^{n} T_i \alpha_i c_i $$
+The method operates on a discretized ray. The ray is split into $n$ segments with endpoints $\{t_1, t_2, \dots, t_{n+1}\}$ [S1, unofficial].
+*   **Segment $i$:** Defined by interval $[t_i, t_{i+1}]$ with length $\delta_i = t_{i+1} - t_i$ [S1, unofficial].
+*   **Assumption:** Volume density $\sigma$ and color $\mathbf{c}$ are constant within each interval, denoted as $\sigma_i$ and $\mathbf{c}_i$ [S1, unofficial].
 
 **Formulas**
-The continuous form of the integral is derived from the probability of the first hit at $t$:
+The transmittance $T(t)$, representing the probability that a ray passes through the medium up to distance $t$ without interaction, is defined by the Beer-Lambert law [S1, unofficial][S3]:
+$$ T(t) = \exp\left(-\int_0^t \sigma(s) ds\right) $$
+The probability that the first interaction (hit) occurs at distance $t$ is the product of surviving up to $t$ and interacting at $t$ [S1, unofficial]:
 $$ P[\text{first hit at } t] = T(t)\sigma(t)dt = \exp\left(-\int_0^t \sigma(s) ds\right) \sigma(t) dt $$
-The expected color is the integral of this probability weighted by color:
-$$ C = \int_{t_1}^{t_N} T(t)\sigma(t)c(t) dt $$
-Where $T(t) = \exp\left(-\int_0^t \sigma(s) ds\right)$ [S1, unofficial].
+The rendering equation for the expected color $\mathbf{C}$ is the integral of the color contribution weighted by the probability of the first hit [S1, unofficial]:
+$$ \mathbf{C} = \int_{t_1}^{t_N} T(t)\sigma(t)\mathbf{c}(t) dt $$
+In the low-albedo formulation, the light contribution $C_\lambda(s)$ at position $s$ includes emission, transmission, and reflection [S2, unofficial]:
+$$ C_\lambda(s) = E_\lambda(s) + T_\lambda(s) + R_\lambda(s) $$
+where $R_\lambda(s)$ is computed via standard illumination equations involving light source color and distance [S2, unofficial].
 
-**Parameters**
-*   $n$: Number of samples. Typical values depend on resolution and density variation; higher $n$ reduces discretization error [S1, unofficial].
-*   $\sigma_i$: Extinction coefficient. Must be non-negative.
-
-**Edge Cases and Pitfalls**
-*   **Zero Density:** If $\sigma_i = 0$, then $\alpha_i = 0$ and $T_{i+1} = T_i$, correctly passing through the segment without contribution or attenuation [S1, unofficial].
-*   **High Density:** If $\sigma_i \delta_i$ is large, $\alpha_i \to 1$ and $T_{i+1} \to 0$, effectively blocking the ray [S1, unofficial].
-*   **Precision:** Computing $T_i$ as a product of many terms can lead to underflow. It is numerically stable to compute optical depth $\tau_i = \sum_{j=1}^{i-1} \sigma_j \delta_j$ and then $T_i = \exp(-\tau_i)$ [S1, G, unofficial].
+**Algorithm Steps**
+1.  Discretize the ray from $t_1$ to $t_{n+1}$ into $n$ segments of length $\delta_i$ [S1, unofficial].
+2.  For each segment $i$, assume constant density $\sigma_i$ and color $\mathbf{c}_i$ [S1, unofficial].
+3.  Compute the transmittance $T_i$ at the start of segment $i$ as the product of survival probabilities of all preceding segments [S1, unofficial]:
+    $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where $\alpha_j$ is the opacity of segment $j$ [S1, unofficial].
+4.  Compute the opacity $\alpha_i$ for segment $i$ using the extinction coefficient and segment length [S1, unofficial]:
+    $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+5.  Approximate the integral using quadrature by summing the contributions of each segment [S1, unofficial]:
+    $$ \mathbf{C} \approx \sum_{i=1}^n T_i \alpha_i \mathbf{c}_i $$
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volume_rendering_integral(ray_origin, ray_direction, samples):
+def volume_rendering_integral(ray_origin, ray_direction, ray_length, num_samples):
     """
-    samples: list of tuples (t_start, t_end, sigma, color)
-    Returns: expected color vector
+    Computes the expected color along a ray using the volume rendering integral.
+    Assumes constant density and color per sample interval.
     """
-    total_color = [0.0, 0.0, 0.0]
-    current_transmittance = 1.0
-    
-    for t_start, t_end, sigma, color in samples:
-        delta_t = t_end - t_start
-        # Alpha is the probability of interaction in this segment
-        alpha = 1.0 - math.exp(-sigma * delta_t)
+    # Discretize ray
+    delta_t = ray_length / num_samples
+    t_start = 0.0
+    accumulated_transmittance = 1.0
+    expected_color = [0.0, 0.0, 0.0]
+
+    for i in range(num_samples):
+        # Sample position at the start of the interval
+        pos = ray_origin + ray_direction * t_start
         
-        # Contribution: Transmittance to this point * Alpha * Color
-        contribution = current_transmittance * alpha * color
-        total_color = total_color + contribution
+        # Query volume properties at current position
+        # [G] In practice, these are interpolated from a 3D grid or neural network
+        sigma = query_density(pos)
+        color = query_color(pos)
+        
+        # Compute opacity for this segment
+        # alpha = 1 - exp(-sigma * delta_t)
+        # [G] Guard against numerical instability if sigma * delta_t is very large
+        if sigma * delta_t > 10.0:
+            alpha = 1.0
+        else:
+            alpha = 1.0 - math.exp(-sigma * delta_t)
+        
+        # Add contribution: Transmittance * Opacity * Color
+        expected_color += accumulated_transmittance * alpha * color
         
         # Update transmittance for the next segment
-        current_transmittance = current_transmittance * (1.0 - alpha)
+        accumulated_transmittance *= (1.0 - alpha)
         
-        # Early exit if fully opaque
-        if current_transmittance < 1e-6:
-            break
-            
-    return total_color
+        # Advance ray
+        t_start += delta_t
+
+    return expected_color
 ```
+
+**Parameters and Edge Cases**
+*   **$\sigma_i$ (Density):** Must be non-negative. If $\sigma_i = 0$, $\alpha_i = 0$ and the segment is transparent [S1, unofficial].
+*   **Precision:** The product of transmittances can underflow to zero for dense volumes, causing "black holes" where no light is seen. This is handled by the multiplicative update $T_{i+1} = T_i(1-\alpha_i)$ [S1, unofficial].
+*   **Low-Albedo Assumption:** The standard integral assumes single scattering. If multiple scattering is significant, the term $C_\lambda(s)$ must include in-scattering from other directions, which turns the integral into a recursive equation requiring iterative solvers or approximations like the [Single Scattering Model](1053-single-scattering-model.md) [S2, unofficial].
 
 ## Subtopics
 
 ### [Continuous-Wave ToF Phasor Model](9486-continuous-wave-tof-phasor-model.md)
-The Continuous-Wave ToF Phasor Model extends the volume rendering integral to simulate images captured by continuous-wave Time-of-Flight (C-ToF) cameras by incorporating a complex-valued path length importance function. It differs from standard volume rendering by weighting contributions based on light travel distance and from depth-map-based methods by operating directly on complex phasor values, thereby avoiding wrap-around ambiguities and handling multi-path interference more robustly.
+Extends the integral to C-ToF cameras using complex-valued path length importance functions to handle multi-path interference and avoid wrap-around ambiguities.
 
 ### [Fast Cache Estimator](9562-fast-cache-estimator.md)
-The Fast Cache Estimator is an unbiased Monte Carlo estimator for the incoming radiance term in the volume rendering integral, designed to reduce computational cost by decoupling density queries from appearance evaluations. It reduces the number of expensive physically-based appearance evaluations from $N$ to $K \ll N$ samples drawn from a categorical distribution based on render weights, while still requiring density queries for all $N$ points to determine those weights. Unlike the [Volume Rendering Integral](8682-volume-rendering-integral.md) which typically sums over all sample points, this method approximates the integral using a subset of points, trading off the number of appearance evaluations for a slight increase in variance that is mitigated by importance sampling.
+An unbiased Monte Carlo estimator that decouples density queries from appearance evaluations, reducing computational cost by sampling a subset of points based on render weights.
 
 ### [Spherical Harmonic Volume Rendering](11250-spherical-harmonic-volume-rendering.md)
-Spherical Harmonic Volume Rendering is a heuristic method for simulating advanced light-material interactions in interactive direct volume rendering (DVR) by incorporating complex material functions (reflectance and scattering) and colored area light sources using a unified Spherical Harmonic (SH) basis representation. Unlike slice-based techniques that are limited to headlights or cone-shaped scattering approximations, this approach supports arbitrary light directions and full-sphere scattering, enabling the simulation of environmental effects like in-scattering and color bleeding.
+Uses SH basis representation to simulate complex light-material interactions, supporting arbitrary light directions and full-sphere scattering for interactive DVR.
 
 ### Interactive Volume Shading
-Interactive Volume Shading is a model of interactive volume shading which captures volumetric light attenuation effects. The model adds direct light attenuation to the classic volume rendering to incorporate volumetric shadows and improve visual perception. It considers an approximation to phase functions, and to single and even multiple forward scattering. Their objective is not to perform a physically accurate computation of scattering effects, but the obtaining of interactive meaningful visualizations. Their model phenomenologically mimics scattering and light attenuation through the volume and takes advantage of graphics hardware [S2].
+A model that adds direct light attenuation to classic volume rendering to incorporate volumetric shadows and improve visual perception, considering approximations to phase functions and single/multiple forward scattering for interactive hardware-based visualization [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(n)$ per ray, where $n$ is the number of samples. Linear scaling with sample count [S1, unofficial].
-*   **Memory Complexity:** $O(n)$ to store sample data if not streamed, or $O(1)$ if samples are generated on the fly from a volume texture [S1, unofficial].
-*   **Strengths:** Differentiable with respect to $\sigma$ and $c$, enabling gradient-based optimization (e.g., in NeRFs) [S1, unofficial]. Simple to implement and highly parallelizable [S1, unofficial].
-*   **Limitations:** Assumes piecewise constant density and color, which can cause aliasing if $n$ is insufficient [S1, unofficial]. Does not account for multiple scattering or complex phase functions without extensions [S1, unofficial].
-*   **When to use:** When rendering participating media with emission and absorption, or when differentiability is required for learning-based methods [S1, unofficial].
-*   **When not to use:** When accurate multiple scattering or complex angular scattering distributions are required without approximation [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of samples per ray, as each sample requires a density/color query and a constant-time update [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ per ray if density is queried on-the-fly, or $O(V)$ if the volume grid is stored in memory [S1, unofficial].
+*   **Strengths:** Differentiable with respect to density and color, enabling gradient-based optimization (e.g., in NeRFs) [S1, unofficial]. Computationally efficient for single-scattering approximations [S2, unofficial].
+*   **Limitations:** Assumes low-albedo (single scattering); inaccurate for highly scattering media like clouds or fog without in-scattering extensions [S2, unofficial]. Performance degrades with high $N$ required for smooth gradients in sparse volumes [S1, unofficial].
+*   **When to use:** Real-time visualization, differentiable rendering, and scenes where single scattering dominates.
+*   **When not to use:** Highly participating media with strong multiple scattering (e.g., thick fog, milk) without additional in-scattering terms [S2, unofficial].
 
 ## Background
-The volume rendering integral is derived from the Radiative Transfer Equation (RTE) and the Beer-Lambert law [S1, S3, unofficial]. It was formalized in the context of computer graphics by Catmull (1980) for direct volume rendering [S1, unofficial]. The probabilistic interpretation and the specific quadrature form $C \approx \sum T_i \alpha_i c_i$ are widely used in modern neural radiance fields (NeRFs) and differentiable rendering [S1, unofficial].
+The volume rendering integral was formally derived by [152] (cited in [S2, unofficial]) building on earlier descriptions by [14] and [98] (cited in [S2, unofficial]). It is based on the conservation of energy for light passing through a participating medium [S1, unofficial]. The probabilistic interpretation of the integral, linking transmittance to the probability of no hits, was popularized in modern computer graphics literature [S1, unofficial]. It serves as the foundation for many modern neural rendering techniques, often referred to as the NeRF Formulation [S1, S2, unofficial].
 
 ## Sources
 [S1] PDF Volume Rendering - faculty.cc.gatech.edu, https://faculty.cc.gatech.edu/~hays/compvision2025spring/lectures/26.pdf, fetched 2026-10-26 (unofficial)
-[S2] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S3] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26

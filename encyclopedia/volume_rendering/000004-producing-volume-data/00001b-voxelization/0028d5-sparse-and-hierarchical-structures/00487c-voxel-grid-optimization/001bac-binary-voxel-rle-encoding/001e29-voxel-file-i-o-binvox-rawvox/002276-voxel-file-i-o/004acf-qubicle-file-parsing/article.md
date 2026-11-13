@@ -1,0 +1,279 @@
+# Qubicle File Parsing
+Also called: QBToSchematic, Qubicle QB to Schematic Conversion
+
+## Overview
+This method parses the binary `.qb` file format used by the Qubicle voxel editor to reconstruct a 3D voxel grid. It handles both uncompressed and run-length encoded (RLE) compressed data streams, applying necessary axis orientation and color format transformations to produce a standardized voxel list. It is distinguished from sibling parsers by its specific handling of Qubicle's matrix-based scene structure and its unique compressed bitstream flags.
+
+## How it works
+**Inputs:** A path to a `.qb` file.
+**Outputs:** A list of `VoxelDTO` objects, each containing world coordinates $(X, Y, Z)$ and color $(R, G, B)$.
+
+### Data Structures
+The file begins with a global header, followed by a sequence of matrix blocks.
+
+**QB Header (uint32 fields):**
+1. `version`: File format version.
+2. `colorFormat`: Integer indicating color channel order (0 or 1).
+3. `zAxisOrientation`: Integer indicating axis mapping (0 or 1).
+4. `compressed`: Boolean flag (0 for uncompressed, non-zero for compressed).
+5. `visibilityMaskEncoded`: Boolean flag.
+6. `numMatrices`: Number of matrix blocks following the header.
+
+**Matrix Header (variable size):**
+1. `nameLength` (byte): Length of the matrix name string.
+2. `name` (UTF8 string): Matrix identifier, length `nameLength`.
+3. `sizeX` (uint): Width of the voxel grid.
+4. `sizeY` (uint): Height of the voxel grid.
+5. `sizeZ` (uint): Depth of the voxel grid.
+6. `posX` (int): World X offset.
+7. `posY` (int): World Y offset.
+8. `posZ` (int): World Z offset.
+
+**Compressed Stream Constants:**
+- `CODE_FLAG`: Constant value `2`. Indicates a compressed run of voxels follows.
+- `NEXT_SLICE_FLAG`: Constant value `6`. Indicates the end of the current Z-slice.
+
+### Algorithm Steps
+
+1. **Parse Header:** Read the 6 uint32 values from the start of the file.
+2. **Iterate Matrices:** Loop `numMatrices` times.
+3. **Parse Matrix Header:** Read `nameLength`, then the UTF8 string, then the 6 size/position uint32/int32 values.
+4. **Parse Voxel Data:** Depending on the `compressed` flag in the global header, execute either the Uncompressed or Compressed parsing routine.
+5. **Transform and Emit:** For each voxel identified, calculate world coordinates and transform color channels, then add to the output list.
+
+#### Uncompressed Mode (`compressed == 0`)
+Iterate through the voxel grid in Z-Y-X order (outer to inner loop: $z \in [0, sizeZ-1]$, $y \in [0, sizeY-1]$, $x \in [0, sizeX-1]$).
+1. Read 4 bytes as a raw `Color` integer.
+2. Extract Alpha channel $A$.
+3. If $A \neq 0$, the voxel is present.
+4. Calculate local coordinates $(x, y, z)$.
+5. Transform coordinates to world space $(X, Y, Z)$ using the `zAxisOrientation` rule.
+6. Transform color channels $(R, G, B)$ using the `colorFormat` rule.
+7. Emit voxel.
+
+#### Compressed Mode (`compressed != 0`)
+Initialize $z = 0$ and a linear index counter $index = -1$.
+1. Read 4-byte chunks (uint32) from the stream sequentially.
+2. Let the read value be $data$.
+3. If $data == CODE\_FLAG$:
+    a. Read the next uint32 as `count`.
+    b. Read the next uint32 as `color`.
+    c. Loop `count` times:
+        i. Increment $index$.
+        ii. Calculate local coordinates $(x, y)$ from $index$:
+            $$x = (index + 1) \pmod{sizeX}$$
+            $$y = \lfloor (index + 1) / sizeX \rfloor$$
+        iii. Transform coordinates to world space $(X, Y, Z)$ using the `zAxisOrientation` rule.
+        iv. Transform color channels using the `colorFormat` rule.
+        v. Emit voxel.
+4. If $data == NEXT\_SLICE\_FLAG$:
+    a. Increment $z$.
+    b. Reset $index = -1$.
+    c. Continue reading the next chunk.
+5. Repeat until the matrix data is exhausted.
+
+### Coordinate Transformation Formulas
+The transformation depends on the global `zAxisOrientation` flag.
+
+**Uncompressed Mode:**
+- If `zAxisOrientation == 1`:
+  $$X = z + posX$$
+  $$Z = x + posX$$
+  $$Y = y + posY$$
+- Else (`zAxisOrientation == 0`):
+  $$X = x + posX$$
+  $$Z = z + posZ$$
+  $$Y = y + posY$$
+
+**Compressed Mode:**
+- If `zAxisOrientation == 1`:
+  $$X = z + posZ$$
+  $$Z = x + posX$$
+  $$Y = y$$
+- Else (`zAxisOrientation == 0`):
+  $$X = x + posX$$
+  $$Z = z + posZ$$
+  $$Y = y$$
+
+*Note: In compressed mode, the Y coordinate is often treated as fixed or implicit in the run structure depending on the specific Qubicle version, but the source notes specify $Y=y$ for orientation 0 and $Y=y$ for orientation 1 (implied by absence of offset addition in the note's formula for Y in compressed mode, or potentially $Y$ is not transformed by offsets in the compressed path described).*
+
+### Color Transformation Formulas
+The transformation depends on the global `colorFormat` flag. Let the raw 4-byte read be `data` (or `color` in compressed mode).
+
+- If `colorFormat == 0`:
+  $$R = data.B$$
+  $$G = data.G$$
+  $$B = data.R$$
+- Else (`colorFormat == 1`):
+  $$R = data.R$$
+  $$G = data.G$$
+  $$B = data.B$$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parse_qb_file(file_path):
+    with open(file_path, 'rb') as f:
+        # 1. Parse Global Header
+        version = read_uint32(f)
+        color_format = read_uint32(f)
+        z_axis_orientation = read_uint32(f)
+        compressed = read_uint32(f)
+        visibility_mask_encoded = read_uint32(f)
+        num_matrices = read_uint32(f)
+
+        voxels = []
+
+        # 2. Iterate Matrices
+        for _ in range(num_matrices):
+            # 3. Parse Matrix Header
+            name_length = read_byte(f)
+            name = read_utf8_string(f, name_length)
+            size_x = read_uint32(f)
+            size_y = read_uint32(f)
+            size_z = read_uint32(f)
+            pos_x = read_int32(f)
+            pos_y = read_int32(f)
+            pos_z = read_int32(f)
+
+            # 4. Parse Voxel Data
+            if compressed == 0:
+                voxels.extend(parse_uncompressed(f, size_x, size_y, size_z, 
+                                                 pos_x, pos_y, pos_z, 
+                                                 z_axis_orientation, color_format))
+            else:
+                voxels.extend(parse_compressed(f, size_x, size_y, size_z, 
+                                               pos_x, pos_y, pos_z, 
+                                               z_axis_orientation, color_format))
+
+        return voxels
+
+def parse_uncompressed(f, size_x, size_y, size_z, pos_x, pos_y, pos_z, z_axis_orientation, color_format):
+    voxels = []
+    for z in range(size_z):
+        for y in range(size_y):
+            for x in range(size_x):
+                color_data = read_uint32(f)
+                alpha = (color_data >> 24) & 0xFF # Assuming standard packing, check source if specific byte order
+                
+                if alpha != 0:
+                    # Transform Color
+                    if color_format == 0:
+                        r = (color_data >> 16) & 0xFF
+                        g = (color_data >> 8) & 0xFF
+                        b = color_data & 0xFF
+                        # Note: Source says R=data.B, G=data.G, B=data.R. 
+                        # Assuming data is stored as BGRA or similar. 
+                        # Standard uint32 read might be little-endian.
+                        # Let's stick to the source's logical mapping:
+                        # If color_format == 0: R=data.B, G=data.G, B=data.R
+                        # We need to extract B, G, R from the raw bytes.
+                        raw_bytes = color_data.to_bytes(4, 'little') # Assumption
+                        b_val = raw_bytes[0]
+                        g_val = raw_bytes[1]
+                        r_val = raw_bytes[2]
+                        final_r = b_val
+                        final_g = g_val
+                        final_b = r_val
+                    else:
+                        raw_bytes = color_data.to_bytes(4, 'little')
+                        r_val = raw_bytes[0]
+                        g_val = raw_bytes[1]
+                        b_val = raw_bytes[2]
+                        final_r = r_val
+                        final_g = g_val
+                        final_b = b_val
+
+                    # Transform Coordinates
+                    if z_axis_orientation == 1:
+                        world_x = z + pos_x
+                        world_z = x + pos_x # Source says posX for Z? Check note: "Z = x + posX"
+                        world_y = y + pos_y
+                    else:
+                        world_x = x + pos_x
+                        world_z = z + pos_z
+                        world_y = y + pos_y
+                    
+                    voxels.append(VoxelDTO(world_x, world_y, world_z, final_r, final_g, final_b))
+    return voxels
+
+def parse_compressed(f, size_x, size_y, size_z, pos_x, pos_y, pos_z, z_axis_orientation, color_format):
+    voxels = []
+    z = 0
+    index = -1
+    
+    while True:
+        try:
+            data = read_uint32(f)
+        except EOFError:
+            break
+            
+        if data == 2: # CODE_FLAG
+            count = read_uint32(f)
+            color_data = read_uint32(f)
+            
+            # Transform Color
+            if color_format == 0:
+                raw_bytes = color_data.to_bytes(4, 'little')
+                b_val = raw_bytes[0]
+                g_val = raw_bytes[1]
+                r_val = raw_bytes[2]
+                final_r = b_val
+                final_g = g_val
+                final_b = r_val
+            else:
+                raw_bytes = color_data.to_bytes(4, 'little')
+                r_val = raw_bytes[0]
+                g_val = raw_bytes[1]
+                b_val = raw_bytes[2]
+                final_r = r_val
+                final_g = g_val
+                final_b = b_val
+
+            for _ in range(count):
+                index += 1
+                x = (index + 1) % size_x
+                y = (index + 1) // size_x
+                
+                # Transform Coordinates
+                if z_axis_orientation == 1:
+                    world_x = z + pos_z # Source: "X = z + posZ"
+                    world_z = x + pos_x # Source: "Z = x + posX"
+                    world_y = y         # Source: "Y = y"
+                else:
+                    world_x = x + pos_x
+                    world_z = z + pos_z
+                    world_y = y
+                
+                voxels.append(VoxelDTO(world_x, world_y, world_z, final_r, final_g, final_b))
+                
+        elif data == 6: # NEXT_SLICE_FLAG
+            z += 1
+            index = -1
+        else:
+            # Unknown flag or data? Source implies only CODE and NEXT_SLICE are handled explicitly.
+            # Pitfall: Other values might be padding or errors.
+            pass
+            
+    return voxels
+```
+
+### Edge Cases and Pitfalls
+- **Precision:** Coordinate calculations use integer arithmetic. Ensure no overflow if `pos` values are large.
+- **Boundaries:** The compressed mode resets `index` at each slice. Ensure `sizeX` is not zero to avoid division by zero.
+- **Degenerate Input:** If `numMatrices` is 0, return an empty list. If a matrix has 0 volume, skip parsing.
+- **Color Format Ambiguity:** The source notes define `colorFormat` 0 as swapping R and B. The exact byte extraction depends on the endianness of the `uint32` read. The pseudocode assumes little-endian extraction for clarity, but the logical mapping (R=data.B) must be respected.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the total number of voxels in the uncompressed case. For compressed mode, it is $O(M)$ where $M$ is the number of 4-byte chunks in the stream, which is typically much smaller than $N$ if compression is effective.
+- **Memory Complexity:** $O(N)$ to store the output voxel list. The parser itself uses $O(1)$ auxiliary space.
+- **Strengths:** Handles both compressed and uncompressed data; supports multiple matrices; explicit axis/color transformations.
+- **Limitations:** Limited to the specific Qubicle `.qb` format; compression scheme is simple RLE with specific flags, not a general-purpose codec.
+
+## Background
+The Qubicle File Parsing method originates from the `FileToVox` project, an unofficial tool for converting various 3D formats into the Vox format used by MagicaVoxel. The specific implementation for `.qb` files is found in the `QBToSchematic` class within the `FileToVox` repository. Qubicle is a voxel art editor, and its `.qb` format stores scenes with multiple matrices.
+
+## Sources
+[S1] FileToVox, https://github.com/Zarbuz/FileToVox, fetched 2026-10-29 (unofficial)

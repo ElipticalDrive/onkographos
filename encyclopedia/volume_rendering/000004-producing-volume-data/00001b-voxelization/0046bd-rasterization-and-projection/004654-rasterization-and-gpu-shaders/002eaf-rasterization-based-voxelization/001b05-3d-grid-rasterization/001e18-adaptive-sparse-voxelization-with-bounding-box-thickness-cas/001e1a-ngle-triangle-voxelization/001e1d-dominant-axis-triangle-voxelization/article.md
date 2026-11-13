@@ -1,326 +1,641 @@
 # Dominant-Axis Triangle Voxelization
 
-Also called: 3D Bounding Box Voxelization, Case 7-9 Voxelization, Dominant Axis Voxelization, Multi-Pass Voxelization, Voxelization with Dominant Axis Projection
+Also called: Dominant Axis Voxelization, Voxelization with Dominant Axis Projection, Dominant-Axis Triangle Rasterization into Voxel Grid
 
 ## Overview
-Dominant-Axis Triangle Voxelization is a rasterization-based algorithm that determines which voxels in a sparse voxel DAG are intersected by a triangle by projecting the triangle onto a 2D plane defined by its dominant normal axis [S1, S2, unofficial]. It sets itself apart from general 3D clipping methods by reducing the problem to 2D edge tests along the axis of maximum surface alignment, optimizing column casting for sparse storage [S1, unofficial]. This method is a specific implementation detail within the NGLE Triangle Voxelization framework, handling the 3D bounding box thickness cases (Cases 7-9) where the triangle spans multiple voxels in all three dimensions [S1, S2, unofficial].
+Dominant-Axis Triangle Voxelization is a rasterization-based method for converting triangle meshes into a sparse voxel grid (such as a Sparse Voxel Octree or DAG) by projecting the triangle onto a 2D plane defined by its dominant normal axis [S1, S2, unofficial]. It solves the problem of efficiently determining which voxels are intersected by a triangle while minimizing redundant depth tests [S1, unofficial]. It sets itself apart from general 3D grid rasterization by explicitly classifying triangles into "thin" (1-voxel thick in one axis) and "thick" categories, using 2D projection tests for thin triangles and column-casting with secondary plane checks for thick ones [S1, S2, unofficial].
 
 ## How it works
+
 ### Inputs and Outputs
 **Inputs:**
-- Triangle vertices in world space: $v_0, v_1, v_2$ [S1, unofficial].
-- Triangle bounding box in grid coordinates: $bbox_{grid}.min, bbox_{grid}.max$ [S1, unofficial].
-- Voxel side length: $unitlength$ [S1, unofficial].
-- Parent bounding box limits: $p_{bbox\_grid}.min, p_{bbox\_grid}.max$ [S1, unofficial].
-- Mode flag: `single_pass` or `multi_pass` [S2, unofficial].
-- In multi-pass mode: Pre-computed dominant axis buffer, current projection direction $projDir.direction$, and primitive vertex index `vid` [S2, unofficial].
+*   Triangle vertices in world space: $v_0, v_1, v_2$ [S1, S4, unofficial].
+*   Triangle vertex attributes (color, normal) [S1, S4, unofficial].
+*   Voxel grid parameters: `gridsize` (resolution), `unitlength` (voxel side length) [S1, S2, unofficial].
+*   Bounding box of the partition or parent node: `p_bbox_grid` (min/max voxel indices) [S1, S2, unofficial].
+*   Voxel storage: `voxels` array (indexed by Morton code offset) and `voxel_data` vector for non-binary mode [S1, S2, unofficial].
 
 **Outputs:**
-- A set of occupied voxel Morton codes in a sparse array [S1, unofficial].
-- Voxel data (e.g., color, normal) if non-binary mode is enabled [S1, unofficial].
+*   Marked voxels in the `voxels` array.
+*   Voxel data (normal, color) in `voxel_data` vector (non-binary mode) [S1, unofficial].
 
 ### Data Structures
-- **Voxel Storage**: A sparse array indexed by Morton codes. The base offset is `morton_start`. For non-binary mode, `VoxelData` is pushed to a vector, and the index (`voxel_data.size() - 1`) is stored in the voxels array. Binary mode stores `true` [S1, unofficial].
-- **Dominant Axis Buffer**: In multi-pass mode, an array storing the pre-computed dominant axis for each triangle, accessed via `vid / 3` [S2, unofficial].
+*   **Voxel Storage:**
+    *   `voxels`: An array indexed by `morton_code - morton_start`.
+        *   In `BINARY_VOXELIZATION` mode: stores boolean `true` if occupied [S1, unofficial].
+        *   In non-binary mode: stores an index into `voxel_data` [S1, unofficial].
+    *   `voxel_data`: A vector of `VoxelData` structures. Each entry contains:
+        *   `normal`: The triangle's normal vector [S1, unofficial].
+        *   `color`: The average color of the triangle's vertices ($average3Vec(v_0, v_1, v_2)$) [S1, unofficial].
+*   **Triangle Info:**
+    *   `t.v0, t.v1, t.v2`: Vertex positions [S1, unofficial].
+    *   `t.v0_color, t.v1_color, t.v2_color`: Vertex colors [S1, unofficial].
+    *   `t_bbox_grid`: The bounding box of the triangle in voxel indices [S1, unofficial].
+
+### Parameters
+*   `unitlength`: The physical size of a single voxel, used to convert voxel indices to world coordinates and to expand edge distances for robustness [S1, S2, unofficial].
+*   `EMPTY_VOXEL`: A constant representing an unmarked voxel (e.g., `false` or `0`) [S1, unofficial].
+*   `DIST_FACTOR`: Constant multiplier for distance in attenuation (used in lighting variants, not core voxelization) [S3, unofficial]. Value: `1.1f`.
+*   `pc.large_triangle_threshold`: Threshold for voxel count to decide between direct rasterization and deferred processing [S4, unofficial]. Value: Not given in the sources.
+*   `WORKGROUP_SIZE`: Fixed constant for compute shader workgroup size [S4, unofficial]. Value: `64`.
 
 ### Steps
 
-1. **Calculate Plane Constant:**
-   Compute the plane constant $d$ using the normal $n$ and vertex $v_0$:
-   $$ d = -1.0 \cdot (n_x \cdot v_{0x} + n_y \cdot v_{0y} + n_z \cdot v_{0z}) $$
-   [S1, unofficial]
+1.  **Transform and Normalize:**
+    *   Transform vertices to voxel space: $v_{voxel} = \frac{v_{world} - min}{unitlength}$ [S4, unofficial].
+    *   Compute the triangle normal: $n = normalize(cross(v_1 - v_0, v_2 - v_0))$ [S4, unofficial].
+    *   Compute the plane constant: $d = -dot(n, v_0)$ [S1, S2, unofficial].
 
-2. **Determine Dominant Axis:**
-   Identify the axis with the largest absolute normal component.
-   - Initialize `dominant_axis = X`.
-   - If $|n_y| > |n_{dominant\_axis}|$, set `dominant_axis = Y`.
-   - If $|n_z| > |n_{dominant\_axis}|$, set `dominant_axis = Z`.
-   [S1, unofficial]
-   
-   *Single-Pass Mode:* Compute the triangle's normal by transforming vertices to world space ($pos_0, pos_1, pos_2$). Calculate the absolute cross product of edge vectors: $triNormal = |\text{cross}(pos_1 - pos_0, pos_2 - pos_0)|$ [S2, unofficial].
-   
-   *Multi-Pass Mode:* Retrieve the pre-computed dominant axis from the buffer using `vid / 3`. If the retrieved axis does not match `projDir.direction`, output a degenerate position `float4(-2,-2,-2,-2)` to cull the primitive [S2, unofficial].
+2.  **Determine Dominant Axis:**
+    *   Calculate the absolute normal components: $abs\_n = |n|$ [S3, unofficial].
+    *   Select the dominant axis based on the largest component:
+        *   `dominant_axis = X`
+        *   If $abs\_n[Y] > abs\_n[dominant\_axis]$, `dominant_axis = Y` [S1, S2, unofficial].
+        *   If $abs\_n[Z] > abs\_n[dominant\_axis]$, `dominant_axis = Z` [S1, S2, unofficial].
+    *   *Note:* In single-pass GPU modes, this is computed per triangle in the vertex shader [S3, unofficial]. In multi-pass, it is pre-computed and stored [S3, unofficial].
 
-3. **Iterate Based on Dominant Axis:**
-   The algorithm projects the triangle onto the plane perpendicular to the dominant axis and iterates over the 2D grid cells within the triangle's bounding box on that plane [S1, unofficial].
+3.  **Compute Bounding Box:**
+    *   Calculate voxel-space bounding box extents:
+        *   $x_{dim} = \max(x_0, x_1, x_2) - \min(x_0, x_1, x_2) + 1$
+        *   $y_{dim} = \max(y_0, y_1, y_2) - \min(y_0, y_1, y_2) + 1$
+        *   $z_{dim} = \max(z_0, z_1, z_2) - \min(z_0, z_1, z_2) + 1$ [S4, unofficial].
+    *   Determine `mindim = min(x_dim, y_dim, z_dim)` [S4, unofficial].
 
-   **Case A: Dominant Axis is X**
-   - Iterate over $y$ and $z$ within $bbox_{grid}.min/max$ [S1, unofficial].
-   - **YZ Plane Projection Test:** For each edge $e_i$ ($i=0,1,2$), compute the 2D edge normal in the YZ plane:
-     $$ n_{yz\_ei} = \text{vec2}(-e_{iz}, e_{iy}) $$
-     If $n_x < 0.0$, negate $n_{yz\_ei}$ [S1, unofficial].
-     Compute the offset:
-     $$ d_{yz\_ei} = -1.0 \cdot (n_{yz\_ei} \cdot \text{vec2}(v_{0y}, v_{0z})) + \max(0.0, unitlength \cdot n_{yz\_ei,x}) + \max(0.0, unitlength \cdot n_{yz\_ei,y}) $$
-     A voxel at $(y,z)$ is inside the triangle's projection if:
-     $$ (n_{yz\_ei} \cdot \text{vec2}(y \cdot unitlength, z \cdot unitlength)) + d_{yz\_ei} \ge 0.0 $$
-     for all three edges [S1, unofficial].
-   - **X-Range Calculation:** For valid $(y,z)$ columns, determine the range of voxels in the X direction. Define min/max corners in the YZ plane:
-     $$ min\_corner = (y \cdot unitlength, z \cdot unitlength) $$
-     $$ max\_corner = min\_corner + \text{vec2}(unitlength, unitlength) $$
-     Swap components if corresponding normal components are negative: if $n_y < 0$, swap $min\_corner[0]$ and $max\_corner[0]$; if $n_z < 0$, swap $min\_corner[1]$ and $max\_corner[1]$ [S1, unofficial].
-     Project YZ corners to X coordinates on the triangle plane:
-     $$ x_{min\_world} = \frac{n_y \cdot min\_corner[0] + n_z \cdot min\_corner[1] + d}{-1.0 \cdot n_x} $$
-     $$ x_{max\_world} = \frac{n_y \cdot max\_corner[0] + n_z \cdot max\_corner[1] + d}{-1.0 \cdot n_x} $$
-     Convert to voxel indices:
-     $$ x_{min} = x_{min\_world} / unitlength $$
-     $$ x_{max} = x_{max\_world} / unitlength $$
-     [S1, unofficial]
-   - **Clamping:** Clamp $x_{min}$ and $x_{max}$ to $p_{bbox\_grid}.min/max[X]$ [S1, unofficial].
-   - **Overlap Tests:** If the depth range ($x_{max} - x_{min}$) > 1, perform additional overlap tests in the ZX and XY planes for each $x \in [x_{min}, x_{max}]$. Compute edge normals and offsets for these planes, adjusting signs based on normal components (e.g., if $n_y < 0.0$, negate ZX edge normals) [S1, unofficial].
-   - **Voxel Marking:** For each $x$, compute the Morton index for $(z, y, x)$. Check if already marked. Test the voxel center against the XY and ZX edge inequalities. If inside both, mark the voxel and increment `nfilled` [S1, unofficial].
+4.  **Classify and Rasterize:**
+    *   **Case 1: Thin Triangle (1 voxel thick in one axis)**
+        *   If $z_{dim} == 1$ (thin in Z):
+            *   Perform 2D overlap test in XY plane [S1, unofficial].
+            *   Compute edge normals for XY plane: $n_{xy\_e0} = (-e_0[Y], e_0[X])$, etc. [S1, unofficial].
+            *   If $n[Z] < 0$, negate edge normals [S1, unofficial].
+            *   Compute distances: $d_{xy\_e0} = -dot(n_{xy\_e0}, v_0[XY]) + \max(0, unitlength \cdot n_{xy\_e0}[X]) + \max(0, unitlength \cdot n_{xy\_e0}[Y])$ [S1, unofficial].
+            *   Iterate $x$ from $t\_bbox\_grid.min[X]$ to $max[X]$ and $y$ from $min[Y]$ to $max[Y]$ [S1, unofficial].
+            *   For each $(x,y)$, compute center $p_{xy} = (x \cdot unitlength, y \cdot unitlength)$ [S1, unofficial].
+            *   Test if inside: if $(dot(n_{xy\_ei}, p_{xy}) + d_{xy\_ei}) < 0$ for any edge, skip [S1, unofficial].
+            *   If inside, mark voxel at $(x, y, z_{min})$ [S1, unofficial].
+        *   If $y_{dim} == 1$ (thin in Y):
+            *   Perform 2D overlap test in XZ plane [S1, unofficial].
+            *   Compute edge normals $n_{zx\_ei} = (-e_i[Z], e_i[X])$ [S1, unofficial].
+            *   If $n[Y] < 0$, negate edge normals [S1, unofficial].
+            *   Compute distances $d_{zx\_ei}$ similarly [S1, unofficial].
+            *   Iterate $z, x$; test center $p_{zx}$; mark voxel if inside [S1, unofficial].
+        *   If $x_{dim} == 1$ (thin in X):
+            *   Perform 2D overlap test in YZ plane [S1, unofficial].
+            *   Compute edge normals $n_{yz\_ei} = (-e_i[Z], e_i[Y])$ [S1, unofficial].
+            *   If $n[X] < 0$, negate edge normals [S1, unofficial].
+            *   Compute distances $d_{yz\_ei}$ similarly [S1, unofficial].
+            *   Iterate $y, z$; test center $p_{yz}$; mark voxel if inside [S1, unofficial].
 
-   **Case B: Dominant Axis is Y**
-   - Iterate over $z$ and $x$ within $bbox_{grid}.min/max$ [S1, unofficial].
-   - **XZ Plane Projection Test:** Similar to YZ test, project onto XZ plane [S1, unofficial].
-   - **Y-Range Calculation:** Determine Y-range using corner projection:
-     $$ y_{min\_world} = \frac{n_z \cdot min\_corner[0] + n_x \cdot min\_corner[1] + d}{-1.0 \cdot n_y} $$
-     Clamp $y_{min}$ and $y_{max}$ to $p_{bbox\_grid}.min/max[Y]$. Handle $y_{min} == y_{max}$ special case [S1, unofficial].
-   - **Overlap Tests:** For ranges > 1, test YZ and XY planes [S1, unofficial].
+    *   **Case 2: Thick Triangle (3D bounding box)**
+        *   Determine the iteration plane based on `dominant_axis` [S1, S2, unofficial].
+        *   **If `dominant_axis == X`:**
+            *   Iterate $y$ from $t\_bbox\_grid.min[Y]$ to $max[Y]$ and $z$ from $min[Z]$ to $max[Z]$ [S1, S2, unofficial].
+            *   Compute YZ edge normals $n_{yz\_ei} = (-e_i[Z], e_i[Y])$ [S2, unofficial].
+            *   If $n[X] < 0$, negate edge normals [S1, S2, unofficial].
+            *   Compute distances $d_{yz\_ei}$ [S1, S2, unofficial].
+            *   Test voxel center $p_{yz} = (y \cdot unitlength, z \cdot unitlength)$ against YZ projection [S2, unofficial].
+            *   If inside YZ projection:
+                *   Calculate column range in X:
+                    *   Define voxel corners in YZ: $min\_corner = (y \cdot unitlength, z \cdot unitlength)$, $max\_corner = min\_corner + (unitlength, unitlength)$ [S2, unofficial].
+                    *   Swap components if normal components are negative: if $n[Y] < 0$, swap $min\_corner[0], max\_corner[0]$; if $n[Z] < 0$, swap $min\_corner[1], max\_corner[1]$ [S1, S2, unofficial].
+                    *   Project corners to plane:
+                        $$x_{min\_world} = \frac{n[Y] \cdot min\_corner[0] + n[Z] \cdot min\_corner[1] + d}{-n[X]}$$
+                        $$x_{max\_world} = \frac{n[Y] \cdot max\_corner[0] + n[Z] \cdot max\_corner[1] + d}{-n[X]}$$
+                    *   Convert to voxel indices: $x_{min} = x_{min\_world} / unitlength$, $x_{max} = x_{max\_world} / unitlength$ [S2, unofficial].
+                *   Clamp $x_{min}, x_{max}$ to $p\_bbox\_grid.min[X], p\_bbox\_grid.max[X]$ [S1, S2, unofficial].
+                *   **Special Case:** If $x_{min} == x_{max}$, compute Morton index for $(z, y, x_{min})$. If not marked, mark it and continue [S1, unofficial].
+                *   **Range > 1:** Iterate $x$ from $x_{min}$ to $x_{max}$ [S1, S2, unofficial].
+                    *   For each $x$, compute Morton index for $(z, y, x)$ [S2, unofficial].
+                    *   Check if already marked; if so, continue [S2, unofficial].
+                    *   Perform additional overlap tests in XY and ZX planes for the voxel center at $(x, y, z)$ [S1, S2, unofficial].
+                    *   If inside both XY and ZX projections, mark the voxel [S2, unofficial].
 
-   **Case C: Dominant Axis is Z**
-   - Iterate over $x$ and $y$ within $bbox_{grid}.min/max$ [S1, unofficial].
-   - **XY Plane Projection Test:** Similar to previous tests, project onto XY plane [S1, unofficial].
-   - **Z-Range Calculation:** Determine Z-range using corner projection:
-     $$ z_{min\_world} = \frac{n_x \cdot min\_corner[0] + n_y \cdot min\_corner[1] + d}{-1.0 \cdot n_z} $$
-     Clamp $z_{min}$ and $z_{max}$ to $p_{bbox\_grid}.min/max[Z]$. Handle $z_{min} == z_{max}$ special case [S1, unofficial].
-   - **Overlap Tests:** For ranges > 1, test XZ and YZ planes [S1, unofficial].
+        *   **If `dominant_axis == Y`:**
+            *   Iterate $z$ and $x$ in $t\_bbox\_grid$ [S1, S2, unofficial].
+            *   Perform XZ plane projection tests (edge normals $n_{zx\_ei} = (-e_i[Z], e_i[X])$) [S1, S2, unofficial].
+            *   If inside XZ projection, determine Y-range:
+                $$y_{min\_world} = \frac{n[Z] \cdot min\_corner[0] + n[X] \cdot min\_corner[1] + d}{-n[Y]}$$
+                (Note: $min\_corner$ components correspond to Z and X axes) [S2, unofficial].
+            *   Clamp $y_{min}, y_{max}$ to $p\_bbox\_grid$ [S2, unofficial].
+            *   Handle $y_{min} == y_{max}$ as single voxel [S2, unofficial].
+            *   For ranges > 1, test YZ and XY planes [S1, S2, unofficial].
+            *   *Pitfall:* Source code contains a bug where $y_{max}$ is clamped using $y_{min}$ instead of $y_{max}$ [S1, unofficial].
 
-4. **Write Voxel Data:**
-   Write to voxel texture using one of three methods based on function constants [S2, unofficial]:
-   - `kUseRWTexture`: Read existing value, perform max blend ($res = \max(res, stored)$), write back [S2, unofficial].
-   - `kUseWTexture`: Write directly without blending [S2, unofficial].
-   - `Atomic buffer`: Convert result to RGBA8 uint. Use `atomic_compare_exchange_weak_explicit` loop to perform max blend: load `prevValue`, if mismatch, $res = \max(res, rgba8ToVec4(prevValue))$, convert back to `newValue`, retry [S2, unofficial].
+        *   **If `dominant_axis == Z`:**
+            *   Iterate $x$ and $y$ in $t\_bbox\_grid$ [S1, S2, unofficial].
+            *   Perform XY plane projection tests (edge normals $n_{xy\_ei} = (-e_i[Y], e_i[X])$) [S1, S2, unofficial].
+            *   If inside XY projection, determine Z-range:
+                $$z_{min\_world} = \frac{n[X] \cdot min\_corner[0] + n[Y] \cdot min\_corner[1] + d}{-n[Z]}$$
+                (Note: $min\_corner$ components correspond to X and Y axes) [S2, unofficial].
+            *   Clamp $z_{min}, z_{max}$ to $p\_bbox\_grid$ [S2, unofficial].
+            *   Handle $z_{min} == z_{max}$ as single voxel [S1, unofficial].
+            *   For ranges > 1, test XZ and YZ planes [S1, S2, unofficial].
+
+5.  **Mark Voxel:**
+    *   Compute Morton index: $index = mortonEncode(z, y, x)$ [S1, unofficial].
+    *   Check if `voxels[index - morton_start]` is `EMPTY_VOXEL` [S1, unofficial].
+    *   If not empty, continue [S1, unofficial].
+    *   If empty:
+        *   In `BINARY_VOXELIZATION`: `voxels[index - morton_start] = true` [S1, unofficial].
+        *   In non-binary: Push `VoxelData(normal, average_color)` to `voxel_data`, store `voxel_data.size() - 1` in `voxels[index - morton_start]` [S1, unofficial].
+    *   Increment `nfilled` [S1, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dominant_axis_voxelization(triangle, bbox_grid, unitlength, parent_bbox, mode, dominant_axis_buffer=None, proj_dir=None, vid=None):
+def dominant_axis_voxelization(triangles, gridsize, unitlength, morton_start, voxels, voxel_data):
     """
-    Voxelize a triangle using the dominant axis method.
-    triangle: {v0: vec3, v1: vec3, v2: vec3}
-    bbox_grid: {min: vec3i, max: vec3i}
-    unitlength: float
-    parent_bbox: {min: vec3i, max: vec3i}
-    mode: 'single_pass' or 'multi_pass'
-    dominant_axis_buffer: list of ints (only for multi_pass)
-    proj_dir: int (only for multi_pass)
-    vid: int (only for multi_pass)
+    Voxelize triangles using the dominant-axis method.
+    
+    Args:
+        triangles: List of Triangle objects with v0, v1, v2 (vec3), v0_color, v1_color, v2_color (vec3).
+        gridsize: int, resolution of the voxel grid.
+        unitlength: float, size of one voxel.
+        morton_start: int, base offset for Morton codes in the voxels array.
+        voxels: list, array of booleans or indices.
+        voxel_data: list, list of VoxelData objects (only used in non-binary mode).
+        
+    Returns:
+        int, total number of filled voxels.
     """
-    v0 = triangle['v0']
-    v1 = triangle['v1']
-    v2 = triangle['v2']
+    nfilled = 0
     
-    # 1. Calculate Normal and Plane Constant
-    edge1 = v1 - v0
-    edge2 = v2 - v0
-    normal = abs(cross(edge1, edge2))
-    d = -dot(normal, v0)
-    
-    # Guard against degenerate triangle
-    if dot(normal, normal) == 0:
-        return []
-
-    # 2. Determine Dominant Axis
-    if mode == 'single_pass':
+    for tri in triangles:
+        # 1. Transform to voxel space
+        # Assuming world space is already voxel space or transformed by unitlength/min
+        v0 = tri.v0
+        v1 = tri.v1
+        v2 = tri.v2
+        
+        # 2. Compute Normal and Plane Constant
+        e0 = v1 - v0
+        e1 = v2 - v1
+        e2 = v0 - v2
+        
+        normal = normalize(cross(e0, e1))
+        d = -dot(normal, v0)
+        
+        # 3. Determine Dominant Axis
+        abs_n = abs(normal)
         dominant_axis = 'X'
-        if abs(normal['Y']) > abs(normal[dominant_axis]):
+        if abs_n[1] > abs_n[0]:
             dominant_axis = 'Y'
-        if abs(normal['Z']) > abs(normal[dominant_axis]):
+        if abs_n[2] > abs_n[dominant_axis]:
             dominant_axis = 'Z'
-    else: # multi_pass
-        precomputed_axis = dominant_axis_buffer[vid // 3]
-        if precomputed_axis != proj_dir:
-            return [] # Cull primitive
-        dominant_axis = precomputed_axis
+            
+        # 4. Compute Bounding Box in Voxel Space
+        min_x = int(min(v0[0], v1[0], v2[0]))
+        max_x = int(max(v0[0], v1[0], v2[0]))
+        min_y = int(min(v0[1], v1[1], v2[1]))
+        max_y = int(max(v0[1], v1[1], v2[1]))
+        min_z = int(min(v0[2], v1[2], v2[2]))
+        max_z = int(max(v0[2], v1[2], v2[2]))
+        
+        x_dim = max_x - min_x + 1
+        y_dim = max_y - min_y + 1
+        z_dim = max_z - min_z + 1
+        
+        # 5. Rasterize based on thickness and dominant axis
+        if z_dim == 1:
+            # Thin in Z: 2D test in XY
+            rasterize_2d(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, 'XY', dominant_axis, voxels, voxel_data, morton_start, nfilled)
+        elif y_dim == 1:
+            # Thin in Y: 2D test in XZ
+            rasterize_2d(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, 'XZ', dominant_axis, voxels, voxel_data, morton_start, nfilled)
+        elif x_dim == 1:
+            # Thin in X: 2D test in YZ
+            rasterize_2d(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, 'YZ', dominant_axis, voxels, voxel_data, morton_start, nfilled)
+        else:
+            # Thick: Column casting
+            if dominant_axis == 'X':
+                rasterize_column(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, 'X', voxels, voxel_data, morton_start, nfilled)
+            elif dominant_axis == 'Y':
+                rasterize_column(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, 'Y', voxels, voxel_data, morton_start, nfilled)
+            else: # dominant_axis == 'Z'
+                rasterize_column(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, 'Z', voxels, voxel_data, morton_start, nfilled)
+                
+    return nfilled
 
-    occupied_voxels = []
+def rasterize_2d(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, plane, dominant_axis, voxels, voxel_data, morton_start, nfilled):
+    """
+    Rasterize a thin triangle by testing voxel centers in the projection plane.
+    """
+    # Determine edge vectors and normals for the projection plane
+    e0 = tri.v1 - tri.v0
+    e1 = tri.v2 - tri.v1
+    e2 = tri.v0 - tri.v2
+    
+    if plane == 'XY':
+        # Edge normals in XY: n_xy = (-e_y, e_x)
+        n_e0 = vec2(-e0[1], e0[0])
+        n_e1 = vec2(-e1[1], e1[0])
+        n_e2 = vec2(-e2[1], e2[0])
+        # If normal Z is negative, negate edge normals to maintain consistent winding/inside test
+        if normal[2] < 0.0:
+            n_e0 = -n_e0
+            n_e1 = -n_e1
+            n_e2 = -n_e2
+            
+        # Compute distances
+        d_e0 = -dot(n_e0, vec2(tri.v0[0], tri.v0[1])) + max(0.0, unitlength * abs(n_e0[0])) + max(0.0, unitlength * abs(n_e0[1]))
+        d_e1 = -dot(n_e1, vec2(tri.v1[0], tri.v1[1])) + max(0.0, unitlength * abs(n_e1[0])) + max(0.0, unitlength * abs(n_e1[1]))
+        d_e2 = -dot(n_e2, vec2(tri.v2[0], tri.v2[1])) + max(0.0, unitlength * abs(n_e2[0])) + max(0.0, unitlength * abs(n_e2[1]))
+        
+        # Iterate XY
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                p_xy = vec2(x * unitlength, y * unitlength)
+                if (dot(n_e0, p_xy) + d_e0) < 0.0: continue
+                if (dot(n_e1, p_xy) + d_e1) < 0.0: continue
+                if (dot(n_e2, p_xy) + d_e2) < 0.0: continue
+                
+                # Inside XY projection
+                z = min_z # Since z_dim == 1
+                mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled)
 
-    # 3. Iterate based on Dominant Axis
+    elif plane == 'XZ':
+        # Edge normals in XZ: n_xz = (-e_z, e_x)
+        n_e0 = vec2(-e0[2], e0[0])
+        n_e1 = vec2(-e1[2], e1[0])
+        n_e2 = vec2(-e2[2], e2[0])
+        if normal[1] < 0.0:
+            n_e0 = -n_e0
+            n_e1 = -n_e1
+            n_e2 = -n_e2
+            
+        d_e0 = -dot(n_e0, vec2(tri.v0[0], tri.v0[2])) + max(0.0, unitlength * abs(n_e0[0])) + max(0.0, unitlength * abs(n_e0[1]))
+        d_e1 = -dot(n_e1, vec2(tri.v1[0], tri.v1[2])) + max(0.0, unitlength * abs(n_e1[0])) + max(0.0, unitlength * abs(n_e1[1]))
+        d_e2 = -dot(n_e2, vec2(tri.v2[0], tri.v2[2])) + max(0.0, unitlength * abs(n_e2[0])) + max(0.0, unitlength * abs(n_e2[1]))
+        
+        # Iterate XZ
+        for z in range(min_z, max_z + 1):
+            for x in range(min_x, max_x + 1):
+                p_xz = vec2(x * unitlength, z * unitlength)
+                if (dot(n_e0, p_xz) + d_e0) < 0.0: continue
+                if (dot(n_e1, p_xz) + d_e1) < 0.0: continue
+                if (dot(n_e2, p_xz) + d_e2) < 0.0: continue
+                
+                y = min_y
+                mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled)
+
+    elif plane == 'YZ':
+        # Edge normals in YZ: n_yz = (-e_z, e_y)
+        n_e0 = vec2(-e0[2], e0[1])
+        n_e1 = vec2(-e1[2], e1[1])
+        n_e2 = vec2(-e2[2], e2[1])
+        if normal[0] < 0.0:
+            n_e0 = -n_e0
+            n_e1 = -n_e1
+            n_e2 = -n_e2
+            
+        d_e0 = -dot(n_e0, vec2(tri.v0[1], tri.v0[2])) + max(0.0, unitlength * abs(n_e0[0])) + max(0.0, unitlength * abs(n_e0[1]))
+        d_e1 = -dot(n_e1, vec2(tri.v1[1], tri.v1[2])) + max(0.0, unitlength * abs(n_e1[0])) + max(0.0, unitlength * abs(n_e1[1]))
+        d_e2 = -dot(n_e2, vec2(tri.v2[1], tri.v2[2])) + max(0.0, unitlength * abs(n_e2[0])) + max(0.0, unitlength * abs(n_e2[1]))
+        
+        # Iterate YZ
+        for z in range(min_z, max_z + 1):
+            for y in range(min_y, max_y + 1):
+                p_yz = vec2(y * unitlength, z * unitlength)
+                if (dot(n_e0, p_yz) + d_e0) < 0.0: continue
+                if (dot(n_e1, p_yz) + d_e1) < 0.0: continue
+                if (dot(n_e2, p_yz) + d_e2) < 0.0: continue
+                
+                x = min_x
+                mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled)
+
+def rasterize_column(tri, normal, d, unitlength, min_x, max_x, min_y, max_y, min_z, max_z, dominant_axis, voxels, voxel_data, morton_start, nfilled):
+    """
+    Rasterize a thick triangle by casting columns along the dominant axis.
+    """
+    e0 = tri.v1 - tri.v0
+    e1 = tri.v2 - tri.v1
+    e2 = tri.v0 - tri.v2
+    
     if dominant_axis == 'X':
-        for y in range(bbox_grid['min']['Y'], bbox_grid['max']['Y'] + 1):
-            for z in range(bbox_grid['min']['Z'], bbox_grid['max']['Z'] + 1):
-                if not is_inside_yz_projection(triangle, normal, d, y, z, unitlength):
-                    continue
+        # Iterate YZ
+        for z in range(min_z, max_z + 1):
+            for y in range(min_y, max_y + 1):
+                # YZ Edge Normals
+                n_e0 = vec2(-e0[2], e0[1])
+                n_e1 = vec2(-e1[2], e1[1])
+                n_e2 = vec2(-e2[2], e2[1])
+                if normal[0] < 0.0:
+                    n_e0 = -n_e0
+                    n_e1 = -n_e1
+                    n_e2 = -n_e2
+                    
+                d_e0 = -dot(n_e0, vec2(tri.v0[1], tri.v0[2])) + max(0.0, unitlength * abs(n_e0[0])) + max(0.0, unitlength * abs(n_e0[1]))
+                d_e1 = -dot(n_e1, vec2(tri.v1[1], tri.v1[2])) + max(0.0, unitlength * abs(n_e1[0])) + max(0.0, unitlength * abs(n_e1[1]))
+                d_e2 = -dot(n_e2, vec2(tri.v2[1], tri.v2[2])) + max(0.0, unitlength * abs(n_e2[0])) + max(0.0, unitlength * abs(n_e2[1]))
                 
+                p_yz = vec2(y * unitlength, z * unitlength)
+                if (dot(n_e0, p_yz) + d_e0) < 0.0: continue
+                if (dot(n_e1, p_yz) + d_e1) < 0.0: continue
+                if (dot(n_e2, p_yz) + d_e2) < 0.0: continue
+                
+                # Calculate X range
+                # Voxel corners in YZ
                 min_corner = vec2(y * unitlength, z * unitlength)
-                max_corner = min_corner + vec2(unitlength, unitlength)
+                max_corner = vec2((y + 1) * unitlength, (z + 1) * unitlength)
                 
-                if normal['Y'] < 0:
+                if normal[1] < 0.0:
                     min_corner[0], max_corner[0] = max_corner[0], min_corner[0]
-                if normal['Z'] < 0:
+                if normal[2] < 0.0:
                     min_corner[1], max_corner[1] = max_corner[1], min_corner[1]
-                
-                x_min_world = (normal['Y'] * min_corner[0] + normal['Z'] * min_corner[1] + d) / (-1.0 * normal['X'])
-                x_max_world = (normal['Y'] * max_corner[0] + normal['Z'] * max_corner[1] + d) / (-1.0 * normal['X'])
-                
-                x_min = x_min_world / unitlength
-                x_max = x_max_world / unitlength
-                
-                x_min = clamp(x_min, parent_bbox['min']['X'], parent_bbox['max']['X'])
-                x_max = clamp(x_max, parent_bbox['min']['X'], parent_bbox['max']['X'])
-                
-                for x in range(x_min, x_max + 1):
-                    if x_max > x_min:
-                        if not is_inside_zx_projection(triangle, normal, d, x, z, unitlength):
-                            continue
-                        if not is_inside_xy_projection(triangle, normal, d, x, y, unitlength):
-                            continue
                     
-                    morton = compute_morton(z, y, x)
-                    occupied_voxels.append(morton)
-                    
+                x_min_world = (normal[1] * min_corner[0] + normal[2] * min_corner[1] + d) / (-normal[0])
+                x_max_world = (normal[1] * max_corner[0] + normal[2] * max_corner[1] + d) / (-normal[0])
+                
+                x_min = int(x_min_world / unitlength)
+                x_max = int(x_max_world / unitlength)
+                
+                # Clamp to bounding box
+                x_min = max(x_min, min_x)
+                x_max = min(x_max, max_x)
+                
+                if x_min > x_max: continue
+                
+                if x_min == x_max:
+                    mark_voxel(x_min, y, z, tri, voxels, voxel_data, morton_start, nfilled)
+                else:
+                    for x in range(x_min, x_max + 1):
+                        # Additional tests in XY and ZX planes
+                        # XY Plane Test
+                        n_xy_e0 = vec2(-e0[1], e0[0])
+                        n_xy_e1 = vec2(-e1[1], e1[0])
+                        n_xy_e2 = vec2(-e2[1], e2[0])
+                        if normal[2] < 0.0:
+                            n_xy_e0 = -n_xy_e0
+                            n_xy_e1 = -n_xy_e1
+                            n_xy_e2 = -n_xy_e2
+                            
+                        d_xy_e0 = -dot(n_xy_e0, vec2(tri.v0[0], tri.v0[1])) + max(0.0, unitlength * abs(n_xy_e0[0])) + max(0.0, unitlength * abs(n_xy_e0[1]))
+                        d_xy_e1 = -dot(n_xy_e1, vec2(tri.v1[0], tri.v1[1])) + max(0.0, unitlength * abs(n_xy_e1[0])) + max(0.0, unitlength * abs(n_xy_e1[1]))
+                        d_xy_e2 = -dot(n_xy_e2, vec2(tri.v2[0], tri.v2[1])) + max(0.0, unitlength * abs(n_xy_e2[0])) + max(0.0, unitlength * abs(n_xy_e2[1]))
+                        
+                        p_xy = vec2(x * unitlength, y * unitlength)
+                        if (dot(n_xy_e0, p_xy) + d_xy_e0) < 0.0: continue
+                        if (dot(n_xy_e1, p_xy) + d_xy_e1) < 0.0: continue
+                        if (dot(n_xy_e2, p_xy) + d_xy_e2) < 0.0: continue
+                        
+                        # ZX Plane Test
+                        n_zx_e0 = vec2(-e0[2], e0[0])
+                        n_zx_e1 = vec2(-e1[2], e1[0])
+                        n_zx_e2 = vec2(-e2[2], e2[0])
+                        if normal[1] < 0.0:
+                            n_zx_e0 = -n_zx_e0
+                            n_zx_e1 = -n_zx_e1
+                            n_zx_e2 = -n_zx_e2
+                            
+                        d_zx_e0 = -dot(n_zx_e0, vec2(tri.v0[0], tri.v0[2])) + max(0.0, unitlength * abs(n_zx_e0[0])) + max(0.0, unitlength * abs(n_zx_e0[1]))
+                        d_zx_e1 = -dot(n_zx_e1, vec2(tri.v1[0], tri.v1[2])) + max(0.0, unitlength * abs(n_zx_e1[0])) + max(0.0, unitlength * abs(n_zx_e1[1]))
+                        d_zx_e2 = -dot(n_zx_e2, vec2(tri.v2[0], tri.v2[2])) + max(0.0, unitlength * abs(n_zx_e2[0])) + max(0.0, unitlength * abs(n_zx_e2[1]))
+                        
+                        p_zx = vec2(x * unitlength, z * unitlength)
+                        if (dot(n_zx_e0, p_zx) + d_zx_e0) < 0.0: continue
+                        if (dot(n_zx_e1, p_zx) + d_zx_e1) < 0.0: continue
+                        if (dot(n_zx_e2, p_zx) + d_zx_e2) < 0.0: continue
+                        
+                        mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled)
+
     elif dominant_axis == 'Y':
-        for z in range(bbox_grid['min']['Z'], bbox_grid['max']['Z'] + 1):
-            for x in range(bbox_grid['min']['X'], bbox_grid['max']['X'] + 1):
-                if not is_inside_xz_projection(triangle, normal, d, x, z, unitlength):
-                    continue
-                
-                min_corner = vec2(x * unitlength, z * unitlength)
-                max_corner = min_corner + vec2(unitlength, unitlength)
-                
-                if normal['X'] < 0:
-                    min_corner[0], max_corner[0] = max_corner[0], min_corner[0]
-                if normal['Z'] < 0:
-                    min_corner[1], max_corner[1] = max_corner[1], min_corner[1]
-                
-                y_min_world = (normal['Z'] * min_corner[0] + normal['X'] * min_corner[1] + d) / (-1.0 * normal['Y'])
-                y_max_world = (normal['Z'] * max_corner[0] + normal['X'] * max_corner[1] + d) / (-1.0 * normal['Y'])
-                
-                y_min = y_min_world / unitlength
-                y_max = y_max_world / unitlength
-                
-                y_min = clamp(y_min, parent_bbox['min']['Y'], parent_bbox['max']['Y'])
-                y_max = clamp(y_max, parent_bbox['min']['Y'], parent_bbox['max']['Y'])
-                
-                for y in range(y_min, y_max + 1):
-                    if y_max > y_min:
-                        if not is_inside_yz_projection(triangle, normal, d, y, z, unitlength):
-                            continue
-                        if not is_inside_xy_projection(triangle, normal, d, x, y, unitlength):
-                            continue
+        # Iterate XZ
+        for z in range(min_z, max_z + 1):
+            for x in range(min_x, max_x + 1):
+                # XZ Edge Normals
+                n_e0 = vec2(-e0[2], e0[0])
+                n_e1 = vec2(-e1[2], e1[0])
+                n_e2 = vec2(-e2[2], e2[0])
+                if normal[1] < 0.0:
+                    n_e0 = -n_e0
+                    n_e1 = -n_e1
+                    n_e2 = -n_e2
                     
-                    morton = compute_morton(z, y, x)
-                    occupied_voxels.append(morton)
+                d_e0 = -dot(n_e0, vec2(tri.v0[0], tri.v0[2])) + max(0.0, unitlength * abs(n_e0[0])) + max(0.0, unitlength * abs(n_e0[1]))
+                d_e1 = -dot(n_e1, vec2(tri.v1[0], tri.v1[2])) + max(0.0, unitlength * abs(n_e1[0])) + max(0.0, unitlength * abs(n_e1[1]))
+                d_e2 = -dot(n_e2, vec2(tri.v2[0], tri.v2[2])) + max(0.0, unitlength * abs(n_e2[0])) + max(0.0, unitlength * abs(n_e2[1]))
+                
+                p_xz = vec2(x * unitlength, z * unitlength)
+                if (dot(n_e0, p_xz) + d_e0) < 0.0: continue
+                if (dot(n_e1, p_xz) + d_e1) < 0.0: continue
+                if (dot(n_e2, p_xz) + d_e2) < 0.0: continue
+                
+                # Calculate Y range
+                min_corner = vec2(x * unitlength, z * unitlength)
+                max_corner = vec2((x + 1) * unitlength, (z + 1) * unitlength)
+                
+                if normal[0] < 0.0:
+                    min_corner[0], max_corner[0] = max_corner[0], min_corner[0]
+                if normal[2] < 0.0:
+                    min_corner[1], max_corner[1] = max_corner[1], min_corner[1]
+                    
+                y_min_world = (normal[2] * min_corner[0] + normal[0] * min_corner[1] + d) / (-normal[1])
+                y_max_world = (normal[2] * max_corner[0] + normal[0] * max_corner[1] + d) / (-normal[1])
+                
+                y_min = int(y_min_world / unitlength)
+                y_max = int(y_max_world / unitlength)
+                
+                y_min = max(y_min, min_y)
+                y_max = min(y_max, max_y)
+                
+                if y_min > y_max: continue
+                
+                if y_min == y_max:
+                    mark_voxel(x, y_min, z, tri, voxels, voxel_data, morton_start, nfilled)
+                else:
+                    for y in range(y_min, y_max + 1):
+                        # Additional tests in YZ and XY planes
+                        # YZ Plane Test
+                        n_yz_e0 = vec2(-e0[2], e0[1])
+                        n_yz_e1 = vec2(-e1[2], e1[1])
+                        n_yz_e2 = vec2(-e2[2], e2[1])
+                        if normal[0] < 0.0:
+                            n_yz_e0 = -n_yz_e0
+                            n_yz_e1 = -n_yz_e1
+                            n_yz_e2 = -n_yz_e2
+                            
+                        d_yz_e0 = -dot(n_yz_e0, vec2(tri.v0[1], tri.v0[2])) + max(0.0, unitlength * abs(n_yz_e0[0])) + max(0.0, unitlength * abs(n_yz_e0[1]))
+                        d_yz_e1 = -dot(n_yz_e1, vec2(tri.v1[1], tri.v1[2])) + max(0.0, unitlength * abs(n_yz_e1[0])) + max(0.0, unitlength * abs(n_yz_e1[1]))
+                        d_yz_e2 = -dot(n_yz_e2, vec2(tri.v2[1], tri.v2[2])) + max(0.0, unitlength * abs(n_yz_e2[0])) + max(0.0, unitlength * abs(n_yz_e2[1]))
+                        
+                        p_yz = vec2(y * unitlength, z * unitlength)
+                        if (dot(n_yz_e0, p_yz) + d_yz_e0) < 0.0: continue
+                        if (dot(n_yz_e1, p_yz) + d_yz_e1) < 0.0: continue
+                        if (dot(n_yz_e2, p_yz) + d_yz_e2) < 0.0: continue
+                        
+                        # XY Plane Test
+                        n_xy_e0 = vec2(-e0[1], e0[0])
+                        n_xy_e1 = vec2(-e1[1], e1[0])
+                        n_xy_e2 = vec2(-e2[1], e2[0])
+                        if normal[2] < 0.0:
+                            n_xy_e0 = -n_xy_e0
+                            n_xy_e1 = -n_xy_e1
+                            n_xy_e2 = -n_xy_e2
+                            
+                        d_xy_e0 = -dot(n_xy_e0, vec2(tri.v0[0], tri.v0[1])) + max(0.0, unitlength * abs(n_xy_e0[0])) + max(0.0, unitlength * abs(n_xy_e0[1]))
+                        d_xy_e1 = -dot(n_xy_e1, vec2(tri.v1[0], tri.v1[1])) + max(0.0, unitlength * abs(n_xy_e1[0])) + max(0.0, unitlength * abs(n_xy_e1[1]))
+                        d_xy_e2 = -dot(n_xy_e2, vec2(tri.v2[0], tri.v2[1])) + max(0.0, unitlength * abs(n_xy_e2[0])) + max(0.0, unitlength * abs(n_xy_e2[1]))
+                        
+                        p_xy = vec2(x * unitlength, y * unitlength)
+                        if (dot(n_xy_e0, p_xy) + d_xy_e0) < 0.0: continue
+                        if (dot(n_xy_e1, p_xy) + d_xy_e1) < 0.0: continue
+                        if (dot(n_xy_e2, p_xy) + d_xy_e2) < 0.0: continue
+                        
+                        mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled)
 
     elif dominant_axis == 'Z':
-        for x in range(bbox_grid['min']['X'], bbox_grid['max']['X'] + 1):
-            for y in range(bbox_grid['min']['Y'], bbox_grid['max']['Y'] + 1):
-                if not is_inside_xy_projection(triangle, normal, d, x, y, unitlength):
-                    continue
-                
-                min_corner = vec2(x * unitlength, y * unitlength)
-                max_corner = min_corner + vec2(unitlength, unitlength)
-                
-                if normal['X'] < 0:
-                    min_corner[0], max_corner[0] = max_corner[0], min_corner[0]
-                if normal['Y'] < 0:
-                    min_corner[1], max_corner[1] = max_corner[1], min_corner[1]
-                
-                z_min_world = (normal['X'] * min_corner[0] + normal['Y'] * min_corner[1] + d) / (-1.0 * normal['Z'])
-                z_max_world = (normal['X'] * max_corner[0] + normal['Y'] * max_corner[1] + d) / (-1.0 * normal['Z'])
-                
-                z_min = z_min_world / unitlength
-                z_max = z_max_world / unitlength
-                
-                z_min = clamp(z_min, parent_bbox['min']['Z'], parent_bbox['max']['Z'])
-                z_max = clamp(z_max, parent_bbox['min']['Z'], parent_bbox['max']['Z'])
-                
-                for z in range(z_min, z_max + 1):
-                    if z_max > z_min:
-                        if not is_inside_xz_projection(triangle, normal, d, x, z, unitlength):
-                            continue
-                        if not is_inside_yz_projection(triangle, normal, d, y, z, unitlength):
-                            continue
+        # Iterate XY
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                # XY Edge Normals
+                n_e0 = vec2(-e0[1], e0[0])
+                n_e1 = vec2(-e1[1], e1[0])
+                n_e2 = vec2(-e2[1], e2[0])
+                if normal[2] < 0.0:
+                    n_e0 = -n_e0
+                    n_e1 = -n_e1
+                    n_e2 = -n_e2
                     
-                    morton = compute_morton(z, y, x)
-                    occupied_voxels.append(morton)
+                d_e0 = -dot(n_e0, vec2(tri.v0[0], tri.v0[1])) + max(0.0, unitlength * abs(n_e0[0])) + max(0.0, unitlength * abs(n_e0[1]))
+                d_e1 = -dot(n_e1, vec2(tri.v1[0], tri.v1[1])) + max(0.0, unitlength * abs(n_e1[0])) + max(0.0, unitlength * abs(n_e1[1]))
+                d_e2 = -dot(n_e2, vec2(tri.v2[0], tri.v2[1])) + max(0.0, unitlength * abs(n_e2[0])) + max(0.0, unitlength * abs(n_e2[1]))
+                
+                p_xy = vec2(x * unitlength, y * unitlength)
+                if (dot(n_e0, p_xy) + d_e0) < 0.0: continue
+                if (dot(n_e1, p_xy) + d_e1) < 0.0: continue
+                if (dot(n_e2, p_xy) + d_e2) < 0.0: continue
+                
+                # Calculate Z range
+                min_corner = vec2(x * unitlength, y * unitlength)
+                max_corner = vec2((x + 1) * unitlength, (y + 1) * unitlength)
+                
+                if normal[0] < 0.0:
+                    min_corner[0], max_corner[0] = max_corner[0], min_corner[0]
+                if normal[1] < 0.0:
+                    min_corner[1], max_corner[1] = max_corner[1], min_corner[1]
+                    
+                z_min_world = (normal[0] * min_corner[0] + normal[1] * min_corner[1] + d) / (-normal[2])
+                z_max_world = (normal[0] * max_corner[0] + normal[1] * max_corner[1] + d) / (-normal[2])
+                
+                z_min = int(z_min_world / unitlength)
+                z_max = int(z_max_world / unitlength)
+                
+                z_min = max(z_min, min_z)
+                z_max = min(z_max, max_z)
+                
+                if z_min > z_max: continue
+                
+                if z_min == z_max:
+                    mark_voxel(x, y, z_min, tri, voxels, voxel_data, morton_start, nfilled)
+                else:
+                    for z in range(z_min, z_max + 1):
+                        # Additional tests in XZ and YZ planes
+                        # XZ Plane Test
+                        n_xz_e0 = vec2(-e0[2], e0[0])
+                        n_xz_e1 = vec2(-e1[2], e1[0])
+                        n_xz_e2 = vec2(-e2[2], e2[0])
+                        if normal[1] < 0.0:
+                            n_xz_e0 = -n_xz_e0
+                            n_xz_e1 = -n_xz_e1
+                            n_xz_e2 = -n_xz_e2
+                            
+                        d_xz_e0 = -dot(n_xz_e0, vec2(tri.v0[0], tri.v0[2])) + max(0.0, unitlength * abs(n_xz_e0[0])) + max(0.0, unitlength * abs(n_xz_e0[1]))
+                        d_xz_e1 = -dot(n_xz_e1, vec2(tri.v1[0], tri.v1[2])) + max(0.0, unitlength * abs(n_xz_e1[0])) + max(0.0, unitlength * abs(n_xz_e1[1]))
+                        d_xz_e2 = -dot(n_xz_e2, vec2(tri.v2[0], tri.v2[2])) + max(0.0, unitlength * abs(n_xz_e2[0])) + max(0.0, unitlength * abs(n_xz_e2[1]))
+                        
+                        p_xz = vec2(x * unitlength, z * unitlength)
+                        if (dot(n_xz_e0, p_xz) + d_xz_e0) < 0.0: continue
+                        if (dot(n_xz_e1, p_xz) + d_xz_e1) < 0.0: continue
+                        if (dot(n_xz_e2, p_xz) + d_xz_e2) < 0.0: continue
+                        
+                        # YZ Plane Test
+                        n_yz_e0 = vec2(-e0[2], e0[1])
+                        n_yz_e1 = vec2(-e1[2], e1[1])
+                        n_yz_e2 = vec2(-e2[2], e2[1])
+                        if normal[0] < 0.0:
+                            n_yz_e0 = -n_yz_e0
+                            n_yz_e1 = -n_yz_e1
+                            n_yz_e2 = -n_yz_e2
+                            
+                        d_yz_e0 = -dot(n_yz_e0, vec2(tri.v0[1], tri.v0[2])) + max(0.0, unitlength * abs(n_yz_e0[0])) + max(0.0, unitlength * abs(n_yz_e0[1]))
+                        d_yz_e1 = -dot(n_yz_e1, vec2(tri.v1[1], tri.v1[2])) + max(0.0, unitlength * abs(n_yz_e1[0])) + max(0.0, unitlength * abs(n_yz_e1[1]))
+                        d_yz_e2 = -dot(n_yz_e2, vec2(tri.v2[1], tri.v2[2])) + max(0.0, unitlength * abs(n_yz_e2[0])) + max(0.0, unitlength * abs(n_yz_e2[1]))
+                        
+                        p_yz = vec2(y * unitlength, z * unitlength)
+                        if (dot(n_yz_e0, p_yz) + d_yz_e0) < 0.0: continue
+                        if (dot(n_yz_e1, p_yz) + d_yz_e1) < 0.0: continue
+                        if (dot(n_yz_e2, p_yz) + d_yz_e2) < 0.0: continue
+                        
+                        mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled)
 
-    return occupied_voxels
-
-def compute_morton(z, y, x):
-    # Standard 3D Morton code interleaving
-    m = 0
-    for i in range(10): # Assumes coordinates fit in 10 bits each
-        m |= ((x & (1 << i)) << (2 * i))
-        m |= ((y & (1 << i)) << (2 * i + 1))
-        m |= ((z & (1 << i)) << (2 * i + 2))
-    return m
-
-def is_inside_yz_projection(triangle, normal, d, y, z, unitlength):
-    v0 = triangle['v0']
-    v1 = triangle['v1']
-    v2 = triangle['v2']
-    edges = [v1 - v0, v2 - v1, v0 - v2]
+def mark_voxel(x, y, z, tri, voxels, voxel_data, morton_start, nfilled):
+    """
+    Mark a voxel if it is not already marked.
+    """
+    index = morton_encode(z, y, x)
+    if voxels[index - morton_start] != 0: # Assuming 0 is EMPTY_VOXEL
+        return
     
-    for e in edges:
-        n_yz_ei = vec2(-e['Z'], e['Y'])
-        if normal['X'] < 0.0:
-            n_yz_ei = -n_yz_ei
-        d_yz_ei = -1.0 * dot(n_yz_ei, vec2(v0['Y'], v0['Z'])) + \
-                  max(0.0, unitlength * n_yz_ei[0]) + \
-                  max(0.0, unitlength * n_yz_ei[1])
-        if dot(n_yz_ei, vec2(y * unitlength, z * unitlength)) + d_yz_ei < 0.0:
-            return False
-    return True
+    # Mark voxel
+    # In binary mode, voxels[index] = True
+    # In non-binary mode, push data and store index
+    # For this pseudocode, we assume non-binary mode logic for completeness
+    normal = tri.normal
+    color = (tri.v0_color + tri.v1_color + tri.v2_color) / 3.0
+    voxel_data.append(VoxelData(normal, color))
+    voxels[index - morton_start] = len(voxel_data) - 1
+    nfilled += 1
 
-def is_inside_xz_projection(triangle, normal, d, x, z, unitlength):
-    v0 = triangle['v0']
-    v1 = triangle['v1']
-    v2 = triangle['v2']
-    edges = [v1 - v0, v2 - v1, v0 - v2]
-    
-    for e in edges:
-        n_xz_ei = vec2(-e['Z'], e['X'])
-        if normal['Y'] < 0.0:
-            n_xz_ei = -n_xz_ei
-        d_xz_ei = -1.0 * dot(n_xz_ei, vec2(v0['X'], v0['Z'])) + \
-                  max(0.0, unitlength * n_xz_ei[0]) + \
-                  max(0.0, unitlength * n_xz_ei[1])
-        if dot(n_xz_ei, vec2(x * unitlength, z * unitlength)) + d_xz_ei < 0.0:
-            return False
-    return True
+def morton_encode(z, y, x):
+    """
+    Encode 3D coordinates into a Morton code.
+    Implementation details omitted for brevity, assumed to be available.
+    """
+    pass
 
-def is_inside_xy_projection(triangle, normal, d, x, y, unitlength):
-    v0 = triangle['v0']
-    v1 = triangle['v1']
-    v2 = triangle['v2']
-    edges = [v1 - v0, v2 - v1, v0 - v2]
-    
-    for e in edges:
-        n_xy_ei = vec2(-e['Y'], e['X'])
-        if normal['Z'] < 0.0:
-            n_xy_ei = -n_xy_ei
-        d_xy_ei = -1.0 * dot(n_xy_ei, vec2(v0['X'], v0['Y'])) + \
-                  max(0.0, unitlength * n_xy_ei[0]) + \
-                  max(0.0, unitlength * n_xy_ei[1])
-        if dot(n_xy_ei, vec2(x * unitlength, y * unitlength)) + d_xy_ei < 0.0:
-            return False
-    return True
+def morton_encode_LUT(z, y, x):
+    """
+    Encode using LUT if available.
+    """
+    pass
+
+def morton3D_64_encode(z, y, x):
+    """
+    Encode using libmorton style.
+    """
+    pass
 ```
 
-### Parameters
-- `unitlength`: The side length of a voxel, used to convert grid coordinates to world coordinates and vice versa [S1, unofficial].
-- `DIST_FACTOR`: A constant multiplier for distance in attenuation calculation. Value: 1.1f [S2, unofficial].
-- `CONSTANT`, `LINEAR`, `QUADRATIC`: Coefficients for the attenuation formula. Values: CONSTANT=1, LINEAR=0, QUADRATIC=1 [S2, unofficial].
-
 ### Edge Cases and Pitfalls
-- **Division by Zero**: If the dominant axis component of the normal is zero, the projection formula divides by zero. The code assumes the dominant axis has the largest magnitude, but does not explicitly check for zero [S1, unofficial].
-- **Clamping Typo**: In the Y-dominant case, the source code contains a typo where $y_{max}$ is clamped using $y_{min}$ as the lower bound argument: `clampval<int>(y_min, p_bbox_grid.min[Y], p_bbox_grid.max[Y])` instead of `clampval<int>(y_max, ...)` [S1, unofficial].
-- **Degenerate Triangles**: If the triangle normal is zero, the dominant axis cannot be determined. [G] A check for zero-length normal should be added before computing the dominant axis.
+*   **Division by Zero:** The column range calculation divides by $-n[dominant\_axis]$. If the dominant axis component is exactly 0 (e.g., due to precision issues or a degenerate triangle normal), this causes division by zero [S1, S2, S4, unofficial]. The algorithm assumes the dominant axis selection prevents this, but robust implementations should check for near-zero values [S1, S2, unofficial].
+*   **Clamping Bug:** In the Y-dominant case, source code contains a bug where $y_{max}$ is clamped using $y_{min}$ instead of $y_{max}$ [S1, unofficial].
+*   **Thin Triangle Handling:** If a triangle is 1 voxel thick in an axis, the 2D projection test is used. If the triangle is not actually thin but the bounding box calculation results in a dimension of 1 due to integer truncation, the 2D test may miss voxels that the 3D column casting would find. However, the method relies on the bounding box dimensions to classify [S1, unofficial].
+*   **Morton Index Overflow:** The `voxels` array is indexed by `morton_code - morton_start`. If the Morton code exceeds the allocated array size, an out-of-bounds access occurs [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Strengths**: Not given in the sources.
-- **Limitations**: Not given in the sources.
-- **When to Use**: Not given in the sources.
-- **When Not to Use**: Not given in the sources.
+
+*   **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of triangles and $A$ is the area of the triangle's projection in voxels. For thick triangles, the complexity is proportional to the projected area plus the column depth checks.
+*   **Memory Complexity:** $O(V)$, where $V$ is the number of voxels in the sparse grid. The `voxels` array size depends on the Morton code range, and `voxel_data` stores attributes for each filled voxel [S1, S2, unofficial].
+*   **Performance:** The method is efficient for sparse voxel grids because it avoids testing voxels outside the triangle's projection. The dominant axis selection minimizes the number of plane tests required [S1, S2, unofficial].
+*   **Strengths:**
+    *   Efficient culling of empty columns.
+    *   Handles thin triangles explicitly, reducing redundant tests.
+    *   Supports both binary and non-binary voxelization [S1, unofficial].
+*   **Limitations:**
+    *   Sensitive to numerical precision in plane tests and column range calculations [S1, S2, unofficial].
+    *   Requires careful handling of edge cases (thin triangles, degenerate normals) [S1, S2, unofficial].
+    *   The clamping bug in the Y-dominant case can lead to incorrect voxel marking [S1, unofficial].
 
 ## Background
-This method is part of the NGLE Triangle Voxelization algorithm, which classifies triangle bounding box thickness into 9 cases (1D, 2D, or 3D) and uses plane/projection tests to determine which grid cells are intersected [S1, S2, unofficial]. It is used in high-resolution sparse voxel DAG construction [S1, unofficial] and real-time voxel cone tracing applications [S2, unofficial].
+
+*   **Origin:** The method is described in the context of Sparse Voxel Octree (SVO) builders, specifically in the `ooc_svo_builder` project [S1, unofficial] and the `INF584-High_Resolution_Sparse_Voxel_DAGs` project [S2, unofficial].
+*   **History:** It is a rasterization-based approach that evolved from 2D triangle rasterization techniques adapted for 3D voxel grids. The dominant axis selection is a common optimization in voxelization to reduce the search space [S1, S2, unofficial].
+*   **Usage:** Used in SVO builders for real-time ray tracing and global illumination, where efficient conversion of triangle meshes to voxel data is required [S1, S2, S3, S4, unofficial].
 
 ## Sources
-[S1] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)
-[S2] kakashidinho/VoxelConeTracingMetal, https://github.com/kakashidinho/VoxelConeTracingMetal, fetched 2026-10-26 (unofficial)
+
+[S1] Forceflow/ooc_svo_builder, https://github.com/Forceflow/ooc_svo_builder, fetched 2026-10-26 (unofficial)
+[S2] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)
+[S3] kakashidinho/VoxelConeTracingMetal, https://github.com/kakashidinho/VoxelConeTracingMetal, fetched 2026-10-26 (unofficial)
+[S4] Oshanath/Voxel-Cone-Tracing, https://github.com/Oshanath/Voxel-Cone-Tracing, fetched 2026-10-26 (unofficial)

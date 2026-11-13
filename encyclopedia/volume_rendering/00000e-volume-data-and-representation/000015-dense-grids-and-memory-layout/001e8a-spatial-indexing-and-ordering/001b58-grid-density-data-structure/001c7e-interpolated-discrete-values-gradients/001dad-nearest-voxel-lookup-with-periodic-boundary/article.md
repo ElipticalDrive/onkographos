@@ -40,6 +40,8 @@ Nearest Voxel Lookup retrieves the scalar value (e.g., density) of the single gr
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def nearest_voxel_lookup_periodic(grid, p):
     # 1. Transform to local space
     grid_size = grid.bounds[1] - grid.bounds[0]
@@ -52,9 +54,9 @@ def nearest_voxel_lookup_periodic(grid, p):
     p_voxel = p_norm * grid.baseResolution
     
     # 4. Quantize to integer indices using floor
-    xi = int(np.floor(p_voxel.x))
-    yi = int(np.floor(p_voxel.y))
-    zi = int(np.floor(p_voxel.z))
+    xi = int(math.floor(p_voxel.x))
+    yi = int(math.floor(p_voxel.y))
+    zi = int(math.floor(p_voxel.z))
     
     # 5. Apply periodic boundary conditions (modulo)
     N = grid.baseResolution
@@ -78,8 +80,8 @@ def nearest_voxel_lookup_periodic(grid, p):
 
 ## Subtopics
 
-### Nearest Integer Rounding (Floor)
-Converts continuous floating-point coordinates into discrete integer grid indices by rounding to the closest integer value [Child Note]. It serves as the fundamental coordinate quantization step in volume rendering, mapping sample points to voxel centers or corners [Child Note]. Unlike floor-based indexing which truncates towards zero or negative infinity, this method minimizes spatial quantization error by selecting the nearest grid node, which is critical for accurate gradient estimation and high-fidelity reconstruction [Child Note]. It differs from [Ceil](1574-ceil.md) which always rounds up, and [Floor](1575-floor.md) which always rounds down, by balancing bias in both directions [Child Note]. Choose it when minimizing spatial quantization error is prioritized over directional bias. [4233-nearest-integer-rounding.md]
+### [Nearest Integer Rounding](4233-nearest-integer-rounding.md)
+Converts continuous floating-point coordinates into discrete integer grid indices by rounding to the closest integer value. It serves as the fundamental coordinate quantization step in volume rendering, mapping sample points to voxel centers or corners [G]. Unlike floor-based indexing which truncates towards zero or negative infinity, this method minimizes spatial quantization error by selecting the nearest grid node, which is critical for accurate gradient estimation and high-fidelity reconstruction [G]. It differs from [Ceil](1574-ceil.md) which always rounds up, and [Floor](1575-floor.md) which always rounds down, by balancing bias in both directions [G]. Choose it when minimizing spatial quantization error is prioritized over directional bias. [4233-nearest-integer-rounding.md]
 
 ### [Nearest Neighbor Interpolation](5891-nearest-neighbor-interpolation.md)
 Maps a continuous 3D world point to the value of the single closest voxel in a discrete density grid. It solves the problem of retrieving attribute values for sample points that do not align with integer grid coordinates. Unlike trilinear or inverse weighting methods, which average surrounding voxels to ensure continuity, this method provides at best a rough estimate of the volume's nature by selecting the nearest grid vertex. It is distinguished by its extreme computational speed and lack of smoothing, making it suitable for rapid prototyping or when performance is critical over visual fidelity. Choose it when computational speed is paramount and visual smoothness is secondary. [5891-nearest-neighbor-interpolation.md]
@@ -100,7 +102,7 @@ Rounds a 3D vector down to the nearest integer coordinates [S5]. Takes an input 
 - **When not to use:** High-fidelity rendering requiring smooth gradients, or when the grid resolution is high enough that interpolation artifacts are negligible compared to the cost [S1, unofficial].
 
 ## Background
-The method originates from basic volume rendering techniques using 3D voxel grids. It is commonly referred to as "probing" in libraries like OpenVDB, which are designed for efficient storage and retrieval of sparse or dense volume data [S1, unofficial]. The technique is used for retrieving density values at sample points that do not align with integer grid coordinates [S1, unofficial]. The use of periodic boundary conditions (wrapping) is employed to handle out-of-bounds indices via modulo arithmetic [S3, unofficial].
+The method originates from basic volume rendering techniques using 3D voxel grids [S1, unofficial]. It is commonly referred to as "probing" in libraries like OpenVDB, which are designed for efficient storage and retrieval of sparse or dense volume data [S1, unofficial]. The technique is used for retrieving density values at sample points that do not align with integer grid coordinates [S1, unofficial]. The use of periodic boundary conditions (wrapping) is employed to handle out-of-bounds indices via modulo arithmetic [S3, unofficial].
 
 ## Sources
 [S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)

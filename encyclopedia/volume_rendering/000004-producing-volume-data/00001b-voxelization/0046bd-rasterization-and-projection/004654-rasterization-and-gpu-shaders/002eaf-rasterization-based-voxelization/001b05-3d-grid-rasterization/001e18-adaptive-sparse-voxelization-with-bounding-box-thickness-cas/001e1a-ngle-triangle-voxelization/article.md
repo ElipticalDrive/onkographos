@@ -3,256 +3,233 @@
 Also called: N-gle
 
 ## Overview
-NGLE Triangle Voxelization is a rasterization-based algorithm that converts a triangle mesh into a sparse voxel DAG by classifying each triangle's axis-aligned bounding box (AABB) thickness into nine cases (1D, 2D, or 3D) and applying optimized plane and projection tests to determine intersected grid cells [S1, unofficial]. It distinguishes itself from general 3D clipping methods by classifying bounding box thickness into 1D, 2D, and 3D cases, using 2D projection tests for thin boxes and combined plane/projection tests for thick boxes [S1, unofficial].
+NGLE Triangle Voxelization is a rasterization-based algorithm for converting triangle meshes into a sparse voxel data structure (specifically a Sparse Voxel DAG or Octree) by classifying triangles into nine cases based on the thickness of their axis-aligned bounding box (AABB) in grid coordinates [S1, unofficial]. It solves the problem of efficiently determining which voxels are intersected by a triangle while minimizing redundant depth tests, setting itself apart from general 3D grid rasterization by explicitly handling "thin" (1-voxel thick) triangles via 2D projection and "thick" triangles via 3D plane and projection tests [S1, unofficial][S2].
 
 ## How it works
-**Inputs:**
-- Triangle vertices $v_0, v_1, v_2$ in world space [S1, unofficial].
-- `unitlength`: The side length of a voxel in world units [S1, unofficial].
-- `morton_start`, `morton_end`: The range of Morton codes allocated for the partition [S1, unofficial].
-- `voxels`: A boolean array (for binary voxelization) or a size_t array with a parallel `vector<VoxelData>` (for data-rich voxelization) [S1, unofficial].
-
-**Outputs:**
-- Marked voxels in the sparse grid corresponding to the triangle's intersection [S1, unofficial].
-- Optional voxel data (normal, average color) stored in `voxel_data` [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A list of triangles (each with 3 vertices in world space), a voxel side length `unitlength`, and a partition range defined by `morton_start` and `morton_end` (Morton codes).
+*   **Output:** A sparse voxel grid (or DAG nodes) where intersected voxels are marked. In binary mode, a boolean flag is set; in data-rich mode, normal and color data are stored.
 
 **Data Structures:**
-- `VoxelData`: Contains `normal` (vec3) and `color` (vec3, computed as the average of the triangle's vertex colors) [S1, unofficial].
-- Grid coordinates are integers derived from world coordinates by multiplying by `1.0f/unitlength` and casting to `int` [S1, unofficial].
+*   `VoxelData`: A struct containing `normal` (vec3) and `color` (vec3). Used only when `BINARY_VOXELIZATION` is not defined [S1, unofficial].
+*   `voxels`: An array indexed by Morton code. If `BINARY_VOXELIZATION` is defined, `voxels` is `bool*`; otherwise, it is `size_t*` (indices into a `vector<VoxelData>`).
+*   `p_bbox_grid`: The bounding box of the current partition in grid coordinates, with `min` and `max` components.
 
-**Steps:**
+**Parameters:**
+*   `unitlength`: The side length of a voxel in world units [S1, unofficial].
+*   `morton_start`, `morton_end`: The range of Morton codes allocated for the current partition [S1, unofficial].
 
-1. **Initialize Voxel Array:**
-   Clear the voxel array for the range `[morton_start, morton_end)` to `EMPTY_VOXEL` [S1, unofficial].
+**Algorithm Steps:**
 
-2. **Compute Partition Bounding Box:**
-   Decode `morton_start` and `morton_end - 1` into grid coordinates to determine `p_bbox_grid.min` and `p_bbox_grid.max` [S1, unofficial].
+1.  **Initialize Voxel Array:**
+    *   If `BINARY_VOXELIZATION` is defined, allocate `bool* voxels`. Otherwise, allocate `size_t* voxels` and `vector<VoxelData>& voxel_data`.
+    *   Clear the voxel entries for the range `[morton_start, morton_end)` to `EMPTY_VOXEL` (or `false`) [S1, unofficial].
 
-3. **Compute Triangle Grid Bounding Box:**
-   - Compute the world-space AABB of the triangle, $t\_bbox\_world$ [S1, unofficial].
-   - Convert to grid coordinates: $t\_bbox\_grid = \text{cast\_int}(t\_bbox\_world \times \frac{1.0}{\text{unitlength}})$ [S1, unofficial].
-   - Clamp $t\_bbox\_grid$ to `p_bbox_grid` to stay within the partition [S1, unofficial].
+2.  **Compute Partition Bounding Box:**
+    *   Decode `morton_start` and `morton_end - 1` into 3D grid coordinates to determine `p_bbox_grid.min` and `p_bbox_grid.max` [S1, unofficial].
 
-4. **Determine Bounding Box Thickness:**
-   Compute a boolean vector `one_thick` where `one_thick[axis]` is 1 if $t\_bbox\_grid.min[axis] == t\_bbox\_grid.max[axis]$, and 0 otherwise [S1, unofficial].
+3.  **Process Each Triangle:**
+    *   **Compute World AABB:** Calculate the world-space bounding box `t_bbox_world` of the triangle vertices.
+    *   **Convert to Grid AABB:** Convert `t_bbox_world` to grid coordinates `t_bbox_grid` by multiplying by `unit_div` (`1.0f / unitlength`) and casting to `int`. Clamp `t_bbox_grid` to `p_bbox_grid` to stay within the partition [S1, unofficial].
+    *   **Determine Thickness:** Compute the `one_thick` vector. For each axis $i \in \{X, Y, Z\}$:
+        $$ \text{one\_thick}[i] = \begin{cases} 1 & \text{if } t\_bbox\_grid.min[i] == t\_bbox\_grid.max[i] \\ 0 & \text{otherwise} \end{cases} $$
+    *   **Compute Triangle Geometry:**
+        *   Edges: $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$.
+        *   Normal: $n = \text{normalize}(e_0 \times e_1)$ [S1, unofficial].
 
-5. **Compute Triangle Geometry:**
-   - Edges: $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$ [S1, unofficial].
-   - Normal: $n = \text{normalize}(e_0 \times e_1)$ [S1, unofficial].
+    *   **Case Classification and Voxelization:**
 
-6. **Handle 2D Bounding Box Cases (Cases 4-6):**
-   If `one_thick.sum() == 1`, the triangle is thin in one dimension [S1, unofficial]. Identify the dominant axis (where `one_thick` is 1) and perform a 2D projection test on the plane perpendicular to it [S1, unofficial].
+        *   **Cases 4-6 (2D Bounding Box):** If $\sum \text{one\_thick} == 1$, the triangle is thin in one axis. Identify the dominant axis (where `one_thick` is 1). Perform a 2D projection test on the plane perpendicular to the dominant axis.
+            *   **Case 4 (Thin in X, Thick in Y, Z):**
+                *   Project onto YZ plane.
+                *   Compute edge normals for the 2D projection: $n_{yz\_e0} = \text{vec2}(-e_0[Z], e_0[Y])$, etc.
+                *   If $n[X] < 0$, negate all $n_{yz\_ei}$.
+                *   Compute offsets: $d_{yz\_ei} = -1.0f \cdot (n_{yz\_ei} \cdot \text{vec2}(v_i[Y], v_i[Z])) + \max(0.0f, \text{unitlength} \cdot n_{yz\_ei}[0]) + \max(0.0f, \text{unitlength} \cdot n_{yz\_ei}[1])$.
+                *   Iterate $y, z$ in `t_bbox_grid`.
+                *   Compute Morton index with fixed $x = t\_bbox\_grid.min[X]$.
+                *   Test: For point $p_{yz} = \text{vec2}(y, z)$, if $(n_{yz\_ei} \cdot p_{yz} + d_{yz\_ei}) < 0$ for all $i \in \{0, 1, 2\}$, skip. Otherwise, mark voxel [S1, unofficial].
+            *   **Case 5 (Thin in Y, Thick in X, Z):**
+                *   Project onto ZX plane.
+                *   Compute edge normals: $n_{zx\_e0} = \text{vec2}(-e_0[X], e_0[Z])$, etc.
+                *   If $n[Y] < 0$, negate all $n_{zx\_ei}$.
+                *   Compute offsets $d_{zx\_ei}$ similarly.
+                *   Iterate $z, x$ in `t_bbox_grid`.
+                *   Compute Morton index with fixed $y = t\_bbox\_grid.min[Y]$.
+                *   Test projection against all three edges. Mark if intersected [S1, unofficial].
+            *   **Case 6 (Thin in Z, Thick in X, Y):**
+                *   Project onto XY plane.
+                *   Compute edge normals: $n_{xy\_e0} = \text{vec2}(-e_0[Y], e_0[X])$, etc.
+                *   If $n[Z] < 0$, negate all $n_{xy\_ei}$.
+                *   Compute offsets $d_{xy\_ei}$ similarly.
+                *   Iterate $x, y$ in `t_bbox_grid`.
+                *   Compute Morton index with fixed $z = t\_bbox\_grid.min[Z]$.
+                *   Test projection against all three edges. Mark if intersected [S1, unofficial].
 
-   - **Case 4 (Thin in X, Thick in Y, Z):**
-     - Project onto YZ plane.
-     - Compute edge normals in 2D: $n_{yz\_e0} = (-e_0[Z], e_0[Y])$, etc. [S1, unofficial].
-     - If $n[X] < 0$, negate all $n_{yz\_ei}$ [S1, unofficial].
-     - Compute offsets: $d_{yz\_ei} = -1.0 \cdot (n_{yz\_ei} \cdot \text{vec2}(v_i[Y], v_i[Z])) + \max(0.0, \text{unitlength} \cdot n_{yz\_ei}[0]) + \max(0.0, \text{unitlength} \cdot n_{yz\_ei}[1])$ [S1, unofficial].
-     - Iterate $y, z$ in $t\_bbox\_grid$. Fixed $x = t\_bbox\_grid.min[X]$.
-     - For a point $p_{yz} = (y, z)$, if $(n_{yz\_ei} \cdot p_{yz} + d_{yz\_ei}) < 0$ for all $i \in \{0,1,2\}$, skip [S1, unofficial]. Otherwise, mark voxel [S1, unofficial].
-
-   - **Case 5 (Thin in Y, Thick in X, Z):**
-     - Project onto ZX plane.
-     - Compute edge normals: $n_{zx\_e0} = (-e_0[X], e_0[Z])$, etc. [S1, unofficial].
-     - If $n[Y] < 0$, negate all $n_{zx\_ei}$ [S1, unofficial].
-     - Compute offsets $d_{zx\_ei}$ similarly [S1, unofficial].
-     - Iterate $z, x$ in $t\_bbox\_grid$. Fixed $y = t\_bbox\_grid.min[Y]$.
-     - Skip if projection test fails for all edges [S1, unofficial].
-
-   - **Case 6 (Thin in Z, Thick in X, Y):**
-     - Project onto XY plane.
-     - Compute edge normals: $n_{xy\_e0} = (-e_0[Y], e_0[X])$, etc. [S1, unofficial].
-     - If $n[Z] < 0$, negate all $n_{xy\_ei}$ [S1, unofficial].
-     - Compute offsets $d_{xy\_ei}$ similarly [S1, unofficial].
-     - Iterate $x, y$ in $t\_bbox\_grid$. Fixed $z = t\_bbox\_grid.min[Z]$.
-     - Skip if projection test fails for all edges [S1, unofficial].
-
-7. **Handle 3D Bounding Box Cases (Cases 7-9):**
-   If `one_thick.sum() == 0`, the triangle spans multiple voxels in all dimensions [S1, unofficial]. Determine the dominant axis of $n$ (axis with largest absolute component) [S1, unofficial].
-   - Compute critical point $c$: $c[axis] = \text{unitlength}$ if $n[axis] > 0$, else $0$ [S1, unofficial].
-   - Compute plane distances: $d_1 = n \cdot (c - v_0)$ and $d_2 = n \cdot ((\Delta p - c) - v_0)$, where $\Delta p = (\text{unitlength}, \text{unitlength}, \text{unitlength})$ [S1, unofficial].
-   - Setup projection tests for all three planes (XY, YZ, ZX) as in Cases 4-6 [S1, unofficial].
-   - Iterate $x, y, z$ in $t\_bbox\_grid$.
-   - **Plane Test:** If $(n \cdot p + d_1) \cdot (n \cdot p + d_2) > 0.0$, skip [S1, unofficial]. This checks if the voxel center is entirely on one side of the triangle plane [S1, unofficial].
-   - **Projection Tests:** If any of the three 2D projection tests fails, skip [S1, unofficial].
-   - Otherwise, mark voxel [S1, unofficial].
+        *   **Cases 7-9 (3D Bounding Box):** If $\sum \text{one\_thick} == 0$, the triangle has variable size in all dimensions.
+            *   Determine the dominant axis of the normal $n$ (the axis with the largest absolute component).
+            *   Compute critical point $c$:
+                $$ c[i] = \begin{cases} \text{unitlength} & \text{if } n[i] > 0 \\ 0 & \text{otherwise} \end{cases} $$
+            *   Compute plane distances for the bounding box:
+                *   $d_1 = n \cdot (c - v_0)$
+                *   $d_2 = n \cdot ((\delta_p - c) - v_0)$, where $\delta_p = \text{vec3}(\text{unitlength}, \text{unitlength}, \text{unitlength})$ [S1, unofficial].
+            *   Setup projection tests for all three planes (XY, YZ, ZX) as in Cases 4-6.
+            *   Iterate $x, y, z$ in `t_bbox_grid`.
+            *   Compute Morton index.
+            *   **Plane Intersection Test:** Let $p = \text{vec3}(x, y, z)$. If $(n \cdot p + d_1) \cdot (n \cdot p + d_2) > 0.0f$, skip. This checks if the voxel center is entirely on one side of the triangle plane (assuming the plane passes through the box, $d_1$ and $d_2$ have opposite signs) [S1, unofficial].
+            *   **Projection Tests:** If the plane test passes, test the voxel against all three 2D projection planes. If any projection test fails (voxel is outside the triangle's 2D shadow on that plane), skip. Otherwise, mark voxel [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ngle_voxelize(triangle, unitlength, morton_start, morton_end, voxels, voxel_data=None):
-    # 1. Initialize Voxel Array
-    for i in range(morton_start, morton_end):
-        voxels[i] = False
-        if voxel_data is not None:
-            voxel_data[i] = None
+def voxelize_ngle(triangles, unitlength, morton_start, morton_end, binary_mode=True):
+    # 1. Initialize
+    voxel_count = morton_end - morton_start
+    if binary_mode:
+        voxels = [False] * voxel_count
+        voxel_data = None
+    else:
+        voxels = [0] * voxel_count  # Indices into voxel_data
+        voxel_data = []
 
+    unit_div = 1.0 / unitlength
+    
     # 2. Compute Partition Bounding Box
-    # Morton encode/decode: standard bit-interleaving (not given in sources)
     p_min = decode_morton(morton_start)
     p_max = decode_morton(morton_end - 1)
-    p_bbox_min = [p_min[0], p_min[1], p_min[2]]
-    p_bbox_max = [p_max[0], p_max[1], p_max[2]]
-
-    # 3. Compute Triangle Grid Bounding Box
-    t_bbox_world = compute_world_bbox(triangle.v0, triangle.v1, triangle.v2)
-    t_bbox_grid_min = [clamp(int(t_bbox_world[i] / unitlength), p_bbox_min[i], p_bbox_max[i]) for i in range(3)]
-    t_bbox_grid_max = [clamp(int(t_bbox_world[i+3] / unitlength), p_bbox_min[i], p_bbox_max[i]) for i in range(3)]
-
-    # 4. Determine Bounding Box Thickness
-    one_thick = [1 if t_bbox_grid_min[i] == t_bbox_grid_max[i] else 0 for i in range(3)]
-    thickness_sum = sum(one_thick)
-
-    # 5. Compute Triangle Geometry
-    e0 = [triangle.v1[i] - triangle.v0[i] for i in range(3)]
-    e1 = [triangle.v2[i] - triangle.v1[i] for i in range(3)]
-    e2 = [triangle.v0[i] - triangle.v2[i] for i in range(3)]
-    edges = [e0, e1, e2]
-    verts = [triangle.v0, triangle.v1, triangle.v2]
-    n = normalize(cross(e0, e1))
-
-    if thickness_sum == 1:
-        # Cases 4-6: 2D Projection
-        dominant_axis = one_thick.index(1)
-        if dominant_axis == 0: # Case 4: Thin X, Project YZ
-            process_2d_projection(edges, verts, n, unitlength, t_bbox_grid_min, t_bbox_grid_max, 0, voxels, voxel_data)
-        elif dominant_axis == 1: # Case 5: Thin Y, Project ZX
-            process_2d_projection(edges, verts, n, unitlength, t_bbox_grid_min, t_bbox_grid_max, 1, voxels, voxel_data)
-        else: # Case 6: Thin Z, Project XY
-            process_2d_projection(edges, verts, n, unitlength, t_bbox_grid_min, t_bbox_grid_max, 2, voxels, voxel_data)
-    else:
-        # Cases 7-9: 3D Bounding Box
-        abs_n = [abs(n[i]) for i in range(3)]
-        dominant_normal_axis = abs_n.index(max(abs_n))
-
-        c = [0.0, 0.0, 0.0]
-        c[dominant_normal_axis] = unitlength if n[dominant_normal_axis] > 0 else 0.0
-
-        delta_p = [unitlength, unitlength, unitlength]
-        d1 = dot(n, [c[i] - triangle.v0[i] for i in range(3)])
-        d2 = dot(n, [(delta_p[i] - c[i]) - triangle.v0[i] for i in range(3)])
-
-        # Precompute 2D projection params for all 3 planes
-        proj_xy = compute_2d_params(edges, verts, n, unitlength, axis=2)
-        proj_yz = compute_2d_params(edges, verts, n, unitlength, axis=0)
-        proj_zx = compute_2d_params(edges, verts, n, unitlength, axis=1)
-
-        for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
-            for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+    
+    for tri in triangles:
+        # 3. Compute Grid AABB
+        t_bbox_world = compute_world_bbox(tri.v0, tri.v1, tri.v2)
+        t_bbox_grid_min = clamp(int(t_bbox_world.min * unit_div), p_min)
+        t_bbox_grid_max = clamp(int(t_bbox_world.max * unit_div), p_max)
+        
+        # 4. Determine Thickness
+        one_thick = [0, 0, 0]
+        for axis in range(3):
+            if t_bbox_grid_min[axis] == t_bbox_grid_max[axis]:
+                one_thick[axis] = 1
+        
+        # 5. Compute Geometry
+        e0 = tri.v1 - tri.v0
+        e1 = tri.v2 - tri.v1
+        e2 = tri.v0 - tri.v2
+        n = normalize(cross(e0, e1))
+        
+        sum_one_thick = sum(one_thick)
+        
+        if sum_one_thick == 1:
+            # Cases 4-6: 2D Projection
+            dominant_axis = one_thick.index(1)
+            
+            if dominant_axis == 0: # Case 4: Thin X, Project YZ
+                # Compute 2D edge normals and d values for YZ plane
+                # Note: Logic from S1 assumes specific winding/normal flip handling
+                # Simplified projection test logic:
+                for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                    for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                        p_2d = vec2(y, z)
+                        # Check if p_2d is inside the projected triangle
+                        # Using barycentric or edge function. S1 uses edge normals.
+                        if is_inside_projected_triangle_2d(p_2d, tri, dominant_axis=0):
+                            morton = encode_morton(t_bbox_grid_min[0], y, z)
+                            voxels[morton - morton_start] = True if binary_mode else add_voxel_data(voxels, voxel_data, tri, morton)
+                            
+            elif dominant_axis == 1: # Case 5: Thin Y, Project ZX
                 for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
-                    p = [x, y, z]
+                    for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                        p_2d = vec2(z, x) # Order depends on S1's specific indexing, assuming Z then X
+                        if is_inside_projected_triangle_2d(p_2d, tri, dominant_axis=1):
+                            morton = encode_morton(x, t_bbox_grid_min[1], z)
+                            voxels[morton - morton_start] = True if binary_mode else add_voxel_data(voxels, voxel_data, tri, morton)
+                            
+            elif dominant_axis == 2: # Case 6: Thin Z, Project XY
+                for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                    for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+                        p_2d = vec2(x, y)
+                        if is_inside_projected_triangle_2d(p_2d, tri, dominant_axis=2):
+                            morton = encode_morton(x, y, t_bbox_grid_min[2])
+                            voxels[morton - morton_start] = True if binary_mode else add_voxel_data(voxels, voxel_data, tri, morton)
+                            
+        elif sum_one_thick == 0:
+            # Cases 7-9: 3D Bounding Box
+            # Determine dominant axis of normal
+            abs_n = abs(n)
+            dominant_axis = argmax(abs_n)
+            
+            # Compute critical point c
+            c = vec3(0.0)
+            for axis in range(3):
+                if n[axis] > 0:
+                    c[axis] = unitlength
+            
+            delta_p = vec3(unitlength, unitlength, unitlength)
+            d1 = dot(n, c - tri.v0)
+            d2 = dot(n, (delta_p - c) - tri.v0)
+            
+            # Precompute 2D projection parameters for all 3 planes
+            proj_params = compute_2d_proj_params(tri, unitlength)
+            
+            for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+                for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                    for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+                        p = vec3(x, y, z)
+                        
+                        # Plane Intersection Test
+                        val = dot(n, p) + d1
+                        val2 = dot(n, p) + d2
+                        if val * val2 > 0.0:
+                            continue
+                            
+                        # Projection Tests
+                        # Check XY, YZ, ZX projections
+                        p_xy = vec2(x, y)
+                        p_yz = vec2(y, z)
+                        p_zx = vec2(z, x)
+                        
+                        if (is_inside_proj(p_xy, proj_params['xy']) and
+                            is_inside_proj(p_yz, proj_params['yz']) and
+                            is_inside_proj(p_zx, proj_params['zx'])):
+                            
+                            morton = encode_morton(x, y, z)
+                            voxels[morton - morton_start] = True if binary_mode else add_voxel_data(voxels, voxel_data, tri, morton)
 
-                    # Plane Test: If (n \cdot p + d_1) \cdot (n \cdot p + d_2) > 0.0, skip [S1, unofficial]
-                    n_dot_p = dot(n, p)
-                    if (n_dot_p + d1) * (n_dot_p + d2) > 0.0:
-                        continue
+def is_inside_projected_triangle_2d(p_2d, tri, dominant_axis):
+    # Helper to implement the specific edge normal logic from S1
+    # This abstracts the complex sign-flipping and d-value calculation
+    # for the 2D projection based on the dominant axis.
+    # Returns True if the point is inside the triangle's 2D projection.
+    pass
 
-                    # Projection Tests
-                    if not is_inside_2d(p, proj_xy, axes=(0, 1)):
-                        continue
-                    if not is_inside_2d(p, proj_yz, axes=(1, 2)):
-                        continue
-                    if not is_inside_2d(p, proj_zx, axes=(2, 0)):
-                        continue
+def compute_2d_proj_params(tri, unitlength):
+    # Computes edge normals and d values for XY, YZ, ZX planes
+    # as described in Cases 4-6 of S1.
+    pass
 
-                    # Mark Voxel
-                    morton = encode_morton(p)
-                    voxels[morton] = True
-                    if voxel_data is not None:
-                        voxel_data[morton] = VoxelData(normal=n, color=average_color(triangle))
-
-def process_2d_projection(edges, verts, n, unitlength, t_min, t_max, fixed_axis, voxels, voxel_data):
-    axis0 = (fixed_axis + 1) % 3
-    axis1 = (fixed_axis + 2) % 3
-    n_2d = []
-    d_2d = []
-    for i in range(3):
-        e = edges[i]
-        v = verts[i]
-        nx = -e[axis1]
-        ny = e[axis0]
-        if n[fixed_axis] < 0:
-            nx = -nx
-            ny = -ny
-        n_2d.append([nx, ny])
-        term1 = -1.0 * (nx * v[axis0] + ny * v[axis1])
-        term2 = max(0.0, unitlength * nx)
-        term3 = max(0.0, unitlength * ny)
-        d_2d.append(term1 + term2 + term3)
-    for a0 in range(t_min[axis0], t_max[axis0] + 1):
-        for a1 in range(t_min[axis1], t_max[axis1] + 1):
-            p_2d = [a0, a1]
-            inside = False
-            for j in range(3):
-                val = n_2d[j][0] * p_2d[0] + n_2d[j][1] * p_2d[1] + d_2d[j]
-                if val >= 0.0:
-                    inside = True
-                    break
-            if inside:
-                p = [0, 0, 0]
-                p[axis0] = a0
-                p[axis1] = a1
-                p[fixed_axis] = t_min[fixed_axis]
-                morton = encode_morton(p)
-                voxels[morton] = True
-                if voxel_data is not None:
-                    voxel_data[morton] = VoxelData(normal=n, color=average_color(triangle))
-
-def compute_2d_params(edges, verts, n, unitlength, axis):
-    axis0 = (axis + 1) % 3
-    axis1 = (axis + 2) % 3
-    n_2d = []
-    d_2d = []
-    for i in range(3):
-        e = edges[i]
-        v = verts[i]
-        nx = -e[axis1]
-        ny = e[axis0]
-        if n[axis] < 0:
-            nx = -nx
-            ny = -ny
-        n_2d.append([nx, ny])
-        term1 = -1.0 * (nx * v[axis0] + ny * v[axis1])
-        term2 = max(0.0, unitlength * nx)
-        term3 = max(0.0, unitlength * ny)
-        d_2d.append(term1 + term2 + term3)
-    return {'n_2d': n_2d, 'd_2d': d_2d, 'axes': (axis0, axis1)}
-
-def is_inside_2d(p, proj, axes):
-    axis0, axis1 = axes
-    p_2d = [p[axis0], p[axis1]]
-    for j in range(3):
-        val = proj['n_2d'][j][0] * p_2d[0] + proj['n_2d'][j][1] * p_2d[1] + proj['d_2d'][j]
-        if val >= 0.0:
-            return True
-    return False
-
-def average_color(tri):
-    return [(tri.v0[i] + tri.v1[i] + tri.v2[i]) / 3.0 for i in range(3)]
-
-class VoxelData:
-    def __init__(self, normal, color):
-        self.normal = normal
-        self.color = color
+def add_voxel_data(voxels, voxel_data, tri, morton):
+    # Adds normal and average color to voxel_data and returns index
+    normal = normalize(cross(tri.v1 - tri.v0, tri.v2 - tri.v1))
+    color = (tri.v0_color + tri.v1_color + tri.v2_color) / 3.0
+    voxel_data.append(VoxelData(morton, normal, color))
+    return len(voxel_data) - 1
 ```
 
 ## Subtopics
 
 ### Triangle-to-Grid Insertion
-A simpler variant that determines overlapped cells by bounding box overlap and adds a triangle reference to each [S2]. It uses bounding box overlap test instead of exact triangle-in-box test [S2]. The exact test reduces triangle references by more than one third, but shrinks ray-triangle intersection tests by only a few percent after mailboxing, so the higher rebuild cost of the exact test is not justified [S2]. For scenes with dominantly long, skinny, and diagonal triangles, a more accurate test may still pay off [S2].
+Triangle-to-Grid Insertion is a simpler method where, for each triangle, the cells overlapped by the triangle's bounding box are determined, and a reference to the triangle is added to each of these cells [S2]. It uses a bounding box overlap test instead of an exact triangle-in-box test. While the exact test reduces triangle references by more than one third, it shrinks ray-triangle intersection tests by only a few percent after mailboxing, making the higher rebuild cost unjustified for most scenes [S2]. However, for scenes with dominantly long, skinny, and diagonal triangles, a more accurate test may still pay off [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources [S1, unofficial].
-- **Memory Complexity:** Not given in the sources [S1, unofficial].
-- **Strengths:** Optimized for sparse storage via Morton codes; handles 2D cases efficiently by reducing dimensionality; robust for general triangle orientations [G].
-- **Limitations:** Conservative for 2D cases (may include voxels slightly outside the triangle if not careful with edge cases, though the projection test is exact for the grid cells); 3D cases require more tests [G].
-- **When to use:** When building a sparse voxel DAG for ray tracing or volume rendering where performance is critical and the scene contains varied triangle orientations [G].
-- **When not to use:** For scenes with very long, skinny, diagonal triangles where bounding box overlap is highly inaccurate and exact tests might be justified [S2].
+*   **Time Complexity:** Linear with respect to the number of voxels in the bounding box of each triangle, multiplied by the number of triangles. The 2D cases (4-6) are faster as they iterate over a 2D plane. The 3D cases (7-9) iterate over a 3D volume but use plane tests to skip empty regions.
+*   **Memory Complexity:** Proportional to the number of intersected voxels. Sparse storage (Morton codes) ensures only occupied voxels are stored.
+*   **Strengths:** Efficiently handles thin triangles via 2D projection. Robust 3D handling for thick triangles. Compatible with sparse data structures like DAGs/Octrees.
+*   **Limitations:** Bounding box approximation in the initial step can lead to overestimation of voxels (mitigated by the plane/projection tests). Precision issues may arise with very small `unitlength` or large coordinates.
+*   **When to use:** When building sparse voxel structures for ray tracing or volume rendering where triangle count is high and geometry varies in thickness.
+*   **When not to use:** For dense voxel grids where simple rasterization might be faster, or for scenes with extremely thin, diagonal triangles where bounding box insertion is insufficient and exact tests are preferred [S2].
 
 ## Background
-NGLE Triangle Voxelization is part of the Sparse Voxel DAG (SVO) builder implementation found in the INF584 High Resolution Sparse Voxel DAGs project [S1, unofficial]. It builds on the concept of adaptive sparse voxelization with bounding box thickness cases [Adaptive Sparse Voxelization with Bounding Box Thickness Cases](1686-adaptive-sparse-voxelization-with-bounding-box-thickness-cas.md). The method is designed to efficiently rasterize triangles into a sparse grid structure for subsequent ray traversal [S1, unofficial].
+NGLE Triangle Voxelization is described in the context of building high-resolution Sparse Voxel DAGs [S1, unofficial]. It is part of a pipeline that includes partitioning and octree building. The method is designed to efficiently populate a sparse voxel structure from triangle meshes, leveraging the properties of Morton codes for spatial locality. The approach is detailed in the GitHub repository `leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs` [S1, unofficial].
 
 ## Sources
 [S1] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)

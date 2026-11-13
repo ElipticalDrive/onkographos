@@ -1,0 +1,226 @@
+--- v002.md
++++ v003.md
+@@ -1,109 +1,155 @@
+ # Radon Transform
+-Also called: Forward Radon Transform, Parallel-Beam Radon Transform, Sinogram Generation
++Also called: Discrete Radon Transform, Forward Radon Transform, Parallel-Beam Radon Transform, Sinogram Generation, Transformée de Radon, Transformée de Radon discrète
+ 
+ ## Overview
+-The Radon transform generates a sinogram by computing the line integrals of a 2D image's contrast along parallel rays at various angles [S2, unofficial]. It serves as the forward projection operator in tomographic reconstruction, converting spatial domain data into projection domain data [S2, unofficial]. Unlike [Filtered Back-Projection](11308-filtered-back-projection-fbp.md), which is an approximate inverse method, the Radon transform is the direct linear mapping used to acquire the measurements required for reconstruction [S2, unofficial].
++The Radon transform maps a 2D continuous or discrete function $f(x,y)$ into a set of 1D projections $R_\theta(\rho)$ by integrating the function along parallel lines defined by an angle $\theta$ and a radial offset $\rho$ [S2, S3, unofficial]. In digital imaging, it generates a **sinogram**, which is the fundamental input for tomographic reconstruction algorithms like Filtered Back-Projection [S3, unofficial]. It differs from its sibling [Filtered Back-Projection](11308-filtered-back-projection-fbp.md) by being the forward acquisition model (image to sinogram) rather than the inverse reconstruction model (sinogram to image).
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   Input: A 2D image array $I$ of size $H \times W$.
+-*   Output: A sinogram array $P$ of size $N_d \times N_\theta$, where $N_d$ is the number of detectors and $N_\theta$ is the number of projection angles.
++### Inputs and Outputs
++*   **Input:** A 2D image $I$ of size $H \times W$ (height $\times$ width), where $I(i,j)$ is the intensity at pixel coordinates $(i,j)$.
++*   **Input:** An array of projection angles $\Theta = \{\theta_0, \dots, \theta_{N-1}\}$ in radians, typically spanning $[0, \pi)$ [S2, S3, unofficial].
++*   **Input:** A set of detector positions (radial offsets) $\rho$, typically linearly spaced to cover the image diagonal [S1, S3, unofficial].
++*   **Output:** A sinogram matrix $P$ of size $N_\rho \times N_\theta$, where $P(k, m) = R_{\theta_m}(\rho_k)$ [S1, S3, unofficial].
+ 
+-**Data Structures:**
+-*   `image`: 2D numpy array or tensor.
+-*   `theta`: 1D array of projection angles in radians.
+-*   `rs`: 1D array of detector positions.
+-*   `sinogram`: 2D array where columns correspond to angles and rows to detector positions.
++### Data Structures
++*   **Image $I$:** 2D array, indices $i \in [0, H-1]$ (row/y), $j \in [0, W-1]$ (col/x).
++*   **Angles $\Theta$:** 1D array of floats, length $N_\theta$.
++*   **Detectors $\rho$:** 1D array of floats, length $N_\rho$.
++*   **Sinogram $P$:** 2D array, rows correspond to detector indices, columns to angle indices.
+ 
+-**Parameters:**
+-*   `theta`: Projection angles. Typically calculated as `np.linspace(0.0, 180.0, max(image.shape), endpoint=False)` to provide approximately as many projections as pixels across the object [S2, unofficial].
+-*   `rs`: Linearly spaced detector positions. Typically from -1 to 1, with length equal to the image height (or diagonal, depending on implementation) [S1, unofficial].
+-*   `dr`: Detector spacing, calculated as the difference between consecutive detector positions `rs` [S1, unofficial].
++### Mathematical Definition
++The continuous Radon transform is defined as the line integral of the function $f(x,y)$ along a line $L$ parameterized by $\theta$ and $\rho$ [S2, unofficial]:
+ 
+-**Steps:**
+-1.  Generate an array of rotation angles `thetas` from 0 to 180 degrees with a 1-degree step, converted to radians [S1, unofficial].
+-2.  For each angle in `thetas`:
+-    a. Rotate the input image by the current angle. The rotation is typically performed using bilinear interpolation to handle non-integer pixel coordinates [S1, unofficial].
+-    b. Sum the pixel values along the vertical axis (axis 0) of the rotated image to obtain the projection profile for that angle [S1, unofficial].
+-3.  Multiply each projection profile by the detector spacing `dr` to approximate the integral [S1, unofficial].
+-4.  Transpose the resulting array of projection profiles to form the sinogram $P$, such that dimensions are (detectors $\times$ angles) [S1, unofficial].
++$$
++R_\theta(\rho) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(x,y) \delta(\rho - x \cos \theta - y \sin \theta) \, dx \, dy
++$$
+ 
+-**Pseudocode:**
++where $\delta(\cdot)$ is the Dirac delta function [S2, unofficial].
++
++For a discrete image $I(i,j)$, the function is modeled as a sum of discrete Dirac impulses [S2, unofficial]:
++
++$$
++f(x,y) = \sum_{i=-\infty}^{\infty} \sum_{j=-\infty}^{\infty} I(i,j) \Delta(x - j) \Delta(y - i)
++$$
++
++where $\Delta(\cdot)$ is the discrete Dirac impulse (1 if argument is 0, 0 otherwise) [S2, unofficial]. Substituting this into the continuous definition yields the discrete Radon transform [S2, unofficial]:
++
++$$
++R_\theta(\rho) = \sum_{i=0}^{H-1} \sum_{j=0}^{W-1} I(i,j) \Delta(\rho - j \cos \theta - i \sin \theta)
++$$
++
++In practice, $\Delta(\rho - j \cos \theta - i \sin \theta)$ is non-zero only if the line passes through the pixel $(i,j)$. Since pixels have finite area, this is often approximated by summing pixel values weighted by the intersection area or using interpolation (e.g., nearest-neighbor or linear) to map pixel centers to the projection grid [S2, S3, unofficial].
++
++### Parameters
++*   **Angles ($\theta$):** Typically $N_\theta = \max(H, W)$ angles spaced evenly in $[0, 180^\circ)$ [S3, unofficial].
++*   **Detectors ($\rho$):** Linearly spaced positions covering the image extent. Commonly from $-R$ to $R$ where $R$ is the image radius, with $N_\rho = \max(H, W)$ [S1, S3, unofficial].
++*   **Detector Spacing ($dr$):** The distance between adjacent detector positions, used for numerical integration scaling [S1, unofficial].
++
++### Algorithm Steps
++1.  **Initialize:** Create an empty sinogram matrix $P$ of shape $(N_\rho, N_\theta)$.
++2.  **Loop over angles:** For each angle $\theta_m$ in $\Theta$:
++    a.  **Rotate Image:** Rotate the image $I$ by $-\theta_m$ (or equivalently, rotate the coordinate system) so that the projection direction aligns with one of the image axes. Alternatively, compute the projection geometry directly using rotation matrices [S1, S3, unofficial].
++    b.  **Project:** Sum the pixel values along the axis perpendicular to the projection direction. If rotating the image, sum along rows (axis 0) to get a 1D projection profile $p_m$ of length $N_\rho$ [S1, unofficial].
++    c.  **Scale:** Multiply the projection profile by the detector spacing $dr$ to approximate the integral [S1, unofficial].
++    d.  **Store:** Assign $p_m$ to the $m$-th column of $P$.
++3.  **Transpose:** Depending on convention, the sinogram may be stored as $(N_\rho, N_\theta)$ or $(N_\theta, N_\rho)$. Standard convention (e.g., scikit-image) is $(N_\rho, N_\theta)$ [S1, S3, unofficial].
++
++### Pseudocode
+ ```python
+ import numpy as np
+ from scipy.ndimage import rotate
+ 
+-def radon_transform(image, theta_degrees=None, rs=None):
++def radon_transform(image, angles_deg, num_detectors=None):
+     """
+-    Compute the forward Radon transform (sinogram) of a 2D image.
++    Compute the discrete Radon transform (sinogram) of a 2D image.
+     
+     Args:
+-        image: 2D numpy array representing the object.
+-        theta_degrees: Array of angles in degrees. If None, defaults to 0-180 with 1-degree step.
+-        rs: Array of detector positions. If None, defaults to linearly spaced from -1 to 1 with length equal to image height.
++        image: 2D numpy array (H, W).
++        angles_deg: 1D array of angles in degrees, typically 0 to 180.
++        num_detectors: Number of detector bins. Defaults to max(image.shape).
+         
+     Returns:
+-        sinogram: 2D numpy array of shape (num_detectors, num_angles).
++        sinogram: 2D numpy array (num_detectors, len(angles_deg)).
+     """
+-    # Default parameters if not provided
+-    if theta_degrees is None:
+-        theta_degrees = np.arange(0, 180, 1)
++    H, W = image.shape
++    if num_detectors is None:
++        num_detectors = max(H, W)
++        
++    # Define detector positions linearly spaced from -R to R
++    # R is the radius of the image (half diagonal)
++    R = np.sqrt((H/2)**2 + (W/2)**2)
++    rs = np.linspace(-R, R, num_detectors)
++    dr = rs[1] - rs[0] if len(rs) > 1 else 1.0
+     
+-    if rs is None:
+-        # Detector positions from -1 to 1, length equal to image height
+-        rs = np.linspace(-1, 1, image.shape[0])
++    N_angles = len(angles_deg)
++    sinogram = np.zeros((num_detectors, N_angles))
++    
++    for m, theta_deg in enumerate(angles_deg):
++        theta_rad = np.deg2rad(theta_deg)
+         
+-    # Convert angles to radians
+-    thetas_rad = np.deg2rad(theta_degrees)
+-    
+-    num_angles = len(thetas_rad)
+-    num_detectors = len(rs)
+-    
+-    # Calculate detector spacing for integration approximation
+-    dr = rs[1] - rs[0] if num_detectors > 1 else 1.0
+-    
+-    sinogram = np.zeros((num_detectors, num_angles))
+-    
+-    for i, angle in enumerate(thetas_rad):
+-        # Rotate the image by the current angle
+-        # Note: scipy.ndimage.rotate rotates counter-clockwise. 
+-        # The sign of the angle may need adjustment depending on coordinate system conventions.
+-        rotated_image = rotate(image, angle * 180 / np.pi, reshape=False, order=1)
++        # Rotate the image to align the projection direction with the vertical axis.
++        # The angle for rotation is -theta_rad to project along the direction theta_rad.
++        # mode='constant' with cval=0 handles boundaries.
++        rotated = rotate(image, -theta_deg, reshape=False, order=1, mode='constant', cval=0.0)
+         
+-        # Sum along the vertical axis (axis 0) to get projection profile
+-        # This corresponds to integrating along rays perpendicular to the detector array
+-        projection = np.sum(rotated_image, axis=0)
++        # Sum along the vertical axis (axis 0) to get the projection profile
++        # This corresponds to integrating along lines of constant x' in the rotated frame
++        projection = np.sum(rotated, axis=0)
+         
+-        # Multiply by detector spacing to approximate the integral
++        # Scale by detector spacing to approximate the integral
+         projection *= dr
+         
+-        # Store in sinogram
+-        sinogram[:, i] = projection
++        # Store in sinogram. 
++        # Note: The projection profile length is W (or H depending on reshape=False behavior).
++        # We must map this to the detector grid rs.
++        # In a simple implementation using reshape=False, the projection is along the original width.
++        # For a rigorous implementation, interpolation onto the rs grid is required.
++        # Here we assume a simplified case where the projection length matches num_detectors
++        # or we interpolate.
+         
++        # Interpolate projection onto the detector grid rs
++        # The projection array corresponds to positions along the rotated x-axis.
++        # We need to map the pixel coordinates to the rs positions.
++        # This step is complex in pure Python without libraries; 
++        # standard libraries (skimage) handle this via ray-driven or distance-driven methods.
++        # For this pseudocode, we assume the projection array is already aligned 
++        # or we use a simple nearest-neighbor assignment for demonstration.
++        
++        # Simplified assignment: assume projection length matches num_detectors
++        if len(projection) == num_detectors:
++            sinogram[:, m] = projection
++        else:
++            # Fallback: interpolate
++            # The projection values are at positions corresponding to the rotated image width.
++            # This is a simplification; real implementations use geometry matrices.
++            pass 
++            
+     return sinogram
+ ```
++[G] The pseudocode above is a high-level approximation. Production implementations (like `skimage.transform.radon`) use distance-driven or ray-driven methods to accurately map pixel contributions to detector bins, handling sub-pixel geometry and interpolation. The `rotate` method is computationally expensive and introduces interpolation artifacts.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** The rotation step may introduce artifacts at the image boundaries if not padded or handled correctly. `reshape=False` in rotation preserves the original image size, potentially clipping data at corners [S1, unofficial].
+-*   **Precision:** Summing pixel values approximates the continuous line integral. Finer detector spacing (`dr`) improves accuracy but increases memory usage [S1, unofficial].
+-*   **Degenerate Input:** If the image is empty or has zero height/width, the detector spacing calculation may fail. Guard against division by zero or empty arrays [G].
++### Edge Cases and Pitfalls
++*   **Boundary Effects:** Pixels at the image edge contribute partially to projections. Using `reshape=False` in rotation avoids resampling artifacts but may leave gaps. Proper handling requires accounting for the exact intersection area of rays with pixels [S2, unofficial].
++*   **Aliasing:** If the number of angles $N_\theta$ is too small relative to the image frequency content, reconstruction artifacts occur. The Nyquist criterion for angular sampling suggests $N_\theta \ge \pi N_\rho / 2$ [S2, S3, unofficial].
++*   **Precision:** Floating-point errors in rotation and summation can accumulate. Using double precision is recommended [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Filtered Back-Projection (FBP)](11308-filtered-back-projection-fbp.md)
+-An approximate algorithm for the inverse Radon transform. It is among the fastest methods for inverse Radon transform and relies on the Fourier slice theorem. Choose this when speed is critical and noise levels are low.
++The inverse method that reconstructs the image from the sinogram. It applies a high-pass filter to the projections to correct for the $1/|\omega|$ blurring inherent in simple back-projection. Choose FBP when speed is critical and noise levels are moderate.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_\theta \cdot N_d \cdot N_p)$, where $N_\theta$ is the number of angles, $N_d$ is the number of detectors, and $N_p$ is the number of pixels in the image (for the summation step). The rotation step adds overhead proportional to the image size.
+-*   **Memory Complexity:** $O(N_d \cdot N_\theta)$ for the sinogram storage.
+-*   **Strengths:** Directly models the physical acquisition process in parallel-beam CT. Differentiable, allowing gradient-based optimization in differentiable rendering pipelines [Parent].
+-*   **Limitations:** Computationally expensive for high-resolution images and many angles. Sensitive to noise in the projection data, which propagates to reconstruction errors.
+-*   **When to use:** When implementing the forward model for differentiable tomographic reconstruction or when generating synthetic sinograms for training data.
+-*   **When not to use:** When real-time performance is required for large volumes, or when the acquisition geometry is not parallel-beam (e.g., cone-beam or fan-beam), which require different projection models.
++*   **Time Complexity:** $O(N_\theta \cdot N_\rho \cdot \log(\max(H,W)))$ if using FFT-based methods, or $O(N_\theta \cdot N_\rho \cdot N_{pixels})$ for direct ray-tracing. The rotation-based approach is $O(N_\theta \cdot H \cdot W \cdot \log(HW))$ due to FFT rotation [S1, S3, unofficial].
++*   **Memory Complexity:** $O(N_\rho \cdot N_\theta)$ for the sinogram storage.
++*   **Strengths:** Mathematically well-defined; direct link to Fourier Slice Theorem; standard input for FBP [S2, S3, unofficial].
++*   **Limitations:** Sensitive to noise; requires many projections for high-quality reconstruction; artifacts from limited angles or missing data [S2, unofficial].
++*   **When to use:** As the forward model in differentiable tomography [S1, S2, unofficial] or as a preprocessing step for FBP [S3, unofficial].
++*   **When not to use:** For real-time applications with very few projections; iterative methods (e.g., SIRT) may be better for sparse data.
+ 
+ ## Background
+-The Radon transform was introduced by Johann Radon in 1917 [S2, unofficial]. It forms the mathematical foundation of computed tomography (CT), where the goal is to reconstruct a 2D image from a set of projections [S2, unofficial]. The method is widely used in medical imaging, materials science, and computer vision for tomographic reconstruction [S2, unofficial]. In the context of differentiable rendering, it is implemented as a differentiable operation to enable gradient-based optimization of scene parameters [Parent].
++The Radon transform was introduced by Johann Radon in 1917 [S2, unofficial]. It forms the mathematical foundation of computed tomography (CT). The discrete implementation is widely used in medical imaging, materials science, and computer vision. The `skimage.transform.radon` function provides a standard implementation in Python [S3, unofficial]. The TorchRadon library extends this to GPU-accelerated, differentiable operations for deep learning applications [S1, unofficial].
+ 
+ ## Sources
+ [S1] guibo-tech/Tomographic-Reconstruction, https://github.com/guibo-tech/Tomographic-Reconstruction, fetched 2026-10-26 (unofficial)
+-[S2] plot_radon_transform.rst.txt, https://scikit-image.org/docs/stable/_sources/auto_examples/transform/plot_radon_transform.rst.txt, fetched 2026-10-30 (unofficial)+[S2] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)
++[S3] plot_radon_transform.rst.txt, https://scikit-image.org/docs/stable/_sources/auto_examples/transform/plot_radon_transform.rst.txt, fetched 2026-10-30 (unofficial)

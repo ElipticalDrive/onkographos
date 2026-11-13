@@ -1,0 +1,370 @@
+--- v006.md
++++ v007.md
+@@ -4,206 +4,169 @@
+ 
+ ## Overview
+-Multi-Grid Ray Traversal traverses rays through multiple binary occupancy grids to generate ray intervals, sample positions, and termination planes. It solves the problem of efficiently sampling dense volumetric data by combining pre-computed ray-AABB intersections with voxel-level traversal. Unlike single-grid traversal, it handles disjoint or overlapping spatial partitions by sorting intersection times and managing chunked memory layouts for variable-length output segments [S1, unofficial][S2, unofficial].
++Multi-Grid Ray Traversal traverses rays through multiple binary occupancy grids (typically arranged as mipmaps or hierarchical levels) to generate ray intervals, sample positions, and termination planes [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of efficiently sampling dense volumetric scenes by combining pre-computed ray-AABB intersections with voxel-level traversal, allowing rays to skip empty regions across multiple grid resolutions [S2, unofficial]. Unlike single-grid traversal, this method handles overlapping grids by prioritizing the first intersected grid and supports adaptive step sizing based on cone angles [S2, unofficial]. It builds on [Multi-level Grid Structures](6354-multi-level-grid-structures.md) by explicitly managing multiple grid levels and their intersection events [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:**
+-    *   `rays_o`: Ray origins, shape `[n_rays, 3]` (float).
+-    *   `rays_d`: Ray directions, shape `[n_rays, 3]` (normalized float).
+-    *   `binaries`: Binary occupancy grids, shape `[n_grids, resx, resy, resz]` (boolean). All grids share the same resolution [S1, unofficial][S2, unofficial].
+-    *   `aabbs`: Axis-Aligned Bounding Boxes for each grid, shape `[n_grids, 6]` (float), storing min/max x, y, z [S1, unofficial][S2, unofficial].
+-    *   `rays_mask`: Optional boolean mask, shape `[n_rays]`, to skip specific rays [S1, unofficial][S2, unofficial].
+-    *   `near_planes`: Optional per-ray near plane distances, shape `[n_rays]`. Defaults to zeros [S1, unofficial][S2, unofficial].
+-    *   `far_planes`: Optional per-ray far plane distances, shape `[n_rays]`. Defaults to infinity [S1, unofficial][S2, unofficial].
+-    *   `t_sorted`: Optional pre-computed sorted intersection times, shape `[n_rays, n_grids * 2]` (float) [S1, unofficial][S2, unofficial].
+-    *   `t_indices`: Optional pre-computed sorted grid indices, shape `[n_rays, n_grids * 2]` (int64) [S1, unofficial][S2, unofficial].
+-    *   `hits`: Optional pre-computed hit flags, shape `[n_rays, n_grids]` (boolean) [S1, unofficial][S2, unofficial].
+-    *   `step_size`: Fixed step size for marching. Default `1e-3`. If `<= 0.0`, records steps per voxel cell; if `> 0.0`, uses uniform or cone-based marching [S1, unofficial][S2, unofficial].
+-    *   `cone_angle`: Controls linear step size increase with distance. Default `0.0` (constant step size). Must be `>= 0.0` [S1, unofficial][S2, unofficial].
+-    *   `traverse_steps_limit`: Maximum number of traversal steps per ray. Default `-1` (unlimited) [S1, unofficial][S2, unofficial].
+-    *   `over_allocate`: If `True`, over-allocates memory for outputs. Requires `traverse_steps_limit > 0` [S1, unofficial][S2, unofficial].
+-    *   `compute_intervals`, `compute_samples`, `compute_terminate_planes`: Boolean flags to enable specific outputs [S2, unofficial].
+-
++    *   `rays_o`: Ray origins, shape `[n_rays, 3]`, float [S2, unofficial][S3, unofficial].
++    *   `rays_d`: Ray directions, shape `[n_rays, 3]`, normalized float [S2, unofficial][S3, unofficial].
++    *   `binaries`: Binary occupancy grids, shape `[n_grids, resx, resy, resz]`, boolean [S2, unofficial][S3, unofficial]. All grids share the same resolution [S2, unofficial].
++    *   `aabbs`: Axis-aligned bounding boxes for each grid, shape `[n_grids, 6]`, float, storing `{xmin, ymin, zmin, xmax, ymax, zmax}` [S1, unofficial][S3, unofficial].
++    *   `rays_mask`: Optional boolean mask, shape `[n_rays]`, to skip specific rays [S2, unofficial][S3, unofficial].
++    *   `near_planes`: Optional float tensor, shape `[n_rays]`, per-ray near plane distances [S3, unofficial].
++    *   `far_planes`: Optional float tensor, shape `[n_rays]`, per-ray far plane distances [S3, unofficial].
++    *   `t_sorted`: Optional float tensor, shape `[n_rays, n_grids * 2]`, pre-computed sorted intersection distances [S2, unofficial][S3, unofficial].
++    *   `t_indices`: Optional int64 tensor, shape `[n_rays, n_grids * 2]`, pre-computed sorted grid indices for each intersection [S2, unofficial][S3, unofficial].
++    *   `hits`: Optional boolean tensor, shape `[n_rays, n_grids]`, pre-computed hit flags [S2, unofficial][S3, unofficial].
++    *   `step_size`: Optional float, default `1e-3` [S1, unofficial][S2, unofficial][S3, unofficial].
++    *   `cone_angle`: Optional float, default `0.0` [S1, unofficial][S2, unofficial][S3, unofficial].
++    *   `traverse_steps_limit`: Optional int, default `-1` (unlimited) [S1, unofficial][S2, unofficial][S3, unofficial].
++    *   `over_allocate`: Optional bool, default `False` [S1, unofficial][S2, unofficial][S3, unofficial].
++    *   `eps`: Epsilon for traversal setup, default `1e-6f` [S2, unofficial].
+ *   **Outputs:**
+-    *   `intervals`: `PackedRaySegmentsSpec` structure storing traversal intervals per ray, supporting chunked memory layouts via `chunk_cnts` (counts) and `chunk_starts` (offsets) [S1, unofficial].
+-    *   `samples`: `RaySamples` object containing sample positions within each interval [S1, unofficial].
+-    *   `terminated_t`: Tensor of shape `[n_rays]` containing terminated t values [S1, unofficial].
++    *   `intervals`: Ray traversal intervals [S2, unofficial].
++    *   `samples`: Sample positions within intervals [S2, unofficial].
++    *   `terminated_t`: Termination plane distances, shape `[n_rays]` [S2, unofficial][S3, unofficial].
+ 
+ **Data Structures:**
+-*   **PackedRaySegmentsSpec**: A structure that packs variable-length segments into contiguous memory. It uses `chunk_cnts` (array of segment counts per ray) and `chunk_starts` (cumulative offsets) to map ray/segment indices to flat arrays of interval bounds and sample data [S1, unofficial].
+-*   **Binary Grid**: A 4D boolean tensor `[n_grids, resx, resy, resz]` representing voxel occupancy. Empty voxels are `False`, occupied are `True` [S1, unofficial][S2, unofficial].
++*   **RaySpec:** Contains origins, directions, and near/far planes.
++*   **PackedRaySegmentsSpec:** Stores traversal intervals and sample positions per ray, supporting chunked memory layouts via `chunk_cnts` (counts per chunk) and `chunk_starts` (start indices) [S2, unofficial].
++*   **Intersection Data:** `t_sorted` and `t_indices` are concatenated from `t_mins` and `t_maxs` of ray-AABB intersections, then sorted [S2, unofficial][S3, unofficial].
+ 
+-**Algorithm Steps:**
++**Parameters:**
++*   `step_size`: Fixed step size for marching. If `<= 0.0`, records steps per voxel cell. If `> 0.0`, uses uniform or cone-based marching [S2, unofficial].
++*   `cone_angle`: Controls linear step size increase with distance. `0.0` means uniform marching with `step_size` [S2, unofficial].
++*   `traverse_steps_limit`: Maximum number of traversal steps per ray. Enables early termination [S2, unofficial].
++*   `over_allocate`: If `True`, `traverse_steps_limit` must be set and `> 0` [S1, unofficial][S3, unofficial].
+ 
+-1.  **Initialization**:
+-    *   Initialize `rays_mask` to all-ones boolean tensor `[n_rays]` if `None` [S2, unofficial].
+-    *   Initialize `near_planes` to zeros `[n_rays]` if `None` [S1, unofficial][S2, unofficial].
+-    *   Initialize `far_planes` to infinity `[n_rays]` if `None` [S1, unofficial][S2, unofficial].
+-    *   If `t_sorted`, `t_indices`, or `hits` are `None`, compute ray-AABB intersections using `ray_aabb_intersect(rays_o, rays_d, aabbs)` to get `t_mins`, `t_maxs`, and `hits` [S2, unofficial].
+-    *   Concatenate `t_mins` and `t_maxs` along the last dimension and sort them to get `t_sorted` and `t_indices` [S1, unofficial][S2, unofficial].
++**Steps:**
++1.  **Initialization:**
++    *   Initialize `rays_mask` to all-ones boolean tensor `[n_rays]` if `None` [S3, unofficial].
++    *   Initialize `near_planes` to zeros `[n_rays]` if `None` [S3, unofficial].
++    *   Initialize `far_planes` to infinity `[n_rays]` if `None` [S3, unofficial].
++    *   If `t_sorted`, `t_indices`, or `hits` are `None`, compute ray-AABB intersections using `ray_aabb_intersect(rays_o, rays_d, aabbs)` to get `t_mins`, `t_maxs`, and `hits` [S3, unofficial].
++    *   Concatenate `t_mins` and `t_maxs` along the last dimension and sort them to get `t_sorted` and `t_indices` [S2, unofficial][S3, unofficial].
++    *   Set `traverse_steps_limit` to `-1` if `None` [S3, unofficial].
+ 
+-2.  **Parallel Setup**:
+-    *   Compute thread ID: `tid = blockIdx.x * blockDim.x + threadIdx.x` [S1, unofficial].
+-    *   If `first_pass` is `False` and `chunk_cnts[tid] == 0`, skip processing for this ray [S1, unofficial].
+-    *   Set base indices for intersections: `base_hits = tid * n_grids`, `base_t_sorted = tid * n_grids * 2` [S1, unofficial].
++2.  **Parallel Execution Setup:**
++    *   Parallelize over rays using grid/block indices: `tid = blockIdx.x * blockDim.x + threadIdx.x` [S2, unofficial].
++    *   Skip rays where `rays_mask[tid]` is false or `chunk_cnts[tid] == 0` on non-first passes [S2, unofficial].
+ 
+-3.  **Interval Generation**:
+-    *   Loop over intersections `i` from `base_t_sorted` to `base_t_sorted + n_grids * 2 - 1` [S1, unofficial].
+-    *   Determine `is_entering = t_indices[i] < n_grids` and `level = t_indices[i] % n_grids` [S1, unofficial].
+-    *   Compute interval bounds:
+-        $$this\_tmin = \max(t\_sorted[i], near\_plane)$$
+-        $$this\_tmax = \min(t\_sorted[i + 1], far\_plane)$$
+-    *   If `this_tmin >= this_tmax`, skip this interval (degenerate) [S1, unofficial].
++3.  **Interval Processing:**
++    *   For each ray `tid`, initialize ray spec with origins, directions, near/far planes [S2, unofficial].
++    *   Set base indices for intersections: `base_hits = tid * n_grids`, `base_t_sorted = tid * n_grids * 2` [S2, unofficial].
++    *   Loop over intersections `i` from `base_t_sorted` to `base_t_sorted + n_grids * 2 - 1`:
++        *   Determine `is_entering = t_indices[i] < n_grids` [S2, unofficial].
++        *   Determine `level = t_indices[i] % n_grids` [S2, unofficial].
++        *   Compute interval bounds: `this_tmin = fmaxf(t_sorted[i], near_plane[tid])` and `this_tmax = fminf(t_sorted[i + 1], far_plane[tid])` [S2, unofficial].
++        *   Skip if `this_tmin >= this_tmax` (invalid/degenerate interval) [S2, unofficial].
+ 
+-4.  **Voxel Traversal Setup**:
+-    *   Setup traversal for the current AABB using `setup_traversal(ray, this_tmin, this_tmax, eps, aabb, resolution, delta, tdist, step_index, current_index, final_index)` with `eps = 1e-6f` [S1, unofficial].
+-    *   Handle discontinuous traversal: If `!continuous`, adjust `t_last`:
+-        *   If `step_size <= 0.0f`, set `t_last = this_tmin` [S1, unofficial].
+-        *   Else, march forward using `dt = _calc_dt(t_last, cone_angle, step_size, 1e10f)` until `t_last + dt * 0.5f >= this_tmin` [S1, unofficial].
++4.  **Step Alignment (Discontinuous Traversal):**
++    *   If `!continuous`, adjust `t_last`:
++        *   If `step_size <= 0.0f`, set `t_last = this_tmin` [S2, unofficial].
++        *   Else, march forward using `dt = _calc_dt(t_last, cone_angle, step_size, 1e10f)` until `t_last + dt * 0.5f >= this_tmin` [S2, unofficial].
+ 
+-5.  **Sampling and Termination**:
+-    *   Perform voxel traversal within `[this_tmin, this_tmax]` using the calculated step size and cone angle.
+-    *   If `traverse_steps_limit` is reached, terminate early [S1, unofficial][S2, unofficial].
+-    *   Store intervals, samples, and termination planes based on flags [S2, unofficial].
++5.  **Voxel Traversal Setup:**
++    *   Setup traversal for the current AABB using `setup_traversal(ray, this_tmin, this_tmax, eps, aabb, resolution, delta, tdist, step_index, current_index, final_index)` [S2, unofficial].
++    *   `aabb` is the bounding box for the grid identified by `level` [S2, unofficial].
++
++6.  **Ray Marching:**
++    *   Traverse the voxel grid from `this_tmin` to `this_tmax` using the configured step size and cone angle [S2, unofficial].
++    *   Record samples and intervals.
++    *   Terminate if `traverse_steps_limit` is reached [S2, unofficial].
++
++7.  **Output Generation:**
++    *   Call the C++ kernel `traverse_grids` with prepared inputs, setting `compute_intervals`, `compute_samples`, and `compute_terminate_planes` to `True` [S3, unofficial].
++    *   Return `RayIntervals`, `RaySamples`, and termination planes [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import torch
+-import math
+-
+-def multi_grid_ray_traversal(
+-    rays_o: torch.Tensor,
+-    rays_d: torch.Tensor,
+-    binaries: torch.Tensor,
+-    aabbs: torch.Tensor,
+-    rays_mask: torch.Tensor = None,
+-    near_planes: torch.Tensor = None,
+-    far_planes: torch.Tensor = None,
+-    t_sorted: torch.Tensor = None,
+-    t_indices: torch.Tensor = None,
+-    hits: torch.Tensor = None,
+-    step_size: float = 1e-3,
+-    cone_angle: float = 0.0,
+-    traverse_steps_limit: int = -1,
+-    over_allocate: bool = False,
+-    compute_intervals: bool = True,
+-    compute_samples: bool = True,
+-    compute_terminate_planes: bool = True
+-):
++def traverse_grids_kernel(rays_o, rays_d, binaries, aabbs, rays_mask=None, 
++                          near_planes=None, far_planes=None, t_sorted=None, 
++                          t_indices=None, hits=None, step_size=1e-3, 
++                          cone_angle=0.0, traverse_steps_limit=-1, 
++                          over_allocate=False, eps=1e-6):
+     """
+-    Traverses rays through multiple binary grids.
+-    Note: This is a simplified Python representation of the CUDA kernel logic.
+-    Actual implementation requires CUDA kernels for ray_aabb_intersect and voxel traversal.
++    Multi-Grid Ray Traversal Kernel.
+     """
+     n_rays = rays_o.shape[0]
+-    n_grids = binaries.shape[0]
+-    resx, resy, resz = binaries.shape[1], binaries.shape[2], binaries.shape[3]
++    n_grids = aabbs.shape[0]
+     
+     # 1. Initialization
+     if rays_mask is None:
+-        rays_mask = torch.ones(n_rays, dtype=torch.bool, device=rays_o.device)
++        rays_mask = torch.ones(n_rays, dtype=torch.bool)
+     if near_planes is None:
+-        near_planes = torch.zeros(n_rays, device=rays_o.device)
++        near_planes = torch.zeros(n_rays)
+     if far_planes is None:
+-        far_planes = torch.full((n_rays,), float('inf'), device=rays_o.device)
++        far_planes = torch.full((n_rays,), float('inf'))
++    if traverse_steps_limit is None:
++        traverse_steps_limit = -1
+         
+-    # 2. Pre-compute intersections if not provided
++    # Pre-compute intersections if not provided
+     if t_sorted is None or t_indices is None or hits is None:
+-        # Placeholder for ray_aabb_intersect CUDA call
+-        # t_mins, t_maxs, hits = ray_aabb_intersect(rays_o, rays_d, aabbs)
+-        # For demonstration, assume dummy values
+-        t_mins = torch.zeros(n_rays, n_grids, device=rays_o.device)
+-        t_maxs = torch.ones(n_rays, n_grids, device=rays_o.device)
+-        hits = torch.ones(n_rays, n_grids, dtype=torch.bool, device=rays_o.device)
++        t_mins, t_maxs, hits = ray_aabb_intersect(rays_o, rays_d, aabbs)
++        # Concatenate and sort
++        t_all = torch.cat([t_mins, t_maxs], dim=-1) # Shape: [n_rays, n_grids * 2]
++        # Note: t_indices must track which grid each t belongs to
++        # Simplified: assume t_mins/t_maxs are paired per grid
++        t_sorted = torch.sort(t_all, dim=-1).values
++        # Reconstruct t_indices based on sorted order (pseudo-code logic)
++        t_indices = torch.zeros_like(t_sorted, dtype=torch.int64)
++        # In practice, this requires tracking indices during sort
++        # For implementation, see nerfacc's C++ backend
+         
+-        # Concatenate and sort
+-        # t_mins shape: [n_rays, n_grids], t_maxs shape: [n_rays, n_grids]
+-        # Concatenate along last dim: [n_rays, n_grids * 2]
+-        t_combined = torch.cat([t_mins, t_maxs], dim=-1)
+-        # Sort to get t_sorted and t_indices
+-        # Note: Sorting indices need to track whether it's a min or max
+-        # This is a simplified representation
+-        t_sorted, t_indices = torch.sort(t_combined, dim=-1)
+-        # t_indices values need to be mapped to grid IDs. 
+-        # In reality, t_indices stores the original index (0 to n_grids*2-1)
+-        # We need to map these back to grid IDs (0 to n_grids-1)
+-        # If index < n_grids, it's an entry (min), else exit (max)
+-        # The actual grid ID is index % n_grids
+-        grid_ids = t_indices % n_grids
+-        is_entering = t_indices < n_grids
+-        # Reconstruct t_indices to store grid IDs and entry/exit flag if needed
+-        # For simplicity, we assume t_indices stores the grid ID and we derive entry/exit from sorted order
+-        # In the source, t_indices maps each intersection to its grid ID.
+-        # The sorting is done on t values.
++    # 2. Parallel Execution
++    tid = blockIdx.x * blockDim.x + threadIdx.x
++    if tid >= n_rays:
++        return
+         
+-    # 3. Parallel Processing (Simulated for single ray for clarity)
+-    intervals = []
+-    samples = []
+-    terminated_t = torch.zeros(n_rays, device=rays_o.device)
++    if not rays_mask[tid]:
++        return
++        
++    # 3. Interval Processing
++    base_t_sorted = tid * n_grids * 2
++    near_plane = near_planes[tid]
++    far_plane = far_planes[tid]
+     
+-    for r in range(n_rays):
+-        if not rays_mask[r]:
++    # Iterate through sorted intersections
++    # Note: In CUDA, this loop is unrolled or vectorized
++    for i in range(n_grids * 2 - 1):
++        idx = base_t_sorted + i
++        t_curr = t_sorted[idx]
++        t_next = t_sorted[idx + 1]
++        
++        # Determine if entering or exiting (simplified logic)
++        # Actual implementation uses t_indices to determine grid ID
++        # level = t_indices[idx] % n_grids
++        
++        this_tmin = max(t_curr, near_plane)
++        this_tmax = min(t_next, far_plane)
++        
++        if this_tmin >= this_tmax:
+             continue
+             
+-        # Get sorted intersections for this ray
+-        ray_t_sorted = t_sorted[r] # Shape [n_grids * 2]
+-        ray_t_indices = t_indices[r] # Shape [n_grids * 2]
+-        ray_near = near_planes[r]
+-        ray_far = far_planes[r]
+-        
+-        t_last = 0.0
+-        step_count = 0
+-        
+-        for i in range(0, len(ray_t_sorted), 2):
+-            if i + 1 >= len(ray_t_sorted):
+-                break
+-                
+-            t_min = ray_t_sorted[i]
+-            t_max = ray_t_sorted[i+1]
+-            
+-            # Compute interval bounds
+-            this_tmin = max(t_min, ray_near)
+-            this_tmax = min(t_max, ray_far)
+-            
+-            if this_tmin >= this_tmax:
+-                continue
+-                
+-            # Determine grid ID for this interval
+-            # The source says t_indices[i] maps to grid ID.
+-            # Assuming t_indices is sorted alongside t_sorted
+-            grid_id = ray_t_indices[i] % n_grids
+-            
+-            # Setup traversal
+-            # eps = 1e-6
+-            # aabb = aabbs[grid_id]
+-            # resolution = (resx, resy, resz)
+-            
+-            # Handle discontinuous traversal
++        # 4. Step Alignment
++        # t_last is maintained per ray across intervals
++        # If !continuous, align t_last to this_tmin
++        if not continuous:
+             if step_size <= 0.0:
+                 t_last = this_tmin
+             else:
+-                # March forward until t_last + dt * 0.5 >= this_tmin
+-                # dt = _calc_dt(t_last, cone_angle, step_size, 1e10)
+-                # This is a placeholder for the adaptive step calculation
+-                dt = step_size
+-                while t_last + dt * 0.5 < this_tmin:
+-                    t_last += dt
+-                    step_count += 1
+-                    if traverse_steps_limit > 0 and step_count > traverse_steps_limit:
+-                        break
+-                if traverse_steps_limit > 0 and step_count > traverse_steps_limit:
+-                    break
++                while t_last + calc_dt(t_last, cone_angle, step_size, 1e10) * 0.5 < this_tmin:
++                    t_last += calc_dt(t_last, cone_angle, step_size, 1e10)
+                     
+-            # Perform voxel traversal
+-            # This involves iterating through voxels in the binary grid
+-            # and collecting samples
+-            # Placeholder for voxel traversal logic
+-            # samples_r = voxel_traverse(binaries[grid_id], ray_o, ray_d, this_tmin, this_tmax, t_last, step_size, cone_angle)
+-            # intervals.append((this_tmin, this_tmax))
+-            
+-        terminated_t[r] = this_tmax if intervals else ray_far
++        # 5. Voxel Traversal Setup
++        # Identify the grid for this interval
++        # grid_id = t_indices[idx] // 2 (if pairs are min/max)
++        # aabb = aabbs[grid_id]
++        # Setup traversal state: setup_traversal(..., aabb, ...)
+         
+-    return intervals, samples, terminated_t
++        # 6. Ray Marching
++        # Traverse voxels from this_tmin to this_tmax
++        # Record samples and intervals
++        # Check traverse_steps_limit
++        
++    # 7. Output
++    # Write to intervals, samples, terminated_t tensors
+ ```
+ 
+@@ -211,17 +174,23 @@
+ 
+ ### [Ray Marching Particle Grid Traversal](5182-ray-marching-particle-grid-traversal.md)
+-A hybrid technique using a low-resolution grid for culling and a high-resolution grid for precise hit testing in dense particle systems. It skips large empty regions by querying a coarser occupancy grid first.
++A hybrid technique using a low-resolution grid for culling and a high-resolution grid for precise hit testing in particle systems. It skips empty regions by querying a coarser occupancy grid first, switching to high-resolution traversal only when occupied cells are detected.
++
++### [Multi-Grid Ray Traversal with Adaptive Step Size](14341-multi-grid-ray-traversal-with-adaptive-step-size.md)
++A CUDA kernel that traverses rays through multiple AABB voxel grids, handling overlapping grids by priority and outputting traversal intervals with adaptive step sizing based on cone angle. It explicitly manages multiple hierarchical grid levels with sorted intersection events, ensuring the first grid's occupancy status takes precedence in overlapping regions.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Dominated by ray-AABB intersection tests ($O(n\_rays \times n\_grids)$) and voxel traversal within occupied intervals. Voxel traversal is proportional to the number of occupied voxels intersected by rays.
+-*   **Memory Complexity**: Requires storage for `binaries` ($O(n\_grids \times resx \times resy \times resz)$), `aabbs` ($O(n\_grids)$), and output structures (`intervals`, `samples`) which scale with the number of samples per ray. `over_allocate` can increase peak memory usage to avoid dynamic resizing [S1, unofficial][S2, unofficial].
+-*   **Performance**: Efficient for sparse volumes where large empty regions can be skipped via AABB culling. Performance degrades if rays intersect many small occupied grids or if the volume is dense.
+-*   **Strengths**: Handles multiple disjoint grids efficiently; supports adaptive step sizes via `cone_angle`; chunked memory layout handles variable-length outputs.
+-*   **Limitations**: Not differentiable to any inputs [S2, unofficial]. Overlapping grids require careful ordering as the first grid's occupancy overwrites the second's [S1, unofficial]. Discontinuous traversal requires careful alignment of `t_last` to avoid misaligned samples [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of rays and the number of grid levels intersected. Sorting intersections is $O(N \log N)$ where $N$ is the number of grids per ray [S2, unofficial].
++*   **Memory Complexity:** Proportional to the number of rays and grids. Over-allocation can increase memory usage but avoids dynamic resizing [S1, unofficial][S3, unofficial].
++*   **Measured Performance:** Used in NeRF training pipelines (e.g., TensoRF, K-Planes) to accelerate sampling on NeRF-Synthetic and Tanks&Temple datasets [S2, unofficial].
++*   **Strengths:** Efficiently handles multiple grid resolutions; skips empty space; supports adaptive step sizes; parallelizable on GPU [S2, unofficial].
++*   **Limitations:** Not differentiable to inputs [S3, unofficial]; overlapping grids require careful ordering (first grid takes precedence) [S2, unofficial]; degenerate intervals must be handled [S2, unofficial].
++*   **When to use:** Dense volumetric scenes with hierarchical occupancy data; NeRF training acceleration [S2, unofficial].
++*   **When not to use:** Scenes with few grid levels; when differentiability is required [S3, unofficial].
+ 
+ ## Background
+-Multi-Grid Ray Traversal is a core component of the NerfAcc library, designed to accelerate NeRF rendering by efficiently sampling occupancy grids. It was introduced in the NerfAcc paper (Li et al., 2023) as part of a general NeRF acceleration toolbox [S1, unofficial]. It is widely used in modern NeRF implementations such as nerfstudio, SDFStudio, and threestudio [S1, unofficial].
++Multi-Grid Ray Traversal is part of the NerfAcc library, developed by Ruilong Li, Hang Gao, Matthew Tancik, and Angjoo Kanazawa [S2, unofficial]. It was introduced in the paper "NerfAcc: Efficient Sampling Accelerates NeRFs" (arXiv:2305.04966, 2023) [S2, unofficial]. The method is used in various NeRF implementations, including TensoRF, K-Planes, and BARF, to accelerate training by reducing the number of samples needed [S2, unofficial].
+ 
+ ## Sources
+-[S1] NerfAcc: Efficient Sampling Accelerates NeRFs, https://github.com/nerfstudio-project/nerfacc, fetched 2026-10-26 (unofficial)
+-[S2] CNC: Compressed Neural Coordinate Fields, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)+[S1] taylor2nerf/taylor-nerf, https://github.com/taylor2nerf/taylor-nerf, fetched 2026-10-26 (unofficial)
++[S2] nerfstudio-project/nerfacc, https://github.com/nerfstudio-project/nerfacc, fetched 2026-10-26 (unofficial)
++[S3] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)

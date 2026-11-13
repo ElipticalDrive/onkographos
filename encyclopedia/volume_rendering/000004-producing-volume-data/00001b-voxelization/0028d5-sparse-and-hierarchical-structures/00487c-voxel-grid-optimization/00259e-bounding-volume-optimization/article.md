@@ -3,138 +3,120 @@
 Also called: Adaptive Voxel-Array-Größe, BV Optimisation, Bounding Volume Optimisation, Bounding-Volume-Optimierung, SDF Bounding Volume Culling, Volumen-Größenanpassung
 
 ## Overview
-Bounding Volume Optimization reduces the computational cost of volume rendering by restricting ray marching or voxel traversal to the minimal axis-aligned bounding box (AABB) that encloses the active geometry, thereby eliminating false positives and skipping evaluations of non-contributing objects [S1, unofficial][S2]. Unlike sibling methods that focus on data compression or grid smoothing, this method operates on the spatial domain limits, ensuring that expensive Signed Distance Field (SDF) evaluations or ray steps are only performed where geometry exists [S1, unofficial][S2].
+Bounding Volume Optimization reduces the computational cost of volume rendering by restricting ray marching or voxel traversal to the minimal axis-aligned bounding box (AABB) that encloses active geometry, thereby eliminating evaluations of non-contributing empty space [S1, unofficial][S2]. It sets itself apart from sibling methods like [Grid Resolution Calculation](2908-grid-resolution-calculation.md) by focusing on spatial culling of the traversal domain rather than just determining grid dimensions, and from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by addressing traversal efficiency rather than storage footprint.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of volumetric primitives or SDF objects, each defined by its geometry and its local bounding volume.
-*   **Output:** A reduced traversal domain (for voxel grids) or a culling mask (for raymarching) that excludes empty space outside the union of object bounding volumes.
+*   **Input:** A set of scene primitives (e.g., SDF objects) and their associated bounding volumes (AABBs).
+*   **Output:** A traversal mask or culling decision that skips evaluation of primitives that do not contribute to the minimal distance field or active voxel regions.
 
 **Data Structures:**
-For each object $i$, the bounding volume is stored as an AABB defined by:
-*   `min`: A 3D vector $(x_{min}, y_{min}, z_{min})$ representing the minimum corner.
-*   `max`: A 3D vector $(x_{max}, y_{max}, z_{max})$ representing the maximum corner.
-*   *Note:* In voxel grid contexts, these coordinates are often quantized to voxel indices [S1, unofficial].
+*   **Bounding Volume:** An Axis-Aligned Bounding Box (AABB) defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$.
+*   **Voxel Array Dimensions:** The dimensions of the 3D volume array are adjusted to match the actual extents of the voxel data, rather than using a fixed power-of-two size. For example, if the maximum height of a voxel landscape is 321 voxels within a 512-width base, the array size is adapted to $512 \times 321 \times 512$ instead of a fixed $512^3$ [S1, unofficial].
 
-**Numbered Steps:**
-1.  **Compute Global Bounds:** Calculate the union of all individual object bounding volumes to determine the global active domain $[X_{min}, X_{max}] \times [Y_{min}, Y_{max}] \times [Z_{min}, Z_{max}]$ [S1, unofficial].
-2.  **Resize Traversal Domain:**
-    *   *For Voxel Grids:* Resize the 3D texture or array dimensions to match the global bounds. For example, if a landscape fits within $512 \times 321 \times 512$ voxels, allocate only that size instead of a fixed $512^3$ cube [S1, unofficial].
-    *   *For Raymarching:* Initialize the ray march start and end points based on the intersection of the ray with the global bounding box [S2].
-3.  **Per-Object Culling (Raymarching):** For each sample point or ray segment, test against the bounding volumes of all objects. Skip the evaluation of the SDF map function for any object whose bounding volume does not contain the current sample position [S2].
-4.  **Traversal:** Perform the volume rendering (ray marching or voxel traversal) only within the optimized bounds [S1, unofficial][S2].
+**Steps:**
+1.  **Compute Bounding Volumes:** For each primitive in the scene, compute its AABB. This defines the spatial region where the primitive's Signed Distance Field (SDF) or geometry is relevant [S2].
+2.  **Adapt Array Dimensions:** Determine the global bounding box of all active primitives. Adjust the voxel array dimensions to tightly enclose this region. This eliminates unused regions that would otherwise cause false positives during traversal [S1, unofficial].
+3.  **Traverse and Cull:** During ray marching or voxel traversal, check if the current ray segment or voxel position intersects with the bounding volume of each primitive.
+4.  **Conditional Evaluation:** Only evaluate the expensive SDF map function for primitives whose bounding volumes intersect the current ray or voxel location. Primitives outside the bounding volume are skipped [S2].
+5.  **Handle Dynamic Scenes:** For dynamic scenes, update the bounding volumes and array dimensions as primitives move. This allows dense voxel models to serve as bounding boxes for rigid bodies, where voxels act as contact points and mass parts [S1, unofficial].
 
 **Formulas:**
-Let $B_i$ be the bounding box of object $i$. The global bounding box $B_{global}$ is:
-$$ B_{global} = \bigcup_{i} B_i $$
-A ray $R(t) = O + tD$ is clipped to $B_{global}$ to find the valid interval $[t_{enter}, t_{exit}]$ for marching [S2].
+*   **Array Size Adaptation:** If the scene extents are $[X_{min}, X_{max}] \times [Y_{min}, Y_{max}] \times [Z_{min}, Z_{max}]$ and voxel size is $v$, the array dimensions $D_x, D_y, D_z$ are:
+    $$ D_x = \lceil \frac{X_{max} - X_{min}}{v} \rceil, \quad D_y = \lceil \frac{Y_{max} - Y_{min}}{v} \rceil, \quad D_z = \lceil \frac{Z_{max} - Z_{min}}{v} \rceil $$
+    [S1, unofficial]
+*   **Culling Condition:** A primitive $P$ with AABB $B_P$ is evaluated for a ray origin $O$ and direction $D$ at step $t$ if:
+    $$ O + tD \in B_P $$
+    [S2]
 
 **Parameters:**
-*   **Resolution:** The voxel count is determined by the physical size of the bounding box and the desired voxel size. Not given in the sources.
-*   **Primitive Count:** The optimization becomes more significant as the number of expensive primitives increases [S2].
+*   **Voxel Size:** Determines the resolution and the tightness of the bounding volume adaptation. Not given in the sources.
+*   **Primitive Count:** The number of primitives affects the overhead of bounding volume checks. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Disjoint Objects:** If objects are far apart, a single global bounding box may still include large empty regions. In such cases, per-object culling (Step 3) is necessary even if the global bounds are tight [S2].
-*   **Precision:** Quantizing bounding box coordinates to voxel indices may introduce slight inaccuracies at the boundaries [S1, unofficial].
-*   **GPU Architecture:** Modern GPUs are MIMD (Multiple Instruction, Multiple Data), not pure SIMD. This allows different Streaming Multiprocessors (SMs) to handle different instruction streams, helping to distribute expensive threads after cheaper culling operations finish early [S2].
+*   **False Positives:** Using a fixed, oversized array (e.g., $512^3$ for a $512 \times 321 \times 512$ scene) loads unnecessary data into GPU memory and causes false positives during traversal [S1, unofficial].
+*   **Lighting Artifacts:** AABBs have flat faces with constant normals, which can lead to hard, physically implausible lighting if not handled carefully (e.g., sharp transitions between lit and unlit faces) [S1, unofficial].
+*   **GPU Architecture:** Modern GPUs are MIMD (Multiple Instruction, Multiple Data) rather than pure SIMD. This allows different Streaming Multiprocessors (SMs) to process different instruction streams, helping to distribute expensive threads after cheaper culling operations finish early [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def bounding_volume_optimization(ray_origin, ray_direction, objects, voxel_grid=None):
-    """
-    ray_origin: vec3
-    ray_direction: vec3
-    objects: list of dict with keys 'bbox_min' (vec3), 'bbox_max' (vec3), 'sdf_func' (callable)
-    voxel_grid: optional 3D array, if provided, traversal is limited to its dimensions
-    """
+def render_frame(scene_primitives, ray_origin, ray_direction, voxel_size):
+    # Step 1: Compute global bounding box of all primitives
+    global_min = [inf, inf, inf]
+    global_max = [-inf, -inf, -inf]
     
-    # Step 1: Compute global bounds if using voxel grid resizing
-    if voxel_grid is not None:
-        global_min = vec3(inf, inf, inf)
-        global_max = vec3(-inf, -inf, -inf)
-        for obj in objects:
-            global_min = min(global_min, obj['bbox_min'])
-            global_max = max(global_max, obj['bbox_max'])
+    for primitive in scene_primitives:
+        bbox = compute_aabb(primitive)
+        global_min = min(global_min, bbox.min)
+        global_max = max(global_max, bbox.max)
         
-        # Resize or clamp traversal to global bounds
-        # Note: In a real implementation, this might involve allocating a new texture
-        # or adjusting the ray marching interval.
-        t_min, t_max = ray_intersect_bbox(ray_origin, ray_direction, global_min, global_max)
-        if t_max < 0:
-            return None # Ray misses global bounds
+    # Step 2: Adapt array dimensions
+    array_dims = [
+        ceil((global_max[0] - global_min[0]) / voxel_size),
+        ceil((global_max[1] - global_min[1]) / voxel_size),
+        ceil((global_max[2] - global_min[2]) / voxel_size)
+    ]
+    
+    # Step 3: Traverse and cull
+    distance = 0.0
+    while distance < max_ray_length:
+        current_pos = ray_origin + ray_direction * distance
         
-        # Step 4: Traverse within bounds
-        # The actual marching loop would be implemented here, 
-        # stepping from t_min to t_max.
-        # For voxel grids, the loop indices are clamped to the grid dimensions
-        # derived from global_min and global_max.
-        pass
-
-    # Step 3: Per-object culling for raymarching
-    # This is the primary optimization for SDF raymarching
-    for t in range(start_t, end_t, step_size):
-        current_pos = ray_origin + t * ray_direction
-        
-        min_dist = inf
-        active_object = None
-        
-        for obj in objects:
-            # Check if current_pos is inside object's bounding box
-            if (obj['bbox_min'].x <= current_pos.x <= obj['bbox_max'].x and
-                obj['bbox_min'].y <= current_pos.y <= obj['bbox_max'].y and
-                obj['bbox_min'].z <= current_pos.z <= obj['bbox_max'].z):
-                
-                # Only evaluate SDF if inside bounding volume
-                dist = obj['sdf_func'](current_pos)
-                if dist < min_dist:
-                    min_dist = dist
-                    active_object = obj
-        
-        # Use min_dist for marching or shading
-        # If min_dist is inf, the point is outside all bounding volumes
-        if min_dist == inf:
-            continue # Skip evaluation
+        # Check if current position is within global bounds
+        if not is_inside_bbox(current_pos, global_min, global_max):
+            break
             
-        # Proceed with raymarching step using min_dist
-        # ...
+        min_dist = inf
+        for primitive in scene_primitives:
+            # Step 4: Conditional evaluation
+            if is_bbox_intersect_ray(primitive.aabb, ray_origin, ray_direction, distance):
+                sdf_val = evaluate_sdf(primitive, current_pos)
+                min_dist = min(min_dist, sdf_val)
+                
+        if min_dist == inf:
+            # No primitives found, skip ahead or break
+            break
+            
+        distance += min_dist
+        
+    return distance
 ```
 
 ## Subtopics
 
-### [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md)
-Smoothes voxel surfaces after optimization; choose when visual quality is prioritized over raw traversal speed.
+### 3D Voxel Grid Smoothing
+Smooths the voxel grid to reduce aliasing and improve visual quality. Choose when visual fidelity is more important than raw traversal speed. [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md)
 
-### [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md)
-Compresses the optimized voxel data; choose when memory bandwidth is the bottleneck.
+### Binary Voxel RLE Encoding
+Compresses binary voxel data using Run-Length Encoding. Choose when memory bandwidth is the bottleneck. [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md)
 
-### [Coordinate Grid Generation](1273-coordinate-grid-generation.md)
-Generates the spatial indices for the optimized domain; choose when mapping world coordinates to voxel indices is required.
+### Coordinate Grid Generation
+Generates the coordinate grid for voxel traversal. Choose when setting up the traversal structure. [Coordinate Grid Generation](1273-coordinate-grid-generation.md)
 
-### [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md)
-Creates the binary mask used to define the active region; choose when preparing data for the optimization step.
+### Occupancy Voxel Creation
+Creates occupancy voxels from geometry. Choose when converting mesh data to voxel data. [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md)
 
-### [Grid Resolution Calculation](2908-grid-resolution-calculation.md)
-Determines the voxel size based on the bounding volume; choose when balancing detail and performance.
+### Grid Resolution Calculation
+Calculates the optimal grid resolution. Choose when balancing memory and accuracy. [Grid Resolution Calculation](2908-grid-resolution-calculation.md)
 
-### [Voxelization Optimization](3191-voxelization-optimization.md)
-Optimizes the generation of the voxel grid itself; choose when the bottleneck is in creating the data, not rendering it.
+### Voxelization Optimization
+Optimizes the voxelization process. Choose when accelerating the conversion from geometry to voxels. [Voxelization Optimization](3191-voxelization-optimization.md)
 
-### [Bucket-based LBVH construction](5163-bucket-based-lbvh-construction.md)
-Builds acceleration structures for sparse volumes; choose when the scene has complex, non-uniform geometry that bounding boxes alone cannot efficiently cull.
+### Bucket-based LBVH construction
+Constructs a Linear Bounding Volume Hierarchy using bucketing. Choose for complex scenes with many primitives to accelerate traversal. [Bucket-based LBVH construction](5163-bucket-based-lbvh-construction.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of SDF evaluations or ray steps from $O(N^3)$ (full grid) to $O(V_{active})$, where $V_{active}$ is the volume of the active bounding box [S1, unofficial][S2].
-*   **Memory Complexity:** Reduces memory usage from $O(N^3)$ to $O(V_{active})$ for voxel grids [S1, unofficial].
-*   **Measured Performance:** In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
-*   **Strengths:** Eliminates false positives in traversal; significantly reduces computation cost for sparse scenes; allows for separation of game world and entities [S1, unofficial].
-*   **Limitations:** Requires pre-computation of bounding volumes; less effective if the scene is uniformly dense; bounding box normals can cause hard lighting artifacts if not handled [S1, unofficial].
-*   **When to Use:** When the scene contains sparse geometry or large empty spaces; when SDF evaluation is expensive [S2].
-*   **When Not to Use:** When the scene is fully dense and fills the bounding box; when the overhead of bounding volume checks exceeds the savings from skipped evaluations.
+*   **Time Complexity:** Reduces the number of SDF evaluations from $O(N \cdot M)$ to $O(K \cdot M)$, where $N$ is the total number of primitives, $M$ is the number of ray steps, and $K$ is the number of primitives intersecting the ray's bounding volume. In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
+*   **Memory Complexity:** Reduces memory usage by adapting the voxel array size to the actual data extents. A fixed $512^3$ array is replaced by a tighter $512 \times 321 \times 512$ array, saving memory and reducing cache misses [S1, unofficial].
+*   **Strengths:** Eliminates false positives, reduces GPU load by skipping expensive computations, and leverages GPU MIMD architecture to distribute workload efficiently [S1, unofficial][S2].
+*   **Limitations:** AABBs can cause lighting artifacts due to flat normals [S1, unofficial]. The overhead of bounding volume checks must be justified by the savings in SDF evaluations.
+*   **When to Use:** Use when the scene contains many primitives, especially expensive SDFs, and when the geometry is sparse or confined to a small region within a larger volume.
+*   **When Not to Use:** Avoid when the scene is uniformly dense or when the overhead of bounding volume checks exceeds the savings from culling.
 
 ## Background
-Bounding Volume Optimization originated in the context of raymarching distance fields and voxel-based rendering to address the high computational cost of evaluating Signed Distance Fields (SDFs) across empty space [S1, unofficial][S2]. It was notably discussed in the context of CUDA-based raymarching engines and voxel-based game physics, where reducing the active voxel domain was critical for performance [S1, unofficial][S2]. The technique leverages the MIMD nature of modern GPUs to distribute the variable workload resulting from spatial culling [S2].
+Bounding Volume Optimization originated as a technique to minimize the cost of the map function in raymarching by skipping SDF evaluations for non-contributing objects [S2]. It is widely used in real-time raymarching and voxel rendering to improve performance, particularly in scenes with complex geometry or large empty spaces [S1, unofficial][S2].
 
 ## Sources
 [S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
