@@ -1,0 +1,133 @@
+--- v029.md
++++ v030.md
+@@ -4,53 +4,102 @@
+ 
+ ## Overview
+-From-region visibility preprocessing is a technique that precomputes which geometric primitives are visible from specific regions of the viewing space, allowing for the culling of occluded geometry during rendering. It differs from view-relative culling methods like [Voxel Backface Culling and Internal Face Masking](4569-voxel-backface-culling-and-internal-face-masking.md) by being independent of the camera's instantaneous position, and from topological culling like [Face Culling](8735-face-culling.md) by handling complex, non-voxel-based geometry where neighbor relationships are not sufficient to determine occlusion.
++From-region visibility preprocessing identifies and eliminates geometry that is occluded from specific viewing regions before rendering, thereby reducing the polygon count processed by the GPU. Unlike topological culling which removes internal faces based on neighbor occupancy, this method handles complex occlusion relationships in large-scale environments. It is distinguished from its siblings by its focus on precomputing visibility for regions rather than individual points or static blocks, though it suffers from significantly higher preprocessing times compared to methods like PLP or cPLP [S1, unofficial].
+ 
+ ## How it works
+-The method involves offline computation of visibility relationships between regions of the scene and the geometric primitives (triangles) within it.
++The method involves precomputing visibility information for a set of viewing regions. The core challenge is managing the computational cost of this precomputation, which often involves occluder fusion to reduce the number of potential occluders [S1, unofficial].
+ 
+ **Inputs:**
+-*   A 3D scene model defined by a set of triangles $T$.
+-*   A set of viewing regions $R$ (e.g., waypoints, grid cells, or camera frustums).
++*   A 3D scene model (typically represented as a mesh or voxelized environment).
++*   A set of predefined viewing regions (or a single region for from-region queries).
+ 
+ **Outputs:**
+-*   A visibility map $V$, where $V(r, t) = 1$ if triangle $t$ is visible from region $r$, and $0$ otherwise.
++*   A visibility map or culling mask indicating which triangles/polygons are visible from the specified regions.
+ 
+ **Data Structures:**
+-*   **Visibility Map:** A sparse matrix or hash map storing pairs $(r, t)$ for visible triangles.
+-*   **Occluder Data:** Geometric data for triangles used to test occlusion.
++*   **Occluder List:** A collection of geometric primitives (triangles) that can block visibility. In Wonka et al.'s approach, occluder fusion is used to merge or simplify these occluders to speed up computation [S1, unofficial].
++*   **Visibility Map:** A data structure linking viewing regions to the subset of visible triangles.
+ 
+-**Algorithm Steps:**
+-1.  **Region Definition:** Divide the viewing space into discrete regions $R = \{r_1, r_2, ..., r_n\}$. [S1, unofficial]
+-2.  **Visibility Testing:** For each region $r_i \in R$:
+-    a.  Determine the set of candidate triangles $T_{cand}$.
+-    b.  For each triangle $t \in T_{cand}$, test if it is occluded by any other triangle $t' \in T$ from the viewpoint defined by $r_i$.
+-    c.  If $t$ is not occluded, add $(r_i, t)$ to the visibility map. [S1, unofficial]
+-3.  **Occluder Fusion (Wonka et al.):** To reduce preprocessing time, merge occluders that block the same set of triangles, reducing the number of ray-triangle intersection tests. [S1, unofficial]
+-4.  **Runtime Culling:** During rendering, identify the current viewing region $r_{curr}$. Retrieve the precomputed list of visible triangles for $r_{curr}$ and render only those. [S1, unofficial]
++**Steps:**
++1.  **Scene Analysis:** Identify potential occluders within the scene geometry.
++2.  **Occluder Fusion:** Apply fusion techniques to reduce the number of distinct occluders. This step is critical for performance but contributes to long preprocessing times [S1, unofficial].
++3.  **Visibility Computation:** For each viewing region, determine which triangles are visible by testing against the fused occluders. This can be done using ray casting or hierarchical visibility structures.
++4.  **Storage:** Store the resulting visibility data for runtime use.
+ 
+ **Parameters:**
+-*   **Region Size/Granularity:** Not given in the sources. Smaller regions increase accuracy but increase preprocessing time and memory.
+-*   **Occluder Fusion Threshold:** Not given in the sources.
++*   **Preprocessing Time:** Highly dependent on scene complexity. For example, 9 hours for 8 million triangles (Wonka et al.) and 33 hours for 6 million triangles (Durand et al.) [S1, unofficial].
++*   **Hardware:** Can utilize multiple processors to overlap visibility computation and rendering [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Preprocessing Time:** The method requires significant offline computation. [S1, unofficial]
+-*   **Dataset Limitations:** Early implementations were limited to 2.5D datasets. [S1, unofficial]
+-*   **Memory:** Storing visibility maps for large models can be memory-intensive. [S1, unofficial]
++*   **Preprocessing Time:** The primary pitfall is the excessive time required for precomputation, making it impractical for dynamic scenes or very large datasets without significant hardware resources [S1, unofficial].
++*   **Dimensionality Limitations:** Early versions (Wonka et al.) were limited to 2.5D datasets, restricting their applicability to true 3D environments [S1, unofficial].
++
++**Pseudocode:**
++```python
++def from_region_visibility_preprocessing(scene, regions):
++    """
++    Precompute visibility for given regions in a scene.
++    
++    Args:
++        scene: The 3D scene model (mesh or voxel data).
++        regions: A list of viewing regions.
++        
++    Returns:
++        visibility_map: A dictionary mapping region IDs to visible triangle indices.
++    """
++    visibility_map = {}
++    
++    # Step 1: Identify potential occluders
++    # In practice, this might involve building a BVH or similar structure
++    occluders = identify_occluders(scene)
++    
++    # Step 2: Occluder Fusion
++    # Reduce the number of occluders to speed up visibility tests
++    fused_occluders = fuse_occluders(occluders)
++    
++    # Step 3: Compute visibility for each region
++    for region_id, region in regions.items():
++        visible_triangles = []
++        
++        # For each triangle in the scene, check if it is visible from the region
++        # This is the computationally expensive part
++        for triangle in scene.triangles:
++            if is_visible_from_region(triangle, region, fused_occluders):
++                visible_triangles.append(triangle.id)
++        
++        visibility_map[region_id] = visible_triangles
++        
++    return visibility_map
++
++def is_visible_from_region(triangle, region, occluders):
++    """
++    Check if a triangle is visible from a given region against a set of occluders.
++    [G] This is a simplified representation; actual implementation may use ray tracing or hierarchical culling.
++    """
++    # Sample points within the region or use the region's center/extent
++    # For simplicity, we assume a ray test from the region center
++    ray_origin = region.center
++    ray_direction = triangle.center - ray_origin
++    
++    # Check if any occluder blocks the ray to the triangle
++    for occluder in occluders:
++        if occluder.intersects_ray(ray_origin, ray_direction, triangle):
++            return False
++    return True
++```
+ 
+ ## Subtopics
+ 
+ ### Chhugani et al. Visibility and LOD System
+-A system that precomputes from-region visibility and levels of detail per region, focusing on image accuracy. It guarantees less than one pixel of screen-space deviation and correct visibility. For a model with 13 million triangles, using a cluster of 16 PCs, the accuracy guarantee costs 128 hours of precomputation. [S1, unofficial]
++A system that precomputes from-region visibility and levels of detail per region, focusing on image accuracy. It guarantees less than one pixel of screen-space deviation and correct visibility. However, it requires significant computational resources: for a model with 13 million triangles on a cluster of 16 PCs, the accuracy guarantee costs 128 hours of precomputation [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing time is high. For a model with 8 million triangles, preprocessing took 9 hours. [S1, unofficial] For a model with 6 million triangles, Durand et al.'s algorithm took 33 hours. [S1, unofficial]
+-*   **Memory Complexity:** Depends on the number of regions and visible triangles per region. Not given in the sources.
+-*   **Strengths:** Enables real-time rendering of large datasets by reducing the number of triangles sent to the rasterizer. Can overlap visibility computation and rendering using multiple processors. [S1, unofficial]
+-*   **Limitations:** Long preprocessing times. Early versions were limited to 2.5D datasets. [S1, unofficial]
+-*   **When to use:** When rendering large, static scenes where the viewing regions are known in advance and preprocessing time is acceptable.
+-*   **When not to use:** For dynamic scenes or when preprocessing time is prohibitive.
++*   **Time Complexity:** Preprocessing time is very high, scaling poorly with triangle count. Reported times range from 9 hours (8M triangles) to 33 hours (6M triangles) [S1, unofficial].
++*   **Memory Complexity:** Requires storing visibility maps for all regions, which can be substantial for large scenes.
++*   **Performance:** Runtime rendering is fast as visibility is precomputed. However, the preprocessing bottleneck limits its use in dynamic or interactive scenarios without careful management.
++*   **Strengths:** High accuracy in visibility determination; can handle complex occlusion.
++*   **Limitations:** Extremely long preprocessing times; limited to 2.5D in early versions; requires significant hardware for large models.
+ 
+ ## Background
+-The concept was introduced by Teller et al., but their algorithm required long preprocessing times and assumed axis-aligned cells. Wonka et al. [152] presented a from-region visibility preprocessing algorithm with occluder fusion, which used 2 processors to overlap visibility computation and rendering at runtime. This algorithm required long preprocessing times (9 hours for a model with 8 million triangles) and was limited to 2.5D datasets. In later work, Wonka et al. [153] used a from-point approach that needed little preprocessing, but they only reported results for in-core, 2.5D datasets. Durand et al. [41] presented a from-region visibility preprocessing algorithm that could handle 3D environments, as opposed to 2.5D [152], but the algorithm required long preprocessing times (33 hours for a model with 6 million triangles). Schaufler et al. [120] also presented a from-region 3D visibility preprocessing algorithm, but their largest test model had only 0.6 million triangles. Chhugani et al. [20] developed a system that precomputes from-region visibility and levels of detail per region. Their system focuses on image accuracy, and is able to interactively render large datasets with less than one pixel of screen-space deviation and correct visibility. Unfortunately, for a model with 13 million triangles, and using a cluster of 16 PCs, the accuracy guarantee costs 128 hours of precomputation. [S1, unofficial]
++The method was introduced by Durand et al. and Wonka et al. as a solution for out-of-core visualization of large datasets. Durand et al. extended the concept to 3D environments, while Wonka et al. focused on 2.5D datasets with occluder fusion. The approach was part of a broader effort to enable interactive walkthroughs of massive 3D models by reducing the rendering load through visibility culling [S1, unofficial].
+ 
+ ## Sources

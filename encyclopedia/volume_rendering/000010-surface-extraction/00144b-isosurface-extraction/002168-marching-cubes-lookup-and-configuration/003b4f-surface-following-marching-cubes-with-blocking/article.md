@@ -2,37 +2,37 @@
 
 
 ## Overview
-Surface-following Marching Cubes with Blocking is a surface extraction algorithm designed for unbounded rendering of particle-based volumes. It resolves the topological ambiguities and disconnected holes inherent in standard Marching Cubes by treating the iso-surface as a connected manifold grown from seed triangles rather than processed voxel-by-voxel [S1]. Unlike standard Marching Cubes, which evaluates each cube independently and may produce inconsistent topology at shared edges, this method propagates the surface through adjacent cubes via a queue of "growth edges," ensuring topological consistency across the entire reconstructed model [S1]. It is particularly suited for 3D reconstruction where only the main contour is required or for isolating specific connected components from scattered data by controlling the seed region [S1].
+Surface-following Marching Cubes with Blocking is a surface extraction method designed for unbounded rendering of particle-based volumes [S1]. It resolves the topological inconsistencies of standard voxel-based Marching Cubes by treating the iso-surface as a connected manifold grown from seed triangles rather than processed independently per voxel [S1]. Unlike standard Marching Cubes, which evaluates each cube independently and may produce inconsistent topology at shared edges, this method propagates the surface through adjacent cubes via a queue of "growth edges," ensuring topological consistency across the entire reconstructed model [S1]. It is particularly suited for 3D reconstruction where only the main contour is required or for isolating specific connected components from scattered data by controlling the seed region [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of particles with positions and scalar values (e.g., density), and a target isovalue.
+*   **Input:** A set of particles (points with associated scalar values or densities) and an isovalue threshold.
 *   **Output:** A manifold triangle mesh representing the iso-surface.
 
 **Data Structures:**
-*   **Particle Grid:** A separate grid for particle lookups with cube size $R_c$. This grid is much coarser than the marching cubes grid to keep traversal volume low [S1].
-*   **Corner Cache:** A hash map storing the corners (vertices) of the marching cubes cells to ensure consistent vertex sharing between adjacent cubes [S1].
-*   **Growth Queue:** A queue of edges or cells to process, enabling the surface-following traversal [S1].
+1.  **Particle List:** Stores particle positions and values.
+2.  **Lookup Grid:** A separate grid for particle lookups with cube size $R_c$. This grid is much coarser than the marching cubes grid [S1].
+3.  **Corner Cache:** A hash map storing the geometric corners (vertices) of the generated mesh to ensure shared vertices are reused [S1].
+4.  **Growth Queue:** A queue of edges or cubes to process next, enabling the surface-following traversal [S1].
 
-**Steps:**
-1.  **Initialization:** Identify seed triangles or cells where the iso-surface intersects the domain. Add their boundary edges to the growth queue [S1].
-2.  **Lookup:** For each cell/edge in the queue, perform a point insert and 3D lookup cache operation to find relevant particles [S1]. The lookup uses a separate grid with cube size $R_c$ [S1].
-3.  **Surface Following:** Process the cell using Marching Cubes logic. Instead of evaluating all cubes, only evaluate cubes connected to the current surface front.
-4.  **Topology Consistency:** Use the corner cache (hash map) to store and retrieve vertex positions. This ensures that shared vertices between adjacent cubes are identical, preventing gaps and holes [S1].
-5.  **Propagation:** If new triangles are generated, add their boundary edges to the growth queue if not already processed [S1].
-6.  **Termination:** Continue until the growth queue is empty, ensuring the entire connected component is extracted [S1].
-
-**Formulas:**
-*   Lookup Volume: The method avoids the $3 \times 3 \times 3$ volume lookup used in other approaches, which returns $6.5$ times more particles than necessary. Instead, it uses an exact lookup within a volume of $(4/3)\pi R_c^3$ [S1].
-*   $R_c$: Cube size of the separate particle lookup grid [S1].
+**Algorithm Steps:**
+1.  **Initialization:** Identify seed triangles or cubes that intersect the isovalue. Add their boundary edges to the Growth Queue.
+2.  **Surface Following:** While the Growth Queue is not empty:
+    a.  Dequeue an edge or cube.
+    b.  Determine the local iso-surface geometry using Marching Cubes logic on the relevant particles.
+    c.  Generate triangles for the surface segment.
+    d.  Identify new boundary edges created by these triangles.
+    e.  Enqueue new edges if they have not been processed, ensuring each edge is processed once to maintain manifold consistency.
+3.  **Particle Lookup Optimization:** To efficiently find particles near a cube, use the separate lookup grid with cube size $R_c$. This keeps the traversal volume to a $3 \times 3 \times 3$ block [S1]. This approach performs an exact lookup without returning particles outside $R_c$, avoiding the false positives inherent in coarser grids that return particles from a $(3R_c)^3$ volume which must then be culled by floating-point distance calculations [S1].
+4.  **Mesh Construction:** Use the corner cache (hash map) to store and retrieve vertex positions. This ensures that shared vertices between adjacent triangles are identical, preserving the manifold property [S1].
 
 **Parameters:**
-*   $R_c$: Cube size for the particle lookup grid. Must be chosen to balance lookup accuracy and performance [S1].
-*   Isovalue: The scalar threshold for surface extraction.
+*   $R_c$: The cube size of the particle lookup grid. It is chosen to be much coarser than the marching cubes grid to balance lookup speed and accuracy [S1].
+*   Isovalue: The threshold for surface extraction.
 
 **Edge Cases and Pitfalls:**
-*   **Disconnected Components:** The surface-following nature means it only extracts the connected component containing the seed. Other components must be seeded separately [S1].
-*   **Lookup Grid Resolution:** If the lookup grid resolution is increased to reduce false positives, insertion/lookup costs can dominate overall extraction costs [S1].
+*   **Disconnected Components:** The surface-following nature means it only extracts the connected component containing the seeds. Disconnected parts of the volume will not be rendered unless additional seeds are provided [S1].
+*   **Lookup Grid Resolution:** If the lookup grid resolution is increased to reduce false positives, the insertion/lookup costs quickly grow and dominate overall isosurface extraction costs [S1].
 
 ## Subtopics
 
@@ -40,14 +40,14 @@ Surface-following Marching Cubes with Blocking is a surface extraction algorithm
 Edge Growth Marching Cubes is a surface extraction algorithm that resolves the topological ambiguities and disconnected holes inherent in standard Marching Cubes (MC) by treating the iso-surface as a connected manifold grown from seed triangles rather than processed voxel-by-voxel. Unlike standard MC, which evaluates each cube independently and may produce inconsistent topology at shared edges, this method propagates the surface through adjacent cubes via a queue of "growth edges," ensuring topological consistency across the entire reconstructed model. It is particularly suited for 3D reconstruction where only the main contour is required or for isolating specific connected components from scattered data by controlling the seed region.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of surface triangles and the cost of particle lookup. The use of a coarse lookup grid ($R_c$) keeps the number of cubes traversed during insertion/lookup down to a reasonable $3 \times 3 \times 3$ volume [S1].
-*   **Memory Complexity:** Requires storage for the particle grid, corner cache (hash map), and growth queue [S1].
-*   **Performance:** Measured on a 3.2Ghz Intel Core 2 Duo processor with 4MB of L2 cache (single core) [S1]. The method allows for unbounded rendering [S1].
-*   **Strengths:** Topological consistency, efficient particle lookup, unbounded rendering capability [S1].
-*   **Limitations:** Only extracts connected components from seeds; lookup grid resolution affects performance [S1].
+*   **Time Complexity:** The surface-following traversal ensures each edge is processed once, leading to efficient mesh generation. However, the particle lookup cost depends on the density of particles and the size of $R_c$. The $3 \times 3 \times 3$ traversal volume keeps lookup costs low compared to naive methods [S1].
+*   **Memory Complexity:** Requires storage for the particle list, the coarse lookup grid, and the corner cache. The corner cache can grow large for complex surfaces but reduces duplicate vertex generation [S1].
+*   **Performance:** In tests on a 3.2Ghz Intel Core 2 Duo processor with 4MB of L2 cache, this approach was compared against Marching Slices with block subdivision and other methods [S1]. The exact frame rates are not specified in the provided notes, but the method is designed for real-time particle isosurface extraction [S1].
+*   **Strengths:** Topological consistency (manifold mesh), efficient particle lookup with coarse grid, suitable for unbounded rendering.
+*   **Limitations:** Only extracts connected components from seeds; lookup grid resolution trade-off between accuracy and speed.
 
 ## Background
-The method was introduced in the context of real-time particle isosurface extraction. It is compared against Marching slices with block subdivision, Marching cubes using a hash map, and other approaches using 3D lookup caches [S1]. The approach is noted as the only one that performs an exact lookup without returning particles outside of $R_c$, avoiding the need for culling via floating-point distance calculations [S1].
+This method was introduced in the context of real-time particle isosurface extraction [S1]. It addresses the limitations of standard Marching Cubes when applied to particle-based data, where topological inconsistencies and disconnected holes are common. The use of a separate coarse grid for particle lookups is a key innovation to maintain performance while ensuring accurate surface reconstruction [S1].
 
 ## Sources
 [S1] Real-time particle isosurface extraction, https://doi.org/10.1145/1342250.1342256, fetched 2026-11-04

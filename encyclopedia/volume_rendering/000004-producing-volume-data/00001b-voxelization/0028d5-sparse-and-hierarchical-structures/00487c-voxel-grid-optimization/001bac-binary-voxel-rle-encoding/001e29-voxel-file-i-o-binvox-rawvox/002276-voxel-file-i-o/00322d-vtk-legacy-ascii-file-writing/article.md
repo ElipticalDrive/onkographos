@@ -31,6 +31,8 @@ def write_vtk_legacy_ascii(output_path, cell_bounds, scalar_fields):
     """
     cell_bounds: list of tuples (cell_min, cell_max), each a tuple of 3 floats.
     scalar_fields: dict mapping name -> list of values (length len(cell_bounds)).
+    Fields expected by [S1, unofficial]: void_ratio (double), void_ratio_smoothed (double), 
+    particle_count (int), solid_volume (double), measurement_volume (double).
     """
     cell_count = len(cell_bounds)
     point_count = cell_count * 8
@@ -80,7 +82,7 @@ def write_vtk_legacy_ascii(output_path, cell_bounds, scalar_fields):
 
 **Edge Cases:**
 - Precision: Coordinates must be formatted with `{:.17g}` to preserve double precision [S1, unofficial].
-- Empty Grids: Not given in the sources.
+- Empty Grids: Not given in the sources. [G]
 
 ## Subtopics
 
@@ -88,13 +90,13 @@ def write_vtk_legacy_ascii(output_path, cell_bounds, scalar_fields):
 A variant used in the Grasshopper environment that serializes VoxelGrid objects into a custom chunk-based format rather than standard VTK ASCII [S2, unofficial]. It removes the 'PersistentData' chunk, writes a 'GridCount' Int32, and iterates through persistent data branches [S2, unofficial]. For each grid, it creates a 'Grid' chunk, converts the voxel grid to bytes, compresses them, converts to a hex string, and writes it to the 'Data' field along with the GH_Path [S2, unofficial]. Reading involves reversing this process: reading the count, finding the 'Grid' chunk by index, reading the hex string, decompressing, and reconstructing the VoxelGrid [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [G]
+- **Memory Complexity:** Not given in the sources. [G]
+- **Performance:** Not given in the sources. [G]
 - **Strengths:** Human-readable text format and explicit vertex definitions for every cell [S1, unofficial].
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Limitations:** Not given in the sources. [G]
+- **When to use:** Not given in the sources. [G]
+- **When not to use:** Not given in the sources. [G]
 
 ## Background
 The VTK Legacy ASCII format is part of the Visualization Toolkit (VTK) file formats, specifically the `UNSTRUCTURED_GRID` representation [S1, unofficial]. It is used in point-cloud voxelization workflows to export voxel data for visualization [S1, unofficial]. The format relies on the VTK Hexahedron cell type (ID 11) to represent voxels [S1, unofficial].

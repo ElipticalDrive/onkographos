@@ -3,7 +3,7 @@
 Also called: Procedural Noise, Procedural Volumetrics, Implicit Noise Fields
 
 ## Overview
-Procedural noise functions generate volumetric density, color, or occupancy fields on-the-fly from spatial coordinates, eliminating the need to store large 3D texture maps or voxel grids [S1, S2, unofficial][S3][S4, unofficial]. This family solves the problem of creating organic, non-repeating, and scalable volumetric structures (such as clouds, smoke, terrain, or fire) while avoiding the memory overhead and directional artifacts inherent in earlier value noise methods [S1, S2, unofficial][S3][S4, unofficial]. Unlike sibling methods that focus on specific pattern generation (e.g., [Worley Noise](1726-worley-noise.md)) or data storage ([Data Structures and Implementation](7153-data-structures-and-implementation.md)), this family encompasses the mathematical primitives and evaluation strategies used to define the scalar field itself.
+Procedural noise functions generate volumetric density, color, or occupancy fields on-the-fly from spatial coordinates, eliminating the need to store large 3D texture maps or voxel grids [S1, S2, unofficial][S3][S4, unofficial]. This family solves the problem of creating organic, non-repeating, and scalable volumetric structures (such as clouds, smoke, terrain, or fire) while avoiding the memory overhead and directional artifacts inherent in earlier value noise methods [S1, S2, unofficial][S3][S4, unofficial].
 
 ## Shared principles
 The family shares the following mechanism, terms, and math:
@@ -58,12 +58,8 @@ Cartoon Noise Lattice Generation produces independent, tileable noise lattices f
     - For a surface patch: Range is [0,1] along each surface dimension and [-1,1] along the normal. Basis vectors are dP/du, dP/dv, and Normal (N) [S1, unofficial].
 - **Pitfall**: Transformations for curves and surfaces are costly compared to spheres, especially for surfaces composed of arbitrary parametric primitives requiring search [S1, unofficial].
 
-### Noise-based 2D Fire
-- **Steps**:
-    - Multiply Voronoi noise and Perlin noise textures [S2, unofficial].
-    - Interpolate the product of the noises with a standard UV texture to create a modified UV coordinate [S2, unofficial].
-    - Sample a single Gaussian blob using the modified UV to create fire-like variations [S2, unofficial].
-    - Apply a color gradient to give an orange color to the result [S2, unofficial].
+### [Noise-based 2D Fire](2697-noise-based-2d-fire.md)
+Not given in the sources.
 
 ### Sinusoidal Ridged FBM
 - **Definition**: Ridged variant using sine function to create periodic ridges, suitable for lava textures [S3].

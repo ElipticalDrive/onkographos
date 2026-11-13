@@ -1,170 +1,171 @@
 # Octree Frustum Culling & LOD Selection
 
-Also called: CPU Frustum Culling, CPU-based Octree LOD & Frustum Culling
+Also called: CPU Frustum Culling, CPU-based Octree LOD & Frustum Culling, Octree Frustum Culling, Octree-based Visibility Culling
 
 ## Overview
-This method recursively traverses a chunk-based octree to determine which spatial regions are visible within the camera's view frustum and assigns an appropriate Level of Detail (LOD) based on the distance from the camera [S1, unofficial]. It differs from sibling techniques by combining visibility culling and LOD selection into a single recursive traversal, deferring geometry queueing until a node is determined to be either fully visible at its current LOD or fully outside the frustum [S1, unofficial]. It builds on [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by adding distance-based LOD logic and explicit frustum plane intersection tests [S1, unofficial].
+This method uses an octree spatial partitioning structure to efficiently determine which chunks of a voxel world are visible within the camera's view frustum and to select the appropriate Level of Detail (LOD) for each visible chunk [S1, S2, unofficial]. It solves the problem of rendering massive voxel worlds (e.g., $256^3$ cubes) by avoiding the transfer of invisible geometry to the GPU, which would otherwise consume prohibitive amounts of VRAM (e.g., ~4.5 GB for a full $256^3$ world) [S1, unofficial]. It is distinguished from sibling methods by its explicit integration of LOD selection based on distance during the culling traversal, rather than relying solely on static distance sorting or out-of-core clipping [S2, unofficial].
 
 ## How it works
+### Inputs and Outputs
 **Inputs:**
-- `set`: The chunk set structure containing octree metadata, root size, and geometry arrays [S1, unofficial].
-- `cam`: Camera structure containing `frustum_planes` (array of 6 planes) and `lod_origin` (camera position) [S1, unofficial].
-- `lod`: Current level of detail (unsigned 8-bit integer) [S1, unofficial].
-- `x, y, z`: Chunk coordinates at the current `lod` level [S1, unofficial].
+*   Camera state: `cam.frustum_planes` (6 planes defining the view frustum), `cam.lod_origin` (camera position for distance calculation).
+*   Chunk Set: `set` containing:
+    *   `set->root`: Base chunk size in voxels.
+    *   `set->max[3]`: Maximum chunk coordinates in the world.
+    *   `set->max_bitw[3]`: Bit width required to index the maximum chunk coordinates.
+    *   `set->gsvl[lod][x][y][z]`: Array of `GeometrySVL*` pointers for high-LOD geometry.
+    *   `set->gmesh[index]`: Array of `GeometryMesh*` pointers for base-LOD geometry.
+*   Current traversal coordinates: `(x, y, z)` at current `lod`.
 
 **Outputs:**
-- Populated geometry queues: `queue_gsvl`, `queue_mesh`, `queue_misc` [S1, unofficial].
+*   Populated render queues:
+    *   `queue_gsvl[0xFFFF]`: Array of `GeometrySVL*` pointers.
+    *   `queue_mesh[0xFFFF]`: Array of `GeometryMesh*` pointers.
+    *   `queue_misc[0xFFFF]`: Array of `uint32_t` indices.
+    *   Counts: `queue_gsvl_count`, `queue_mesh_count`, `queue_misc_count`.
 
-**Data Structures:**
-The chunk set (`set`) contains:
-- `root`: Base root size of the chunk set [S1, unofficial].
-- `max[3]`: Maximum chunk coordinates for each axis [S1, unofficial].
-- `max_bitw[3]`: Bit width required to index the maximum coordinate for each axis [S1, unofficial].
-- `gsvl[lod][index]`: Array of `GeometrySVL*` pointers for structured volume geometry [S1, unofficial].
-- `gmesh[index]`: Array of `GeometryMesh*` pointers for mesh geometry [S1, unofficial].
+### Data Structures
+The geometry is stored in a hierarchical manner indexed by LOD and chunk coordinates.
+*   `GeometrySVL`: Struct representing a geometry object at a specific LOD. Contains a `vbo` field (boolean/pointer) indicating if valid vertex buffer data exists.
+*   `GeometryMesh`: Struct representing base-level geometry. Contains a `vbo` field.
+*   The index into `set->gsvl` is calculated using a flattened 3D coordinate system. The bit width for flattening depends on the current LOD and the maximum bit width of the world.
 
-The queue structures contain:
-- `queue_gsvl[0xFFFF]`: Array of `GeometrySVL*` pointers [S1, unofficial].
-- `queue_mesh[0xFFFF]`: Array of `GeometryMesh*` pointers [S1, unofficial].
-- `queue_misc[0xFFFF]`: Array of `uint32_t` indices [S1, unofficial].
-- `queue_gsvl_count`, `queue_mesh_count`, `queue_misc_count`: Current counts of enqueued items [S1, unofficial].
+### Parameters
+*   `lod`: Current level of detail (unsigned 8-bit integer).
+*   `ws_root`: World space root size, calculated as `set->root << lod`.
+*   `LOD_SCALE`: Distance scale factor, value `1024`.
+*   `FRUSTUM_RADIUS_MULTIPLIER`: Multiplier for the frustum culling bounding box, value `0.85`.
 
-**Parameters:**
-- `ws_root`: World space root size, calculated as `set->root << lod` [S1, unofficial].
-- `LOD_SCALE`: Distance scale factor, value `1024` [S1, unofficial].
-- `FRUSTUM_RADIUS_MULT`: Frustum culling radius multiplier, value `0.85` [S1, unofficial].
+### Algorithm Steps
+1.  **Compute World-Space Center**: Calculate the center of the current chunk in world space.
+    $$ center[i] = (coord[i] \times ws\_root) + \frac{ws\_root}{2} $$
+    for $i \in \{0, 1, 2\}$.
 
-**Algorithm Steps:**
-1. **Compute World-Space Center:** Calculate the center of the current chunk in world space [S1, unofficial].
-   $$ center[i] = (coord[i] \times ws\_root) + \frac{ws\_root}{2} $$
-   where $i \in \{0, 1, 2\}$ corresponds to x, y, z axes [S1, unofficial].
-2. **Boundary Check:** Verify the chunk coordinates are within the defined bounds of the chunk set [S1, unofficial].
-   $$ \text{if } (coord[i] \ll lod) \ge set.max[i] \text{ for any } i, \text{ return.} $$
-3. **Frustum Culling:** Check if the chunk intersects the camera frustum [S1, unofficial]. The chunk is treated as a sphere with a radius scaled by `0.85` of the world-space root size [S1, unofficial].
-   $$ \text{if } \neg \text{gfx\_fcull\_visible}(cam.frustum\_planes, center, ws\_root \times 0.85), \text{ return.} $$
-   [G] `gfx_fcull_visible` performs a standard sphere vs. 6-plane frustum intersection test. If the object is completely outside any plane, it returns false.
-4. **Distance Calculation:** Compute the Euclidean distance from the camera's LOD origin to the chunk's world-space center [S1, unofficial].
-   $$ distance = \sqrt{\sum_{i=0}^{2} (center[i] - cam.lod\_origin[i])^2} $$
-5. **LOD Decision:**
-   - **If** $distance > lod \times 1024$: The chunk is far enough to be rendered at the current LOD [S1, unofficial]. Enqueue the appropriate geometry and return [S1, unofficial].
-   - **Else**: The chunk is close enough to require a higher resolution (lower LOD index) [S1, unofficial]. Decrement `lod` and recurse into the 8 children [S1, unofficial].
-6. **Geometry Enqueuing (Far Case):**
-   - Calculate the bit widths for the flattened index:
-     $$ octree\_bitw[i] = set.max\_bitw[i] - \min(lod, set.max\_bitw[i]) $$
-   - **If** $lod == 0$:
-     - Calculate the mesh index: $index = \text{flatten3}((uint16_t[])\{x, y, z\}, set.max\_bitw)$ [S1, unofficial].
-     - Retrieve $m = set.gmesh[index]$ [S1, unofficial].
-     - If $m.vbo$ exists, enqueue $m$ into `queue_mesh` and $index$ into `queue_misc` [S1, unofficial].
-     - Return [S1, unofficial].
-   - **Else**:
-     - Calculate the SVL index: $idx = \text{flatten3}((uint16_t[])\{x, y, z\}, octree\_bitw)$ [S1, unofficial].
-     - Retrieve $g = set.gsvl[lod][idx]$ [S1, unofficial].
-     - If $g.vbo$ exists, enqueue $g$ into `queue_gsvl` [S1, unofficial].
-     - Return [S1, unofficial].
-7. **Recursion (Close Case):**
-   - Decrement `lod` [S1, unofficial].
-   - Iterate $nx, ny, nz \in \{0, 1\}$ [S1, unofficial].
-   - Recursively call the algorithm with coordinates $((x \times 2) + nx, (y \times 2) + ny, (z \times 2) + nz)$ [S1, unofficial].
+2.  **Boundary Check**: Verify if the current chunk coordinates exceed the world bounds.
+    $$ \text{if } (coord[i] \ll lod) \ge set->max[i] \text{ for any } i, \text{ return.} $$
 
-**Pseudocode:**
+3.  **Frustum Culling**: Check if the chunk's bounding box intersects the view frustum. The bounding box is defined by the chunk center and a radius of $ws\_root \times 0.85$.
+    $$ \text{if } \neg \text{gfx\_fcull\_visible}(cam.frustum\_planes, center, ws\_root \times 0.85), \text{ return.} $$
 
+4.  **Distance Calculation**: Compute the Euclidean distance from the camera's LOD origin to the chunk center.
+    $$ distance = \text{glm\_vec\_distance}(cam.lod\_origin, center) $$
+
+5.  **LOD Selection and Enqueue**:
+    *   If $distance > lod \times 1024$:
+        *   The chunk is visible but at a distance requiring a specific LOD.
+        *   Calculate the bit width for the current LOD's geometry index:
+            $$ octree\_bitw[i] = set->max\_bitw[i] - \min(lod, set->max\_bitw[i]) $$
+        *   Flatten the chunk coordinates $(x, y, z)$ using `octree_bitw` to get the index.
+        *   Retrieve the geometry object `g = set->gsvl[lod][index]`.
+        *   If `g->vbo` exists, enqueue `g` into `queue_gsvl`.
+        *   If `lod == 0`, also retrieve the base mesh `m = set->gmesh[flatten3(x,y,z, set->max_bitw)]`. If `m->vbo` exists, enqueue `m` into `queue_mesh` and its index into `queue_misc`.
+        *   Return (do not recurse).
+    *   Else ($distance \le lod \times 1024$):
+        *   Decrement `lod`.
+        *   Recurse into the 8 children of the current octree node.
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Module-level queue storage matching the evidence layout
-queue_gsvl = [None] * 0xFFFF
-queue_mesh = [None] * 0xFFFF
-queue_misc = [None] * 0xFFFF
-queue_gsvl_count = 0
-queue_mesh_count = 0
-queue_misc_count = 0
-
-def euclidean_distance(v1, v2):
-    """Compute Euclidean distance between two 3D vectors [G]."""
-    return ((v1[0]-v2[0])**2 + (v1[1]-v2[1])**2 + (v1[2]-v2[2])**2)**0.5
-
-def sphere_frustum_cull(planes, center, radius):
-    """Check if a sphere intersects the view frustum [G].
-    Returns True if the sphere is inside or intersects at least one plane, False if completely outside."""
-    for plane in planes:
-        # plane is (normal_x, normal_y, normal_z, distance)
-        dist = center[0]*plane[0] + center[1]*plane[1] + center[2]*plane[2] - plane[3]
-        if dist < -radius:
-            return False
-    return True
-
-def flatten3(coords, bitw):
-    """Flatten 3D coordinates into a 1D index using provided bit widths [G].
-    Assumes standard little-endian bit packing: x occupies lowest bits, then y, then z."""
-    x, y, z = coords
-    b0, b1, b2 = bitw
-    return (z << (b0 + b1)) | (y << b0) | x
-
-def octree_cull(set, cam, lod, x, y, z):
-    # 1. Compute World-Space Root Size
+def octree_cull(set, lod, x, y, z):
     ws_root = set.root << lod
-
-    # 2. Boundary Check
+    
+    # 1. Compute world-space center
+    center = [0, 0, 0]
     for i in range(3):
-        coord = [x, y, z][i]
-        if (coord << lod) >= set.max[i]:
+        center[i] = (x if i==0 else y if i==1 else z) * ws_root + (ws_root // 2)
+        # Note: The source uses coord[i] in the formula, mapped to x,y,z here
+        
+    # 2. Boundary check
+    # The source checks: if ((coord[i]<<lod) >= set->max[i]) return
+    # Here coord is the chunk coordinate at the current lod level? 
+    # Actually, the source implies 'coord' is the absolute chunk coordinate.
+    # In the recursive step, x,y,z are absolute chunk coordinates.
+    # The shift '<< lod' seems to be checking against max_bitw or max?
+    # Source: if ((coord[i]<<lod) >= set->max[i]) return.
+    # This logic in the source is slightly ambiguous regarding 'coord'.
+    # Assuming x,y,z are the chunk indices at the current LOD level relative to the root?
+    # Or absolute? The recursion passes (x*2)+nx. So x,y,z are absolute chunk indices.
+    # The check (coord[i] << lod) >= max[i] seems to imply coord is a lower-level index?
+    # Let's stick to the source formula literally.
+    for i in range(3):
+        coord = x if i==0 else y if i==1 else z
+        if ((coord << lod) >= set.max[i]):
             return
 
-    # 3. Compute World-Space Center
-    center = [0.0, 0.0, 0.0]
-    for i in range(3):
-        coord = [x, y, z][i]
-        center[i] = (coord * ws_root) + (ws_root / 2.0)
-
-    # 4. Frustum Culling
-    if not sphere_frustum_cull(cam.frustum_planes, center, ws_root * 0.85):
+    # 3. Frustum cull
+    radius = ws_root * 0.85
+    if not gfx_fcull_visible(set.cam.frustum_planes, center, radius):
         return
 
-    # 5. Distance Calculation
-    distance = euclidean_distance(cam.lod_origin, center)
+    # 4. Calculate distance
+    distance = glm_vec_distance(set.cam.lod_origin, center)
 
-    # 6. LOD Decision
+    # 5. LOD check
     if distance > lod * 1024:
-        # Enqueue geometry for current LOD
+        # Enqueue geometry for this LOD
+        octree_bitw = [0, 0, 0]
+        for i in range(3):
+            coord = x if i==0 else y if i==1 else z
+            octree_bitw[i] = set.max_bitw[i] - min(lod, set.max_bitw[i])
+        
+        # Flatten 3D coordinate to 1D index
+        coords = [x, y, z]
+        index = flatten3(coords, octree_bitw)
+        
+        g = set.gsvl[lod][index]
+        if g.vbo:
+            queue_gsvl[queue_gsvl_count] = g
+            queue_gsvl_count += 1
+            
         if lod == 0:
-            # Mesh Geometry
-            index = flatten3([x, y, z], set.max_bitw)
-            m = set.gmesh[index]
+            # Enqueue base mesh
+            base_index = flatten3(coords, set.max_bitw)
+            m = set.gmesh[base_index]
             if m.vbo:
                 queue_mesh[queue_mesh_count] = m
                 queue_mesh_count += 1
-                queue_misc[queue_misc_count] = index
+                queue_misc[queue_misc_count] = base_index
                 queue_misc_count += 1
-        else:
-            # SVL Geometry
-            octree_bitw = [0, 0, 0]
-            for i in range(3):
-                octree_bitw[i] = set.max_bitw[i] - min(lod, set.max_bitw[i])
-            
-            idx = flatten3([x, y, z], octree_bitw)
-            g = set.gsvl[lod][idx]
-            if g.vbo:
-                queue_gsvl[queue_gsvl_count] = g
-                queue_gsvl_count += 1
         return
 
-    # 7. Recurse into children
-    new_lod = lod - 1
+    # 6. Recurse
+    lod -= 1
     for nx in range(2):
         for ny in range(2):
             for nz in range(2):
-                octree_cull(set, cam, new_lod, (x * 2) + nx, (y * 2) + ny, (z * 2) + nz)
+                octree_cull(set, lod, (x * 2) + nx, (y * 2) + ny, (z * 2) + nz)
+
+def flatten3(coords, bitw):
+    # Helper to flatten 3D coordinates using bit widths
+    # Assuming bitw[i] is the number of bits for dimension i
+    # This is a standard spatial hashing flattening
+    # Implementation detail: [G] Standard bit-packing flattening
+    idx = 0
+    stride = 1
+    for i in range(2, -1, -1):
+        idx += coords[i] * stride
+        stride <<= bitw[i]
+    return idx
 ```
 
+### Edge Cases and Pitfalls
+*   **VRAM Exhaustion**: Without culling, a $256 \times 256 \times 256$ world contains 16,777,216 cubes. At 48 bytes per cube (6 faces $\times$ 4 vertices $\times$ 12 bytes/vertex for float positions), this requires ~4.5 GB of GPU RAM, which is often unavailable [S1, unofficial].
+*   **Temporal Coherency**: The method exploits temporal coherency. When a cube is removed, previously hidden cubes become visible. When a cube is added, it only affects the visibility of the six adjacent cubes on its primary faces [S1, unofficial].
+*   **Backface Culling**: Invisible faces (those not facing the camera) are typically handled by GPU backface culling, not this CPU method [S1, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of nodes in the octree, but typically much less due to frustum culling skipping large portions of the tree [G]. The traversal is depth-first [S1, unofficial].
-- **Memory Complexity:** $O(D)$ where $D$ is the maximum depth of the octree (recursion stack) [G]. The queue sizes are bounded by $0xFFFF$ entries per type [S1, unofficial].
-- **Performance:** Efficient for large sparse volumes as it avoids processing invisible or distant low-detail chunks [G]. The fixed-size queues prevent memory fragmentation but may limit the number of chunks processed per frame if the scene is extremely dense [G].
-- **Strengths:** Simple implementation, low CPU overhead per frame, effective culling [G].
-- **Limitations:** CPU-bound traversal can become a bottleneck for very deep octrees or high frame rates [G]. The fixed LOD scale factor (1024) may not suit all scene scales [S1, unofficial].
+*   **Time Complexity**: The octree approach achieves visibility determination in $O(\log(N))$ time complexity, where $N$ is the number of cubes [S1, unofficial].
+*   **Memory Complexity**: Depends on the octree structure and the geometry storage. The queues are fixed-size arrays (`0xFFFF`), limiting the number of enqueued objects per frame.
+*   **Strengths**: Significantly reduces the number of cubes sent to the GPU, preventing VRAM exhaustion and reducing bandwidth consumption [S1, unofficial]. Efficiently handles large static worlds by leveraging spatial partitioning [S1, unofficial].
+*   **Limitations**: Requires CPU overhead for traversal and culling calculations. The LOD selection is discrete and based on distance thresholds, which may cause popping if not smoothed [S2, unofficial].
+*   **When to Use**: Suitable for large, static voxel worlds where frustum culling and LOD are critical for performance [S1, S2, unofficial].
+*   **When Not to Use**: Not suitable for highly dynamic worlds where the octree structure changes frequently and the overhead of updating the tree outweighs the culling benefits, or if the world is small enough that brute-force culling is sufficient.
 
 ## Background
-This method is derived from the voxel platforming engine implementation in the `voxplat` repository by kosshi-net [S1, unofficial]. It represents a practical approach to managing chunk-based voxel data in real-time applications, balancing visibility culling with LOD selection to maintain performance [S1, unofficial].
+The concept of using octrees for visibility culling in voxel worlds was discussed in the context of manual occlusion culling and space partitioning algorithms [S1, unofficial]. The specific implementation details, including the LOD selection logic and queue structures, are derived from the "voxplat" project [S2, unofficial]. The method addresses the limitations of naive rendering approaches that fail to account for the massive data volume of high-resolution voxel grids [S1, unofficial].
 
 ## Sources
-[S1] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
+[S1] Manual occlusion culling with glDrawElements, https://gamedev.stackexchange.com/questions/77969/manual-occlusion-culling-with-gldrawelements, fetched 2026-10-26 (unofficial)
+[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)

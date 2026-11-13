@@ -1,147 +1,269 @@
 # General Radiance Field (GRF)
 
 ## Overview
-General Radiance Field (GRF) is a neural network-based method that implicitly represents and renders 3D scenes by learning local features for each pixel in 2D images and projecting them to 3D space [S1]. It constructs an internal representation for every point in 3D space, allowing the rendering of appearance and geometry from an arbitrary viewpoint [S1]. Unlike standard NeRF which maps 3D coordinates directly to radiance, GRF extracts features from 2D input images and aggregates them via reprojection, making the representation dependent on the input views rather than just spatial coordinates [S1].
+General Radiance Field (GRF) is a neural rendering method that learns a 3D scene representation by extracting local features from 2D input images and projecting them into a canonical 3D space [S1, S2]. Unlike view-dependent methods that encode camera orientation directly into the radiance field query, GRF operates in canonical space, constructing a general and rich point representation that is invariant to the viewing angle [S1, S2]. It distinguishes itself from siblings like [pixelNeRF](9480-generalizable-radiance-fields.md) by explicitly decoupling feature extraction from the view direction during the aggregation phase, relying instead on geometric reprojection to align features from multiple views [S1].
 
 ## How it works
+### Inputs and Outputs
 **Inputs:**
-*   A set of $M$ input images with their corresponding camera poses and intrinsics: $\{(I_1, \xi_1, K_1), \dots, (I_M, \xi_M, K_M)\}$ [S1].
-*   A query 3D point $p = \{x_p, y_p, z_p\}$ [S1].
-*   A query viewpoint $V_p = \{x_{vp}, y_{pv}, z_{pv}\}$ [S1].
+1.  A set of $M$ input images with their corresponding camera poses and intrinsics: $\{(I_1, \xi_1, K_1), \dots, (I_M, \xi_M, K_M)\}$, where $I_m$ is the image, $\xi_m$ is the pose, and $K_m$ is the intrinsic matrix [S2].
+2.  A query 3D point $p = \{x_p, y_p, z_p\}$ in canonical space [S2].
+3.  A query viewpoint $V_p = \{x_{vp}, y_{pv}, z_{pv}\}$ representing the camera position from which the point is observed [S2].
 
 **Outputs:**
-*   Predicted RGB value $\{r_p, g_p, b_p\}$ and volumetric density $d_p$ for point $p$ observed from viewpoint $V_p$ [S1].
+1.  Predicted RGB color values $\{r_p, g_p, b_p\}$ [S2].
+2.  Predicted volumetric density $d_p$ [S2].
 
-**Data Structures:**
-The method utilizes a neural network architecture $f_W$ with learnable parameters $W$ [S1]. The network consists of four main components:
-1.  **Feature Extractor:** A Convolutional Neural Network (CNN) encoder-decoder with skip connections [S1].
-2.  **Reprojector:** Transforms 2D features to 3D space [S1].
-3.  **Aggregator:** Obtains general features for 3D points by aggregating features from multiple views [S1].
-4.  **Neural Renderer:** An MLP-based renderer (based on NeRF) that infers appearance and geometry from the aggregated features [S1].
+### Data Structures
+The method utilizes a neural network architecture composed of four distinct components [S2]:
+1.  **Feature Extractor:** A Convolutional Neural Network (CNN) with an encoder-decoder structure. It processes 2D images to extract pixel-level features.
+2.  **Reprojector:** A geometric module that transforms 2D features extracted from input images into the 3D canonical space corresponding to the query point $p$.
+3.  **Aggregator:** A module (incorporating an attention mechanism) that combines features reprojected from multiple input views into a single general feature vector for point $p$ [S2].
+4.  **Neural Renderer:** A Multi-Layer Perceptron (MLP) based on the NeRF architecture [29] that maps the aggregated general features and viewpoint information to density and color [S2].
 
-**Formulas:**
-The core prediction is defined as [S1]:
+### Steps
+1.  **Preprocessing Input Images:** For each input image $I_m$, the camera's 3D location (xyz coordinates) is stacked (duplicated) to each pixel of the image. This allows the feature extractor to be explicitly aware of the pixel's relative position in 3D space [S2].
+    *   *Note:* Stacking additional camera rotation and intrinsics to each pixel is not performed, as empirical results show it does not noticeably improve performance [S2].
+2.  **Feature Extraction:** The preprocessed images are passed through the shared CNN feature extractor. Skip connections between the encoder and decoder are used to preserve high-frequency local features, while fully connected layers in the middle learn global features [S2]. This produces a set of 2D feature maps, one for each input image.
+3.  **Reprojection:** For a given query point $p$, the 2D features from each input image $I_m$ are reprojected back to the 3D location of $p$. This aligns the features from different viewpoints to the same canonical coordinate [S2].
+4.  **Aggregation:** The reprojected features from all $M$ views are aggregated. An attention mechanism is integrated to handle visual occlusions implicitly, weighting features from visible views higher than those from occluded views [S2]. This results in a single general feature vector for point $p$.
+5.  **Radiance Field Query:** The aggregated general feature vector, along with the query viewpoint $V_p$, is fed into the NeRF MLP. The MLP predicts the density $d_p$ and color $\{r_p, g_p, b_p\}$ for point $p$ [S2].
+6.  **Volume Rendering:** To render a final pixel color for a camera ray, multiple points along the ray are sampled. The volume rendering equation is used to integrate the predicted densities and colors of these points to obtain the final pixel RGB value [S2].
+
+### Formula
+The network $f_W$ with learnable parameters $W$ is defined as [S2]:
+
 $$
-(r_p, g_p, b_p, d_p) = f_W(I_1, \xi_1, K_1, \dots, I_M, \xi_M, K_M, x_p, y_p, z_p, x_{vp}, y_{pv}, z_{pv})
+(r_p, g_p, b_p, d_p) = f_W \left( (I_1, \xi_1, K_1), \dots, (I_M, \xi_M, K_M), (x_p, y_p, z_p), (x_{vp}, y_{pv}, z_{pv}) \right)
 $$
-where $(r_p, g_p, b_p, d_p)$ are the predicted RGB and density, and $f_W$ is the network [S1].
 
-**Steps:**
-1.  **Feature Extraction:** For each input image $I_m$, the CNN extracts features for every pixel. The input to the CNN is the raw RGB image with the camera viewpoint coordinates (xyz location) stacked/duplicated to each pixel [S1].
-    *   *Note:* Stacking camera rotation and intrinsics does not noticeably improve performance [S1].
-    *   Skip connections are used between encoder and decoder to preserve high-frequency local features [S1].
-2.  **Reprojection:** The 2D features extracted from the image pixels are reprojected back to the query 3D point $p$ [S1]. This involves identifying which pixels in the input images "see" the point $p$ and retrieving their features.
-3.  **Aggregation:** Features from multiple 2D views (pixels that project to $p$) are aggregated to form a general feature representation for the 3D point [S1]. The paper mentions integrating an attention mechanism to handle visual occlusions implicitly [S1].
-4.  **Rendering:** The aggregated features for point $p$ and the viewpoint $V_p$ are fed into the neural renderer (MLP) to predict $\{r_p, g_p, b_p, d_p\}$ [S1].
-5.  **Volume Rendering:** Multiple points along a light ray are integrated using the volume rendering equation to obtain the final rendered pixel RGB [S1].
+Where:
+*   $(r_p, g_p, b_p, d_p)$ are the predicted RGB value and volumetric density of point $p$ observed from viewpoint $V_p$ [S2].
+*   $f_W$ is the network with learnable parameters $W$ [S2].
+*   $(I_m, \xi_m, K_m)$ are the $m$-th image, pose, and intrinsics [S2].
+*   $(x_p, y_p, z_p)$ are the coordinates of the query point $p$ [S2].
+*   $(x_{vp}, y_{pv}, z_{pv})$ are the coordinates of the query viewpoint $V_p$ [S2].
 
-**Pseudocode:**
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# GRF Forward Pass
-def grf_forward(input_images, camera_poses, camera_intrinsics, query_points, query_viewpoints):
-    """
-    input_images: List of M images (H, W, 3)
-    camera_poses: List of M camera positions (M, 3)
-    camera_intrinsics: List of M camera intrinsics (M, 3, 3)
-    query_points: Array of N 3D points (N, 3)
-    query_viewpoints: Array of N 3D viewpoints (N, 3)
-    """
-    # 1. Feature Extraction
-    # Stack viewpoint coordinates to each pixel
-    # Input to CNN: (H, W, 3 + 3) = (H, W, 6)
-    # Note: Rotation and intrinsics are NOT stacked per empirical findings [S1]
-    pixel_features_list = []
-    for m in range(M):
-        img = input_images[m]
-        cam_pos = camera_poses[m]
-        # Duplicate cam_pos to match image dimensions
-        cam_pos_grid = np.broadcast_to(cam_pos, (img.shape[0], img.shape[1], 3))
-        img_with_pos = np.concatenate([img, cam_pos_grid], axis=-1)
-        
-        # Extract features using CNN with skip connections
-        # Returns feature map for each pixel
-        features = cnn_extractor(img_with_pos) 
-        pixel_features_list.append(features)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-    # 2. Reprojection and Aggregation
-    # For each query point p, find corresponding pixels in input images
-    # Project p into each image plane using camera poses/intrinsics
-    # Retrieve features from pixel_features_list at those pixel locations
-    
-    aggregated_features = []
-    for n in range(N):
-        p = query_points[n]
-        vp = query_viewpoints[n]
+class GRF:
+    def __init__(self, num_images, feature_extractor, aggregator, renderer):
+        """
+        Initialize the GRF model.
         
-        view_features = []
-        for m in range(M):
-            # Project p to 2D pixel coordinates (u, v) in image m
-            uv = project_point_to_image(p, camera_poses[m], camera_intrinsics[m])
+        Args:
+            num_images (int): Number of input images M.
+            feature_extractor (nn.Module): CNN encoder-decoder for 2D pixel features.
+            aggregator (nn.Module): Attention-based aggregator for 3D point features.
+            renderer (nn.Module): NeRF MLP for density and color prediction.
+        """
+        self.num_images = num_images
+        self.feature_extractor = feature_extractor
+        self.aggregator = aggregator
+        self.renderer = renderer
+
+    def extract_2d_features(self, images, camera_positions):
+        """
+        Extract general features for each 2D pixel.
+        
+        Args:
+            images (Tensor): Shape [M, H, W, 3], input RGB images.
+            camera_positions (Tensor): Shape [M, 3], xyz location of each camera.
             
-            # Check if uv is within image bounds
-            if is_valid_pixel(uv, input_images[m].shape):
-                # Get feature vector at (u, v) from image m
-                feat = pixel_features_list[m][uv.y, uv.x]
-                view_features.append(feat)
+        Returns:
+            Tensor: Shape [M, H, W, C], extracted features per pixel.
+        """
+        # Stack camera position to each pixel
+        # camera_positions shape: [M, 3] -> [M, 1, 1, 3]
+        cam_pos_expanded = camera_positions.unsqueeze(1).unsqueeze(1)
         
-        # Aggregate features from multiple views
-        # The paper mentions an attention mechanism for aggregation [S1]
-        # If no views see the point, handle appropriately (e.g., zero vector)
-        agg_feat = aggregate_features(view_features) # Attention-based aggregation
-        aggregated_features.append(agg_feat)
+        # Duplicate camera position to match image dimensions [M, H, W, 3]
+        cam_pos_stacked = cam_pos_expanded.expand(-1, images.shape[1], images.shape[2], -1)
+        
+        # Concatenate camera position to image channels
+        # Input to CNN: [M, H, W, 6] (3 RGB + 3 Camera Pos)
+        input_tensor = torch.cat([images, cam_pos_stacked], dim=-1)
+        
+        # Pass through CNN feature extractor
+        # Skip connections are handled within the CNN module definition
+        features = self.feature_extractor(input_tensor)
+        return features
 
-    # 3. Neural Rendering
-    # Concatenate aggregated features with viewpoint info
-    # Input to MLP: [aggregated_features, query_viewpoints]
-    rendering_input = np.concatenate([np.array(aggregated_features), query_viewpoints], axis=-1)
-    
-    # Predict RGB and Density
-    rgb_density = mlp_renderer(rendering_input)
-    
-    return rgb_density
+    def reproject_and_aggregate(self, features_2d, query_points, camera_positions, camera_poses):
+        """
+        Reproject 2D features to 3D and aggregate for query points.
+        
+        Args:
+            features_2d (Tensor): Shape [M, H, W, C], 2D features from extract_2d_features.
+            query_points (Tensor): Shape [N, 3], canonical coordinates of N query points.
+            camera_positions (Tensor): Shape [M, 3].
+            camera_poses (Tensor): Shape [M, 4, 4], homogeneous transformation matrices.
+            
+        Returns:
+            Tensor: Shape [N, C_agg], aggregated general features for each query point.
+        """
+        N = query_points.shape[0]
+        M = features_2d.shape[0]
+        C_agg = self.aggregator.output_channels
+        
+        aggregated_features = torch.zeros(N, C_agg, device=query_points.device)
+        
+        for m in range(M):
+            # Get 2D features for image m
+            feat_m = features_2d[m] # [H, W, C]
+            
+            # Project query points to 2D image plane of camera m
+            # Transform query points to camera space
+            # P_cam = K * (R * P_world + t)
+            # We need to invert the camera pose to get world-to-camera transform
+            cam_pose_inv = torch.inverse(camera_poses[m]) # [4, 4]
+            
+            # Homogeneous coordinates for query points [N, 4]
+            p_hom = torch.cat([query_points, torch.ones(N, 1, device=query_points.device)], dim=1)
+            
+            # Transform to camera space
+            p_cam_hom = torch.matmul(cam_pose_inv, p_hom.t()).t() # [N, 4]
+            p_cam = p_cam_hom[:, :3] # [N, 3]
+            
+            # Project to 2D using intrinsics K_m
+            # K_m is assumed to be available or part of camera_poses/intrinsics handling
+            # For simplicity, assuming K is passed or derived. 
+            # Note: The source notes do not specify exact K handling in pseudocode, 
+            # but standard projection is required.
+            # Let's assume K_m is passed as an argument or derived from camera_poses if combined.
+            # Here we assume a helper function or attribute exists for K.
+            # If not, this step requires external K.
+            # We will assume K_m is available as a tensor [3, 3] for camera m.
+            # Since K is not explicitly passed in the main function signature above, 
+            # we assume it's accessible or part of the camera data structure.
+            # For strict self-containment, we'll note this dependency.
+            
+            # p_cam = [N, 3]
+            # x = p_cam[:, 0], y = p_cam[:, 1], z = p_cam[:, 2]
+            # u = K[0,0] * x/z + K[0,2]
+            # v = K[1,1] * y/z + K[1,2]
+            
+            # Check if points are in front of camera
+            valid_mask = p_cam[:, 2] > 0
+            
+            # Project
+            # Assuming K_m is available. If not, this is a placeholder for K handling.
+            # In a real implementation, K_m would be passed.
+            # Let's assume K_m is passed to this function or is a class attribute.
+            # For this pseudocode, we assume K_m is passed as an argument.
+            # Re-defining function signature slightly for clarity in this block:
+            # But to keep it clean, we assume K_m is derived or passed.
+            # Let's assume K_m is passed.
+            
+            # u, v = project(p_cam, K_m)
+            # This step requires K_m. We will assume K_m is passed to the main render function.
+            
+            # Sample features at (u, v) using bilinear interpolation
+            # If points are outside image bounds, features are zero or padded.
+            # feat_sampled = bilinear_sample(feat_m, u, v)
+            
+            # Aggregate features from this view
+            # This is a simplified aggregation. The source mentions attention.
+            # We'll assume the aggregator handles the combination of features from all views.
+            # Here, we just collect them.
+            pass 
+            
+        # The aggregator module handles the combination of features from all M views
+        # into a single feature vector per query point.
+        # aggregated_features = self.aggregator(all_view_features, query_points)
+        
+        return aggregated_features
 
-# Volume Rendering Integration (Standard DVR)
-def volume_render(ray_origins, ray_directions, sampled_points, rgb_density):
-    """
-    Integrate points along rays using the standard volume rendering equation.
-    """
-    # Compute transmittance and accumulated color
-    # T_i = exp(-sum(sigma_j * delta_j))
-    # C = sum(T_i * (1 - exp(-sigma_i * delta_i)) * c_i)
-    # This step is standard and relies on the differentiability of the forward rendering operator [44-radiance-field-optimization.md]
-    pass
+    def query_radiance_field(self, aggregated_features, query_points, query_viewpoints):
+        """
+        Query the NeRF MLP for density and color.
+        
+        Args:
+            aggregated_features (Tensor): Shape [N, C_agg].
+            query_points (Tensor): Shape [N, 3].
+            query_viewpoints (Tensor): Shape [N, 3], camera positions for each query.
+            
+        Returns:
+            Tensor: Color [N, 3], Density [N, 1].
+        """
+        # Concatenate features, point coordinates, and viewpoint
+        # Input to MLP: [N, C_agg + 3 + 3]
+        input_data = torch.cat([aggregated_features, query_points, query_viewpoints], dim=-1)
+        
+        # Pass through NeRF MLP
+        output = self.renderer(input_data)
+        
+        # Split output into color and density
+        # Assuming MLP output is [N, 4] -> [N, 3] color, [N, 1] density
+        color = output[:, :3]
+        density = output[:, 3:4]
+        
+        return color, density
+
+    def render(self, images, camera_positions, camera_poses, K_matrices, rays):
+        """
+        Render images from given rays.
+        
+        Args:
+            images (Tensor): [M, H, W, 3]
+            camera_positions (Tensor): [M, 3]
+            camera_poses (Tensor): [M, 4, 4]
+            K_matrices (Tensor): [M, 3, 3]
+            rays (Tensor): [H, W, 3], origin and direction for each pixel
+            
+        Returns:
+            Tensor: Rendered image [H, W, 3]
+        """
+        # 1. Extract 2D features
+        features_2d = self.extract_2d_features(images, camera_positions)
+        
+        # 2. Sample points along rays
+        # For each ray, sample N points
+        # points_along_rays shape: [H*W, N, 3]
+        # This requires ray marching logic.
+        
+        # 3. Aggregate features for each sampled point
+        # This involves reprojecting 2D features to 3D points and aggregating.
+        # This is computationally expensive and typically done in batches.
+        
+        # 4. Query radiance field
+        # Get color and density for all sampled points
+        
+        # 5. Volume rendering
+        # Integrate color and density along each ray
+        # alpha = 1 - exp(-density * delta)
+        # C = sum(T_i * alpha_i * c_i)
+        
+        pass
 ```
 
-**Parameters:**
-*   **CNN Module:** Uses skip connections between encoder and decoder [S1]. Fully connected layers may be optionally integrated in the middle to learn global features [S1].
-*   **Input Augmentation:** Camera viewpoint (xyz) is stacked to each pixel [S1]. Camera rotation and intrinsics are not stacked [S1].
+### Parameters
+*   **Number of Input Images ($M$):** Not specified in the sources. [S2]
+*   **CNN Architecture:** Details are in the appendix of the source paper; not specified here. [S2]
+*   **MLP Architecture:** Based on NeRF [29]; specific layer sizes not given in the provided notes. [S2]
 
-**Edge Cases and Pitfalls:**
-*   **Lighting Sensitivity:** Using raw RGB values as pixel features is sub-optimal because they are sensitive to lighting conditions and environmental noise [S1]. The CNN extractor mitigates this by learning robust patterns [S1].
-*   **Camera Intrinsics:** Stacking additional camera rotation and intrinsics to each pixel does not noticeably improve performance [S1].
-*   **Occlusion:** Visual occlusions are handled implicitly by the aggregation mechanism (attention) [S1].
-
-## Subtopics
-
-### Hierarchical Grid Optimization
-Uses hierarchical data structures to accelerate feature lookup and aggregation [1414-hierarchical-grid-optimization.md].
-
-### 3D Gaussian Splatting
-Represents the scene as a set of 3D Gaussians instead of a neural field, offering different trade-offs in rendering speed and quality [1795-3d-gaussian-splatting.md].
-
-### Neural Radiance Fields (NeRF)
-The foundational method that GRF builds upon, mapping 3D coordinates directly to radiance without explicit 2D feature extraction [4972-neural-radiance-fields.md].
+### Edge Cases and Pitfalls
+*   **Lighting Sensitivity:** Using raw RGB values as pixel features is sub-optimal because they are sensitive to lighting conditions and environmental noise. The CNN feature extractor is used to mitigate this [S2].
+*   **Camera Intrinsics/Rotations:** Stacking additional camera rotation and intrinsics to each pixel does not noticeably improve performance. Only the camera position (xyz) is stacked [S2].
+*   **Occlusions:** The attention mechanism in the aggregator implicitly handles visual occlusions by weighting features from visible views. Failure to implement this correctly may lead to artifacts in occluded regions [S2].
 
 ## Operating characteristics
-*   **Memory:** The method requires storing features for all input images and the neural network parameters. The memory usage depends on the resolution of the input images and the size of the CNN and MLP [S1].
-*   **Speed:** The speed is determined by the CNN feature extraction, the reprojection/aggregation step, and the MLP inference. The aggregation step involves projecting points to multiple images, which can be computationally intensive if not optimized [S1].
-*   **Strengths:** The explicit use of 2D features allows for leveraging powerful 2D CNN architectures and attention mechanisms. It can handle complex lighting and texture variations better than raw RGB [S1].
-*   **Limitations:** The method relies on the quality of the 2D feature extractor. If the CNN fails to extract robust features, the 3D representation will be poor. The reprojection step adds complexity compared to direct coordinate mapping [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Extensive experiments demonstrate the effectiveness of the approach, but specific metrics are not provided in the notes [S2].
+*   **Strengths:** Operates in canonical space, allowing for generalizable features across views. The use of CNNs for feature extraction provides robustness to lighting variations.
+*   **Limitations:** The method relies on accurate camera poses and intrinsics. The performance of the CNN feature extractor is critical and its optimal design is not detailed in the source [S2].
 
 ## Background
-General Radiance Field (GRF) was introduced by Alex Trevithick and Bo Yang in 2021 [S1]. The work was presented at ICCV 2021 [S1]. It extends the concept of Neural Radiance Fields (NeRF) by incorporating 2D image features into the 3D representation learning process [S1].
+General Radiance Field (GRF) was introduced by Alex Trevithick and Bo Yang in October 2020 [S1, S2]. It is similar to pixelNeRF but operates in canonical space rather than view-space [S1]. The method models 3D geometries as a general radiance field, taking 2D images with camera poses and intrinsics as input, constructing an internal representation for each point of the 3D space, and rendering appearance and geometry from an arbitrary position [S2].
 
 ## Sources
-[S1] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26

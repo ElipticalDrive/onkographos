@@ -1,0 +1,92 @@
+# Sparse Volume Textures
+
+Also called: SVT Volume Rendering, Chunked SVT rendering, Sparse Volume Texture (SVT) Sampling in Materials
+
+## Overview
+Sparse Volume Textures (SVT) is a volume rendering technique in Unreal Engine 5 that renders large, sparse volumetric datasets (up to ~6 gigavoxels) by sampling data stored in sparse tiles within a large volume texture [S1, S2, unofficial][S3]. It solves the problem of integrating sparse, potentially animated 3D data into the rendering pipeline using standard material nodes, circumventing the DirectX 11 API limit of contiguous memory allocation for large textures [S2, unofficial][S3]. Unlike debug viewers or fog-specific renderers, it supports full lighting, emission, and color, making it suitable for scientific data visualization [S1, unofficial]. It builds on [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) by defining the material and actor workflow required to visualize the data.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A Sparse Volume Texture asset (typically imported from an OpenVDB/VDB file) [S3, S4].
+*   **Input:** A Volume-domain material instance [S4].
+*   **Input:** A Heterogeneous Volume Actor in the scene [S4].
+*   **Output:** Rendered volumetric image with lighting, shadows, and emission [S1, unofficial][S4].
+
+**Data Structures:**
+*   **Sparse Volume Texture (SVT):** Stores voxel data in a sparse manner using hierarchical data structures (tiles) [S1, unofficial]. The texture is defined by a Volume Resolution (e.g., $32k \times 32k \times 16k$) [S2, unofficial].
+*   **Attributes A and B:** Output pins from the SVT Sample node, both returning `float4` vectors [S3]. Attribute A typically contains density in its first channel [S3].
+*   **Lighting Cache:** A dense internal volume cache used for lighting calculations [S4]. It does not allocate a volume resolution greater than $1024 \times 1024 \times 512$ voxels [S4].
+*   **Voxel Grids:** Two grids are used for voxelization (emission, extinction, albedo):
+    *   World-space (Ortho) Grid [S4].
+    *   Frustum-aligned Grid [S4].
+
+**Numbered Steps:**
+1.  **Import Data:** Import a VDB file into the Content Browser (drag-and-drop or Import button) to create a Sparse Volume Texture asset [S4].
+2.  **Create Material:** Create a Volume-domain material. Set the Material Domain to `Volume` and the Blend Mode to `Additive` [S3].
+3.  **Sample SVT:** Add a `Sparse Volume Texture Sample` node to the material graph. Connect the SVT asset to this node [S3, S4].
+4.  **Compute UVs:** Provide three-dimensional UV coordinates to the sample node. These can be computed from world space position (optional; if unassigned, the engine computes them automatically using the same logic) [S3]. The UV space extends from 0 to 1 in all three dimensions (XYZ) [S3].
+5.  **Extract Data:** Retrieve data from the `Attributes A` and `Attributes B` output pins (both `float4`) [S3]. Use the first channel of Attribute A for density in the simplest setup [S3].
+6.  **Setup Actor:** Add a `Heterogeneous Volume Actor` to the scene [S4].
+7.  **Assign Material:** Assign the SVT material instance to the Heterogeneous Volume Actor [S4].
+8.  **Configure Lighting:** Adjust lighting parameters (Step Factor, Downsample Factor) to balance quality and performance [S4].
+9.  **Render:** The engine uses a deferred rendering model with ray marching for real-time rendering, or the Path Tracer for global illumination [S4].
+
+**Formulas and Parameters:**
+*   **UV Coordinates:** $UV \in [0, 1]^3$. The UV space spans the union of bounding boxes of individual frames [S3].
+*   **Lighting Step Size:** $Step = Factor \times Resolution$ [S4]. Increasing `Lighting Step Factor` takes longer steps, sacrificing quality for performance [S4].
+*   **Shadow Step Size:** $Step = Factor \times Resolution$ [S4]. Increasing `Shadow Step Factor` takes longer steps, sacrificing quality for performance [S4].
+*   **Lighting Cache Resolution:** $Resolution_{cache} = Resolution_{SVT} / LightingDownsampleFactor$ [S4]. The cache is dense [S4].
+*   **Streaming Mip Bias:** Controls the texture level. Lower values = higher density/quality; higher values = lower density/quality [S4].
+
+**Pseudocode (Material Graph Logic):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Simplified representation of the material graph logic
+def render_svt_material(svt_asset, world_position):
+    # 1. Compute 3D UV coordinates from world position
+    # If UVs are not provided, engine auto-computes:
+    # uv = (world_position - volume_origin) / volume_size
+    uv = compute_3d_uv_from_world(world_position)
+    
+    # 2. Sample the Sparse Volume Texture
+    # Returns two float4 vectors: Attribute A and Attribute B
+    attribute_a, attribute_b = svt_asset.sample(uv)
+    
+    # 3. Extract density (typically first channel of Attribute A)
+    density = attribute_a.x
+    
+    # 4. Apply lighting and shading based on density
+    # This involves ray marching through the volume
+    color = apply_lighting(density, attribute_a, attribute_b)
+    
+    return color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Chunk Border Artifacts:** When chunking large datasets into textures smaller than one gigavoxel, each chunk is lit separately without neighbor information, causing borders to appear incorrectly bright [S2, unofficial].
+*   **Signed Integer Overflow:** Signed int32 overflows in SVT-related source code can cause crashes; these must be handled by converting to unsigned uint32 or int64 [S2, unofficial].
+*   **Pivot Transform Issues:** Forcing the pivot to the volume’s center (Pivot at Centroid) may break transforms if the original transforms were authored with the pivot at the origin (usually a corner) [S4].
+*   **Missing Voxels:** Lowering the shading rate of world-space or frustum-aligned voxel grids may exceed the bottom-level memory limit, causing voxels to not be allocated and portions of the volume to be missing [S4]. Solution: Increase memory limit or raise shading rate [S4].
+*   **Overlapping Volumes:** Overlapping heterogeneous volumes appear blocky due to homogeneous aggregation within a single volume [S4]. Disable aggregation with `r.HeterogeneousVolumes.Tessellation.BottomLevelGrid.HomogeneousAggregation = 0` [S4].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time rendering uses deferred rendering with ray marching [S4]. Performance is directly correlated with the imported SVT resolution [S4].
+*   **Memory Complexity:** The internal lighting cache is dense and limited to $1024 \times 1024 \times 512$ voxels [S4]. Bottom-level voxel grids for world-space and frustum-aligned grids have configurable memory limits (default 128 MB, recommended 512 MB) [S4].
+*   **Measured Performance:** Achieved 20 fps on an NVIDIA RTX 3500 Ada Generation Laptop GPU for the Kolumbo dataset ($4211 \times 1501 \times 935 \approx 6$ billion total voxels, ~2.6 billion non-empty) [S2, unofficial].
+*   **Scaling:** Supports sparse datasets up to $32k \times 32k \times 16k$ voxels, provided compressed tile data (including MIP data and padding) does not exceed 4 gigavoxels [S2, unofficial].
+*   **Strengths:** Supports full lighting, emission, and color; suitable for scientific data visualization; handles static and animated data [S1, unofficial][S4].
+*   **Limitations:** Chunking introduces border artifacts [S2, unofficial]; requires DirectX 12 for large textures (up to 8 gigavoxels theoretically) [S2, unofficial]; path tracing requires hardware ray tracing support [S4]; overlapping volumes cause blockiness [S4].
+*   **When to Use:** For rendering large, general-purpose sparse volumetric data (e.g., scientific visualization) where lighting and color are required [S1, unofficial].
+*   **When Not to Use:** For debug viewing (use SparseVolumeTextureViewer) [S1, unofficial]; for fog-specific effects (use Volumetric Fog) [S1, unofficial]; for cloud-specific effects (use Volumetric Cloud) [S1, unofficial]; when chunk border artifacts are unacceptable without post-processing [S2, unofficial].
+
+## Background
+*   **Origin:** The method is implemented in Unreal Engine 5, specifically utilized in a custom build of UE 5.4 for the ARENA2 visualization dome at GEOMAR Helmholtz Centre for Ocean Research Kiel [S2, unofficial].
+*   **History:** The approach was developed to address the limitations of DirectX 11 (1 gigavoxel limit due to memory fragmentation) by leveraging DirectX 12 reserved resources, which allow textures up to $2048^3 = 8$ gigavoxels [S2, unofficial].
+*   **Usage:** Used for visualizing large oceanographic datasets (e.g., Kolumbo dataset) [S2, unofficial].
+
+## Sources
+[S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://arxiv.org/abs/2504.07485, fetched 2026-10-27 (unofficial)
+[S2] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.researchgate.net/publication/390671564_Rendering_Large_Volume_Datasets_in_Unreal_Engine_5_A_Survey, fetched 2026-10-28 (unofficial)
+[S3] Sparse Volume Textures in Unreal Engine | Unreal Engine 5.8 ... - Epic Dev, https://dev.epicgames.com/documentation/en-us/unreal-engine/sparse-volume-textures-in-unreal-engine, fetched 2026-10-28
+[S4] Heterogeneous Volumes, https://dev.epicgames.com/documentation/unreal-engine/heterogeneous-volumes-in-unreal-engine, fetched 2026-10-28

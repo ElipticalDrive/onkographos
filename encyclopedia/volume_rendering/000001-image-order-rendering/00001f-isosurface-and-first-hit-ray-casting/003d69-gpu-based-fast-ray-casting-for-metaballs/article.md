@@ -3,180 +3,158 @@
 Also called: Nishita and Nakamae's Algorithm
 
 ## Overview
-This method renders particle-based implicit surfaces (metaballs) directly on the GPU by evaluating the isosurface condition per pixel, avoiding polygonization and expensive precomputation or acceleration structures [S1]. It solves the problem of high rendering costs for large numbers of moving metaballs by maintaining a compact, dynamically updated list of contributing metaballs along each viewing ray and using Bézier Clipping to solve the resulting polynomial equations [S1]. Unlike [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) which relies on grid-based density evaluation, this method is exact for the chosen polynomial density functions and preserves small objects that might be missed by grid-based approaches [S1].
+This method renders particle-based implicit surfaces (metaballs) directly on the GPU by evaluating the isosurface condition per pixel, avoiding polygonization and expensive precomputation or acceleration structures [S1]. It solves the problem of high rendering costs for large numbers of moving metaballs by maintaining a limited-size list of contributing metaballs along each viewing ray and using Bézier Clipping to solve the resulting polynomial equations [S1]. Unlike sibling methods that rely on grid-based repulsion buffers or vertex attribute interpolation, this approach handles millions of particles and small objects smoothly by extracting metaballs via depth peeling and solving quartic or degree-six density functions exactly [S1].
 
 ## How it works
-**Inputs:**
-- $N$ metaballs, each defined by center $\mathbf{p}_i \in \mathbb{R}^3$, effective radius $R_i$, density coefficient $q_i$, and a density function $f_i(r)$ with finite support [S1].
-- Isosurface threshold $T$ [S1].
-- Camera parameters defining the viewing ray $\mathbf{R}(t) = \mathbf{o} + t\mathbf{d}$, where $t$ is the distance from the viewpoint [S1].
-
-**Outputs:**
-- Color for each pixel, derived from the isosurface closest to the viewpoint [S1].
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ metaballs, each defined by center $\mathbf{p}_i$, effective radius $R_i$, density coefficient $q_i$, and a density function $f_i(r)$ with finite support [S1]. The viewing ray $r(t) = \mathbf{o} + t\mathbf{d}$ for each pixel [G]. Threshold $T$ [S1].
+*   **Outputs:** Color and normal for the closest isosurface intersection per pixel [S1].
 
 **Data Structures:**
-- **ID List:** A fixed-size array storing the indices of metaballs contributing to the current interval. The capacity is limited to $K = 4 \times N_{buf} - 2$, where $N_{buf}$ is the number of depth peeling buffers [S1]. In experiments, $K=14$ was used [S1].
-- **Stored $t$:** The $t$-parameter of the last processed ray-sphere intersection, marking the start of the current interval [S1].
+*   **ID List:** A dynamic list storing metaball IDs contributing to the current ray interval. Capacity is limited to $K$ [S1].
+*   **Stored $t$:** The $t$-parameter of the last processed ray-sphere intersection [S1].
+*   **Texture:** Stores the current ID list and stored $t$ for each pixel, updated via depth peeling [S1].
 
 **Density Function:**
-The density function $f_i$ is a function of $r = \|\mathbf{x} - \mathbf{p}_i\|$ and monotonically decreases as $r$ increases. It has finite support $R_i$, such that $f_i(r) = 0$ for $r \ge R_i$ [S1]. The method supports quartic and degree-six polynomials [S1].
-
-**The Isosurface Equation:**
-The surface is defined by points $\mathbf{x}$ satisfying:
-$$ f(\mathbf{x}) = \sum_{i=0}^{N-1} q_i f_i(\|\mathbf{x} - \mathbf{p}_i\|) - T = 0 \quad (1) $$
+The density function $f_i$ for metaball $i$ is a function of $r = \|\mathbf{x} - \mathbf{p}_i\|$ and monotonically decreases as $r$ increases. If $f_i$ has finite support $R_i$, $f_i(r) = 0$ for $r \ge R_i$ [S1]. The method supports quartic and degree-six polynomials [S1]. The isosurface is defined by:
+$$ f(\mathbf{x}) = \sum_{i=0}^{N-1} q_i f_i(\|\mathbf{x} - \mathbf{p}_i\|) - T = 0 $$
 The normal vector at $\mathbf{x}$ is derived from $-\nabla f(\mathbf{x})$ [S1].
 
 **Algorithm Steps:**
-1.  **Initialize:** Set the stored $t$ to the near plane or previous intersection. Initialize the ID list as empty.
-2.  **Depth Peeling (Ray-Sphere Intersection):**
-    - Render the effective spheres (spheres with radius $R_i$) using depth peeling to find intersections from front to back [S1].
-    - For each pixel, if a new intersection at $t_k$ with metaball ID $B_k$ is found:
-        - If the ID list is not full and $B_k$ is not already in the list, insert $B_k$ into the ID list [S1].
-        - If $B_k$ is already in the list, discard the fragment (optimization: in 32-bit float, duplicate checks can be omitted without visible artifacts) [S1].
-        - Perform a **Ray-Isosurface Test** in the interval $[t_{k-1}, t_k]$ using the metaballs currently in the ID list plus the new $B_k$ (if added) [S1].
-        - Update the stored $t$ to $t_k$ [S1].
-        - If an intersection is found in the test, terminate depth peeling for this pixel and proceed to shading [S1].
-        - If the ID list capacity $K$ is exceeded during insertion, treat the current ray-sphere intersection as a ray-isosurface intersection immediately to prevent holes [S1].
-3.  **Ray-Isosurface Test (Bézier Clipping):**
-    - Construct a 1D Bézier curve $D(u)$ representing the density function along the ray segment.
-    - Solve $d(u) = 0$ using Bézier Clipping [S1].
-    - **Single Case:** If only one effective sphere intersects the interval, perform a standard ray-sphere intersection test. The radius can be precomputed [S1].
-    - **Multiple Case:** If two or more effective spheres intersect, construct the Bézier form equation and solve it [S1].
-4.  **Shading:**
-    - Evaluate the surface normal at the hit point using the gradient of the density function [S1].
-    - Compute color using local lighting models (ambient, diffuse, specular) [S1].
+1.  **Initialize:** For each pixel, initialize the ID list as empty and stored $t$ to the near clipping plane.
+2.  **Depth Peeling Loop:**
+    a.  Render effective spheres (spheres with radius $R_i$) to find the $k$-th nearest ray-sphere intersection $(t_k, B_k)$ in parallel [S1].
+    b.  If no intersection is found, terminate the loop for this pixel [S1].
+    c.  Update the ID list:
+        i.  If $B_k$ is not in the ID list, insert it [S1].
+        ii. If $B_k$ is already in the ID list, remove it (handling occlusion) [S1].
+        iii. If the ID list size exceeds $K$, treat the ray-sphere intersection as a ray-isosurface intersection (fallback) [S1].
+    d.  **Ray-Isosurface Test:** In the interval $[t_{k-1}, t_k]$, perform a ray-isosurface test using the metaballs in the ID list [S1].
+        i.  **Single Case:** If only one metaball is in the ID list, perform a ray-sphere intersection test. The radius can be precomputed [S1].
+        ii. **Multiple Case:** If two or more metaballs are in the ID list, construct a degree-$M$ Bézier curve equation $d(u)=0$ representing the density function along the ray segment, and solve for roots using Bézier Clipping [S1].
+        iii. If a root is found in $[t_{k-1}, t_k]$, record the intersection, shade the surface, and terminate the loop for this pixel [S1].
+    e.  Update stored $t$ to $t_k$ [S1].
+    f.  Repeat steps 2a-2e until an isosurface is found or no more intersections are available [S1].
+3.  **Shading:** Evaluate and shade the isosurface closest to the viewpoint at every pixel [S1].
 
-**Bézier Clipping Solver:**
-A degree-$M$ Bézier curve is defined as:
-$$ \mathbf{D}(u) = (u, d(u)) = \sum_{i=0}^M \mathbf{D}_i \mathbf{B}_i^M(u), \quad (2) $$
-where $\mathbf{B}_i^M(u) = \binom{M}{i} u^i (1-u)^{M-i}$ are Bernstein polynomials, and control points $\mathbf{D}_i = (i/M, d_i)$ [S1].
-
-The algorithm iteratively clips the curve in the range $[u_{min}, u_{max}]$, where $u_{min}$ and $u_{max}$ are the points where the convex hull of the control points intersects the $u$-axis (i.e., where the $y$-coordinate of the control points changes sign or bounds the zero crossing) [S1].
-- Use de Casteljau's algorithm to subdivide the curve and find the new bounding box [S1].
-- If the range $[u_{min}, u_{max}]$ does not converge below a threshold, split the curve in two and recurse [S1].
-- **Pitfall:** Roots may be misdetected when the convex hull barely intersects the axis. Mitigation: slightly increase the clipping range heuristic [S1].
+**Bézier Clipping:**
+A degree-$M$ Bézier curve is denoted with parameter $u \in [0,1]$ as:
+$$ \mathbf{D}(u) = (u, d(u)) = \sum_{i=0}^M \mathbf{D}_i \mathbf{B}_i^M(u) $$
+where $\mathbf{B}_i^M(u) = \binom{M}{i} u^i (1-u)^{M-i}$ are Bernstein polynomials, and $\mathbf{D}_i = (i/M, d_i)$ are control points [S1]. The curve lies within the convex hull of $\mathbf{D}_i$. The intersection with the $u$-axis lies between $u_{min}$ and $u_{max}$, where the convex hull intersects the axis. Iteratively clip the curve in $[u_{min}, u_{max}]$ using de Casteljau's algorithm. If the range does not converge past a threshold, split the curve and recurse [S1]. To mitigate root misdetection when the convex hull barely intersects the axis, slightly increase the clipping range [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_metaballs(metaballs, camera, threshold, max_peel_iterations):
-    # Initialize depth peeling buffers
-    # Each buffer stores: (t, id_list) for each pixel
-    # t: float, distance to last intersection
-    # id_list: list of metaball indices
+def render_metaballs(pixels, metaballs, threshold, max_id_list_size=14):
+    # pixels: list of (origin, direction)
+    # metaballs: list of (center, radius, coefficient, density_func)
+    # Returns: list of (color, normal)
     
-    prev_buffers = initialize_buffers()
-    current_buffers = initialize_buffers()
-    
-    for k in range(1, max_peel_iterations + 1):
-        # Step 1: Depth Peeling - Find k-th ray-sphere intersection
-        # Render effective spheres. For each pixel, compute intersection t_k and metaball ID B_k
-        intersections = depth_peel_step(metaballs, camera, prev_buffers, k)
+    results = []
+    for pixel in pixels:
+        o, d = pixel
+        id_list = []
+        stored_t = near_clipping_plane
+        hit = False
         
-        # Step 2: Update ID Lists and Perform Isosurface Test
-        for each pixel p:
-            if intersections[p] is None:
-                current_buffers[p] = prev_buffers[p]
-                continue
-                
-            t_k, B_k = intersections[p]
-            t_prev = prev_buffers[p].t
-            id_list = prev_buffers[p].id_list
+        while not hit:
+            # Step 2a: Find k-th intersection via depth peeling
+            # In practice, this is done in parallel across pixels using GPU textures
+            # Here we simulate the sequential logic for a single pixel
+            t_k, ball_id = find_kth_sphere_intersection(o, d, metaballs, stored_t, id_list)
             
-            # Check capacity
-            if len(id_list) >= K:
-                # Fallback: treat ray-sphere intersection as isosurface intersection
-                # This prevents holes in dense groups
-                hit_t, hit_u = ray_sphere_isosurface_test(t_prev, t_k, id_list + [B_k], camera, metaballs)
-                if hit_t is not None:
-                    shade_pixel(p, hit_t, hit_u, metaballs)
-                    current_buffers[p] = prev_buffers[p] # Mark as done
-                    continue
+            if t_k is None:
+                break # No more spheres
             
-            # Insert B_k if not present (optimization: skip check for 32-bit float)
-            if B_k not in id_list:
-                id_list.append(B_k)
-            
-            # Perform Ray-Isosurface Test in [t_prev, t_k]
-            hit_t, hit_u = ray_isosurface_test(t_prev, t_k, id_list, camera, metaballs)
-            
-            if hit_t is not None:
-                shade_pixel(p, hit_t, hit_u, metaballs)
-                current_buffers[p] = prev_buffers[p] # Mark as done
+            # Step 2c: Update ID list
+            if ball_id in id_list:
+                id_list.remove(ball_id)
             else:
-                # Update state for next iteration
-                current_buffers[p].t = t_k
-                current_buffers[p].id_list = id_list
-        
-        prev_buffers = current_buffers
-        # Check if all pixels are done to break early
-
-def ray_isosurface_test(t_start, t_end, id_list, camera, metaballs):
-    # Construct the 1D density function d(u) along the ray segment
-    # u in [0, 1] maps to t in [t_start, t_end]
-    # d(u) = sum(q_i * f_i(||R(t_start + u*(t_end-t_start)) - p_i||)) - T
-    
-    # Convert polynomial coefficients to Bézier form
-    bezier_coeffs = construct_bezier_curve(id_list, t_start, t_end, camera, metaballs)
-    
-    # Solve d(u) = 0 using Bézier Clipping
-    return bezier_clipping_solve(bezier_coeffs, t_start, t_end)
-
-def bezier_clipping_solve(coeffs, t_start, t_end):
-    # Iteratively clip the range [u_min, u_max]
-    # u_min, u_max are derived from the convex hull of control points
-    # where the hull crosses the u-axis (y=0)
-    
-    u_min, u_max = get_convex_hull_bounds(coeffs)
-    
-    while (u_max - u_min) > threshold:
-        # Subdivide using de Casteljau's algorithm to narrow the range
-        new_coeffs = de_casteljau_subdivision(coeffs, u_min, u_max)
-        u_min, u_max = get_convex_hull_bounds(new_coeffs)
-        
-        # If range doesn't shrink, split curve
-        if u_max - u_min == 0:
-            mid = (u_min + u_max) / 2
-            left_coeffs, right_coeffs = split_bezier_curve(coeffs, mid)
-            # Recursively solve both parts
-            res_left = bezier_clipping_solve(left_coeffs, t_start, t_end)
-            if res_left is not None: return res_left
-            return bezier_clipping_solve(right_coeffs, t_start, t_end)
+                if len(id_list) < max_id_list_size:
+                    id_list.append(ball_id)
+                else:
+                    # Fallback for dense groups
+                    hit = True
+                    hit_t = t_k
+                    hit_normal = compute_normal_from_sphere(o, d, metaballs[ball_id])
+                    break
             
-    # Return the root within the final range
-    return t_start + u_min * (t_end - t_start), u_min
+            # Step 2d: Ray-Isosurface Test
+            interval_start = stored_t
+            interval_end = t_k
+            
+            # Construct density function along ray segment
+            # This involves evaluating sum(q_i * f_i(||r(t) - p_i||)) - T
+            # Convert to Bézier form for the interval [interval_start, interval_end]
+            bezier_curve = construct_bezier_curve(id_list, o, d, interval_start, interval_end, threshold)
+            
+            # Solve for root using Bézier Clipping
+            root = bezier_clipping(bezier_curve)
+            
+            if root is not None and interval_start <= root <= interval_end:
+                hit = True
+                hit_t = root
+                hit_point = o + hit_t * d
+                hit_normal = compute_gradient_normal(id_list, hit_point, threshold)
+        
+        if hit:
+            results.append(shade(hit_point, hit_normal, o, d))
+        else:
+            results.append(background_color)
+            
+    return results
+
+def bezier_clipping(bezier_curve):
+    u_min, u_max = 0.0, 1.0
+    # Initial clipping range based on convex hull intersection with u-axis
+    u_min, u_max = get_convex_hull_intersection(bezier_curve)
+    
+    while u_max - u_min > threshold:
+        # Clip using de Casteljau's algorithm
+        bezier_curve = clip_bezier_curve(bezier_curve, u_min, u_max)
+        
+        # Check for convergence or split
+        if not converge(bezier_curve):
+            # Split curve and recurse
+            mid = (u_min + u_max) / 2
+            left_curve, right_curve = split_bezier_curve(bezier_curve, mid)
+            root_left = bezier_clipping(left_curve)
+            if root_left is not None:
+                return root_left
+            return bezier_clipping(right_curve)
+        
+        # Update range
+        u_min, u_max = get_convex_hull_intersection(bezier_curve)
+        
+    return (u_min + u_max) / 2
 ```
 
 ## Subtopics
 
 ### [Real-Time Metaball Ray Casting with Fragment Lists](9945-real-time-metaball-ray-casting-with-fragment-lists.md)
-A real-time ray casting method for rendering particle-based medium representations (metaballs) that builds per-pixel lists of relevant metaballs, incrementally constructs a piecewise polynomial approximation of summed densities along rays, and finds intersections with the isosurface. It builds on the core ray-casting principles but focuses on fragment list management for real-time performance [9945-real-time-metaball-ray-casting-with-fragment-lists.md].
+A real-time ray casting method for rendering particle-based medium representations (metaballs) that builds per-pixel lists of relevant metaballs, incrementally constructs a piecewise polynomial approximation of summed densities along rays, and finds intersections with the isosurface. It replaces the multipass depth peeling used in [GPU-based Fast Ray Casting for Metaballs](9502-gpu-based-fast-ray-casting-for-metaballs.md) with single-pass fragment list gathering, allowing robust handling of local extremities of depth complexity and scaling to millions of particles.
 
 ### Metaball Culling via Occlusion Queries
-Reduces the number of rendered metaballs by culling effective spheres hidden from the viewpoint by 'kernel spheres' (spheres making up the isosurface). It renders kernel spheres first, saves ray parameters to a texture, then renders effective spheres using occlusion queries to determine which were drawn, culling those that were not. This can reduce the number of metaballs to be rendered to 10-20% in dense groups [S1].
+Reduces the number of rendered metaballs by culling effective spheres hidden from the viewpoint by 'kernel spheres' (spheres making up the isosurface) [S1]. Render the kernel spheres and save the ray parameters to a texture. Disable writes to the depth buffer. Render the effective spheres, using the occlusion query to determine which effective spheres were drawn. Cull the effective spheres that were not rendered in the above test [S1]. This culling can reduce the number of metaballs to be rendered to 10-20% in dense groups [S1].
 
 ### Ray-Isosurface Test Special Case Handling
-Procedural rules for handling degenerate or dense ray-metaball intersections during depth peeling to prevent duplicate IDs, holes, or occlusion errors.
-- **Duplicate IDs:** When multiple effective spheres intersect at the same point, compare ray parameters and return only one ID. Checking for duplicates in the list drastically increases cost; omitting it in 32-bit float produces no visible artifacts [S1].
-- **Capacity Exceeded:** When dense groups exceed the ID list upper limit $K = 4 \times N_{buf} - 2$ (e.g., $K=14$), treat the ray-sphere intersection as a ray-isosurface intersection to prevent holes [S1].
-- **Delayed Intersection:** If the ray intersects the isosurface only after crossing other metaballs, repeat depth peeling until termination, provided $K$ is not exceeded [S1].
+Procedural rules for handling degenerate or dense ray-metaball intersections during depth peeling to prevent duplicate IDs, holes, or occlusion errors [S1]. When multiple effective spheres intersect the viewing ray at the same point, compare ray parameters and return only one metaball ID. Check if the ID is already stored in the list; discard fragments containing that ID if present [S1]. When dense groups exceed the ID list upper limit $K = 4 \times N_{buf} - 2$, the standard intersection test fails and causes holes. Fallback: treat the ray-sphere intersection as a ray-isosurface intersection [S1]. When the viewing ray intersects the isosurface only after crossing other metaballs, repeat depth peeling until termination to keep the isosurface visible, provided $K$ is not exceeded [S1]. Parameter: $K$ (Upper limit for the ID list capacity). Value used in experiments: 14. No visual artifacts observed with this value [S1]. Pitfall: Checking for duplicate IDs in the list drastically increases depth peeling cost. In 32-bit floating point computations, omitting this check produces no visible artifacts [S1].
 
 ### Depth Peeling for Ray-Sphere Intersection
 A technique to obtain ray-sphere intersections in parallel from front to back by drawing effective spheres and storing IDs and ray parameters into a texture, discarding fragments whose parameters are less than previous ones [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on screen resolution and the number of depth peeling iterations. The most expensive part is Bézier Clipping [S1].
-- **Memory Complexity:** Limited by GPU memory for depth peeling buffers and the ID list per pixel ($K$ entries) [S1].
-- **Performance:** An animation with 1,000 moving metaballs was rendered in 640×480 at 23.1 fps [S1].
-- **Strengths:** No polygonization artifacts; preserves small objects; no acceleration structures needed; handles high-degree polynomials (quartic, degree-six) accurately [S1].
-- **Limitations:** Performance degrades with very dense groups if $K$ is exceeded (requires fallback); Bézier Clipping is computationally expensive; texture-based precomputation of Bézier coefficients showed little coherence and hurt performance [S1].
-- **When to use:** Real-time visualization of particle-based simulations (fluid, molecular dynamics) where small details matter and polygonization is unsuitable [S1].
-- **When not to use:** Scenes with extremely dense metaball clusters where $K$ is frequently exceeded and fallback causes visual artifacts or performance hits; scenes where precomputed vertex attributes (like Loop and Blinn's method) are feasible for fewer metaballs [S1].
+*   **Time Complexity:** Depends on screen resolution and the number of metaballs intersecting each ray. Depth peeling requires multiple passes, one per intersecting sphere. Bézier Clipping converges quickly but requires iterative clipping [S1].
+*   **Memory Complexity:** Limited by the ID list size $K$ and texture storage for depth peeling. $K$ is typically 14 [S1].
+*   **Measured Performance:** An animation with 1,000 moving metaballs was rendered in 640×480 at 23.1 fps [S1].
+*   **Strengths:** Handles large numbers of moving metaballs efficiently without precomputation or acceleration structures. Renders small objects smoothly, unlike grid-based methods [S1]. Solves quartic and degree-six polynomials accurately [S1].
+*   **Limitations:** Performance degrades with very dense groups of metaballs due to ID list limits and depth peeling passes. Bézier Clipping can be computationally expensive [S1].
+*   **When to Use:** Real-time visualization of particle-based simulations (fluid dynamics, molecular dynamics) with many moving metaballs [S1].
+*   **When Not to Use:** Scenes with extremely dense static metaballs where grid-based methods might be more efficient, or when hardware does not support efficient depth peeling [S1].
 
 ## Background
-The method is based on Nishita and Nakamae's algorithm [NN94], which used Bézier Clipping to solve quartic and degree-six polynomial equations for isosurface tests [S1]. It was adapted for the GPU by [S1] to handle large numbers of moving metaballs, addressing the limitations of polygonization (missing small objects, high memory cost) and previous GPU methods (Loop and Blinn's method, which is fast for few metaballs but slow for many due to neighbor-dependent vertex attributes; van Kooten et al.'s method, which suffers from small objects due to buffer resolution limits) [S1].
+Originated from Nishita and Nakamae's algorithm for ray casting implicit surfaces [S1]. The method was adapted for the GPU by [S1] to handle large numbers of moving metaballs. It builds on the concept of finite support density functions (quartic and degree-six polynomials) proposed by Nishita and Nakamae [S1]. Bézier Clipping was introduced by Nishita and Nakamae [NN94] and later optimized for GPUs by Pabst et al. [PSS*06] and Campagna et al. [CSS97] [S1].
 
 ## Sources
 [S1] GPU‐based Fast Ray Casting for a Large Number of Metaballs, https://doi.org/10.1111/j.1467-8659.2008.01132.x, fetched 2026-11-01

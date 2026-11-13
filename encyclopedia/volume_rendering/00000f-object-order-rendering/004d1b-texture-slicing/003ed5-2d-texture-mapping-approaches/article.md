@@ -1,44 +1,108 @@
 # 2D Texture Mapping Approaches
 
-Also called: 2D Texture Mapping
+Also called: 2D Texture Mapping, TMRenderAction, Texture Mapping Render Action
 
 ## Overview
-2D Texture Mapping Approaches is a family of object-order volume rendering techniques that decompose a 3D scalar field into stacks of 2D texture slices, projecting them onto proxy geometry and compositing them using hardware-accelerated alpha blending. This method solves the problem of rendering volumetric data on graphics hardware that lacks native 3D texture support or trilinear interpolation, relying instead on standard 2D texture mapping and bilinear interpolation. It sets itself apart from sibling methods like [View-Aligned Slicing with 3D Textures](870-view-aligned-slicing-with-3d-textures.md) by avoiding 3D texture units entirely, and from [Cabral Texture Mapping](7257-cabral-texture-mapping.md) by using standard ray-casting compositing rather than filtered back projection.
+2D Texture Mapping Approaches are object-order volume rendering techniques that decompose a 3D scalar field into a stack of 2D slices, which are then rasterized as textured polygons and composited into the frame buffer using hardware alpha blending [S1, book][S2]. Unlike view-aligned slicing methods that regenerate geometry per frame to align with the camera, this approach typically uses object-aligned slices (along X, Y, or Z axes), trading visual accuracy for hardware compatibility and rendering speed on systems lacking native 3D texture support [S4, unofficial][S21]. It solves the problem of efficiently rendering volumetric data by leveraging the high performance of 2D texture mapping units and hardware compositing, effectively combining backward projection (slice generation) and forward projection (blending) [S1, book][S2].
 
-## Shared principles
-The texture slicing family shares the following mechanism, terms, and mathematical foundations:
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field (volume data), typically stored as a `vtkImageData` dataset or equivalent texture memory [S1, book]. A transfer function mapping scalar values to color and opacity [S1, book].
+*   **Output:** A 2D image (frame buffer) representing the volume from the current viewpoint.
 
-1.  **Proxy Geometry:** The volume is intersected by a series of parallel planes. These planes are represented as geometric primitives (typically quads, triangles, or triangle strips) in screen space or object space. The geometry represents the "cut" through the volume [S1, book][S2, unofficial][S3, book].
-2.  **Intersection Computation:** The core algorithm involves calculating the intersection points between the slicing plane and the volume's bounding box or individual cells. For bounding box approaches, this involves solving line-plane intersection equations [S1, book][S2, unofficial]. For cell-based approaches, it involves slicing individual grid cells [S1, S2, unofficial][S3, book].
-3.  **Polygon Tessellation:** The resulting intersection points are sorted and tessellated into triangles or triangle strips suitable for rasterization. Sorting is often done by projecting points onto a 2D plane and computing a pseudo-angle to avoid trigonometric functions [S2, unofficial][S4, book].
-4.  **Texture Mapping:** The generated polygons are textured using the volume data. This typically involves mapping the 3D position of the polygon vertices to 3D texture coordinates to sample the scalar field [S1, book][S2, unofficial].
-5.  **Hardware Compositing:** The fragments are composited into the frame buffer using hardware-supported alpha blending. The standard blending equation is:
+**Data Structures:**
+*   **Texture Map:** A 2D array of texels. Each texel contains 1 to 4 components: Intensity (1), RGB (3), or RGBA (4) [S1, book].
+*   **Texture Coordinates:** 2D parameters $(u, v)$ associated with each vertex of the proxy geometry [S1, book].
+*   **Render Action Instance:** An object (e.g., `vzTMRenderAction`) that maintains a list of managed shapes and handles the rendering pipeline state [S2].
+
+**Steps:**
+1.  **Initialization:** Create the render action instance with a thread count parameter (typically 1) [S2]. Manage the shape node containing the volume geometry to ensure textures are resident in graphics memory [S2].
+2.  **Geometry Generation:** Generate proxy geometry (quads or triangles) representing the intersection of slicing planes with the volume bounding box [S1, book][S3, unofficial].
+3.  **Texture Coordinate Assignment:** Associate texture coordinates $(u, v)$ with each vertex of the proxy geometry. These coordinates map the vertex position into the 2D texture map [S1, book].
+4.  **Rasterization:** Begin drawing by calling the render action's draw method with appropriate flags (e.g., `VZ_RESTORE_GL_STATE_BIT`) [S2]. The graphics hardware linearly interpolates texture coordinates across the polygon fragments [S1, book].
+5.  **Sampling:** Use the interpolated texture coordinates to index into the 2D texture map. The resulting texel value (color/intensity/alpha) is retrieved [S1, book].
+6.  **Compositing:** Apply the texel value to the pixel using hardware-supported alpha blending. The standard blending equation is:
     $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
-    where $C_{src}$ and $A_{src}$ are the color and opacity from the texture sample, and $C_{dest}$ is the current frame buffer color [S3, book]. This implements the discrete volume rendering integral when slices are processed in correct depth order [S3, book].
-6.  **Depth Ordering:** To ensure correct transparency, slices must be rendered in back-to-front (or front-to-back with appropriate blending) order relative to the viewer [S1, book][S3, S4, book].
+    where $C_{src}$ and $A_{src}$ are the color and opacity from the texture sample, and $C_{dest}$ is the current frame buffer color [G]. Slices must be processed in correct depth order (back-to-front) to ensure correct transparency [S1, book][S3, unofficial][S4, book].
+7.  **Completion:** End the drawing sequence [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+render_action = TMRenderAction(thread_count=1)
+shape = create_shape_node(geometry=volume_geometry, appearance=volume_appearance)
+render_action.manage(shape)
+
+# Rendering Loop
+def render_volume():
+    render_action.begin_draw(flags=VZ_RESTORE_GL_STATE_BIT)
+    render_action.draw(shape)
+    render_action.end_draw()
+
+# Cleanup
+render_action.unmanage(shape)
+delete(render_action)
+```
+
+**Parameters:**
+*   **Thread Count:** Integer specifying the number of threads the render action can create. Typical value: 1 [S2].
+*   **Texture Components:** 1 (Intensity), 3 (RGB), or 4 (RGBA) [S1, book].
+
+**Edge Cases and Pitfalls:**
+*   **Power of Two:** Many rendering systems require image dimensions to be exact powers of two. Non-power-of-two textures may be automatically converted, incurring extra computation [S1, book].
+*   **Alpha Support:** Some renderers only support 2D textures or lack alpha texture support [S1, book].
+*   **Precision:** Gross errors in output images may occur if graphics hardware stores insufficient bits per component for texture and frame buffer [S1, book].
 
 ## Subtopics
 
 ### [2D Texture-Based Volume Rendering](916-2d-texture-based-volume-rendering.md)
-2D Texture-Based Volume Rendering is an object-order technique that renders volumetric data by decomposing the volume into three stacks of 2D texture slices aligned with the object's X, Y, and Z axes, then projecting and compositing the stack most perpendicular to the viewing direction back-to-front. It solves the problem of rendering 3D scalar fields on hardware that lacks native 3D texture support or trilinear interpolation, relying instead on standard 2D texture mapping and bilinear interpolation. Unlike [3D Texture-Based Volume Rendering](915-3d-texture-based-volume-rendering.md), which uses a single 3D texture and view-aligned geometry, this method requires storing three full copies of the volume data in memory and suffers from aliasing artifacts due to the lack of spatial interpolation in the third dimension.
+An object-order technique that renders volumetric data by decomposing the volume into a stack of 2D texture slices aligned with the object's coordinate axes (X, Y, or Z). It solves the problem of rendering 3D scalar fields on hardware that lacks native 3D texture support or to exploit the high performance of 2D texture mapping units. Unlike view-aligned 3D texture methods which require trilinear interpolation and per-frame geometry regeneration, this method uses object-aligned slices and bilinear interpolation, trading visual accuracy for compatibility and speed. It is a hybrid approach combining backward projection (generating slices) and forward projection (blending into the frame buffer).
 
 ### [Palette Texture Volume Rendering](6502-palette-texture-volume-rendering.md)
-Palette Texture Volume Rendering is an acceleration technique for 2D slicing volume visualization on mobile devices, utilizing adaptive screen-resolution rendering, compressed palette textures, and basic graphics hardware functionality. It solves the problem of limited computational resources and memory on low-end clients by reducing texture memory footprint and fragment count. It sets itself apart from standard 2D texture mapping by replacing RGBA volume slices with 8-bit indexed palette textures to realize the transfer function directly in hardware, and by employing a luminance-based heuristic to estimate opacity for adaptive resolution scaling, avoiding expensive off-screen buffer operations.
+An acceleration technique for 2D texture-slicing volume visualization designed for resource-constrained mobile devices. It solves the problem of slow rendering and high memory usage on low-end hardware by combining adaptive screen-resolution rendering with compressed palette textures. Unlike standard 2D texture mapping approaches which render at full resolution with uncompressed RGBA textures, this method reduces fragment count by rendering at a lower resolution and scales the result up, while using palette textures to compress volume data and implicitly encode the transfer function.
 
 ### [Cabral Texture Mapping](7257-cabral-texture-mapping.md)
-Cabral Texture Mapping is a volume rendering method that implements filtered back projection (FBP) for CT data using 2D texture mapping hardware and an accumulation buffer. It differs from standard ray-casting texture slicing by treating the rendering process as a back-projection of pre-filtered data, allowing for specific shading and transfer function behaviors that standard texture interpolation might mishandle.
+A volume rendering method that implements the filtered back projection (FBP) algorithm for Computed Tomography (CT) using hardware-accelerated texture mapping and an accumulation buffer. It differs from standard ray-casting or standard texture-slicing approaches by treating the reconstruction process as a series of texture-mapped slices that are blended back into the image space, effectively performing the back-projection step via rasterization. While it produces unshaded images, it suffers from the drawback that the volume must be re-shaded and re-loaded whenever viewing parameters change, and non-linear transfer functions are not interpolated correctly by the texture hardware.
 
 ### [Wall Surface Projection & Texture Mapping](9883-wall-surface-projection-texture-mapping.md)
-Wall Surface Projection & Texture Mapping renders 3D volumetric data by projecting individual visible block faces onto the 2D screen plane, applying perspective-correct UV mapping, and compositing the resulting pixels directly. Unlike standard texture slicing which composites semi-transparent slices back-to-front, this method treats opaque block surfaces as discrete geometric primitives, shading them per-face and handling clipping against the view frustum. It is distinct from sibling methods like Cabral Texture Mapping by relying on explicit screen-space projection of block faces rather than ray-casting through texture volumes.
+Renders a 3D volume by projecting individual axis-aligned block faces onto 2D screen coordinates, handling clipping, perspective-correct UV mapping, and per-face shading to draw pixels directly. It differs from standard texture slicing by operating on discrete, visible block faces (often in voxel engines) rather than continuous slicing planes, relying on manual pixel iteration for rasterization instead of hardware fragment shaders.
+
+### [Multi-constraints-based projective texture mapping](12075-multi-constraints-based-projective-texture-mapping.md)
+A technique for applying 2D texture images to 3D volume datasets (typically iso-surfaces) by warping the texture to align with user-defined key points on an intermediate projection template. Unlike traditional mesh-based mapping which requires explicit geometry and hole-filling, this method uses a plenoptic surface and spatial transfer functions to control texture placement, allowing for animation and handling topological artifacts without visual degradation. It sets itself apart from sibling methods like [Cabral Texture Mapping](7257-cabral-texture-mapping.md) by synthesizing texture detail via warping rather than reconstructing existing voxel data, and from [Projective Space Texture Mapping with Multi-Resolution Templates](13236-projective-space-texture-mapping-with-multi-resolution-templ.md) by relying on explicit user-supplied key points for alignment rather than automatic multi-resolution sampling.
+
+### [Projective Space Texture Mapping with Multi-Resolution Templates](13236-projective-space-texture-mapping-with-multi-resolution-templ.md)
+A technique that assigns solid textures to any position within a volume object using a mathematical indexing function, effectively acting as a pseudo-procedure functional model for solid textures. It solves the problem of degrading image quality when interpolating textures to resolutions exceeding that of the texture map by connecting 3D positions in the volume to 2D projective positions on a plenoptic surface, and then to integral coordinates in a morphed texture image. Unlike standard texture mapping which requires explicit UV parameterization, this method uses plenoptic indexing functions to substitute mathematical/procedure models for projective space texturing. It sets itself apart from siblings like [Cabral Texture Mapping](7257-cabral-texture-mapping.md) by explicitly utilizing a multi-resolution intermediate template generated via forward projection (DVR/DSR) and an inverse projection step for rendering, allowing for high-resolution patches to eliminate aliasing artifacts.
 
 ### Data-Driven Texture Coordinate Generation
-Data-Driven Texture Coordinate Generation is a minor variant where texture coordinates are procedurally generated as a function of local data values to threshold geometry, using a texture map with two entries (fully transparent and fully opaque) [S1, book]. The process involves creating a texture map with two entries: Entry 1 is fully transparent ($\alpha = 0$) and Entry 2 is fully opaque ($\alpha = 1$) [S1, book]. For each vertex or pixel, the local data value is evaluated; if the value is less than a threshold, the texture coordinate indexes into the transparent portion, otherwise it indexes into the opaque portion [S1, book].
+A variant where texture coordinates are generated procedurally as a function of local data values to threshold geometry, using a texture map with two entries (fully transparent and fully opaque) [S1, book].
+1. Create a texture map with two entries: transparent ($\alpha = 0$) and opaque ($\alpha = 1$) [S1, book].
+2. For each vertex/pixel, evaluate the local data value [S1, book].
+3. If data value < threshold, set texture coordinate to index into the transparent portion [S1, book].
+4. If data value >= threshold, set texture coordinate to index into the opaque portion [S1, book].
+The special texture map consists of two entries: Entry 1 is fully transparent (alpha=0), Entry 2 is fully opaque (alpha=1) [S1, book].
+
+### High-Resolution Patching
+A technique to overcome resolution limitations by directly importing a high-resolution image (patch) for a specific portion of the morphed texture image during texture mapping [S3, unofficial].
+1. Import a high-resolution texture image (patch) during texture mapping, with or without morphing, to replace or composite with the low-resolution area [S3, unofficial].
+2. Fine-tune the inverse projection to an extremely small area to digitally composite textures using different texture images (e.g., cliff texture and horse leg texture) [S3, unofficial].
+In a horse-on-cliff experiment, the paint area in the low-resolution texture was 66x20 pixels, while the high-resolution horse image was 256x166 pixels. Using the high-res patch preserved details, whereas the low-res patch suffered from alias artifacts and detail loss [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of slices and the resolution of the texture map. Rasterization is generally fast due to hardware acceleration.
+*   **Memory Complexity:** Requires texture memory for the 2D texture maps. The size depends on the number of slices and their resolution [S1, book].
+*   **Measured Performance:** High performance on hardware with efficient 2D texture mapping units. Suitable for real-time applications like video games where interactivity is required [S1, book].
+*   **Scaling:** Performance scales with the number of slices and texture resolution. Power-of-two constraints may impact memory usage [S1, book].
+*   **Strengths:** Compatibility with older hardware lacking 3D texture support; high performance due to hardware acceleration; simplicity of implementation [S4, unofficial][S17].
+*   **Limitations:** Lower visual accuracy compared to view-aligned methods due to object-aligned slices and bilinear interpolation; potential for aliasing artifacts if resolution is insufficient [S4, S21, unofficial].
+*   **When to Use:** When hardware lacks 3D texture support; when performance is critical and visual accuracy can be traded; for real-time applications [S1, book][S4, unofficial].
+*   **When Not to Use:** When high visual accuracy is required and view-aligned slicing is feasible; when non-linear transfer functions need precise interpolation (e.g., Cabral method drawbacks) [S2].
 
 ## Background
-The concept of texture mapping as a technique to add detail to an image without requiring modeling detail was established in early computer graphics literature, often described as pasting a picture to the surface of an object [S1, book]. The use of texture mapping requires two pieces of information: a texture map and texture coordinates [S1, book]. The texture map is the picture we paste, and the texture coordinates specify the location where the picture is pasted [S1, book]. More generally, texture mapping is a table lookup for color, intensity, and/or transparency that is applied to an object as it is rendered [S1, book]. Textures maps and coordinates are most often two-dimensional, but three-dimensional texture maps and coordinates are supported by most new graphics hardware [S1, book].
-
-In the context of volume rendering, texture mapping interfaces a data input with the graphics library's texture mapping functions [S1, book]. It requires texture coordinates to be defined by the actor's modeller [S1, book]. The technique is used in video games to provide realistic scenes with low numbers of polygons for interactivity [S1, book]. It supports both 2D (pixmap) and 3D (volume) texture maps [S1, book].
+Originating from the general concept of texture mapping in computer graphics, this approach was adapted for volume rendering to leverage existing 2D texture hardware [S1, book]. The `vzTMRenderAction` class, part of the VZ (Volume Visualization) library, provides a concrete implementation of this technique, managing the rendering pipeline for texture-mapped volume slices [S2]. It is widely used in applications requiring real-time volume visualization, such as medical imaging and scientific visualization, where hardware compatibility and speed are paramount [S1, book].
 
 ## Sources
-
 [S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S2] Chapter 2. Getting Started, https://techpubs.jurassic.nl/library/manuals/4000/007-4389-010/sgi_html/ch02.html, fetched 2026-10-30
+[S3] Texture Mapping Volume Objects, https://doi.org/10.2312/vvg.20051006, fetched 2026-10-30 (unofficial)

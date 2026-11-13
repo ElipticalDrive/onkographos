@@ -1,9 +1,9 @@
 # Data Feature-Based Classification
 
-Also called: Multi-Dimensional Transfer Function (MDTF) design, Feature-based classification
+Also called: Multi-Dimensional Transfer Function (MDTF) design, Feature-based Transfer Functions
 
 ## Overview
-Data Feature-Based Classification extends the classification domain from scalar intensity to multi-dimensional feature vectors $\mathbf{f}(\mathbf{x})$, enabling the separation of structures with overlapping intensity ranges by leveraging geometric, topological, or statistical attributes [S1, unofficial][S2][S3][S4]. It solves the ambiguity of intensity-only classification by mapping derived features (e.g., curvature, shape descriptors, local histograms) to optical properties, allowing users to distinguish materials based on their structural context rather than raw density [S1, unofficial][S3]. Unlike basic scalar transfer functions, this family supports high-dimensional input spaces and complex feature extraction pipelines, ranging from local geometric derivatives to global topological graphs [S1, unofficial][S3].
+Data Feature-Based Classification extends volume rendering classification by mapping derived feature vectors $\mathbf{f}(\mathbf{x})$—rather than just scalar intensity—to optical properties, enabling the distinction of structures with similar intensities but different geometric, topological, or contextual characteristics. It differs from its siblings by providing a unified framework for incorporating diverse attributes (curvature, shape, color, histograms, graphs) into the classification domain, whereas [Feature-Based Transfer Functions](13183-feature-based-transfer-functions.md) focuses on the general concept, and specific siblings like [Curvature-based Transfer Function](5452-curvature-based-transfer-function.md) or [Robust Material Graph Deduction](7459-robust-material-graph-deduction.md) implement specific feature extraction and graph-based strategies.
 
 ## Shared principles
 All methods in this family evaluate a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
@@ -32,7 +32,7 @@ Transfer functions are commonly implemented as piecewise linear functions define
 ## Subtopics
 
 ### [Curvature-based Transfer Function](5452-curvature-based-transfer-function.md)
-Maps scalar intensity and local surface curvature to optical properties to distinguish features based on geometric shape rather than intensity alone. It solves the problem of distinguishing between structures with similar intensities but different curvatures, such as the borders of small versus large features, and is primarily used for non-photorealistic rendering to highlight contours, ridges, and valleys. Unlike gradient-based methods that detect edges, cbTF emphasizes the "bumpiness" or deviation from a straight aspect of the underlying isosurfaces.
+Maps scalar data values and local surface curvature to optical properties to distinguish features based on geometric shape rather than intensity alone. It solves the problem of distinguishing between structures with similar intensities but different curvatures, such as the borders of small versus large features, and is primarily used for non-photorealistic rendering to highlight contours, ridges, and valleys. Unlike gradient-based methods that detect edges, cbTF emphasizes the "bumpiness" or deviation from a straight aspect of the underlying isosurfaces.
 
 ### [Shape-based Transfer Function Generation](5941-shape-based-transfer-function-generation.md)
 Assigns optical properties to volumetric features based on their 3D shape rather than solely on intensity or gradient magnitude. It solves the problem of distinguishing features with overlapping intensity ranges (e.g., contrast-filled vessels vs. bones) by using a shape descriptor derived from curve-skeletons. Unlike per-voxel classification methods that rely on local filters, this method assigns a uniform shape descriptor to each entire volumetric feature (segment), allowing for a more intuitive user interface where optical properties are assigned to shape classes rather than individual voxels.
@@ -58,17 +58,25 @@ Determines optical properties by measuring the distance or correlation between a
 ### [Local Histogram-based Classification Probability](14137-local-histogram-based-classification-probability.md)
 Separates overlapping tissues in volume rendering by using local histogram range weights as a second attribute alongside intensity. It allows a 2D Transfer Function to distinguish materials with identical intensity values but different neighborhood contexts, such as vessels and spongy bone in CT angiographies. Unlike standard intensity-based classification, this method computes a signed classification certainty $P$ derived from the narrowness of local intensity distributions, enabling the separation of materials that are indistinguishable by scalar value alone.
 
+### [Critical Point Classification](14338-critical-point-classification.md)
+Identifies and categorizes stationary points (where the gradient vanishes) in a scalar field to define optical properties for volume rendering. It distinguishes itself from sibling methods like [Curvature-based Transfer Function](5452-curvature-based-transfer-function.md) by focusing on topological singularities (maxima, minima, saddles) rather than local curvature magnitude or shape descriptors. This method is particularly effective for highlighting structural features such as peaks, pits, and saddle regions in scientific data.
+
 ### Domain Knowledge Attributes for Classification
 Attributes that capture domain knowledge to complement gradient-based measures. The paper specifically employs 'range weight' and 'local variance' as examples of these attributes to enable additional visualization possibilities [S1, unofficial].
 
 ### Feature Visualization
-Calculate 3-dimensional PCA components using teacher's feature map of first frame of training view images, then visualize features by components as RGB, normalized with min-max values with outlier removal [S2].
+Calculate 3-dimensional PCA components using teacher's feature map of first frame of training view images. Visualize features by components as RGB, normalized with min-max values with outlier removal [S2].
 
 ### Color-based Feature Detectors
-Feature detectors that exploit color separation in RGB image data to highlight specific tissues by computing normalized ratios of individual color channels [S3]. The red feature detector is defined as $c_R = R / (R + G + B)$, the green as $c_G = G / (R + G + B)$, and the blue as $c_B = B / (R + G + B)$ [S3]. A brown feature detector is created by a weighted linear combination: $c_{BR} = 0.5 * c_R + 1.0 * c_G$, exploiting that brown is composed of $0.5*R + 1.0*G + 0.0*B$ [S3].
+Feature detectors that exploit color separation in RGB image data to highlight specific tissues by computing normalized ratios of individual color channels [S3].
+*   $c_R = R / (R + G + B)$
+*   $c_G = G / (R + G + B)$
+*   $c_B = B / (R + G + B)$
+*   $c_{BR} = 0.5 * c_R + 1.0 * c_G$ (brown feature detector)
+*   Brown color composition: Brown is composed of 0.5*R + 1.0*G + 0.0*B [S3].
 
 ## Background
-The concept of using attributes beyond intensity to guide classification emerged with the development of Multi-Dimensional Transfer Functions (MDTFs). The foundational work by [S1, unofficial] introduced a design process using sorted histograms to incorporate domain knowledge attributes like range weight and local variance, allowing users to dynamically define classification criteria in a uniform way. This approach moved beyond simple scalar thresholds to handle the complexity of multidimensional data spaces. Subsequent developments expanded the feature domain to include geometric properties like curvature [S4, unofficial] and shape descriptors derived from skeletonization [S3], as well as high-dimensional color and spatial contexts [S1, unofficial]. The family has evolved to include automated graph-based deduction of material structures [S1, unofficial] and machine learning techniques for feature extraction [S2], reflecting a shift from manual parameter tuning to data-driven classification strategies.
+The concept of using multiple attributes for transfer function design emerged to overcome the limitations of scalar-only classification. Early work by [S1, unofficial] introduced Multi-Dimensional Transfer Function (MDTF) design using sorted histograms, allowing users to dynamically define attributes like range weight and local variance to capture domain knowledge. This approach enabled the incorporation of any type of classifying information in a uniform way. Subsequent developments expanded the feature domain to include color-based detectors [S3], shape-based descriptors [S3], and topological graph structures [S1, unofficial], reflecting a shift from manual, intensity-based tuning to automated, feature-driven classification.
 
 ## Sources
 [S1] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)

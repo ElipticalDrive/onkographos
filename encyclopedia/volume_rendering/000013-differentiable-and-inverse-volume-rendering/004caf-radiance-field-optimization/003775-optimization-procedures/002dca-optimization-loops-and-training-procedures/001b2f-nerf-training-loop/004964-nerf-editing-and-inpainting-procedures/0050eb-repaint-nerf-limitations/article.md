@@ -1,18 +1,27 @@
 # RePaint-NeRF Limitations
-
 Also called: NeRF editing constraints
 
 ## Overview
-This article documents the limitations of the RePaint-NeRF framework, which performs NeRF editing via semantic masks and diffusion models [S1]. It addresses the constraints regarding computational efficiency, geometric fidelity during drastic shape changes, and view-angle-dependent artifacts. These limitations distinguish the method from sibling approaches that may prioritize speed or geometric consistency over the specific text-guided semantic editing pipeline [S1].
+This article documents the specific failure modes and resource constraints of the RePaint-NeRF method [S1], which performs NeRF editing via semantic masks and diffusion model guidance. It addresses the limitations of optimization-based NeRF editing where the target geometry or appearance diverges significantly from the source, or where view-angle constraints introduce artifacts. Unlike sibling methods that may mitigate these issues through progressive strategies or adaptive view selection, RePaint-NeRF is subject to severe time, memory, and geometric consistency bottlenecks [S1].
 
 ## Shared principles
 Not given in the sources.
 
 ## Subtopics
-Not given in the sources.
+
+### Geometric and Semantic Inconsistency
+When the target object shape differs drastically from the source object, the training process struggles to converge, often resulting in incomplete edits [S1]. For example, transforming a hotdog into a cup may fail to fully replace the original geometry, leaving residual artifacts [S1]. Additionally, restricted view angles cause geometric artifacts at image edges; generated objects at the periphery may incorrectly combine features from multiple source objects (e.g., a generated daisy at the view edge combining features from two orchids) [S1].
+
+### Computational Complexity
+The method is time and memory intensive, requiring more than 30 minutes to generate a high-quality 3D model at the object level [S1]. This computational burden prevents scaling to larger resolutions or larger scenes [S1].
+
+### Comparison with Siblings
+*   **Progressive Inpainting-and-Erasing [8658-progressive-inpainting-and-erasing.md]**: Uses a coarse-to-fine strategy to mitigate geometric artifacts, potentially addressing the edge-blending issues seen in RePaint-NeRF.
+*   **Adaptive View Selection for Inpainting [12405-adaptive-view-selection-for-inpainting.md]**: Selects views to optimize editing quality, which may reduce the view-angle constraints that cause peripheral artifacts in RePaint-NeRF.
+*   **NeRF-In [12372-nerf-in-inpainting-optimization.md]**: Focuses on optimization stability, which may help with the convergence issues when shapes differ significantly.
 
 ## Background
-RePaint-NeRF was proposed by the authors of the paper "RePaint-NeRF: NeRF Editing via Semantic Masks and Diffusion Models" [S1]. The method utilizes a pre-trained 2D diffusion model to guide the regeneration of masked parts of a NeRF scene, incorporating background prompts and CLIP loss to handle invisible backgrounds, along with depth information for semantic mask acquisition [S1].
+Origin: RePaint-NeRF was proposed in 2023 by the authors of "RePaint-NeRF: NeRF Editting via Semantic Masks and Diffusion Models" [S1]. It builds on the framework of using pre-trained 2D diffusion models for gradient guidance in NeRF editing.
 
 ## Sources
 [S1] RePaint-NeRF: NeRF Editting via Semantic Masks and Diffusion Models, https://doi.org/10.24963/ijcai.2023/201, fetched 2026-10-26

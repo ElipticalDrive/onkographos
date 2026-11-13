@@ -3,106 +3,103 @@
 Also called: GenerateTriangles, Mesh Splitting by Material
 
 ## Overview
-Material-Based Mesh Sectioning splits a decoded mesh into separate sections (arrays of triangles) based on the material ID associated with each triangle's vertices [S1, unofficial]. It solves the problem of organizing geometry for GPU submission by grouping triangles that share the same material, enabling efficient batching and rendering [S1, unofficial]. It differs from sibling methods like [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md) by focusing on the logical disambiguation of material references rather than the geometric assembly or sectioning of the mesh itself [S1, unofficial].
+Material-Based Mesh Sectioning splits a decoded mesh into separate arrays of triangles based on the material ID associated with each triangle's vertices [S1, unofficial]. It solves the problem of organizing geometry for multi-material rendering by ensuring that triangles sharing the same material are grouped contiguously, which facilitates subsequent merging and GPU resource management [S1, unofficial]. It differs from sibling methods like [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md) by focusing on the logical disambiguation and caching of material references rather than the geometric assembly or sectioning of the mesh itself [S1, unofficial].
 
 ## How it works
-**Inputs:** A decoded mesh structure containing vertex positions, indices, and per-vertex material IDs.
-**Outputs:** An array of mesh sections, where each section contains the triangles belonging to a specific material ID.
+**Inputs and Outputs**
+*   **Input:** A decoded mesh object containing vertex positions, indices, and per-vertex material IDs.
+*   **Output:** An array of mesh sections, where each section corresponds to a unique material ID and contains an array of triangles (triplets of vertices).
 
-**Data Structures:**
-*   `MeshSection`: A container for a single material group.
-    *   `material_id`: Integer identifier for the material.
-    *   `triangles`: List of triangle definitions (three vertex indices or positions).
-*   `MeshSections`: Dynamic array of `MeshSection` objects.
+**Data Structures**
+*   **Mesh Section:** A structure containing an array of triangles. The array is dynamically resized based on the maximum material ID encountered.
+*   **Triangle:** Defined by three vertices. Each vertex includes a position (3 floats) and inherits the material ID from the source mesh's vertex data.
 
-**Steps:**
-1.  **Decode Input:** Retrieve the decoded mesh using `GetDecodedMesh`.
-2.  **Sanity Check:** If the number of indices is less than 3, return an empty `MeshSections` array.
-3.  **Initialize Sections:** Create an empty `MeshSections` array.
-4.  **Iterate Triangles:** Loop through the decoded mesh indices in steps of 3. Let $i$ be the current index.
-5.  **Retrieve Vertices:** Get the three vertex indices $v_0 = \text{indices}[i]$, $v_1 = \text{indices}[i+1]$, $v_2 = \text{indices}[i+2]$.
-6.  **Get Positions:** Retrieve the 3D positions $P_0, P_1, P_2$ for these vertices. Add the mesh offset to each position: $P'_k = P_k + \text{mesh\_offset}$ for $k \in \{0, 1, 2\}$.
-7.  **Determine Material ID:**
-    *   Let $m_0, m_1, m_2$ be the material IDs of vertices $v_0, v_1, v_2$.
-    *   If $m_0 = m_1 = m_2$, set $m_{tri} = m_0$.
-    *   Else if $m_1 = m_2$, set $m_{tri} = m_1$.
-    *   Else, set $m_{tri} = m_0$.
-    *   *Note:* This logic prioritizes consistency, preferring the material of the second and third vertices if they match, otherwise defaulting to the first [S1, unofficial].
-8.  **Ensure Section Existence:** If $m_{tri} \ge \text{len}(\text{MeshSections})$, resize the array to $m_{tri} + 1$ with zeroed elements.
-9.  **Add Triangle:** Append the triangle defined by $(P'_0, P'_1, P'_2)$ to `MeshSections[m_tri].triangles`.
+**Steps**
+1.  **Decode:** Retrieve the decoded mesh using `GetDecodedMesh` [S1, unofficial].
+2.  **Sanity Check:** If the number of indices in the mesh is less than 3, return an empty mesh sections array [S1, unofficial].
+3.  **Initialize Sections:** Create an empty array to hold mesh sections. The size of this array will be determined by the maximum material ID encountered.
+4.  **Iterate Triangles:** Loop through the mesh indices in steps of 3. For each triplet of indices $(i, i+1, i+2)$:
+    a.  **Retrieve Vertices:** Get the three vertices corresponding to the current indices.
+    b.  **Adjust Position:** Add the mesh's global offset to each vertex's position to ensure correct world-space coordinates [S1, unofficial].
+    c.  **Determine Material ID:**
+        i.  Start with the material ID of Vertex 0.
+        ii. If Vertex 1 and Vertex 2 have the same material ID, use that ID instead. This rule prioritizes consistency when two vertices share a material, implying a preference for the majority material in a triangle [S1, unofficial].
+    d.  **Ensure Section Existence:** If the determined `materialID` is greater than or equal to the current number of sections, resize the sections array to `materialID + 1`, initializing new elements as empty [S1, unofficial].
+    e.  **Add Triangle:** Append the current triangle (with its adjusted positions and determined material ID) to the section at index `materialID` [S1, unofficial].
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def material_based_mesh_sectioning(decoded_mesh):
-    indices = decoded_mesh.indices
-    vertices = decoded_mesh.vertices
-    mesh_offset = decoded_mesh.offset
+    # Step 1: Decode
+    mesh = decoded_mesh
     
-    if len(indices) < 3:
+    # Step 2: Sanity Check
+    if len(mesh.indices) < 3:
         return []
     
-    mesh_sections = []
+    # Step 3: Initialize Sections
+    # We don't know the max material ID yet, so we start with an empty list
+    sections = []
     
-    for i in range(0, len(indices), 3):
-        v0_idx = indices[i]
-        v1_idx = indices[i+1]
-        v2_idx = indices[i+2]
+    # Step 4: Iterate Triangles
+    for i in range(0, len(mesh.indices), 3):
+        idx0, idx1, idx2 = mesh.indices[i], mesh.indices[i+1], mesh.indices[i+2]
         
-        p0 = vertices[v0_idx] + mesh_offset
-        p1 = vertices[v1_idx] + mesh_offset
-        p2 = vertices[v2_idx] + mesh_offset
+        # Retrieve Vertices
+        v0 = mesh.vertices[idx0]
+        v1 = mesh.vertices[idx1]
+        v2 = mesh.vertices[idx2]
         
-        m0 = vertices[v0_idx].material_id
-        m1 = vertices[v1_idx].material_id
-        m2 = vertices[v2_idx].material_id
+        # Adjust Position (add mesh offset)
+        v0.pos += mesh.offset
+        v1.pos += mesh.offset
+        v2.pos += mesh.offset
         
-        if m0 == m1 == m2:
-            material_id = m0
-        elif m1 == m2:
-            material_id = m1
-        else:
-            material_id = m0
-            
-        if material_id >= len(mesh_sections):
-            # Resize array to hold new section, initialized with empty triangles
-            new_sections = [None] * (material_id + 1)
-            for j in range(len(mesh_sections)):
-                new_sections[j] = mesh_sections[j]
-            mesh_sections = new_sections
-            
-        if mesh_sections[material_id] is None:
-            mesh_sections[material_id] = {
-                'material_id': material_id,
-                'triangles': []
-            }
-            
-        mesh_sections[material_id]['triangles'].append((p0, p1, p2))
+        # Determine Material ID
+        mat_id = v0.material_id
+        if v1.material_id == v2.material_id:
+            mat_id = v1.material_id
         
-    return mesh_sections
+        # Ensure Section Existence
+        if mat_id >= len(sections):
+            # Resize to mat_id + 1, initializing new elements as empty
+            sections.extend([[] for _ in range(mat_id - len(sections) + 1)])
+        
+        # Add Triangle
+        # A triangle is represented as a tuple of vertices
+        triangle = (v0, v1, v2)
+        sections[mat_id].append(triangle)
+        
+    return sections
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Mixed Materials:** If a triangle has vertices with different material IDs, the logic above assigns a single material ID based on the specified priority. This may result in visual artifacts if the material boundary cuts through the triangle.
-*   **Sparse Material IDs:** If material IDs are large and sparse, resizing the array to `material_id + 1` can lead to significant memory waste. A hash map or dictionary might be more efficient in such cases, though the source specifies array resizing [S1, unofficial].
-*   **Empty Sections:** The source mentions resizing with zeroed elements, implying empty sections are valid entries in the array.
+**Parameters**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls**
+*   **Degenerate Input:** If the mesh has fewer than 3 indices, the function returns an empty array [S1, unofficial].
+*   **Material ID Consistency:** The rule for determining material ID (preferring V1/V2 if they match) may lead to unexpected material assignments if a triangle has vertices with IDs (A, B, B). In this case, the triangle is assigned material B, even if V0 is A. This behavior is specific to the source implementation [S1, unofficial].
+*   **Sparse Material IDs:** If material IDs are sparse (e.g., IDs 0 and 1000 are used, but 1-999 are not), the sections array will be large and mostly empty. This is a memory inefficiency not addressed by the basic algorithm [S1, unofficial].
 
 ## Subtopics
 
 ### [Material ID Assignment & Caching](13805-material-id-assignment-caching.md)
-Maps block-level material identifiers to unique, globally distinct terrain material IDs to facilitate mesh merging and GPU resource management. It creates material objects on demand and caches the results to avoid redundant GPU allocations. It differs from sibling methods by focusing on the logical disambiguation and caching of material references rather than the geometric assembly or sectioning of the mesh itself.
+Maps block-level material identifiers to unique, globally distinct terrain material IDs to facilitate mesh merging and GPU resource management. It creates material objects on demand and caches the results to avoid redundant GPU allocations, ensuring that visually identical materials share a single GPU resource. It differs from sibling methods by focusing on the logical disambiguation and caching of material references rather than the geometric assembly or sectioning of the mesh itself.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$, where $N$ is the number of triangles, as each triangle is processed exactly once.
-*   **Memory Complexity:** $O(N + M)$, where $M$ is the maximum material ID used. The array size depends on the highest material ID, not the number of unique materials.
-*   **Strengths:** Simple implementation, efficient for dense material ID spaces, facilitates GPU batching.
-*   **Limitations:** Inefficient for sparse material ID spaces; potential for visual artifacts if triangles span multiple materials.
-*   **When to Use:** When material IDs are dense and small integers, and GPU batching by material is required.
-*   **When Not to Use:** When material IDs are sparse or large, or when triangles frequently span multiple materials.
+*   **Time Complexity:** $O(N)$, where $N$ is the number of triangles in the input mesh. Each triangle is processed exactly once.
+*   **Memory Complexity:** $O(N + M)$, where $N$ is the number of triangles and $M$ is the maximum material ID. The sections array size depends on $M$, and the total number of triangles stored is $N$.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with the number of triangles. Memory usage scales with the number of triangles and the range of material IDs.
+*   **Strengths:** Simple to implement; effectively groups geometry by material for efficient rendering.
+*   **Limitations:** Inefficient for sparse material IDs; does not handle material blending or transparency sorting.
+*   **When to Use:** When rendering meshes with distinct, non-overlapping materials per triangle.
+*   **When Not to Use:** When material IDs are sparse or when material blending is required.
 
 ## Background
-Originating from the VoxelGenerator project by Jay2645, this method is part of the mesh assembly pipeline for voxel-based rendering [S1, unofficial]. It builds on the geometry definition and assembly phase, which determines exposed faces and culls internal ones [14339-geometry-definition-of-assembly.md].
+The method originates from the VoxelGenerator project by Jay2645 [S1, unofficial]. It is used in voxel-based game engines to manage terrain geometry, where different block types (grass, stone, etc.) are assigned different materials. The method ensures that triangles for each material type are grouped together, allowing for efficient batch rendering.
 
 ## Sources
 [S1] Jay2645/VoxelGenerator, https://github.com/Jay2645/VoxelGenerator, fetched 2026-10-27 (unofficial)

@@ -3,7 +3,7 @@
 Also called: Point-Ray Distance Test for Selection Highlighting, PointProjection
 
 ## Overview
-The Ray-Point Distance Test is a fragment shader technique used to determine if a viewing ray passes within a specified radius of a small, fixed set of pre-selected 3D points, outputting a binary highlight color to indicate selection proximity [S1, unofficial]. It differs from general ray-primitive intersection methods by operating on a discrete, small constant number of points rather than continuous geometric primitives, and by explicitly using the ray segment endpoints (front and back faces) to compute perpendicular distance, making it suitable for interactive selection highlighting in volume rendering contexts [S1, unofficial].
+The Ray-Point Distance Test is a fragment shader technique that tests whether a viewing ray passes within a specified radius of up to 10 pre-selected 3D points, outputting a binary highlight color to indicate selection proximity [S1, unofficial]. It differs from general ray-primitive intersection methods by operating on a discrete, small constant number of points rather than continuous geometric primitives, and by explicitly using the ray segment endpoints to compute perpendicular distance [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -15,47 +15,50 @@ The Ray-Point Distance Test is a fragment shader technique used to determine if 
 *   **Output**: `outColor` (vec4), where red (1.0, 0.0, 0.0, 1.0) indicates a hit and green (0.0, 1.0, 0.0, 1.0) indicates no hit [S1, unofficial].
 
 **Data Structures**
-The method relies on standard GLSL vector types. The selected points are stored in a fixed-size array of 10 vec3s. The ray is defined by two vec3 positions: the origin (derived from vertex input) and the endpoint (sampled from texture) [S1, unofficial].
+The method relies on standard GLSL vector types for all geometric data [S1, unofficial]. The selected points are stored in a fixed-size array of 10 vec3s [S1, unofficial]. The ray is defined by two vec3 positions: the origin derived from vertex input and the endpoint sampled from a texture [S1, unofficial].
 
 **Steps**
 1.  **Ray Endpoint Sampling**: Sample the ray endpoint position from the `u_TexCoordToRayEndPoint` texture using the vertex screen coordinate `v_screenCoord` [S1, unofficial].
-2.  **Ray Definition**: Compute the ray origin as `v_gridPosition`. Compute the ray direction as `normalize(backface - v_gridPosition)`, where `backface` is the sampled endpoint [S1, unofficial].
+2.  **Ray Definition**: Compute the ray origin as `v_gridPosition` [S1, unofficial]. Compute the ray direction as `normalize(backface - v_gridPosition)`, where `backface` is the sampled endpoint [S1, unofficial].
 3.  **Distance Calculation**: For each of the 10 selected points in `u_SelectedPoints`, compute the perpendicular distance from the point to the ray segment defined by the origin and endpoint [S1, unofficial].
 4.  **Hit Test**: If the computed distance for any point is less than or equal to `u_SelectedPointsRadius_M`, set a hit flag to true [S1, unofficial].
 5.  **Hardcoded Check**: Additionally, evaluate the distance against a hardcoded point at `vec3(0.5)` unconditionally [S1, unofficial].
 6.  **Output**: Output `vec4(1.0, 0.0, 0.0, 1.0)` if the hit flag is true, otherwise output `vec4(0.0, 1.0, 0.0, 1.0)` [S1, unofficial].
 
 **Formula**
-The perpendicular distance $d$ from a point $\mathbf{x}_0$ to the line segment defined by $\mathbf{x}_1$ (ray origin) and $\mathbf{x}_2$ (ray endpoint) is calculated as [S1, unofficial]:
+The perpendicular distance $d$ from a point $\mathbf{x}_0$ to the line defined by $\mathbf{x}_1$ (ray origin) and $\mathbf{x}_2$ (ray endpoint) is calculated as [S1, unofficial]:
 
 $$
 d = \frac{\| (\mathbf{x}_0 - \mathbf{x}_1) \times (\mathbf{x}_0 - \mathbf{x}_2) \|}{\| \mathbf{x}_2 - \mathbf{x}_1 \|}
 $$
 
 Where:
-*   $\mathbf{x}_0$ is the selected point coordinate.
-*   $\mathbf{x}_1$ is the ray origin.
-*   $\mathbf{x}_2$ is the ray endpoint.
-*   $\times$ denotes the cross product.
-*   $\| \cdot \|$ denotes the Euclidean norm (length).
+*   $\mathbf{x}_0$ is the selected point coordinate [S1, unofficial].
+*   $\mathbf{x}_1$ is the ray origin [S1, unofficial].
+*   $\mathbf{x}_2$ is the ray endpoint [S1, unofficial].
+*   $\times$ denotes the cross product [S1, unofficial].
+*   $\| \cdot \|$ denotes the Euclidean norm (length) [S1, unofficial].
 
 **Parameters**
 *   `u_SelectedPointsRadius_M`: The radius threshold. Typical values are not specified, but it is a world-unit float [S1, unofficial].
 *   `u_SelectedPoints[10]`: Fixed array of 10 points. The implementation assumes exactly 10 points are processed, even if fewer are logically selected [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-*   **Loop Unrolling**: The loop over the 10 selected points is manually unrolled into explicit logical OR checks rather than using a dynamic for-loop. This is likely done to avoid GLSL loop unrolling limits or dynamic indexing restrictions [S1, unofficial].
-*   **Hardcoded Point**: The check against `vec3(0.5)` is executed unconditionally, regardless of the number of selected points or the radius threshold, which may lead to false positives if not accounted for in the application logic [S1, unofficial].
-*   **Ray Segment vs. Line**: The formula computes distance to the line segment, but the specific implementation uses the cross-product formula which technically computes distance to the infinite line passing through $\mathbf{x}_1$ and $\mathbf{x}_2$. However, in the context of volume rendering rays, the segment is often long enough that this distinction is negligible, or the formula is applied as an approximation for segment distance [S1, unofficial]. *Note: The provided source code uses the cross-product formula, which is exact for infinite lines. For strict segment distance, clamping the projection parameter is required, but the source does not implement this.* [G]
+*   **Loop Unrolling**: The loop over the 10 selected points is manually unrolled into explicit logical OR checks rather than using a dynamic for-loop [S1, unofficial].
+*   **Hardcoded Point**: The check against `vec3(0.5)` is executed unconditionally, regardless of the number of selected points or the radius threshold [S1, unofficial].
+*   **Ray Segment vs. Line**: The source labels the formula as distance to the line segment, but the implementation uses the cross-product formula which computes distance to the infinite line passing through $\mathbf{x}_1$ and $\mathbf{x}_2$ [S1, unofficial]. For strict segment distance, clamping the projection parameter is required, but the source does not implement this [G].
 
 **Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import numpy as np
+
 def ray_point_distance_test(v_gridPosition, v_screenCoord, u_TexCoordToRayEndPoint, u_SelectedPoints, u_SelectedPointsRadius_M):
     # Step 1: Sample ray endpoint
-    backface = texture(u_TexCoordToRayEndPoint, v_screenCoord).xyz
+    backface = u_TexCoordToRayEndPoint[v_screenCoord]
     
     # Step 2: Define ray
     ray_origin = v_gridPosition
@@ -74,51 +77,52 @@ def ray_point_distance_test(v_gridPosition, v_screenCoord, u_TexCoordToRayEndPoi
         x2 = ray_endpoint
         
         x2_minus_x1 = x2 - x1
-        len_x2x1 = length(x2_minus_x1)
+        len_x2x1 = np.linalg.norm(x2_minus_x1)
         
-        # Avoid division by zero if ray has zero length
+        # Guard against division by zero if ray has zero length [G]
         if len_x2x1 == 0:
-            dist = length(x0 - x1)
+            dist = np.linalg.norm(x0 - x1)
         else:
-            dist = length(cross(x0 - x1, x0 - x2)) / len_x2x1
+            dist = np.linalg.norm(np.cross(x0 - x1, x0 - x2)) / len_x2x1
             
         if dist <= u_SelectedPointsRadius_M:
             hit = True
             break # Optimization: no need to check further if one hit is found
             
     # Step 5: Hardcoded check against vec3(0.5)
-    hardcoded_point = vec3(0.5)
+    hardcoded_point = np.array([0.5, 0.5, 0.5])
     x0 = hardcoded_point
     x1 = ray_origin
     x2 = ray_endpoint
     x2_minus_x1 = x2 - x1
-    len_x2x1 = length(x2_minus_x1)
+    len_x2x1 = np.linalg.norm(x2_minus_x1)
     
     if len_x2x1 == 0:
-        dist_hardcoded = length(x0 - x1)
+        dist_hardcoded = np.linalg.norm(x0 - x1)
     else:
-        dist_hardcoded = length(cross(x0 - x1, x0 - x2)) / len_x2x1
+        dist_hardcoded = np.linalg.norm(np.cross(x0 - x1, x0 - x2)) / len_x2x1
         
     if dist_hardcoded <= u_SelectedPointsRadius_M:
         hit = True
         
     # Step 6: Output color
     if hit:
-        return vec4(1.0, 0.0, 0.0, 1.0)
+        return np.array([1.0, 0.0, 0.0, 1.0])
     else:
-        return vec4(0.0, 1.0, 0.0, 1.0)
+        return np.array([0.0, 1.0, 0.0, 1.0])
 ```
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ per fragment, as the number of selected points is fixed at 10. The cost is dominated by 10 cross-product and length calculations, plus one hardcoded check.
-*   **Memory Complexity**: $O(1)$ additional memory per fragment, as no dynamic data structures are allocated.
-*   **Strengths**: Extremely fast for small numbers of points; suitable for real-time selection highlighting in interactive volume rendering.
+*   **Time Complexity**: $O(1)$ per fragment, as the number of selected points is fixed at 10 [S1, unofficial].
+*   **Performance Cost**: The cost is dominated by 10 cross-product and length calculations, plus one hardcoded check [S1, unofficial].
+*   **Memory Complexity**: $O(1)$ additional memory per fragment, as no dynamic data structures are allocated [S1, unofficial].
+*   **Strengths**: Extremely fast for small numbers of points; suitable for real-time selection highlighting in interactive volume rendering [S1, unofficial].
 *   **Limitations**: Not scalable to large numbers of points; the hardcoded point check may cause unintended behavior; the distance formula is for infinite lines, not segments, which may be inaccurate for short rays or points far outside the segment bounds [S1, unofficial].
-*   **When to Use**: Interactive selection highlighting for a small, known set of points in a volume rendering application.
-*   **When Not to Use**: When the number of points is large or dynamic; when strict segment distance is required for points potentially outside the ray segment bounds.
+*   **When to Use**: Interactive selection highlighting for a small, known set of points in a volume rendering application [S1, unofficial].
+*   **When Not to Use**: When the number of points is large or dynamic; when strict segment distance is required for points potentially outside the ray segment bounds [S1, unofficial].
 
 ## Background
-This method originates from an unofficial WebGL volume rendering implementation [S1, unofficial]. It is designed as a fragment shader technique for selection highlighting, leveraging the parallel execution model of GPUs to test multiple points against rays generated per pixel. The approach is specific to the context of the `yngve-sk/Volume-Rendering-WebGL` project and is not a widely standardized method in general graphics literature.
+This method originates from an unofficial WebGL volume rendering implementation [S1, unofficial]. It is designed as a fragment shader technique for selection highlighting, leveraging the parallel execution model of GPUs to test multiple points against rays generated per pixel [S1, unofficial]. The approach is specific to the context of the `yngve-sk/Volume-Rendering-WebGL` project and is not a widely standardized method in general graphics literature [S1, unofficial].
 
 ## Sources
 [S1] yngve-sk/Volume-Rendering-WebGL, https://github.com/yngve-sk/Volume-Rendering-WebGL, fetched 2026-10-27 (unofficial)
