@@ -1,0 +1,150 @@
+--- v003.md
++++ v004.md
+@@ -1,8 +1,8 @@
+ # Hierarchical Volume Traversal with Adaptive Termination
+ 
+-Also called: Pyramidal Volume Traversal, TraceRay2
++Also called: Combined Hierarchical Enumeration and Adaptive Termination, Levoy's Ray Tracing Optimizations, Pyramidal Volume Traversal, TraceRay2
+ 
+ ## Overview
+-Hierarchical Volume Traversal with Adaptive Termination is a ray tracing algorithm that uses a pyramidal data structure of binary volumes to skip empty regions and an adaptive termination criterion to stop tracing when opacity changes become negligible [S1]. Unlike geometric ray tracing, which uses bounding volumes or spatial subdivision with lists of primitives, this method uses a hierarchical binary volume structure, which is more efficient for volume data because volume datasets have tens of millions of spatially ordered cells with single samples, whereas geometric scenes have hundreds of cells with many primitives [S1].
++Hierarchical Volume Traversal with Adaptive Termination is a ray tracing algorithm that uses a pyramidal data structure of binary volumes to skip empty regions and an adaptive termination criterion to stop tracing when accumulated opacity exceeds a threshold [S1]. Unlike geometric ray tracing, which uses bounding volumes or spatial subdivision with lists of primitives, this method uses a hierarchical binary volume structure, which is more efficient for volume data because volume datasets have tens of millions of spatially ordered cells with single samples, whereas geometric scenes have hundreds of cells with many primitives [S1].
+ 
+ ## How it works
+@@ -45,6 +45,5 @@
+     a.  Calculate the cell index $\mathbf{i}$ at current level $m$ containing point $\mathbf{x}$ using the `Index(m, x)` procedure [S1].
+     b.  If the cell value $V_m(\mathbf{i})$ is 1 and $m > m_{min}$:
+-        i.  Decrement level $m$ by 1 to descend into the hierarchy ($m := m - 1$) [S1].
+-        ii. Continue to the next iteration of the loop to re-evaluate the cell at the new level [S1].
++        i.  Decrement level $m$ by 1 ($m := m - 1$) and repeat the loop [S1].
+     c.  Else (if cell is 1 and at min level, or cell is 0):
+         i.  If the cell value $V_m(\mathbf{i})$ is 1:
+@@ -73,11 +72,12 @@
+ ### Pseudocode
+ ```python
+-def TraceRay2(u, epsilon, m_max, m_min, M, V, InBounds, First, Index, Next, Parent, RenderCell):
++def TraceRay2(u, epsilon, m_max, m_min, M, V, bounds):
++    # u = (origin, direction), V = [V_0, V_1, ..., V_M], bounds = (min_x, max_x, min_y, max_y, min_z, max_z)
+     C_ray = 0.0
+     alpha_ray = 0.0
+-    x = First(u)
++    x = First(u, bounds)
+     m = m_max
+-    while InBounds(x) and alpha_ray <= 1.0 - epsilon:
+-        i = Index(m, x)
++    while InBounds(x, bounds) and alpha_ray <= 1.0 - epsilon:
++        i = Index(m, x, bounds)
+         if V[m][i] == 1 and m > m_min:
+             m -= 1
+@@ -85,8 +85,8 @@
+         else:
+             if V[m][i] == 1:
+-                x_exit = Next(m, x, u)
+-                C_ray, alpha_ray = RenderCell(u, x, x_exit, C_ray, alpha_ray, V)
+-            x_next = Next(m, x, u)
+-            while m < M and Parent(m, Index(m, x_next)) != Parent(m, i):
++                x_exit = Next(m, x, u, bounds)
++                C_ray, alpha_ray = RenderCell(u, x, x_exit, C_ray, alpha_ray, V, bounds)
++            x_next = Next(m, x, u, bounds)
++            while m < M and Parent(m, Index(m, x_next, bounds)) != Parent(m, i):
+                 i = Parent(m, i)
+                 m += 1
+@@ -94,5 +94,5 @@
+     return C_ray, alpha_ray
+ 
+-def RenderCell(u, x1, x2, C_ray, alpha_ray, V):
++def RenderCell(u, x1, x2, C_ray, alpha_ray, V, bounds):
+     U1 = Image(x1)
+     U2 = Image(x2)
+@@ -101,5 +101,5 @@
+             U = (x, y)
+             obj_x = Object(U)
+-            if V[0][Index(0, obj_x)] == 1:
++            if V[0][Index(0, obj_x, bounds)] == 1:
+                 C_sample = Sample(V.color, obj_x)
+                 alpha_sample = Sample(V.opacity, obj_x)
+@@ -109,12 +109,52 @@
+ 
+ # [G] Standard projection/resampling helpers:
+-# First(u): computes ray entry point into volume bounds.
+-# InBounds(x): returns True if x is inside volume bounds.
+-# Index(m, x): maps object-space coordinates x to cell index at level m.
+-# Next(m, x, u): computes exit point of cell at level m along ray u from x.
+-# Parent(m, i): returns parent cell index of i at level m.
+-# Image(x): maps object-space coordinates x to 2D image pixel coordinates.
+-# Object(U): maps 2D image pixel U to object-space coordinates.
+-# Sample(field, x): trilinearly interpolates field value at object-space x.
++def First(u, bounds):
++    o, d = u
++    t_min = 0.0
++    for k in range(3):
++        if d[k] == 0.0:
++            if o[k] < bounds[2*k] or o[k] > bounds[2*k+1]: return None
++        else:
++            t1 = (bounds[2*k] - o[k]) / d[k]
++            t2 = (bounds[2*k+1] - o[k]) / d[k]
++            t_min = max(t_min, min(t1, t2))
++    return o + t_min * d
++
++def InBounds(x, bounds):
++    return all(bounds[2*k] <= x[k] <= bounds[2*k+1] for k in range(3))
++
++def Index(m, x, bounds):
++    cell_size = (bounds[1] - bounds[0]) / (2**m)
++    return tuple(int((x[k] - bounds[2*k]) / cell_size) for k in range(3))
++
++def Next(m, x, u, bounds):
++    o, d = u
++    cell_size = (bounds[1] - bounds[0]) / (2**m)
++    t_max = float('inf')
++    for k in range(3):
++        if d[k] != 0.0:
++            t = (bounds[2*k] + cell_size - x[k]) / d[k]
++            if t > 0.0: t_max = min(t_max, t)
++    return x + t_max * d
++
++def Parent(m, i):
++    return tuple(i[k] // 2 for k in range(3))
++
++def Image(x):
++    return (int(x[0]), int(x[1]))
++
++def Object(U):
++    return (float(U[0]), float(U[1]), 0.0)
++
++def Sample(field, x):
++    # [G] Standard trilinear interpolation of field at object-space x
++    ix, iy, iz = x
++    fx, fy, fz = ix - int(ix), iy - int(iy), iz - int(iz)
++    def v(x, y, z): return field[int(x)][int(y)][int(z)]
++    c00 = v(ix, iy, iz) * (1-fx) + v(ix+1, iy, iz) * fx
++    c01 = v(ix, iy, iz+1) * (1-fx) + v(ix+1, iy, iz+1) * fx
++    c10 = v(ix, iy+1, iz) * (1-fx) + v(ix+1, iy+1, iz) * fx
++    c11 = v(ix, iy+1, iz+1) * (1-fx) + v(ix+1, iy+1, iz+1) * fx
++    return c00 * (1-fy) + c01 * fy
+ ```
+ 
+@@ -122,16 +162,19 @@
+ *   **Resampling Artifacts:** Resampling at non-uniformly spaced points (determined by ray-cell intersections) adds noise artifacts to the image. The solution is to superimpose evenly spaced sample locations and only resample at those specific points [S1].
+ *   **Level Zero Descent:** Descending to level zero is inefficient for orthographic projections because ray-cell intersection costs exceed simple differencing. The solution is to stop descent at $m_{min}=2$ and render level-zero cells within that higher-level cell [S1].
++*   **Zero Direction Components:** Ray directions with zero components must be handled in `Next` to avoid division by zero when computing cell exit distances [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The traversal skips empty regions, reducing the number of samples taken [S1]. The adaptive termination stops tracing when opacity is high, further reducing work [S1]. The cost of traversal is minimized by starting at $m_{max} = M - 2$ [S1].
++*   **Time Complexity:** The traversal skips empty regions, reducing the number of samples taken [S1]. The adaptive termination stops tracing when accumulated opacity exceeds $1 - \epsilon$, further reducing work [S1]. The cost of traversal is minimized by starting at $m_{max} = M - 2$ [S1]. Performance time is proportional to the number of rays cast [S2, unofficial].
+ *   **Memory Complexity:** The memory required is $2N^3$ bytes for the volume data, $(2^{M+1} - 1)/7$ bits for the pyramid, and $P^2$ bytes for the output image [S1].
+-*   **Strengths:** Efficient for volume data with large empty regions. The hierarchical structure allows skipping large empty areas. The adaptive termination reduces work for opaque regions [S1].
+-*   **Limitations:** Inefficient if the volume is mostly opaque or has no empty regions, as the hierarchy may not provide significant skipping. Descending to level zero is inefficient for orthographic projections due to high intersection costs [S1].
++*   **Strengths:** Efficient for volume data with large empty regions. The hierarchical structure allows skipping large empty areas. The adaptive termination reduces work for opaque regions [S1]. Combining termination and octree optimizations achieves savings of more than an order of magnitude [S2, unofficial].
++*   **Limitations:** Inefficient if the volume is mostly opaque or has no empty regions, as the hierarchy may not provide significant skipping. Descending to level zero is inefficient for orthographic projections due to high intersection costs [S1]. Precise selection of parameters is crucial for the adaptive rendering algorithm [S2, unofficial].
+ *   **When to Use:** Suitable for volume datasets with significant empty space and where ray-cell intersection costs are high (e.g., orthographic projections) [S1].
+ *   **When Not to Use:** Not suitable for geometric scenes with many primitives per cell, as the method is optimized for volume data with single samples per cell [S1].
+ 
+ ## Background
+-The method was introduced in the paper "Efficient ray tracing of volume data" [S1]. It is based on the observation that volume datasets contain coherent regions of uninteresting voxels (opacity zero) and can be encoded as a hierarchical spatial enumeration represented by a pyramid of binary volumes [S1]. The method is also known as Pyramidal Volume Traversal or TraceRay2 [S1].
++The method was introduced in the paper "Efficient ray tracing of volume data" [S1]. It is based on the observation that volume datasets contain coherent regions of uninteresting voxels (opacity zero) and can be encoded as a hierarchical spatial enumeration represented by a pyramid of binary volumes [S1]. The method is also known as Pyramidal Volume Traversal or TraceRay2 [S1]. It builds on earlier work in adaptive rendering based on estimated image complexity at sample regions of the image plane [S2, unofficial].
+ 
+ ## Sources
+-[S1] Efficient ray tracing of volume data, https://doi.org/10.1145/78964.78965, fetched 2026-10-25+[S1] Efficient ray tracing of volume data, https://doi.org/10.1145/78964.78965, fetched 2026-10-25
++[S2] DTIC ADA248167: Distributed Ray Casting for High-Speed Volume Rendering, https://archive.org/details/DTIC_ADA248167, fetched 2026-10-26 (unofficial)
++[S3] Volume Rendering With Ray Casting - WPI, https://web.cs.wpi.edu/~matt/courses/cs563/talks/powwie/p1/ray-cast.htm, fetched 2026-10-26 (unofficial)

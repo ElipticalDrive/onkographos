@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -8,13 +8,10 @@
+ ## How it works
+ **Inputs:**
+-- `parent`: Volume data structure containing:
+-  - `width`: Integer width of the volume grid (bounds for x and y dimensions) [S1, unofficial].
+-  - `zSize`: Integer depth (z-dimension) of the volume grid [S1, unofficial].
+-  - `v2`: 1D array of voxel values (integers, typically 0-255) [S1, unofficial].
+-  - `transfer_a`: 1D array of 32-bit integers storing alpha values indexed by voxel value [S1, unofficial].
+-  - `transfer_rgb`: 1D array of 32-bit integers storing RGB values indexed by voxel value [S1, unofficial].
++- `parent`: Volume data structure containing `width`, `zSize`, `transfer_a`, `transfer_rgb`, and `volume_data` [S1, unofficial].
+ - `light`: 3D vector `(light[0], light[1], light[2])` representing the light direction [S1, unofficial].
+-- `out_a`: Accumulated alpha (float, initialized to 0.0) [S1, unofficial].
+-- `rgb`: Accumulated color (array of 3 floats, initialized to 0.0) [S1, unofficial].
++- `out_a`: Accumulated alpha (float) [S1, unofficial].
++- `rgb`: Accumulated color (array of 3 floats) [S1, unofficial].
++- `id_a`, `id_b`, `id_c`: Current voxel coordinates [S1, unofficial].
++- `value`: Current voxel value used for transfer function lookup [S1, unofficial].
+ 
+ **Outputs:**
+@@ -23,7 +20,6 @@
+ 
+ **Data Structures:**
+-- Voxel values are accessed via linear indexing using coordinates `id_a`, `id_b`, `id_c` [S1, unofficial].
+-- The memory layout follows `v(id_c, id_a + id_b * width)`, implying a linear index of `id_c * (width * width) + id_a + id_b * width` [S1, unofficial].
+-- Neighbor indices are clamped to valid ranges: lower bounds to 0, `id_a_2` and `id_b_2` to `width - 1`, and `id_c_2` to `zSize - 1` [S1, unofficial].
++- Voxel values are accessed via linear indexing using coordinates `id_a`, `id_b`, `id_c` with the layout `v(id_c, id_a + id_b * width)` [S1, unofficial].
++- Neighbor indices are clamped to valid ranges: lower bounds to 0, `id_a_2` and `id_b_2` to `parent.width - 1`, and `id_c_2` to `parent.zSize - 1` [S1, unofficial].
+ 
+ **Steps:**
+@@ -31,8 +27,8 @@
+ 1. **Gradient Estimation:**
+    Calculate the 3D gradient vector $\mathbf{g} = (g_x, g_y, g_z)$ using central differences on the least significant byte (0-255) of voxel values, normalized by 255.0 [S1, unofficial].
+-   $$g_x = \frac{V(id_c, id_{a2}, id_b) \ \& \ 0xFF}{255.0} - \frac{V(id_c, id_{a1}, id_b) \ \& \ 0xFF}{255.0}$$
+-   $$g_y = \frac{V(id_c, id_a, id_{b2}) \ \& \ 0xFF}{255.0} - \frac{V(id_c, id_a, id_{b1}) \ \& \ 0xFF}{255.0}$$
+-   $$g_z = \frac{V(id_{c2}, id_a, id_b) \ \& \ 0xFF}{255.0} - \frac{V(id_{c1}, id_a, id_b) \ \& \ 0xFF}{255.0}$$
+-   where $V(id_c, id_a, id_b)$ returns the clamped voxel value [S1, unofficial].
++   $$g_x = \frac{v(id_c, id_{a2} + id_b \cdot width) \ \& \ 0xFF}{255.0} - \frac{v(id_c, id_{a1} + id_b \cdot width) \ \& \ 0xFF}{255.0}$$
++   $$g_y = \frac{v(id_c, id_a + id_{b2} \cdot width) \ \& \ 0xFF}{255.0} - \frac{v(id_c, id_a + id_{b1} \cdot width) \ \& \ 0xFF}{255.0}$$
++   $$g_z = \frac{v(id_{c2}, id_a + id_b \cdot width) \ \& \ 0xFF}{255.0} - \frac{v(id_{c1}, id_a + id_b \cdot width) \ \& \ 0xFF}{255.0}$$
++   where $id_{a1} = id_a - 1$, $id_{a2} = id_a + 1$, $id_{b1} = id_b - 1$, $id_{b2} = id_b + 1$, $id_{c1} = id_c - 1$, and $id_{c2} = id_c + 1$ [S1, unofficial].
+ 
+ 2. **Gradient Normalization:**
+@@ -67,17 +63,14 @@
+ **Pseudocode:**
+ ```python
+-def gradient_based_diffuse_lighting_with_alpha_blending(
+-    parent, light, out_a, rgb, id_a, id_b, id_c
+-):
++def gradient_based_diffuse_lighting_with_alpha_blending(parent, light, out_a, rgb, id_a, id_b, id_c, value):
+     width = parent.width
+     z_size = parent.zSize
+-    height = width  # Derived from clamping rule: id_b_2 clamped to width - 1 [S1, unofficial]
+ 
+     def get_voxel(a, b, c):
+         a = max(0, min(a, width - 1))
+-        b = max(0, min(b, height - 1))
++        b = max(0, min(b, width - 1))
+         c = max(0, min(c, z_size - 1))
+-        idx = c * (width * height) + a + b * width
+-        return (parent.v2[idx] & 0xFF) / 255.0
++        idx = c * (width * width) + a + b * width
++        return (parent.volume_data[idx] & 0xFF) / 255.0
+ 
+     # 1. Gradient Estimation
+@@ -97,10 +90,6 @@
+ 
+     # 4. Transfer Function Lookup
+-    current_idx = id_c * (width * height) + id_a + id_b * width
+-    current_val = parent.v2[current_idx]
+-    
+-    aa = (parent.transfer_a[current_val] & 0x000000FF) / 255
+-    rgb_val = parent.transfer_rgb[current_val]
+-    
++    aa = (parent.transfer_a[value] & 0x000000FF) / 255.0
++    rgb_val = parent.transfer_rgb[value]
+     vv_red = ((rgb_val & 0x00FF0000) >> 16) / 255.0
+     vv_green = ((rgb_val & 0x0000FF00) >> 8) / 255.0
+@@ -121,14 +110,25 @@
+ ```
+ 
++**Edge Cases and Pitfalls:**
++- Neighbor indices must be clamped to valid bounds: lower bounds to 0, `id_a_2` and `id_b_2` to `parent.width - 1`, and `id_c_2` to `parent.zSize - 1` [S1, unofficial].
++- If the gradient magnitude is zero, the normalized gradient components are explicitly set to 0 to avoid division by zero [S1, unofficial].
++- The method assumes a specific memory layout `v(id_c, id_a + id_b * width)` and transfer function format [S1, unofficial].
++
++## Subtopics
++
++### Gradient-Based Shading Interpolation
++This variant interpolates between surface-shaded and unshaded results using the gradient magnitude to prevent homogeneous regions from being surface shaded [S2]. The interpolation factor uses the formula $1 - (1 - ||\nabla f||)^2$ to weight the surface shading contribution, allowing midrange gradient magnitudes to be interpreted as surface features [S2]. The final result is modulated by light attenuation (shadows) regardless of the surface shading state [S2].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per voxel for the lighting and blending step, requiring 6 neighbor lookups for gradient estimation and constant-time transfer function access [S1, unofficial].
+-- **Memory Complexity:** $O(1)$ additional memory per voxel for the current step, plus storage for the transfer functions and volume data [S1, unofficial].
+-- **Performance:** The method is computationally lightweight per voxel, suitable for CPU-based direct volume rendering as indicated by the source repository [S1, unofficial]. The 6 neighbor lookups and transfer function accesses add overhead compared to simple alpha blending [S1, unofficial].
+-- **Strengths:** Provides surface-like shading effects without explicit surface extraction and is straightforward to implement [S1, unofficial].
+-- **Limitations:** Gradient estimation via central differences can be noisy in low-resolution volumes, and boundary clamping may distort normals at edges [S1, unofficial]. The method assumes a specific memory layout and transfer function format [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
+ 
+ ## Background
+-The method originates from a direct volume rendering implementation on the CPU, specifically documented in the `browarsoftware/directvolumerenderingcpu` repository [S1, unofficial]. It combines gradient-based normal estimation with standard front-to-back alpha compositing to render scalar volumes [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources
+-[S1] browarsoftware/directvolumerenderingcpu, https://github.com/browarsoftware/directvolumerenderingcpu, fetched 2026-10-26 (unofficial)+[S1] browarsoftware/directvolumerenderingcpu, https://github.com/browarsoftware/directvolumerenderingcpu, fetched 2026-10-26 (unofficial)
++[S2] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01

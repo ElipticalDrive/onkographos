@@ -7,11 +7,11 @@ MPI Volume Rendering (1D/2D Decomposition) is a distributed-memory parallel volu
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset (typically `float32`), opacity and color transfer functions (TFs), rendering parameters (step size, bounding box), and MPI communicator.
+*   **Input:** A 3D scalar volume dataset (typically `float32`), opacity and color transfer functions (TFs), rendering parameters (step size, bounding box), and MPI communicator [S3, S5, unofficial].
 *   **Output:** A final 2D RGBA image assembled by the root process, along with performance metrics (timing, early termination counts) [S3, unofficial].
 
 **Data Structures:**
-*   **Volume Data:** Stored as a contiguous 1D array or flattened multi-dimensional array. In C/C++ implementations, it is often a `std::vector<float>` with index calculation $I = z \cdot Y \cdot X + y \cdot X + x$ (assuming X is the fastest varying dimension) [S2, unofficial]. In Python, it is a `numpy` array of shape $(X, Y, Z)$ or $(Z, Y, X)$ depending on loading order, converted to C-contiguous memory [S3, S5, unofficial].
+*   **Volume Data:** Stored as a contiguous array. In C/C++, it is a `std::vector<float>` with index calculation $I = z \cdot Y \cdot X + y \cdot X + x$ (assuming X is the fastest varying dimension) [S2, unofficial]. In Python, it is a `numpy` array of shape $(X, Y, Z)$ or $(Z, Y, X)$ depending on loading order, converted to C-contiguous memory [S3, S5, unofficial].
 *   **Transfer Functions:** Precomputed dictionaries or arrays mapping scalar values to opacity and RGB color. For efficiency, these are loaded once per process into local lookup structures (e.g., sorted key-value pairs for binary search) to avoid repeated file I/O or complex interpolation during the ray loop [S3, unofficial].
 *   **Local Image Buffer:** Each process maintains a local buffer for its assigned sub-image region. In C++, this is often a 3D array `eachImage[eachYlen][eachXlen][4]` storing RGBA floats [S4, unofficial]. In Python, it is a numpy array of shape $(rows, cols, 4)$ [S3, unofficial].
 
@@ -21,7 +21,7 @@ MPI Volume Rendering (1D/2D Decomposition) is a distributed-memory parallel volu
 2.  **Transfer Function Loading:** All processes load opacity and color transfer functions from text files. These are parsed into local dictionaries or arrays. For opacity, keys are scalar values and values are opacities. For color, keys are scalar values and values are RGB triplets [S3, unofficial].
 3.  **Domain Decomposition:**
     *   **1D Decomposition:** The volume is split along the X-axis (or Y-axis). If $N$ processes are used, the X-dimension $X_{dim}$ is divided into chunks. Process $p$ receives X-range $[p \cdot chunk\_size, (p+1) \cdot chunk\_size)$. The last process receives the remainder to cover the full width. The Y and Z dimensions remain full [S3, S5, unofficial].
-    *   **2D Decomposition:** The volume is split along X and Y axes. The number of processes $N$ is factorized into $N_x \times N_y$ such that $N_x \ge N_y$ and $N_x \approx N_y$ (square-ish grid) [S3, S5, unofficial]. Process $(p_x, p_y)$ receives a block defined by $[p_x \cdot chunk\_x, (p_x+1) \cdot chunk\_x)$ and $[p_y \cdot chunk\_y, (p_y+1) \cdot chunk\_y)$. The last blocks in each dimension receive the remainder [S3, S5, unofficial].
+    *   **2D Decomposition:** The volume is split along X and Y axes. The number of processes $N$ is factorized into $N_x \times N_y$ such that $N_x \ge N_y$ and $N_x \approx N_y$ (square-ish grid) [S3, S5, unofficial]. Process $(p_x, p_y)$ receives a block defined by $[p_x \cdot chunk\_x, (p_x+1) \cdot chunk\_x)$ and $[p_y \cdot chunk\_y, (p_y+1) \cdot chunk\_y)$. The last blocks in each dimension receive the remainder [S3, unofficial]. (Note: [S5, unofficial] distributes the remainder to the first extra processes instead).
 4.  **Data Distribution:** Rank 0 distributes the relevant sub-domains to all other processes. In C++, this involves iterating through the global data indices corresponding to the process's bounds and sending the flattened subset via `MPI_Send` [S4, unofficial]. In Python, `mpi4py` scatter or send operations are used [S3, S5, unofficial].
 5.  **Ray Casting (Local Rendering):** Each process renders its assigned sub-domain independently:
     *   Iterate over each pixel $(x, y)$ in the local sub-image bounds.
@@ -33,7 +33,7 @@ MPI Volume Rendering (1D/2D Decomposition) is a distributed-memory parallel volu
         *   Update accumulated values using front-to-back compositing:
             $$ C' = C' + (1 - A') C A $$
             $$ A' = A' + (1 - A') A $$
-        *   **Early Termination:** If $A'$ exceeds a threshold (e.g., 0.97 or 1.0), terminate the ray for this pixel, increment the early termination counter, and break the Z-loop [S2, S3, unofficial].
+        *   **Early Termination:** If $A'$ exceeds a threshold (e.g., 0.97 [S2, unofficial] or 1.0 [S3, unofficial]), terminate the ray for this pixel, increment the early termination counter, and break the Z-loop.
 6.  **Result Assembly:**
     *   **Global Reduction (Simple):** Each process sends its local sub-image and early termination count to Rank 0. Rank 0 assembles the final image by placing each sub-image in its correct spatial position based on the decomposition grid [S3, S5, unofficial].
     *   **Binary Swap (Optimized):** To avoid bottlenecking Rank 0, processes may use a binary swap reduction. Processes exchange partial images with partners in a tree-like structure ($\log_2 N$ steps), compositing received images onto their own [S4, unofficial].
@@ -48,27 +48,13 @@ import numpy as np
 from mpi4py import MPI
 import bisect
 
-def interpolate_volume(data, x, y, z, z_dim, y_dim, x_dim):
+def interpolate_volume(data, x, y, z, z_dim):
     """Linear interpolation of volume value at continuous z."""
     z_idx = int(np.floor(z))
-    z_next = z_idx + 1
-    if z_next >= z_dim:
-        z_next = z_dim - 1
-    
+    z_next = min(z_idx + 1, z_dim - 1)
     alpha = z - z_idx
-    # Indices assuming C-order (x fastest) or F-order depending on layout. 
-    # Based on S3, data is transposed to (x, y, z) and contiguous.
-    # Index = i * y_dim * z_dim + j * z_dim + k for (i,j,k)
-    # However, S3 code uses: sub_data[i, j, before_index]
-    # Let's assume local_data is (local_x, local_y, z_dim)
-    
-    # Using the formula from S3: Vp = (1-alpha)*V1 + alpha*V2
-    # V1 is at floor(z), V2 is at ceil(z)
-    
-    # Note: In the provided S3 code, sub_data is indexed as [i, j, k]
-    # where i is local x, j is local y, k is z.
-    val1 = data[int(x), int(y), z_idx]
-    val2 = data[int(x), int(y), z_next]
+    val1 = data[x, y, z_idx]
+    val2 = data[x, y, z_next]
     return (1 - alpha) * val1 + alpha * val2
 
 def interpolate_tf(tf_keys, tf_values, scalar_val):
@@ -78,12 +64,10 @@ def interpolate_tf(tf_keys, tf_values, scalar_val):
         return tf_values[0]
     if idx >= len(tf_keys):
         idx = len(tf_keys) - 1
-        
     k1 = tf_keys[idx-1]
     k2 = tf_keys[idx]
     v1 = tf_values[idx-1]
     v2 = tf_values[idx]
-    
     if k2 == k1:
         return v1
     alpha = (scalar_val - k1) / (k2 - k1)
@@ -91,10 +75,6 @@ def interpolate_tf(tf_keys, tf_values, scalar_val):
 
 def render_subdomain(local_data, x_start, x_end, y_start, y_end, z_dim, step_size, 
                      color_keys, color_values, opacity_keys, opacity_values):
-    """
-    Renders a subdomain.
-    Returns: sub_image (H, W, 3), sub_opacity (H, W), early_terminations
-    """
     h = y_end - y_start
     w = x_end - x_start
     sub_image = np.zeros((h, w, 3), dtype=np.float32)
@@ -103,45 +83,27 @@ def render_subdomain(local_data, x_start, x_end, y_start, y_end, z_dim, step_siz
     
     for i in range(h):
         for j in range(w):
-            global_x = x_start + j
-            global_y = y_start + i
-            
             acc_r, acc_g, acc_b = 0.0, 0.0, 0.0
             acc_a = 0.0
-            
             z = 0.0
             while z < z_dim:
-                # Sample scalar value
-                # Note: local_data indices must map to global coordinates
-                # Assuming local_data is sliced such that local_x corresponds to global_x
-                # In S3, local_data is data[start_x:end_x, start_y:end_y, :]
-                # So local index (i, j, k) maps to global (start_x+j, start_y+i, k)
-                
-                local_x = global_x - x_start
-                local_y = global_y - y_start
-                
-                # Linear interpolation in Z
+                local_x = j
+                local_y = i
                 z_idx = int(np.floor(z))
-                z_next = z_idx + 1
-                if z_next >= z_dim: z_next = z_dim - 1
+                z_next = min(z_idx + 1, z_dim - 1)
                 alpha_z = z - z_idx
-                
                 val1 = local_data[local_x, local_y, z_idx]
                 val2 = local_data[local_x, local_y, z_next]
                 scalar_val = (1 - alpha_z) * val1 + alpha_z * val2
                 
                 # Interpolate Color
-                # Color TF: keys are scalars, values are RGB tuples
-                # S3 code handles color interpolation manually
                 c_idx = bisect.bisect(color_keys, scalar_val)
                 if c_idx == len(color_keys): c_idx = len(color_keys) - 1
-                if c_idx == 0: c_idx = 1 # Handle edge case if needed, or clamp
-                
+                if c_idx == 0: c_idx = 1
                 k1_c = color_keys[c_idx-1]
                 k2_c = color_keys[c_idx]
-                v1_c = color_values[c_idx-1] # RGB tuple
-                v2_c = color_values[c_idx]   # RGB tuple
-                
+                v1_c = color_values[c_idx-1]
+                v2_c = color_values[c_idx]
                 if k2_c == k1_c:
                     r, g, b = v1_c
                 else:
@@ -154,12 +116,10 @@ def render_subdomain(local_data, x_start, x_end, y_start, y_end, z_dim, step_siz
                 o_idx = bisect.bisect(opacity_keys, scalar_val)
                 if o_idx == len(opacity_keys): o_idx = len(opacity_keys) - 1
                 if o_idx == 0: o_idx = 1
-                
                 k1_o = opacity_keys[o_idx-1]
                 k2_o = opacity_keys[o_idx]
                 v1_o = opacity_values[o_idx-1]
                 v2_o = opacity_values[o_idx]
-                
                 if k2_o == k1_o:
                     op = v1_o
                 else:
@@ -173,16 +133,13 @@ def render_subdomain(local_data, x_start, x_end, y_start, y_end, z_dim, step_siz
                 acc_b += factor * b
                 acc_a += factor
                 
-                # Early Termination
-                if acc_a >= 0.97: # Threshold from S2/S3
+                if acc_a >= 0.97:
                     early_terminations += 1
                     break
-                
                 z += step_size
             
             sub_image[i, j] = [acc_r, acc_g, acc_b]
             sub_opacity[i, j] = acc_a
-            
     return sub_image, sub_opacity, early_terminations
 
 def main():
@@ -190,29 +147,47 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
     
-    # 1. Load TFs (All ranks)
-    # ... (Load opacity_keys, opacity_values, color_keys, color_values) ...
+    # Load transfer functions (all ranks)
+    # The sources do not give the exact file I/O and parsing boilerplate for TF loading.
     
     if rank == 0:
-        # 2. Load Volume and Decompose
-        # ... (Load global data, determine bounds for each rank) ...
-        # 3. Scatter Data
-        # ... (Send local_data to each rank) ...
-        pass
-    else:
-        # 4. Receive Data
-        # ... (Recv local_data) ...
+        # Load volume data and determine decomposition bounds
+        # The sources do not give the exact file I/O and decomposition logic boilerplate.
+        bounds_list = []
+        for r in range(size):
+            # Calculate bounds for rank r based on partitioning type
+            bounds_list.append((x_start, x_end, y_start, y_end))
         
-    # 5. Render
-    sub_image, sub_opacity, early_term = render_subdomain(...)
-    
-    # 6. Gather/Composite
-    if rank == 0:
-        # Assemble final image from all sub_images
-        pass
+        # Scatter data and bounds
+        for r in range(size):
+            comm.Send(local_data_for_rank_r, dest=r, tag=0)
+            comm.Send(bounds_list[r], dest=r, tag=1)
+            
+        # Render own subdomain
+        sub_img, sub_op, early_term = render_subdomain(...)
+        # Gather results
+        all_sub_imgs = [None] * size
+        all_sub_imgs[0] = sub_img
+        for r in range(1, size):
+            recv_buf = np.empty(...)
+            comm.Recv(recv_buf, source=r, tag=2)
+            all_sub_imgs[r] = recv_buf
+        # Assemble final image
+        final_image = assemble_image(all_sub_imgs, bounds_list)
+        save_image(final_image)
     else:
-        # Send sub_image to rank 0
-        pass
+        # Receive data and bounds
+        local_data = np.empty(...)
+        comm.Recv(local_data, source=0, tag=0)
+        bounds = np.empty(4, dtype=int)
+        comm.Recv(bounds, source=0, tag=1)
+        x_start, x_end, y_start, y_end = bounds
+        
+        # Render
+        sub_img, sub_op, early_term = render_subdomain(local_data, x_start, x_end, y_start, y_end, ...)
+        
+        # Send result to rank 0
+        comm.Send(sub_img, dest=0, tag=2)
 
 if __name__ == "__main__":
     main()
@@ -221,7 +196,7 @@ if __name__ == "__main__":
 **Parameters:**
 *   **Step Size:** Distance between sample points along the ray. Typical value: 0.5 [S3, S5, unofficial].
 *   **Partitioning Type:** 1 for 1D (X-axis split), 2 for 2D (X and Y split) [S3, S5, unofficial].
-*   **Early Termination Threshold:** Opacity value at which ray casting stops. Common values: 0.97 or 1.0 [S2, S3, unofficial].
+*   **Early Termination Threshold:** Opacity value at which ray casting stops. Thresholds of 0.97 [S2, unofficial] or 1.0 [S3, unofficial] are used.
 *   **Volume Dimensions:** Examples include 1000x1000x200 [S2, unofficial] or 2000x2000x400 [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
@@ -229,6 +204,7 @@ if __name__ == "__main__":
 *   **Non-Divisible Dimensions:** When splitting dimensions among processes, the last process in a dimension receives the remainder of the division to ensure all data is covered [S3, S5, unofficial].
 *   **Load Imbalance:** If opacity reaches 1.0 quickly at isosurfaces, rays terminate early, causing uneven computation times across partitions [S1].
 *   **RGB Clamping:** RGB values exceeding 1.0 should be clamped to 1.0 to prevent invalid colors [S4, unofficial].
+*   **Axis-Aligned Restriction:** This method only supports rays cast along the Z-axis. General ray directions are not supported by the decomposition strategy [S3, unofficial].
 
 ## Subtopics
 
@@ -258,14 +234,14 @@ A deep learning-based method that trains one independent Implicit Neural Represe
 *   **Memory Complexity:** $O(V_{local})$, where $V_{local}$ is the size of the sub-domain assigned to each process. This allows rendering volumes much larger than the memory of a single node.
 *   **Measured Performance:** On a 512-node cluster, render times for a 128x128x128 head dataset were 0.0593s (render) and 0.3782s (composite) [S1]. For a 256x256x128 vessel dataset, 0.0453s (render) and 0.2167s (composite) [S1].
 *   **Scaling:** Near-linear speedup is observed for datasets with uniform opacity distribution (e.g., vorticity dataset) [S1]. Load imbalance occurs for datasets with sharp isosurfaces (e.g., head dataset) where early termination varies significantly across partitions [S1].
-*   **Strengths:** Simple implementation, good scalability for large volumes, early termination optimization reduces computation time by ~15% [S2, unofficial].
+*   **Strengths:** Early termination optimization reduces execution time by 15% on tested systems [S2, unofficial].
 *   **Limitations:** Load imbalance due to non-uniform data density, communication bottleneck if using global reduction (mitigated by binary swap) [S4, unofficial].
 *   **When to Use:** Large volumetric datasets that fit in distributed memory, static viewing angles, uniform or predictable opacity distribution.
 *   **When Not to Use:** Highly dynamic views requiring frequent remapping (use OS-DVR), unstructured meshes (use Static Load Balancing), or when inter-process communication overhead dominates (use 3D decomposition if depth is large).
 
 ## Background
 *   **Origin:** The method is based on distributed memory parallel volume rendering techniques using MPI [S1][S2, S3, unofficial]. Early implementations used PVM on CM-5 and IBM RS/6000 workstations [S1].
-*   **History:** Developed to address the scalability limits of single-node volume rendering as dataset sizes increased [S1][S4, unofficial]. The 1D/2D decomposition strategy was chosen to simplify ray casting and compositing compared to 3D decomposition [S2, S3, unofficial].
+*   **History:** Developed to address the scalability limits of single-node volume rendering as dataset sizes increased [S1][S4, unofficial].
 *   **Usage:** Used in scientific visualization projects for large datasets (e.g., 2000x2000x400 float32) on MPI clusters [S3, unofficial]. Also validated at HPC scale with INR variants [S6, unofficial].
 
 ## Sources

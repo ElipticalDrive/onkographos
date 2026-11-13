@@ -1,0 +1,63 @@
+# Slice-by-Slice Backprojection
+
+Also called: Kajiya/Von Herzen Backprojection, Parallel Ray Backprojection
+
+## Overview
+Slice-by-Slice Backprojection is a method for computing global illumination in participating media (such as clouds) by reorganizing the backprojection integral into a single sweep through the volume [S1, unofficial]. Unlike standard ray casting which traces rays from the eye, this approach calculates light intensity by processing the volume one horizontal slice at a time, assuming parallel light rays (e.g., sunlight) [S1, unofficial]. It sets itself apart from sibling texture slicing methods by focusing on light transport (scattering) rather than direct visibility, often utilizing parallel ray assumptions to optimize the sweep [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume density field $\rho(x,y,z)$, a light direction vector $\vec{l}$ (assumed parallel), and the volume bounding box.
+*   **Output:** The radiance or light intensity distribution within the volume.
+
+**Data Structures:**
+*   **Volume Grid:** A 3D array of scalar density values.
+*   **Slice Buffer:** A 2D array representing the current horizontal slice being processed, storing intermediate light intensity or transmittance values.
+
+**Steps:**
+1.  **Define Slicing Plane:** Define a series of parallel planes perpendicular to the vertical axis (horizontal slices) that intersect the volume bounding box.
+2.  **Iterate Slices:** For each slice $i$ from the bottom to the top (or light source to receiver):
+    a.  **Intersect Volume:** Determine the intersection of the current slice plane with the volume geometry. This results in a 2D polygon representing the cross-section of the volume at that height [S1, unofficial].
+    b.  **Sample Density:** For each pixel/fragment within the slice polygon, sample the density $\rho$ from the volume data structure at the corresponding 3D coordinates.
+    c.  **Compute Light Transport:** Calculate the light intensity contribution for this slice. Assuming parallel rays, the light transport equation is integrated along the ray direction $\vec{l}$ passing through the slice. The intensity $I$ at a point is updated based on the incoming light, the local density, and the scattering phase function [S1, unofficial].
+    d.  **Composite:** Accumulate the computed light intensity into the output buffer for the current slice.
+3.  **Finalize:** The final image is composed from the accumulated light intensities of all slices.
+
+**Formulas:**
+The light intensity $I$ is computed by integrating the radiative transfer equation along the parallel ray direction $\vec{l}$:
+$$ I = \int_{0}^{L} \rho(s) \cdot \sigma_s \cdot P(\vec{l}, \vec{\omega}) \cdot e^{-\int_{0}^{s} \rho(t) \sigma_t dt} ds $$
+Where:
+*   $L$ is the path length through the volume.
+*   $\rho(s)$ is the density at distance $s$.
+*   $\sigma_s$ is the scattering coefficient.
+*   $P(\vec{l}, \vec{\omega})$ is the phase function.
+*   $\sigma_t$ is the extinction coefficient.
+
+**Parameters:**
+*   **Light Direction:** Typically $(0, 1, 0)$ for sunlight.
+*   **Slice Resolution:** Matches the output image resolution or a lower resolution for performance.
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Slices:** Slices at the very top or bottom of the volume may have zero intersection area; these should be skipped.
+*   **Precision:** Accumulating light intensity over many slices can lead to precision issues; using high-precision buffers (e.g., 32-bit float) is recommended [G].
+*   **Parallel Ray Assumption:** This method assumes parallel light rays. If the light source is close (point light), this approximation breaks down, and a different backprojection or ray tracing method is required [S1, unofficial].
+
+## Subtopics
+
+### Multi-Pass Slice-by-Slice Backprojection
+A variant that handles light scattering in multiple directions by performing a multi-pass slice-by-slice sweep at random angles [S1, unofficial]. This approach scatters energy more realistically than the single-direction parallel ray assumption but requires multiple passes through the volume, increasing computational cost. It is chosen when global illumination effects from multiple scattering directions are critical.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of slices and $M$ is the number of pixels per slice. For multi-pass variants, it scales with the number of passes.
+*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(W \cdot H)$ for the slice buffer.
+*   **Performance:** Efficient for large volumes with parallel light sources due to cache-friendly sequential access of slices. However, it may suffer from overdraw if the volume geometry is complex.
+*   **Strengths:** Simple implementation, good performance for cloud-like volumes with distant light sources.
+*   **Limitations:** Assumes parallel light rays; less accurate for complex lighting scenarios or close light sources. Multi-pass variants are computationally expensive.
+*   **When to Use:** Real-time or near-real-time rendering of clouds and fog with sunlight.
+*   **When Not to Use:** Scenes with complex, local light sources or when high-fidelity global illumination is required without multiple passes.
+
+## Background
+The method was introduced by Kajiya and Von Herzen [98] as a way to calculate light intensity for cloud-like volumes efficiently by processing slices in a single sweep [S1, unofficial]. A similar technique was demonstrated in the Heidelberg ray-tracing model [157], where shadow rays were propagated simultaneously slice-by-slice [S1, unofficial]. Dachille et al. [44] extended this to multi-pass scattering, and Kniss et al. [113][114] proposed a single-pass approximation using recursive slice-blurring [S1, unofficial].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

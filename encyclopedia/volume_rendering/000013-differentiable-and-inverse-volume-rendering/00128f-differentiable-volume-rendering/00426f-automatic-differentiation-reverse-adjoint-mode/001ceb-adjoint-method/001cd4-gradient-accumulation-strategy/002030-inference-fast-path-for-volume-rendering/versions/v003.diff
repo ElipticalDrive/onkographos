@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -8,16 +8,10 @@
+ **Inputs and Outputs:**
+ *   **Inputs:** Volume data, ray origins, ray directions, and a compile-time boolean template parameter `NeedsBackward` [S1, unofficial].
+-*   **Outputs:**
+-    *   `outRgb`: Accumulated color (always allocated) [S1, unofficial].
+-    *   `outWs`: Per-sample weights (allocated only if `NeedsBackward` is true) [S1, unofficial].
+-    *   `outDepth`: Per-ray depth (allocated only if `NeedsBackward` is true) [S1, unofficial].
+-    *   `outTotalSamples`: Per-ray total sample count (allocated only if `NeedsBackward` is true) [S1, unofficial].
++*   **Outputs:** `outRgb` (accumulated color), `outWs` (per-sample weights), `outDepth` (per-ray depth), and `outTotalSamples` (per-ray total sample count) [S1, unofficial]. When `NeedsBackward` is false, `outWs`, `outDepth`, and `outTotalSamples` are size-0 placeholder tensors with matching dtype and device [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `outRgb`: Tensor of shape `[num_rays, channels]` [S1, unofficial].
+-*   `outWs`: Tensor of shape `[num_rays, max_samples]` [S1, unofficial].
+-*   `outDepth`: Tensor of shape `[num_rays]` [S1, unofficial].
+-*   `outTotalSamples`: Tensor of shape `[num_rays]` [S1, unofficial].
+-*   When `NeedsBackward` is false, `outWs`, `outDepth`, and `outTotalSamples` are size-0 placeholder tensors with matching dtype and device [S1, unofficial].
++*   Output tensors are allocated with `torch::empty` (or equivalent) [S1, unofficial].
++*   When `NeedsBackward` is true, `outWs` is allocated with zeros because the backward pass's `thrust::inclusive_scan` reads into the early-termination tail [S1, unofficial].
++*   Exact tensor shapes are Not given in the sources.
+ 
+ **Algorithm:**
+@@ -29,37 +23,74 @@
+ ```python
+ def volume_render_forward(volume_data, ray_origins, ray_directions, needs_backward):
++    num_rays = len(ray_origins)
++    channels = volume_data.channels
++    max_samples = volume_data.max_samples_per_ray
++
+     # Allocate color output tensor
+-    out_rgb = allocate_tensor(shape=[num_rays, channels], dtype=float32, device=current_device)
+-    
++    out_rgb = empty_tensor(shape=(num_rays, channels), dtype=float32, device=current_device)
++
+     if needs_backward:
+         # Allocate backward-only outputs with zeros for inclusive_scan tail
+-        out_ws = allocate_zeros_tensor(shape=[num_rays, max_samples], dtype=float32, device=current_device)
+-        out_depth = allocate_tensor(shape=[num_rays], dtype=float32, device=current_device)
+-        out_total_samples = allocate_tensor(shape=[num_rays], dtype=int32, device=current_device)
++        out_ws = zeros_tensor(shape=(num_rays, max_samples), dtype=float32, device=current_device)
++        out_depth = empty_tensor(shape=(num_rays,), dtype=float32, device=current_device)
++        out_total_samples = empty_tensor(shape=(num_rays,), dtype=int32, device=current_device)
+         kernel_needs_backward = True
+     else:
+         # Allocate size-0 placeholder tensors with matching dtype and device
+-        out_ws = allocate_tensor(shape=[0], dtype=float32, device=current_device)
+-        out_depth = allocate_tensor(shape=[0], dtype=float32, device=current_device)
+-        out_total_samples = allocate_tensor(shape=[0], dtype=int32, device=current_device)
++        out_ws = empty_tensor(shape=(0,), dtype=float32, device=current_device)
++        out_depth = empty_tensor(shape=(0,), dtype=float32, device=current_device)
++        out_total_samples = empty_tensor(shape=(0,), dtype=int32, device=current_device)
+         kernel_needs_backward = False
+-        
++
+     # Execute kernel specialization via tag dispatch
+-    execute_kernel(volume_data, ray_origins, ray_directions, out_rgb, out_ws, out_depth, out_total_samples, kernel_needs_backward)
+-    
++    if kernel_needs_backward:
++        volume_render_kernel_backward(volume_data, ray_origins, ray_directions,
++                                      out_rgb, out_ws, out_depth, out_total_samples)
++    else:
++        volume_render_kernel_forward(volume_data, ray_origins, ray_directions, out_rgb)
++
+     return out_rgb, out_ws, out_depth, out_total_samples
+ 
+-def volume_render_kernel(out_rgb, out_ws, out_depth, out_total_samples, needs_backward):
+-    for ray_id in range(num_rays):
+-        # Standard ray marching accumulation into out_rgb[ray_id]
+-        accumulate_color(out_rgb, ray_id, volume_data, ray_origins[ray_id], ray_directions[ray_id])
+-        
+-        if needs_backward:
+-            # Store per-sample weight for backward pass
+-            out_ws[ray_id, sample_idx] = current_weight
+-            # Store per-ray depth and total samples
++def volume_render_kernel_forward(volume_data, ray_origins, ray_directions, out_rgb):
++    for ray_id in range(len(ray_origins)):
++        origin = ray_origins[ray_id]
++        direction = ray_directions[ray_id]
++        accumulated_color = zeros_tensor(shape=(len(volume_data.channels),), dtype=float32)
++        current_weight = 0.0
++        current_depth = 0.0
++        current_total_samples = 0
++
++        for sample_idx in range(volume_data.max_samples_per_ray):
++            sample_pos = origin + sample_idx * direction * step_size
++            opacity, weight = sample_volume(volume_data, sample_pos)
++            accumulated_color += weight * sample_color
++            current_weight += weight
++            current_depth += sample_idx * step_size
++            current_total_samples += 1
++
++        out_rgb[ray_id] = accumulated_color
++
++def volume_render_kernel_backward(volume_data, ray_origins, ray_directions, out_rgb, out_ws, out_depth, out_total_samples):
++    for ray_id in range(len(ray_origins)):
++        origin = ray_origins[ray_id]
++        direction = ray_directions[ray_id]
++        accumulated_color = zeros_tensor(shape=(len(volume_data.channels),), dtype=float32)
++        current_weight = 0.0
++        current_depth = 0.0
++        current_total_samples = 0
++
++        for sample_idx in range(volume_data.max_samples_per_ray):
++            sample_pos = origin + sample_idx * direction * step_size
++            opacity, weight = sample_volume(volume_data, sample_pos)
++            accumulated_color += weight * sample_color
++            current_weight += weight
++            current_depth += sample_idx * step_size
++            current_total_samples += 1
++
++            out_ws[ray_id, sample_idx] = weight
+             out_depth[ray_id] = current_depth
+             out_total_samples[ray_id] = current_total_samples
+-        # When needs_backward is false, these stores are skipped entirely
++
++        out_rgb[ray_id] = accumulated_color
+ ```
+ 
+@@ -75,5 +106,5 @@
+ *   **Memory:** Eliminates the allocation and zero-initialization of the $N$-sized `outWs` buffer and the per-sample stores to `outDepth` and `outTotalSamples` during inference [S1, unofficial].
+ *   **Strengths:** Significant reduction in global-memory traffic and kernel execution time for inference-only workloads [S1, unofficial].
+-*   **Limitations:** Only applicable when gradients are not required. Requires careful handling of placeholder tensors in the host code [S1, unofficial].
++*   **Limitations:** Only applicable when gradients are not required [S1, unofficial].
+ 
+ ## Background

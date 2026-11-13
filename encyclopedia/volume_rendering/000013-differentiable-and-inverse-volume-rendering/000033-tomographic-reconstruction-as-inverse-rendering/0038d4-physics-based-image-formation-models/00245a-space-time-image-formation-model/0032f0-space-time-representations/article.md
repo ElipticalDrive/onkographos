@@ -1,6 +1,5 @@
 # Space-time representations
 
-Also called: Space-time neural representations, Time-conditioned 3D representations
 
 ## Overview
 Space-time representations model dynamic scenes by extending the query space of the rendering function to include time, omitting the explicit deformation network used in warp-based methods [S1]. Unlike warp-based approaches that separate geometry into a static canonical form and a dynamic transformation, space-time methods use a single unified function to directly regress dynamic properties by conditioning a 3D representation with a time component [S1]. This approach is tolerant of topology changes and can model a wider range of motion but is prone to time inconsistency [S1].
@@ -11,107 +10,65 @@ Space-time representations model dynamic scenes by extending the query space of 
 *   **Output:** A property vector $\xi$ (e.g., color, density, or feature vector) [S1].
 
 **Data Structures:**
-The representation is typically implemented as a neural network (MLP) or an explicit feature grid.
-1.  **Neural Implicit Model:** A single MLP $f_{\theta}$ that takes the encoded query as input [S1].
-2.  **Explicit Feature Grid:** A set of features stored at discrete time slots, interpolated for arbitrary $t$ [S1].
-3.  **Shared 3D Gaussians:** A set of 3D Gaussians with parameters (e.g., mean, covariance, opacity) that are time-dependent [S1].
+The representation is implemented as either a neural implicit model conditioned on a time variable, a set of 3D Gaussians with time-dependent parameters, or an explicit feature grid [S1].
 
 **Algorithm:**
-The method proceeds by defining the query function and handling temporal interpolation.
-
-1.  **Define the Query Function:**
-    The core function maps the encoded query to the output property. Two common formulations exist [S1]:
+1.  **Define the Query Function:** The method uses a single unified function to directly regress dynamic properties [S1]. Two common formulations exist [S1]:
     
     *Formulation A (Time in Main Function):*
     $$f_{\theta} : (\gamma(p, \mathbf{d}, t)) \rightarrow \xi \quad (12)$$
-    Here, $\gamma$ is an encoding function that processes position, direction, and time jointly.
+    Here, $\gamma$ is an encoding function that processes position, direction, and time jointly, and $\xi$ is the output property [S1].
 
     *Formulation B (Time in Encoding):*
     $$f : (\text{enc}(p, t), [\text{enc}(\mathbf{d})]) \rightarrow \xi \quad (13)$$
-    Here, the encoding function $\text{enc}$ depends on time, while the main network $f$ may only process spatial and directional encodings. This separates the temporal dependency into the feature extraction stage.
+    Here, the encoding function $\text{enc}$ depends on time, while the main network $f$ processes the encoded spatial and directional features [S1].
 
-2.  **Discretize Time (for Grid/Slot-based methods):**
-    Divide the total time interval into $N$ equally spaced time slots [S1].
+2.  **Discretize Time:** Divide the time interval into equally spaced time slots [S1].
 
-3.  **Compute Features at Time Slots:**
-    Compute features for the spatial points at each discrete time slot using an MLP-based neural network or an explicit feature grid [S1].
+3.  **Compute Features at Time Slots:** Compute features at these discrete time slots using an MLP-based neural network or an explicit feature grid [S1].
 
-4.  **Interpolate for Arbitrary Time:**
-    For a query at an arbitrary time $t$, compute the feature by interpolating between the features of the neighboring time slots [S1].
+4.  **Interpolate for Arbitrary Time:** Compute the feature of a point $p \in \mathbb{R}^3$ at any time $t$ by interpolating between the features of the neighboring time slots [S1].
 
-5.  **Enforce Time Consistency (Optional):**
-    To mitigate time inconsistency, enforce local time consistency using flow fields [S1]. Flow fields define forward and backward mappings between neighboring time steps when available [S1].
+5.  **Enforce Time Consistency (Optional):** Enforce time consistency locally by using flow fields, which define forward and backward mappings between neighboring time steps when available [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def query_space_time_representation(p, d, t, model_type='grid'):
+def query_space_time_representation(p, d, t, time_slots, enc_net, main_net):
     """
     Query a space-time representation for a property at position p, direction d, and time t.
-    
-    Args:
-        p: Spatial position (3D vector)
-        d: Viewing direction (3D vector)
-        t: Time coordinate (scalar)
-        model_type: 'mlp' for neural implicit, 'grid' for feature grid interpolation
-        
-    Returns:
-        xi: Output property (e.g., color/density)
+    Implements Formulation B: time-dependent encoding with interpolation between slots.
     """
-    if model_type == 'mlp':
-        # Formulation A: Time is part of the main function's encoding
-        # gamma encodes position, direction, and time
-        encoded_query = encode_joint(p, d, t)
-        xi = mlp_network(encoded_query)
-        
-    elif model_type == 'grid':
-        # Formulation B: Time is part of the spatial encoding
-        # 1. Determine neighboring time slots
-        # Assume time slots are equally spaced with step size dt
-        # Find indices k such that t_k <= t < t_{k+1}
-        t_k = floor(t / dt) * dt
-        t_k1 = t_k + dt
-        
-        # 2. Compute/Retrieve features at neighboring slots
-        # enc(p, t) computes the spatial feature encoding at time t
-        feat_k = compute_spatial_encoding(p, t_k)
-        feat_k1 = compute_spatial_encoding(p, t_k1)
-        
-        # 3. Interpolate features based on time
-        # Linear interpolation factor
-        alpha = (t - t_k) / dt
-        interpolated_feat = lerp(feat_k, feat_k1, alpha)
-        
-        # 4. Encode direction (static or time-independent)
-        enc_d = encode_direction(d)
-        
-        # 5. Pass through main network
-        xi = main_network(concat(interpolated_feat, enc_d))
-        
+    # 1. Find neighboring time slots
+    k = 0
+    while k < len(time_slots) - 1 and time_slots[k + 1] <= t:
+        k += 1
+    t_k = time_slots[k]
+    t_k1 = time_slots[min(k + 1, len(time_slots) - 1)]
+    
+    # 2. Compute features at neighboring slots using an MLP or feature grid [S1]
+    feat_k = enc_net(concatenate(p, t_k))
+    feat_k1 = enc_net(concatenate(p, t_k1))
+    
+    # 3. Interpolate features for arbitrary time t
+    alpha = (t - t_k) / (t_k1 - t_k) if t_k1 != t_k else 0.0
+    interpolated_feat = feat_k + alpha * (feat_k1 - feat_k)
+    
+    # 4. Encode direction (static)
+    enc_d = enc_net(d)
+    
+    # 5. Main network regression
+    xi = main_net(concatenate(interpolated_feat, enc_d))
     return xi
-
-def enforce_consistency_with_flow(p, t, flow_field):
-    """
-    Optional step to enforce time consistency using flow fields.
-    Uses forward/backward mappings between neighboring time steps.
-    """
-    # Get flow vectors for forward and backward steps
-    f_fwd = flow_field.forward(p, t)
-    f_bwd = flow_field.backward(p, t)
-    
-    # Apply constraints or warping based on flow
-    # Implementation details depend on specific flow field formulation [S1]
-    pass
+# Optional: Enforce time consistency locally using flow fields [S1]
 ```
 
 **Parameters:**
-*   **Time slots:** Equally spaced intervals used to discretize the time domain for feature computation [S1]. The number of slots affects memory usage and interpolation accuracy.
+*   **Time slots:** Equally spaced intervals used to discretize the time domain for feature computation [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Time Inconsistency:** Due to the flexibility of the representation, the model may produce inconsistent results across time, especially if the number of observations is limited [S1].
-*   **Topology Changes:** While space-time representations are more tolerant of topology changes than warp-based methods, extreme deformations may still challenge the single unified function [S1].
-*   **Interpolation Artifacts:** Linear interpolation between time slots may introduce artifacts if the motion is non-linear or high-frequency [S1].
 
 ## Subtopics
 
@@ -122,12 +79,12 @@ Models temporal changes by learning a temporally global 3D canonical representat
 A failed design that models temporal changes by storing a static feature matrix for each spatial point and computing features via an inner product with time-dependent basis functions. It differs by attempting to represent the entire volume as a linear combination of static basis volumes, which proved intractable due to memory and artifacts.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the underlying representation. MLP-based methods require forward passes through the network for every query. Grid-based methods with interpolation are generally faster for rendering but may have higher training costs [S1].
-*   **Memory Complexity:** Can be high if explicit feature grids are used for all time slots. Neural implicit models have lower memory footprint but may require more computation per query [S1].
-*   **Strengths:** Tolerant of topology changes; can model a wider range of motion than warp-based methods; simpler implementation by omitting the deformation network [S1].
-*   **Limitations:** Prone to time inconsistency; performance depends on the number of observations; may struggle with complex topological changes compared to warp-based methods if not regularized [S1].
-*   **When to Use:** When the scene undergoes significant topology changes or when a simpler pipeline without explicit deformation fields is preferred.
-*   **When Not to Use:** When long-term temporal consistency is critical and the scene has stable topology (warp-based methods may be better) [S1].
+*   **Time Complexity:** Using grid interpolation between time slots decreases the computational burden and enables faster training compared to evaluating an MLP at every time step [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Tolerant of topology changes; can model a wider range of motion than warp-based methods; omits the explicit deformation network [S1].
+*   **Limitations:** Prone to time inconsistency; performance depends on the number of observations available [S1].
+*   **When to Use:** When the scene undergoes topology changes or when a simpler pipeline without explicit deformation fields is preferred [S1].
+*   **When Not to Use:** When long-term temporal consistency is critical, as the representation is prone to time inconsistency [S1].
 
 ## Background
 Space-time representations emerged as an alternative to warp-based dynamic scene representations, aiming to simplify the modeling of dynamic scenes by directly incorporating time into the query space [S1]. The approach builds on the idea of conditioning 3D representations with time, allowing for a unified function to regress dynamic properties [S1]. Recent advances have explored both neural implicit models and explicit feature grids to implement this paradigm [S1].

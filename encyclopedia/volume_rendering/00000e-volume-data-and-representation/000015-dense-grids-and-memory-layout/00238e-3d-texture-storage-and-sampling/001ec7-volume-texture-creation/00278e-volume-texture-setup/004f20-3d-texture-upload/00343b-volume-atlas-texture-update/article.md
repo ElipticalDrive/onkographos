@@ -11,7 +11,7 @@ A method to populate a 3D volume atlas texture with sampled data values, trackin
     *   `sampler`: A function with signature `(xi, yi, zi, x, y, z, t) => number` that returns the scalar value for a given local voxel index, world position, and timestep [S1, unofficial].
     *   `timeOffset`: The starting timestep index for the update loop [S1, unofficial].
     *   `timeCount`: The number of timesteps to update [S1, unofficial].
-    *   `uniforms`: An object containing resolution, origin, and texture state parameters [S1, unofficial].
+    *   `uniforms`: An object containing resolution, origin, voxel size, and texture state parameters [S1, unofficial].
 *   **Outputs:** An object containing the computed `minValue` and `maxValue` of the sampled data [S1, unofficial].
 
 **Data Structures:**
@@ -109,7 +109,7 @@ def update_volume_atlas_texture(sampler, timeOffset, timeCount, uniforms):
     count = timeCount if timeCount is not None else uniforms.timeCount.value
     end = start + min(count, uniforms.timeCount.value)
 
-    # Extract voxel size and origin
+    # Extract voxel size and origin from uniforms
     voxel_size_x = uniforms.voxelSizeX
     voxel_size_y = uniforms.voxelSizeY
     voxel_size_z = uniforms.voxelSizeZ
@@ -173,14 +173,14 @@ def to_half_float(value):
 *   **Degenerate Input:** If `timeCount` is 0, the loop range is empty, and min/max remain infinity/negative infinity [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
+*   **Measured Performance:** Not given in the sources. [S1, unofficial]
+*   **Scaling:** Not given in the sources. [S1, unofficial]
+*   **Strengths:** Not given in the sources. [S1, unofficial]
+*   **Limitations:** Not given in the sources. [S1, unofficial]
+*   **When to use:** Not given in the sources. [S1, unofficial]
+*   **When not to use:** Not given in the sources. [S1, unofficial]
 
 ## Background
 This method is part of the `three.js-volume-renderer` library, which provides volume rendering capabilities for Three.js [S1, unofficial]. It was developed to support dynamic volume data, such as medical imaging (NIfTI files) and geometry-based SDFs, by allowing efficient updates of multi-volume textures [S1, unofficial].

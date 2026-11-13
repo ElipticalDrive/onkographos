@@ -3,50 +3,68 @@
 Also called: chunk budget policies
 
 ## Overview
-Budget Plans manage chunk loading policies for chunked volumes, replacing the single octree-focused policy with presets for exploration, whole-volume figures, and frame-rate holding [S1, unofficial]. Unlike [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md) which focuses on geometric radius, or [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md) which manages eviction, Budget Plans define the target detail level and spatial extent based on user intent, while GPU residency is capped separately by the renderer [S1, unofficial].
+Budget Plans manage chunk loading policies for chunked volume rendering, replacing the single octree-focused policy with presets for exploration, whole-volume figures, and frame-rate holding [S1, unofficial]. It solves the problem of rigid streaming behavior by allowing mid-session switching and re-folding of load options based on user intent [S1, unofficial]. Unlike siblings that focus on geometric generation or scanner mechanics, Budget Plans shape the octree structure and residency targets to balance detail and performance [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   Input: A budget plan configuration object or preset name.
-*   Output: A resolved `BudgetPlan` object containing `minLevel`, `halo`, `radius`, and `gridDims` [S1, unofficial].
+- Input: A configuration object specifying the desired plan (preset or explicit), current scene state (minLevel, halo), and optional explicit options.
+- Output: A resolved `BudgetPlan` object containing `gridDims`, `stride`, `radius`, and other parameters used by the streaming engine.
 
 **Data Structures:**
-The `BudgetPlan` type contains:
-*   `minLevel`: Integer, the minimum LOD level to stream [S1, unofficial].
-*   `halo`: Integer, the number of chunks surrounding the view volume to keep resident [S1, unofficial].
-*   `radius`: String or number, defines the spatial extent for detail shrink passes [S1, unofficial].
-*   `gridDims`: Array of 3 integers `[x, y, z]`, defining the exact lattice block counts per axis (used in Exact Lattice Grid variant) [S1, unofficial].
+- `BudgetPlan`: An object containing:
+  - `gridDims`: Array of integers `[x, y, z]` representing the number of bricks per axis.
+  - `stride`: Array of integers `[x, y, z]` representing the stride for chunk indexing.
+  - `radius`: Number or string ('volume') defining the detail shrink pass radius.
+  - `minLevel`: Integer minimum LOD level.
+  - `halo`: Integer halo size.
 
 **Steps:**
-1.  **Resolve Plan:** Call `resolveBudgetPlan` with the desired preset or explicit options. The resolution follows a precedence order (lowest to highest): focus baseline, named preset, explicit plan object, individual options [S1, unofficial].
-2.  **Apply Mid-Session:** Call `setBudgetPlan` to switch plans during runtime. This triggers a re-fold over load options [S1, unofficial].
-3.  **State Preservation:** During the switch, `minLevel` and `halo` are derived from the current state. This prevents the switch from undoing `setMaxDetail` calls or undercutting wider kernels already streamed [S1, unofficial].
-4.  **Uniform Detail Shrink:** If `radius` is set to `'volume'`, a uniform detail shrink pass is enabled. This pass only affects detail levels beyond the specified radius, allowing the budget pass to converge on the finest uniform level that fits within the budget [S1, unofficial].
-5.  **Lattice Indexing (Exact Lattice Grid):** If `gridDims` is specified, the system replaces octree-based brick sizing with an exact lattice. `chunkAtVoxel` indexes this lattice using the real `gridDims` and `stride` set on the plan [S1, unofficial].
+1. **Resolve Plan:** Call `resolveBudgetPlan` with the input configuration.
+   - Determine the effective plan based on precedence: focus baseline < named preset < explicit plan object < individual options [S1, unofficial].
+   - If a named preset is used, apply its default parameters.
+2. **Apply Radius:** If `radius` is set to 'volume', enable a uniform detail shrink pass. This pass only affects levels beyond the specified radius and converges on the finest uniform level that fits within the budget [S1, unofficial].
+3. **Switch Plan:** If `setBudgetPlan` is called mid-session:
+   - Re-fold over the current load options.
+   - Preserve `minLevel` and `halo` from the current state to prevent undoing `setMaxDetail` or undercutting wider kernels already streamed [S1, unofficial].
+4. **Handle Lattice Grid (if applicable):** If `gridDims` is specified:
+   - Set `gridDims[a]` bricks per axis, all drawn from `minLevel`.
+   - Set `stride` on the plan so `chunkAtVoxel` can index it correctly.
+   - For each axis, if a brick would exceed `deviceLimit`, grow the axis count (since `emitBrick` clamps oversize textures, which squashes sampling) [S1, unofficial].
+   - Return the built plan's `gridDims` to the caller.
 
 **Parameters:**
-*   **Presets:** Three presets are available: `focus`, `uniform`, and `interactive` [S1, unofficial].
-*   **targetFrameMs:** A parameter that is resolved and readable, but currently no action is taken on it [S1, unofficial].
+- **Presets:** Three presets are available: `focus`, `uniform`, `interactive` [S1, unofficial].
+- **Precedence:** Lowest to highest: focus baseline, named preset, explicit plan object, individual options [S1, unofficial].
+- **targetFrameMs:** Resolved and readable, but currently not acted upon [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Chunk 0 Eviction:** If chunk 0 is evicted, the volume may blank out (WebGL2) because `draw()` early-returns on null `volumeTexture`/`volumeGradientTexture`. These textures are best-effort aliases of chunk 0; real textures bind per chunk. A refocus that evicts chunk 0 silently kills the volume [S1, unofficial].
-*   **Fallback Sampling:** If the primary sampler fails, the system falls back to `vol.pickSampler` (mm-space, backed by the coarse floor) to ensure both backends function [S1, unofficial].
+- **Chunk 0 Eviction:** If chunk 0 is evicted, the volume may appear blanked because `draw()` early-returns on null `volumeTexture` / `volumeGradientTexture`, which are best-effort aliases of chunk 0 [S1, unofficial].
+- **Unreachable Counts:** Previous `chunkVolumeMultiLOD` sized bricks from scalar `cellEdge`, causing counts to step 2, 8, 12, 16, 27, 4 on `hoa_heart` L5 (181x186x246), making 4 or 9 unreachable [S1, unofficial]. `maxBricks` only coarsened by raising level floor, fighting level control [S1, unofficial].
+- **Degenerate Plans:** Multi-LOD plans previously returned degenerate `[1,1,1]` for `gridDims` [S1, unofficial].
 
 ## Subtopics
 
+### [Block Loading Badges](6011-block-loading-badges.md)
+Block Loading Badges provide per-pane visibility into the status of GPU upload queues for chunk-based volume rendering. They solve the problem of opaque streaming progress by tracking the resident count movement of fetched blocks, distinguishing actual data acquisition from planned requests. Unlike general budget plans that shape octree structure, badges specifically monitor the GPU residency cap and upload queue depth, ensuring the UI reflects only the blocks the stream actually requested and fetched.
+
+### [Capacity Handling](14405-capacity-handling.md)
+Capacity Handling converts continuous block quotas derived from logarithmic smoothing into integer budgets that strictly respect block capacity limits and sum to the global target count $K$. It serves as the final step in Budget Plans, ensuring that the number of retained Gaussians per chunk is a valid integer before Quadratic Selection determines which specific Gaussians to keep. It differs from simple rounding by handling capacity clipping and deficit redistribution through iterative passes.
+
 ### Exact Lattice Grid
-Replaces octree-based brick sizing with an exact lattice defined by `gridDims`, allowing specific block counts previously unreachable due to scalar `cellEdge` sizing [S1, unofficial].
-*   **How it works:** Set real `gridDims`/stride on the plan so `chunkAtVoxel` indexes it. An axis grows when a brick would exceed `deviceLimit`, as `emitBrick` clamps oversize textures which squashes sampling; callers read the built plan's own `gridDims` back [S1, unofficial].
-*   **Pitfall:** Previous `chunkVolumeMultiLOD` sized bricks from scalar `cellEdge`, causing counts to step 2, 8, 12, 16, 27, 4 on `hoa_heart` L5 (181x186x246); 4 or 9 were unreachable. `maxBricks` only coarsened by raising the level floor, fighting level control [S1, unofficial].
+Exact Lattice Grid replaces octree-based brick sizing with an exact lattice defined by `gridDims`, allowing specific block counts that were previously unreachable due to scalar `cellEdge` sizing [S1, unofficial]. It sets real `gridDims`/`stride` on the plan so `chunkAtVoxel` indexes it. An axis grows when a brick would exceed `deviceLimit`, since `emitBrick` clamps an oversize texture and that squashes the sampling, so callers read the built plan's own `gridDims` back [S1, unofficial]. Previous `chunkVolumeMultiLOD` sized bricks from scalar `cellEdge`, so counts stepped 2, 8, 12, 16, 27, 4 on `hoa_heart` L5; 4 or 9 were unreachable. `maxBricks` only coarsened by raising level floor, fighting level control [S1, unofficial].
 
 ## Operating characteristics
-*   **Complexity:** Not given in the sources.
-*   **Performance:** The `targetFrameMs` parameter is resolved but not yet acted upon, so frame-rate holding performance is not currently optimized by this system [S1, unofficial].
-*   **Strengths:** Allows mid-session switching without undoing manual detail settings; supports exact block counts for uniform volumes [S1, unofficial].
-*   **Limitations:** Chunk 0 eviction can blank the volume if not handled; `targetFrameMs` is inert; the plan budget only shapes the octree, and GPU residency is capped separately by the renderer [S1, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Allows mid-session switching of streaming policies; supports uniform detail shrink for whole-volume figures; provides exact lattice control for specific block counts.
+- **Limitations:** `targetFrameMs` is not yet acted upon; Chunk 0 eviction can blank the volume; previous brick sizing led to unreachable block counts.
+- **When to Use:** Use for exploring (focus), whole-volume figures (uniform), or holding frame rate while rotating (interactive). Use Exact Lattice Grid when specific block counts are required.
+- **When Not to Use:** Not suitable for scenarios requiring dynamic frame-rate adaptation (as `targetFrameMs` is inert).
 
 ## Background
-Originated in the Niivue project to address the limitation of having only one octree-focused policy, which was suitable for exploration but poor for whole-volume figures or frame-rate holding [S1, unofficial]. The design doc is located at `docs/budget-plans.md`, with remaining streaming work tracked in `docs/streaming-todos.md` [S1, unofficial].
+Origin: Introduced in [S1, unofficial] as part of the `niivue` library's streaming improvements. The design doc is located at `docs/budget-plans.md`. Remaining streaming work is tracked in `docs/streaming-todos.md` (off-thread chunk decode is the next item) [S1, unofficial].
 
 ## Sources
 [S1] feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection, https://github.com/niivue/mono/pull/138, fetched 2026-10-27 (unofficial)

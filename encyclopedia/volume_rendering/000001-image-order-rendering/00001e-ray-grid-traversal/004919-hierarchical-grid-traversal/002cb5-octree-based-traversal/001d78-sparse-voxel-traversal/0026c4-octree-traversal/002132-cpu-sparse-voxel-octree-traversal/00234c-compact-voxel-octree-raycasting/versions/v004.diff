@@ -1,0 +1,67 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Compact Voxel Octree Raycasting is a CPU-based ray traversal algorithm for Sparse Voxel Octrees that optimizes memory layout and traversal logic by compacting active ray-voxel interactions and decoding node masks on-the-fly [S2, unofficial]. It solves the problem of inefficient traversal in sparse structures by using an explicit stack to manage non-sequential memory layouts and a parallel "COMPACTIFY" step to filter out non-intersecting rays, ensuring that only valid ray-voxel pairs are processed in subsequent levels [S1][S2, unofficial]. Unlike recursive or parametric approaches, it relies on a linear block structure with explicit state management, making it suitable for high-performance CPU implementations where memory bandwidth and cache locality are critical [S2, unofficial]. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) and differs from [Parametric Octree Traversal](2361-parametric-octree-traversal.md), [Iterative Octree Traversal](2618-iterative-octree-traversal.md), [Recursive Octree Traversal](2632-recursive-voxel-octree-traversal.md), and [Sparse Voxel Octree Path Tracing](2988-sparse-voxel-octree-path-tracing.md) by explicitly managing traversal state and compacting active ray lists between levels.
++Compact Voxel Octree Raycasting is a ray traversal algorithm for Sparse Voxel Octrees (SVO) that uses an explicit stack to manage non-sequential memory layouts and decodes node masks on-the-fly to determine traversal order and leaf status [S2, unofficial]. It solves the problem of processing non-intersecting ray-voxel pairs by applying a parallel COMPACTIFY reduction step between traversal levels to filter active rays [S1][S2, unofficial]. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) and differs from [Parametric Octree Traversal](2361-parametric-octree-traversal.md), [Iterative Octree Traversal](2618-iterative-octree-traversal.md), [Recursive Octree Traversal](2632-recursive-voxel-octree-traversal.md), and [Sparse Voxel Octree Path Tracing](2988-sparse-voxel-octree-path-tracing.md) by explicitly managing traversal state and compacting active ray lists between levels [S1][S2, unofficial].
+ 
+ ## How it works
+@@ -63,5 +63,5 @@
+     fb.drawPixel(cur_x, cur_y, (red / 256, 0, blu / 256))
+ 
+-def ray_cast(r_o, r_d, ot, fb, cur_x, cur_y, termin_level):
++def ray_cast(r_o, r_d, ot, fb, cur_x, cur_y, termin_level, stack_size, stack_level_max):
+     dir_mask = 0
+     if r_d.x == 0: r_d.x = 1e-10
+@@ -74,5 +74,5 @@
+     tx0, ty0, tz0 = 0.0, 0.0, 0.0
+     tx1, ty1, tz1 = 1.0, 1.0, 1.0
+-    txm, tym, tzm = 1.0, 1.0, 1.0
++    txm, tym, tzm = 1.0/abs(r_d.x), 1.0/abs(r_d.y), 1.0/abs(r_d.z) # [G] Standard ray marching deltas
+     t_start = min(tx1, min(ty1, tz1))
+     level, si, sl = 0, 0, 0
+@@ -82,5 +82,5 @@
+     exit_node = False
+     stack_underflow = False
+-    stack = [None] * 1024
++    stack = [None] * stack_size
+     c_leaf, c_valid, c_offset = [False]*8, [False]*8, [0]*8
+ 
+@@ -113,12 +113,15 @@
+ 
+         if c_valid[idx_flip]:
+-            assert si < 1024
++            assert si < stack_size
+             stack[si] = (tx0, ty0, tz0, tx1, ty1, tz1, node_adr, idx)
+             si += 1
+-            if sl < 32: sl += 1
++            if sl < stack_level_max: sl += 1
+             level += 1
+             is_first_node = True
+-            # [G] Standard octree subdivision updates tx0..tz1 to child bounds based on idx_flip
+             child_ptr = ot.get_entry(node_adr).node.child_ptr
++            # [G] Handle far pointer if bit 15 is set
++            if child_ptr & (1 << 15):
++                far_entry = ot.get_entry(node_adr + child_ptr)
++                child_ptr = far_entry.node.far_ptr
+             child_bep = ot.get_relative_entry(node_adr, child_ptr)
+             node_adr = child_bep.adr + c_offset[idx_flip]
+@@ -129,5 +132,5 @@
+ def COMPACTIFY(N_l, D, S):
+     # Parallel reduction step per [S1]
+-    N_l_plus_1 = []
++    N_l_plus_1 = [None] * len(N_l)
+     for t in range(len(N_l)):
+         if D[t] == 1:
+@@ -140,8 +143,8 @@
+ 
+ ## Operating characteristics
+-The time complexity is $O(N)$ where $N$ is the number of rays, but the COMPACTIFY step reduces active rays as they traverse deeper into the octree [S1][S2, unofficial]. Memory complexity is $O(D)$ for the explicit stack, where $D$ is the maximum octree depth, plus temporary storage for the COMPACTIFY active ray list [S1][S2, unofficial]. The method is optimized for CPU execution, leveraging explicit stack management and parallel reduction to minimize memory bandwidth and cache misses [S2, unofficial]. Strengths include non-recursive traversal avoiding stack overflow, reduced processing load via compaction, and on-the-fly mask decoding minimizing memory accesses [S2, unofficial]. Limitations include a heuristic `new_node` function that may not be optimal for all ray directions, and fixed-point precision constraints for extreme scene scales [S2, unofficial]. It is best suited for CPU-based ray tracing of sparse voxel octrees where memory efficiency and explicit traversal control are required [S2, unofficial]. It should be avoided for GPU implementations where recursive or parametric methods align better with hardware architecture, and for dense scenes where stack management and compaction overhead outweigh benefits [S2, unofficial].
++The time complexity is $O(N)$ where $N$ is the number of rays, but the COMPACTIFY step reduces active rays as they traverse deeper into the octree [S1][S2, unofficial]. Memory complexity is $O(D)$ for the explicit stack, where $D$ is the maximum octree depth, plus temporary storage for the COMPACTIFY active ray list [S1][S2, unofficial]. Strengths include non-recursive traversal avoiding stack overflow, reduced processing load via compaction, and on-the-fly mask decoding minimizing memory accesses [S2, unofficial]. Limitations include a heuristic `new_node` function that may not be optimal for all ray directions, and fixed-point precision constraints for extreme scene scales [S2, unofficial]. It is best suited for CPU-based ray tracing of sparse voxel octrees where memory efficiency and explicit traversal control are required [S2, unofficial].
+ 
+ ## Background
+-Compact Voxel Octree Raycasting originates from the SVO Workbench project [S2, unofficial]. The COMPACTIFY technique, which forms the parallel reduction core of this method, was introduced in the context of Neural Geometric Level of Detail (NGLOD) for real-time rendering with implicit 3D shapes [S1]. The SVO Workbench provides a concrete CPU implementation of this traversal algorithm for sparse voxel structures [S2, unofficial].
++The algorithm is described in the SVO Workbench repository for traversing compacted voxel octrees using an explicit stack and on-the-fly mask decoding [S2, unofficial]. The COMPACTIFY technique, which forms the parallel reduction core of this method, was introduced for real-time rendering with implicit 3D shapes to manage active ray-voxel lists [S1]. The SVO Workbench provides a concrete CPU implementation of this traversal algorithm for sparse voxel structures [S2, unofficial].
+ 
+ ## Sources

@@ -13,6 +13,7 @@ The method computes the single-scattering radiance contribution by splitting the
     *   $\omega_0$: Camera ray direction.
     *   $\omega_i$: Light direction.
     *   $L_i$: Incident light radiance (assumed constant or sampled).
+    *   $L_{\text{s}}$: Surface radiance at the interaction point.
     *   $\sigma_a$: Absorption coefficient.
     *   $\sigma_s$: Scattering coefficient.
     *   $\sigma_t = \sigma_a + \sigma_s$: Extinction coefficient.
@@ -21,18 +22,20 @@ The method computes the single-scattering radiance contribution by splitting the
     *   $t_{SC}$: Distance to the closest surface intersection or medium exit.
     *   $N_{\text{sample}}$: Number of samples for the numerical integration.
     *   $S(x)$: Importance sampling function transforming uniform samples to the target distribution.
+    *   $\text{PDF}(t')$: Probability density function of the sample distance.
+    *   $V(t', \omega_i)$: Binary visibility function (1 if unoccluded, 0 if occluded).
 *   **Outputs:**
     *   $L(\omega_i, \omega_0)$: Estimated outgoing radiance.
 
 **Data Structures**
-The method relies on standard floating-point accumulators for the numerator and denominator of the ratio estimator. No complex data structures are required beyond the ray parameters and sample values.
+The method relies on standard floating-point accumulators for the numerator and denominator of the ratio estimator. No complex data structures are required beyond the ray parameters and sample values [G].
 
 **Steps**
-1.  **Compute Unoccluded Term:** Calculate the analytic unoccluded single-scattering integral $\mathcal{R}_{\text{box}}$ for the box section of the medium. This term assumes no occlusion (visibility $V=1$) [S1].
-2.  **Generate Samples:** Generate $N_{\text{sample}}$ sample distances $t'$ using the importance sampling function $S(x)$, which transforms uniform random variables $\xi$ into the target distribution [S1].
+1.  **Compute Unoccluded Term:** Calculate the analytic unoccluded single-scattering integral $\mathcal{R}_{\text{box}}$ for the box section of the medium, representing the integral over transmittance with light source radiance separated out [S1].
+2.  **Generate Samples:** Generate $N_{\text{sample}}$ sample distances $t'$ using the importance sampling function $S(x)$, which transforms uniform random variables $\xi$ into the target distribution via $t' = S(\xi \cdot \frac{k}{N_{\text{sample}}-1})$ [S1].
 3.  **Compute Ratio Numerator:** For each sample $k$, compute the weighted visibility. The numerator sum is:
     $$ \text{Num} = \sum_{k=0}^{N_{\text{sample}}} \frac{e^{-\sigma_t(t' + d_m(t'))} V(t', \omega_i)}{\text{PDF}(t')} $$
-    where $d_m(t')$ is the distance to the medium boundary from the sample point, and $V(t', \omega_i)$ is the binary visibility function (1 if unoccluded, 0 if occluded) [S1].
+    where $d_m(t')$ is the distance to the medium boundary from the sample point, and $V(t', \omega_i)$ is the binary visibility function [S1].
 4.  **Compute Ratio Denominator:** For each sample $k$, compute the weight ignoring visibility. The denominator sum is:
     $$ \text{Den} = \sum_{k=0}^{N_{\text{sample}}} \frac{e^{-\sigma_t(t' + d_m(t'))}}{\text{PDF}(t')} $$
     This term represents the unoccluded estimate used for normalization [S1].
@@ -47,8 +50,10 @@ The method relies on standard floating-point accumulators for the numerator and 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def ratio_estimator_volume_scattering(
-    omega_0, omega_i, L_i, sigma_a, sigma_s, f_phase, 
+    omega_0, omega_i, L_i, L_s, sigma_a, sigma_s, f_phase, 
     t_S, t_SC, N_sample, S_func, pdf_func, visibility_func
 ):
     """
@@ -58,6 +63,7 @@ def ratio_estimator_volume_scattering(
         omega_0: Camera ray direction.
         omega_i: Light direction.
         L_i: Incident light radiance.
+        L_s: Surface radiance at the interaction point.
         sigma_a: Absorption coefficient.
         sigma_s: Scattering coefficient.
         f_phase: Phase function f(omega_i, omega_0).
@@ -74,28 +80,26 @@ def ratio_estimator_volume_scattering(
     sigma_t = sigma_a + sigma_s
     
     # Step 1: Compute analytic unoccluded term R_box
-    # Note: The exact analytic formula for R_box depends on the medium geometry 
-    # (e.g., box intersection). This is assumed to be provided by the caller 
-    # or a separate analytic integration routine.
-    R_box = compute_analytic_unoccluded_integral(
-        omega_0, omega_i, sigma_a, sigma_s, f_phase, t_S, t_SC
-    )
+    # The exact analytic formula for R_box depends on the medium geometry (e.g., box intersection).
+    # Not given in the sources.
+    R_box = 0.0
     
     # Step 2 & 3 & 4: Compute Numerator and Denominator of the ratio
     numerator = 0.0
     denominator = 0.0
     
+    # Guard against division by zero if N_sample is 1 [G]
+    denom_idx = N_sample - 1 if N_sample > 1 else 1
+    
     for k in range(N_sample):
         # Generate sample distance t' from uniform distribution
-        # S_func transforms uniform sample to target distribution
-        t_prime = S_func(k / (N_sample - 1))
+        t_prime = S_func(k / denom_idx)
         
-        # Calculate distance to medium boundary from sample point
-        # d_m(t') is the remaining distance to the end of the segment or boundary
-        d_m = compute_distance_to_boundary(t_prime, t_SC)
+        # Calculate distance to medium boundary from sample point [G]
+        d_m = max(0.0, t_SC - t_prime)
         
         # Calculate transmittance from sample point to boundary
-        transmittance = exp(-sigma_t * (t_prime + d_m))
+        transmittance = math.exp(-sigma_t * (t_prime + d_m))
         
         # Get PDF value for importance sampling
         p_val = pdf_func(t_prime)
@@ -121,7 +125,7 @@ def ratio_estimator_volume_scattering(
         
     # Step 6: Combine terms
     # Surface radiance term (unoccluded surface contribution)
-    L_surface = compute_surface_radiance(omega_0, omega_i) * exp(-sigma_t * t_SC)
+    L_surface = L_s * math.exp(-sigma_t * t_SC)
     
     # Volumetric scattering term
     L_volume = sigma_s * f_phase * R_box * V_hat * L_i
@@ -140,11 +144,11 @@ def ratio_estimator_volume_scattering(
 ## Subtopics
 
 ### Moment-Based Approximate Estimator
-An approximate estimator for single scattering that uses a heuristic formula based on projection on moments to estimate visibility [S1]. It computes the unoccluded single-scattering term analytically and then applies the heuristic to estimate the ratio between unoccluded and occluded radiance [S1]. Unlike the sampling-based Ratio Estimator, which asymptotically converges to the correct solution, the Moment-Based Approximate Estimator provides an approximate solution [S1]. It is useful when computational resources are limited and exact convergence is not required, but it lacks the unbiased guarantee of the full Ratio Estimator [S1].
+An approximate estimator for single scattering that uses a heuristic formula based on projection on moments to estimate visibility [S1]. It computes the unoccluded single-scattering term analytically and then applies the heuristic to estimate the ratio between unoccluded and occluded radiance [S1]. Unlike the sampling-based Ratio Estimator, which asymptotically converges to the correct solution, the Moment-Based Approximate Estimator provides an approximate solution [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of samples $N_{\text{sample}}$ for the ratio estimation part. The analytic term is computed in constant time relative to sampling.
-*   **Memory Complexity:** Constant, requiring only accumulators for the numerator and denominator.
+*   **Time Complexity:** Linear with respect to the number of samples $N_{\text{sample}}$ for the ratio estimation part. The analytic term is computed in constant time relative to sampling [G].
+*   **Memory Complexity:** Constant, requiring only accumulators for the numerator and denominator [G].
 *   **Strengths:**
     *   Asymptotically converges to the correct solution, even in multiple scattering cases [S1].
     *   Can be easily combined with existing sampling schemes such as equidistant and distance sampling algorithms [S1].
@@ -152,11 +156,11 @@ An approximate estimator for single scattering that uses a heuristic formula bas
 *   **Limitations:**
     *   Requires careful implementation in progressive rendering to avoid bias [S1].
     *   Performance depends on the efficiency of the visibility function and the importance sampling distribution [S1].
-*   **When to Use:** Use when unbiased single-scattering results are required in participating media, especially when integrating with existing Monte Carlo path tracers.
-*   **When Not to Use:** Use the Moment-Based Approximate Estimator if performance is critical and approximate results are acceptable, or if the scene is static and precomputed.
+*   **When to Use:** Use when unbiased single-scattering results are required in participating media, especially when integrating with existing Monte Carlo path tracers [G].
+*   **When Not to Use:** Use the Moment-Based Approximate Estimator if performance is critical and approximate results are acceptable, or if the scene is static and precomputed [G].
 
 ## Background
-The Ratio Estimator for Volume Scattering was introduced in the context of collimated whole volume light scattering in homogeneous finite media [S1]. It builds upon previous approaches that used ratio estimators for shadowing BRDFs [S1] or approximate filtering techniques based on Fourier coefficients and moments [S1]. The work demonstrates that the ratio estimator, previously considered an approximation, actually asymptotically converges to the correct solution of the integral [S1]. It generalizes the technique to multiple scattering and progressive rendering, providing a robust framework for volumetric light transport [S1].
+The Ratio Estimator for Volume Scattering was introduced in the context of collimated whole volume light scattering in homogeneous finite media [S1]. It builds upon previous approaches that used ratio estimators for shadowing BRDFs or approximate filtering techniques based on Fourier coefficients and moments [S1]. The work demonstrates that the ratio estimator, previously considered an approximation, actually asymptotically converges to the correct solution of the integral [S1]. It generalizes the technique to multiple scattering and progressive rendering, providing a robust framework for volumetric light transport [S1].
 
 ## Sources
 [S1] Collimated Whole Volume Light Scattering in Homogeneous Finite Media, https://doi.org/10.1109/tvcg.2021.3135764, fetched 2026-10-27

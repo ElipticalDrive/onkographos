@@ -1,0 +1,191 @@
+# Hartley-Hartley Tangent Vector Formula
+
+Also called: HH formula, HH technique, Householder formula for tangential vector orthogonalization
+
+## Overview
+The Hartley-Hartley (HH) Tangent Vector Formula is a method for computing tangent and bitangent vectors from a given surface normal vector using Householder reflections [S1]. It solves the problem of establishing a local orthonormal reference frame for splat orientation in point cloud rendering without requiring neighborhood data [S1]. Unlike the Covariance Matrix (CM) technique, which is shape-aware and rotationally invariant, HH is non-shape aware and extrinsic, meaning stroke directions depend on the embedding space rather than the point cloud shape [S1]. It is chosen when computational efficiency is prioritized over local geometric coherence, particularly for noisy, under-sampled, or sparse data where CM fails [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A unit normal vector $\mathbf{n} = [n_x, n_y, n_z]^T$.
+*   **Output:** A tangent vector $\mathbf{t}$ and a bitangent (binormal) vector $\mathbf{b}$, such that $\{\mathbf{n}, \mathbf{t}, \mathbf{b}\}$ form an orthonormal basis.
+
+**Data Structures:**
+*   The vectors are represented as 3-component floating-point arrays.
+*   The calculation is typically performed in a geometry shader to avoid storing extra vertices [S1].
+
+**Steps:**
+1.  Evaluate the sign of the first component of the normal vector, $n_x$.
+2.  Compute the tangent vector $\mathbf{t}$ based on the sign of $n_x$.
+3.  Compute the bitangent vector $\mathbf{b}$ based on the sign of $n_x$.
+
+**Formulas:**
+The source text contains garbled LaTeX for the formulas in Algorithm 1 [S1]. However, the structure is defined by conditional logic based on $n_x$. The standard Householder orthogonalization for a vector $\mathbf{n}$ to find a vector orthogonal to it typically involves constructing a reflection matrix. The specific formulas provided in the source are:
+
+If $n_x \ge 0$:
+$$
+\mathbf{t}^T = \left[ -n_y \left(1 - \frac{n_z}{n_y+1}\right) - \frac{n_z}{n_y+1} \right] \quad \text{(Note: Source text garbled, likely missing components)}
+$$
+$$
+\mathbf{b}^T = \left[ -n_z - \frac{n_z}{n_y+1} \right] \left[ 1 - \frac{n_z}{n_x+1} \right] \quad \text{(Note: Source text garbled, likely missing components)}
+$$
+
+If $n_x < 0$:
+$$
+\mathbf{t}^T = \left[ n_y \left(1 + \frac{n_z}{n_y-1}\right) - \frac{n_z}{n_y-1} \right] \quad \text{(Note: Source text garbled, likely missing components)}
+$$
+$$
+\mathbf{b}^T = \left[ n_z \frac{n_z}{n_y-1} \right] \left[ 1 + \frac{n_z}{n_x-1} \right] \quad \text{(Note: Source text garbled, likely missing components)}
+$$
+
+*Correction/Interpretation Note:* The source explicitly states the formulas are derived from collinearity and orthogonality conditions of the Householder matrix [S1]. The garbled text `t = −n y 1 − nn y+1 − nn y+1 x x` suggests a structure involving terms like $1 - \frac{n_z}{n_y+1}$. A standard Householder vector $\mathbf{v}$ for reflecting $\mathbf{n}$ to a basis vector (e.g., $\mathbf{e}_1$) is $\mathbf{v} = \mathbf{n} \pm \|\mathbf{n}\|\mathbf{e}_1$. The tangent and bitangent are then derived from the null space of $\mathbf{n}$ or via cross products. Given the ambiguity, the implementation must rely on the standard Householder construction for orthogonalization, using the conditional sign choice to avoid cancellation errors when $n_x$ is near 1 or -1. The source confirms the computational cost is 1 order operation, 3 summations/subtractions, 10–12 multiplications, and 1 division [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_hh_tangent_bitangent(n_x, n_y, n_z):
+    """
+    Computes tangent and bitangent vectors from a unit normal vector
+    using the Hartley-Hartley (Householder) formula.
+    
+    Args:
+        n_x, n_y, n_z: Components of the unit normal vector n.
+        
+    Returns:
+        t: Tangent vector [tx, ty, tz]
+        b: Bitangent vector [bx, by, bz]
+    """
+    # Step 1: Evaluate sign of n_x
+    if n_x >= 0:
+        # Step 2: Compute tangent vector for n_x >= 0
+        # Source formula is garbled. Standard Householder approach:
+        # We want a vector orthogonal to n.
+        # The source implies a specific algebraic form. 
+        # Based on "t = -n_y (1 - n_z/(n_y+1)) ...", we interpret the structure.
+        # However, to be implementable and correct, we use the standard 
+        # Householder reflection logic which the source cites as the basis.
+        # The source claims continuity and smoothness.
+        
+        # Reconstructing from standard HH orthogonalization for robustness:
+        # If n_x >= 0, reflect n towards e_1 = [1, 0, 0]
+        # v = n + sign(n_x) * e_1 = n + [1, 0, 0]
+        # But the source uses specific algebraic terms. 
+        # Given the garbled nature, we implement the standard robust 
+        # Householder orthogonalization which satisfies the source's 
+        # description of "collinearity and orthogonality conditions".
+        
+        # Standard robust Householder vector v to map n to e_1:
+        # v = n + sign(n_x) * [1, 0, 0]
+        # However, the source specifically distinguishes cases by n_x sign 
+        # and uses n_y and n_z in denominators. This suggests a different 
+        # basis alignment or a specific derivation.
+        
+        # Let's stick to the source's explicit conditional structure 
+        # as closely as possible, filling gaps with standard vector math 
+        # to ensure orthogonality, as the exact garbled text is ambiguous.
+        
+        # Source: t^T = [ -n_y (1 - n_z/(n_y+1)) - n_z/(n_y+1) ]
+        # This looks like a 1D projection or a component. 
+        # A full 3D vector is required.
+        
+        # Implementation of the standard Householder orthogonalization 
+        # which is the "method" described:
+        # 1. Choose a reference vector, e.g., e_1 = [1, 0, 0].
+        # 2. Compute v = n + sign(n_x) * e_1.
+        # 3. Normalize v.
+        # 4. Tangent t = v x n (cross product).
+        # 5. Bitangent b = n x t.
+        
+        # This satisfies the "Householder formula" description and 
+        # "collinearity and orthogonality conditions" [S1].
+        
+        sign_nx = 1.0
+    else:
+        sign_nx = -1.0
+
+    # Construct Householder vector v
+    # v = n + sign(n_x) * [1, 0, 0]
+    v_x = n_x + sign_nx
+    v_y = n_y
+    v_z = n_z
+    
+    # Normalize v
+    v_len_sq = v_x*v_x + v_y*v_y + v_z*v_z
+    if v_len_sq == 0:
+        # Degenerate case: n = [-1, 0, 0]
+        # Use a different reference, e.g., e_2
+        v_x = n_x
+        v_y = n_y + 1.0
+        v_z = n_z
+        v_len_sq = v_x*v_x + v_y*v_y + v_z*v_z
+    
+    v_len = sqrt(v_len_sq)
+    v_x /= v_len
+    v_y /= v_len
+    v_z /= v_len
+    
+    # Tangent t is orthogonal to n and v (and thus in the plane of n and e_1)
+    # t = v x n
+    tx = v_y * n_z - v_z * n_y
+    ty = v_z * n_x - v_x * n_z
+    tz = v_x * n_y - v_y * n_x
+    
+    # Normalize t
+    t_len_sq = tx*tx + ty*ty + tz*tz
+    if t_len_sq == 0:
+        # n is parallel to e_1, t is undefined by this cross product
+        # Use e_2 as tangent
+        tx, ty, tz = 0.0, 1.0, 0.0
+    else:
+        t_len = sqrt(t_len_sq)
+        tx /= t_len
+        ty /= t_len
+        tz /= t_len
+        
+    # Bitangent b = n x t
+    bx = n_y * tz - n_z * ty
+    by = n_z * tx - n_x * tz
+    bz = n_x * ty - n_y * tx
+    
+    # Normalize b (should already be unit length if n and t are orthonormal)
+    b_len_sq = bx*bx + by*by + bz*bz
+    if b_len_sq > 0:
+        b_len = sqrt(b_len_sq)
+        bx /= b_len
+        by /= b_len
+        bz /= b_len
+        
+    return [tx, ty, tz], [bx, by, bz]
+```
+
+**Parameters:**
+*   The calculation is performed in the geometry shader [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The formula is designed to be continuous and smooth in most of its domain [S1].
+*   **Degenerate Input:** If the normal vector is zero, the method fails. The source assumes unit normal vectors [S1].
+*   **Assumption:** The advantage of real-time computation holds under the assumption that normal vectors have been estimated by a more efficient technique than the CM method [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The HH formula calculations sum up to 1 order operation, 3 summations/subtractions, 10–12 multiplications, and 1 division [S1]. This is much less demanding than solving the eigenvalue problem for a 3x3 matrix required by the Covariance Matrix (CM) technique [S1].
+*   **Memory Complexity:** It requires no additional storage for neighborhood data, unlike CM which needs neighboring points [S1]. It is performed in the geometry shader to avoid storing three extra vertices per point, which is more effective for large datasets [S1].
+*   **Strengths:**
+    *   Computationally cheap, allowing for real-time tangent computation [S1].
+    *   Works with noisy, under-sampled, or sparse data with holes, where CM fails [S1].
+    *   Applicable to diverse input types: depth maps, implicit surfaces, meshes, and point clouds [S1].
+    *   Produces "virtual paint brush strokes" that flow smoothly and continuously, providing local and global coherence [S1].
+*   **Limitations:**
+    *   Non-shape aware: Tangent directions depend on the embedding space, not the local point cloud shape [S1].
+    *   Extrinsic: Rotating the point cloud changes the stroke directions [S1].
+    *   Uses an isotropic radius, ignoring local anisotropic density [S1].
+*   **When to use:** Use when rendering noisy, sparse, or low-quality data, or when computational efficiency is critical and shape-aware orientation is not required.
+*   **When not to use:** Use CM instead when shape-aware, rotationally invariant orientation is needed and the data is dense and high-quality.
+
+## Background
+*   **Origin:** The method is described in "Stroke-based splatting: an efficient multi-resolution point cloud visualization technique" [S1]. It is based on the Householder formula for orthogonalization [S1].
+*   **History:** The technique was compared to Eberly (EB), Square Plate (SQP), and Covariance Matrix (CM) techniques [S1]. It was chosen for its analyticity, continuity, and low computational cost [S1].
+*   **Usage:** It is used in stroke-based splatting to provide virtual paint brush strokes that carry first-order differential information of the estimated surface normal plane [S1].
+
+## Sources
+[S1] Stroke-based splatting: an efficient multi-resolution point cloud visualization technique, https://doi.org/10.1007/s00371-017-1420-7, fetched 2026-10-26
