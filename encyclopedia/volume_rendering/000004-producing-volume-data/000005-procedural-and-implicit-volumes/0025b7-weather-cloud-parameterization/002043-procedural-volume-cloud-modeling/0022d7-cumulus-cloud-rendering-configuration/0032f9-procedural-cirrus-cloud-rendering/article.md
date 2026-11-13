@@ -1,107 +1,52 @@
 # Procedural Cirrus Cloud Rendering
 
-Also called: Layered FBM Cirrus, Strand-Based Cirrus
 
 ## Overview
-Procedural Cirrus Cloud Rendering is a technique for generating the appearance of high-altitude ice-crystal clouds using layered fractal Brownian motion (fbm) noise on a 2D plane projected from the view ray, modulated by wind direction and time to create strands, hooks, and fibres [S1, unofficial]. It differs from volumetric scattering methods by computing density and radiance analytically per ray, avoiding volume integration, and from simpler noise clouds by explicitly modeling the anisotropic, fibrous structure characteristic of cirrus [S1, unofficial].
+Procedural Cirrus Cloud Rendering is a technique for generating the appearance of high-altitude ice-crystal clouds using layered fractal Brownian motion (fbm) noise on a 2D plane projected from the view ray, modulated by wind direction and time to create strands, hooks, and fibres [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** View ray direction ($rayDir$), sun direction ($sunDir$), sun height ($sunHeight$), time ($time$), and sky radiance scale ($SKY\_RADIANCE\_SCALE$).
-*   **Parameters:** $CIRRUS\_HEIGHT = 0.15$, $CIRRUS\_WIND = (0.94, 0.34)$, $CIRRUS\_DRIFT = 0.02$, $CIRRUS\_COVERAGE = 0.45$, $CIRRUS\_MAX\_OPACITY = 0.85$ [S1, unofficial].
-*   **Outputs:** Final linear radiance color ($outColor$).
+*   **Inputs:** View ray direction ($rayDir$), sun direction ($sunDir$), sun height ($sunHeight$), time ($time$), sky radiance scale ($SKY\_RADIANCE\_SCALE$), cloud plane scale ($CIRRUS\_SCALE$), and cloud brightness ($CIRRUS\_BRIGHTNESS$) [S1, unofficial].
+*   **Outputs:** Final linear radiance color ($outColor$) and cloud density [S1, unofficial].
 
 **Data Structures**
-No persistent data structures are required. The method is stateless and computed per pixel/ray.
+No persistent data structures are required; the method is stateless and computed per ray [S1, unofficial].
+
+**Parameters**
+*   $CIRRUS\_HEIGHT = 0.15$ [S1, unofficial].
+*   $CIRRUS\_WIND = (0.94, 0.34)$ [S1, unofficial].
+*   $CIRRUS\_DRIFT = 0.02$ [S1, unofficial].
+*   $CIRRUS\_COVERAGE = 0.45$ [S1, unofficial].
+*   $CIRRUS\_MAX\_OPACITY = 0.85$ [S1, unofficial].
+*   $CIRRUS\_SCALE$ and $CIRRUS\_BRIGHTNESS$ are not given in the sources [G].
 
 **Algorithm Steps**
-1.  **Ray Projection:** Project the view ray direction onto the cloud plane. The plane coordinates ($plane$) are derived from the x and z components of the ray direction, scaled by height and a global scale factor. A minimum y-component threshold prevents division by zero or extreme values for rays pointing downwards [S1, unofficial].
-    $$ plane = rayDir.xz \times \frac{CIRRUS\_HEIGHT}{\max(rayDir.y, 0.02)} \times CIRRUS\_SCALE $$
-    *Note: $CIRRUS\_SCALE$ is not given a value in the sources [G].*
-
-2.  **Wind Frame Calculation:** Compute coordinates aligned with the wind direction. The "across" vector is perpendicular to the wind direction in the 2D plane. The wind frame ($wind\_frame$) consists of the projection of the plane onto the wind vector and the across vector [S1, unofficial].
-    $$ across = (-CIRRUS\_WIND.y, CIRRUS\_WIND.x) $$
-    $$ wind\_frame.x = dot(plane, CIRRUS\_WIND) $$
-    $$ wind\_frame.y = dot(plane, across) $$
-
-3.  **Animation:** Drift the wind frame in the wind direction based on time to simulate cloud movement [S1, unofficial].
-    $$ wind\_frame.x += time \times CIRRUS\_DRIFT $$
-
-4.  **Aliasing Control:** Calculate the pixel width across the wind direction using `fwidth` (the absolute difference of the derivative across the screen) to detect high-frequency variations that may alias [S1, unofficial].
-    $$ pixel\_across = fwidth(wind\_frame.y) $$
-
-5.  **Visibility Check:** If the ray points downwards ($rayDir.y < 0.02$), return zero density [S1, unofficial].
-
-6.  **Patch Generation:** Generate the base cloud coverage using coarse fbm noise. The noise is evaluated at a lower frequency ($0.25, 0.5$) with 4 octaves [S1, unofficial].
-    $$ patches = fbm(wind\_frame \times (0.25, 0.5), 4) $$
-
-7.  **Patch Smoothing:** Apply a smoothstep to create soft edges for the patches, controlled by the coverage parameter. The thresholds shift based on $CIRRUS\_COVERAGE$ [S1, unofficial].
-    $$ patches = smoothstep(0.55 - CIRRUS\_COVERAGE \times 0.3, 0.75 - CIRRUS\_COVERAGE \times 0.3, patches) $$
-
-8.  **Hook Generation:** Generate hooks (curls) using a coarser fbm noise with a different frequency ($0.6, 1.2$) and 3 octaves. A constant offset ($31.7, 5.3$) ensures variation [S1, unofficial].
-    $$ hooks = fbm(wind\_frame \times (0.6, 1.2) + (31.7, 5.3), 3) $$
-
-9.  **Strand Frame Offset:** Offset the strand frame by the hooks to create curls in the strands. The hooks are scaled by 0.8 [S1, unofficial].
-    $$ strand\_frame = wind\_frame + (0.0, hooks \times 0.8) $$
-
-10. **Strand Generation:** Generate strands using fbm at a higher frequency ($0.8, 7.0$) with 4 octaves. A constant offset ($-12.1, 47.9$) is added [S1, unofficial].
-    $$ strands = fbm(strand\_frame \times (0.8, 7.0) + (-12.1, 47.9), 4) $$
-
-11. **Strand Smoothing:** Smooth the strands using a fixed smoothstep range [S1, unofficial].
-    $$ strands = smoothstep(0.3, 0.85, strands) $$
-
-12. **Fibre Generation:** Generate fine fibres using fbm at a very high frequency ($1.5, 28.0$) with 3 octaves. A constant offset ($7.3, -21.4$) is added [S1, unofficial].
-    $$ fibres = fbm(strand\_frame \times (1.5, 28.0) + (7.3, -21.4), 3) $$
-
-13. **Fibre Smoothing:** Smooth the fibres using a fixed smoothstep range [S1, unofficial].
-    $$ fibres = smoothstep(0.25, 0.75, fibres) $$
-
-14. **Horizon Fade for Fibres:** Fade fibres towards an average value of 0.5 near the horizon. The fade is controlled by the pixel width across the wind, scaled by 28.0. This reduces visible aliasing and structural detail near the horizon [S1, unofficial].
-    $$ fibres = mix(fibres, 0.5, smoothstep(0.15, 0.4, pixel\_across \times 28.0)) $$
-
-15. **Density Combination:** Combine patches, strands, and fibres to form the base density. Fibres modulate the density between 0.35 and 1.0 [S1, unofficial].
-    $$ density = patches \times strands \times mix(0.35, 1.0, fibres) $$
-
-16. **Fray Noise Generation:** Generate fray noise using fbm at frequency ($3.0, 16.0$) with 2 octaves. A constant offset ($-3.9, 13.1$) is added [S1, unofficial].
-    $$ fray = fbm(strand\_frame \times (3.0, 16.0) + (-3.9, 13.1), 2) $$
-
-17. **Horizon Fade for Fray:** Fade fray towards an average value of 0.6 near the horizon, controlled by pixel width scaled by 16.0 [S1, unofficial].
-    $$ fray = mix(fray, 0.6, smoothstep(0.15, 0.4, pixel\_across \times 16.0)) $$
-
-18. **Fray Application:** Apply fray to the density. The fray value is squared and scaled by 1.6, then mixed with 1.0 based on the density itself. This adds fine texture variation, particularly in denser regions [S1, unofficial].
-    $$ density *= mix(fray \times fray \times 1.6, 1.0, smoothstep(0.1, 0.5, density)) $$
-
-19. **Horizon Density Fade:** Fade the density to zero near the horizon based on the ray's y-component. The fade occurs between $y=0.03$ and $y=0.22$ [S1, unofficial].
-    $$ density *= smoothstep(0.03, 0.22, rayDir.y) $$
-
-20. **Final Density:** Return the final density scaled by the maximum opacity [S1, unofficial].
-    $$ return density \times CIRRUS\_MAX\_OPACITY $$
-
-21. **Base Radiance:** Initialize the cloud color as white, scaled by brightness [S1, unofficial].
-    $$ colour = vec3(1.0) \times CIRRUS\_BRIGHTNESS $$
-    *Note: $CIRRUS\_BRIGHTNESS$ is not given a value in the sources [G].*
-
-22. **Sun Scattering:** Add sun scattering to the color. The scattering intensity depends on the dot product between the view ray and sun direction ($sunDot$) raised to the 8th power, scaled by 1.5 and sun height [S1, unofficial].
-    $$ colour += vec3(1.0, 0.97, 0.9) \times pow(sunDot, 8.0) \times 1.5 \times sunHeight $$
-
-23. **Sunset Factor:** Compute a sunset factor that is non-zero when the sun is low (between height 0.0 and 0.5) [S1, unofficial].
-    $$ sunsetFactor = smoothstep(0.0, 0.2, sunHeight) \times (1.0 - smoothstep(0.2, 0.5, sunHeight)) $$
-
-24. **Sunset Tint:** Apply a warm tint during sunset by mixing the current color with a warmer version ($1.0, 0.75, 0.5$) scaled by the sunset factor and 0.4 [S1, unofficial].
-    $$ colour = mix(colour, colour \times vec3(1.0, 0.75, 0.5), sunsetFactor \times 0.4) $$
-
-25. **Sky Radiance Scaling:** Scale the final cloud color by the sky radiance scale [S1, unofficial].
-    $$ return colour \times SKY\_RADIANCE\_SCALE $$
-
-26. **Integration in Main Shader:** In the main shader, compute the ray direction from the fragment clip position. Compute the sun direction and time from push constants. Compute the base sky color using aerial and sun disc radiance functions. Mix the cloud radiance into the final color based on the computed cloud density. Output the linear radiance [S1, unofficial].
-    $$ rayDir = computeRayDir(fragClipPos) $$
-    $$ sunDir = normalize(pc.sun\_direction.xyz) $$
-    $$ time = pc.sun\_direction.w $$
-    $$ color = aerialRadiance(rayDir, sunDir) + sunDiscRadiance(rayDir, sunDir) $$
-    $$ cloudDensity = cloudDensity(rayDir, time) $$
-    $$ cloudRadiance = cloudRadiance(rayDir, sunDir) $$
-    $$ color = mix(color, cloudRadiance, cloudDensity) $$
-    $$ outColor = vec4(color, 1.0) $$
+1.  **Ray Projection:** Project the view ray direction onto the cloud plane using $plane = rayDir.xz \times \frac{CIRRUS\_HEIGHT}{\max(rayDir.y, 0.02)} \times CIRRUS\_SCALE$ [S1, unofficial].
+2.  **Wind Frame:** Compute wind-aligned coordinates: $across = (-CIRRUS\_WIND.y, CIRRUS\_WIND.x)$, $wind\_frame.x = dot(plane, CIRRUS\_WIND)$, $wind\_frame.y = dot(plane, across)$ [S1, unofficial].
+3.  **Animation:** Drift the wind frame: $wind\_frame.x += time \times CIRRUS\_DRIFT$ [S1, unofficial].
+4.  **Aliasing Control:** Calculate pixel width across the wind: $pixel\_across = fwidth(wind\_frame.y)$ [S1, unofficial].
+5.  **Visibility:** Return zero density if $rayDir.y < 0.02$ [S1, unofficial].
+6.  **Patches:** Generate base coverage: $patches = fbm(wind\_frame \times (0.25, 0.5), 4)$ [S1, unofficial].
+7.  **Patch Smoothing:** $patches = smoothstep(0.55 - CIRRUS\_COVERAGE \times 0.3, 0.75 - CIRRUS\_COVERAGE \times 0.3, patches)$ [S1, unofficial].
+8.  **Hooks:** $hooks = fbm(wind\_frame \times (0.6, 1.2) + (31.7, 5.3), 3)$ [S1, unofficial].
+9.  **Strand Frame:** $strand\_frame = wind\_frame + (0.0, hooks \times 0.8)$ [S1, unofficial].
+10. **Strands:** $strands = fbm(strand\_frame \times (0.8, 7.0) + (-12.1, 47.9), 4)$ [S1, unofficial].
+11. **Strand Smoothing:** $strands = smoothstep(0.3, 0.85, strands)$ [S1, unofficial].
+12. **Fibres:** $fibres = fbm(strand\_frame \times (1.5, 28.0) + (7.3, -21.4), 3)$ [S1, unofficial].
+13. **Fibre Smoothing:** $fibres = smoothstep(0.25, 0.75, fibres)$ [S1, unofficial].
+14. **Fibre Horizon Fade:** $fibres = mix(fibres, 0.5, smoothstep(0.15, 0.4, pixel\_across \times 28.0))$ [S1, unofficial].
+15. **Density:** $density = patches \times strands \times mix(0.35, 1.0, fibres)$ [S1, unofficial].
+16. **Fray:** $fray = fbm(strand\_frame \times (3.0, 16.0) + (-3.9, 13.1), 2)$ [S1, unofficial].
+17. **Fray Horizon Fade:** $fray = mix(fray, 0.6, smoothstep(0.15, 0.4, pixel\_across \times 16.0))$ [S1, unofficial].
+18. **Fray Application:** $density *= mix(fray \times fray \times 1.6, 1.0, smoothstep(0.1, 0.5, density))$ [S1, unofficial].
+19. **Density Horizon Fade:** $density *= smoothstep(0.03, 0.22, rayDir.y)$ [S1, unofficial].
+20. **Final Density:** $return density \times CIRRUS\_MAX\_OPACITY$ [S1, unofficial].
+21. **Radiance Base:** $colour = vec3(1.0) \times CIRRUS\_BRIGHTNESS$ [S1, unofficial].
+22. **Sun Scattering:** $colour += vec3(1.0, 0.97, 0.9) \times pow(sunDot, 8.0) \times 1.5 \times sunHeight$ [S1, unofficial].
+23. **Sunset Factor:** $sunsetFactor = smoothstep(0.0, 0.2, sunHeight) \times (1.0 - smoothstep(0.2, 0.5, sunHeight))$ [S1, unofficial].
+24. **Sunset Tint:** $colour = mix(colour, colour \times vec3(1.0, 0.75, 0.5), sunsetFactor \times 0.4)$ [S1, unofficial].
+25. **Sky Scaling:** $return colour \times SKY\_RADIANCE\_SCALE$ [S1, unofficial].
+26. **Integration:** In the main shader, compute $rayDir$ from fragment clip position, $sunDir$ and $time$ from push constants, base sky color from aerial and sun disc radiance, mix cloud radiance by density, and output linear radiance [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -116,28 +61,21 @@ def procedural_cirrus_cloud_rendering(rayDir, sunDir, sunHeight, time, SKY_RADIA
     CIRRUS_MAX_OPACITY = 0.85
 
     # 1. Project ray onto cloud plane
-    # Note: CIRRUS_SCALE is not defined in sources [G]
-    plane_x = rayDir.x * (CIRRUS_HEIGHT / max(rayDir.y, 0.02)) * CIRRUS_SCALE
-    plane_y = rayDir.z * (CIRRUS_HEIGHT / max(rayDir.y, 0.02)) * CIRRUS_SCALE
-    plane = vec2(plane_x, plane_y)
+    plane = vec2(rayDir.x, rayDir.z) * (CIRRUS_HEIGHT / max(rayDir.y, 0.02)) * CIRRUS_SCALE
 
     # 2. Compute wind-aligned coordinates
     across = vec2(-CIRRUS_WIND.y, CIRRUS_WIND.x)
-    wind_frame_x = dot(plane, CIRRUS_WIND)
-    wind_frame_y = dot(plane, across)
-    wind_frame = vec2(wind_frame_x, wind_frame_y)
+    wind_frame = vec2(dot(plane, CIRRUS_WIND), dot(plane, across))
 
     # 3. Animate wind frame
-    wind_frame_x += time * CIRRUS_DRIFT
-    wind_frame = vec2(wind_frame_x, wind_frame_y)
+    wind_frame.x += time * CIRRUS_DRIFT
 
     # 4. Calculate pixel width across wind
-    # Note: fwidth is a GLSL intrinsic; in a CPU implementation, this requires derivatives
     pixel_across = fwidth(wind_frame.y)
 
     # 5. Visibility check
     if rayDir.y < 0.02:
-        return vec3(0.0)
+        return 0.0, vec3(0.0)
 
     # 6. Generate patches
     patches = fbm(wind_frame * vec2(0.25, 0.5), 4)
@@ -149,9 +87,7 @@ def procedural_cirrus_cloud_rendering(rayDir, sunDir, sunHeight, time, SKY_RADIA
     hooks = fbm(wind_frame * vec2(0.6, 1.2) + vec2(31.7, 5.3), 3)
 
     # 9. Offset strand frame
-    strand_frame_x = wind_frame.x
-    strand_frame_y = wind_frame.y + hooks * 0.8
-    strand_frame = vec2(strand_frame_x, strand_frame_y)
+    strand_frame = wind_frame + vec2(0.0, hooks * 0.8)
 
     # 10. Generate strands
     strands = fbm(strand_frame * vec2(0.8, 7.0) + vec2(-12.1, 47.9), 4)
@@ -166,8 +102,7 @@ def procedural_cirrus_cloud_rendering(rayDir, sunDir, sunHeight, time, SKY_RADIA
     fibres = smoothstep(0.25, 0.75, fibres)
 
     # 14. Fade fibres near horizon
-    fade_fibres = smoothstep(0.15, 0.4, pixel_across * 28.0)
-    fibres = mix(fibres, 0.5, fade_fibres)
+    fibres = mix(fibres, 0.5, smoothstep(0.15, 0.4, pixel_across * 28.0))
 
     # 15. Combine density
     density = patches * strands * mix(0.35, 1.0, fibres)
@@ -176,13 +111,10 @@ def procedural_cirrus_cloud_rendering(rayDir, sunDir, sunHeight, time, SKY_RADIA
     fray = fbm(strand_frame * vec2(3.0, 16.0) + vec2(-3.9, 13.1), 2)
 
     # 17. Fade fray near horizon
-    fade_fray = smoothstep(0.15, 0.4, pixel_across * 16.0)
-    fray = mix(fray, 0.6, fade_fray)
+    fray = mix(fray, 0.6, smoothstep(0.15, 0.4, pixel_across * 16.0))
 
     # 18. Apply fray to density
-    fray_term = fray * fray * 1.6
-    fray_mix = smoothstep(0.1, 0.5, density)
-    density *= mix(fray_term, 1.0, fray_mix)
+    density *= mix(fray * fray * 1.6, 1.0, smoothstep(0.1, 0.5, density))
 
     # 19. Fade density near horizon
     density *= smoothstep(0.03, 0.22, rayDir.y)
@@ -191,7 +123,6 @@ def procedural_cirrus_cloud_rendering(rayDir, sunDir, sunHeight, time, SKY_RADIA
     final_density = density * CIRRUS_MAX_OPACITY
 
     # 21. Compute radiance
-    # Note: CIRRUS_BRIGHTNESS is not defined in sources [G]
     colour = vec3(1.0) * CIRRUS_BRIGHTNESS
 
     # 22. Add sun scattering
@@ -202,31 +133,47 @@ def procedural_cirrus_cloud_rendering(rayDir, sunDir, sunHeight, time, SKY_RADIA
     sunsetFactor = smoothstep(0.0, 0.2, sunHeight) * (1.0 - smoothstep(0.2, 0.5, sunHeight))
 
     # 24. Apply sunset warm tint
-    sunset_tint = vec3(1.0, 0.75, 0.5)
-    colour = mix(colour, colour * sunset_tint, sunsetFactor * 0.4)
+    colour = mix(colour, colour * vec3(1.0, 0.75, 0.5), sunsetFactor * 0.4)
 
     # 25. Scale by sky radiance
     cloud_radiance = colour * SKY_RADIANCE_SCALE
 
-    return cloud_radiance, final_density
+    return final_density, cloud_radiance
+
+# Helper: Layered fractal Brownian motion (standard implementation)
+def fbm(p, octaves):
+    value = 0.0
+    amplitude = 0.5
+    frequency = 1.0
+    for _ in range(octaves):
+        value += amplitude * noise(p * frequency)
+        amplitude *= 0.5
+        frequency *= 2.0
+    return value
+
+# Helper: Screen-space derivative width (GLSL intrinsic equivalent)
+def fwidth(val):
+    # In a CPU implementation, derivatives must be computed from neighboring pixels
+    # or passed as inputs. This placeholder assumes dx and dy are available.
+    return abs(dx(val)) + abs(dy(val))
 ```
 
 **Edge Cases and Pitfalls**
-*   **Downward Rays:** Rays with $y < 0.02$ are treated as having zero density. This prevents artifacts when the camera looks below the cloud plane [S1, unofficial].
-*   **Horizon Aliasing:** The `pixel_across` calculation is critical for aliasing control. Near the horizon, where the cloud plane is viewed at a grazing angle, the noise frequencies can exceed the Nyquist limit. The fade-out of fibres and fray near the horizon mitigates this [S1, unofficial].
-*   **Undefined Parameters:** $CIRRUS\_SCALE$ and $CIRRUS\_BRIGHTNESS$ are used in formulas but no values are provided in the sources [G]. Implementers must choose appropriate values or derive them from context.
+*   **Downward Rays:** Rays with $y < 0.02$ are treated as having zero density [S1, unofficial].
+*   **Horizon Aliasing:** The `pixel_across` calculation controls aliasing near the horizon where the cloud plane is viewed at a grazing angle [S1, unofficial].
+*   **Undefined Parameters:** $CIRRUS\_SCALE$ and $CIRRUS\_BRIGHTNESS$ are used in formulas but no values are provided in the sources [G].
 *   **Derivatives:** The use of `fwidth` requires access to screen-space derivatives, which are typically available in fragment shaders but not in CPU-based ray tracers without additional logic [G].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per pixel, as it involves a fixed number of noise evaluations and arithmetic operations.
-*   **Memory Complexity:** $O(1)$, as no volume data structures are stored.
-*   **Strengths:** Extremely fast rendering; no memory bandwidth issues; easy to integrate into existing ray tracers; visually plausible for high-altitude clouds.
-*   **Limitations:** No volumetric scattering (no self-shadowing, no subsurface scattering); limited to a single plane; aliasing can occur if not handled by the horizon fade; requires manual tuning of parameters for different scenes.
-*   **When to Use:** Real-time rendering of high-altitude cirrus clouds; background sky elements; when performance is critical and volumetric accuracy is not required.
-*   **When Not to Use:** Low-altitude clouds requiring volumetric effects; scenes with complex lighting interactions within the cloud; when physical accuracy is required.
+*   **Time Complexity:** $O(1)$ per pixel, as it involves a fixed number of noise evaluations and arithmetic operations [G].
+*   **Memory Complexity:** $O(1)$, as no volume data structures are stored [G].
+*   **Strengths:** Extremely fast rendering; no memory bandwidth issues; easy to integrate into existing ray tracers; visually plausible for high-altitude clouds [G].
+*   **Limitations:** No volumetric scattering (no self-shadowing, no subsurface scattering); limited to a single plane; aliasing can occur if not handled by the horizon fade; requires manual tuning of parameters for different scenes [G].
+*   **When to Use:** Real-time rendering of high-altitude cirrus clouds; background sky elements; when performance is critical and volumetric accuracy is not required [G].
+*   **When Not to Use:** Low-altitude clouds requiring volumetric effects; scenes with complex lighting interactions within the cloud; when physical accuracy is required [G].
 
 ## Background
-The method originates from the VoxelPhase project by migaelstrydom, which implements procedural cloud rendering in Rust and GLSL [S1, unofficial]. It is designed for real-time graphics and integrates with a sky rendering pipeline that includes aerial radiance and sun disc radiance.
+The method is implemented in the VoxelPhase project using Rust and GLSL [S1, unofficial]. It is designed for real-time graphics and integrates with a sky rendering pipeline that includes aerial radiance and sun disc radiance [S1, unofficial].
 
 ## Sources
 [S1] migaelstrydom/VoxelPhase, https://github.com/migaelstrydom/VoxelPhase, fetched 2026-10-28 (unofficial)

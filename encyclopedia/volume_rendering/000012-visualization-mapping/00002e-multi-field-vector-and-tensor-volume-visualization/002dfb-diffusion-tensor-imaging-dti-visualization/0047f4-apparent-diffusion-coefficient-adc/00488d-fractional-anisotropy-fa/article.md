@@ -1,0 +1,106 @@
+# Fractional Anisotropy (FA)
+
+## Overview
+Fractional Anisotropy (FA) is a scalar metric that quantifies the degree of anisotropy in a voxel based solely on the eigenvalues of the diffusion tensor [S1][S2, unofficial]. It solves the problem of distinguishing directional diffusion structures (such as white matter tracts) from isotropic environments (such as cerebrospinal fluid) where Mean Diffusivity (MD) alone is insufficient [S2, unofficial]. Unlike higher-order anisotropy measures, FA is rotationally invariant but ignores higher-order tensor components, making it sensitive to noise when only a single tensor is available [S1][S2, unofficial].
+
+## How it works
+**Inputs:**
+*   $D$: A $3 \times 3$ symmetric positive-definite diffusion tensor.
+*   $\lambda_1, \lambda_2, \lambda_3$: The three eigenvalues of $D$, sorted such that $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$ [S2, unofficial].
+
+**Outputs:**
+*   $FA$: A scalar value in the range $[0, 1]$ [S2, unofficial].
+
+**Data Structures:**
+*   The diffusion tensor $D$ is typically stored as a $3 \times 3$ symmetric matrix or its 6 unique components.
+*   Eigenvalues are computed via standard linear algebra routines (e.g., solving the characteristic polynomial or using Jacobi eigenvalue algorithm for symmetric matrices).
+
+**Steps:**
+1.  Compute the Mean Diffusivity ($MD$) of the tensor:
+    $$ MD = \frac{\lambda_1 + \lambda_2 + \lambda_3}{3} $$
+2.  Compute the sum of squared deviations from the mean:
+    $$ S_{dev} = (\lambda_1 - MD)^2 + (\lambda_2 - MD)^2 + (\lambda_3 - MD)^2 $$
+3.  Compute the sum of squared eigenvalues:
+    $$ S_{sq} = \lambda_1^2 + \lambda_2^2 + \lambda_3^2 $$
+4.  Calculate FA using the following formula:
+    $$ FA = \sqrt{\frac{3}{2}} \sqrt{\frac{S_{dev}}{S_{sq}}} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_fractional_anisotropy(eigenvalues):
+    """
+    Computes Fractional Anisotropy from the three eigenvalues of a diffusion tensor.
+    
+    Args:
+        eigenvalues (list of float): [lambda_1, lambda_2, lambda_3]
+        
+    Returns:
+        float: FA value in [0, 1]
+    """
+    # Ensure eigenvalues are non-negative (physical constraint for diffusion tensors)
+    # [G] Clamp negative eigenvalues to zero if numerical noise produces them,
+    # as diffusion tensors must be positive semi-definite.
+    lam = [max(0.0, l) for l in eigenvalues]
+    
+    # Step 1: Compute Mean Diffusivity (MD)
+    md = sum(lam) / 3.0
+    
+    # Step 2: Compute sum of squared deviations from mean
+    sum_sq_dev = sum((l - md) ** 2 for l in lam)
+    
+    # Step 3: Compute sum of squared eigenvalues
+    sum_sq_eig = sum(l ** 2 for l in lam)
+    
+    # Handle degenerate case where all eigenvalues are zero
+    if sum_sq_eig == 0:
+        return 0.0
+        
+    # Step 4: Compute FA
+    # Formula: sqrt(3/2) * sqrt( sum((lambda_i - MD)^2) / sum(lambda_i^2) )
+    fa = (3.0 / 2.0) ** 0.5 * (sum_sq_dev / sum_sq_eig) ** 0.5
+    
+    # Clamp to [0, 1] to handle floating point inaccuracies
+    return max(0.0, min(1.0, fa))
+```
+
+**Parameters:**
+*   None. FA is a deterministic function of the tensor's eigenvalues.
+
+**Edge Cases and Pitfalls:**
+*   **Noise Sensitivity:** FA is calculated using only one tensor per voxel, making it prone to noise conditions [S2, unofficial]. In regions with low signal-to-noise ratio, eigenvalue estimation errors can lead to inaccurate FA values [S2, unofficial].
+*   **Isotropic Limit:** If $\lambda_1 = \lambda_2 = \lambda_3$, then $FA = 0$, representing perfect isotropic diffusion [S2, unofficial].
+*   **Anisotropic Limit:** If $\lambda_2 = \lambda_3 = 0$ and $\lambda_1 > 0$, $FA = 1$, representing the hypothetical case of an infinite cylinder [S2, unofficial].
+*   **Higher-Order Ignorance:** FA does not reveal any information about higher-order components due to the orthogonality of tensors [S1]. It cannot distinguish between complex fiber crossings that might be present in the same voxel if they are averaged into a single tensor [S1].
+
+## Subtopics
+
+### Fractional Multi Fiber Index (FMI)
+**Definition:** A measure of anisotropy based on the ratio of energy in higher-order spherical harmonics to those of second order, used to indicate the influence of multiple directions in a voxel [S1].
+**Formula:**
+$$ FMI = \frac{\sum_{l>2} \sum_{m} |a^m_l|^2}{\sum_{m} |a^m_2|^2} $$
+where $a^m_l$ are the spherical harmonic coefficients of order $l$ and degree $m$ [S1].
+**Pitfall:** Instabilities occur when both tensor components of order two and higher orders are close to zero. This is handled by introducing a threshold on the overall energy for calculation [S1].
+**When to choose:** Use FMI when analyzing voxels with complex fiber architectures (e.g., crossings) that cannot be captured by a single second-order tensor, unlike FA which assumes a single dominant direction [S1].
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ per voxel, assuming eigenvalues are pre-computed. Eigenvalue decomposition of a $3 \times 3$ symmetric matrix is constant time.
+**Memory Complexity:** $O(1)$ auxiliary space per voxel.
+**Strengths:**
+*   Rotationally invariant [S2, unofficial].
+*   Effective for distinguishing white matter (high FA) from cerebrospinal fluid (low FA, high MD) [S2, unofficial].
+*   Standard metric in clinical and research DTI pipelines [S2, unofficial].
+**Limitations:**
+*   Prone to noise [S2, unofficial].
+*   Cannot resolve multiple fiber orientations within a single voxel (partial volume effect) [S1].
+*   Does not capture higher-order diffusion structures [S1].
+**When to use:** When visualizing or quantifying the integrity of coherent fiber bundles where a single dominant diffusion direction is assumed.
+**When not to use:** In regions with complex fiber crossings or when higher-order diffusion information is required [S1].
+
+## Background
+Fractional Anisotropy was introduced by Basser et al. [BP96] as a rotationally invariant anisotropy metric for diffusion tensor imaging [S2, unofficial]. It is widely used in medical imaging and computer science to characterize tissue microstructure, particularly in the brain [S1][S2, unofficial]. The metric is derived from the eigenvalues of the diffusion tensor, which describes the magnitude and direction of water diffusion in biological tissues [S2, unofficial].
+
+## Sources
+[S1] HOT- Lines: Tracking Lines in Higher Order Tensor Fields, https://doi.org/10.1109/vis.2005.48, fetched 2026-10-27
+[S2] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)

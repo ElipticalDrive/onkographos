@@ -1,0 +1,173 @@
+--- v004.md
++++ v005.md
+@@ -4,66 +4,107 @@
+ 
+ ## Overview
+-The Visible Zone Algorithm is a conservative visibility computation method designed for incremental updates in volume rendering, primarily targeting 2D and 2.5D datasets [S1, unofficial]. It sets itself apart from sibling methods like [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) by guaranteeing correct visibility with less than one pixel of screen-space deviation, whereas siblings may rely on probabilistic approximations or orthogonal projections that sacrifice strict correctness for speed [S1, unofficial]. It solves the problem of maintaining real-time frame rates for large datasets by precomputing visibility zones that allow the renderer to skip occluded regions without re-evaluating the entire volume structure per frame.
++The Visible Zone Algorithm is a conservative visibility computation method that determines which primitives (typically points or voxels) are potentially visible from a set of viewpoints by projecting them into screen space and retaining only those within a specified depth thickness [S2, unofficial]. It solves the problem of efficiently culling occluded geometry in volume rendering and point cloud visualization by precomputing a visibility mask, allowing for significant reduction in rendering work without sacrificing visual correctness [S2, unofficial]. It sets itself apart from its siblings by providing a strict worst-case correctness guarantee for visibility, unlike approximate methods that trade accuracy for speed [S1].
+ 
+ ## How it works
+-The algorithm computes a "visible zone" for each voxel or geometric primitive, defining the range of view angles or screen regions where the element is guaranteed to be visible. These zones are precomputed and stored, allowing for incremental updates when the camera moves.
++The algorithm computes a binary visibility matrix $O$ of size $N \times K$, where $N$ is the number of input points and $K$ is the number of viewpoints. It operates by projecting all points from each viewpoint, grouping them by pixel, sorting by depth, and marking the top $\tau$ points as visible.
+ 
+ **Inputs:**
+-- Volume dataset (or surface mesh for 2.5D cases).
+-- Camera parameters (position, orientation, field of view).
+-- Precomputed visibility zones (from previous frame or initialization).
++- $P$: Set of $N$ points (e.g., Gaussian centroids or voxel centers) [S1].
++- $V$: Set of $K$ viewpoints [S1].
++- $\tau$: Thickness parameter, defining the number of visible layers per pixel [S1].
+ 
+ **Outputs:**
+-- Set of visible voxels/primitives for the current frame.
+-- Updated visibility zones for the next frame.
++- $O$: $N \times K$ visibility matrix, where $O[i, j] = 1$ if point $i$ is visible from viewpoint $j$, else $0$ [S1].
+ 
+ **Data Structures:**
+-- **Visibility Zone:** A data structure storing the angular or screen-space bounds of a voxel's visibility. Exact layout is not specified in the sources [S1, unofficial].
+-- **Incremental Update Buffer:** Stores changes in camera position to update zones efficiently.
++- $M$: A dictionary or hash map mapping pixel coordinates $(u, v)$ to a list of points projected to that pixel [S1].
++- $M^*$: A set of points identified as visible for the current viewpoint [S1].
+ 
+ **Steps:**
+-1. **Initialization:** Precompute visibility zones for all voxels/primitives. This involves determining the angular extent from which each voxel is visible. For a model with 13 million triangles, this step can take 128 hours on a cluster of 16 PCs [S1, unofficial].
+-2. **Camera Update:** When the camera moves, calculate the change in view direction.
+-3. **Zone Update:** Incrementally update the visibility zones based on the camera movement. This avoids recomputing zones from scratch.
+-4. **Visibility Test:** For each voxel, check if it falls within the updated visible zone. If yes, include it in the rendering pipeline; if no, cull it.
+-5. **Rendering:** Render only the visible voxels using standard front-to-back compositing.
+-
+-**Formulas:**
+-- No specific formulas are provided in the sources [S1, unofficial]. The algorithm relies on geometric bounds and incremental updates.
+-
+-**Parameters:**
+-- **Precomputation Time:** Can be significant (e.g., 128 hours for 13 million triangles on 16 PCs) [S1, unofficial].
+-- **Accuracy:** Less than one pixel of screen-space deviation [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Large Datasets:** Precomputation time can be prohibitive for very large models [S1, unofficial].
+-- **Dynamic Scenes:** The algorithm is designed for incremental updates, but rapid camera movements may require frequent zone updates, impacting performance.
++1. Initialize $O$ with zeros [S1].
++2. For each viewpoint $j$ from $1$ to $K$:
++   a. Let $c$ be the current viewpoint [S1].
++   b. Retrieve extrinsic matrix $d$ and intrinsic matrix $K_{intr}$ for $c$ [S1].
++   c. Initialize empty list $M$ [S1].
++   d. For each point $i$ from $1$ to $N$:
++      i. Let $p$ be point $P[i]$ [S1].
++      ii. Compute 2D projection $x_c = (u, v)$ using forward projection with $d$ and $K_{intr}$ [S1].
++      iii. Add $p$ to the list $M_{u,v}$ associated with pixel $(u, v)$ in $M$ [S1].
++   e. Initialize empty set $M^*$ [S1].
++   f. For each list $M_{u,v}$ in $M$:
++      i. Sort $M_{u,v}$ by depth $z$ (ascending) [S1].
++      ii. For $k$ from $1$ to $\tau$:
++          1. Add the $k$-th point in the sorted list to $M^*$ [S1].
++   g. For each point $i$ from $1$ to $N$:
++      i. If $P[i]$ is in $M^*$, set $O[i, j] = 1$ [S1].
++3. Return $O$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def visible_zone_algorithm(volume, camera, prev_zones):
+-    # Step 1: Initialize zones if first frame
+-    if prev_zones is None:
+-        zones = precompute_visibility_zones(volume)
+-    else:
+-        zones = prev_zones
++def compute_visibility_mask(P, V, tau):
++    """
++    Compute visibility mask for points P from viewpoints V with thickness tau.
++    P: List of N points, each with 3D coordinates (x, y, z).
++    V: List of K viewpoints, each with extrinsic (d) and intrinsic (K_intr) matrices.
++    tau: Integer, number of visible layers per pixel.
++    Returns: N x K matrix O.
++    """
++    N = len(P)
++    K = len(V)
++    O = [[0 for _ in range(K)] for _ in range(N)]
+ 
+-    # Step 2: Update camera
+-    camera_delta = calculate_camera_delta(camera)
++    for j in range(K):
++        c = V[j]
++        d = c.extrinsic_matrix
++        K_intr = c.intrinsic_matrix
++        M = {}  # Dictionary mapping (u, v) to list of points
+ 
+-    # Step 3: Incrementally update zones
+-    updated_zones = incremental_update_zones(zones, camera_delta)
++        # Project all points
++        for i in range(N):
++            p = P[i]
++            # Forward projection: 3D to 2D
++            u, v = forward_projection(p, d, K_intr)
++            if (u, v) not in M:
++                M[(u, v)] = []
++            M[(u, v)].append(p)
+ 
+-    # Step 4: Determine visible voxels
+-    visible_voxels = []
+-    for voxel in volume:
+-        if is_in_visible_zone(voxel, updated_zones):
+-            visible_voxels.append(voxel)
++        M_star = set()
+ 
+-    # Step 5: Render visible voxels
+-    render(visible_voxels)
++        # Determine visible points per pixel
++        for pixel_coords, point_list in M.items():
++            # Sort by depth z
++            point_list.sort(key=lambda pt: pt.z)
++            # Pick first tau points
++            for k in range(min(tau, len(point_list))):
++                M_star.add(point_list[k])
+ 
+-    return updated_zones
++        # Update visibility matrix
++        for i in range(N):
++            if P[i] in M_star:
++                O[i][j] = 1
++
++    return O
++
++def forward_projection(p, d, K_intr):
++    """
++    Project 3D point p using extrinsic d and intrinsic K_intr.
++    Returns (u, v) pixel coordinates.
++    """
++    # Transform to camera coordinates
++    p_cam = transform(p, d)
++    # Project to normalized device coordinates
++    p_ndc = project(p_cam, K_intr)
++    # Convert to pixel coordinates
++    u, v = pixel_coords(p_ndc)
++    return u, v
+ ```
++
++**Parameters:**
++- $\tau$: Thickness. Typical values are not specified in the sources, but it controls the trade-off between culling aggressiveness and correctness [S1].
++
++**Edge Cases and Pitfalls:**
++- If $\tau$ is larger than the number of points projected to a pixel, all points are marked visible [S1].
++- Precision in projection and sorting can affect which points are considered "in front" [G].
++- The algorithm assumes points are distinct; overlapping points at the same depth may require tie-breaking logic [G].
+ 
+ ## Subtopics
+@@ -73,16 +114,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Precomputation is expensive (e.g., 128 hours for 13 million triangles on 16 PCs) [S1, unofficial]. Runtime is efficient, achieving real-time frame rates for 2D and 2.5D datasets [S1, unofficial].
+-- **Memory Complexity:** Not specified [S1, unofficial].
+-- **Measured Performance:** Real-time frame rates for 2D and 2.5D datasets [S1, unofficial].
+-- **Scaling:** Precomputation time scales with dataset size; runtime scales with the number of visible voxels.
+-- **Strengths:** Conservative visibility guarantee; less than one pixel of screen-space deviation [S1, unofficial].
+-- **Limitations:** High precomputation cost; not suitable for very large models without significant computational resources [S1, unofficial].
+-- **When to Use:** When correct visibility is critical and precomputation time is acceptable.
+-- **When Not to Use:** For very large datasets where precomputation time is prohibitive.
++The algorithm achieves real-time frame rates for 2D and 2.5D datasets [S2, unofficial]. However, the precomputation cost can be high; for a model with 13 million triangles, the accuracy guarantee costs 128 hours of precomputation on a cluster of 16 PCs [S2, unofficial]. It is suitable for scenarios where conservative visibility is critical and precomputation time is acceptable [S2, unofficial]. It is less suitable for dynamic scenes where viewpoints change frequently, as the mask must be recomputed [G].
+ 
+ ## Background
+-The Visible Zone Algorithm was developed by Hall-Holt and Rusinkiewicz [S1, unofficial]. It is designed for conservative visibility computation with incremental updates, enabling real-time rendering of large 2D and 2.5D datasets [S1, unofficial]. The algorithm is part of a broader effort to optimize out-of-core visualization of large datasets [S1, unofficial].
++The Visible Zone Algorithm was developed by Hall-Holt and Rusinkiewicz [S2, unofficial]. It is designed for conservative visibility computation with incremental updates [S2, unofficial]. It is used in out-of-core visualization of large datasets [S2, unofficial].
+ 
+ ## Sources
+-[S1] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)+[S1] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26
++[S2] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

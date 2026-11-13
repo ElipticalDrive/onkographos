@@ -1,0 +1,1889 @@
+Visibility-Based Geometry Pruning of Neural Plenoptic Scene
+Representations
+Davi R Freitas, Ioan Tabus, Christine Guillemot
+To cite this version:
+Davi R Freitas, Ioan Tabus, Christine Guillemot. Visibility-Based Geometry Pruning of Neural Plenoptic Scene
+Representations. IEEE Transactions on Multimedia, In press, pp.1-17. ⟨10.1109/tmm.2025.3618548⟩. ⟨hal05101627⟩
+HAL Id: hal-05101627
+https://hal.science/hal-05101627v1
+Submitted on 6 Jun 2025
+HAL is a multi-disciplinary open access archive
+for the deposit and dissemination of scientific research documents, whether they are published or not.
+The documents may come from teaching and research
+institutions in France or abroad, or from public or private research centers.
+L’archive ouverte pluridisciplinaire HAL, est destinée au dépôt et à la diffusion de documents scientifiques de niveau recherche, publiés ou non, émanant
+des établissements d’enseignement et de recherche
+français ou étrangers, des laboratoires publics ou
+privés.
+Distributed under a Creative Commons CC BY 4.0 - Attribution - International License
+1
+Visibility-Based Geometry Pruning of Neural
+Plenoptic Scene Representations
+Davi R. Freitas
+, Student Member, IEEE, Ioan Tabus , Senior Member, IEEE, Christine Guillemot
+, Fellow, IEEE
+Abstract—The need for more realistic 3D scene representations
+has fomented the development of models for a wide range of
+applications. In this context, solutions that attempt to model the
+light’s behavior through the plenoptic function have provided
+considerable advancements using neural-based approaches, often
+presenting a trade-off between rendering time and model sizes. In
+this work, we propose a pruning framework to reduce the sizes of
+these models by computing the visibility over the training data,
+applicable to different 3D scene representations. In particular, we
+implement first a solution suitable for the 3D Gaussian Splatting,
+and then we exemplify the solution for the Neural Radiance
+Fields (NeRF)-style of rendering using PlenOctrees. We show
+that our pruning solution produces smaller models in terms of
+the number of elements – be they voxels, points, or Gaussians
+– with minimal losses in terms of rendering novel views. We
+further assess our solution by combining it with state-of-theart (SOTA) compression solutions for both rendering schemes.
+Results over the NeRF-Synthetic dataset show comparable metrics to the SOTA for PlenOctrees, achieving marginal gains for
+lower bitrates. For 3DGS, the combination of our pruning method
+and compression solutions achieves a compression ratio of up to
+37.5 times over the uncompressed 3DGS models, with only a 0.5
+dB decrease in rendering quality. When compared against other
+SOTA compression methods, our solution produces models 1.4
+times smaller, with less than a 0.1 dB loss over novel views for
+synthetic data, and models 1.9 times smaller with less than 0.2
+dB loss when synthesizing novel views on real-world, outdoor
+content.
+Index Terms—NeRF, PlenOctrees, 3D Gaussian Splatting,
+Pruning, Compression
+I. I NTRODUCTION
+T
+HE modeling of three-dimensional (3D) scenes has been
+a focal point of study across multiple disciplines. In computer vision, for example, representing a 3D scene structure
+from 2D images allows the generation of novel photorealistic
+views that can be used for a wide range of applications
+related to object recognition and scene understanding, such as
+virtual and augmented reality, 3D reconstruction, and medical
+imaging. On the other hand, in domains like robotics, a robust
+3D representation is paramount to facilitate spatial perception, navigation, and interaction for tasks like autonomous
+exploration and industrial automation. Traditional methods for
+representation of such scenes include point clouds (PC) [1],
+meshes [2], voxel grids [3], and even sets of depth maps [4].
+On the other hand, 3D scene rendering has seen considerable advancements using neural-based representations that
+This project has received funding from the European Union’s Horizon 2020
+research and innovation programme under the Marie Skłodowska-Curie grant
+agreement No 956770.
+parametrize the scene as a description of the light rays in
+space, the so-called plenoptic function. Neural Radiance Fields
+(NeRF) [5] was among the first exponents, which led to extensions to enhance the method by improving its image quality
+[6], [7], adapting it to different image formats [8], [9], making
+it more generalizable for sparse inputs [10], accelerating its
+training and/or inference speed [11]–[14], among others.
+Nevertheless, NeRF’s design for volumetric rendering resulted in the advent of solutions that accelerate the rendering
+via a trade-off between the model’s size and speed. 3D
+Gaussian Splatting (3DGS) [15] emerged as an alternative by
+representing 3D scenes by using Gaussian kernels, generating
+a rendering process that is both fast and with state-of-theart (SOTA) quality without a particular need for a neural
+network (NN). However, the tendency of 3DGS optimization
+to produce an elevated number of Gaussians to represent 3D
+scenes results in large model sizes. This has proved to be a
+challenge for the widespread adoption of such models, since
+applications like handheld devices and head-mounted displays
+work with constrained resources that are not compliant with
+the elevated storage and memory footprints. This fomented the
+development of solutions that compress them [16]–[19].
+In this work, we propose a framework to reduce the size of
+3D scene representations for scenes with an “inwards-facing”
+disposition, by exploiting their underlying geometry regardless
+of their format. This is achieved by using the training views to
+compute the visibility of the elements in the scene – be they
+points, voxels, or Gaussians, depending on the representation
+type – and pruning the ones that are deemed less visible and
+thus, less impactful for the rendering quality of the model. We
+implement our method with two solutions that use a different
+underlying framework to render 3D scenes. In this work, we
+primarily focus on 3DGS, where we remove Gaussians to
+generate more compact models, thus reducing the memory
+consumption of such scenes as well as allowing them to be
+rendered faster. Moreover, we also apply our pruning method
+in a NeRF-style approach, where we use the PlenOctrees
+framework to prune voxels from large octrees.
+In short, our solution has the following contributions:
+1) A geometry pruning approach that can be applied to
+both PlenOctree and Gaussian splatting with minimal
+modifications,
+a) When used in conjunction with PlenOctrees, our
+pruning solution provides an accurate geometry,
+closer to the ground-truth than the pruned point
+clouds obtained by other existing approaches,
+2
+b) For the 3DGS, we embed our method inside the
+optimization/densification process to reduce the required number of Gaussians to represent the scene,
+2) We finally combine our pruning method with existing
+compression algorithms for both our solutions implemented with PlenOctrees and Gaussian Splatting, to
+achieve even smaller bitrates than in the SOTA.
+II. R ELATED W ORK
+A. Plenoptic Representations
+The ability to model scenes and objects with changing
+colors as the viewer changes their viewing angle, i.e. nonLambertian, is highly desired in immersive applications. As
+such, the plenoptic function [20] is a mathematical model that
+represents a “sea of light” by describing each light ray in the
+world as a wave through a set of parameters, generally given
+by
+P (x, y, z, θ, ϕ, λ, t).
+(1)
+This provides a means of representation of the intensity of
+each light ray in the world according to the spatial coordinates
+(x, y, z), the viewing angle (θ, ϕ), the light wavelength λ and
+time t. Such function can be incorporated differently in the
+modeling of 3D scenes according to the type of scene representation; 360° videos only have 3 degrees of freedom, using
+the angular coordinates θ, ϕ [21]. Light field images define the
+light transport in a 3-D scene with a 5D feature space, with
+spatial and angular coordinates [22]. Plenoptic point clouds
+[23], [24] represent such a model with a collection of vectors,
+with an explicit geometry given by a finite set of points in R3
+and a finite number of RGB colors as attributes corresponding
+to the camera viewpoints during capture, naturally sampling
+the viewing direction of the 3D space.
+In this context, the Neural Radiance Fields (NeRF) [5] concept is first introduced as a scene-specific, learned continuous
+light field. Through the use of multi-layer perceptrons (MLP),
+NeRF implements a continuous function F that maps the 3D
+coordinates x = (x, y, z) from a direction n with azimuth and
+elevation n = (θ, ϕ) into a color c and density σ
+(c, σ) = FΘ (x, n).
+(2)
+B. Novel View Synthesis
+NeRF is able to represent 3-D scenes by reconstructing
+them via a NN (see Eq. 2) from a set of training images
+with known camera positions. The view-dependent color c
+and the density σ that are output from the NN are parameters
+used in a classical volume rendering approach [26], where a
+predicted pixel color (or radiance) Ĉ(r) of the original pixel
+C(r) is obtained by accumulating the transmittance T over a
+ray r(t) = o + tn. Here o is the camera center in the world
+space coordinates and n is determined by the pixel position.
+Thus, the predicted radiance of Ĉ(r) can be viewed as
+Z tf
+Ĉ(r) =
+T (t)σ(r(t))c(r(t), n)dt,
+(3)
+tn
+Z t
+T (t) = exp(−
+(4)
+Effectively, this integral is numerically computed as
+Ĉ(r) =
+N
+X
+Ti (1 − exp(−σi δi ))ci ,
+(5)
+i=1
+by partitioning t between the near and far planes – with
+bounds tn and tf , respectively – into evenly-spaced N bins,
+and each sample is drawn uniformly at random from
+Pi−1within
+these partitions. The transmissivity Ti = exp(− j=1 σj δj )
+represents the accumulation of the density values sampled
+along a ray r separated by distances given by a step-size
+δi = ti+1 − ti .
+The use of the density σ in the rendering equation in Eq. 5
+effectively creates a density field to represent the scene’s geometry, in such a way that allows the scene to be reconstructed
+for different views in a robust way, even if the true underlying
+geometry is unknown Such modeling of the 3-D geometry
+is also known as soft modeling and was first introduced in
+Soft3D [27]. For the case of NeRF, this soft modeling of
+the scene’s geometry allows for quality enhancement when
+rendering novel views (Eq. 5) without specific knowledge of
+the scene’s underlying geometry.
+Differentiable splatting, such as 3-D Gaussian Splatting [15]
+(3DGS), is an alternative approach to these NeRF-like methods
+by modeling a scene optimizing a set of 3-D Gaussians. The
+image formation model for a predicted pixel color Ĉ is
+Ĉ =
+X
+i∈ℵ
+Therefore, NeRF naturally represents the plenoptic function
+in Eq. 1, with the coordinates and viewing direction being
+represented through x and n in Eq. 2 to obtain the viewdependent color c, which models the dependency on the
+wavelength λ of the plenoptic light intensity function in Eq.1.
+Representations where the scene is implicitly defined as a
+continuous function of spatial coordinates through learned or
+inferred parameters are known as implicit scene representations. When these quantities are defined continuously in spatial
+coordinates and are parametrized by an NN, they are defined
+as a neural field [25]. The continuity and differentiability of
+such approaches make them suitable for novel view synthesis,
+i.e., for generating new viewpoints of the scene.
+σ(r(s))ds).
+tn
+αi ci
+i−1
+Y
+(1 − αj ),
+(6)
+j=1
+where ℵ is a set of ordered 3D points that overlap the
+same pixel after projection, αi is the opacity, and ci is the
+color associated to each i-th Gaussian projected to the same
+pixel. Defining the accumulation of densities in a ray from
+Eq. 5 in NeRF as the opacity αi =(1 − exp(−σi δi )), it is
+straightforward that the image formation model from 3DGS
+(Eq. 6) is the same as NeRF’s (Eq. 5). Nevertheless, as a
+point-based α-blending approach, 3DGS’ rendering differs
+from NeRF’s volumetric one, as the non-continuous nature
+of the former’s modeling requires the estimation of α values
+by evaluating 2D Gaussians, and those can only be obtained
+via rasterization of the 3D Gaussians as opposed to NeRF’s
+ray marching.
+3
+C. Speed-up NeRF Variants and Model Compression
+Ray-marching through the scene in NeRF’s rendering makes
+its training and inference intrinsically slow since every sample
+in the ray has to query the MLP to obtain the volume rendering
+parameters for the predicted pixel color (Eq. 5).
+As a result, different proposals have sought to speed up
+the training efficiency and/or the rendering time of the NN’s
+evaluation. Pre-baking NeRF’s outputs into a sparse voxel grid
+[28], [29], or representing the parameters into octrees [12]
+are ways to accelerate the model’s rendering. Alternatively,
+optimizing over a sparse voxel grid from scratch [13] or using
+auxiliary multi-scale hash grids to reduce the complexity of
+the NN’s task [11] can also speed up the training.
+However, these grid-based, NeRF-like solutions improve the
+rendering speed at the cost of storage space. Hence, solutions
+have been proposed to address such weaknesses. The authors
+in [30] reduce the grid sizes by learning a hybrid tensor rank
+decomposition, while Rho et al. [31] transform the spatial
+information into the frequency domain. Re:NeRF [32] applies
+voxel pruning via removing and re-including parameters for
+any NeRF-like method that minimizes a differentiable loss
+function. In addition to pruning voxels, the work in [33] aims
+to also compress the scene according to an octree quantization
+and intra-frame prediction of the volume rendering parameters
+as point cloud attributes by looking at a point’s neighborhood.
+D. Gaussian Splatting Compression
+3D Gaussian Splatting achieved breakthroughs in the task
+of synthesizing novel views by achieving real-time rendering performance while presenting smaller storage footprints
+comparatively to other view-dependent representations, such
+as voxel-based [24], [34], [35] and the grid-based, NeRFlike approaches [36]. Nevertheless, such Gaussian-based optimization tends to over-parametrize the scene with kernels
+to generate high-fidelity renders, increasing the storage and
+memory requirements. Moreover, previous work [33] shows
+that representing view-dependent colors as a set of spherical
+harmonics (SH) coefficients takes up most of the said storage
+costs. Hence, Niedemayr et al. [16] proposed to compress
+both the SHs coefficients and the Gaussian parameters via
+a clustering algorithm based on the sensitivity of the reconstruction quality to the changes of such attributes. This
+clustering is combined with quantization-aware training to
+compress codebooks of the SHs and Gaussian parameters with
+dictionary-based entropy coding. In addition to the attribute
+compression, Lee et al. [17] also proposed to reduce the
+number of Gaussians during optimization. This is done with
+a learnable mask that removes small-sized Gaussians and
+those with low opacity. This is combined with a geometry
+codebook representation of the Gaussians and a grid-based
+neural field to represent the view-dependent colors by feeding
+the view direction and feature vectors into a small MLP.
+Other solutions to reduce the sizes of 3DGS models include
+vector quantization [18], self-organizing grids [19], [37], and
+distillation of SH coefficients to a lower degree [19].
+These works address the size reduction of models that
+follow either a NeRF-like or a splatting pipeline. Our solution
+aims to prune the scene models by looking at the scene’s
+disposition to the acquired viewpoints, thus being able to be
+used for both NeRF-based and splatting-based methods with
+minimal adaptations.
+III. P ROPOSED F RAMEWORK
+Leveraging the scene’s underlying geometry is a way to
+orient the pruning while minimizing distortion losses by
+exploring redundancies while maintaining the object’s “watertightness”, regardless of the geometry’s representation.
+We focus in this work on inward-facing scenes, that is,
+the cameras in the training set are arranged to be centered
+around an object. As a result, scenes of this type tend to be
+less sparse when compared to natural, large-scale ones. This
+type of camera arrangement leads to points being visible by
+multiple cameras at once. Therefore, one can leverage such a
+setup to prune points from the scene based on their visibility
+with regard to the training viewpoints. Removing the ones that
+are less visible to a given set of cameras can minimize losses
+on the 2-D rendered views while working directly on the 3-D
+space without the need for ground-truth geometry.
+Consider an object in space as seen in Fig. 1 represented
+by N unbounded points of the format pi = (xi , yi , zi ), for
+i = 1, ..., N , forming the list of points Pw = {pi }N
+i=1 in
+the World Coordinate Space. In order to generate K rendered
+views for the scene, the points in Pw are projected to a set of
+camera poses D = {dj }K
+j=1 . Each point p is forward projected
+to each j Camera Coordinate System (CCS) through p̃c =
+dj p̃, where p̃c and p̃ are p in homogeneous coordinates in
+the Camera and World Coordinate
+respectively. In
+ Systems,
+
+R t
+addition to that, each pose dj =
+corresponds to the
+0 1
+4×4 extrinsic matrix containing each camera’s translation t
+and rotation R. The homogeneous image coordinates x̃c are
+then obtained by projecting the homogeneous 3D coordinates
+x̃c = Kp̃c , where the camera intrinsic matrix K is assumed
+to be known for each viewpoint. The 2D pixel coordinates xc
+are finally obtained by normalizing the x̃c by the depth. We
+denote x̃c = (u, v) = π(p) the projection of a point p into
+the pixel (u, v) of a view, as described above.
+The forward projection also allows the estimation of the
+points’ visibility to each camera, detecting potential occlusions. This is done by analyzing the set of points that end up
+being projected to the same pixel coordinates xc (see Fig. 1).
+Note that the projected pixel positions are dependent on
+the camera position in the World Coordinate System and its
+optical characteristics. Hence, the distance from the point to
+the camera and the image’s resolution are two of the factors
+that determine the perceived point size in a given image.
+Moreover, the perceived point size is also affected by the
+rendering method of its underlying representation.
+Let Let Muv = {pi |π(pi ) = (u, v)}i be the set of 3D
+points that are projected by the projection π to the same pixel
+of coordinates (u, v). One can then order the points in the
+set Muv based on the z-values of its elements in the Camera
+Coordinate System, and consider the τ closest points to be visible, with the rest of the set being marked as occluded for that
+4
++Y
+Pixel
+(𝒖, 𝒗)
+𝑧2
+𝑧1
+𝑧5
+𝑧3
+-Z
+𝑧4
+Pixel FoV
+(from intrinsic matrix 𝑲)
+𝑇ℎ𝑖𝑐𝑘𝑛𝑒𝑠𝑠 defines the τ
+points with smallest zvalues as visible
+Camera 𝑐𝑘 with position
+and rotation given by 𝑫
+𝑘 − 1, 𝑘, 𝑘 + 1
+3-Dimensional Scene +
+Training Setup
+Visibility mask 𝑂
+for N points with relation to
+each of the K viewpoints
+𝑧1
+𝑧2
+𝑧3
+𝑧4
+𝑧5
+The point 𝑧𝑛 can be removed if
+the sum of the 𝑛-th row is smaller
+than the 𝜐 (MVE) parameter
+(
+𝐾
+𝑘 =1 𝑂𝑛𝑘 <
+𝜐)
+Fig. 1: Proposed pruning scheme where, for each camera with an extrinsic matrix D, the 3D scene is forward-projected to
+detect which points lie in the frustum of the same pixel. Based on the Thickness parameter, the τ elements with the smallest
+z-values are considered visible from that viewpoint. These are marked as units in a N × K binary visibility map, and points
+are removed if they are not visible for at least ν training views. This is controlled by the MVE parameter.
+specific viewpoint. That is, M∗uv = argminS⊆Muv
+|S|=τ
+P
+pi ∈S zi ,
+where S corresponds to any subset of size τ of Muv . One
+can adjust τ as a parameter in order to control how many of
+the points in Muv are marked as visible for a given pixel: a
+lower value will mark more points as “occluded” at each view,
+essentially modifying the “thickness” of the object. Hence, we
+refer to τ in this work as thickness.
+When applying such occlusion detection to all the training
+views, a binary N × K visibility mask O can be computed,
+where 1 means that the n-th point is visible for the k-th
+viewpoint, and 0 otherwise. The visibility mask computation
+procedure is further detailed in Algorithm 1.
+Additionally, the pruning of the points can be controlled by
+analyzing how many cameras each point is visible on, since
+the overall rendering quality is less sensitive to points occluded
+by most viewpoints. We perform this by evaluating against a
+threshold ν overP
+the column-wise sum of the elements from O,
+K
+such that Sn = k=1 Onk > ν, n = 1, ..., K. We can combine
+the threshold ν in addition to the thickness parameter to adjust
+the degree of pruning of the scene’s geometry. We also refer
+to ν as minimum number of views per element (MVE), as an
+MVE value of ν means that every point or element in the
+space that is pruned is only visible for ν or fewer views.
+Assuming an “inwards-facing” camera disposition, with the
+cameras posed around a central object, occlusions of points
+from specific viewpoints are determined by the self-occlusions
+of the object’s own geometry. The visibility of these points
+can be adjusted based on the user’s desired depth of traversal
+through the scene, controlled via the thickness parameter. The
+MVE can be viewed as a mechanism to mitigate the formation
+of floating artifacts during training by discouraging the model
+from generating elements outside the object’s watertight surfaces, effectively pruning these spurious elements.
+Notice that we refer to the smallest unit here as an element,
+since our algorithm has the flexibility to be used with any
+method that produces spatial structures. Hence, we show our
+visibility-based algorithm’s application with a NeRF-based
+and a splatting-based rendering approach.
+A. NeRF-based Approach
+The framework for our solution based on NeRF’s rendering
+is based on PlenOctrees [12], an approach that provides
+faster rendering by pre-tabulating the NN that predicts the
+parameters required for NeRF’s volume rendering. We review
+the pipeline of the PlenOctrees method in order to then explain
+how our pruning method interacts with the original solution.
+The method consists of constructing an octree structure
+where each voxel contains the rendering parameters optimized
+via rendering loss [12]. To achieve real-time performance,
+the ray-marching procedure has to be done directly on the
+PlenOctree, which means that the color information in the
+voxel has to be view-independent beforehand. Hence, the
+NeRF network from which PlenOctree extracts its parameters
+is a modified version that outputs spherical harmonics (SH)
+coefficients for the color and the density of the soft geometry.
+This greatly increases the storage and memory requirements
+to execute such an approach, as SHs of order 3 mean that each
+voxel stores 16 coefficients per color channel.
+In order to reduce the impact of this tradeoff of speed
+for size, the original PlenOctrees paper [12] proposes some
+techniques to reduce the complexity of the structures. The
+work in [33] further explores the search for a more compact
+representation by reducing the number of occupied voxels
+during optimization, performed by thresholding the octree
+based on the σ values. The pruned PlenOctree was then
+fine-tuned and compressed as a voxelized point cloud whose
+attributes were the SH coefficients and the density.
+5
+σ Density
++
++Y
+K Spherical Harmonics
+Pixel
+(𝒖, 𝒗)
+𝑧2
+𝑧1
+𝑧5
+𝑧3
+-Z
+𝑧4
+Pixel FoV
+(from intrinsic matrix 𝑲)
+𝑇ℎ𝑖𝑐𝑘𝑛𝑒𝑠𝑠 defines the τ
+points with smallest zvalues as visible
+Camera 𝑐𝑘 with position
+and rotation given by 𝑫
+𝑘 − 1, 𝑘, 𝑘 + 1
+3-Dimensional Scene +
+Training Setup
+𝑧1
+𝑧2
+𝑧3
+𝑧4
+𝑧5
+Visibility mask 𝑂
+for N points with relation to
+each of the K viewpoints
+Neural
+Network
+Training
+Extraction
+Visibilitybased pruning
+Optimization
+The point 𝑧𝑛 can be removed if
+the sum of the 𝑛-th row is smaller
+than the 𝜐 (MVE) parameter
+(
+𝐾
+𝑘 =1 𝑂𝑛𝑘 <
+𝜐)
+Fine-tuning
+Compression
+(a)
+Small voxel size
+Large voxel size
+(b)
+Fig. 2: Proposed pruning strategy in the Plenoctrees pipeline. (a) The pruning method is introduced after the initial optimization
+step in the octree and is followed by a fine-tuning stage before being conveyed for compression. (b) Plenoctrees’ voxel-based
+representation produces fixed splats as cubes, which can cause rendering issues when pruned. A voxel size that is too small
+(left) can generate holes, while a size too large (right) can make the scene appear “blocky”.
+We can introduce our visibility-based pruning method in this
+pipeline by replacing the pruning strategy based on the threshold on σ from the optimization step with our algorithm, as seen
+in Fig. 2-(a). Here, NeRF’s density field is discretized into the
+PlenOctree’s voxels, which have a fixed size in the 3D space
+for a given resolution. This fixed size means that increased
+geometric detail may require a higher voxel resolution, and
+pruning these voxels could potentially increase the occurrences
+of holes due to their fixed splats for more aggressive values
+of thickness and MVE. Since these splats are non-adaptive
+due to their intrinsic representation, one can minimize such
+a phenomenon by downsampling the octree, thus increasing
+the perceived voxel size. Therefore, an additional parameter
+for our method when working with PlenOctrees is the grid’s
+resolution; a lower resolution may be able to fill apparent holes
+in the object, although an increased voxel size may reduce
+the quality of the renders due to the lack of detail in finer
+geometry, making the object appear “blocky”, as in Fig. 2-(b).
+Algorithm 2 details the pruning implementation within the
+PlenOctrees pipeline. A PlenOctree child node poct is first
+converted into a voxel ppc in a voxelized PC M by ppc =
+poct × 2R − 0.5, where R is the depth of the voxel grid. The
+local coordinates are converted into world positions and then
+sent for the visibility mask computation. After the voxels are
+pruned, the PC M is converted back to a PlenOctree Ĝ, from
+where it can be re-optimized with a fine-tuning step done in the
+same manner as the first optimization block from Fig. 2-(a).
+That is, the octree is optimized with stochastic gradient descent
+on the original training images using the same rendering loss
+2
+P
+ˆ
+as NeRF, LRGB =
+C(r) − C(r)
+.
+r∈R
+2
+B. Splatting-based Approach
+The 3DGS pipeline, on the other hand, provides an adaptive
+splat by representing the 3-D scene via a set of Gaussian kernels. This is achieved by the fact that each one of these Gaussians can be approximately represented by a corresponding
+ellipsoid by describing its covariance matrix Σ with a scaling
+matrix S and rotation matrix R. This anisotropic modeling
+of the covariance allows the Gaussians to be optimized into
+different shapes, as opposed to the fixed splats one sees in
+voxel-based solutions such as PlenOctrees (Sec. III-A).
+To project the Gaussian positions, we use the location
+of their centroids as points of reference for the visibility
+algorithm. Note that the centroids are the positions where the
+density of the kernels is at its highest, that is, where they
+appear more “opaque” (see Fig 3).
+Our method can be implemented by embedding our pruning
+into 3DGS’ optimization pipeline, as seen in Fig. 4. More
+specifically, the visibility computation and consequent removal
+of Gaussians can be performed jointly with the Adaptive
+Density Control block, by removing the occluded kernels every
+time the α value of the Gaussians is reset to zero.
+Algorithm 3 details the steps in this procedure within
+3DGS’ optimization and densification pipeline, with the steps
+concerning our visibility pruning algorithm being highlighted
+in blue. After a certain number of iterations, the visibility mask
+6
++Y
+Algorithm 1 Computation of the Visibility Mask.
+function C OMPUTE V ISIBILITY M ASK(P, V, τ )
+Input: Set of points P , viewpoints V and thickness τ
+Output: A N × K visibility matrix O
+O ← InitializeWith0s()
+for all j ← 1 to K do
+c ← V [j]
+▷ Current viewpoint
+d ← GetExtrinsicMatrix(c)
+K ← GetIntrinsicMatrix(c)
+M ← ∅ ▷ List of points projected to same pixel
+for all i ← 1 to N do
+p ← P [i]
+▷ Current point
+xc = (u, v) ← ForwardProjection(p, d, K) ▷
+3D to 2D
+Mu,v .add(p)
+end for
+M∗ ← ∅
+for all Mu,v in M do
+▷ Set Mu,v = {(xi , yi , zi ) | i = 1, . . . , M }
+Sort(Mu,v ) by the key zi
+for each i = 1 to τ do
+▷ Thickness
+M∗ .add(Mu,v [i])
+▷ Pick first τ points
+end for
+end for
+for all i ← 1 to N do
+if P [i] in M∗ then
+O[i, j] ← 1
+end if
+end for
+end for
+return O
+end function
+Algorithm 2 Visibility Pruning within PlenOctrees.
+G ← Set of PlenOctree child nodes
+V ← Set of training views
+M ← PointCloudWorldCoords(G)
+O ← ComputeVisibilityMask(M, V ) ▷ Visibility Mask
+for all rowsP
+n in O do
+K
+sum ← k=1 Onk ▷ Number of visible viewpoints
+for Voxel in n
+if sum ≤ ν then
+▷ MVE
+RemoveVoxel(M )
+end if
+end for
+Ĝ ← PlenOctreesFromPointCloud(M )
+𝑧2
+𝑧1
+Pixel
+FoV
+𝑧5
+𝑧3
+-Z
+𝑧4
+Fig. 3: Visibility computation using 3DGS’ Gaussian kernels.
+Notice that the Gaussians’ centroids are considered as reference positions, where they are perceived as the most “opaque”.
+O is computed and the points are pruned according to their
+values in O in relation to the threshold defined by the MVE
+parameter.
+Consequently, pruning the occluded Gaussians results in not
+only the color information, but the α to be more concentrated
+into the remaining kernels, making the “distilled” model closer
+to a “hard” geometry representation than a soft one. This
+mechanism gradually controls the number of kernels during
+training and allows the remaining Gaussians to be optimized
+in terms of both their shape (geometrical parameters) and their
+color attributes (SH parameters).
+Moreover, to prioritize the pruning of the smaller Gaussians,
+we also introduce a regularization term for 3DGS’ loss
+N
+L = (1 − λ)L1 + λLD−SSIM + β
+1 X 1
+.
+N i=1 ∥Si ∥
+(7)
+Here, the loss terms L1 and LD−SSIM are the L1 rendering
+loss and the D-SSIM term used in the original 3DGS [15]
+paper, and we introduce the regularization term on the scaling
+matrices S of the Gaussians to encourage the removal of
+smaller kernels. The scaling regularization term in Eq. 7 is
+only applied for the duration of the densification process in
+the optimization of the 3DGS. This is done to steer the existing
+Gaussians into larger sizes, hence limiting the number of
+newly generated kernels that converge into small ellipsoids
+(which are less important for the rendering quality).
+IV. C OMPRESSION
+Our visibility-based geometry pruning method can generate more compact representations in terms of numbers of
+elements, be they points, voxels, or even Gaussians. These
+models can be combined with existing compression algorithms
+to achieve lower bit-rates than the ones from the state-of-theart.
+A. PlenOctrees
+In [33], the density σ and the SHs k from the Plenoctrees
+models are compressed from the perspective of a plenoptic
+point cloud. That is, consider the coordinate indices of the
+7
+Camera
+Projection
+Differentiable
+Tile Rasterizer
+Initialization
+Image
+3D Gaussians
++Y
+SfM Points
+𝑧2
+𝑧1
+Pixel
+FoV
+Adaptive
+Density Control
+𝑧5
+𝑧3
+-Z
+𝑧4
+Visibility-based
+pruning
+Gradient Flow
+Operation Flow
+Fig. 4: Proposed pruning strategy in the 3DGS pipeline.
+Algorithm 3 Visibility Pruning within 3DGS.
+M ← SfM Points
+▷ Positions
+V ← Set of Training Views
+S, C, A ← InitAttributes()
+▷ Covariances, Colors,
+Opacities
+i←0
+▷ Iteration Count
+while not converged do
+v, Iˆ ← SampleTrainingView(V )
+▷ Camera v and
+Image Iˆ
+I ← Rasterize(M, S, C, A, v)
+L ← Loss(I, ˆ
+I)
+▷ Loss
+M, S, C, A ← Adam(∇L)
+▷ Backprop & Step
+if IsRefinementIteration(i) then
+for all Gaussians (µ, Σ, c, α) in (M, S, C, A) do
+if α < ϵ or IsTooLarge(µ, Σ) then ▷ Pruning
+RemoveGaussian()
+end if
+if ∇p L > τp then
+▷ Densification
+if ∥S∥ > τS then ▷ Over-reconstruction
+SplitGaussian(µ, Σ, c, α)
+else
+▷ Under-reconstruction
+CloneGaussian(µ, Σ, c, α)
+end if
+end if
+end for
+end if
+if IsVisibilityPruneIteration(i) then
+O ← ComputeVisibilityMask(M, V ) ▷ Visibility
+Mask
+for all rowsP
+n in O do
+K
+sum ← k=1 Onk
+▷ Number of visible
+viewpoints for Gaussian in r
+if sum ≤ ν then
+▷ MVE
+RemoveGaussian()
+end if
+end for
+end if
+i←i+1
+end while
+n-th child in the PlenOctree grid with depth M , denoted as
+xoct (n) = [Xn , Yn , Zn ]. This set of nodes can be interpreted as
+a voxelized point cloud (PC) at depth M , containing N voxels.
+The coordinates representing the geometry of this voxelized
+PC, denoted by xpc , are given by xpc = xoct × 2M − 0.5.
+Each point is associated with density and spherical harmonics
+0
+1
+ℓ
+attributes s(n) = (σn , k0n0 , k−1
+n1 , kn1 , kn1 , . . . , knℓ ), where
+m
+3
+knℓ ∈ R . That is, P represents a voxelized PC where,
+rather than having a single color attribute, contains multiple
+ones corresponding to the parameters required for the volume
+rendering in PlenOctree.
+The geometry xpc is encoded losslessly in [33], with the
+attributes encoded lossily using a modified version of the
+Geometry-Based Video Point Cloud Coding (G-PCC) from
+the Moving Picture Experts Group (MPEG) [38], [39]. The
+orthogonal basis formed by the decomposition into SHs provides a decorrelation between the multiple attributes of P for
+each of the color channels that is analogous to the usage of
+Karhunen-Loève Transform (KLT) coefficients applied in [40].
+In this work, we compress the geometry and multiple
+attributes from the Plenoctrees derived PC P using the more
+recent Geometry-Based Solid Content Test Model (GeS-TM)
+[41] to compress the models. As a branch split from G-PCC,
+in this codec the attributes are lossy compressed via the region
+adaptive hierarchical transform (RAHT), while the geometry is
+either losslessly encoded via octree representation, or encoded
+with losses using the triangle soup (Trisoup) coding. Both are
+then entropy encoded to create the respective bitstreams.
+Once the attributes are decoded and unscaled, the PC P can
+be reconstructed into P̂ . From the geometry xpc of P̂ that was
+encoded losslessly, one can reconstruct a PlenOctree with the
+same structure as the original one, but with lossy reconstructed
+attributes σ and SHs. These are encoded with attribute quantization parameters (QP) of six different values, from the lowest
+to the highest quantization: (22, 28, 34, 40, 46, 51). This allows
+the selection of a certain level of model quality according to
+the bitrate constraints of the user.
+8
+B. 3D Gaussian Splatting
+For 3DGS, we combine our pruning solution with two
+SOTA compression methods, which are summarized in the rest
+of this subsection. The compression solution by Niedemayr et
+al. [16] targets strictly the color attributes and the Gaussian
+parameters (scale and rotation). This is achieved by first applying sensitivity-aware vector clustering to group the kernels’
+colors and shape parameters into codebooks. This parameter
+sensitivity measure S is calculated by evaluating the change
+in the image quality to changes of a parameter p, such that
+K
+X
+∂Ei
+.
+∂p
+i=1 Pi i=1
+1
+S(p) = PK
+(8)
+E is the sum of the RGB components for all pixels. Pi is the
+number of pixels in image i. S is used to guide the clustering
+into codebooks C, computed via k-Means using a similarity
+measure between the vectors and the centroids of C.
+The parameters are then fine-tuned on the training set,
+with the optimization for position, opacity, and scaling for
+the Gaussians, as well as the color and codebook entries.
+This is done via quantization-aware training with Min-Max
+Quantization. In the forward pass, the quantization is simulated
+considering a certain number of bits in addition to the moving
+average of each parameter’s minimum and maximum values.
+The backward pass then ignores the simulated quantization and
+calculates the gradient for the parameter without quantization.
+Finally, the set of Gaussians and the codebooks for the
+SHs and Gaussian shape parameters are compressed with
+DEFLATE [42]. By ordering the Gaussians according to their
+positions in Z-order in Morton order, one can leverage the
+spatial coherence of the attributes with a dictionary-based
+entropy coding algorithm (LZ77 [43]).
+The second one, proposed by Lee et al. [17], introduces a
+mechanism to reduce the number of Gaussians, in addition to
+their compression. In combination with our visibility-pruning
+strategy, this can lead to representations with even fewer
+kernels and, consequently, more compact.
+The Gaussian reduction strategy is based on a learnable
+mask during the optimization that removes Gaussians that
+minimally impact performance. This is done by targeting the
+removal of small-sized kernels at every densification step, due
+to their minimal impact on rendering quality performance.
+Therefore, binary masks M are applied to the opacities and
+scale attributes of the kernels. The masked scale ŝ and opacity
+ô are employed with the straight-through estimator,
+Mn = sg (1 [σ(mn ) > ϵ] − σ(mn )) + σ(mn ),
+(9)
+ŝn = Mn sn ,
+(10)
+ôn = Mn on ,
+where ϵ is the masking threshold, sg(.) the stop gradient
+[44], 1 the indicator function and σ(.) the sigmoid function.
+The compression part of this work also uses codebooks
+to represent geometric attributes, such as scale and rotation,
+using vector quantization. More specifically, residual vector
+quantization is used, cascading L stages of vector quantization.
+For the color attribute compression, the view-dependent
+colors are represented via a grid-based neural field. Hash grids
+are used for the input positions, features, and view direction,
+which are fed into an MLP to get the view-dependent color.
+Therefore, the end-to-end loss is given by
+L = Lren + λm Lm + Lr + Ls ,
+(11)
+where Lren is the combination of the L1 andP
+SSIM loss as
+N
+in Eq. 7, Lm is the masking loss term, Lm = N1 n=1 σ(mn ),
+and Lr and Ls are the objective functions for the rotation and
+scale of the Gaussians [17].
+Note that, when combining our visibility-based pruning
+solution with the one in Lee et al. [17], we use the loss
+function defined in Eq. 11, while for our method combined
+with the work in Niedemayr et al. [16], we keep Eq. 7.
+V. E XPERIMENTS
+A. Experimental Setup
+1) Dataset: We use in our experiments the NeRF-Synthetic
+360 – also known as Blender – dataset from the original
+NeRF [5], which contains 8 sequences with splits of 100
+images for training, 100 for validation, and 200 for testing with
+dimensions of 800 × 800 each and ground-truth camera poses.
+The ground-truth point clouds for the geometry assessment
+were obtained from the modified NeRF-Synthetic 360 dataset
+introduced in [36], available at https://drcfts.github.io/c-ppc/.
+Additionally, we also use in our experiments the real-world
+dataset of the Mip-NeRF 360 [7], containing 5 outdoor and
+4 indoor environments for a total of 9 large-scale scenes.
+Each scene has a variable number of camera poses, with the
+testing split considered to be every 8th image of the set of the
+rendering views, and no validation poses, as is generally done
+in the literature [7].
+2) Baselines: On the PlenOctrees’ side of our visibilitybased pruning solution, we compare our proposal against the
+pruning and compression methods presented in [33], which we
+refer to as “Compressed PlenOctrees (C-PO)” in this work. For
+the 3DGS’ side, we assess our method against the state-of-theart compression solutions from [16] and [17], which we call
+as “Niedermayr” and “Lee” in our benchmark comparisons.
+For our proposed methods that use Eq. 7 as their loss
+function (our solution in Sec. V-C1 and the combination of
+our pruning with the compression from the work in [16]), the
+selected value for the β hyperparameter was of 1 × 10−5 . The
+λ and λm parameter values used were of 0.2 and 5 × 10−4
+respectively, according to the existing literature.
+3) Performance evaluation: All the reported PSNR values
+are the averages of the individual image PSNRs measured
+for the respective color channels at each of the 200 test
+poses for the scenes of the NeRF-Synthetic dataset. The
+sizes reported for the rate-distortion (RD) analysis of the
+compression schemes are given in bytes, while the analysis of
+the pruned models is given by the number of retained points.
+Reporting the sizes in bytes is relevant for applications where
+the efficient transmission of the models over communication
+links is required while reporting the sizes as the number of
+retained points is a (crude) estimation of the memory size
+needed for fast accessing the uncompressed models at the
+9
+inference time. Therefore, both facets of model complexity
+are used in the experiments.
+For the Receiver Operating Characteristic (ROC) curves, a
+“match” between points of the predicted B and the reference
+A geometry is computed on the WCS. As such, a “match” is
+given when the distance between points bi ∈ B and aj ∈ A
+is below a certain threshold δ in world coordinates. Therefore,
+δ is considered
+√ to be the value of the diagonal of the voxel
+in B, that is, 3, scaled to the world coordinates. The classification of true positives
+P (T P ) and false positives (F P ) are
+thus given by T P =
+d(bi , aj ) ≤ δ) and
+aj ∈A 1 (minbi ∈B
+
+P
+F P = bi ∈B 1 minaj ∈A d(bi , aj ) > δ , where d(., .) is the
+euclidean distance between points. The positive condition P
+is calculated by the amount of points in A, while the negative
+condition N is calculated by subtracting the total amount of
+points in a voxelized grid (e.g. 5123 for a “resolution 9” grid)
+from P. The True Positive Rate (TPR), given by TPP , measures
+the ratio of ground-truth points that have a predicted point
+within the distance threshold. The False Positive Rate (FPR)
+is given by FNP and measures the ratio of predicted points that
+do not have a corresponding ground-truth point.
+B. Performance Analysis of the Proposed Pruning with
+PlenOctrees
+1) Selection of Operating Points: For the PlenOctrees side
+of our pruning method, the combination of different values
+of the MVE, thickness and the voxel resolution (shortened
+as “reso” in Fig. 5) provide different levels of distortion and
+model complexity – which we approximate in this analysis by
+computing the number of points of the models before being
+conveyed for compression. Fig. 5 shows the rendering average
+PSNR results for three scenes of the NeRF-Synthetic dataset
+– namely hotdog, lego, and materials – for multiple operating
+points. Points with the same combination of thickness and
+voxel resolution are grouped into curves, in which the MVE
+parameter is tested for the values of 0, 1, 3, 5, 10 and 25.
+Fig. 5: Average PSNR (in dB) vs number of points, comparing the combination of operating points of the parameters
+thickness, MVE and resolution implemented with PlenOctrees.
+Results were obtained over scenes hotdog, lego, and materials.
+Therefore, we choose an optimal set of operating points
+with regard to RD, where the chosen values were the fol-
+lowing: (thickness, MVE, reso) = [(1, 10, 8), (3, 0, 8), (5, 0, 8),
+(10, 0, 8), (25, 0, 9), (100, 25, 9). These operating points were
+chosen using Pareto fronts [45] rather than the combination of
+parameters obtained from computing the upper convex hull.
+This was performed to obtain a set of combinations that cover
+a greater rate range with minimal PSNR loss.
+Fig. 6: Average PSNR (in dB) as a function of the number of
+points, comparing our chosen operating points implemented in
+PlenOctrees against the pruning approach performed in [33]
+over the sequences hotdog, lego, and materials.
+Fig. 6 shows the RD optimized curve for the given set of
+operating points from Fig. 5. Our solution provides gains over
+the method in [33] in the medium to low range of number of
+points.
+2) Geometry Accuracy: In addition to the rendering assessment for our pruning with PlenOctrees introduced in Sec.
+V-B1, we also benchmark our pruned PlenOctree models in
+terms of its scene structure, by comparing their underlying
+geometry against ground-truth PCs. One could do so by
+measuring the error via commonly used geometry metrics,
+such as the point-to-point (D1) or the point-to-plane (D2)
+errors [46]. Considering a reference PC A and reconstructed
+PC B, the D1 and D2 metrics calculate the MSE between
+the points and their closest neighbors in the other PC, that is,
+from both A to B, and B to A, and taking the lowest value
+of both directions as the final result. The downside of such a
+symmetric metric is the assumption that both A and B have
+close to the same amount of points, and thus the PSNR in both
+directions will have closely related values. Here, where B can
+have a significantly larger amount of points than A, the PSNR
+value from the A −
+→ B direction will be considerably higher
+than in B −
+→ A, as any given point in A will be more likely
+to have a corresponding point (or plane) in B. As the number
+of points from the pruned PCs B decreases, the PSNR values
+in both directions converge, as the values in A −
+→ B decrease
+and B −
+→ A increase. Therefore, the non-trivial analysis of
+these metrics led us to benchmark it via ROC curves.
+As Fig. 7 shows, our pruning solution for the sequence
+drums presents a higher rate of “hits” (TPR) for a fixed rate
+of misses (FPR), in particular for the medium to low range
+in terms of the number of points. The gains provided in both
+Figs. 6 and 7, corroborate the perception that our solution
+improves upon the pruning in the SOTA in terms of rendering
+10
+Fig. 7: ROC Curve assessing the accuracy of the predicted
+geometry by the proposed method implemented in PlenOctrees
+and the one in [33] against the ground-truth. Results are
+performed over the sequences hotdog, lego, and materials.
+performance by proposing a points removal method that is less
+harmful to the overall geometry of the scene.
+3) Rate-distortion Performance: We combine our pruning
+method with the compression scheme from [33] to assess the
+models over their storage footprints. This compression scheme
+(see Sec. IV-A) encodes the density σ and the SHs from the
+PlenOctrees with six different attribute QPs. We combine each
+compression rate with the set of operating points from the
+pruning parameters chosen in Sec. V-B1 to obtain a set of
+compression operating points, as seen in Fig. 8.
+Fig. 9: Average PSNR (in dB) vs Bitrate (in bytes) comparing
+our pruning solution with PlenOctrees against the work in [33]
+for the 8 sequences of the NeRF-Synthetic dataset.
+Results over the whole NeRF-Synthetic dataset in Fig. 9
+show that using compression favors the models of [33] for the
+medium to high bitrates, while the compressed models using
+our method provides gains for the lower bitrates, that is, close
+to and under 1 MB. For the whole curve, our solution yields a
+BD-PSNR gain of 0.23 dB, or a BD-rate reduction of -18.19%.
+C. Performance Analysis of the Proposed Pruning with 3DGS
+over Synthetic Data
+1) Number of Gaussians: For the 3DGS side of our implementation, we first analyze our method according to the
+number of elements – which in this case is represented by the
+Gaussians – per iteration during the optimization process.
+As an example, we assess our method using a thickness
+value of 1 and different MVE values against the Vanilla 3DGS
+[15] (“Vanilla”) and the pruning solution by Lee [17] (“Lee”).
+Fig. 8: Average PSNR (in dB) vs Bitrate (in bytes) comparing
+the operating points of thickness, MVE, and resolution of our
+pruning implemented with PlenOctrees when using 6 values
+for the attributes QP for the compression of GeS-TM. Results
+are performed over hotdog, lego, and materials.
+Average results from the scenes hotdog, lego, and materials
+in Fig. 8 show that the addition of the compression scheme
+step means that the compressed model can achieve low bitrate
+ranges for higher QPs even with higher combinations of
+thickness and MVE. As such, we use the set of thickness =
+100 and MVE = 25 with the six different compression rates as
+our operating points to assess our model for the entire NeRFSynthetic dataset against the solution from [33].
+Fig. 10: Number of Gaussians per Iteration results for our
+method with a thickness of 1 and MVE values of 0, 1, 2, 3,
+5, 10, and 25 implemented with 3DGS compared against the
+Vanilla 3DGS [15], and Lee’s pruning solution [17] for drums.
+The results from Fig. 10 show that for higher values of
+MVE, our solution can generate a more compact version of
+the scene compared to the Vanilla and to Lee, reducing the
+number of kernels by up to 3.32 and 1.70 times, respectively.
+11
+TABLE I: Quality metrics vs Number of Gaussians comparison for our solution with 3DGS using values of thickness of
+1 and MVE of 0, 5, 10, 25 against the vanilla 3DGS [15] and
+Lee’s pruning and compression solution [17] for drums.
+Method
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+# Gaussians ↓
+Vanilla [15]
+26.17
+0.955
+0.037
+347623
+Lee [17]
+26.17
+0.953
+0.041
+178548
+26.18
+0.955
+0.038
+221200
+26.15
+0.955
+0.038
+175099
+26.17
+0.955
+0.038
+151701
+26.10
+0.954
+0.039
+104821
+Ours - 3DGS
+(MVE = 0)
+Ours - 3DGS
+(MVE = 5)
+Ours - 3DGS
+(MVE = 10)
+Ours - 3DGS
+(MVE = 25)
+Notice also how our pruning strategy, performed at every
+3000 iterations, gradually controls the number of Gaussians
+during the training from the start, with the pruned geometry
+shaping the creation of new Gaussians throughout the optimization. Lee, on the other hand, keeps a similar number of
+kernels in comparison to the Vanilla during training while the
+densification of the Gaussians is activated, which happens until
+iteration 15000. Only after the optimization stops producing
+new Gaussians does the number of kernels start to decrease.
+Table I shows the quality metrics and the number of
+Gaussians of our method with varying MVE values compared
+to Vanilla and Lee, which demonstrate that the pruning of the
+Gaussian representation does not result in a significant increase
+in distortion, with the smallest pruned model presenting values
+in PSNR, SSIM and LPIPS close to the bigger, vanilla model.
+However, when comparing the size of the models in terms of
+bitrate, Lee presents an advantage in terms of size reduction
+due to its compression mechanism in addition to pruning.
+Although our smallest model (26.0 MB) is smaller than
+Vanilla (86.6 MB), Lee achieves even further bitrate savings
+(6.67 MB). Therefore, we combine our pruning with SOTA
+compression solutions for Gaussian-based representations to
+also evaluate our method in terms of bitrate.
+2) Rate-distortion Performance: We combine our pruning
+method with each of the compression solutions in Niedemayr
+[16] and Lee [17] to achieve even further bitrate savings.
+We use these combinations to assess our models against the
+SOTA regarding rendering quality in the context of novel view
+synthesis and storage costs. As such, the average results for
+all scenes of the NeRF-Synthetic dataset are shown in Fig. 11,
+where we compare our methods against 3DGS [15], and the
+works from Niedermayr [16] and Lee [17]. We re-executed all
+the reported results from the SOTA for the given scenes.
+Results from Fig. 11 show that the combination of our
+pruning with existing compression methods achieves even
+smaller bitrates at the cost of minimal loss in quality when
+compared to these compression methods alone. Moreover, one
+can observe that, for both combinations, our method that uses
+a higher value for the MVE parameter (25 vs 10) provides
+a more advantageous trade-off between rendering quality and
+model size, as the optimization of the Gaussian kernel can
+compensate for the more aggressive pruning by our method.
+Fig. 11: Average PSNR (in dB) vs Bitrate (in bytes) comparing
+our pruning method (implemented in 3DGS) combined with
+the compression from both Niedermayr’s and Lee’s works,
+against the vanilla 3DGS [15], Niedermayr [16] and Lee [17]
+for all scenes of NeRF-Synthetic. The used parameters for our
+method were thickness = 1 and MVE = (10, 25).
+The combination of our method with Lee is able to achieve
+the smallest ranges in terms of bitrate, with a quality decrease
+of less than 0.2 dB in comparison to the combination of our
+pruning with Niedermayr. We further detail these comparisons
+in Tab. II, where we additionally show the quality metrics in
+SSIM and LPIPS and evaluate the model sizes in terms of the
+number of Gaussians. The reported results for our method are
+given with parameter values of thickness = 1 and MVE = 25.
+The results from Tab. II further corroborate that our method
+achieves competitive results compared to the SOTA. Our
+method combined with Niedemayr’s work provides minimal
+quality loss when compared to standalone work from [16],
+as the number of kernels decreases by a ratio of 2.60 times
+and the overall bitrate size by a ratio of 1.40 times with
+a negligible loss in terms of quality. Our method combined
+with Lee’s solution presents similar results, as the number
+of Gaussians reduces by 1.70 times and the model size in
+bytes by 1.40 times, with a decrease of PSNR of less than
+0.1 dB and losses of 0.001 on SSIM and LPIPS. When
+assessing the compression methods against the vanilla 3DGS,
+our method’s compression ratio reaches 26.3 times when
+combined with Niedemayr’s method at the cost of 0.4 dB
+in average PSNR, while the combination of our solution and
+Lee’s work achieves a compression ratio of 37.5 times at
+the cost of 0.54 dB on average. One can also observe from
+Tab. II that the results within 3DGS’ framework present more
+competitive metrics compared to the one implemented within
+PlenOctrees’. Although the PlenOctrees solution can achieve
+bitrates of under 1MB, it does at the cost of significant quality
+loss, of up to 5 dB compared to the splatting approaches.
+3) Visualization Results: Fig. 12 provides a visualization
+for these methods for a test view from materials. In Figs. 12(d) and (f), our pruning method can reduce the number of
+Gaussians in the scene without introducing significant losses
+to its structure, as seen in 3DGS in Fig. 12-(b). Consequently,
+one can notice the quality preservation even when our pruning
+is combined with different compression methods.
+12
+TABLE II: Average quality metrics, number of Gaussians, and bitrates comparing the proposed solution implemented in 3DGS
+combined with the compression methods from Niedermayr and Lee against the vanilla 3DGS, and the standalone methods
+from Niedermayr [16] and Lee [17] over the NeRF-synthetic dataset. Parameter values of thickness of 1, MVE of 25, and reso
+of 9 are used for our method with 3DGS. Results containing our method’s implementation compressed within the PlenOctrees
+pipeline with values of thickness of 100 and MVE of 25 are added for benchmark, as well as the PlenOctrees [12] baseline.
+Method
+3DGS [15]
+Niedermayr [16]
+Lee [17]
+Ours - 3DGS + Niedermayr
+Ours - 3DGS + Lee
+PlenOctrees [12]
+Ours - PlenOctrees (QP = 22)
+Ours - PlenOctrees (QP = 51)
+(a) Ground-truth
+image
+(e) Lee [17]
+(27.11 dB).
+PSNR ↑
+33.33
+32.91
+32.85
+32.91
+32.79
+31.71
+31.38
+28.12
+SSIM ↑
+0.969
+0.968
+0.967
+0.968
+0.966
+0.958
+0.954
+0.917
+(b) 3DGS [15]
+(27.40 dB).
+(f) Ours - 3DGS +
+Lee (MVE = 25) (27.19 dB).
+LPIPS ↓
+0.030
+0.033
+0.035
+0.034
+0.036
+0.053
+0.061
+0.109
+# Gaussians ↓
+287,604
+267,844
+118,304
+102,883
+69,435
+-
+(c) Niedermayr [16]
+(27.20 dB).
+(g) Ours - PlenOctrees
+(QP = 22) (27.00 dB).
+Size ↓ (MB)
+71.33
+3.79
+2.66
+2.71
+1.90
+1.93×103
+34.36
+0.86
+(d) Ours - 3DGS + Niedermayr
+(MVE = 25) (27.12 dB).
+(h) Ours - PlenOctrees
+(QP = 51) (25.29 dB).
+Fig. 12: Testing view for the scene (a) materials from (b) 3DGS [15], (c) Niedermayr [16], (d) our pruning method with MVE
+= 25 combined with Niedermayr, (e) Lee [17], (f) our pruning method with MVE = 25 combined with Lee, (g) our pruning
+method with PlenOctrees with QP = 22, and (h) our pruning method with PlenOctrees with QP = 51.
+D. Performance Analysis of the Proposed Pruning with 3DGS
+over Real-World Content
+We further analyze the effectiveness of our method extending our experiments with large-scale, real-world content by
+assessing over the Mip-NeRF 360 dataset [7]. This dataset
+was selected for evaluation due to the disposition of the
+camera poses in its 9 scenes in an “inwards-facing” layout
+in its majority, containing scenes both in outdoor and indoor
+environments with information also in the background. We
+define the dataset to be arranged in its majority as “inwardsfacing” since the camera path does not follow a centered
+object for all scenes. Going back to the discussion about
+the significance of the thickness and MVE parameters from
+Section III, it means that points in the scene can be occluded
+from being outside the camera frustum for a certain viewpoint,
+rather than only being not visible due to self-occlusions from
+the object’s geometry. This phenomenon combined with the
+fact that parts of the model are located in the background of
+the scene propelled us to provide a more detailed analysis on
+the effects of the parameters for such large-scale scenes.
+1) Effects on Parameter Values: For the large real-world
+scenes of the Mip-NeRF 360 dataset, the MVE parameter tends
+to affect to a greater degree the Gaussians that are occluded
+from views due to being outside the camera frustum, rather
+than self-occlusions from other objects in the scene. For these
+cases, the kernels of the scene located in the background will
+be marked as occluded more frequently, being more likely to
+be pruned for higher values of MVE. Figure 13 illustrates this
+13
+(a) Ground-truth
+image.
+(b) 3DGS [15]
+(26.35 dB).
+(c) Our pruning (thickness = 1, (d) Our pruning (thickness = 1,
+MVE = 5) (24.68 dB).
+MVE = 100) (16.85 dB).
+Fig. 13: Testing view example for the scene (a) kitchen from (b) 3DGS [15], (c) our pruning method with a thickness value
+of 1 and MVE of 5 (d) our pruning method with a thickness value of 1 and MVE of 100.
+case, where, for the same thickness value, a higher value of
+MVE in Fig. 13-(d) presents a significant decrease in terms of
+PSNR when compared to the vanilla 3DGS [15] – Fig. 13-(b) –
+due to the under-represented background despite the accurate
+representation of the lego truck centered in the foreground.
+Besides, one can notice that a lower value for MVE – Fig.
+13-(c) – better represents such parts of the scene, although
+some finer details from the background – around the area of
+the plant’s leaves – cause the rendered view to present a lower
+PSNR value when compared to the full, vanilla model. It is
+important to emphasize that, for such cases, higher values of
+thickness would not improve the rendered view significantly,
+since these points would not be visible regardless of how
+“deep” ones marches into the scene with each ray within the
+camera’s frustum, which is observed in Fig. 14.
+Fig. 14: Average PSNR (in dB) vs number of Gaussian
+kernels, comparing the combination of operating points of the
+parameters thickness, MVE implemented with 3DGS. Results
+were obtained for the average of the training data for the 9
+scenes of the Mip-NeRF 360 dataset [7].
+2) Parameter Selection: We assess the different levels of
+distortion and model complexity for our pruning method over
+the Mip-NeRF 360 dataset by looking the combination of the
+MVE and thickness parameter values. Here, we approximate
+the complexity by computing the number of Gaussian kernels.
+Fig. 14 shows the rendering average PSNR results for the
+training split of the 9 real-world scenes of the Mip-NeRF 360
+dataset [7] for multiple operating points. Points with the same
+combination of thickness are grouped into curves, in which
+the MVE parameter is tested for the values of (1, 5, 10, 25, 50).
+As explained in the previous section, the under-representation
+of the background components results in models with higher
+thickness values providing marginal gains at the cost of a
+significant increase in the number of Gaussians, thus making
+the combination of points in from the thickness value of 1
+to be more efficient in terms of RD. In order to select the
+MVE value, we detect the elbow point of the curve using the
+“kneedle” algorithm [47], illustrated by the vertical dotted line
+in Fig. 14. Therefore, a combination of (thickness, MVE) =
+(1, 10) is used when combining our pruning method with the
+compression schemes from Section IV-B.
+Fig. 15: Average PSNR (in dB) vs Bitrate (in bytes) comparing
+our pruning method within 3DGS combined with the compression from both Niedermayr’s and Lee’s works, against 3DGS
+[15], Niedermayr [16] and Lee [17] for the testing split of
+the outdoor scenes from Mip-NeRF 360 [7]. Used parameter
+values for our method were thickness = 1 and MVE = 10.
+3) Rate-distortion Performance: The Mip-NeRF 360
+dataset consists of 5 outdoor scenes, and 4 indoor scenes,
+which have different characteristics in terms of size and even
+the arrangement of camera poses. As one can see in Table III,
+the outdoor scenes have an average of 4.7 million Gaussians
+for the Vanilla 3DGS [15], while the indoor scenes present
+an average of 1.4 million Gaussians. The larger scenes of the
+outdoor environments as well as their camera paths being more
+centered around an object provide a larger separation between
+the foreground and the background in these scenes when
+compared to the indoor ones, allowing our pruning method
+14
+Fig. 16: Average PSNR (in dB) vs Bitrate (in bytes) comparing our pruning method within 3DGS combined with the
+compression from both Niedermayr’s and Lee’s works, against
+3DGS [15], Niedermayr [16] and Lee [17] for the testing split
+of indoor scenes from Mip-NeRF 360 [7]. Used parameter
+values for our method were thickness = 1 and MVE = 10.
+to perform better in the former than in the latter. As a result,
+we divide our RD plots between the outdoor (Fig. 15) and the
+indoor scenes (Fig. 16), when comparing our methods against
+the vanilla 3DGS [15] and the original works from Niedermayr
+[16] and Lee [17]. Here, we use the same name conventions
+as in Section V-C2. However, we add for the results in Table
+III the metrics for the CNC method [48], which is a SOTA
+compression method for scene rendering based on the InstantNGP (INGP) approach [11]. Although these models present
+bitrates in the low range, the lack of rendering quality of the
+baseline INGP approach for the unbounded scenes of the MipNeRF 360 dataset compromises this compression approach
+regarding RD performance. One can observe from the outdoor
+results from Table III and Fig. 15 that our pruning method
+reduces the number of Gaussians by 2.9× when combined
+with the Niedermayr compression method, and 3.7× when
+combined with the Lee method, resulting in compression gains
+of 55× and 43×, respectively at a loss of around 0.4 dB for
+both methods. When comparing the compression solutions of
+Niedermayr and Lee combined with our pruning solution (in
+blue in Fig. 15) and without (in red), we further reduce the
+model size of the method from Niedermayr by 1.93× at a
+cost of less than 0.2 dB, while we reduce Lee’s by 1.38×
+at a approximately 0.1 dB loss. One can see by the per-scene
+results in the indoor scenes in Table III and in Fig. 16 that our
+pruning method is not as efficient as in the outdoor sequences,
+particularly for the “room” scene. The scene disposition of
+“room” is directly related to the lack of performance of our
+method there, as a great part of the objects of interest in the
+scene are located in the background of its viewpoints, with
+the center of scene mainly consisting of an empty carpet.
+Thus, under-representing the background in this scene means
+that, for some viewpoints, the badly reconstructed objects will
+be in the near-plane of the camera frustum, becoming more
+evident for certain views and dropping their quality metrics
+significantly, thus reducing the average in the testing split
+(which consists of only 39 rendered views).
+E. Method Scalability
+In addition to the limitations of our method for some of the
+indoor scenes from the Mip-NeRF 360 dataset presented in
+the last Section, the scalability of the solution with regard to
+the computational overhead on the training time relies on the
+number of Gaussians in the scene as well as the number of
+cameras in which to compute the visibility mask O.
+As an example, for an NVIDIA A40 GPU, while the training
+time for “drums”, the largest scene of the NeRF-Synthetic
+dataset, increases from approximately 9 to 11 minutes when
+comparing the introduction of our pruning method over the
+vanilla version of 3DGS, this value increases from 50 minutes
+to just under 3 hours for “bicycle”, the largest scene of the
+Mip-NeRF 360 dataset. Note that our method can be sped
+up by implementing the computation of the occlusion mask
+using CUDA programming, taking advantage of the hardware
+acceleration provided by the CUDA kernels.
+In terms of inference time, the reduced number of Gaussians
+of the reconstructed models with our pruning method makes
+the scene rendering faster. As an example, for the “bicycle”
+scene of the Mip-NeRF 360 dataset, the vanilla 3DGS achieves
+a performance of 45.41 FPS in an NVIDIA A40 GPU, while
+the pruned model with our method achieves a rendering speed
+of 85.47 FPS for the same scene. When comparing the solution
+from Niedermayr et al. [16] for the same scene, we notice
+an increase in rendering speed from 79.22 to 102.25 FPS by
+applying our pruning method, while in Lee et al. [17] our
+solution increased it from 73.82 to 96.58 FPS.
+VI. C ONCLUSION
+We propose a pruning framework to reduce the size of
+3D “inwards-facing” scene representations adaptable to different types of depiction of the geometry, such as NeRFor 3DGS-based methods. This is achieved by computing the
+visibility over the training data of the elements of the given
+representation, which can be points, voxels, or even Gaussian
+kernels depending on the model’s underlying structure. We
+implement our solution in two specific scenarios, with the grid
+representation of PlenOctrees for the NeRF-based rendering,
+and the 3DGS for the splatting-based approach.
+We show that our pruning solution produces smaller models
+in terms of the number of points with minimal losses in terms
+of rendering quality in a novel view synthesis context for both
+PlenOctrees and Gaussian Splatting implementations.
+We further assess the sizes of our methods by combining
+our pruning approach with existing compression methods to
+evaluate them over their storage footprints. On synthetic data,
+results show comparable metrics to existing solutions on the
+PlenOctrees’ representation, achieving marginal gains for the
+lower bitrates. On the 3DGS side, the combination of our pruning method and compression solutions achieves a compression
+ratio of up to 37.5 times over their original, uncompressed
+counterparts for the Gaussian-based scenes, with only a 0.5
+dB decrease in rendering quality. While comparing our model
+sizes to other SOTA approaches, our solution produces models
+smaller by 1.4 times, with less than a 0.1 dB loss over novel
+rendered views. We also assess our pruning method over largescale, real-world scenes, where our method produces model
+15
+TABLE III: Per-scene quality metrics, number of Gaussians and bitrate for our solution within the 3DGS framework using
+values of thickness of 1 and MVE of 10 for the compression methods from Niedermayr and Lee against the vanilla 3DGS [15],
+CNC [48], and the 3DGS compressed with the methods from Niedermayr [16] and Lee [17] for the Mip-NeRF 360 dataset.
+Method
+Vanilla
+Niedemayr [16]
+Lee [17]
+Ours - 3DGS +
+Niedermayr
+Ours - 3DGS +
+Lee
+CNC [48]
+PSNR ↑
+Gaussians ↓
+Size ↓
+PSNR ↑
+Gaussians ↓
+Size ↓
+PSNR ↑
+Gaussians ↓
+Size ↓
+PSNR ↑
+Gaussians ↓
+Size ↓
+PSNR ↑
+Gaussians ↓
+Size ↓
+PSNR ↑
+Size ↓
+bicycle
+25.15
+5,982,171
+1,483.58
+24.95
+5,128,847
+48.83
+24.78
+2,238,541
+42.49
+24.90
+2,308,202
+28.12
+24.69
+1,571,983
+32.23
+20.65
+3.96
+flowers
+21.47
+3,548,227
+879.96
+21.14
+3,186,815
+32.36
+20.90
+1,518,816
+31.40
+21.12
+1,458,863
+19.48
+20.87
+1,070,767
+24.65
+19.39
+3.99
+Outdoor Scenes
+garden
+stump
+27.24
+26.55
+5,725,511
+4,791,348
+1,419.93
+1,188.26
+26.84
+26.26
+5,253,715
+4,310,682
+48.50
+41.79
+26.70
+26.33
+2,321,569
+1,660,830
+43.22
+33.90
+26.30
+26.15
+1,814,132
+1,272,939
+22.54
+17.27
+26.47
+26.06
+1,433,262
+1,079,998
+29.57
+24.42
+22.18
+23.69
+3.63
+3.65
+sizes smaller by 1.9 times than other SOTA approaches at the
+cost of less than 0.2 dB loss when synthesizing novel views
+on the outdoor scenes of the Mip-NeRF 360 dataset.
+R EFERENCES
+[1] Ricardo L De Queiroz and Philip A Chou, “Motion-compensated
+compression of dynamic voxelized point clouds,” IEEE Transactions
+on Image Processing, vol. 26, no. 8, pp. 3886–3895, 2017.
+[2] Scott Gebhardt, Eliezer Payzer, Leo Salemann, Alan Fettinger, Eduard
+Rotenberg, and Christopher Seher, “Polygons, point-clouds and voxels:
+A comparison of high-fidelity terrain representations,” in Simulation
+Interoperability Workshop and Special Workshop on Reuse of Environmental Data for Simulation—Processes, Standards, and Lessons
+Learned, 2009, p. 9.
+[3] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh, “Neural volumes: Learning dynamic
+renderable volumes from images,” arXiv preprint arXiv:1906.07751,
+2019.
+[4] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan, “Mvsnet:
+Depth inference for unstructured multi-view stereo,” in Proceedings of
+the European conference on computer vision (ECCV), 2018, pp. 767–
+783.
+[5] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T
+Barron, Ravi Ramamoorthi, and Ren Ng, “Nerf: Representing scenes as
+neural radiance fields for view synthesis,” Communications of the ACM,
+vol. 65, no. 1, pp. 99–106, 2021.
+[6] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan, “Mip-nerf: A multiscale
+representation for anti-aliasing neural radiance fields,” in Proceedings of
+the IEEE/CVF international conference on computer vision, 2021, pp.
+5855–5864.
+[7] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and
+Peter Hedman, “Mip-nerf 360: Unbounded anti-aliased neural radiance
+fields,” in Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, 2022, pp. 5470–5479.
+[8] Kai Gu, Thomas Maugey, Sebastian Knorr, and Christine Guillemot,
+“Omni-nerf: neural radiance field from 360 image captures,” in 2022
+IEEE International Conference on Multimedia and Expo (ICME). IEEE,
+2022, pp. 1–6.
+[9] Kai Gu, Thomas Maugey, Sebastian Knorr, and Christine Guillemot,
+“Vanishing point aided hash-frequency encoding for neural radiance
+fields (nerf) from sparse 360°input,” in 2023 IEEE International
+Symposium on Mixed and Augmented Reality (ISMAR), 2023, pp. 1142–
+1151.
+[10] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo
+Xiang, Jingyi Yu, and Hao Su, “Mvsnerf: Fast generalizable radiance
+field reconstruction from multi-view stereo,” in Proceedings of the
+IEEE/CVF international conference on computer vision, 2021, pp.
+14124–14133.
+treehill
+22.47
+3,760,485
+932.60
+22.34
+3,382,724
+34.86
+22.53
+1,960,410
+38.37
+22.36
+1,357,154
+19.40
+22.59
+1,211,233
+26.80
+19.56
+3.87
+room
+32.10
+1,474,918
+365.78
+31.69
+1,171,963
+14.57
+30.79
+510,463
+14.86
+28.48
+456,436
+9.22
+30.48
+437,737
+13.93
+28.12
+2.99
+Indoor Scenes
+counter
+kitchen
+29.28
+31.10
+1,164,511
+1,796,475
+288.80
+445.53
+28.98
+30.48
+1,003,430
+1,641,640
+13.72
+19.25
+28.66
+30.56
+529,737
+1,131,206
+15.21
+24.47
+27.01
+29.58
+438,109
+809,327
+9.60
+12.89
+28.30
+30.13
+453,771
+1,047,187
+14.06
+23.07
+26.54
+27.68
+3.22
+2.68
+bonsai
+32.51
+1,245,869
+308.98
+31.84
+1,048,259
+13.51
+31.87
+597,239
+16.76
+31.33
+496,053
+9.50
+31.86
+517,431
+15.50
+26.23
+3.67
+[11] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller,
+“Instant neural graphics primitives with a multiresolution hash encoding,” ACM transactions on graphics (TOG), vol. 41, no. 4, pp. 1–15,
+2022.
+[12] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo
+Kanazawa, “Plenoctrees for real-time rendering of neural radiance
+fields,” in Proceedings of the IEEE/CVF International Conference on
+Computer Vision, 2021, pp. 5752–5761.
+[13] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa, “Plenoxels: Radiance fields without
+neural networks,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2022, pp. 5501–5510.
+[14] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yu-Xiong Wang, and David
+Forsyth, “Diver: Real-time and accurate neural radiance fields with
+deterministic integration for volume rendering,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2022, pp. 16200–16209.
+[15] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George
+Drettakis, “3d gaussian splatting for real-time radiance field rendering.,”
+ACM Trans. Graph., vol. 42, no. 4, pp. 139–1, 2023.
+[16] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann,
+“Compressed 3d gaussian splatting for accelerated novel view synthesis,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2024, pp. 10349–10358.
+[17] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung
+Park, “Compact 3d gaussian representation for radiance field,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2024, pp. 21719–21728.
+[18] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and Hamed Pirsiavash,
+“Compact3d: Smaller and
+faster gaussian splatting with vector quantization,” arXiv preprint
+arXiv:2311.18159, 2023.
+[19] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and
+Zhangyang Wang, “Lightgaussian: Unbounded 3d gaussian compression
+with 15x reduction and 200+ fps,” 2023.
+[20] Edward H Adelson, James R Bergen, et al., The plenoptic function and
+the elements of early vision, vol. 2, Vision and Modeling Group, Media
+Laboratory, Massachusetts Institute of Technology, 1991.
+[21] Mai Xu, Chen Li, Shanyi Zhang, and Patrick Le Callet, “State-ofthe-art in 360° video/image processing: Perception, assessment and
+compression,” IEEE Journal of Selected Topics in Signal Processing,
+vol. 14, no. 1, pp. 5–26, 2020.
+[22] Changyin Zhou and Shree K. Nayar, “Computational cameras: Convergence of optics and processing,” Trans. Img. Proc., vol. 20, no. 12, pp.
+3322–3340, dec 2011.
+[23] Gustavo Sandri, Ricardo L de Queiroz, and Philip A Chou, “Compression of plenoptic point clouds,” IEEE Transactions on Image Processing,
+vol. 28, no. 3, pp. 1419–1427, 2018.
+[24] Maja Krivokuća, Ehsan Miandji, Christine Guillemot, and Philip A
+Chou, “Compression of plenoptic point cloud attributes using 6-d point
+16
+clouds and 6-d transforms,” IEEE Transactions on Multimedia, vol. 25,
+pp. 593–607, 2021.
+[25] Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany, Shiqin Yan,
+Numair Khan, Federico Tombari, James Tompkin, Vincent Sitzmann,
+and Srinath Sridhar, “Neural fields in visual computing and beyond,”
+Computer Graphics Forum, 2022.
+[26] James T Kajiya and Brian P Von Herzen, “Ray tracing volume densities,”
+ACM SIGGRAPH computer graphics, vol. 18, no. 3, pp. 165–174, 1984.
+[27] Eric Penner and Li Zhang, “Soft 3d reconstruction for view synthesis,”
+vol. 36, no. 6, 2017.
+[28] Peter Hedman, Pratul P Srinivasan, Ben Mildenhall, Jonathan T Barron,
+and Paul Debevec, “Baking neural radiance fields for real-time view
+synthesis,” in Proceedings of the IEEE/CVF international conference
+on computer vision, 2021, pp. 5875–5884.
+[29] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian
+Theobalt, “Neural sparse voxel fields,” NeurIPS, 2020.
+[30] Jiaxiang Tang, Xiaokang Chen, Jingbo Wang, and Gang Zeng,
+“Compressible-composable nerf via rank-residual decomposition,” Advances in Neural Information Processing Systems, vol. 35, pp. 14798–
+14809, 2022.
+[31] Daniel Rho, Byeonghyeon Lee, Seungtae Nam, Joo Chan Lee,
+Jong Hwan Ko, and Eunbyung Park, “Masked wavelet representation
+for compact neural radiance fields,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2023, pp.
+20680–20690.
+[32] Chenxi Lola Deng and Enzo Tartaglione, “Compressing explicit voxel
+grid representations: fast nerfs become also small,” in Proceedings of
+the IEEE/CVF Winter Conference on Applications of Computer Vision,
+2023, pp. 1236–1245.
+[33] Davi R Freitas, Christine Guillemot, and Ioan Tabus, “Compression of
+plenoctree model attributes enabling fast communication and rendering
+of neural radiance fields,” in 2023 31st European Signal Processing
+Conference (EUSIPCO). IEEE, 2023, pp. 590–594.
+[34] Li Li, Zhu Li, Shan Liu, and Houqiang Li, “Plenoptic point cloud
+compression using multiview extension of high efficiency video coding,”
+IEEE Transactions on Multimedia, vol. 25, pp. 2007–2021, 2023.
+[35] Diogo C. Garcia, Camilo Dorea, Renan U. B. Ferreira, Davi R. Freitas,
+Ricardo L. de Queiroz, Rogerio Higa, Ismael Seidel, and Vanessa
+Testoni, “Differential transform for video-based plenoptic point cloud
+coding,” IEEE Transactions on Image Processing, vol. 31, pp. 1994–
+2003, 2022.
+[36] Davi R. Freitas, Ricardo L. de Queiroz, Ioan Tabus, and Christine
+Guillemot, “A comparative assessment of implicit and explicit plenoptic
+scene representations,” in 2024 IEEE 26th International Workshop on
+Multimedia Signal Processing (MMSP), 2024, pp. 1–6.
+[37] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and Peter Eisert,
+“Compact 3d scene representation via self-organizing gaussian grids,”
+arXiv preprint arXiv:2312.13299, 2023.
+[38] D. Graziosi, O. Nakagami, S. Kuma, A. Zaghetto, T. Suzuki, and
+A. Tabatabai, “An overview of ongoing point cloud compression
+standardization activities: video-based (V-PCC) and geometry-based (GPCC),” APSIPA, vol. 9, 04 2020.
+[39] “G-PCC Codec Description v10,”
+[40] Davi R Freitas, Gustavo L Sandri, and Ricardo L De Queiroz,
+“Geometry-based compression of plenoptic point clouds,” in 2022 IEEE
+24th International Workshop on Multimedia Signal Processing (MMSP).
+IEEE, 2022, pp. 1–5.
+[41] “WG7, MPEG 3D Graphics Coding and Haptics, “Test model for
+geometry-based solid point cloud - GeS TM 3.0”,”
+[42] Peter Deutsch, “Rfc1951: Deflate compressed data format specification
+version 1.3,” 1996.
+[43] Jacob Ziv and Abraham Lempel, “A universal algorithm for sequential
+data compression,” IEEE Transactions on information theory, vol. 23,
+no. 3, pp. 337–343, 1977.
+[44] Jakob Foerster, Gregory Farquhar, Maruan Al-Shedivat, Tim
+Rocktäschel, Eric Xing, and Shimon Whiteson, “Dice: The infinitely
+differentiable monte carlo estimator,” in International Conference on
+Machine Learning. PMLR, 2018, pp. 1529–1538.
+[45] David A Van Veldhuizen, Gary B Lamont, et al., “Evolutionary
+computation and convergence to a pareto front,” in Late breaking papers
+at the genetic programming 1998 conference. Citeseer, 1998, pp. 221–
+228.
+[46] Dong Tian, Hideaki Ochimizu, Chen Feng, Robert Cohen, and Anthony
+Vetro, “Geometric distortion metrics for point cloud compression,” in
+2017 IEEE International Conference on Image Processing (ICIP). IEEE,
+2017, pp. 3460–3464.
+[47] Ville Satopaa, Jeannie Albrecht, David Irwin, and Barath Raghavan,
+“Finding a” kneedle” in a haystack: Detecting knee points in system
+behavior,” in 2011 31st international conference on distributed computing systems workshops. IEEE, 2011, pp. 166–171.
+[48] Yihang Chen, Qianyi Wu, Mehrtash Harandi, and Jianfei Cai, “How
+far can we compress instant-ngp-based nerf?,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2024, pp. 20321–20330.
+Davi R. Freitas (Student Member, IEEE) received a
+B.S. degree in computer engineering and a Master of
+Science degree in signal processing from the Universidade de Brasilia, Brazil, in 2019 and 2021, respectively. He is currently pursuing a Ph.D. degree with
+INRIA/Université de Rennes 1, France, and Tampere
+University, Finland. He is part of the PLENOPTIMA
+Project as an Early-Stage Researcher.
+Ioan Tabus (Senior Member, IEEE) received a
+Ph.D. degree (Hons.) from the Tampere University
+of Technology, Finland, in 1995. He held teaching
+positions at the Department of Control and Computers, Politehnica University of Bucharest, from
+1984 to 1995. Since 1996, he has been a Senior
+Researcher, and since January 2000 till June 2024
+he has been a Professor with the Department of
+Signal Processing, Tampere University of Technology, which was merged into Tampere University in
+2019. He is now a Professor emeritus at Tampere
+University. He is the coauthor of two books and more than 250 publications in
+the fields of signal compression, image processing, bioinformatics and system
+identification. His research interests include light field image processing,
+plenoptic image compression, point cloud compression, audio, image, data
+compression, and statistical signal processing. He was an Associate Editor
+of the IEEE TRANSACTIONS ON IMAGE PROCESSING, IEEE TRANSACTIONS ON SIGNAL PROCESSING and Signal Processing (EURASIP).
+He was the Editor-in-Chief of the EURASIP Journal on Bioinformatics and
+Systems Biology from 2006 to 2014.
+Christine Guillemot (Fellow, IEEE) received the
+Ph.D. degree from Ecole Nationale Superieure des
+Telecommunications, Paris, France, and an Habilitation for Research Direction from the University
+of Rennes, Rennes, France. She is a Director of
+Research at INRIA. From 1985 to 1997, she was
+with FRANCE TELECOM, where she was involved
+in various projects in the area of image and video
+coding and processing for TV, HDTV, and multimedia. From January 1990 to mid. 1991, she was
+with Bellcore, NJ, USA, as a Visiting Scientist. Her
+research interests include signal and image processing, and computer vision.
+She was an Associate Editor for the IEEE Transactions on Image Processing
+from 2000 to 2003 and from 2014 to 2016, IEEE Transactions on Circuits and
+Systems for Video Technology from 2004 to 2006, and IEEE Transactions
+on Signal Processing during 2007–2009. She was a Senior Member of the
+Editorial Board of the IEEE Journal on Selected Topics in Signal Processing
+during 2013–2015 and was a Senior Area Editor of the IEEE Transactions on
+Image Processing during 2016–2020.
+17
+A PPENDIX A
+A BLATION S TUDY
+We evaluate the effect of the components of our proposed
+method in Tab. IV, more specifically the proposed visibility
+pruning method – with parameters values for thickness of 1
+and MVE of 25 – and the regularization term on the scaling
+values for the Gaussians. These are referred in the table as
+“Vis. Pruning (MVE = 25)” and ”Scaling reg.”, respectively.
+Results were performed on the sequence drums.
+TABLE IV: Average quality metrics per number of Gaussians
+on the scene drums, evaluating the influence from the individual features introduced in the proposed method, namely the
+visibility pruning method and the scaling regularization term.
+Method
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+# Gaussians ↓
+Baseline [15]
+26.17
+0.955
+0.037
+347623
++ Vis. Pruning
+(MVE = 25)
+26.10
+0.954
+0.038
+111592
++ Scaling reg.
+26.18
+0.955
+0.038
+260161
++Scaling reg.
++ Vis. Pruning
+(MVE = 25)
+26.10
+0.954
+0.039
+104821
+The results in Tab. IV suggest that the visibility pruning
+algorithm is responsible for most of the losses in terms of
+rendering quality, while also reducing the number of Gaussians
+by a third of the original 3DGS method. The scaling regularization term reduces the amount of Gaussians to a smaller
+degree, by steering the kernels into larger sizes, producing no
+noticeable losses in terms of quality metrics.

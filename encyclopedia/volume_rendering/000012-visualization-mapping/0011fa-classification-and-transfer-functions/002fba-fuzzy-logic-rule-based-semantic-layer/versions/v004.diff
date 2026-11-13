@@ -1,0 +1,122 @@
+--- v003.md
++++ v004.md
+@@ -19,7 +19,7 @@
+ 
+ **Data Structures:**
+-1.  **Fuzzy Logic Expression Tree:** Constructed on the CPU from the rule base. Nodes represent logical operations (`and`, `or`, `not`) or membership function evaluations [S1].
+-2.  **1D Texture Array:** Stores membership functions and pre-calculated fuzzy logic functions. Each membership function is encoded as a 1D texture [S1].
+-3.  **Shader Code:** Generated from the expression tree. Leaf nodes are replaced with texture lookups; internal nodes are replaced with GPU-compatible operations [S1].
++1.  **Fuzzy Logic Expression Tree:** Constructed on the CPU from the rule base [S1]. Nodes represent logical operations (`and`, `or`, `not`) or membership function evaluations [S1].
++2.  **1D Texture Array:** Stores membership functions and pre-calculated fuzzy logic functions [S1]. Each membership function is encoded as a 1D texture [S1].
++3.  **Shader Code:** Generated from the expression tree [S1]. Leaf nodes are replaced with texture lookups; internal nodes are replaced with GPU-compatible operations [S1].
+ 
+ **Numbered Steps:**
+@@ -30,5 +30,5 @@
+     *   `not` $\rightarrow$ `1.0 - operand` [S1]
+ 3.  **Encode Membership Functions (CPU):** Store membership functions as 1D textures and combine them into a 1D texture array [S1].
+-4.  **Generate Shader Code (CPU):** Substitute leaf nodes of the expression tree with texture lookups into the 1D texture array. Expand the tree into valid shader code [S1].
++4.  **Generate Shader Code (CPU):** Substitute leaf nodes of the expression tree with texture lookups into the 1D texture array [S1]. Expand the tree into valid shader code [S1].
+ 5.  **Upload to GPU:** Upload the generated shader code and the 1D texture array to the GPU [S1].
+ 6.  **Execute Ray Casting (GPU):** For each sample point during volume ray casting, call the `GetColor()` function (or equivalent shader entry point) which evaluates the fuzzy logic rules [S1].
+@@ -45,17 +45,18 @@
+ **Pseudocode:**
+ ```python
+-import math
++def sample_volume(pos, origin, spacing, data):
++    # [G] Standard trilinear interpolation from voxel grid
++    coords = [(pos[i] - origin[i]) / spacing[i] for i in range(3)]
++    return data.interpolate(coords)
+ 
+-def sample_volume(pos, volume_origin, volume_spacing, volume_data):
+-    # [G] Standard trilinear interpolation from voxel grid
+-    coords = [(pos[i] - volume_origin[i]) / volume_spacing[i] for i in range(3)]
+-    # Returns scalar density value at pos
+-    return volume_data.interpolate(coords)
++def texture_lookup(texture_array, index, value):
++    # [G] Simulates GPU 1D texture array sampling
++    return texture_array[index][value]
+ 
+-def evaluate_antecedent(membership_array, data_val, interaction_params):
++def evaluate_antecedent(mf_array, data_val, dist_cursor, dist_plane):
+     # Step 7: Lookup membership values and combine with fuzzy operations
+-    m_low_cursor = membership_array.lookup(0, interaction_params.dist_cursor)
+-    m_high_density = membership_array.lookup(1, data_val)
+-    m_low_plane = membership_array.lookup(2, interaction_params.dist_plane)
++    m_low_cursor = texture_lookup(mf_array, 0, dist_cursor)
++    m_high_density = texture_lookup(mf_array, 1, data_val)
++    m_low_plane = texture_lookup(mf_array, 2, dist_plane)
+     # Rule: (dist_cursor is low AND density is high) OR (dist_plane is low)
+     return max(min(m_low_cursor, m_high_density), m_low_plane)
+@@ -65,8 +66,8 @@
+     return min(style_mf, antecedent_val)
+ 
+-def defuzzify_centroid(style_mf):
++def defuzzify_centroid(style_mf_values):
+     # Step 9: [G] Centroid method for crisp value extraction
+-    numerator = sum(x * style_mf(x) for x in range(100))
+-    denominator = sum(style_mf(x) for x in range(100))
++    numerator = sum(x * v for x, v in enumerate(style_mf_values))
++    denominator = sum(style_mf_values)
+     return numerator / denominator if denominator > 0 else 0.0
+ 
+@@ -84,32 +85,28 @@
+     return new_color
+ 
+-def in_volume_bounds(pos, volume_origin, volume_spacing, volume_shape):
++def in_volume_bounds(pos, origin, spacing, shape):
+     for i in range(3):
+-        idx = (pos[i] - volume_origin[i]) / volume_spacing[i]
+-        if idx < 0 or idx >= volume_shape[i]:
++        idx = (pos[i] - origin[i]) / spacing[i]
++        if idx < 0 or idx >= shape[i]:
+             return False
+     return True
+ 
+-def raycast(origin, direction, volume_data, volume_origin, volume_spacing, step_size, max_steps, membership_array, interaction_params):
++def raycast(origin, direction, volume_data, vol_origin, vol_spacing, step_size, max_steps, mf_array, style_mf_array, dist_cursor, dist_plane):
+     # Step 6: Initialize ray and compositing state
+     color = [0.0, 0.0, 0.0, 0.0]
+     t = 0.0
+     for _ in range(max_steps):
+-        # Step 6: Compute current sample position
+         pos = [origin[i] + direction[i] * t for i in range(3)]
+-        if not in_volume_bounds(pos, volume_origin, volume_spacing, volume_data.shape):
++        if not in_volume_bounds(pos, vol_origin, vol_spacing, volume_data.shape):
+             break
+-        # Step 6: Sample data and evaluate fuzzy rules
+-        data_val = sample_volume(pos, volume_origin, volume_spacing, volume_data)
+-        antecedent = evaluate_antecedent(membership_array, data_val, interaction_params)
++        data_val = sample_volume(pos, vol_origin, vol_spacing, volume_data)
++        antecedent = evaluate_antecedent(mf_array, data_val, dist_cursor, dist_plane)
+         # Step 8: Implication
+-        style_mf = membership_array.lookup(3, 0.5)
+-        implicated = apply_implication(style_mf, antecedent)
++        style_mf_val = texture_lookup(style_mf_array, 0, data_val)
++        implicated = apply_implication(style_mf_val, antecedent)
+         # Step 9: Defuzzification
+-        style_val = defuzzify_centroid(implicated)
++        style_val = defuzzify_centroid([implicated])
+         sample_color = [0.5, 0.5, 0.5, style_val]
+-        # Step 6: Composite
+         color = composite(color, sample_color, sample_color[3])
+-        # Step 6: Advance ray
+         t += step_size
+     return color
+@@ -118,7 +115,7 @@
+ **Parameters:**
+ *   **Interaction-dependent parameters:** Distance to mouse cursor, distance to slicing plane, distance to image plane, viewpoint, user focus [S1].
+-*   **Flatness parameter:** A semantic parameter describing the trade-off between showing spatial relationships and showing important regions. Evaluated locally per sample [S1].
+-*   **Membership function resolution:** Determined by the 1D texture array size. Changes result in interactive updates [S1].
+-*   **Sample distance:** Controls rendering quality and performance. Typical values in examples: 1.0 [S1].
++*   **Flatness parameter:** A semantic parameter describing the trade-off between showing spatial relationships and showing important regions [S1]. Evaluated locally per sample [S1].
++*   **Membership function resolution:** Determined by the 1D texture array size [S1]. Changes result in interactive updates [S1].
++*   **Sample distance:** Controls rendering quality and performance [S1]. Typical values in examples: 1.0 [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -139,5 +136,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The per-frame cost is dominated by the GPU evaluation of fuzzy logic rules per sample. The CPU cost is incurred only when rules change (<1 second) [S1].
++*   **Time Complexity:** The per-frame cost is dominated by the GPU evaluation of fuzzy logic rules per sample [S1]. The CPU cost is incurred only when rules change (<1 second) [S1].
+ *   **Memory Complexity:** Requires storage for membership functions in 1D texture arrays and the generated shader code [S1].
+ *   **Measured Performance:**

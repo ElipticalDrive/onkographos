@@ -3,107 +3,116 @@
 Also called: Adaptive Quality for Volume Rendering, Adaptive Sampling for Interactive Volume Rendering, Dynamic Sampling Rate, Interaction-aware Adaptive Sampling, Two-rate Interaction Sampling
 
 ## Overview
-Adaptive Sampling for Interaction is a technique to maintain smooth user interaction with large volume datasets by dynamically adjusting the rendering step size based on framerate, and performing a high-quality pass after interaction stops [S1, unofficial]. It lowers the sampling rate during user interaction to maintain performance, then re-renders at a higher rate once the action is completed [S2][S3]. Unlike static resolution scaling, it is time-bound and context-aware, specifically designed to decouple performance from user input latency [S1, unofficial]. It builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md).
+Adaptive Sampling for Interaction is a technique to maintain smooth user interaction with large volume datasets by dynamically lowering the rendering sampling rate during camera movement or parameter adjustment, then restoring high-quality rendering after the interaction ceases [S1, unofficial][S2, S3][S4, unofficial]. It differs from static resolution scaling by being triggered by user activity rather than a fixed timer, and from purely error-based adaptive sampling by decoupling visual fidelity from local data complexity in favor of temporal responsiveness [S1, unofficial][S2]. This method bridges the gap between interactive responsiveness and final image quality, ensuring that coarse feedback is provided during exploration while preserving detail for static inspection [S2, S3].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** User interaction events (e.g., camera movement), current frame rate metrics, volume dataset, transfer function.
-*   **Output:** Rendered image with adaptive sampling density; updated step size parameters.
+The method operates as a two-state control loop that modulates the sampling density based on the state of user interaction. It relies on the parent mechanism of ray-centric adaptive step size, where the `relative_step_size` parameter controls the distance between sample points along the ray [S1, unofficial].
 
-**Data Structures:**
-*   `RenderQualityChange`: An enum or event type indicating the quality state. Values include `MAX` (high quality) and potentially lower states (coarse).
-*   `min_step_size`: A scalar float representing the minimum allowed step size for the volume renderer. Clamped between 0.1 and 1.0 to satisfy library constraints (e.g., Vispy's `VolumeVisual` raises a `ValueError` if `relative_step_size` < 0.1) [S1, unofficial].
-*   `relative_step_size`: The current step size multiplier used by the renderer.
+### Inputs and Outputs
+*   **Inputs:** User interaction events (e.g., camera rotation, translation, zoom), current frame rate metrics, and target performance thresholds.
+*   **Outputs:** Adjusted `relative_step_size` for the volume renderer and a final high-quality render pass upon interaction completion.
 
-**Algorithm:**
-The method operates as a control loop triggered by user interaction and frame timing.
+### Data Structures
+The implementation typically involves an event listener structure:
+1.  **Base Layer:** Emits a `render_quality` event when the quality state changes.
+2.  **VispyImageLayer (or equivalent):** Listens to the `render_quality` event and updates the rendering node's `relative_step_size`.
+3.  **Volume Visual Node:** Holds the `relative_step_size` attribute, which is passed to the fragment shader for ray marching.
 
-1.  **Event Emission:** When a quality change is triggered (e.g., `change_render_quality` is called), the base layer emits a `render_quality` event [S1, unofficial].
-2.  **Event Handling:** The visualization layer (e.g., `VispyImageLayer`) listens for the `render_quality` event [S1, unofficial].
-3.  **Quality Adjustment:**
-    *   If the event indicates `RenderQualityChange.MAX` (interaction stopped or high quality requested), set `relative_step_size` to `min_step_size` [S1, unofficial].
-    *   If the framerate drops below a desired threshold during interaction, increase `relative_step_size` (coarser sampling) [S1, unofficial].
-    *   If the framerate is very high, decrease `relative_step_size` (finer sampling) [S1, unofficial].
-4.  **Step Size Update:** Update `min_step_size` based on current performance to ensure it stays within valid bounds and allows for future refinement. A typical update rule observed is:
-    $$ \text{min\_step\_size} = \text{clip}\left(\frac{\text{new\_step\_size}}{4}, 0.1, 1.0\right) $$
-    where `new_step_size` is the current step size before adjustment [S1, unofficial]. The lower bound is strictly 0.1 due to library constraints [S1, unofficial].
-5.  **Final Pass:** When the user stops moving the camera for a sufficient duration, trigger a final high-quality render pass using the minimum step size [S1, unofficial].
+### Parameters
+*   **High Sampling Rate:** Typically 6 to 10 samples per voxel [S2, S3][S4, unofficial].
+*   **Min Step Size:** The minimum allowed value for `relative_step_size`. In Vispy implementations, this is clamped to a minimum of 0.1 because the underlying `VolumeVisual` raises a `ValueError` if the value is lower [S1, unofficial].
+*   **Interaction Step Scale:** A constant defining the coarse step size multiplier during interaction (e.g., `INTERACTION_STEP_SCALE` in webpic) [S5, unofficial].
+*   **Interaction Render Scale:** A constant defining the coarse resolution multiplier during interaction (e.g., `INTERACTION_RENDER_SCALE` in webpic) [S5, unofficial].
 
-**Pseudocode:**
+### Algorithm Steps
+1.  **Initialization:** Set the initial `relative_step_size` to the default high-quality value corresponding to 6–10 samples per voxel [S2, S3].
+2.  **Interaction Detection:** Monitor for user input events (camera movement, parameter changes).
+3.  **Coarsening (During Interaction):**
+    *   When interaction begins, immediately increase the `relative_step_size` (decrease sampling density) to a coarse level defined by `INTERACTION_STEP_SCALE` [S5, unofficial].
+    *   If using resolution scaling, simultaneously reduce the render resolution using `INTERACTION_RENDER_SCALE` [S5, unofficial].
+    *   Ensure `relative_step_size` is clamped to $\ge 0.1$ to prevent runtime errors [S1, unofficial].
+4.  **Monitoring:** Optionally monitor frame rate. If the frame rate drops below a threshold, further increase step size; if it is very high, decrease it [S1, unofficial].
+5.  **Interaction End Detection:** Detect when the user has stopped interacting for a specified idle duration.
+6.  **Restoration (Post-Interaction):**
+    *   **Instant Restore:** Set `relative_step_size` back to the minimum allowed value (highest quality) [S1, unofficial].
+    *   **Ramped Restore (Variant):** Smoothly restore quality over multiple frames to prevent visual popping. Set step scale to an intermediate value (e.g., 0.7) and incrementally approach 1.0 over subsequent frames [S5, unofficial].
+    *   Execute a final high-quality render pass [S1, unofficial][S2].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class AdaptiveInteractionSampler:
-    def __init__(self, min_step_size=0.1, max_step_size=1.0):
+    def __init__(self, renderer, min_step_size=0.1, high_quality_step=0.1):
+        self.renderer = renderer
         self.min_step_size = min_step_size
-        self.max_step_size = max_step_size
-        self.current_step_size = 0.5  # Initial guess
-        self.interaction_timeout = 1.0  # Seconds to wait before high-quality pass
-        self.last_interaction_time = 0.0
+        self.high_quality_step = high_quality_step
+        self.is_interacting = False
+        self.interaction_timeout = 0.0  # seconds
 
-    def on_user_interaction(self, timestamp):
-        """Called when user moves camera or adjusts parameters."""
-        self.last_interaction_time = timestamp
-        # During interaction, allow coarser sampling if needed
-        # Logic to increase step size based on framerate drop would go here
-        pass
+    def on_interaction_start(self):
+        """Called when user begins camera movement or parameter adjustment."""
+        self.is_interacting = True
+        self.interaction_timeout = 0.0
+        # Immediately coarsen sampling
+        # Use a larger step size (coarser) defined by interaction constants
+        coarse_step = self.high_quality_step * INTERACTION_STEP_SCALE_FACTOR
+        self.renderer.set_relative_step_size(coarse_step)
 
-    def on_framerate_check(self, current_fps, target_fps):
-        """Called every frame to adjust sampling based on performance."""
-        if current_fps < target_fps:
-            # Increase step size (coarser) to improve performance
-            self.current_step_size = min(self.current_step_size * 1.1, self.max_step_size)
-        else:
-            # Decrease step size (finer) if performance is good
-            self.current_step_size = max(self.current_step_size * 0.9, self.min_step_size)
+    def on_interaction_update(self, dt):
+        """Called every frame during interaction."""
+        if not self.is_interacting:
+            return
         
-        # Clamp to valid range
-        self.current_step_size = max(0.1, min(self.current_step_size, 1.0))
-        return self.current_step_size
+        # Reset timeout on any new input
+        self.interaction_timeout = 0.0
+        
+        # Optional: Adjust step size based on current framerate
+        # if framerate < target: increase step size
+        # if framerate > target: decrease step size
 
-    def on_interaction_stopped(self, timestamp):
-        """Called when user stops interacting for a duration."""
-        if timestamp - self.last_interaction_time > self.interaction_timeout:
-            # Trigger high-quality pass
-            self.current_step_size = self.min_step_size
-            # Update min_step_size for future interactions based on current performance
-            # Example: set min to 1/4 of current step size, clamped
-            self.min_step_size = max(0.1, min(self.current_step_size / 4, 1.0))
-            return True  # High quality pass triggered
-        return False
+    def on_interaction_end(self):
+        """Called when user stops interacting."""
+        self.is_interacting = False
+        # Restore high quality
+        self.renderer.set_relative_step_size(self.high_quality_step)
+        # Trigger final high-quality render pass
+        self.renderer.render()
 
-    def get_step_size(self):
-        return self.current_step_size
+    def update(self, dt):
+        """Main loop update."""
+        if not self.is_interacting:
+            self.interaction_timeout += dt
+            # Check if idle long enough to trigger restoration
+            if self.interaction_timeout > IDLE_THRESHOLD:
+                self.on_interaction_end()
 ```
 
-**Parameters:**
-*   `min_step_size`: The minimum allowed step size. Clamped between 0.1 and 1.0 [S1, unofficial].
-*   `High sampling rate`: 6 to 10 samples per voxel [S2][S3].
-*   `Target FPS`: Not explicitly defined in sources, but implied as a threshold for triggering coarser sampling [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Library Constraints:** Vispy's `VolumeVisual` raises a `ValueError` if `relative_step_size` is set below 0.1. The implementation must clamp `min_step_size` to at least 0.1 [S1, unofficial].
-*   **Attenuated MIP Artifacts:** With `attenuated_mip`, changing step size causes brightness fluctuations (de-attenuation) during rotation. The volume may appear suddenly brighter and then dim again after the high-quality pass stops movement [S1, unofficial].
-*   **Performance Trade-off:** Without adaptive quality, `attenuated_mip` renders at 17-30 fps. With adaptive quality, it reaches 60 fps during interaction, but the final high-quality pass takes 2-3 seconds [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Vispy Constraint:** The `VispyVolumeVisual` raises a `ValueError` if `relative_step_size` is set below 0.1. The implementation must clamp the minimum step size to at least 0.1 [S1, unofficial].
+*   **Attenuated MIP Brightness Fluctuation:** When using attenuated maximum intensity projection (attenuated_mip), changing the step size can cause brightness fluctuations (de-attenuation) during rotation. The volume may appear suddenly brighter during interaction and dim again after the high-quality pass stops movement [S1, unofficial].
+*   **Visual Popping:** Instantly restoring high quality can cause a visible "pop" in resolution. A ramped restoration strategy mitigates this [S5, unofficial].
 
 ## Subtopics
 
 ### [Interaction Render Scale Damping](8891-interaction-render-scale-damping.md)
-A strategy that dynamically reduces render resolution during user interaction to maintain a target frame rate, then restores original resolution after interaction ceases. It differs by being time-bound and context-aware, decoupling performance from user input latency. It builds on this method.
+Interaction Render Scale Damping is a performance optimization strategy that dynamically reduces the rendering resolution during user interaction (such as camera movement) to maintain a high frame rate, then restores the target resolution after interaction ceases. It differs from static resolution scaling by being time-triggered and context-aware, specifically designed to bridge the gap between interactive responsiveness and final image quality in volume rendering pipelines.
+
+### Interaction Quality Ramp
+Interaction Quality Ramp is a technique to smoothly restore rendering quality after user interaction by ramping step and render scales over multiple painted frames instead of instantly, preventing visual popping [S5, unofficial]. On gesture start, it immediately sets step scale to `INTERACTION_STEP_SCALE` and render scale to `INTERACTION_RENDER_SCALE`. On gesture end, it initiates a settle ramp: the first level sets step scale to 0.7 and render scale to 1. Each painted frame advances the ramp exactly one level until full quality (scale 1) is reached. If a new gesture starts mid-ramp, it immediately re-enters interaction quality, interrupting the restore sequence. Fly mode uses full resolution render scale but coarser step scale (0.7); on idle, it settles to full quality without changing render scale. Marker drag triggers interaction quality on the active edge; release falls back to fly tier if fly is live, otherwise follows the settle ramp [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Frame updates during interaction are significantly faster than high-quality rendering. High sampling rate (6-10 samples/voxel) takes nearly two seconds on Octane2 and nearly one second on GeForce3 [S2][S3]. With adaptive quality (decreased step size), frame rates reach 60 fps during interaction [S1, unofficial].
-*   **Memory Complexity:** Not explicitly defined, but depends on the volume dataset size and the number of active samples per ray.
-*   **Scaling:** Performance scales with the number of samples per voxel. Lowering the sample rate during interaction reduces the number of volume queries, improving frame rate.
-*   **Strengths:** Maintains interactivity during camera movement or parameter adjustment. Provides effective feedback for guiding user exploration, as surface size and location remain readily apparent even with coarser surfaces [S2][S3].
-*   **Limitations:** The final high-quality pass can take 2-3 seconds, causing a delay in visual feedback after interaction stops [S1, unofficial]. Attenuated MIP rendering suffers from brightness fluctuations during step size changes [S1, unofficial].
-*   **When to Use:** Interactive volume rendering where user exploration (camera movement, transfer function adjustment) is frequent and requires immediate feedback.
-*   **When Not to Use:** When final visual fidelity is required without delay, or when the rendering pipeline does not support dynamic step size adjustment (e.g., fixed-step hardware limitations).
+*   **Performance:** At high sampling rates (6–10 samples per voxel), frame updates can take nearly two seconds on an Octane2 and nearly one second on a GeForce3 [S2, S3][S4, unofficial]. By lowering the sample rate during interaction, frame rates can be maintained at 60 fps, compared to 17–30 fps without adaptive quality for attenuated_mip [S1, unofficial].
+*   **Visual Fidelity:** During interaction, the volume rendered surface appears coarser. However, the surface size and location remain readily apparent, providing effective feedback for guiding user exploration [S2, S3][S4, unofficial].
+*   **Trade-offs:** The final high-quality pass after interaction stops can take 2–3 seconds, creating a latency between the user's intent and the final visual result [S1, unofficial]. This is acceptable for exploration but may be perceived as sluggish if the user expects immediate high-fidelity feedback.
+*   **Hardware Dependency:** Performance gains are significant on older or less powerful hardware (e.g., Octane2, GeForce3) where high-resolution volume rendering is expensive [S2, S3].
 
 ## Background
-The concept of lowering sampling rates during interaction to maintain performance, and re-rendering at higher rates after actions are completed, was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S2][S3]. This approach allows users to explore complex volume datasets with 3D transfer functions without being hindered by long frame update times associated with high-quality rendering (e.g., 6-10 samples per voxel) [S2][S3]. The technique was further implemented in modern visualization frameworks like Napari, using Vispy for rendering, to provide a seamless user experience with large volumes [S1, unofficial].
+The technique was introduced in the context of interactive volume rendering using multi-dimensional transfer functions, where high sampling rates were necessary to smooth boundaries between materials but caused unacceptable latency during user interaction [S2, S3][S4, unofficial]. The approach was later implemented in modern visualization frameworks like Napari and Webpic to handle large datasets interactively [S1, S5, unofficial].
 
 ## Sources
 [S1] Adaptive quality for volume rendering, https://github.com/napari/napari/pull/6930, fetched 2026-10-26 (unofficial)
 [S2] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
 [S3] PDF Interactive Volume Rendering Using Multi-Dimensional Transfer Functions ..., https://collections.lib.utah.edu/dl_files/d4/e4/d4e47bfc09e54eee9f532e4f22b17e9214f4c755.pdf, fetched 2026-10-27
+[S4] https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, fetched 2026-11-01 (unofficial)
+[S5] rusaitis/webpic, https://github.com/rusaitis/webpic, fetched 2026-10-27 (unofficial)

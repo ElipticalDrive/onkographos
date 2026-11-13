@@ -1,0 +1,136 @@
+# Camera-Driven Octree Subdivision
+
+Also called: Frustum-Based Octree Subdivision, Octree Space Subdivision
+
+## Overview
+Camera-Driven Octree Subdivision constructs a spatial hierarchy by recursively splitting nodes based on the proximity of visible camera centers to the node's center [S1]. It solves the problem of efficiently mapping 3D space into local warp spaces for multi-view rendering, ensuring that regions near cameras are represented with higher resolution [S1]. It differs from standard spatial subdivision by using camera-centric distance metrics rather than data density or fixed grid depths to determine leaf boundaries [S1].
+
+## How it works
+**Inputs:**
+- A set of visible cameras with known centers and view frustums.
+- A subdivision threshold parameter $\lambda$ (default 3) [S1].
+- A camera selection count $n_c$ (default 4) [S1].
+
+**Outputs:**
+- An octree where leaf nodes define regions $S_i$ for local warping [S1].
+- A subset of $n_c$ cameras selected for each leaf node [S1].
+
+**Data Structures:**
+- **Octree Node:** Contains a bounding box defined by center $\mathbf{c}$ and side length $s$. It has 8 child pointers (or null if leaf).
+- **Leaf Node:** Stores the region $S_i$ and the list of selected camera indices.
+
+**Steps:**
+1. **Initialize Root:** Create a root node with a bounding box size equal to 512 times the bounding box size of all camera centers [S1]. This large initial volume ensures far-away objects (e.g., sky) are contained [S1].
+2. **Traverse and Subdivide:** For each node with side length $s$:
+    a. Retrieve all visible cameras whose view frustums intersect the node's bounding box [S1].
+    b. Calculate the distance $d$ from each visible camera center to the node center $\mathbf{c}$.
+    c. If any visible camera center satisfies $d \le \lambda \cdot s$, subdivide the node into 8 children with side length $s/2$ [S1].
+    d. If no visible camera center satisfies the condition, mark the node as a leaf and stop subdividing [S1].
+3. **Camera Selection:** For each leaf node, if the number of visible cameras exceeds $n_c$, select exactly $n_c$ cameras [S1]. The selection criterion is to maximize the minimal pairwise distance between the selected cameras [S1].
+4. **Warping:** Each leaf node $S_i$ is mapped to a warp space using a warping function $F_i(\mathbf{x})$ centered around the origin [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_camera_driven_octree(cameras, lambda_val=3, nc=4):
+    # Calculate bounding box of all camera centers
+    cam_centers = [c.position for c in cameras]
+    min_pos = min(cam_centers, key=lambda p: p.x)
+    max_pos = max(cam_centers, key=lambda p: p.x)
+    # Note: Source [S1] implies 3D bounding box; simplified here for 1D extent
+    # In practice, compute extent for x, y, z separately
+    extent_x = max_pos.x - min_pos.x
+    # Assume similar extents for y, z or compute similarly
+    # Root size is 512 * bounding box size of all camera centers
+    # "Bounding box size" usually refers to the diagonal or max dimension.
+    # We assume a cubic root for simplicity based on "512 times the bounding box size"
+    root_side = 512 * extent_x 
+    root_center = (min_pos + max_pos) / 2
+    
+    root = Node(center=root_center, side=root_side, cameras=cameras)
+    queue = [root]
+    
+    while queue:
+        node = queue.pop(0)
+        visible_cameras = get_intersecting_cameras(node.cameras, node.bounding_box)
+        
+        # Check subdivision condition
+        should_subdivide = False
+        for cam in visible_cameras:
+            d = distance(cam.position, node.center)
+            if d <= lambda_val * node.side:
+                should_subdivide = True
+                break
+        
+        if should_subdivide:
+            # Subdivide into 8 children
+            half_side = node.side / 2
+            for i in range(8):
+                child_center = get_child_center(node.center, node.side, i)
+                child = Node(center=child_center, side=half_side, cameras=visible_cameras)
+                node.children[i] = child
+                queue.append(child)
+        else:
+            # Mark as leaf
+            node.is_leaf = True
+            # Select cameras if necessary
+            if len(visible_cameras) > nc:
+                node.selected_cameras = select_cameras(visible_cameras, nc)
+            else:
+                node.selected_cameras = visible_cameras
+
+def select_cameras(cameras, nc):
+    # Maximize minimal pairwise distance
+    # This is a greedy or optimization problem.
+    # A simple greedy approach:
+    selected = []
+    remaining = list(cameras)
+    
+    # Pick first camera arbitrarily or based on some heuristic
+    if remaining:
+        selected.append(remaining.pop(0))
+        
+    while len(selected) < nc and remaining:
+        best_cam = None
+        min_dist = -1
+        
+        for cam in remaining:
+            # Calculate min distance to any already selected camera
+            current_min = min(distance(cam.position, s.position) for s in selected)
+            if current_min > min_dist:
+                min_dist = current_min
+                best_cam = cam
+        
+        if best_cam:
+            selected.append(best_cam)
+            remaining.remove(best_cam)
+            
+    return selected
+```
+
+**Parameters:**
+- $\lambda$: Preset threshold for subdivision distance check. Value: 3 [S1].
+- $n_c$: Number of cameras used for warping function construction. Value: 4 [S1].
+
+**Edge Cases:**
+- If no cameras intersect a node, it remains a leaf (or is pruned if the root initialization logic allows empty space skipping, though [S1] focuses on camera proximity).
+- Precision issues in distance calculations may affect the boundary between subdivision and leaf status near the $\lambda s$ threshold [G].
+
+## Subtopics
+
+### Octree Texture Subdivision
+A method that subdivides texture space into an octree to skip empty regions and use lower-resolution textures for distant or low-interest regions [S2, unofficial]. It allows rendering hardware to skip nodes of empty regions and adapt texture resolution based on view point proximity [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of cameras and the depth of the octree. Subdivision is driven by camera proximity, so regions near cameras are deeper.
+- **Memory Complexity:** Proportional to the number of leaf nodes and the selected camera lists.
+- **Strengths:** Efficiently handles large scenes with many cameras by focusing resolution where cameras are present [S1].
+- **Limitations:** Requires pre-computation of camera visibility and distances [S1].
+
+## Background
+Originated in the context of fast Neural Radiance Field (NeRF) training with free camera trajectories [S1]. The method enables efficient scene representation by mapping regions to local warp spaces based on camera visibility [S1].
+
+## Sources
+[S1] F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories, https://doi.org/10.1109/cvpr52729.2023.00404, fetched 2026-10-26
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

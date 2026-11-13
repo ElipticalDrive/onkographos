@@ -1,0 +1,174 @@
+--- v001.md
++++ v002.md
+@@ -4,37 +4,21 @@
+ 
+ ## Overview
+-Estimates a robust clipped depth range $[z_{min}, z_{max}]$ for binning by sampling visible Gaussians, applying a near-depth shift, and selecting percentiles via exact order statistics. It sets itself apart from sibling methods like Median Depth Rendering by using percentile-based range estimation with exact order statistics rather than a single median value, ensuring the binning range covers the majority of contributing geometry while excluding outliers.
++Estimates a robust clipped depth range $[z_{min}, z_{max}]$ for binning by sampling visible Gaussians, applying a near-depth shift, and selecting percentiles via exact order statistics [S1]. It sets itself apart from sibling methods like Median Depth Rendering by using percentile-based range estimation with exact order statistics rather than a single median value, ensuring the binning range covers the majority of contributing geometry while excluding outliers [S1].
+ 
+ ## How it works
+-**Inputs:**
+-*   Projected depths of visible Gaussians.
+-*   Gaussian scales (specifically maximum projected scale $s_{max}$).
+-*   Optional emitted flat IDs.
+-*   Near and far clipping planes ($z_{near}, z_{far}$).
+-*   Sample count $S = 8192$.
+-*   Near-depth shift parameters $\alpha = 1.0$, $\gamma = 0.25$.
+-*   Percentiles $p_{lo} = 1.0$, $p_{hi} = 99.0$.
+-*   Padding fraction $f_{pad} = 0.05$.
+-*   Numerical floor $\epsilon = 10^{-4}$.
++**Inputs:** Projected depths of visible Gaussians, Gaussian scales (specifically maximum projected scale $s_{max}$), optional emitted flat IDs, near and far clipping planes ($z_{near}, z_{far}$), sample count $S = 8192$, near-depth shift parameters $\alpha = 1.0$, $\gamma = 0.25$, percentiles $p_{lo} = 1.0$, $p_{hi} = 99.0$, padding fraction $f_{pad} = 0.05$, numerical floor $\epsilon = 10^{-4}$ [S1].
+ 
+-**Outputs:**
+-*   Robust clipped range $[z_{min}, z_{max}]$.
++**Outputs:** Robust clipped range $[z_{min}, z_{max}]$ [S1].
+ 
+-**Data Structures:**
+-*   List of sampled depth candidates.
++**Data Structures:** List of sampled depth candidates [S1].
+ 
+ **Steps:**
+-1.  **Sampling:** Sample up to $S$ depth candidates from the visible Gaussians or emitted flat IDs.
+-2.  **Near-Depth Shift:** If near-depth mode is enabled (default), convert each sampled depth $z_c$ to a key $z_{key}$ using the formula:
+-    $$ z_{key} = z_c - \min(\alpha \cdot s_{max}, \gamma \cdot z_c) $$
+-    where $s_{max}$ is the Gaussian's maximum projected scale.
+-3.  **Filtering and Clamping:** Discard candidates where $z_{key} \le 0$. Clamp remaining values to the range $[\epsilon, z_{far}]$ (assuming $z_{near} \ge \epsilon$).
+-4.  **Percentile Selection:** Select the exact $p_{lo}$ and $p_{hi}$ percentile values of the sampled candidates using order statistics (e.g., `kthvalue`) to obtain $z_{lo}$ and $z_{hi}$.
+-5.  **Span Calculation:** Calculate the span:
+-    $$ \text{span} = \max(z_{hi} - z_{lo}, 10^{-6}) $$
+-6.  **Range Expansion:** Calculate the final bounds:
+-    $$ z_{min} = \max(z_{near}, z_{lo} - f_{pad} \cdot \text{span}) $$
+-    $$ z_{max} = \min(z_{far}, z_{hi} + f_{pad} \cdot \text{span}) $$
+-7.  **Return:** Return $[z_{min}, z_{max}]$.
++1. Sample up to $S$ depth candidates from the visible Gaussians or emitted flat IDs [S1].
++2. If near-depth mode is enabled (default), convert each sampled depth $z_c$ to a key $z_{key}$ using $z_{key} = z_c - \min(\alpha \cdot s_{max}, \gamma \cdot z_c)$, where $s_{max}$ is the Gaussian's maximum projected scale [S1].
++3. Discard candidates where $z_{key} \le 0$ [S1]. Clamp remaining values to the range $[\max(z_{near}, \epsilon), z_{far}]$ [S1].
++4. Select the exact $p_{lo}$ and $p_{hi}$ percentile values of the sampled candidates using order statistics (e.g., `kthvalue`) to obtain $z_{lo}$ and $z_{hi}$ [S1].
++5. Calculate the span: $\text{span} = \max(z_{hi} - z_{lo}, 10^{-6})$ [S1].
++6. Calculate the final bounds: $z_{min} = \max(z_{near}, z_{lo} - f_{pad} \cdot \text{span})$ and $z_{max} = \min(z_{far}, z_{hi} + f_{pad} \cdot \text{span})$ [S1].
++7. Return $[z_{min}, z_{max}]$ [S1].
+ 
+ **Pseudocode:**
+@@ -54,78 +38,65 @@
+ ):
+     # Step 1: Sample up to S depth candidates
+-    # Note: Implementation details for sampling from visible Gaussians are assumed
+-    # to be handled by the caller or a preceding step.
++    def sample_candidates(depths, scales, max_count):
++        n = len(depths)
++        count = min(max_count, n)
++        # Standard uniform sampling without replacement [G]
++        indices = list(range(n))
++        return [(depths[i], scales[i]) for i in indices[:count]]
++
+     candidates = sample_candidates(projected_depths, gaussian_scales, S)
+-    
+     if not candidates:
+         return [z_near, z_far]
+ 
+     z_keys = []
+-    
+     # Step 2: Near-depth shift
+-    for i, (z_c, s_max) in enumerate(candidates):
+-        # Calculate shift term
++    for z_c, s_max in candidates:
+         shift_term = min(alpha * s_max, gamma * z_c)
+         z_key = z_c - shift_term
+         z_keys.append(z_key)
+-        
++
+     # Step 3: Filter and clamp
+     valid_keys = []
++    lower_bound = max(z_near, epsilon)
+     for z_key in z_keys:
+         if z_key <= 0:
+             continue
+-        # Clamp to [epsilon, z_far]
+-        clamped = max(epsilon, min(z_far, z_key))
++        clamped = max(lower_bound, min(z_far, z_key))
+         valid_keys.append(clamped)
+-        
++
+     if not valid_keys:
+         return [z_near, z_far]
+-        
++
+     # Step 4: Percentile selection via order statistics
+-    # Sort to find percentiles
+     valid_keys.sort()
+     n = len(valid_keys)
+-    
+-    # Calculate indices for percentiles
+-    # Using linear interpolation or nearest rank? 
+-    # The source specifies "exact order statistics (kthvalue)".
+-    # Typically kthvalue implies selecting the k-th smallest element.
+-    # For percentile p, index k = floor(p/100 * (n-1)) or similar.
+-    # We assume standard percentile definition compatible with kthvalue.
+-    
+-    idx_lo = int(p_lo / 100.0 * (n - 1))
+-    idx_hi = int(p_hi / 100.0 * (n - 1))
+-    
+-    # Ensure indices are within bounds
+-    idx_lo = max(0, min(n - 1, idx_lo))
+-    idx_hi = max(0, min(n - 1, idx_hi))
+-    
+-    z_lo = valid_keys[idx_lo]
+-    z_hi = valid_keys[idx_hi]
+-    
++
++    def kth_value(sorted_arr, p_percentile):
++        # Exact order statistics: select the k-th smallest element
++        # Nearest-rank method: k = ceil(p/100 * n) [G]
++        k = int((p_percentile / 100.0) * n)
++        k = max(0, min(n - 1, k))
++        return sorted_arr[k]
++
++    z_lo = kth_value(valid_keys, p_lo)
++    z_hi = kth_value(valid_keys, p_hi)
++
+     # Step 5: Span calculation
+     span = max(z_hi - z_lo, 1e-6)
+-    
++
+     # Step 6: Range expansion
+     z_min = max(z_near, z_lo - f_pad * span)
+     z_max = min(z_far, z_hi + f_pad * span)
+-    
++
+     return [z_min, z_max]
+ ```
+ 
+-**Parameters:**
+-*   $S = 8192$: Maximum number of depth candidates sampled.
+-*   $\alpha = 1.0, \gamma = 0.25$: Near-depth shift parameters.
+-*   $p_{lo} = 1.0, p_{hi} = 99.0$: Percentiles for robust range estimation.
+-*   $f_{pad} = 0.05$: Padding fraction (5% of clipped span) added to the percentile range.
+-*   $\epsilon = 10^{-4}$: Numerical floor for depth values.
++**Parameters:** $S = 8192$: Maximum number of depth candidates sampled [S1]. $\alpha = 1.0, \gamma = 0.25$: Near-depth shift parameters [S1]. $p_{lo} = 1.0, p_{hi} = 99.0$: Percentiles for robust range estimation [S1]. $f_{pad} = 0.05$: Padding fraction (5% of clipped span) added to the percentile range [S1]. $\epsilon = 10^{-4}$: Numerical floor for depth values [S1].
+ 
+-**Pitfalls:**
+-*   The near-depth shift is used only to form the binning key; it does not change the projected Gaussian attributes or the alpha-compositing equations used by the raster kernel.
+-*   Precision issues may arise if $z_{hi} - z_{lo}$ is very small; the span is floored at $10^{-6}$ to prevent division by zero or degenerate ranges.
++**Pitfalls:** The near-depth shift is used only to form the binning key; it does not change the projected Gaussian attributes or the alpha-compositing equations used by the raster kernel [S1]. Precision issues may arise if $z_{hi} - z_{lo}$ is very small; the span is floored at $10^{-6}$ to prevent division by zero or degenerate ranges [S1].
+ 
+ ## Subtopics
+ 
+-### [Median Depth Rendering](8815-median-depth-rendering.md)
++### [Median Depth Rendering](8815-median-depth- rendering.md)
+ Uses a single median depth value for binning. Choose when memory is extremely constrained and a single representative depth is sufficient.
+ 
+@@ -134,12 +105,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by sampling $S$ candidates and sorting them for order statistics, $O(S \log S)$. With $S=8192$, this is fast.
+-*   **Memory Complexity:** $O(S)$ to store candidates.
+-*   **Strengths:** Robust to outliers due to percentile selection. Exact order statistics avoid histogram approximation errors.
+-*   **Limitations:** Requires sorting or selection algorithm. Sensitive to the choice of percentiles $p_{lo}, p_{hi}$.
+-*   **When to use:** When accurate binning range is critical for performance and correctness in Gaussian Splatting rasterization.
++Time complexity is dominated by sampling $S$ candidates and sorting them for order statistics, $O(S \log S)$ [G]. Memory complexity is $O(S)$ to store candidates [G]. Not given in the sources for measured performance with specific hardware, resolution, scene, or scaling behavior [S1]. Strengths include robustness to outliers due to percentile selection and the avoidance of histogram approximation errors via exact order statistics [S1]. Limitations include the requirement for a sorting or selection algorithm and sensitivity to the choice of percentiles $p_{lo}, p_{hi}$ [S1]. Use it when accurate binning range is critical for performance and correctness in Gaussian Splatting rasterization [S1]. Do not use it when hardware lacks efficient sorting primitives or when memory bandwidth is strictly limited to $O(1)$ auxiliary storage [G].
+ 
+ ## Background
+-Originated in the TileGS paper (2026) for tile-local depth binning in Gaussian Splatting rasterization. It improves upon previous methods by using exact order statistics instead of histogram approximations for percentile selection.
++Originated in the TileGS paper (2026) for tile-local depth binning in Gaussian Splatting rasterization [S1]. It improves upon previous methods by using exact order statistics instead of histogram approximations for percentile selection [S1].
+ 
+ ## Sources

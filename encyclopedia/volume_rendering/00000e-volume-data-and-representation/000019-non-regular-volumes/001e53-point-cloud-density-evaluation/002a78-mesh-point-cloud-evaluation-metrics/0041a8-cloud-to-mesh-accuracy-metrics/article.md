@@ -1,106 +1,135 @@
 # Cloud-to-Mesh Accuracy Metrics
-Also called: Accuracy evaluation, Precision metrics
-## Overview
-Cloud-to-mesh accuracy metrics quantify how closely a reconstructed point cloud reflects ground truth locations by computing the displacements between each point in the compared point cloud and the nearest facet in the reference mesh [S1]. It serves as a precision measure, distinguishing itself from completeness (recall) metrics by focusing on the correctness of the reconstructed geometry rather than its coverage [S1]. It is a component of the broader [Mesh/Point Cloud Evaluation Metrics](4797-mesh-point-cloud-evaluation-metrics.md) family.
-## How it works
-**Inputs:**
-1.  A reconstructed point cloud $P = \{p_1, p_2, \dots, p_n\}$ with $n$ points.
-2.  A reference mesh $M$ consisting of a set of triangles (facets).
 
-**Outputs:**
-1.  Mean Error ($\bar{x}$).
-2.  Standard Deviation ($SD$).
-3.  Root Mean Square Error ($RMSE$).
+Also called: Accuracy evaluation, Precision metrics
+
+## Overview
+Cloud-to-Mesh Accuracy Metrics quantify how closely a reconstructed point cloud reflects ground truth locations by computing the Euclidean displacements from each point in the compared cloud to the nearest facet of a reference mesh [S1]. Unlike symmetric metrics that average errors in both directions, this method specifically evaluates the precision of the reconstruction by measuring the orthogonal distance to the reference surface, handling cases where the projection falls outside the triangle boundaries by measuring to the nearest edge [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A reconstructed point cloud $P = \{p_1, p_2, \dots, p_n\}$ with $n$ points, and a reference mesh $M$ consisting of triangles.
+*   **Output:** Statistical measures of geometric accuracy: Mean Error, Standard Deviation (SD), and Root Mean Square Error (RMSE).
 
 **Data Structures:**
-*   Point cloud: Array of $n$ 3D coordinates $(x, y, z)$.
-*   Reference mesh: List of triangles, where each triangle is defined by 3 vertices.
+*   The reference mesh $M$ is represented as a collection of triangles. Each triangle is defined by three vertices and associated with a normal vector.
+*   The point cloud $P$ is a list of 3D coordinates.
 
 **Steps:**
-1.  For each point $p_i$ in the point cloud $P$:
-    a.  Compute the Euclidean distance to the nearest facet in the reference mesh $M$.
-    b.  The distance is the orthogonal (signed) distance from the point to the nearest triangle plane if the orthogonal projection of the point falls within the triangle bounds.
-    c.  If the projection falls outside the triangle, the distance is to the nearest edge or vertex of that triangle [S1].
-    d.  Store this minimum distance as $x_i$.
-2.  Calculate the mean distance $\bar{x}$:
-    $$ \bar{x} = \frac{\sum_{i=1}^{n} x_i}{n} $$
-3.  Calculate the standard deviation $SD$:
-    $$ SD = \sqrt{\frac{\sum_{i=1}^{n} (x_i - \bar{x})^2}{n-1}} $$
-4.  Calculate the Root Mean Square Error $RMSE$:
-    $$ RMSE = \sqrt{\frac{\sum_{i=1}^{n} (x_i - \bar{x})^2}{n}} $$
+1.  For each point $p_i$ in the reconstructed cloud $P$:
+    a.  Find the nearest facet (triangle) in the reference mesh $M$.
+    b.  Calculate the orthogonal (signed) distance from $p_i$ to the plane of the nearest triangle.
+    c.  Check if the orthogonal projection of $p_i$ falls within the boundaries of the triangle.
+    d.  If the projection falls outside the triangle, calculate the distance to the nearest edge of that triangle.
+    e.  Let $x_i$ be the final calculated distance (minimum of the planar distance or edge distance).
+2.  Compute the statistics based on the set of distances $\{x_1, x_2, \dots, x_n\}$.
+
+**Formulas:**
+Let $n$ be the number of points in the compared point cloud, and $x_i$ be the closest distance between point $i$ and the nearest facet of the reference mesh [S1].
+
+The Mean Error ($\bar{x}$) is:
+$$ \bar{x} = \frac{\sum_{i=1}^{n} x_i}{n} $$
+
+The Standard Deviation (SD) is:
+$$ SD = \sqrt{\frac{\sum_{i=1}^{n} (x_i - \bar{x})^2}{n-1}} $$
+
+The Root Mean Square Error (RMSE) is:
+$$ RMSE = \sqrt{\frac{\sum_{i=1}^{n} (x_i - \bar{x})^2}{n}} $$
 
 **Parameters:**
-*   $n$: Number of points in the compared point cloud.
-*   $x_i$: The closest distance between point $i$ and the nearest facet of the reference mesh [S1].
+*   $n$: Number of points in the reconstructed cloud.
+*   Distance threshold: Not explicitly defined as a parameter in the core accuracy calculation, but the method assumes a continuous distance field.
 
 **Edge Cases and Pitfalls:**
-*   The metric assumes a normal distribution without long-tailed data for the validity of Mean and SD as primary descriptors [S1].
-*   Precision in determining whether a point's projection falls inside a triangle is critical; incorrect handling leads to inaccurate distance calculations [S1].
-*   The metric is sensitive to outliers; a few points far from the mesh can significantly skew the Mean and RMSE [S1].
+*   **Projection Outside Triangle:** The method explicitly handles points whose orthogonal projection does not fall on any facet by measuring the distance to the nearest edge [S1].
+*   **Data Distribution:** The metrics assume a normal distribution without long-tailed data for the validity of Mean and SD as primary descriptors [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_cloud_to_mesh_accuracy(point_cloud, reference_mesh):
+def compute_cloud_to_mesh_accuracy(points, mesh):
     """
-    Computes accuracy metrics for a point cloud against a reference mesh.
+    Computes Mean, SD, and RMSE for a point cloud against a reference mesh.
     
     Args:
-        point_cloud: List of 3D points (n, 3).
-        reference_mesh: List of triangles, each triangle is a list of 3 vertices (3D points).
+        points: List of 3D coordinates (n, 3).
+        mesh: Object containing triangles (vertices and indices).
         
     Returns:
-        mean_error: Mean distance.
-        std_dev: Standard deviation of distances.
-        rmse: Root Mean Square Error.
+        dict: Mean, SD, RMSE.
     """
-    n = len(point_cloud)
     distances = []
     
-    for point in point_cloud:
-        min_dist = infinity
-        for triangle in reference_mesh:
-            # Calculate distance from point to triangle
-            dist = distance_point_to_triangle(point, triangle)
-            if dist < min_dist:
-                min_dist = dist
-        distances.append(min_dist)
+    for p in points:
+        # Find nearest triangle in mesh
+        nearest_tri, dist_to_plane, is_inside = find_nearest_triangle_and_distance(p, mesh)
         
-    distances = array(distances)
+        if not is_inside:
+            # If projection is outside, find distance to nearest edge of that triangle
+            dist_to_edge = distance_to_nearest_edge(p, nearest_tri)
+            x_i = min(dist_to_plane, dist_to_edge)
+        else:
+            x_i = dist_to_plane
+            
+        distances.append(x_i)
+        
+    distances = np.array(distances)
+    n = len(distances)
     
-    # Mean Error
-    mean_error = sum(distances) / n
+    if n == 0:
+        return {"Mean": 0, "SD": 0, "RMSE": 0}
+        
+    mean_val = np.mean(distances)
     
-    # Standard Deviation (sample standard deviation)
-    variance = sum((d - mean_error)**2 for d in distances) / (n - 1)
-    std_dev = sqrt(variance)
+    # Standard Deviation (sample standard deviation, n-1)
+    variance = np.sum((distances - mean_val) ** 2) / (n - 1)
+    sd_val = np.sqrt(variance)
     
-    # Root Mean Square Error
-    rmse = sqrt(sum((d - mean_error)**2 for d in distances) / n)
+    # RMSE (population RMSE, n)
+    rmse_val = np.sqrt(np.sum((distances - mean_val) ** 2) / n)
     
-    return mean_error, std_dev, rmse
+    return {
+        "Mean": mean_val,
+        "SD": sd_val,
+        "RMSE": rmse_val
+    }
 
-def distance_point_to_triangle(point, triangle):
+def find_nearest_triangle_and_distance(point, mesh):
     """
-    Computes the Euclidean distance from a point to a triangle.
-    Returns the orthogonal distance if projection is inside, else distance to nearest edge/vertex.
+    Finds the nearest triangle and the orthogonal distance.
+    Returns (triangle, distance, is_inside_projection).
+    [G] Implementation detail: Iterate all triangles or use spatial acceleration structure.
     """
-    # Implementation details for point-triangle distance are standard computational geometry
-    # [G] This helper function implements the standard algorithm for point-to-triangle distance.
-    # It checks barycentric coordinates to determine if the projection lies within the triangle.
-    # If not, it computes distances to the three edges and three vertices, returning the minimum.
-    pass
+    # Placeholder for nearest neighbor search in mesh geometry
+    # This function must return the closest triangle, the signed distance to its plane,
+    # and a boolean indicating if the point's projection lies within the triangle bounds.
+    raise NotImplementedError("Requires specific mesh intersection logic")
+
+def distance_to_nearest_edge(point, triangle):
+    """
+    Calculates the Euclidean distance from a point to the nearest edge of a triangle.
+    """
+    # [G] Implementation detail: Compute distance to each of the 3 edges and take the minimum.
+    raise NotImplementedError("Requires specific edge distance logic")
 ```
+
 ## Subtopics
+
+### [L1-absolute Error (Accuracy)](12111-l1-absolute-error-accuracy.md)
+L1-absolute Error quantifies the geometric accuracy of a reconstructed 3D model by measuring the average signed distance field (SDF) deviation of points sampled from a high-fidelity reference mesh against coarser or estimated reconstructions. It is specifically designed for evaluating TSDF (Truncated Signed Distance Field) or SDF-based volume representations, distinguishing itself from point-to-mesh Euclidean distance metrics by operating directly in the implicit field space.
+
+### [ROC Geometry Matching Evaluation](14003-roc-geometry-matching-evaluation.md)
+ROC Geometry Matching Evaluation quantifies the geometric accuracy of a reconstructed point cloud $B$ against a reference point cloud $A$ by computing the True Positive Rate (TPR) and False Positive Rate (FPR) at a specific distance threshold. Unlike symmetric metrics such as D1/D2 that average errors in both directions and assume similar point counts, this asymmetric method handles cases where the predicted cloud $B$ contains significantly more points than the reference $A$, preventing artificially inflated accuracy scores in the $A \rightarrow B$ direction.
+
 ## Operating characteristics
-*   **Time Complexity:** $O(n \cdot t)$, where $n$ is the number of points in the cloud and $t$ is the number of triangles in the reference mesh. This is because each point must be compared against all triangles to find the nearest facet.
-*   **Memory Complexity:** $O(n + t)$ to store the point cloud and mesh.
-*   **Strengths:** Provides a direct measure of geometric precision; easy to interpret as an average displacement error [S1].
-*   **Limitations:** Computationally expensive for large meshes due to the brute-force search; sensitive to outliers; assumes normal distribution for statistical validity [S1].
-*   **When to use:** When evaluating the precision of reconstructed geometry against a high-fidelity ground truth mesh, particularly in scenarios where coverage (completeness) is secondary to accuracy [S1].
-*   **When not to use:** When the mesh is extremely large and computational efficiency is critical; when the error distribution is not normal or has long tails [S1].
+*   **Time Complexity:** $O(n \cdot m)$ in the naive implementation, where $n$ is the number of points and $m$ is the number of triangles in the reference mesh. Spatial acceleration structures (e.g., BVH) can reduce this to $O(n \log m)$.
+*   **Memory Complexity:** $O(m)$ to store the reference mesh structure.
+*   **Strengths:** Provides a direct measure of precision (how close the points are to the truth). It is robust to variations in point density in the reconstructed cloud because it evaluates each point independently against the ground truth surface [S1].
+*   **Limitations:** It is asymmetric; it does not measure completeness (recall). A cloud with few points but all correctly placed will have high accuracy but low completeness. It assumes the reference mesh is a valid surface representation.
+*   **When to use:** When the primary concern is the geometric fidelity of the reconstructed points to the ground truth surface, particularly in scenarios where the reconstruction density may vary.
+
 ## Background
-The metric was introduced in the context of evaluating 3D geometric reconstruction from Neural Radiance Fields (NeRFs) and Multi-View Stereo (MVS) [S1]. It is part of a broader evaluation framework that includes completeness metrics to assess both precision and recall of reconstructed point clouds [S1]. The method relies on standard statistical measures (Mean, SD, RMSE) applied to the distances between points and mesh facets [S1].
+The Cloud-to-Mesh Accuracy Metric was introduced in the context of evaluating 3D geometric reconstruction from Neural Radiance Fields (NeRFs) and Multi-View Stereo (MVS) [S1]. It is part of a broader evaluation framework that includes completeness metrics, aiming to provide a comprehensive assessment of reconstruction quality by considering both precision and recall [S1]. The method relies on standard statistical measures (Mean, SD, RMSE) applied to the distribution of distances between the reconstructed points and the reference mesh [S1].
+
 ## Sources
 [S1] Vision through Obstacles—3D Geometric Reconstruction and Evaluation of Neural Radiance Fields (NeRFs), https://doi.org/10.3390/rs16071188, fetched 2026-10-30

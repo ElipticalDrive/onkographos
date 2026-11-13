@@ -1,102 +1,60 @@
 # CUDA Ray Marching (IDDR-NGP Backend)
 
 ## Overview
-A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation [S1, unofficial]. It serves as the core inference engine for sparse ray marching, supporting both forward rendering (image generation) and backward pass (gradient computation) for training [S2, unofficial]. It distinguishes itself from standard ray marching by using a hierarchical cascade structure where the sampling resolution expands exponentially as the ray moves away from the grid center, optimizing performance for large volumes [S1, unofficial].
+A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation [S1, unofficial]. It serves as the core inference and training step for the IDDR-NGP backend, differing from standard uniform ray marching by integrating spherical harmonic (SH) evaluation and adaptive step sizing within a single warp-synchronized launch, and from dense voxel tracing by operating on a sparse grid structure with specific boundary handling [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   `rays_o`: Origin positions, shape `[N, 3]` [S1, unofficial].
-*   `rays_d`: Ray directions, shape `[N, 3]` [S1, unofficial].
-*   `near`: Near plane distances, shape `[N]` [S1, unofficial].
-*   `far`: Far plane distances, shape `[N]` [S1, unofficial].
-*   `density_bitfield`: A `uint8` tensor storing the hashed density grid, used for fast lookup during ray marching [S1, unofficial].
-*   **Outputs:**
-    *   `xyzs`: Sampled 3D coordinates, shape `[N, n_step, 3]` [S1, unofficial].
-    *   `dirs`: Sampled ray directions, shape `[N, n_step, 3]` [S1, unofficial].
-    *   `deltas`: Step sizes, shape `[N, n_step, 2]` (first channel for RGB accumulation, second for depth) [S1, unofficial].
+**Inputs and Outputs**
+*   **Inputs**:
+    *   `rays_o`: Origin positions, shape `[N, 3]`, type `float32`.
+    *   `rays_d`: Direction vectors, shape `[N, 3]`, type `float32`.
+    *   `near`: Near plane distances, shape `[N]`, type `float32`.
+    *   `far`: Far plane distances, shape `[N]`, type `float32`.
+    *   `density_bitfield`: Hashed density grid lookup table, type `uint8` [S1, unofficial].
+*   **Outputs**:
+    *   `xyzs`: Sampled 3D coordinates, shape `[N, n_step, 3]`, type `float32`.
+    *   `dirs`: Sampled direction vectors, shape `[N, n_step, 3]`, type `float32`.
+    *   `deltas`: Step sizes, shape `[N, n_step, 2]`. The first channel stores deltas for RGB integration, the second for depth integration [S1, unofficial].
 
-**Data Structures:**
-The density grid is stored in a hashed format (`density_bitfield`) to enable efficient sparse lookups on the GPU [S1, unofficial]. The grid uses a hierarchical cascade structure where resolution expands exponentially with distance from the center [S1, unofficial].
+**Data Structures**
+The `density_bitfield` is a `uint8` tensor storing the hashed density grid. It is used for fast lookup during ray marching [S1, unofficial]. The exact hashing scheme (e.g., hash function, grid resolution, bound) is not specified in the provided sources [S1, unofficial].
 
-**Algorithm Steps:**
-1.  Initialize ray origins `rays_o` and directions `rays_d` for $N$ rays [S1, unofficial].
-2.  Define near and far clipping planes `near` and `far` for each ray [S1, unofficial].
-3.  Load the `density_bitfield` tensor into GPU memory [S1, unofficial].
-4.  For each ray, perform adaptive stepping:
-    a. Start at $t = \text{near}$ [S1, unofficial].
-    b. Sample the hashed density grid at the current position using the `density_bitfield` [S1, unofficial].
-    c. Determine step size based on local density and distance from the grid center (cascade resolution) [S1, unofficial].
-    d. Advance position along `rays_d` by the step size [S1, unofficial].
-    e. Repeat until $t > \text{far}$ or maximum steps reached [S1, unofficial].
-5.  Accumulate transmittance (alpha) and color/depth values using the sampled points [S2, unofficial].
-6.  Return `xyzs`, `dirs`, and `deltas` for further processing or gradient computation [S1, unofficial].
+**Algorithm Steps**
+1.  **Initialization**: For each ray $i \in [0, N)$, initialize current position $p = \text{rays\_o}[i]$ and step counter $k=0$.
+2.  **Marching Loop**: While $k < n_{\text{max\_steps}}$ and $p$ is within bounds:
+    a. **Query Density**: Look up density at $p$ using `density_bitfield`. [G] The specific hash lookup function is not defined in sources.
+    b. **Adaptive Step Size**: Calculate step size $\Delta t$ based on the queried density and a threshold `density_thresh`. [G] The exact formula for adaptive stepping is not provided in sources.
+    c. **Perturbation**: Apply perturbation to the step or position. [G] Details on perturbation method are not provided in sources.
+    d. **Update Position**: $p \leftarrow p + \Delta t \cdot \text{rays\_d}[i]$.
+    e. **Store Sample**: Store $p$, $\text{rays\_d}[i]$, and $\Delta t$ in `xyzs[i, k]`, `dirs[i, k]`, and `deltas[i, k]`.
+    f. **Increment**: $k \leftarrow k + 1$.
+3.  **Completion**: Return `xyzs`, `dirs`, and `deltas`.
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Parameters**
+*   `density_thresh`: Density threshold for stopping or adaptive stepping. Typical value: Not given in the sources.
+*   `bound`: Scene bound. Typical value: Not given in the sources.
+*   `min_near`: Minimum near plane distance. Typical value: Not given in the sources.
+*   `bg_radius`: Background radius. Typical value: Not given in the sources.
 
-```python
-def cuda_ray_marching(rays_o, rays_d, near, far, density_bitfield):
-    """
-    CUDA-accelerated ray marching for sparse density grids.
-    
-    Args:
-        rays_o: Tensor of shape [N, 3], ray origins.
-        rays_d: Tensor of shape [N, 3], ray directions.
-        near: Tensor of shape [N], near plane distances.
-        far: Tensor of shape [N], far plane distances.
-        density_bitfield: Tensor of shape [H], uint8 hashed density grid.
-        
-    Returns:
-        xyzs: Tensor of shape [N, n_step, 3], sampled points.
-        dirs: Tensor of shape [N, n_step, 3], sampled directions.
-        deltas: Tensor of shape [N, n_step, 2], step sizes (RGB, Depth).
-    """
-    N = rays_o.shape[0]
-    # Placeholder for GPU kernel launch details not provided in source
-    # The kernel performs adaptive stepping using density_bitfield
-    # and returns xyzs, dirs, deltas
-    
-    # Implementation details for the kernel are not fully specified in the source.
-    # The kernel likely uses atomic operations for sparse grid updates if training.
-    
-    # Return dummy shapes to satisfy interface requirements
-    # Actual n_step is dynamic and determined by the kernel
-    n_step = 100 # Example value, actual value depends on ray and grid
-    xyzs = torch.zeros(N, n_step, 3, device=rays_o.device)
-    dirs = torch.zeros(N, n_step, 3, device=rays_o.device)
-    deltas = torch.zeros(N, n_step, 2, device=rays_o.device)
-    
-    return xyzs, dirs, deltas
-```
-
-**Parameters:**
-*   `density_scale`: Scaling factor for density values [S1, unofficial].
-*   `min_near`: Minimum near plane distance [S1, unofficial].
-*   `density_thresh`: Density threshold for culling [S1, unofficial].
-*   `bg_radius`: Background radius for infinite background handling [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   Precision issues may arise with large bounds or small density values [S1, unofficial].
-*   Degenerate rays (zero length) should be handled or filtered out [G].
-*   The `density_bitfield` must be properly initialized and synchronized between CPU and GPU [G].
+**Edge Cases and Pitfalls**
+*   **Precision**: Floating-point precision in position updates may cause artifacts. [G] No specific mitigation is mentioned.
+*   **Boundaries**: Rays may exit the `bound` or `bg_radius`. Specific boundary handling is mentioned but not detailed [S1, unofficial].
+*   **Degenerate Input**: Rays with zero length or invalid directions should be handled. [G] No specific handling is mentioned.
 
 ## Subtopics
-
-### [Ray Tracing Kernel](5968-ray-tracing-kernel.md)
-The Ray Tracing Kernel is a GPU-accelerated compute shader that performs volumetric tracing and lighting by stepping through a 3D grid, dynamically adjusting step size and cascade resolution based on distance from the center, and accumulating transmittance (alpha). It serves as the core inference engine for sparse ray marching, supporting both forward rendering (image generation) and backward pass (gradient computation) for training. It distinguishes itself from standard ray marching by using a hierarchical cascade structure where the sampling resolution expands exponentially as the ray moves away from the grid center, optimizing performance for large volumes.
-
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of steps per ray, which is adaptive based on density and distance. Generally $O(N \cdot S)$ where $N$ is the number of rays and $S$ is the average steps per ray [S1, unofficial].
-*   **Memory Complexity:** Dominated by the `density_bitfield` size and the output tensors `xyzs`, `dirs`, `deltas` [S1, unofficial].
-*   **Performance:** Optimized for large volumes due to the hierarchical cascade structure [S1, unofficial].
-*   **Strengths:** Efficient sparse sampling, adaptive step sizes, supports training gradients [S2, unofficial].
-*   **Limitations:** Requires careful tuning of density thresholds and cascade parameters [S1, unofficial].
-*   **When to use:** For training and inference of large-scale sparse radiance fields on GPU [S2, unofficial].
-*   **When not to use:** For small, dense volumes where standard ray marching might be simpler [G].
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**: Not given in the sources.
+*   **Strengths**: GPU-accelerated, sparse grid support, adaptive step sizing, integrated SH evaluation [S1, unofficial].
+*   **Limitations**: Sparse grid structure complexity, dependency on `density_bitfield` layout [S1, unofficial].
+*   **When to Use**: Inference and training for IDDR-NGP backend [S1, unofficial].
+*   **When Not to Use**: Dense voxel scenes, non-CUDA hardware [S1, unofficial].
 
 ## Background
-Originated in the NeRF-Factory/IDDR-NGP project [S1, unofficial]. It is part of the broader effort to accelerate NeRF training and inference using sparse representations and GPU acceleration [S1, unofficial].
+Origin: IDDR-NGP project [S1, unofficial].
+History: Part of the NeRF-Factory/IDDR-NGP repository [S1, unofficial].
+Usage: Used in the NeRF-Factory/IDDR-NGP project for ray marching [S1, unofficial].
 
 ## Sources
 [S1] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
-[S2] Unofficial documentation or source code comments from IDDR-NGP repository, fetched 2026-10-27 (unofficial)

@@ -3,56 +3,150 @@
 Also called: Kumar et al. Uncertainty-Aware INR, Kumar et al. method, Uncertainty-aware implicit neural representations for steady-state vector fields, Uncertainty-aware implicit neural representations for vector fields
 
 ## Overview
-Uncertainty-Aware SIREN is a method for quantifying prediction confidence in implicit neural representations of steady-state vector fields, addressing the gap where preceding approaches did not quantify prediction confidence [S1, unofficial]. It augments SIREN architectures with residual blocks and dropout layers to enable Deep Ensemble and Monte Carlo Dropout techniques, providing per-grid-point uncertainty estimates alongside predicted vectors [S1, unofficial]. Unlike its siblings, it is the only method in its surveyed section that provides explicit uncertainty quantification, which is critical for downstream scientific analysis where decisions depend on knowing where learned representations are trustworthy [S1, unofficial].
+Uncertainty-Aware SIREN is a method for estimating prediction confidence in implicit neural representations (INRs) of steady-state vector fields. It addresses the gap where standard neural fields do not quantify prediction confidence, which is critical for downstream scientific decisions [S1, unofficial]. It sets itself apart from its parent [SIREN Neural Field](1250-siren-neural-field.md) by augmenting the architecture with mechanisms to output uncertainty metrics alongside the predicted vector values, and from siblings like [Fourier Positional Encoding](1267-fourier-positional-encoding.md) by focusing on epistemic and aleatoric uncertainty quantification rather than frequency representation [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** 3D spatial coordinates $(x, y, z)$ and a training dataset of steady-state vector fields (e.g., velocity vectors from fluid dynamics simulations).
-- **Output:** A predicted vector field value $\hat{\mathbf{v}}$ and an associated uncertainty estimate (variance or confidence interval) for each query point.
+- **Input:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ and potentially auxiliary data.
+- **Output:** Predicted steady-state vector field $\mathbf{v} \in \mathbb{R}^3$ and associated uncertainty estimates (variance/confidence) for each grid point [S1, unofficial].
 
 **Data Structures:**
-- **Model Architecture:** A SIREN-based MLP augmented with residual blocks and dropout layers [S1, unofficial].
-- **Deep Ensemble:** A collection of $K$ independent SIREN models (typically $K=10$) trained on the same data with different initializations [S1, unofficial].
-- **Monte Carlo Dropout:** A single SIREN model where dropout is applied during both training and inference [S1, unofficial].
+- The model is a SIREN-based neural network.
+- Architecture: SIREN layers augmented with residual blocks and dropout layers [S1, unofficial].
+- Specific bit-packing or field layouts are not detailed in the sources beyond the standard neural network parameter storage [S1, unofficial].
 
 **Steps:**
-1. **Model Construction:** Construct a SIREN architecture. Replace standard fully connected layers with residual blocks to facilitate gradient flow and stability. Insert dropout layers into the network [S1, unofficial].
-2. **Training:**
-   - For **Deep Ensemble**: Train $K$ independent models from scratch. Each model minimizes a standard reconstruction loss (e.g., Mean Squared Error) between predicted and ground-truth vector values [S1, unofficial].
-   - For **Monte Carlo Dropout**: Train a single model. During training, dropout is active. During inference, dropout remains active to approximate Bayesian inference via stochastic forward passes [S1, unofficial].
-3. **Inference (Uncertainty Estimation):**
-   - For **Deep Ensemble**: Query all $K$ models for the same input coordinate. Compute the mean prediction $\bar{\mathbf{v}}$ and the variance $\sigma^2$ across the $K$ predictions:
-     $$ \bar{\mathbf{v}} = \frac{1}{K} \sum_{k=1}^{K} \mathbf{v}_k $$
-     $$ \sigma^2 = \frac{1}{K} \sum_{k=1}^{K} (\mathbf{v}_k - \bar{\mathbf{v}})^2 $$
-   - For **Monte Carlo Dropout**: Perform $T$ stochastic forward passes with dropout enabled. Compute the mean and variance across the $T$ outputs similarly to the ensemble case [S1, unofficial].
-4. **Output Generation:** Return the mean vector field value and the computed uncertainty map (variance) for the volume [S1, unofficial].
+1. **Model Construction:** Construct a SIREN architecture. Augment this architecture with residual blocks to facilitate gradient flow and dropout layers to enable stochastic inference [S1, unofficial].
+2. **Training:** Train the model on 3D vector field datasets. The sources do not specify the exact loss function, but the goal is to learn the vector field while enabling uncertainty estimation [S1, unofficial].
+3. **Uncertainty Estimation Techniques:** Apply one of two principled techniques during inference or training:
+   - **Deep Ensemble:** Train multiple independent models with different initializations and aggregate their predictions. The variance across ensemble members provides the uncertainty estimate [S1, unofficial].
+   - **Monte Carlo Dropout:** Use dropout layers during inference (not just training). Perform multiple forward passes with different dropout masks and aggregate the results. The variance across these stochastic forward passes provides the uncertainty estimate [S1, unofficial].
+4. **Output Generation:** For a given input coordinate, generate the predicted vector and the per-grid-point uncertainty estimate [S1, unofficial].
 
 **Parameters:**
-- **Number of Ensembles ($K$):** Typically 10 [S1, unofficial].
-- **Number of MC Samples ($T$):** Not specified in the sources, but must be sufficient to stabilize the variance estimate [G].
-- **Dropout Rate:** Not specified in the sources [G].
+- **Dropout Rate:** Not given in the sources.
+- **Number of Ensemble Members:** Not given in the sources.
+- **Network Depth/Width:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **High-Uncertainty Regions:** Uncertainty estimates concentrate near critical points and vortex regions, which are locations where prediction errors have the greatest scientific consequence [S1, unofficial].
-- **Storage Cost:** Deep Ensembles incur a storage cost proportional to the number of models (e.g., 10× the storage cost of a single model) [S1, unofficial].
-- **Precision:** Standard floating-point precision is assumed; no specific numerical stability tricks beyond residual blocks are mentioned [G].
+- High-uncertainty regions concentrate near critical points and vortex regions. These are locations where prediction errors have the greatest scientific consequence, so the uncertainty estimates are particularly important there [S1, unofficial].
+- The method is designed for steady-state vector fields. Its applicability to time-varying fields is not specified [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Uncertainty-Aware SIREN inference
+# Note: The specific architecture details (layer sizes, activation functions) 
+# are not provided in the sources. We assume a standard SIREN block.
+
+import numpy as np
+
+class SIRENBlock:
+    """Simplified SIREN layer placeholder."""
+    def __init__(self, in_features, out_features):
+        self.in_features = in_features
+        self.out_features = out_features
+        # Weights and biases would be initialized here
+        # SIREN typically uses specific initialization for sine activations
+        pass
+
+    def forward(self, x):
+        # Linear transformation followed by sine activation
+        # w, b = self.weights, self.biases
+        # return sin(w @ x + b)
+        return x  # Placeholder
+
+class UncertaintyAwareSIREN:
+    def __init__(self, num_ensemble=1, use_dropout=True, dropout_rate=0.1):
+        self.num_ensemble = num_ensemble
+        self.use_dropout = use_dropout
+        self.dropout_rate = dropout_rate
+        self.models = []
+        
+        # Initialize ensemble of SIREN models with residual blocks and dropout
+        for _ in range(num_ensemble):
+            # Construct SIREN with residual blocks and dropout
+            # model = SIRENWithResidualsAndDropout(...)
+            self.models.append(None)  # Placeholder for actual model construction
+
+    def train(self, data):
+        """
+        Train the ensemble or single model.
+        Data format: (coordinates, vector_values)
+        """
+        # Training procedure is not detailed in the sources.
+        # Typically involves minimizing reconstruction loss.
+        pass
+
+    def predict_uncertainty(self, x):
+        """
+        Predict vector field and uncertainty for input coordinates x.
+        
+        Args:
+            x: numpy array of shape (N, 3) containing N 3D coordinates.
+            
+        Returns:
+            mean_vector: numpy array of shape (N, 3)
+            uncertainty: numpy array of shape (N,) or (N, 3) representing variance
+        """
+        if self.num_ensemble > 1:
+            # Deep Ensemble approach
+            predictions = []
+            for model in self.models:
+                # model.forward(x) returns vector predictions
+                pred = model.forward(x)
+                predictions.append(pred)
+            
+            predictions = np.stack(predictions, axis=0)  # Shape: (num_ensemble, N, 3)
+            mean_vector = np.mean(predictions, axis=0)
+            uncertainty = np.var(predictions, axis=0)
+            # Uncertainty could be the variance across the ensemble
+            # The source mentions "per-grid-point uncertainty estimates"
+            # It is unclear if uncertainty is scalar per point or vector per dimension.
+            # We assume scalar variance of the vector magnitude or mean variance across dims.
+            uncertainty = np.mean(uncertainty, axis=1)  # Shape: (N,)
+            
+        elif self.use_dropout:
+            # Monte Carlo Dropout approach
+            num_samples = 10  # Not given in sources, typical value for MC Dropout
+            predictions = []
+            for _ in range(num_samples):
+                # Enable dropout during inference
+                # model.forward(x, training=True)
+                pred = self.models[0].forward(x, training=True)
+                predictions.append(pred)
+            
+            predictions = np.stack(predictions, axis=0)  # Shape: (num_samples, N, 3)
+            mean_vector = np.mean(predictions, axis=0)
+            uncertainty = np.var(predictions, axis=0)
+            uncertainty = np.mean(uncertainty, axis=1)  # Shape: (N,)
+        else:
+            # Fallback to single model deterministic prediction
+            mean_vector = self.models[0].forward(x)
+            uncertainty = np.zeros(x.shape[0])  # No uncertainty estimate
+        
+        return mean_vector, uncertainty
+```
 
 ## Subtopics
 
-### REV-INR
-A method that replaces multiple models with a single SIREN whose final layer outputs four parameters of a Normal Inverse-Gamma distribution for closed-form estimation of epistemic and aleatoric uncertainty [S1, unofficial]. It applies two novel regularization losses: align epistemic uncertainty with prediction error and aleatoric uncertainty with local gradient magnitude [S1, unofficial]. Training takes 2–3× longer due to the evidential loss computation [S1, unofficial]. On volumes up to $512^3$, REV-INR achieved the highest uncertainty-error correlation among three uncertainty-aware INR variants (correlation coefficients of 0.37–0.85 across six datasets) at inference speeds comparable to a deterministic INR [S1, unofficial].
+### [REV-INR](10472-rev-inr.md)
+REV-INR is a method for estimating both epistemic and aleatoric uncertainty in implicit neural representations (INRs) using a single SIREN model, avoiding the storage and inference costs of deep ensembles. It sets itself apart from Uncertainty-Aware SIREN by replacing multiple models or dropout layers with a single network whose final layer outputs parameters of a Normal Inverse-Gamma distribution, enabling closed-form uncertainty estimation in a single forward pass.
 
 ## Operating characteristics
-- **Time Complexity:** Training Deep Ensembles is $K$ times slower than training a single model. REV-INR training is 2–3× longer than deterministic INR training due to evidential loss computation [S1, unofficial]. Inference for Deep Ensembles requires $K$ forward passes, while REV-INR and Monte Carlo Dropout require fewer passes (though MC Dropout requires $T$ passes for stable variance) [S1, unofficial].
-- **Memory Complexity:** Deep Ensembles require $K$ times the memory of a single model (e.g., 10×) [S1, unofficial]. REV-INR and Monte Carlo Dropout have memory complexity comparable to a single deterministic INR [S1, unofficial].
-- **Measured Performance:** Evaluated on four 3D vector field datasets: Hurricane Isabel ($250 \times 250 \times 50$), Tornado ($128^3$), Turbine ($151 \times 71 \times 56$), and Tangaroa ($300 \times 180 \times 120$) [S1, unofficial]. Silhouette coefficient of 0.848 on CT datasets [S1, unofficial].
-- **Strengths:** Provides the only uncertainty quantification among the surveyed methods in its section [S1, unofficial]. High-uncertainty regions accurately identify critical points and vortices [S1, unofficial]. REV-INR offers high uncertainty-error correlation with low inference latency [S1, unofficial].
-- **Limitations:** Deep Ensembles have high storage and inference costs [S1, unofficial]. REV-INR has higher training costs [S1, unofficial]. Evaluation remains fragmented with no shared benchmarks [S1, unofficial].
-- **When to Use:** When scientific analysis requires knowing where the learned representation is trustworthy, particularly near critical points or vortices [S1, unofficial].
-- **When Not to Use:** When storage or inference latency is strictly constrained and uncertainty quantification is not required [S1, unofficial].
+- **Time Complexity:** Depends on the uncertainty estimation technique. Deep Ensemble requires $N$ forward passes where $N$ is the number of ensemble members. Monte Carlo Dropout requires $M$ forward passes where $M$ is the number of stochastic samples. Single-pass methods (like REV-INR) are faster [S1, unofficial].
+- **Memory Complexity:** Deep Ensemble requires storing $N$ models. Monte Carlo Dropout requires storing one model. REV-INR requires storing one model [S1, unofficial].
+- **Measured Performance:** Evaluated on four 3D vector field datasets: Hurricane Isabel ($250 \times 250 \times 50$), Tornado ($128^3$), Turbine ($151 \times 71 \times 56$), and Tangaroa ($300 \times 180 \times 120$) [S1, unofficial].
+- **Strengths:** Provides per-grid-point uncertainty estimates, which is unique among the methods surveyed in the source section. High-uncertainty regions correctly identify critical points and vortex regions, which are scientifically significant [S1, unofficial].
+- **Limitations:** Requires training multiple models (Deep Ensemble) or multiple forward passes (Monte Carlo Dropout), which increases computational cost. The specific hyperparameters for training are not provided [S1, unofficial].
+- **When to use:** When uncertainty quantification is critical for scientific analysis of steady-state vector fields, and computational resources allow for ensemble or stochastic inference [S1, unofficial].
+- **When not to use:** When real-time single-pass inference is required and computational resources are limited. Consider REV-INR in such cases [S1, unofficial].
 
 ## Background
-Uncertainty-Aware SIREN was developed by Kumar et al. [82] to address the gap in implicit neural representations where no preceding approaches quantified prediction confidence [S1, unofficial]. It is based on SIREN architectures augmented with residual blocks and dropout layers [S1, unofficial]. The method was evaluated on steady-state vector fields from scientific simulations [S1, unofficial]. It is cited as a notable advancement because downstream decisions in scientific analysis depend on knowing where learned representations are trustworthy [S1, unofficial].
+- **Origin:** Developed by Kumar et al. [82] [S1, unofficial].
+- **History:** The method addresses a gap in the field where preceding approaches to neural representations for scientific volume data did not quantify prediction confidence [S1, unofficial].
+- **Usage:** Used for steady-state vector fields in scientific contexts, such as meteorological (Hurricane Isabel, Tornado) and fluid dynamics (Turbine, Tangaroa) data [S1, unofficial].
 
 ## Sources
 [S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

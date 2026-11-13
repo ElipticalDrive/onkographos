@@ -1,0 +1,173 @@
+--- v004.md
++++ v005.md
+@@ -4,84 +4,89 @@
+ 
+ ## Overview
+-RLE4 Ray Tracing is a ray-marching algorithm designed to traverse volume data compressed using Run-Length Encoding (RLE) in the Y-dimension, specifically structured as a "Map4" layout. It solves the problem of efficiently locating the first occupied voxel along a ray or coloring a voxel based on its position within sparse volumetric data. It distinguishes itself from sibling methods by avoiding full decompression of the volume; instead, it uses a texture-based lookup system to determine if a sample point lies in an uncompressed surface region, an "inside" region, or an "outside" region, returning special markers for the latter two [S1, unofficial]. This approach is particularly suited for scenarios where the volume geometry is sparse or has large uniform interior/exterior regions, allowing the renderer to skip volumetric integration in those areas [S1, unofficial].
++RLE4 Ray Tracing is a ray-marching or voxel-intersection algorithm that traverses an RLE4-compressed volume structure (Map4) to locate the first occupied voxel along a ray or to colorize a voxel based on its position [S1, unofficial]. It uses slab-based RLE encoding to skip empty space efficiently [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin and direction (implicitly handled by the caller providing `pos`), volume dimensions `vx, vy, vz`, and a pre-compressed RLE4 (Map4) structure containing slab pointers and Y-range data.
+-*   **Output:** A color value (RGB) packed into a texture array if the voxel is found, or a skip marker if not.
++*   **Input:** A float position `pos` (x, y, z), volume dimensions `vx, vy, vz`, and a pre-compressed RLE4 structure `map4` containing a slab pointer array `map`, a slab data array `slabs`, and the X-dimension size `sx` [S1, unofficial].
++*   **Output:** A packed 16-bit RGB value stored in the texture array if the voxel is found, or a skip indicator if not [S1, unofficial].
+ 
+ **Data Structures:**
+-The Map4 structure consists of:
+-*   `map`: An array of `ushort` pointers (or indices) indexed by `x + z * sx`, where `sx` is the X-dimension size. This acts as a slab pointer for each XZ coordinate.
+-*   `slabs`: A contiguous array of `ushort` values storing the RLE-encoded Y-ranges and color data.
+-*   **Slab Entry Format:** Each slab entry is a 16-bit integer (`ushort`).
+-    *   Bits 0-9 (10 bits): Start Y coordinate (`y1`) relative to the slab start.
+-    *   Bits 10-15 (6 bits): Length of the Y-range (`len = y2 - y1`). Note: The source code calculates `y2` as `y1 + (slab >> 10)`, implying the upper bits store the end Y or length. Based on `y2=y1+(slab>>10)`, the upper 6 bits represent the length or offset. Let $L = slab \gg 10$. Then $y_2 = y_1 + L$.
+-    *   *Correction on decoding:* The source says `y1+=slab&1023; y2=y1+(slab>>10);`. This implies `slab & 1023` is the *increment* to `y1`, not the absolute `y1`. However, standard RLE usually stores absolute or delta. Let's stick strictly to the source formula: `y1` is accumulated. `y2` is `y1 + (slab >> 10)`.
++The Map4 structure uses `map4.map` indexed by `x + z * map4.sx` to point into `map4.slabs` [S1, unofficial]. Each slab entry is a 16-bit integer where bits 0–9 store a Y-coordinate increment and bits 10–15 store the Y-range length [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Coordinate Conversion:** Convert the ray's current float position `pos` to integer voxel coordinates `x, y, z` by scaling with volume dimensions `vx, vy, vz`.
+-    $$ x = \lfloor pos_x \cdot vx \rfloor, \quad y = \lfloor pos_y \cdot vy \rfloor, \quad z = \lfloor pos_z \cdot vz \rfloor $$
+-2.  **Bounds Check:** Verify `x` and `z` are within bounds.
+-    ```python
++1.  **Coordinate Conversion:** Convert the float position `pos` to integer voxel coordinates `x, y, z` by scaling with volume dimensions `vx, vy, vz` [S1, unofficial].
++2.  **Bounds Check:** Verify `x` and `z` are within bounds [S1, unofficial].
++3.  **Slab Access:** Access the slab pointer for the current XZ coordinate [S1, unofficial].
++4.  **Read Segment Lengths:** Read the lengths of the first and second slab segments to skip header data [S1, unofficial].
++5.  **Initialize State:** Set `y1=0, y2=0`. Set pointer `pt` to `p+len1`. Initialize `texture=0` [S1, unofficial].
++6.  **Iterate Slabs:** Loop `s` from `0` to `len1-1` [S1, unofficial]:
++    a.  **Read Slab Entry:** `slab = p[0]; p += 1` [S1, unofficial].
++    b.  **Decode Y-Range:** `y1 += slab & 1023; y2 = y1 + (slab >> 10)` [S1, unofficial].
++    c.  **Check Intersection:** Check if the target Y coordinate `y` falls within the current slab range `[y1, y2)` [S1, unofficial].
++    d.  **Advance:** If not found, advance the texture pointer and Y1: `texture += y2 - y1; y1 = y2` [S1, unofficial].
++
++```python
++def rle4_traverse(pos, vx, vy, vz, map4):
++    # 1. Coordinate conversion
++    x = int(pos[0] * vx)
++    y = int(pos[1] * vy)
++    z = int(pos[2] * vz)
++
++    # 2. Bounds check
+     if x < 0 or x >= vx or z < 0 or z >= vz:
+-        return # Out of bounds
+-    ```
+-3.  **Slab Access:** Access the slab pointer for the current XZ coordinate.
+-    ```python
++        return None
++
++    # 3. Slab access (pointer arithmetic simulated via index offset)
+     p = map4.slabs + map4.map[x + z * map4.sx]
+-    ```
+-4.  **Read Segment Lengths:** Read the lengths of the first and second slab segments to skip header data.
+-    ```python
+-    len1 = p[0]
+-    p += 1
+-    len2 = p[0]
+-    p += 1
+-    ```
+-5.  **Initialize State:**
+-    *   Set `y1 = 0`, `y2 = 0`.
+-    *   Set texture pointer `pt` to `p + len1`.
+-    *   Set `texture_offset = 0`.
+-6.  **Iterate Slabs:** Loop `s` from `0` to `len1 - 1`:
+-    a.  **Read Slab Entry:**
+-        ```python
+-        slab = p[0]
+-        p += 1
+-        ```
+-    b.  **Decode Y-Range:**
+-        ```python
++
++    # 4. Read segment lengths
++    len1 = p[0]; p += 1
++    len2 = p[0]; p += 1
++
++    # 5. Initialize state
++    y1 = 0
++    y2 = 0
++    pt = p + len1
++    texture = 0
++
++    # 6. Iterate slabs
++    for s in range(len1):
++        slab = p[0]; p += 1
+         y1 += slab & 1023
+         y2 = y1 + (slab >> 10)
+-        ```
+-    c.  **Check Intersection:** Check if the target Y coordinate `y` falls within the current slab range `[y1, y2)`.
+-        ```python
++
++        # 6c. Check intersection
+         if y >= y1 and y < y2:
+-            # Voxel found
+-            col = read_color_from_texture(pt, texture_offset, y - y1) # Implementation detail [G]
+-            # Quantize color to 5 bits per channel (0-31 range)
+-            r_ = clamp(float(col.x * 15 + 16), 0, 31)
+-            g_ = clamp(float(col.y * 15 + 16), 0, 31)
+-            b_ = clamp(float(col.z * 15 + 16), 0, 31)
+-            # Store packed RGB
+-            packed = uint(r_ + (g_ << 5) + (b_ << 10))
+-            pt[texture_offset + y - y1] = packed
+-            return
+-        ```
+-    d.  **Advance:** If not found, advance the texture pointer and Y1.
+-        ```python
+-        texture_offset += y2 - y1
++            col = read_color_from_texture(pt, texture + y - y1)
++            r_ = clamp(col[0] * 15 + 16, 0, 31)
++            g_ = clamp(col[1] * 15 + 16, 0, 31)
++            b_ = clamp(col[2] * 15 + 16, 0, 31)
++            packed = int(r_ + (g_ << 5) + (b_ << 10))
++            pt[texture + y - y1] = packed
++            return packed
++
++        # 6d. Advance
++        texture += y2 - y1
+         y1 = y2
+-        ```
+-7.  **Return:** If the loop completes without finding `y`, the voxel is in an empty region (skip).
++
++    return None
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(val, max_val))
++
++def read_color_from_texture(texture_array, offset):
++    # Standard texture/array lookup [G]
++    return texture_array[offset]
++```
+ 
+ **Parameters:**
+-*   Color quantization: 5 bits per channel (0-31 range).
+-*   Y-range decoding: 10 bits for Y-increment, 6 bits for Y-length.
++*   Color quantization: 5 bits per channel (0–31 range) [S1, unofficial].
++*   Y-range decoding: 10 bits for Y-increment, 6 bits for Y-length [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Bounds:** The algorithm assumes the target Y is within the volume bounds checked at the start. If the ray passes through multiple slabs, it iterates until the Y range is found.
+-*   **Precision:** The color quantization uses 5 bits per channel. This may introduce visible banding in high-dynamic-range scenes.
+-*   **Empty Regions:** If the Y coordinate is not found in any slab, the algorithm returns without writing, effectively skipping the voxel. This relies on the caller handling the "skip" state appropriately.
++*   **Bounds:** The algorithm assumes the target Y coordinate is within the volume bounds checked at the start; if the ray passes through multiple slabs, it iterates until the Y range is found [S1, unofficial].
++*   **Precision:** The color quantization uses 5 bits per channel, which may introduce visible banding in high-dynamic-range scenes [S1, unofficial].
++*   **Empty Regions:** If the Y coordinate is not found in any slab, the algorithm returns without writing, effectively skipping the voxel [S1, unofficial].
+ 
+ ## Subtopics
+@@ -91,12 +96,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$ where $k$ is the number of Y-slabs traversed along the ray. In sparse volumes, $k$ is significantly smaller than the total number of voxels.
+-*   **Memory Complexity:** $O(N)$ for the compressed RLE4 structure, where $N$ is the number of occupied Y-ranges. This is much smaller than the full voxel grid for sparse data.
+-*   **Performance:** Efficient for sparse volumes with large uniform regions. The texture-based lookup avoids branching penalties associated with full decomposition.
+-*   **Strengths:** Low memory footprint for sparse data; fast traversal of empty space; GPU-friendly texture lookups.
+-*   **Limitations:** Color quantization limits visual fidelity; requires pre-compression of volume data; not suitable for dense volumes where compression ratio is low.
++*   **Time Complexity:** $O(k)$ where $k$ is the number of Y-slabs traversed along the ray [G].
++*   **Memory Complexity:** $O(N)$ for the compressed RLE4 structure, where $N$ is the number of occupied Y-ranges [G].
++*   **Performance:** Efficient for sparse volumes with large uniform regions, as it avoids full decompression and skips empty space [S1, unofficial].
++*   **Strengths:** Low memory footprint for sparse data; fast traversal of empty space; GPU-friendly texture lookups [S1, unofficial].
++*   **Limitations:** Color quantization limits visual fidelity to 5 bits per channel; requires pre-compression of volume data; not suitable for dense volumes where compression ratio is low [S1, unofficial].
+ 
+ ## Background
+-RLE4 Ray Tracing, also known as Map4 Traversal, originates from the OpenGL-Voxel-Splatting project by sp4cerat [S1, unofficial]. It is an implementation technique for efficient ray casting in sparse volumetric data, leveraging RLE compression to skip empty space. The method is particularly relevant in real-time rendering contexts where memory bandwidth and cache efficiency are critical.
++The method is documented in the OpenGL-Voxel-Splatting repository [S1, unofficial]. It is used for efficient ray casting in sparse volumetric data, leveraging RLE compression to skip empty space [S1, unofficial].
+ 
+ ## Sources

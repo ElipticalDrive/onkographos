@@ -1,0 +1,186 @@
+# Minecraft-style Voxel Meshing with AO and Flip
+
+Also called: Greedy Mesh Generation, Minecraft-style Voxel Meshing, Voxel Face Mesh Generation with AO and Flip
+
+## Overview
+This method generates a mesh for a voxel segment by merging adjacent blocks of the same type into larger rectangular faces, reducing draw calls and vertex count [S2, unofficial]. It extends binary greedy meshing by incorporating ambient occlusion (AO) values into the vertex data and using a "flip" bit to optimize triangle winding order based on AO distribution [S1, unofficial]. It builds on [Multi-Block Binary Meshing with AO](4534-multi-block-binary-meshing-with-ao.md) by adding the specific logic for AO-based flip determination and vertex packing for the final geometry generation [G].
+
+## How it works
+**Inputs:** A voxel segment (typically 16×16×16 blocks), a visibility mask, and block type data [S2, unofficial].
+**Outputs:** A list of vertices (position, color, packed data) and an index buffer for each face direction [S1, unofficial][S2, unofficial].
+
+**Data Structures:**
+1. `mask`: Array of 4096 integers. `mask[i]` stores the block type ID. If the block is null or not visible, it stores `BlockType.AIR` [S2, unofficial].
+2. `done`: Array of 4096 booleans. `done[i]` is true if the block at index `i` has already been included in a merged face [S2, unofficial].
+3. `v0, v1, v2, v3`: Vertex structures containing position, color, and packed data [S1, unofficial].
+4. `packed_data`: A packed integer or struct containing world coordinates, `voxel_id`, `face_id`, `ao` value, and `flip_id` [S1, unofficial].
+
+**Parameters:**
+* `segment_size`: 16 (standard Minecraft chunk segment size) [S2, unofficial].
+* `face_id`: Integer distinguishing the face direction (e.g., 4 for TOP, 5 for FRONT) [S1, unofficial].
+* `AIR`: Constant representing empty space [S2, unofficial].
+
+**Steps:**
+1. **Initialize Mask:** Iterate `i` from 0 to 4095. If `segment.getBlock(i)` is null or `!segment.getBlock(i).isVisible()`, set `mask[i] = AIR`. Else, set `mask[i] = segment.getBlock(i).getType()`. Initialize `done[i] = false` for all `i` [S2, unofficial].
+2. **Iterate Face Directions:** Loop through the 6 face directions `i` (0=TOP, 1=BOT, 2=LEFT, 3=RIGHT, 4=FRONT, 5=BACK). Skip if the face is not visible to the camera (culling) [S2, unofficial].
+3. **Pre-check:** If all blocks in the segment have `mask[j] == AIR` or the face is not visible for any block, skip this face direction [S2, unofficial].
+4. **Scan for Merged Faces:** Iterate `y` from 0 to 15, `z` from 0 to 15, `x` from 0 to 15. Calculate linear index: `sum = x + (z << 4) + (y << 8)`. If `done[sum]` is true, continue. Let `type = mask[sum]`. If `type == AIR`, set `done[sum] = true` and continue. If the block at `sum` does not have the current face `i` visible, set `done[sum] = true` and continue [S2, unofficial].
+5. **Determine Dimensions (Greedy Expansion):** Find the width `w` and height `h` of the largest rectangle of blocks with `type` that are not `done`.
+    * **For TOP/BOT faces (x-z plane):** Find `w`: Iterate `w` from 0 while `w < 15 - x` AND `mask[sum + 1 + w] == type` AND `!done[sum + 1 + w]`. Find `h`: Iterate `h` from 0 while `h < 15 - z`. For each `h`, check if all blocks in the row `sum + (h << 4) + k` for `k` from 0 to `w` match `type` and are not `done`. If any block fails, break. Mark all cells in the rectangle `(x, z)` to `(x+w, z+h)` as `done` [S2, unofficial].
+    * **For LEFT/RIGHT faces (z-y plane):** Find `w` (along z-axis): Iterate `w` from 0 while `w < 15 - z` AND `mask[sum + (w << 4) + 1] == type` AND `!done[sum + (w << 4) + 1]`. Find `h` (along y-axis): Iterate `h` from 0 while `h < 15 - y`. For each `h`, check if all blocks in the column `sum + (h << 8) + (k << 4)` for `k` from 0 to `w` match `type` and are not `done`. If any block fails, break. Mark all cells in the rectangle as `done` [S2, unofficial].
+    * **For FRONT/BACK faces:** The reference snippet skips these with a temporary placeholder, but the general greedy logic applies to the x-y plane [S2, unofficial].
+6. **Calculate Ambient Occlusion and Flip ID:** For the four corners of the generated rectangle, calculate AO values using `get_ao`. Let the corners be indexed 0, 1, 2, 3. Determine `flip_id`: `flip_id = (ao[1] + ao[3]) > (ao[0] + ao[2])`. This boolean determines the winding order of the triangles to optimize for AO shading continuity [S1, unofficial].
+7. **Pack Vertex Data:** For each of the 4 corners of the rectangle, create a vertex `v` using `pack_data`. Arguments: World coordinates (e.g., `bX`, `bY`, `bZ`), `voxel_id`, `face_id`, `ao` value, and `flip_id`. Store these in `v0, v1, v2, v3` [S1, unofficial].
+8. **Generate Geometry:** Call `addVertices(type.getColor(), i, bX, bY, bZ, w, h)`. Add vertex positions based on face type. Add indices for two triangles using the last 4 vertices added: indices are `(size-4, size-3, size-2)` and `(size-2, size-1, size-4)`. If `flip_id` is true, add indices in the order `v3, v1, v0, v3, v2, v1`. If false, add in the order `v0, v2, v1, v0, v3, v2` [S1, unofficial][S2, unofficial].
+
+**Pseudocode:**
+```python
+def generate_mesh(segment, segment_abs_pos):
+    segX, segY, segZ = segment_abs_pos.x * 16, segment_abs_pos.y * 16, segment_abs_pos.z * 16
+    mask = [0] * 4096
+    done = [False] * 4096
+    vertices = []
+    indices = []
+
+    # 1. Initialize mask
+    for i in range(4096):
+        block = segment.get_block(i)
+        if block is None or not block.is_visible():
+            mask[i] = BlockType.AIR
+        else:
+            mask[i] = block.get_type()
+
+    # 2. Iterate face directions (0=TOP, 1=BOT, 2=LEFT, 3=RIGHT, 4=FRONT, 5=BACK)
+    for face in range(6):
+        if not should_render_seg_side(face, segX, segY, segZ):
+            continue
+
+        # 3. Pre-check: skip if all blocks are AIR or face not visible
+        continue_face = True
+        for j in range(4096):
+            if mask[j] == BlockType.AIR:
+                done[j] = True
+                continue
+            block = segment.get_block(j)
+            if not block.is_side_visible(face):
+                done[j] = True
+            else:
+                done[j] = False
+                continue_face = False
+        if continue_face:
+            continue
+
+        # 4. Scan for merged faces
+        for y in range(16):
+            y_ = y << 8
+            bY = y + segY
+            for z in range(16):
+                z_ = z << 4
+                bZ = z + segZ
+                for x in range(16):
+                    sum_idx = x + z_ + y_
+                    if done[sum_idx]:
+                        continue
+                    bX = x + segX
+                    type_id = mask[sum_idx]
+
+                    # 5. Find width w and height h
+                    w, h = 0, 0
+                    if face in (0, 1): # TOP/BOT
+                        # Fixed boundary check: check limit first, then next block
+                        while w < 15 - x and mask[sum_idx + 1 + w] == type_id and not done[sum_idx + 1 + w]:
+                            w += 1
+                        h = 0
+                        while h < 15 - z:
+                            row_ok = True
+                            for k in range(w + 1):
+                                if mask[sum_idx + (h << 4) + k] != type_id or done[sum_idx + (h << 4) + k]:
+                                    row_ok = False
+                                    break
+                            if not row_ok:
+                                break
+                            h += 1
+                        for j in range(h + 1):
+                            for k in range(w + 1):
+                                done[sum_idx + (j << 4) + k] = True
+                    elif face in (2, 3): # LEFT/RIGHT
+                        while w < 15 - z and mask[sum_idx + (w << 4) + 1] == type_id and not done[sum_idx + (w << 4) + 1]:
+                            w += 1
+                        h = 0
+                        while h < 15 - y:
+                            col_ok = True
+                            for k in range(w + 1):
+                                if mask[sum_idx + (h << 8) + (k << 4)] != type_id or done[sum_idx + (h << 8) + (k << 4)]:
+                                    col_ok = False
+                                    break
+                            if not col_ok:
+                                break
+                            h += 1
+                        for j in range(h + 1):
+                            for k in range(w + 1):
+                                done[sum_idx + (j << 8) + (k << 4)] = True
+                    else: # FRONT/BACK
+                        continue # TEMP in source
+
+                    # 6. Calculate AO and flip_id
+                    # [G] AO calculation logic not specified in sources
+                    ao = get_ao_corners(bX, bY, bZ, w, h, face)
+                    flip_id = (ao[1] + ao[3]) > (ao[0] + ao[2])
+
+                    # 7. Pack vertex data
+                    # [G] Packing logic not specified in sources
+                    v0 = pack_data(bX, bY, bZ, 0, face, ao[0], flip_id)
+                    v1 = pack_data(bX, bY, bZ, 1, face, ao[1], flip_id)
+                    v2 = pack_data(bX, bY, bZ, 2, face, ao[2], flip_id)
+                    v3 = pack_data(bX, bY, bZ, 3, face, ao[3], flip_id)
+
+                    # 8. Generate geometry
+                    add_vertices(type_id.get_color(), face, bX, bY, bZ, w, h, v0, v1, v2, v3)
+
+def add_vertices(color, face, x, y, z, w, h, v0, v1, v2, v3):
+    # Vertex positions
+    if face == 0: # TOP
+        v0.pos = (x - 0.5, y + 0.5, z - 0.5)
+        v1.pos = (x - 0.5, y + 0.5, z + 0.5 + h)
+        v2.pos = (x + 0.5 + w, y + 0.5, z + 0.5 + h)
+        v3.pos = (x + 0.5 + w, y + 0.5, z - 0.5)
+    elif face == 1: # BOT
+        v0.pos = (x - 0.5, y - 0.5, z - 0.5)
+        v1.pos = (x + 0.5 + w, y - 0.5, z - 0.5)
+        v2.pos = (x + 0.5 + w, y - 0.5, z + 0.5 + h)
+        v3.pos = (x - 0.5, y - 0.5, z + 0.5 + h)
+    elif face == 2: # LEFT
+        v0.pos = (x - 0.5, y + 0.5 + h, z + 0.5 + w)
+        v1.pos = (x - 0.5, y + 0.5 + h, z - 0.5)
+        v2.pos = (x - 0.5, y - 0.5, z - 0.5)
+        v3.pos = (x - 0.5, y - 0.5, z + 0.5 + w)
+    # RIGHT/FRONT/BACK follow similar logic relative to face normal and dimensions
+
+    # Indices
+    size = len(vertices)
+    vertices.extend([v0, v1, v2, v3])
+    if flip_id:
+        indices.extend([size, size+1, size+2, size+2, size+3, size+1])
+    else:
+        indices.extend([size, size+2, size+1, size, size+3, size+2])
+```
+
+**Pitfalls:**
+* **Boundary Check:** When finding width `w`, the condition `mask[sum + w] == type` checks the block at `w=0` which is already known to be `type`. The loop should check `mask[sum + 1 + w]` to find the *next* block, and must check `w < 15 - x` *before* accessing the array to prevent `ArrayIndexOutOfBoundsException` [S2, unofficial].
+* **AO Calculation:** `get_ao` must correctly sample neighboring blocks to determine the darkness of each corner [G].
+
+## Operating characteristics
+* **Time Complexity:** $O(N)$ where $N$ is the number of blocks in the segment (4096 for a 16×16×16 chunk) [G]. Each block is visited a constant number of times during the greedy expansion [G].
+* **Memory Complexity:** $O(N)$ for the `mask` and `done` arrays [G].
+* **Performance:** Significantly reduces vertex count and draw calls compared to per-block meshing [S2, unofficial]. The greedy merging is efficient for large uniform areas [S2, unofficial].
+* **Strengths:** Simple to implement, effective for voxel games with blocky geometry, integrates AO for shading [S1, unofficial][S2, unofficial].
+* **Limitations:** Only merges axis-aligned rectangles, so diagonal or complex shapes are not optimized [G]. The "flip" optimization is specific to the AO winding order and may not apply to all shading models [S1, unofficial].
+* **When to use:** Voxel-based games with static or infrequently changing chunks [S2, unofficial].
+* **When not to use:** Dynamic meshes with frequent updates, or non-voxel geometry [G].
+
+## Background
+The method originates from community implementations for voxel-based games like Minecraft, where reducing draw calls is critical for performance [S2, unofficial]. The greedy meshing approach itself is a well-known optimization in voxel rendering, first popularized by the need to render large Minecraft worlds efficiently [G]. The specific "flip" logic based on AO sums is documented in community codebases [S1, unofficial].
+
+## Sources
+[S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+[S2] Greedy Mesh generation for a voxel-based game, https://gamedev.stackexchange.com/questions/106168, fetched 2026-10-28 (unofficial)

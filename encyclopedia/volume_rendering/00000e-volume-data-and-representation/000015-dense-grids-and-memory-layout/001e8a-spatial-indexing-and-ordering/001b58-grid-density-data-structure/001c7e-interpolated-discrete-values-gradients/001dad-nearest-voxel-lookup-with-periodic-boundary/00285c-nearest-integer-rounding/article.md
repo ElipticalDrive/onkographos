@@ -1,63 +1,70 @@
 # Nearest Integer Rounding
+
 Also called: Round, Round to nearest integer
+
 ## Overview
-Nearest Integer Rounding rounds a 3D vector to the nearest integer coordinates [S1]. It serves as the fundamental coordinate quantization step in volume rendering, mapping sample points to discrete grid indices [G]. Unlike floor-based indexing which truncates towards zero or negative infinity, this method minimizes spatial quantization error by selecting the nearest grid node [G]. It differs from [Ceil](1574-ceil.md) which always rounds up, and [Floor](1575-floor.md) which always rounds down, by balancing bias in both directions [G].
+Nearest Integer Rounding maps a continuous 3D coordinate to the discrete grid index of the closest voxel center. It serves as the core coordinate quantization step in [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md), determining which voxel stores the value for a given sample point. Unlike [Nearest Neighbor Interpolation](5891-nearest-neighbor-interpolation.md), which may involve texture sampling hardware or specific filtering pipelines, this method is a pure arithmetic operation on coordinates, often implemented as a template function supporting various floating-point precisions.
 
 ## How it works
-**Inputs:** A 3D vector `xyz` of type `Vec3<double>`, `Vec3<float>`, or `Vec3<RealT>` [S1].
-**Outputs:** A coordinate type `CoordT` representing the rounded integer coordinates [S1].
+**Inputs and Outputs:**
+- Input: A 3D vector `xyz` of type `Vec3<RealT>`, where `RealT` is typically `float` or `double`.
+- Output: A coordinate structure `CoordT` (typically an integer-based vector) representing the rounded indices $(i, j, k)$.
 
 **Data Structures:**
-The input is a 3-element vector [S1]. The output is a scalar or vector of integer type, depending on the template specialization [S1].
+- `Vec3T<RealT>`: A template class representing a 3D vector with components `x`, `y`, `z`.
+- `CoordT`: A coordinate type, usually composed of integer types (e.g., `int32_t`), capable of storing grid indices.
 
-**Steps:**
-1. For each component $c \in \{x, y, z\}$ of the input vector $xyz$:
-   - Let $v = xyz.c$.
-   - Compute the rounded integer $r = \text{round}(v)$.
-   - Cast $r$ to `CoordT` [S1].
+**Algorithm:**
+The operation is performed component-wise. For each component $c \in \{x, y, z\}$ of the input vector:
+1. Let $v$ be the floating-point value of the component.
+2. Compute the nearest integer $n$ to $v$.
+3. The standard rounding rule (round half to even or round half away from zero, depending on the underlying C++ `round` implementation) is applied. In the context of the source library (OpenVDB), this typically delegates to standard library rounding functions.
 
-**Formulas:**
-$$ r_c = \text{round}(xyz_c) $$
-where $r_c$ is the integer result for component $c$ [S1].
-
-**Parameters:**
-- `xyz`: The input floating-point coordinates [S1].
-- `CoordT`: The target integer type for the output [S1].
-- `RealT`: The floating-point type of the input (double, float, etc.) [S1].
-
-**Edge Cases and Pitfalls:**
-- The source does not specify tie-breaking rules, overflow handling, or negative zero behavior [S1]. Standard floating-point rounding applies [G].
+**Formula:**
+$$ n_c = \text{round}(v_c) $$
+where $n_c$ is the integer result for component $c$, and $v_c$ is the input floating-point value.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def Round(xyz, CoordT=int):
+def Round(xyz: Vec3[float]) -> Coord:
     """
     Rounds a 3D vector to the nearest integer coordinates.
-    Args:
-        xyz: Input vector of type Vec3<double>, Vec3<float>, or Vec3<RealT>.
-        CoordT: Target integer type for the output.
-    Returns:
-        A tuple of three integers representing the rounded coordinates.
+    Supports float and double precisions.
     """
-    return (CoordT(round(xyz[0])), CoordT(round(xyz[1])), CoordT(round(xyz[2])))
+    # Component-wise rounding
+    # Note: Standard rounding behavior (e.g., round half to even) is assumed
+    # as per typical C++ std::round or equivalent math library behavior.
+    i = round(xyz.x)
+    j = round(xyz.y)
+    k = round(xyz.z)
+    
+    return Coord(i, j, k)
 ```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** When `RealT` is `float`, precision loss may occur for large coordinate values, potentially causing incorrect voxel selection. `double` is preferred for high-precision grid traversal.
+- **Boundary Conditions:** This function does not handle out-of-bounds indices. Wrapping or clamping must be handled by the caller (e.g., in [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md)).
+- **Halfway Values:** The behavior for values exactly halfway between two integers (e.g., 2.5) depends on the underlying rounding implementation. It is critical to verify if the implementation uses "round half to even" or "round half away from zero" for consistency in edge cases.
 
 ## Subtopics
 
 ### Ceil
-Returns the ceiling of a floating-point value as an `int32_t` [S1]. It always rounds up to the nearest integer greater than or equal to the input [S1]. Defined for both `double` and `float` inputs [S1]. Use when you need to ensure coverage of the entire voxel space without gaps, such as in bounding box calculations or when sampling requires including the upper boundary [G].
+Returns the ceiling of a floating-point value as an `int32_t`. It rounds up to the nearest integer greater than or equal to the input. Useful for determining the upper bound of a voxel span. Defined for both `float` and `double` inputs.
+
+### Fract
+Returns the fractional part of a floating-point value. Defined as $x - \lfloor x \rfloor$, where $\lfloor x \rfloor$ is the floor of $x$. The result is in the range $[0, 1)$. Useful for computing interpolation weights or relative positions within a voxel. Defined for both `float` and `double` inputs.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per component [G].
-- **Memory Complexity:** $O(1)$ [G].
-- **Performance:** Extremely fast, typically mapping to a single CPU instruction or a highly optimized library call [G].
-- **Strengths:** Minimal quantization error compared to floor/ceil; simple implementation [G].
-- **Limitations:** Does not handle out-of-bounds indices (that is handled by the parent [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md)); tie-breaking behavior may vary across platforms if not explicitly standardized [G].
+- **Time Complexity:** $O(1)$ per component. The operation is a simple arithmetic call.
+- **Memory Complexity:** $O(1)$. No additional memory allocation.
+- **Performance:** Extremely fast, typically inlined by compilers. Suitable for high-frequency calls in ray marching or grid traversal loops.
+- **Strengths:** Deterministic, precise (with `double`), and independent of hardware texture units.
+- **Limitations:** Does not handle boundary conditions; requires caller to manage out-of-bounds indices.
 
 ## Background
-The `Round` and `Ceil` functions are part of the `nanovdb::math` namespace in OpenVDB, a library for sparse volumetric data [S1]. They are designed for high-performance GPU and CPU execution, indicated by the `__hostdev__` qualifiers [S1]. The implementation is templated to support various floating-point precisions and coordinate types, ensuring flexibility in volume rendering pipelines that may use single or double precision [S1].
+This method is part of the `nanovdb::math` namespace in OpenVDB, a library for sparse volumetric data. It provides low-level mathematical utilities for grid operations, including coordinate rounding, which is fundamental to voxel-based rendering and simulation. The implementation is templated to support various vector and coordinate types, ensuring flexibility across different OpenVDB configurations.
 
 ## Sources
 [S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24

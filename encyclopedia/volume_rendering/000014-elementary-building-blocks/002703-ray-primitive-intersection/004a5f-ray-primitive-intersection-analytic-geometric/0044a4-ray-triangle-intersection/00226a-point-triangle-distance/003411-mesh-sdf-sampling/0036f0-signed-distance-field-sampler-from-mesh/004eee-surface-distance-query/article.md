@@ -1,0 +1,77 @@
+# Surface Distance Query
+
+Also called: Closest Surface Query, Minimum Surface Distance Search
+
+## Overview
+Surface Distance Query finds the minimum distance from a query point to any surface in a given list, and optionally identifies the closest surface object [S1, unofficial]. It serves as the core lookup mechanism for Signed Distance Field Samplers from Mesh, enabling the determination of whether a point lies inside or outside a geometry by comparing its distance to the mesh surface [S1, unofficial]. Unlike analytic ray-primitive intersection which determines visibility along a ray, this query is a static spatial search over a discrete set of surfaces for a specific point.
+
+## How it works
+**Inputs:**
+- `point`: A 3D coordinate $(x, y, z)$ in world space.
+- `surfaces`: A list of surface objects, each providing a method to compute signed distance to the point.
+- `MAX_DISTANCE`: The upper bound for valid distances (default 2000.0f) [S1, unofficial].
+
+**Outputs:**
+- `min_distance`: The shortest distance from `point` to any surface in the list.
+- `closest_surface`: The surface object corresponding to `min_distance`, or null if no surface is closer than `MAX_DISTANCE`.
+
+**Data Structures:**
+- `Surface`: An interface or class representing a geometric primitive (e.g., triangle, mesh) with a method `distance(Point3D p)` returning the signed distance.
+- `List<Surface>`: An ordered collection of `Surface` instances.
+
+**Algorithm:**
+1. Initialize `min_distance` to `MAX_DISTANCE` [S1, unofficial].
+2. Initialize `closest_surface` to `null` [S1, unofficial].
+3. For each `surface` in `surfaces`:
+   a. Compute `d = surface.distance(point)` [S1, unofficial].
+   b. If `d < min_distance`:
+      i. Set `min_distance = d` [S1, unofficial].
+      ii. Set `closest_surface = surface` [S1, unofficial].
+4. Return `min_distance` and `closest_surface` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def surface_distance_query(point, surfaces, max_distance=2000.0):
+    min_distance = max_distance
+    closest_surface = None
+    
+    for surface in surfaces:
+        # Compute signed distance from point to this specific surface
+        d = surface.distance(point)
+        
+        # Update if this surface is closer
+        if d < min_distance:
+            min_distance = d
+            closest_surface = surface
+            
+    return min_distance, closest_surface
+```
+
+**Parameters:**
+- `MAX_DISTANCE`: 2000.0f [S1, unofficial]. This acts as a sentinel value to ignore surfaces that are too far away, effectively treating them as non-existent for the query.
+- `MIN_DISTANCE`: 0.2f [S1, unofficial]. While defined in the source context, it is not explicitly used in the query logic described, but may be relevant for downstream ray marching steps to prevent self-intersection or jitter.
+
+**Edge Cases:**
+- **Empty List:** If `surfaces` is empty, the function returns `MAX_DISTANCE` and `null`.
+- **No Close Surface:** If all surfaces are farther than `MAX_DISTANCE`, the result is `MAX_DISTANCE` and `null`.
+- **Precision:** Floating-point comparisons (`d < min_distance`) are subject to standard IEEE 754 precision limits.
+
+## Subtopics
+
+### [3D Empty Space Supervision](14034-3d-empty-space-supervision.md)
+Uses estimated surface distances to derive emptiness and surfaceness scores for neural radiance field regularization. It sets itself apart by using the query results to penalize solid object codes in free space, complementing 2D pixel-level supervision.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of surfaces in the list. The algorithm iterates through every surface exactly once.
+- **Memory Complexity:** $O(1)$ auxiliary space, excluding the storage of the surface list itself.
+- **Performance:** The performance is linearly dependent on the number of surfaces. For large meshes, this naive iteration is inefficient. However, in the context of the provided source, it is used for relatively simple scenes or as a conceptual baseline for ray marching shaders [S1, unofficial].
+- **Strengths:** Simple to implement; no complex spatial data structures (like BVH or KD-trees) are required for the basic definition.
+- **Limitations:** Does not scale well to complex scenes with many triangles. It does not utilize spatial coherence or acceleration structures.
+
+## Background
+The method is described in the context of a Java-based ray marching shader implementation [S1, unofficial]. It is part of a `SurfaceShader` class that processes rendering faces by querying distances to a list of surfaces. The implementation uses a fixed maximum distance of 2000.0f and a minimum distance of 0.2f, typical for real-time ray marching applications to bound the search space and avoid numerical instability near the camera or self-intersection [S1, unofficial].
+
+## Sources
+[S1] conradplake/ray-marching-shader, https://github.com/conradplake/ray-marching-shader, fetched 2026-10-27 (unofficial)

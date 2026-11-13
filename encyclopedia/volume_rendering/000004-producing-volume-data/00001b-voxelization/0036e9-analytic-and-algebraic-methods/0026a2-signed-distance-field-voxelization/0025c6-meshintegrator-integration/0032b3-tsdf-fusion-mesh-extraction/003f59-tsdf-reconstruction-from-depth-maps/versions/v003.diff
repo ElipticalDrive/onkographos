@@ -1,0 +1,200 @@
+--- v002.md
++++ v003.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-This method converts per-surfel depth outputs from a 2D Gaussian Splatting (or similar primitive-based) renderer into a unified 3D mesh by computing a robust depth value per pixel and fusing the resulting depth maps via Truncated Signed Distance Function (TSDF) fusion [S1]. It differs from direct neural rendering mesh extraction by relying on explicit geometric fusion of rendered depth maps rather than differentiable surface optimization [S1]. It serves as the final step in the pipeline, taking the depth and color maps produced by [TSDF Fusion Mesh Extraction](6831-tsdf-fusion-mesh-extraction.md) (which uses Open3D's ScalableTSDFVolume) and providing the specific algorithmic details for generating the input depth maps and configuring the fusion parameters [S1].
++This method converts per-surfel depth outputs from a primitive-based renderer into a unified 3D mesh by computing a robust depth value per pixel and fusing the resulting depth maps via Truncated Signed Distance Function (TSDF) fusion [S1]. It differs from direct neural rendering mesh extraction by relying on explicit geometric fusion of rendered depth maps rather than differentiable surface optimization [S1]. It serves as the final step in the pipeline, taking the depth and color maps produced by [TSDF Fusion Mesh Extraction](6831-tsdf-fusion-mesh-extraction.md) and providing the specific algorithmic details for generating the input depth maps and configuring the fusion parameters [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Rendered depth maps: For each pixel $p$ in each view, a list of splats $i$ contributing to that pixel, along with their depth $t_i$ and transmittance $T_i$.
+-- Camera intrinsics and extrinsics for each view.
+-- TSDF grid configuration parameters.
++- Rendered depth maps: For each pixel $p$ in each view, a list of splats $i$ contributing to that pixel, along with their depth $t_i$ and transmittance $T_i$ [S1].
++- Camera intrinsics and extrinsics for each view [S1].
++- TSDF grid configuration parameters [S1].
+ 
+ **Outputs:**
+-- A fused TSDF volume.
+-- A mesh extracted from the TSDF volume (typically via Marching Cubes, as handled by the parent method).
++- A fused TSDF volume [S1].
++- A mesh extracted from the TSDF volume (typically via Marching Cubes, as handled by the parent method) [S1].
+ 
+ **Data Structures:**
+-- **TSDF Volume:** A 3D grid of voxels. Each voxel stores a weighted average distance value and a weight accumulator.
+-- **Voxel Layout:** Not explicitly defined in the sources, but standard TSDF implementations store a float for the distance value and a float for the weight [G].
++- **TSDF Volume:** A 3D grid of voxels. Each voxel stores a weighted average distance value and a weight accumulator [G].
++- **Voxel Layout:** Standard TSDF implementations store a float for the distance value and a float for the weight [G].
+ - **Parameters:**
+   - Voxel size: $0.004$ [S1].
+@@ -28,5 +28,5 @@
+ 
+ 1. **Compute Median Depth per Pixel:**
+-   For each pixel $p$ in a rendered depth map, identify all splats $i$ that contribute to that pixel. Calculate the transmittance $T_i$ for each splat. Select the maximum depth $t_i$ among all splats where the transmittance $T_i$ exceeds $0.5$. This value is the median depth $t_{median}$ for the pixel [S1].
++   For each pixel $p$ in a rendered depth map, identify all splats $i$ that contribute to that pixel [S1]. Calculate the transmittance $T_i$ for each splat [S1]. Select the maximum depth $t_i$ among all splats where the transmittance $T_i$ exceeds $0.5$ [S1]. This value is the median depth $t_{median}$ for the pixel [S1].
+    
+    Formula:
+@@ -35,9 +35,9 @@
+ 2. **TSDF Fusion:**
+    Fuse the computed $t_{median}$ depth maps from all views into a single 3D representation using Truncated Signed Distance Fusion (TSDF) via Open3D [S1].
+-   - For each view, project the depth map into the 3D TSDF volume.
++   - For each view, project the depth map into the 3D TSDF volume [S1].
+    - For each voxel intersected by a ray from the camera through a pixel with valid depth:
+-     - Compute the signed distance from the voxel center to the depth surface.
+-     - If the absolute distance is less than the truncation threshold ($0.02$), update the voxel's TSDF value using a weighted average based on the new observation and previous observations.
+-     - Accumulate weights to handle multi-view consistency.
++     - Compute the signed distance from the voxel center to the depth surface [G].
++     - If the absolute distance is less than the truncation threshold ($0.02$), update the voxel's TSDF value using a weighted average based on the new observation and previous observations [G].
++     - Accumulate weights to handle multi-view consistency [G].
+ 
+ 3. **Mesh Extraction:**
+@@ -47,73 +47,88 @@
+ 
+ ```python
+-def compute_median_depth(depth_map, splats, transmittances):
++import numpy as np
++
++def compute_median_depth(depth_maps, splat_transmittances):
+     """
+     Computes the median depth for each pixel based on splat contributions.
+-    
+     Args:
+-        depth_map: List of depths t_i for each splat i contributing to each pixel.
+-        splats: List of splat objects.
+-        transmittances: List of transmittance T_i for each splat i.
+-        
++        depth_maps: List of 2D arrays, each shape (H, W), containing depth t_i per splat per pixel.
++        splat_transmittances: List of 2D arrays, same shape, containing T_i.
+     Returns:
+         median_depth_map: 2D array of median depths per pixel.
+     """
+-    median_depth_map = np.zeros_like(depth_map[0]) # Assuming all depth maps have same shape
+-    for pixel in range(num_pixels):
+-        # Get all splats contributing to this pixel
+-        contributing_splats = get_contributing_splats(pixel, splats)
+-        contributing_transmittances = get_contributing_transmittances(pixel, transmittances)
+-        contributing_depths = get_contributing_depths(pixel, depth_map)
+-        
+-        # Filter splats with transmittance > 0.5
+-        valid_indices = [i for i, T in enumerate(contributing_transmittances) if T > 0.5]
+-        
+-        if valid_indices:
+-            # Select max depth among valid splats
+-            valid_depths = [contributing_depths[i] for i in valid_indices]
+-            median_depth_map[pixel] = max(valid_depths)
+-        else:
+-            median_depth_map[pixel] = np.nan # No valid splats
+-            
++    median_depth_map = np.full_like(depth_maps[0], np.nan)
++    H, W = depth_maps[0].shape
++    for h in range(H):
++        for w in range(W):
++            valid_depths = []
++            for i in range(len(depth_maps)):
++                if splat_transmittances[i][h, w] > 0.5:
++                    valid_depths.append(depth_maps[i][h, w])
++            if valid_depths:
++                median_depth_map[h, w] = max(valid_depths)
+     return median_depth_map
+ 
+ def tsdf_fusion(median_depth_maps, camera_poses, intrinsics, voxel_size=0.004, truncation_threshold=0.02):
+     """
+-    Fuses median depth maps into a TSDF volume using Open3D.
+-    
++    Fuses median depth maps into a TSDF volume using a standard weighted integration scheme.
+     Args:
+         median_depth_maps: List of 2D arrays containing median depths.
+-        camera_poses: List of 4x4 transformation matrices for each view.
+-        intrinsics: Camera intrinsic matrix.
++        camera_poses: List of 4x4 numpy arrays for camera-to-world transforms.
++        intrinsics: 3x3 numpy array for camera intrinsic matrix.
+         voxel_size: Size of each voxel in meters.
+         truncation_threshold: Maximum distance to consider for TSDF update.
+-        
+     Returns:
+-        tsdf_volume: Open3D TSDF volume object.
++        tsdf_volume: 3D numpy array of TSDF values.
+     """
+-    # Initialize TSDF volume using Open3D
+-    # Note: The exact initialization parameters (volume extent, resolution) 
+-    # are not specified in the sources, but are required for implementation [G].
+-    tsdf_volume = o3d.pipelines.integration.ScalableTSDFVolume(
+-        voxel_length=voxel_size,
+-        sdf_trunc=truncation_threshold,
+-        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+-    )
++    # Initialize TSDF volume dimensions based on scene bounds [G]
++    # Not given in the sources. Standard practice allocates a 3D grid covering the camera frustums.
++    D, H_v, W_v = 64, 256, 256 # Placeholder dimensions for implementation [G]
++    tsdf_volume = np.zeros((D, H_v, W_v))
++    weight_volume = np.zeros((D, H_v, W_v))
+     
+     for depth_map, pose in zip(median_depth_maps, camera_poses):
+-        # Create RGBD image from depth map (color can be dummy or from color map)
+-        # Note: Color map integration is not detailed in the sources for this specific step [G].
+-        rgbd_image = o3d.geometry.RGBDImage.create_from_depth_and_color(
+-            o3d.geometry.Image(depth_map.astype(np.float32)),
+-            o3d.geometry.Image(np.zeros_like(depth_map).astype(np.uint8)) # Dummy color
+-        )
+-        
+-        # Integrate into TSDF volume
+-        tsdf_volume.integrate(
+-            rgbd_image,
+-            intrinsics=intrinsics,
+-            extrinsic=pose
+-        )
+-        
++        H, W = depth_map.shape
++        for h in range(H):
++            for w in range(W):
++                depth_val = depth_map[h, w]
++                if np.isnan(depth_val):
++                    continue
++                
++                # Compute ray direction in world space
++                cam_center = np.linalg.inv(pose)[:3, 3]
++                pixel_uv = np.array([w, h, 1.0])
++                ray_dir_cam = np.linalg.inv(intrinsics) @ pixel_uv
++                ray_dir_world = (pose[:3, :3] @ ray_dir_cam)
++                ray_dir_world /= np.linalg.norm(ray_dir_world)
++                
++                # Traverse voxels along the ray within the truncation range
++                # Standard voxel traversal algorithm [G]
++                step_size = voxel_size
++                t = 0.0
++                while t < truncation_threshold * 2.0:
++                    voxel_center_world = cam_center + ray_dir_world * (depth_val + t)
++                    # Convert world coordinates to voxel indices
++                    scene_origin = np.array([-1.0, -1.0, -1.0]) # Placeholder [G]
++                    voxel_idx = (
++                        int((voxel_center_world[0] - scene_origin[0]) / voxel_size),
++                        int((voxel_center_world[1] - scene_origin[1]) / voxel_size),
++                        int((voxel_center_world[2] - scene_origin[2]) / voxel_size)
++                    )
++                    
++                    if 0 <= voxel_idx[0] < D and 0 <= voxel_idx[1] < H_v and 0 <= voxel_idx[2] < W_v:
++                        # Compute signed distance from voxel center to depth surface
++                        signed_dist = -t
++                        
++                        # Update TSDF value using weighted average
++                        current_val = tsdf_volume[voxel_idx]
++                        current_weight = weight_volume[voxel_idx]
++                        new_weight = 1.0
++                        
++                        if abs(signed_dist) < truncation_threshold:
++                            tsdf_volume[voxel_idx] = (current_val * current_weight + signed_dist * new_weight) / (current_weight + new_weight)
++                        weight_volume[voxel_idx] += new_weight
++                    
++                    t += step_size
+     return tsdf_volume
+ ```
+@@ -125,6 +140,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not explicitly given in the sources. However, the method is noted to require half the computation time of GOF (Geometric Optimization Framework) on the TNT dataset [S1].
+-- **Memory Complexity:** Not explicitly given. The parent method uses Open3D's ScalableTSDFVolume, which is designed for scalability [S1].
++- **Time Complexity:** Not explicitly given in the sources. However, the method is noted to require half the computation time of GOF on the TNT dataset [S1].
++- **Memory Complexity:** Not explicitly given in the sources.
+ - **Measured Performance:**
+   - On the TNT dataset, full QGS achieves a mean F1-Score of 0.50 with a training time of 75 minutes [S1].

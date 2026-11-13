@@ -1,0 +1,161 @@
+--- v003.md
++++ v004.md
+@@ -4,99 +4,89 @@
+ 
+ ## Overview
+-Unquantization functions reconstruct continuous or high-precision floating-point values from discrete, integer-quantized representations. In the context of [Wavelet and Transform-based Compression](52-wavelet-and-transform-based-compression.md), specifically [Value compression](53-value-compression.md) using [Quantization](5935-quantization.md), these functions serve as the inverse of the quantization step. Unlike [Scalar Quantization](5726-scalar-quantization.md) which maps uniformly, these specific implementations handle the non-linear or block-based reconstruction required by formats like BC6H, converting stored integer codes back to half-precision or full float ranges.
++Unquantization functions reconstruct continuous floating-point values from discrete integer codes produced by [Quantization](5935-quantization.md). In the context of BC6H compression, these functions map 10-bit or 7-bit integer indices back to half-precision or full-precision float ranges. They differ from sibling methods by their specific fixed-point arithmetic implementations designed for hardware acceleration in block compression, prioritizing low-latency reconstruction over general-purpose precision.
+ 
+ ## How it works
+-The method operates on integer codes produced by the quantization stage. It supports two primary modes: basic half-precision reconstruction and weighted interpolation for higher precision.
++**Inputs:** Integer quantized values (indices), scaling factors, and interpolation weights.
++**Outputs:** Reconstructed floating-point values (half or full precision).
+ 
+-### Inputs and Outputs
+-- **Input**: Integer quantized value(s) $I$, scale factor $S$, and optionally a weight $W$ and endpoint values.
+-- **Output**: Reconstructed floating-point value(s) $\hat{x}$.
++**Data Structures:**
++- `Int(x)`: The integer code (e.g., 10-bit or 7-bit unsigned integer).
++- `Scale`: A normalization factor derived from the quantization step.
++- `weight`: An interpolation factor between two endpoints (0 to 63 for 6-bit weight).
+ 
+-### Data Structures
+-The implementation typically processes blocks of data. For the "Finish Unquantize" variant, inputs include two unquantized endpoints ($E_0, E_1$) and a weight $W$.
++**Formulas:**
+ 
+-### Formulas and Steps
++1.  **Half Precision Unquantization (Unquantize10/9):**
++    Converts an integer code to a half-precision float.
++    $$ \text{Half}(x) = \frac{\text{Int}(x) \times 65536 + 32768}{\text{Scale}} $$
++    Where:
++    - $\text{Int}(x)$ is the input integer value.
++    - $65536$ is $2^{16}$, used for fixed-point scaling.
++    - $32768$ is $2^{15}$, used for rounding (bias).
++    - $\text{Scale}$ is the divisor determined by the quantization range.
+ 
+-#### Basic Unquantization (Half Precision)
+-Reconstructs a half-precision float from an integer code.
++2.  **Finish Unquantization (Interpolation):**
++    Interpolates between two unquantized endpoints using a weight to produce a final float3 result.
++    $$ \text{Result} = \text{f16tof32}\left( \frac{(\text{endpoint0Unq} \times (64 - \text{weight}) + \text{endpoint1Unq} \times \text{weight} + 32) \times 31}{4096} \right) $$
++    Where:
++    - $\text{endpoint0Unq}$ and $\text{endpoint1Unq}$ are the unquantized half-precision values from the first step.
++    - $\text{weight}$ is an integer in $[0, 63]$.
++    - $32$ is the rounding bias for the 6-bit weight interpolation.
++    - $31/4096$ is the scaling factor to map the interpolated integer result back to the float range.
++    - $\text{f16tof32}$ converts the half-precision intermediate result to a full 32-bit float.
+ 
+-1.  **Scale and Offset**: Multiply the integer code $I$ by the scale factor $S$. Add an offset of 32768 to center the rounding.
+-2.  **Division**: Divide the result by the scale factor $S$.
+-3.  **Conversion**: Convert the resulting integer to a half-precision float.
+-
+-$$ \text{Half}(I) = \frac{I \cdot 65536 + 32768}{S} $$
+-
+-Where:
+-- $I$: The integer quantized value.
+-- $S$: The scale factor used during quantization.
+-- The constant 65536 and 32768 are derived from the bit-depth and rounding requirements for half-precision conversion.
+-
+-#### Finish Unquantization (Interpolated)
+-Reconstructs a final float3 value by interpolating between two unquantized endpoints using a weight.
+-
+-1.  **Weighted Sum**: Compute the weighted sum of the two unquantized endpoints $E_0$ and $E_1$ using weight $W$.
+-    $$ \text{Sum} = E_0 \cdot (64 - W) + E_1 \cdot W $$
+-2.  **Rounding Offset**: Add 32 to the sum for rounding.
+-3.  **Scaling**: Multiply by the factor $\frac{31}{4096}$.
+-4.  **Conversion**: Convert the result to a full 32-bit float.
+-
+-$$ \text{Result} = \text{f16tof32}\left( \left( E_0 \cdot (64 - W) + E_1 \cdot W + 32 \right) \cdot \frac{31}{4096} \right) $$
+-
+-Where:
+-- $E_0, E_1$: The unquantized endpoint values (typically half-precision).
+-- $W$: The interpolation weight (integer, range 0-63).
+-- $\text{f16tof32}$: Conversion from half-precision to single-precision float.
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+ def unquantize_half(int_val: int, scale: float) -> float:
+     """
+-    Reconstructs a half-precision float from an integer code.
++    Converts an integer quantized value to half-precision float range.
++    Formula: (Int(x) * 65536 + 32768) / Scale
+     """
+-    # Formula: (Int(x) * 65536 + 32768) / Scale
+-    numerator = int_val * 65536 + 32768
+-    result = numerator / scale
+-    return result
++    # Fixed-point calculation with rounding bias
++    numerator = (int_val * 65536) + 32768
++    return numerator / scale
+ 
+-def finish_unquantize(endpoint0: float, endpoint1: float, weight: int) -> float:
++def finish_unquantize(endpoint0_unq: float, endpoint1_unq: float, weight: int) -> float:
+     """
+-    Interpolates between two unquantized endpoints using a weight and converts to final float3.
++    Interpolates between two unquantized endpoints using a weight.
++    Formula: f16tof32( (endpoint0Unq * (64 - weight) + endpoint1Unq * weight + 32) * (31 / 4096) )
+     """
+-    # Formula: f16tof32( (endpoint0Unq * (64 - weight) + endpoint1Unq * weight + 32) * (31 / 4096) )
++    # Calculate weighted sum with rounding bias
++    # Note: endpoint values are assumed to be in half-precision range or scaled integers
++    # The formula implies integer arithmetic on scaled values before final conversion
++    weighted_sum = (endpoint0_unq * (64 - weight)) + (endpoint1_unq * weight) + 32
++    scaled_result = weighted_sum * (31 / 4096)
+     
+-    # Calculate weighted sum
+-    weighted_sum = endpoint0 * (64 - weight) + endpoint1 * weight
+-    
+-    # Add rounding offset
+-    rounded_sum = weighted_sum + 32
+-    
+-    # Apply scaling factor
+-    scaled_value = rounded_sum * (31 / 4096)
+-    
+-    # Convert to float32 (simulated)
+-    result = float(scaled_value)
+-    return result
++    # Convert to full float32
++    # In implementation, this step handles the final precision conversion
++    return float(scaled_result)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-- **Division by Zero**: Ensure the scale factor $S$ is non-zero.
+-- **Precision Loss**: The conversion from half to float may introduce minor precision artifacts if not handled correctly.
+-- **Weight Range**: The weight $W$ is typically constrained to an integer range (e.g., 0-63). Values outside this range may produce incorrect interpolation results.
++**Parameters:**
++- `scale`: Typically derived from the maximum representable value in the quantization range. Not given in the sources.
++- `weight`: Integer in range $[0, 63]$.
++
++**Edge Cases:**
++- Division by zero if `Scale` is 0.
++- Overflow if `Int(x)` is large and `Scale` is small.
++- Precision loss during `f16tof32` conversion if not handled correctly.
+ 
+ ## Subtopics
+ 
+ ### Finish Unquantize
+-Interpolates between two unquantized endpoints using a weight and converts to final float3. It is used when higher precision is required than what single endpoints provide. Choose this when the compression format uses weighted interpolation between endpoints (e.g., BC6H). Link: [Finish Unquantize](#finish-unquantize).
++Interpolates between two unquantized endpoints using a weight and converts to final float3. It is used when a block requires more than two representative values, allowing for finer granularity in color representation. Choose this when higher visual quality is needed at the cost of additional computation. Link to [Quantization](5935-quantization.md).
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per value.
+-- **Memory Complexity**: $O(1)$ auxiliary space.
+-- **Performance**: Very fast, suitable for real-time GPU decompression.
+-- **Strengths**: Efficient reconstruction of compressed data.
+-- **Limitations**: Precision is limited by the original quantization step.
++- **Time Complexity:** O(1) per pixel/voxel.
++- **Memory Complexity:** O(1).
++- **Performance:** Highly optimized for GPU hardware due to fixed-point arithmetic.
++- **Strengths:** Low latency, hardware-friendly.
++- **Limitations:** Limited precision compared to full float32.
++- **When to use:** Real-time rendering with compressed textures.
++- **When not to use:** High-precision scientific visualization.
+ 
+ ## Background
+-Originating from real-time BC6H compression implementations, these functions are part of the decompression pipeline for block-compressed textures. They address the need to efficiently convert stored integer codes back to usable floating-point values for rendering.
++Originated in the context of BC6H texture compression, developed for efficient real-time rendering. The method is part of the broader family of transform-based compression techniques.
+ 
+ ## Sources
