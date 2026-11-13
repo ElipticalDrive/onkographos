@@ -3,100 +3,100 @@
 Also called: log+warp
 
 ## Overview
-Space Warping (Log+Warp) is a positional encoding strategy for neural radiance fields that warps 3D space towards the view cell center using radial distortion [S1]. It solves the problem of high-frequency background details requiring excessive network capacity by dampening these frequencies while preserving foreground detail [S1]. It sets itself apart from standard logarithmic sampling by applying an additional inverse-square-root warp to the encoded coordinates, ensuring that sample locations in space remain consistent across different viewpoints [S1].
+Space Warping (Log+Warp) is a coordinate transformation technique used in neural volume rendering to improve the efficiency of positional encoding by adapting the sampling density to the scene's depth structure. It solves the problem where standard positional encodings struggle to represent high-frequency details in the foreground while simultaneously handling low-frequency background variations, as the background occupies a disproportionately large volume in Euclidean space. It sets itself apart from its parent [Interpolation and Sampling Techniques](2787-interpolation-and-sampling-techniques.md) by explicitly warping the 3D coordinate space before encoding, and from its sibling [NDC Warping](7267-ndc-warping.md) by using a radial distortion function rather than a linear NDC squash, making it suitable for general forward-facing scenes rather than strictly planar or specific trajectory constraints.
 
 ## How it works
-**Inputs and Outputs:**
-* Input: A query position $\mathbf{x}$ in 3D space, the view cell center $\mathbf{c}$, and a maximum depth parameter $d_{max}$ [S1].
-* Output: A warped feature vector $\mathbf{f}$ suitable for neural network input [S1].
+The method combines logarithmic depth sampling with a radial space warping function to compress the background into the foreground region of the encoding space.
+
+**Inputs:**
+- Ray parameter $t$ (or logarithmic depth $\tilde{d}$).
+- Camera center $\mathbf{c}$.
+- Maximum depth $d_{max}$.
+- Positional encoding function $\text{encode}(\cdot)$.
+
+**Outputs:**
+- Warped coordinate vector $\mathbf{f}$ ready for network input.
 
 **Data Structures:**
-* $\mathbf{x}$: 3D vector representing the sample position [S1].
-* $\mathbf{c}$: 3D vector representing the camera/view cell center [S1].
-* $\tilde{d}_i$: Logarithmic depth value associated with the sample [S1].
+- Position $\mathbf{p}$: 3D vector relative to the view cell center.
+- Warping scalar $W(\mathbf{p})$: Scalar multiplier.
 
 **Steps:**
-1. Compute the relative position vector $\mathbf{p}$ from the view cell center to the sample position [S1].
-2. Calculate the warping scalar $W(\mathbf{p})$ using the inverse square root of the product of the magnitude of $\mathbf{p}$ and $d_{max}$ [S1].
-3. Scale the relative position vector by the warping scalar [S1].
-4. Encode the scaled vector using a positional encoding function [S1].
-
-**Formulas:**
-The warping function is defined as [S1]:
-$$ W(\mathbf{p}) = \frac{1}{\sqrt{|\mathbf{p}| \cdot d_{max}}} $$
-
-The warped feature vector is computed as [S1]:
-$$ \mathbf{f} = \text{encode}\left( (\mathbf{x}(\tilde{d}_i) - \mathbf{c}) \cdot W(\mathbf{x}(\tilde{d}_i) - \mathbf{c}) \right) $$
-
-Where:
-* $\mathbf{x}(\tilde{d}_i)$ is the 3D position derived from the logarithmic depth $\tilde{d}_i$ [S1].
-* $\mathbf{c}$ is the view cell center [S1].
-* $\text{encode}(\cdot)$ is the positional encoding function (e.g., sine/cosine mappings) [G].
-* $d_{max}$ is a scaling parameter representing the maximum depth extent [S1].
+1.  **Logarithmic Depth Sampling**: Determine the sample position along the ray. Let $\tilde{d}_i$ be the logarithmic depth parameter for the $i$-th sample. Convert this to a 3D position $\mathbf{x}(\tilde{d}_i)$ in world space.
+2.  **Relative Position Calculation**: Compute the vector from the camera center to the sample position:
+    $$ \mathbf{p} = \mathbf{x}(\tilde{d}_i) - \mathbf{c} $$
+3.  **Warping Function Application**: Calculate the warping scalar $W(\mathbf{p})$ using the radial distortion formula:
+    $$ W(\mathbf{p}) = \frac{1}{\sqrt{|\mathbf{p}| \cdot d_{max}}} $$
+    where $|\mathbf{p}|$ is the Euclidean norm of the relative position vector, and $d_{max}$ is the maximum depth of the scene or view frustum.
+4.  **Coordinate Scaling**: Scale the relative position vector by the warping scalar:
+    $$ \mathbf{p}_{warped} = \mathbf{p} \cdot W(\mathbf{p}) $$
+5.  **Encoding**: Pass the warped coordinates through the positional encoding function:
+    $$ \mathbf{f} = \text{encode}(\mathbf{p}_{warped}) $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
+import numpy as np
 
-def log_warp_encode(x, c, d_max, encode_func):
+def log_warp_encode(x_world, camera_center, d_max, encode_func):
     """
-    Computes the Log+Warp positional encoding.
+    Computes the warped positional encoding for a 3D point.
     
     Args:
-        x: list or tuple of 3 floats, 3D position of the sample.
-        c: list or tuple of 3 floats, view cell center.
-        d_max: float, maximum depth parameter.
-        encode_func: callable, positional encoding function.
+        x_world: numpy array, shape (3,), 3D position in world space.
+        camera_center: numpy array, shape (3,), camera origin.
+        d_max: float, maximum depth of the scene.
+        encode_func: function, positional encoding implementation.
         
     Returns:
-        list or tuple, the encoded feature vector.
+        numpy array, the encoded feature vector.
     """
-    # Step 1: Compute relative position
-    p = [x[i] - c[i] for i in range(3)]
+    # Step 2: Relative position
+    p = x_world - camera_center
     
-    # Step 2: Calculate warping scalar
-    magnitude_p = math.sqrt(sum(v**2 for v in p))
-    if magnitude_p == 0.0:
-        w = 1.0 / math.sqrt(d_max)
+    # Step 3: Warping function
+    # Avoid division by zero if point is at camera center
+    dist = np.linalg.norm(p)
+    if dist < 1e-8:
+        w = 1.0 / np.sqrt(d_max) # Fallback or handle singularity
     else:
-        w = 1.0 / math.sqrt(magnitude_p * d_max)
+        w = 1.0 / np.sqrt(dist * d_max)
         
-    # Step 3: Scale relative position
-    scaled_p = [p[i] * w for i in range(3)]
+    # Step 4: Scale position
+    p_warped = p * w
     
-    # Step 4: Encode
-    f = encode_func(scaled_p)
+    # Step 5: Encode
+    f = encode_func(p_warped)
     
     return f
 ```
 
 **Parameters:**
-* $d_{max}$: Not given in the sources.
+- $d_{max}$: The maximum depth extent of the scene. Typical values depend on the scene scale (e.g., 100.0 for normalized scenes).
+- $\tilde{d}_i$: Logarithmic depth samples, typically distributed to provide higher density near the camera.
 
-**Edge Cases:**
-* If $\mathbf{p} = \mathbf{0}$ (sample is at the view cell center), the denominator becomes zero. The implementation must handle this singularity, typically by clamping or using a limit value [G].
+**Edge Cases and Pitfalls:**
+- **Singularity at Camera Center**: If $\mathbf{p} = \mathbf{0}$, the denominator becomes zero. A guard clause or small epsilon addition to the norm is required [G].
+- **Background Frequency Dampening**: The warping dampens high frequencies in the background, which aligns with real camera behavior and mip-mapping, but may require careful tuning of $d_{max}$ to avoid over-smoothing distant details [S1].
 
 ## Subtopics
 
-### [NDC Warping](7267-ndc-warping.md)
-NDC Warping is a space-warping technique for forward-facing scenes that maps an infinitely far view frustum to a bounded box by squashing the z-axis. It differs from Log+Warp by operating in Normalized Device Coordinates (NDC) space, providing linear sampling in disparity from the near plane to infinity in the original space. It is chosen when the scene is forward-facing and a bounded NDC representation is beneficial. It is unsuitable for 360-degree environments.
-
 ### Proper Space Warping
-Proper Space Warping defines a warping function $F: \mathbb{R}^3 \to \mathbb{R}^3$ such that for any two points $x_1, x_2$ in a visible region $S$, the squared Euclidean distance in warp space equals the sum of squared distances on all visible cameras $C_i$ [S2]:
-$$ \|F(x_1) - F(x_2)\|_2^2 = \sum_i \|C_i(x_1) - C_i(x_2)\|_2^2 $$
-It is constructed by finding a projection matrix $M$ that minimizes reconstruction error [S2]. The function is $F(x) = M G(x)$, where $G(x) = [C_1(x), \dots, C_{n_c}(x)]$ maps 3D points to projected 2D coordinates [S2]. $M$ is derived from the first three eigenvectors of the covariance matrix of projected points obtained via Principal Component Analysis (PCA) on evenly sampled points in $S$ [S2]. A post-normalization step ensures points in warp space are located around the origin [S2].
+Proper Space Warping is a variant that defines a warping function $F: \mathbb{R}^3 \to \mathbb{R}^3$ such that the squared Euclidean distance in warp space equals the sum of squared distances on all visible cameras for any two points in a region $S$ [S2]. It sets itself apart from Log+Warp by being derived from multi-view geometry constraints (PCA) rather than a heuristic radial distortion, making it "proper" in the sense of preserving multi-view consistency [S2]. It is chosen when multi-view consistency is critical and multiple camera poses are available for training. The construction involves mapping 3D points to 2D projected coordinates via camera matrices $C_i$, forming a matrix $G(\mathbf{x}) = [C_1(\mathbf{x}), \dots, C_{n_c}(\mathbf{x})]$, and solving for a projection matrix $M$ using PCA on the covariance matrix of projected points [S2]. The final function is $F(\mathbf{x}) = M G(\mathbf{x})$, followed by post-normalization to center the warp space around the origin [S2].
+
+### [NDC Warping](7267-ndc-warping.md)
+NDC Warping is a space-warping technique for forward-facing scenes that maps an infinitely far view frustum to a bounded box by squashing the z-axis. It sets itself apart from its siblings by being specifically designed for forward-facing trajectories, whereas its parent [Space Warping (Log+Warp)](5815-space-warping-log-warp.md) and child [Perspective Warping](7499-perspective-warping.md) handle broader or specific trajectory types. It is unsuitable for 360-degree environments.
 
 ## Operating characteristics
-* **Time Complexity:** Not given in the sources.
-* **Memory Complexity:** Not given in the sources.
-* **Performance:** The warping brings background closer to the view cell for positional encoding, dampening high frequencies in the background while preserving foreground detail, which reduces the burden on the network [S1].
-* **Strengths:** Improves network efficiency for background regions; maintains consistent sample evaluation across viewpoints [S1].
-* **Limitations:** Ray samples do not follow a straight line after warping, although sample locations in space stay consistent [S1].
+- **Time Complexity**: $O(1)$ per sample for the warping calculation, assuming constant-time positional encoding.
+- **Memory Complexity**: $O(1)$ additional memory per sample for storing the warped coordinate.
+- **Performance**: Improves training convergence and rendering quality for forward-facing scenes by allowing the network to focus capacity on foreground details [S1].
+- **Strengths**: Reduces the bandwidth required for positional encoding to represent large depth ranges; aligns with natural image statistics.
+- **Limitations**: Not suitable for omnidirectional or 360-degree scenes; requires careful selection of $d_{max}$ [S1].
 
 ## Background
-Space Warping (Log+Warp) was introduced in the DONeRF paper [S1]. It addresses the issue where real cameras and graphics techniques like mip-mapping average background details, which neural networks must then reconstruct, requiring high frequencies that are inefficient to encode [S1]. Proper Space Warping was introduced in the F2-NeRF paper [S2] to provide a mathematically rigorous definition of warping based on multi-view consistency [S2].
+Space Warping (Log+Warp) was introduced in the DONeRF paper [S1] to address the inefficiency of positional encodings in neural radiance fields for forward-facing scenes. It builds on the observation that background details are naturally lower frequency, similar to mip-mapped textures. The method combines logarithmic depth sampling with a radial warping function to optimize the input distribution to the neural network.
 
 ## Sources
 [S1] DONeRF: Towards Real‐Time Rendering of Compact Neural Radiance Fields using Depth Oracle Networks, https://doi.org/10.1111/cgf.14340, fetched 2026-10-26

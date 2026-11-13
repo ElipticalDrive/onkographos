@@ -1,0 +1,253 @@
+--- v005.md
++++ v006.md
+@@ -4,145 +4,136 @@
+ 
+ ## Overview
+-This method approximates directional shadows and light scattering in volume rendering by computing the extinction of light intensity for voxels using a 3D Summed Area Table (SAT) [S1, unofficial]. It solves the problem of efficiently calculating soft shadows and ambient occlusion (AO) without propagating illumination from outside the volume or performing expensive per-sample shadow ray tracing [S1, unofficial]. Unlike half-angle slicing [Sibling: Half-angle slicing] or explicit sampling [Sibling: Explicit Shadow Rays], it handles any light type and multiple sources by covering the shadow cone with axis-aligned cuboids [S1, unofficial].
++This method approximates directional shadows and light scattering in volume rendering by computing the extinction of light intensity for voxels using a 3D Summed Area Table (SAT) [S1, unofficial]. It solves the problem of efficiently calculating soft shadows and ambient occlusion (AO) without propagating illumination from outside the volume or requiring hundreds of explicit shadow ray samples [S1, unofficial]. Unlike half-angle slicing [Sibling: Half-angle Slicing], it handles any light type and multiple sources; unlike Ropinski et al.'s method [Sibling: Illumination Caching], it computes extinction directly within the volume, allowing light sources to be placed inside or on the border of the dataset without special handling [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume dataset $V$, transfer function $T$, light sources (position, type, color), cone angle $\Psi$, sampling frequency, growth rate, and weighting function $h$.
+-*   **Output:** Light cache texture containing shadow and AO terms, applied during ray casting to modulate sample color.
++*   **Input:** Scalar volume dataset $V$, transfer function $TF$, light source positions and types, camera parameters.
++*   **Output:** Precomputed light cache texture containing shadow and AO/color bleeding terms, applied during raycasting.
+ 
+ **Data Structures:**
+-1.  **3D Summed Area Table (SAT):** A 3D texture where each voxel stores the cumulative sum of extinction coefficients $\sigma$ from the origin $(0,0,0)$ to that voxel. Constructed once per transfer function or light source change [S1, unofficial].
+-2.  **Light Cache Texture:** Stores precomputed shadow and AO terms. Updated every frame if lights move or TF changes, or once if static [S1, unofficial].
++*   **3D Summed Area Table (SAT):** A 3D texture where each texel stores the cumulative sum of extinction coefficients along the three axes. The SAT is constructed from the volume data mapped via the transfer function [S1, unofficial].
++*   **Light Cache Texture:** A 3D texture storing precomputed shadow and AO terms. One additional texture lookup per sample is performed during raycasting [S1, unofficial].
++
++**Parameters:**
++*   **Cone angle ($\Psi$):** Defines the angular spread of the shadow cone. Typical values: $1.0^\circ$ to $5.0^\circ$ [S1, unofficial].
++*   **Sampling frequency:** Number of cuboids used for approximation. Typically a few dozen lookups per cone and voxel are sufficient [S1, unofficial].
++*   **Growth rate:** Controls the change of sampling frequency over distance to adjust density [S1, unofficial].
++*   **Weighting function ($h$):** Weights cuboids differently to strengthen or weaken shadow effects [S1, unofficial].
+ 
+ **Steps:**
+-1.  **SAT Construction:** Compute the 3D SAT of extinction coefficients $\sigma$ from the volume data. Time complexity depends on volume size $N^3$ (e.g., 0.311s for $256^3$) [S1, unofficial].
+-2.  **Primary Axis Selection:** For each light source, define a primary axis for sampling. The primary axis is the coordinate axis (X, Y, or Z) with the smallest angle to the vector pointing to the light source [S1, unofficial]. This ensures the best coverage of the cone with axis-aligned cuboids.
+-3.  **Cone Sampling:** Define sampling points along the primary axis using a user-defined sampling frequency and growth rate. The growth rate controls the change of frequency over distance, allowing coarser sampling further away [S1, unofficial].
+-4.  **Cuboid Derivation:** For each sampling point, derive a set of axis-aligned cuboids that approximate the shadow cone. The cuboids are derived from the primary axis sampling and the projection of the query cone onto the primary-secondary axis planes [S1, unofficial].
+-5.  **SAT Lookup:** Perform SAT lookups to sum extinction coefficients for the derived cuboids. The sum represents the total extinction along the cone path [S1, unofficial].
+-6.  **Weighting:** Apply a weighting function $h$ to the cuboid sums to strengthen or weaken the shadow effect [S1, unofficial].
+-7.  **Light Cache Update:** Store the computed shadow and AO terms in the light cache texture. This avoids duplicate queries during ray casting [S1, unofficial].
+-8.  **Ray Casting:** During the standard direct volume ray casting pass, apply illumination terms using one additional texture lookup per sample from the light cache [S1, unofficial].
+-
+-**Formulas:**
+-*   **Cone Angle:** $\Psi$ defines the angular spread of the shadow cone. Typical values: 1.0 to 5.0 degrees [S1, unofficial].
+-*   **Extinction Sum:** For a cuboid $C$, the extinction $E_C$ is obtained via SAT lookup:
+-    $$ E_C = \text{SAT}(C_{max}) - \text{SAT}(C_{min}) $$
+-    where $C_{max}$ and $C_{min}$ are the corner coordinates of the cuboid in the SAT space [S1, unofficial].
+-*   **Shadow Term:** The final shadow term $S$ for a sample is a weighted sum of cuboid extinctions:
+-    $$ S = \sum_{k} h_k \cdot E_{C_k} $$
+-    where $h_k$ is the weight for cuboid $k$ [S1, unofficial].
+-
+-**Parameters:**
+-*   **Cone Angle ($\Psi$):** 1.0–5.0 degrees [S1, unofficial].
+-*   **Sampling Frequency:** Typically a few dozen lookups per cone and voxel [S1, unofficial].
+-*   **Growth Rate:** User-defined, controls sampling density decay with distance [S1, unofficial].
+-*   **Weighting Function ($h$):** User-defined, modulates shadow strength [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Cuboid Artifacts:** Using very few cone samples (e.g., 12) results in clearly visible cuboid artifacts [S1, unofficial].
+-*   **Light Source Position:** The method trivially handles light sources within or on the border of the dataset without additional effort, unlike propagation methods [S1, unofficial].
+-*   **Transfer Function Changes:** The SAT and light cache must be recomputed whenever the transfer function changes, as extinction coefficients depend on the TF [S1, unofficial].
++1.  **Construct SAT:** Build a 3D SAT of extinction coefficients from the volume data. This is done once per transfer function change or light source movement [S1, unofficial].
++2.  **Determine Primary Axis:** For each voxel and light source, define the primary axis for sampling as the coordinate axis with the smallest angle to the vector pointing to the light source [S1, unofficial].
++3.  **Define Sampling Points:** Generate sampling points along the primary axis using the user-defined sampling frequency and growth rate [S1, unofficial].
++4.  **Derive Cuboid Queries:** For each sampling point, derive axis-aligned cuboid queries based on the projection of the query cone onto the primary-secondary axis planes. This ensures the best possible coverage of the cone with axis-aligned lookups [S1, unofficial].
++5.  **Perform SAT Lookups:** Use the SAT to sum extinction coefficients for the derived cuboids covering the cone. Apply the weighting function $h$ if used [S1, unofficial].
++6.  **Store Results:** Store the computed shadow and ambient occlusion/color bleeding terms in the light cache texture [S1, unofficial].
++7.  **Raycasting:** During the direct volume ray casting pass, apply illumination terms using one additional texture lookup per sample [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_sat(volume_data):
++def compute_extinction_sat(volume, transfer_function):
+     """
+-    Compute 3D Summed Area Table of extinction coefficients.
+-    volume_data: 3D array of scalar values.
++    Constructs a 3D Summed Area Table (SAT) for extinction coefficients.
++    volume: 3D array of scalar values.
++    transfer_function: Function mapping scalar value to extinction coefficient.
+     Returns: 3D SAT array.
+     """
+-    # Convert volume data to extinction coefficients using transfer function
+-    extinction = apply_transfer_function(volume_data)
++    # Map volume to extinction coefficients
++    extinction = apply_transfer_function(volume, transfer_function)
+     
+-    # Compute 3D prefix sums
+-    sat = zeros_like(extinction)
+-    for x in range(width):
+-        for y in range(height):
+-            for z in range(depth):
+-                sat[x, y, z] = extinction[x, y, z]
+-                if x > 0: sat[x, y, z] += sat[x-1, y, z]
+-                if y > 0: sat[x, y, z] += sat[x, y-1, z]
+-                if z > 0: sat[x, y, z] += sat[x, y, z-1]
+-                if x > 0 and y > 0: sat[x, y, z] -= sat[x-1, y-1, z]
+-                if x > 0 and z > 0: sat[x, y, z] -= sat[x-1, y, z-1]
+-                if y > 0 and z > 0: sat[x, y, z] -= sat[x, y-1, z-1]
+-                if x > 0 and y > 0 and z > 0: sat[x, y, z] += sat[x-1, y-1, z-1]
++    # Compute 3D SAT
++    # SAT[x, y, z] = sum of extinction[i, j, k] for 0<=i<=x, 0<=j<=y, 0<=k<=z
++    sat = compute_3d_cumulative_sum(extinction)
+     return sat
+ 
+-def get_cuboid_corners(sat_resolution, cone_angle, light_dir, primary_axis):
++def compute_shadow_term(sat, voxel_pos, light_dir, cone_angle, sampling_freq, growth_rate, weighting_func):
+     """
+-    Derive axis-aligned cuboids approximating the shadow cone.
+-    Returns list of cuboid corner tuples (min, max).
++    Computes the shadow term for a voxel using SAT queries.
++    sat: 3D SAT array.
++    voxel_pos: (x, y, z) position of the voxel.
++    light_dir: Unit vector from voxel to light source.
++    cone_angle: Angular spread of the shadow cone (Psi).
++    sampling_freq: Base sampling frequency.
++    growth_rate: Rate of change of sampling frequency over distance.
++    weighting_func: Function to weight cuboids.
++    Returns: Shadow term value.
+     """
+-    # Project cone onto primary-secondary axis planes
+-    # Derive cuboids based on sampling frequency and growth rate
+-    # This is a simplified representation; actual derivation involves
+-    # projecting the cone geometry onto the axes
+-    cuboids = []
+-    # ... implementation details omitted for brevity, see [S1, unofficial] ...
+-    return cuboids
++    # Determine primary axis (axis with smallest angle to light_dir)
++    primary_axis = argmin_angle(light_dir)
++    
++    # Define sampling points along primary axis
++    # Distance from voxel to light source
++    dist = distance(voxel_pos, light_source_pos)
++    
++    # Sampling points depend on frequency and growth rate
++    # This is a simplified representation; actual implementation requires precise geometric derivation
++    sampling_points = []
++    current_freq = sampling_freq
++    for i in range(num_samples):
++        # Calculate position along primary axis based on growth rate
++        pos = voxel_pos + i * step_size * primary_axis_vector
++        sampling_points.append(pos)
++        # Update frequency based on growth rate
++        current_freq *= (1 + growth_rate)
++        
++    shadow_sum = 0.0
++    for point in sampling_points:
++        # Derive cuboid query from point and cone projection
++        cuboid = derive_cuboid(point, light_dir, cone_angle, primary_axis)
++        
++        # Perform SAT lookup for cuboid
++        extinction_sum = sat_lookup(sat, cuboid)
++        
++        # Apply weighting function
++        weight = weighting_func(point, dist)
++        shadow_sum += weight * extinction_sum
++        
++    return shadow_sum
+ 
+-def query_sat(sat, cuboid_corners):
++def raycasting_pass(volume, sat, light_cache, transfer_function, lighting_model):
+     """
+-    Sum extinction coefficients for a cuboid using SAT.
+-    Returns extinction sum.
++    Performs direct volume ray casting with extinction-based shading.
+     """
+-    min_c, max_c = cuboid_corners
+-    # SAT lookup formula
+-    val = sat[max_c]
+-    # Subtract contributions from lower corners
+-    # Add back intersections
+-    # ... standard 3D SAT lookup logic ...
+-    return val
+-
+-def compute_light_cache(sat, light_sources, cone_angle, sampling_freq, growth_rate, weighting_func):
+-    """
+-    Compute shadow and AO terms for all voxels.
+-    Returns light cache texture.
+-    """
+-    light_cache = zeros_like(sat)
+-    for light in light_sources:
+-        primary_axis = get_primary_axis(light.dir)
+-        cuboids = get_cuboid_corners(sat.shape, cone_angle, light.dir, primary_axis)
+-        for voxel in voxels:
+-            extinction_sum = 0
+-            for cuboid in cuboids:
+-                ext = query_sat(sat, cuboid)
+-                extinction_sum += weighting_func(cuboid) * ext
+-            light_cache[voxel] += extinction_sum
+-    return light_cache
+-
+-def ray_cast_with_shadows(ray, volume_data, light_cache, transfer_function):
+-    """
+-    Standard ray casting with shadow modulation.
+-    """
+-    acc_color = 0
+-    acc_alpha = 0
+-    for t in ray_samples:
+-        voxel = sample_volume(ray, t)
+-        color, alpha = transfer_function(voxel)
+-        
+-        # Modulate color with shadow term
+-        shadow_term = sample_light_cache(light_cache, ray, t)
+-        modulated_color = color * (1.0 - shadow_term)
+-        
+-        acc_color += (1.0 - acc_alpha) * modulated_color * alpha
+-        acc_alpha += (1.0 - acc_alpha) * alpha
+-    return acc_color, acc_alpha
++    for each pixel:
++        cast_ray()
++        color = 0.0
++        alpha = 0.0
++        for each sample along ray:
++            # Get base color and opacity from transfer function
++            base_color, opacity = transfer_function(volume[sample_pos])
++            
++            # Get precomputed shadow/AO term from light cache
++            shadow_term = light_cache[sample_pos]
++            
++            # Compute lighting term (e.g., Phong) modulated by shadow
++            # Note: The exact integration with the parent's Phong model is not detailed in [S1, unofficial]
++            # but [S1, unofficial] states one additional texture lookup is sufficient.
++            # Assuming shadow_term modulates the diffuse/specular components.
++            light_intensity = lighting_model(sample_pos, shadow_term)
++            
++            shaded_color = base_color * light_intensity
++            
++            # Front-to-back compositing
++            color += shaded_color * alpha * (1 - alpha)
++            alpha += opacity * (1 - alpha)
++            
++        return color
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   Using very few cone samples (e.g., 12) results in clearly visible cuboid artifacts [S1, unofficial].
++*   The SAT size can be set at a fraction of the volume dataset size, but lower sizes result in more blurred shadows [S1, unofficial].
++*   The method requires recomputation of the SAT and AO/shadow terms when the transfer function changes or light sources move relative to the dataset [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** SAT construction is $O(N^3)$ where $N$ is the volume dimension. Light cache computation is $O(N^3 \cdot K)$ where $K$ is the number of cuboids per voxel. Ray casting adds $O(1)$ per sample for light cache lookup.
+-*   **Memory Complexity:** Requires storage for the SAT ($N^3$) and the light cache ($N^3$).
+-*   **Performance:** On a Mac Pro 2.4GHz dual-Xeon with NVIDIA GeForce GTX 285, SAT construction for $256^3$ takes 0.311s. AO computation for $256^3$ with 3 shells takes 0.0307s, compared to 3.0818s for explicit sampling. Shadow computation for $64^3$ with 50 samples takes 0.0079s/frame [S1, unofficial].
+-*   **Strengths:** Fast, flexible, handles multiple light sources and any light type, handles internal light sources trivially, low cost per frame after precomputation [S1, unofficial].
+-*   **Limitations:** Requires recomputation if TF or light position changes, cuboid artifacts if sampling is too low, limited to directional shadows and AO [S1, unofficial].
+-*   **When to use:** Interactive volume rendering with dynamic transfer functions or light sources, where soft shadows and ambient occlusion are desired [S1, unofficial].
+-*   **When not to use:** When high-quality, physically accurate shadowing is required, or when the volume is static and precomputation is not feasible [S1, unofficial].
++*   **Time Complexity:** SAT construction time scales with volume size. For a $256^3$ volume, SAT construction takes 0.311s; for $64^3$, it takes 0.029s [S1, unofficial]. AO/color bleeding computation for a $256^3$ texture with 3 shells takes 0.0307s, compared to 3.0818s for explicit sampling of radius 7 [S1, unofficial]. Shadow computation for a $64^3$ texture with 50 samples takes 0.0079s/frame [S1, unofficial].
++*   **Memory Complexity:** Requires storage for the 3D SAT and the light cache texture. The SAT size can be smaller than the volume dataset [S1, unofficial].
++*   **Performance:** Interactive performance is achieved. The method is significantly faster than explicit shadow ray sampling (hundreds of samples) [S1, unofficial].
++*   **Strengths:** Fast, flexible, handles any light type and multiple sources, allows light sources inside the volume, low cost for soft shadows [S1, unofficial].
++*   **Limitations:** Requires recomputation on TF or light source changes, potential cuboid artifacts with low sampling [S1, unofficial].
+ 
+ ## Background
+-The method was introduced in "Extinction-based Shading and Illumination in GPU Volume Ray-Casting" by UZH researchers [S1, unofficial]. It was developed to provide interactive performance for volume rendering with complex illumination, addressing the limitations of previous methods like half-angle slicing [Sibling: Half-angle slicing] and explicit shadow ray tracing [Sibling: Explicit Shadow Rays]. The technique leverages the efficiency of Summed Area Tables for fast volume queries [S1, unofficial].
++This method was introduced in the paper "Extinction-based Shading and Illumination in GPU Volume Ray-Casting" by UZH researchers [S1, unofficial]. It was developed to provide interactive volume rendering with dynamic transfer functions and light sources, addressing the limitations of previous methods like half-angle slicing and Ropinski et al.'s approach [S1, unofficial]. It is used in GPU ray-casters for real-time visualization [S1, unofficial].
+ 
+ ## Sources
+-[S1] PDF Extinction-based Shading and Illumination in GPU Volume Ray-Casting - UZH, https://www.ifi.uzh.ch/dam/jcr:ffffffff-9e7f-2af5-ffff-ffffcf9259bb/FastShadows.pdf, fetched 2026-10-30 (unofficial)+[S1] Extinction-based Shading and Illumination in GPU Volume Ray-Casting, https://www.ifi.uzh.ch/dam/jcr:ffffffff-9e7f-2af5-ffff-ffffcf9259bb/FastShadows.pdf, fetched 2026-10-30 (unofficial)

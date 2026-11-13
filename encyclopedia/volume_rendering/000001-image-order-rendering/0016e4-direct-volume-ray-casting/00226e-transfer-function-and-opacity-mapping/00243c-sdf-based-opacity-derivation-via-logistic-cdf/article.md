@@ -3,99 +3,82 @@
 Also called: Alpha compositing via logistic CDF, Alpha computation, Discrete opacity computation from SDF, Eqn. 13, NeuS Opacity Derivation, NeuS Opacity Formula
 
 ## Overview
-This method computes the discrete opacity $\alpha_i$ for a ray segment $[t_i, t_{i+1}]$ in volume rendering by mapping a Signed Distance Function (SDF) $f$ using the Cumulative Distribution Function (CDF) of the logistic distribution [S1, unofficial]. It solves the problem of correctly modeling surface opacity by ensuring the weight function peaks at the surface intersection, thereby avoiding the bias inherent in naive SDF-to-density mappings [S1, unofficial]. Unlike standard transfer functions that map intensity to opacity, this approach derives opacity directly from the geometric probability of surface intersection, building on [Transfer Function and Opacity Mapping](2789-transfer-function-and-opacity-mapping.md).
+This method computes the discrete opacity $\alpha_i$ for a ray segment in volume rendering by mapping a Signed Distance Function (SDF) to opacity using the Cumulative Distribution Function (CDF) of the logistic distribution [S1, unofficial]. It solves the problem of correctly modeling surface opacity by ensuring the weight function peaks at the surface intersection, thereby avoiding the bias inherent in naive SDF-to-density mappings [S1, unofficial]. Unlike standard transfer functions that map scalar values directly to opacity, this approach derives opacity from the geometric gradient of the SDF, ensuring that the accumulated weight is concentrated at the zero-level set of the distance field [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{v}$ (unit vector); a neural network or implicit function $f(\mathbf{p})$ returning the SDF value at position $\mathbf{p}$; a steepness parameter $s > 0$.
-*   **Output:** A tuple $(\mathbf{c}_i, \alpha_i)$ for each sample interval, where $\alpha_i \in [0, 1]$ is the opacity and $\mathbf{c}_i$ is the color (computed separately, see [Transfer Function and Opacity Mapping](2789-transfer-function-and-opacity-mapping.md)).
+**Inputs and Outputs**
+*   **Input**: A ray segment defined by endpoints $t_i$ and $t_{i+1}$, the ray position function $\mathbf{p}(t)$, the SDF function $f(\mathbf{x})$, and the logistic steepness parameter $s$.
+*   **Output**: The discrete opacity $\alpha_i$ for the segment $[t_i, t_{i+1}]$.
 
-**Data Structures:**
-*   **Ray Samples:** An array of $N$ distances $t_0, t_1, \dots, t_N$ along the ray, where $t_0$ is the near plane and $t_N$ is the far plane.
-*   **SDF Values:** An array of scalar values $f_i = f(\mathbf{p}(t_i))$ for each sample point $\mathbf{p}(t_i) = \mathbf{o} + t_i \mathbf{v}$.
+**Data Structures**
+No specific data structures are required beyond the scalar values retrieved from the SDF network or field at the sample points.
 
-**Formulas:**
+**Steps**
+1.  Evaluate the SDF at the start and end of the ray segment: $d_i = f(\mathbf{p}(t_i))$ and $d_{i+1} = f(\mathbf{p}(t_{i+1}))$.
+2.  Compute the logistic CDF value at the start of the segment: $\Phi_s(d_i) = (1 + e^{-s \cdot d_i})^{-1}$.
+3.  Compute the logistic CDF value at the end of the segment: $\Phi_s(d_{i+1}) = (1 + e^{-s \cdot d_{i+1}})^{-1}$.
+4.  Calculate the numerator as the difference between the CDF values: $\Delta \Phi = \Phi_s(d_i) - \Phi_s(d_{i+1})$.
+5.  Compute the opacity using the ratio of the difference to the starting CDF value, clamped to zero to handle numerical noise or exiting surfaces:
+    $$ \alpha_i = \max \left( \frac{\Phi_s(d_i) - \Phi_s(d_{i+1})}{\Phi_s(d_i)}, 0 \right) $$
+
+**Formulas**
 The logistic CDF is defined as:
 $$ \Phi_s(x) = \frac{1}{1 + e^{-sx}} $$
-The logistic PDF is defined as:
-$$ \phi_s(x) = \frac{s e^{-sx}}{(1 + e^{-sx})^2} $$
+where $s$ is the steepness parameter [S1, unofficial].
 
-The discrete opacity $\alpha_i$ for the segment $[t_i, t_{i+1}]$ is computed as:
+The opacity for segment $i$ is:
 $$ \alpha_i = \max \left( \frac{\Phi_s(f(\mathbf{p}(t_i))) - \Phi_s(f(\mathbf{p}(t_{i+1})))}{\Phi_s(f(\mathbf{p}(t_i)))}, 0 \right) $$
+where $f$ is the SDF, $\mathbf{p}(t)$ is the ray position, and $s$ is the steepness [S1, unofficial].
 
-**Parameters:**
-*   $s$: Steepness of the logistic function. Typical values are $s=1000$ or higher to approximate a Dirac delta function at the surface ($f=0$) [S1, unofficial].
+**Parameters**
+*   **Steepness ($s$)**: Controls the sharpness of the transition. A higher $s$ results in a thinner surface layer. Typical values are not explicitly fixed in the source but are chosen to balance surface thickness and rendering quality [S1, unofficial].
 
-**Step-by-Step Method:**
-1.  **Sample Ray:** For each ray, generate $N$ sample points $\mathbf{p}(t_i)$ at distances $t_i$.
-2.  **Evaluate SDF:** Query the SDF network to obtain $f_i = f(\mathbf{p}(t_i))$ for all $i$.
-3.  **Compute Logistic CDF:** Calculate $\Phi_i = \Phi_s(f_i)$ for all $i$.
-4.  **Compute Opacity:** For each segment $i$ from $0$ to $N-1$:
-    *   Calculate the numerator: $\Delta \Phi = \Phi_i - \Phi_{i+1}$.
-    *   Calculate the denominator: $\Phi_{denom} = \Phi_i$.
-    *   Compute raw opacity: $\alpha_{raw} = \Delta \Phi / \Phi_{denom}$.
-    *   Clamp: $\alpha_i = \max(\alpha_{raw}, 0)$.
-5.  **Handle Edge Cases:**
-    *   If $\Phi_i \approx 0$ (deep inside the surface where $f \ll 0$), the denominator approaches 0. In practice, if $\Phi_i < \epsilon$, set $\alpha_i = 0$ to avoid division by zero or numerical instability [G].
-    *   If the ray is exiting the surface ($f$ is increasing), $\Phi_{i+1} > \Phi_i$, resulting in negative $\alpha_{raw}$, which is clamped to 0 by the max function.
+**Edge Cases and Pitfalls**
+*   **Exiting Surface**: If the ray is exiting the surface (SDF is increasing), the density $\rho(t)$ is defined as 0, resulting in $\alpha_i = 0$ [S1, unofficial]. The max function in the final formula handles this case naturally when $\Phi_s(d_i) < \Phi_s(d_{i+1})$.
+*   **Numerical Noise**: The max function with 0 guards against negative opacity values caused by numerical instability or ambiguous gradients [S1, unofficial].
+*   **Division by Zero**: If $\Phi_s(f(\mathbf{p}(t_i)))$ is extremely close to 0, numerical instability may occur. In practice, this corresponds to points very far outside the surface where opacity is negligible.
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def logistic_cdf(x, s):
-    """Compute the CDF of the logistic distribution."""
-    return 1.0 / (1.0 + math.exp(-s * x))
-
-def compute_sdf_opacity(f_values, s=1000.0, epsilon=1e-7):
+def compute_sdf_opacity(sdf, p_t_i, p_t_next, s):
     """
-    Compute discrete opacity alpha_i for segments between sample points.
+    Compute opacity for a ray segment using SDF-based logistic CDF.
     
     Args:
-        f_values: List of SDF values [f_0, f_1, ..., f_N] for N+1 sample points.
-        s: Steepness parameter for the logistic distribution.
-        epsilon: Small value to prevent division by zero.
+        sdf: Function returning signed distance for a point.
+        p_t_i: Point at start of segment t_i.
+        p_t_next: Point at end of segment t_{i+1}.
+        s: Steepness parameter of the logistic distribution.
         
     Returns:
-        List of opacity values [alpha_0, alpha_1, ..., alpha_{N-1}] for N segments.
+        alpha_i: Opacity for the segment.
     """
-    n_segments = len(f_values) - 1
-    alphas = []
+    # 1. Evaluate SDF at endpoints
+    d_i = sdf(p_t_i)
+    d_next = sdf(p_t_next)
     
-    # Precompute logistic CDF for all points
-    phi_values = [logistic_cdf(f, s) for f in f_values]
+    # 2. Compute Logistic CDF at start point
+    # Phi_s(x) = 1 / (1 + exp(-s * x))
+    exp_val = math.exp(-s * d_i)
+    phi_i = 1.0 / (1.0 + exp_val)
     
-    for i in range(n_segments):
-        phi_i = phi_values[i]
-        phi_next = phi_values[i + 1]
+    # 3. Compute Logistic CDF at end point
+    exp_val_next = math.exp(-s * d_next)
+    phi_next = 1.0 / (1.0 + exp_val_next)
+    
+    # 4. Compute numerator
+    delta_phi = phi_i - phi_next
+    
+    # 5. Compute opacity, clamped to 0
+    # Avoid division by zero if phi_i is effectively 0
+    if phi_i < 1e-8:
+        return 0.0
         
-        # Avoid division by zero
-        if phi_i < epsilon:
-            alphas.append(0.0)
-            continue
-            
-        # Compute opacity based on Eqn. 13
-        # alpha_i = (Phi(f(t_i)) - Phi(f(t_{i+1}))) / Phi(f(t_i))
-        numerator = phi_i - phi_next
-        alpha_raw = numerator / phi_i
-        
-        # Clamp to [0, 1]
-        alpha_i = max(alpha_raw, 0.0)
-        
-        # Ensure alpha does not exceed 1 due to numerical noise
-        alpha_i = min(alpha_i, 1.0)
-        
-        alphas.append(alpha_i)
-        
-    return alphas
+    alpha_i = delta_phi / phi_i
+    return max(alpha_i, 0.0)
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Division by Zero:** When $f(\mathbf{p}(t_i)) \to -\infty$ (deep inside the object), $\Phi_s \to 1$. When $f(\mathbf{p}(t_i)) \to +\infty$ (deep outside), $\Phi_s \to 0$. If $\Phi_i$ is extremely small, division by zero occurs. Guard against this with an epsilon check [G].
-*   **Numerical Stability:** For large $s$, $e^{-sx}$ can overflow or underflow. Use `math.exp` carefully or implement a numerically stable sigmoid if $s$ is very large [G].
-*   **Gradient Ambiguity:** The formula inherently handles the sign of the gradient via the CDF difference. If the SDF is noisy, the max function ensures opacity remains non-negative [S1, unofficial].
 
 ## Subtopics
 
@@ -106,19 +89,27 @@ Coverage-based Opacity Mapping is a method to convert accumulated unnormalized G
 SDF-based Volume Rendering is a neural rendering technique that represents a scene as an implicit Signed Distance Field (SDF) parameterized by a neural network, converting SDF values into opacity for volume integration. It solves the problem of reconstructing high-quality surfaces with fine details while rendering photo-realistic images, distinguishing itself from standard NeRF by using a logistic mapping of the SDF to ensure the opacity weight function peaks at the surface intersection. This method builds on [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md) to correctly model surface opacity, avoiding the bias of naive SDF-to-density mapping.
 
 ### NeUDF Discretization (Alpha Compositing)
-NeUDF Discretization is a variant that discretizes the continuous weight function for volume rendering by dividing the sample ray into bins and computing opacity ($\alpha_i$) for each bin based on the Unsigned Distance Function (UDF) values at the bin boundaries [S2]. It modifies the standard logistic CDF approach by using the absolute difference of the transformed UDF values, normalized by the maximum value in the segment, to handle unsigned distances [S2]. The formula is $\alpha_i = \frac{|\varsigma_r \circ \Psi \circ p(t_i) - \varsigma_r \circ \Psi \circ p(t_{i+1})|}{\varsigma_r \circ \Psi \circ p(t_i)}$, where $\varsigma_r \circ \Psi$ represents the transformed UDF value [S2]. A further modification uses $\alpha_i = \frac{\varsigma_i^{\max} - \varsigma_i^{\min}}{\varsigma_i^{\max}}$ where $\varsigma_i^{\max}$ and $\varsigma_i^{\min}$ are the max and min of the set $\{\varsigma_r \circ \Psi \circ p(t_i), \varsigma_r \circ \Psi \circ p(t_{i+1})\}$ [S2]. This variant is chosen when working with Unsigned Distance Fields instead of Signed Distance Fields [S2].
+NeUDF Discretization is a method to discretize the continuous weight function for volume rendering by dividing the sample ray into bins and computing opacity ($\alpha_i$) for each bin based on the UDF values at the bin boundaries [S2]. The opacity is calculated as $\alpha_i = \frac{|\varsigma_r \circ \Psi \circ p(t_i) - \varsigma_r \circ \Psi \circ p(t_{i+1})|}{\varsigma_r \circ \Psi \circ p(t_i)}$, where $\varsigma_r \circ \Psi$ represents the transformed UDF value [S2]. A modified version uses $\alpha_i = \frac{\varsigma_i^{\max} - \varsigma_i^{\min}}{\varsigma_i^{\max}}$, where $\varsigma_i^{\max}$ and $\varsigma_i^{\min}$ are the maximum and minimum of the set $\{\varsigma_r \circ \Psi \circ p(t_i), \varsigma_r \circ \Psi \circ p(t_{i+1})\}$ [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. The dominant cost is querying the SDF network and computing the logistic CDF.
-*   **Memory Complexity:** $O(N)$ to store SDF values and CDF values for the current ray.
-*   **Performance:** Highly efficient for surface reconstruction as it avoids complex integration. Performance depends heavily on the SDF network inference speed [S1, unofficial].
-*   **Strengths:** Provides sharp, unbiased surface reconstruction; naturally handles surface normals via SDF gradients; integrates seamlessly with neural rendering pipelines [S1, unofficial].
-*   **Limitations:** Requires an SDF network; sensitive to the steepness parameter $s$; may produce artifacts if the SDF is not well-trained [S1, unofficial].
-*   **When to Use:** Neural surface reconstruction, multi-view reconstruction, and scenarios requiring high-quality surface details [S1, unofficial].
-*   **When Not to Use:** Standard volumetric data (e.g., medical CT) where density is not related to distance; scenes without clear surface boundaries.
+**Time and Memory Complexity**
+The method requires two evaluations of the SDF and two evaluations of the exponential function per ray segment, resulting in $O(1)$ time complexity per sample relative to the number of samples $N$. Memory complexity is $O(1)$ as no additional data structures are needed beyond the SDF values.
+
+**Measured Performance**
+Specific performance metrics are not provided in the sources. However, the method is designed to be efficient for neural implicit surface rendering [S1, unofficial].
+
+**Scaling**
+The method scales linearly with the number of samples along the ray, as each segment is processed independently.
+
+**Strengths and Limitations**
+*   **Strengths**: Ensures unbiased surface representation by concentrating weight at the zero-level set [S1, unofficial]. Avoids the bias of naive SDF-to-density mapping [S1, unofficial].
+*   **Limitations**: Relies on the accuracy of the SDF gradient. Numerical instability can occur if the starting CDF value is very small [S1, unofficial].
+
+**When to Use**
+Use this method when rendering neural implicit surfaces defined by an SDF, particularly in frameworks like NeuS, where accurate surface opacity is critical for high-quality reconstruction [S1, unofficial].
 
 ## Background
-The method was introduced in the paper "NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction" by Wang et al. [S1, unofficial]. It addresses the limitations of previous neural implicit surface methods that suffered from bias in surface reconstruction due to naive SDF-to-density mappings. The logistic CDF mapping ensures that the opacity weight function peaks at the surface intersection ($f=0$), leading to unbiased surface reconstruction [S1, unofficial]. The method has become a standard component in neural rendering pipelines for surface reconstruction, including variants like NeUDF [S2].
+The method originates from the NeuS paper, which introduced learning neural implicit surfaces by volume rendering for multi-view reconstruction [S1, unofficial]. It was developed to address the limitations of previous neural rendering techniques that struggled with surface detail and aliasing. The approach leverages the properties of the logistic distribution to create a smooth, differentiable opacity function that peaks at the surface boundary [S1, unofficial].
 
 ## Sources
 [S1] NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction, https://doi.org/10.48550/arxiv.2106.10689, fetched 2026-10-26 (unofficial)

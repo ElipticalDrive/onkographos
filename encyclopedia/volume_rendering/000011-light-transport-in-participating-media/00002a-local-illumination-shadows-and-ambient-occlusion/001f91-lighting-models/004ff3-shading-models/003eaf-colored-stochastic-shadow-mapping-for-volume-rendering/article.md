@@ -1,92 +1,158 @@
 # Colored Stochastic Shadow Mapping for Volume Rendering
+
 Also called: CSSM for DVR, Colored Stochastic Shadow Mapping (CSSM), Colored Stochastic Shadow Mapping (CSSM) for Direct Volume Rendering, Stochastic Shadow Mapping for Volume Rendering
 
 ## Overview
-Colored Stochastic Shadow Mapping (CSSM) is a two-step rendering technique for Direct Volume Rendering (DVR) that generates colored shadows using stochastic shadow maps [S1]. It adapts the CSSM concept, originally developed for surface rendering, to volumetric data by modifying probabilistic events to represent photon traversal through a volume with changing opacities [S1]. Unlike traditional shadow maps that use binary occlusion or deep shadow maps that store piecewise linear approximations, CSSM uses stochastic sampling to compute partial, colored shadows for translucent objects while using significantly less texture memory [S1].
+Colored Stochastic Shadow Mapping (CSSM) is a two-step rendering technique for Direct Volume Rendering (DVR) that generates colored, translucent shadows using stochastic sampling [S1]. Unlike traditional shadow maps that produce binary, opaque shadows, CSSM allows translucent objects to cast partial shadows with accurate color information by adapting probabilistic photon traversal events to volumetric data [S1]. It sets itself apart from Deep Shadow Maps (DSM) by using significantly less texture memory (storing one depth value per color channel instead of piecewise linear control points) while producing higher-quality, softer colored shadows [S1].
 
 ## How it works
 CSSM operates in two distinct phases: CSSM Generation (building the shadow map) and DVR Rendering (compositing the volume with shadow factors) [S1].
 
 ### Inputs and Outputs
-**Inputs:**
-*   Volumetric dataset $V$ with opacity $\alpha$ and color/transmission properties.
-*   Light source position and direction (point light assumed).
-*   Camera parameters for DVR.
-*   CSSM resolution (e.g., $1024^2$, $2048^2$, $4096^2$) [S1].
-*   Number of offset queries $m$ (e.g., 7, 13, 21) [S1].
-
-**Outputs:**
-*   CSSM Texture: An RGB texture where each fragment stores three depth values $(c_R, c_G, c_B)$ representing the stochastic shadow depth for each color channel [S1].
-*   Final Volume Rendered Image: Computed by DVR with shadow-aware illumination [S1].
+*   **Inputs:**
+    *   Volumetric dataset with opacity $\alpha$ and transmission properties $t_{\lambda}$.
+    *   Light source position (assumed to be a single point light source) [S1].
+    *   Camera view parameters.
+    *   CSSM texture resolution (e.g., $1024^2$, $2048^2$, $4096^2$) [S1].
+    *   Number of offset queries $m$ (typical values: 7, 13, or 21) [S1].
+*   **Outputs:**
+    *   CSSM texture: An RGB texture where each fragment stores three depth accumulators $(c_R, c_G, c_B)$ [S1].
+    *   Final rendered image with colored shadows [S1].
 
 ### Data Structures
-**CSSM Texture:**
-*   Format: RGB texture.
-*   Layout: Each fragment stores three floating-point depth values: $c_R, c_G, c_B$.
-*   Range: Normalized depth $[0, 1]$ [S1].
-*   Memory: 3 values per fragment [S1].
+*   **CSSM Texture:** An RGB color texture. Each fragment stores three floating-point or fixed-point depth values $(c_R, c_G, c_B)$, initialized to 1.0 (representing "no shadow" or maximum depth) [S1].
+*   **Offsets:** A predefined set of 2D spatial offsets $\Delta_j$ used during the rendering phase to query neighboring CSSM fragments [S1].
 
-### CSSM Generation Steps
-This phase builds the shadow map by simulating photon traversal through the volume from the light source [S1].
+### Pseudocode
 
-1.  **Initialize:** For all fragments of the CSSM texture, initialize depth accumulators for RGB channels: $(c_R, c_G, c_B) := (1, 1, 1)$ [S1].
-2.  **Ray Casting:** Cast and discretize a ray from the light source through the current fragment into the volume [S1].
-3.  **Segment Iteration:** Iterate through each segment $i$ of the discretized ray from $i = 1$ to $n$ [S1].
-4.  **Depth Computation:** Compute the depth $z_i$ of segment $i$, normalized to the range $[0, 1]$ [S1].
-5.  **Random Threshold:** Generate a random number $r_i$ uniformly distributed in $[0, 1]$ [S1].
-6.  **Probability Calculation:** For each wavelength $\lambda \in \{R, G, B\}$, compute the probability $\rho_{i,\lambda}$ that the photon is not transmitted through segment $i$ [S1].
-    *   Formula:
-        $$p_{i,\lambda} = \alpha_i \cdot (1 - t_{i,\lambda})$$
-        Where:
-        *   $\alpha_i$ is the opacity of the volume in segment $i$ [S1].
-        *   $t_{i,\lambda}$ is the conditional probability that the photon is transmitted given it interacts with the volume in segment $i$ [S1].
-7.  **Stochastic Test:** If the computed probability $\rho_{i,\lambda}$ exceeds the random threshold $r_i$, update the depth accumulator for channel $\lambda$:
-    $$c_\lambda := \min(c_\lambda, z_i)$$
-    This records the closest depth where absorption occurred for that color [S1].
-8.  **Early Termination:** Terminate the segment loop early if all color accumulators $(c_R, c_G, c_B)$ are smaller than 1, indicating the photon was fully absorbed or blocked in previous segments [S1].
-9.  **Store:** Store the final accumulated depths $(c_R, c_G, c_B)$ in the CSSM fragment [S1].
+#### Phase 1: CSSM Generation
+This phase builds the shadow map by simulating photon traversal through the volume from the light source's perspective.
 
-### DVR Rendering Steps
-This phase computes shadow factors for volumetric samples using the generated CSSM [S1].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-1.  **Initialize:** For all samples of the DVR approach, initialize shadow factors for RGB channels: $(l_R, l_G, l_B) := (0, 0, 0)$ [S1].
-2.  **Light Coordinates:** Compute the sample position $(s_x, s_y, s_z)$ in the light coordinate system [S1].
-3.  **Offset Iteration:** Iterate through $m$ offset queries, for $j = 1$ to $m$ [S1].
-4.  **CSSM Lookup:** Read the CSSM entries $(c_R, c_G, c_B)$ from the fragment located at $(s_x, s_y) + \Delta_j$, where $\Delta_j$ is the $j$-th offset [S1].
-5.  **Shadow Factor Update:** For each $\lambda \in \{R, G, B\}$:
-    *   If $c_{\lambda,j} > s_z$, then the sample is in shadow for that color.
-    *   Update shadow factor:
-        $$l_\lambda := l_\lambda + \frac{1}{m}$$
-    *   Formula for final shadow factor:
-        $$l_\lambda = \frac{1}{m} \sum_{j=1}^{m} \mathbb{I}(c_{\lambda,j} > s_z)$$
-        Where $\mathbb{I}$ is the indicator function [S1].
-6.  **Illumination:** Use the shadow factor $(l_R, l_G, l_B)$ to modulate the illumination of the volumetric sample [S1].
+```python
+def generate_cssm(volume_data, light_position, cssm_texture, cssm_resolution):
+    # Iterate over all fragments of the CSSM texture
+    for fragment in cssm_texture:
+        # Step 1: Initialize depth accumulators for RGB channels
+        cR, cG, cB = 1.0, 1.0, 1.0
+        
+        # Step 2: Cast and discretize a ray from the light source through the current fragment
+        ray = cast_ray_from_light(light_position, fragment.screen_coords)
+        segments = discretize_ray(ray, volume_data)
+        
+        # Step 3: Iterate through each segment i of the discretized ray
+        for i, segment in enumerate(segments):
+            # Step 4: Compute the depth zi of segment i, normalized to [0, 1]
+            zi = segment.depth_normalized
+            
+            # Step 5: Generate a random number ri uniformly distributed in [0, 1]
+            ri = random_uniform(0, 1)
+            
+            # Step 6 & 7: For each wavelength lambda in {R, G, B}
+            for lambda_channel in ['R', 'G', 'B']:
+                # Get opacity alpha_i and conditional transmission probability t_i,lambda
+                alpha_i = volume_data.get_opacity(segment)
+                t_i_lambda = volume_data.get_transmission_probability(segment, lambda_channel)
+                
+                # Compute probability rho_i,lambda that photon is NOT transmitted
+                # Formula: p_i,lambda = alpha_i * (1 - t_i,lambda)
+                rho_i_lambda = alpha_i * (1.0 - t_i_lambda)
+                
+                # If probability exceeds random threshold, photon is absorbed/blocked
+                if rho_i_lambda > ri:
+                    # Update depth accumulator to the minimum (closest) depth
+                    if lambda_channel == 'R':
+                        cR = min(cR, zi)
+                    elif lambda_channel == 'G':
+                        cG = min(cG, zi)
+                    elif lambda_channel == 'B':
+                        cB = min(cB, zi)
+            
+            # Step 8: Terminate early if all accumulators are < 1 (fully absorbed)
+            if cR < 1.0 and cG < 1.0 and cB < 1.0:
+                break
+        
+        # Step 9: Store final accumulated depths
+        fragment.color = (cR, cG, cB)
+```
+
+#### Phase 2: DVR Rendering
+This phase composites the volume and applies shadow factors by querying the CSSM.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_dvr_with_cssm(volume_data, camera, cssm_texture, offsets, m):
+    # Step 10: Initialize shadow factors for RGB channels
+    lR, lG, lB = 0.0, 0.0, 0.0
+    
+    # Iterate through all samples of the DVR approach
+    for sample in volume_data.samples:
+        # Step 11: Compute sample position (sx, sy, sz) in light coordinate system
+        sx, sy = project_to_light_space(sample.position)
+        sz = sample.depth_normalized_in_light_space
+        
+        # Step 12: Iterate through m offset queries
+        for j in range(m):
+            delta = offsets[j]
+            
+            # Step 13: Read CSSM entries (cR, cG, cB) from fragment at (sx, sy) + delta
+            cR_j, cG_j, cB_j = cssm_texture.sample(sx + delta.x, sy + delta.y)
+            
+            # Step 14: For each wavelength lambda, check if sample is in shadow
+            # Formula: l_lambda = (1/m) * sum(I(c_lambda,j > sz))
+            if cR_j > sz:
+                lR += 1.0 / m
+            if cG_j > sz:
+                lG += 1.0 / m
+            if cB_j > sz:
+                lB += 1.0 / m
+        
+        # Use shadow factors (lR, lG, lB) to modulate illumination for the sample
+        sample.color *= (lR, lG, lB)
+```
+
+### Formulas
+*   **Probability of non-transmission ($\rho_{i,\lambda}$):** The probability that a photon of wavelength $\lambda$ is not transmitted through the $i$-th volume segment is calculated as [S1]:
+    $$ p_{i,\lambda} = \alpha_i \cdot (1 - t_{i,\lambda}) $$
+    Where:
+    *   $\alpha_i$ is the opacity of the volume in segment $i$.
+    *   $t_{i,\lambda}$ is the conditional probability that the photon is transmitted given it interacts with the volume in segment $i$.
+    *   Derivation: $p_{i,\lambda} = 1 - (P(\overline{V}_i) + P(V_i) \cdot P(T_{i,\lambda} | V_i)) = 1 - ((1 - \alpha_i) + \alpha_i \cdot t_{i,\lambda}) = \alpha_i \cdot (1 - t_{i,\lambda})$ [S1].
+
+*   **Shadow Factor ($l_\lambda$):** The shadow factor for a color channel is the average of $m$ binary tests [S1]:
+    $$ l_\lambda = \frac{1}{m} \sum_{j=1}^{m} \mathbb{I}(c_{\lambda,j} > s_z) $$
+    Where:
+    *   $c_{\lambda,j}$ is the CSSM depth value for channel $\lambda$ at offset $j$.
+    *   $s_z$ is the sample's depth in light space.
+    *   $\mathbb{I}(\cdot)$ is the indicator function (1 if true, 0 if false).
 
 ### Parameters
-*   **$\alpha_i$**: Opacity of the volume in segment $i$. Derived from the volume's transfer function or data values [S1].
-*   **$t_{i,\lambda}$**: Conditional probability of transmission for wavelength $\lambda$ in segment $i$. Depends on color properties [S1].
-*   **$m$**: Number of offset queries for denoising/averaging. Typical value: 13 [S1].
-*   **$\Delta_j$**: Spatial offsets for CSSM lookup. Example set for $m=13$: $\{(0,0), (\pm3,\pm3), (\pm4,0), (0,\pm4), (\pm7,0), (0,\pm7)\}$ [S1].
-*   **CSSM Resolution**: Tested resolutions include $1024^2$, $2048^2$, and $4096^2$. Higher resolution improves shadow detail but increases memory [S1].
-*   **Number of Offsets**: Typical values are 7 for pleasing results with no noticeable noise, or 21 for softer shadows. Depends on scene complexity [S1].
+*   **$\alpha_i$ (Opacity):** Derived from the volume's transfer function or data values [S1].
+*   **$t_{i,\lambda}$ (Conditional Transmission):** Depends on the color properties of the volume in segment $i$ [S1].
+*   **$m$ (Number of Offsets):** The number of offset queries used for denoising/averaging. Typical values are 7 (pleasing results, no noticeable noise), 13 (used in experiments), or 21 (softer shadows) [S1].
+*   **$\Delta_j$ (Offsets):** Spatial offsets applied to CSSM lookup coordinates. Example set for $m=13$: $\{(0,0), (\pm3,\pm3), (\pm4,0), (0,\pm4), (\pm7,0), (0,\pm7)\}$ [S1].
+*   **CSSM Resolution:** The resolution of the shadow map texture. Tested resolutions include $1024^2$, $2048^2$, and $4096^2$. Higher resolution improves shadow detail but increases memory usage [S1].
 
 ### Edge Cases and Pitfalls
-*   **Noise:** Stochastic generation introduces noise. Mitigated by averaging over multiple CSSM lookups with offsets. Complex scenes may require more offsets to achieve pleasing results without noise [S1].
-*   **Blurring:** Increasing the number of offsets ($m$) softens shadows but increases computation time and causes blurring [S1].
-*   **Single Light Source:** Limited to a single point light source. Additional light sources require additional shadow maps, which is a general limitation of shadow mapping approaches [S1].
-*   **Precision:** Depth values are normalized to $[0, 1]$. Precision issues may arise with very large depth ranges or very thin structures, though not explicitly detailed in sources [G].
+*   **Noise:** Stochastic generation introduces noise in the shadows. This is mitigated by averaging over multiple CSSM lookups with offsets. Complex scenes may require more offsets ($m$) to achieve pleasing results without noise [S1].
+*   **Blurring:** Increasing $m$ softens shadows but increases computation time and causes blurring [S1].
+*   **Single Light Source:** The method is limited to a single point light source. Additional light sources require additional shadow maps, which is a general limitation of shadow mapping approaches [S1].
+*   **Translucency Handling:** Traditional Shadow Maps (TSM) use a threshold at opacity 0.5, leading to dark, incorrect shadows in the interior of translucent objects. CSSM handles this correctly by storing partial depths [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** CSSM generation is proportional to the number of fragments and segments per ray. Rendering time is proportional to the number of volumetric samples and offsets $m$.
-*   **Memory Complexity:** CSSM stores 3 values per fragment. Deep Shadow Maps (DSM) with 3 nodes per channel store 12 values per fragment (4x storage). CSSM memory is constant regardless of offset count, while DSM memory scales linearly with nodes [S1].
-*   **Measured Performance:** At $1024^2$ resolution, CSSM rendering time is 4.9 ms, higher than Traditional Shadow Mapping (TSM, 3.2 ms) and DSM (3.3 ms) due to increased texture fetches (13 per query for CSSM vs 1 for TSM and 3 for DSM) [S1].
-*   **Strengths:** Produces higher-quality colored shadows than DSM (which appears grey); handles translucent objects correctly unlike TSM (which uses a threshold at opacity 0.5); uses less memory than DSM [S1].
-*   **Limitations:** Limited to single point light source; stochastic noise requires averaging; blurring with high offset counts [S1].
-*   **When to Use:** When colored shadows for translucent volumes are required and memory is constrained compared to DSM. When interactive rates are needed and single light source is sufficient [S1].
-*   **When Not to Use:** When multiple light sources are required (without significant memory overhead for multiple maps); when sharp, non-stochastic shadows are preferred; when memory is extremely tight and TSM is sufficient (though TSM lacks color/translucency support) [S1].
+*   **Time Complexity:** CSSM generation is comparable to other shadow mapping techniques but involves stochastic sampling. Rendering time increases with the number of offsets $m$ due to additional texture fetches. For a $1024^2$ resolution, CSSM rendering time was measured at 4.9 ms, compared to 3.2 ms for Traditional Shadow Mapping (TSM) and 3.3 ms for Deep Shadow Mapping (DSM) [S1]. The performance depends on the frame buffer resolution, not the shadow map resolution [S1].
+*   **Memory Complexity:** CSSM uses significantly less memory than Deep Shadow Maps (DSM). CSSM stores one color buffer (3 values per fragment), while DSM with 3 nodes per channel stores 12 values per fragment (4x storage). DSM memory scales linearly with the number of nodes, whereas CSSM memory is constant regardless of the offset count $m$ [S1].
+*   **Strengths:** Produces higher-quality, softer, and colored shadows for translucent objects. Uses less texture memory than DSM. Compatible with mixed scenes containing both volume and surface renderings [S1].
+*   **Limitations:** Limited to a single point light source. Stochastic noise requires averaging (increasing computation). Blurring increases with more offsets [S1].
+*   **When to Use:** When colored, translucent shadows are required for DVR and memory is a constraint compared to DSM. Suitable for interactive applications where slightly higher rendering time (vs. TSM) is acceptable for quality gains [S1].
+*   **When Not to Use:** When multiple light sources are needed (requires multiple shadow maps). When hard, binary shadows are preferred and translucency is not a concern (TSM is faster) [S1].
 
 ## Background
-CSSM was originally proposed for surface rendering [S1]. It was adapted for Direct Volume Rendering (DVR) by modifying the probabilistic events to represent photon traversal through a volume with changing opacities [S1]. The method was implemented in the Voreen framework using a GPU-based ray casting approach [S1]. It was tested on synthetic datasets (Spheres) and real-world data (Walnut CT dataset) [S1]. The approach is compatible with mixed scenes containing both volume and surface renderings, allowing CSSM to be generated for surfaces first and then DVR to append to the same buffer [S1].
+*   **Origin:** CSSM was proposed as an alternative to Deep Shadow Maps for Direct Volume Rendering [S1]. It adapts the CSSM concept, originally developed for surface rendering, to volumetric data [S1].
+*   **History:** The method was implemented and tested within the Voreen framework, a GPU-based ray casting volume renderer [S1]. It was tested on synthetic datasets (e.g., Test Spheres) and real-world medical data (e.g., Walnut CT dataset) [S1].
+*   **Usage:** Implemented in the Voreen framework. It is compatible with mixed scenes containing both volume and surface renderings; the CSSM can be generated for surfaces first, and then DVR can append to the same buffer without clearing [S1].
 
 ## Sources
 [S1] Colored Stochastic Shadow Mapping for Direct Volume Rendering, https://doi.org/10.2312/eurovisshort.20181072, fetched 2026-10-26

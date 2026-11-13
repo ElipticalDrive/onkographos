@@ -1,0 +1,255 @@
+# Greedy Meshing
+
+Also called: 3D Greedy Meshing, GreedMesh, Greedy Mesher, Greedy Quad Merging, Greedy Quad Meshing, Greedy Quads, Greedy Voxel Meshing, Voxel Quad Merging
+
+## Overview
+Greedy Meshing is a surface extraction algorithm that generates a minimal triangle mesh from voxel data by merging adjacent coplanar faces of identical material into larger quads [S1, S3, S4, unofficial]. It solves the problem of excessive vertex and draw call counts in naive voxel rendering (one quad per exposed face) by reducing geometry by 5–15× compared to per-face meshing [S30, S36, unofficial]. Unlike [Binary Greedy Meshing with Packed Quads](3312-binary-greedy-meshing-with-packed-quads.md) which operates on binary occupancy using bitwise operations, standard Greedy Meshing processes explicit material IDs and supports multiple voxel types and attributes [S2, S3, S31, unofficial]. It differs from [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md) by actively merging adjacent faces into maximal rectangles rather than just culling internal faces [S1, S2, unofficial].
+
+## How it works
+**Inputs:** A 3D voxel volume defined by dimensions $D = [D_x, D_y, D_z]$ and a voxel access function $V(x, y, z)$ returning a material ID or type. A `boundaryPolicy` (default "air") determines if out-of-bounds neighbors are solid or empty [S13, unofficial]. A `mergeKey` function maps voxel attributes (material, UV, transparency) to a comparable integer key [S13, S27, unofficial].
+
+**Outputs:** A list of quads, each defined by an origin $(x, y, z)$, a normal direction $n \in \{0, 1, 2\}$ (X, Y, Z), and dimensions $(w, h)$ in the tangent and bitangent axes [S27, unofficial].
+
+**Data Structures:**
+*   **Mask2D:** A 2D boolean or integer array of size $D_t \times D_b$ (where $t, b$ are tangent and bitangent axes). Stored as a row-major flat array. Entries are `true` (or non-zero) if the face is exposed and unprocessed, `false` (or 0) otherwise [S7, S13, unofficial].
+
+**Algorithm Steps:**
+1.  **Sweep Axes:** Iterate through the three principal axes $n \in \{0, 1, 2\}$ [S1, S7, unofficial]. For each $n$, compute tangent $t = (n + 1) \pmod 3$ and bitangent $b = (n + 2) \pmod 3$ [S1, S7, unofficial].
+2.  **Sweep Slices:** For each slice index $s$ along the normal axis $n$ (from $0$ to $D_n - 1$):
+    *   Initialize a 2D mask $M$ of size $D_t \times D_b$ to all zeros/false [S1, S7, unofficial].
+    *   **Visibility Check:** For each cell $(t, b)$ in the slice:
+        *   Determine the voxel $V_s = V(s, t, b)$ [S7, unofficial].
+        *   Determine the neighbor $V_{nb}$ in the normal direction. If $s > 0$, $V_{nb} = V(s-1, t, b)$; if $s < D_n - 1$, $V_{nb} = V(s+1, t, b)$; if out of bounds, apply `boundaryPolicy` (typically air/empty) [S7, S13, unofficial].
+        *   Compute the merge key $k = \text{mergeKey}(V_s)$ [S13, unofficial].
+        *   If $V_s \neq V_{nb}$ (or $V_s$ is solid and $V_{nb}$ is empty, depending on culling logic), set $M[t, b] = k$ [S7, S15, unofficial]. Otherwise, set $M[t, b] = 0$ [S27, unofficial].
+    *   **Greedy Expansion:** Scan $M$ in lexicographic order (row $b$ from $0$ to $D_b-1$, column $t$ from $0$ to $D_t-1$) [S22, S27, unofficial]:
+        *   If $M[t, b] == 0$, continue [S7, unofficial].
+        *   Let $k = M[t, b]$. Start a new quad at origin $(t, b, s)$ with normal $n$ [S27, unofficial].
+        *   **Expand Width ($w$):** Increment $w$ starting at 1 while $t + w < D_t$ and $M[t + w, b] == k$ [S7, S27, unofficial].
+        *   **Expand Height ($h$):** Increment $h$ starting at 1 while $b + h < D_b$ and for all $k' \in [0, w)$, $M[t + k', b + h] == k$ [S7, S27, unofficial].
+        *   **Emit Quad:** Add quad with origin $(t, b, s)$, normal $n$, width $w$, height $h$ to the output list [S27, unofficial].
+        *   **Mark Processed:** Set $M[t + k', b + k''] = 0$ for all $k' \in [0, w)$ and $k'' \in [0, h)$ to prevent double-counting [S21, S27, unofficial].
+3.  **Repeat:** Repeat steps 1–2 for all three axes.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def greedy_mesh(volume, dims, boundary_policy="air", merge_key=None):
+    """
+    volume: function (x, y, z) -> material_id
+    dims: tuple (Dx, Dy, Dz)
+    boundary_policy: "air" or "solid"
+    merge_key: function (material_id, x, y, z) -> int. Default: identity.
+    """
+    if merge_key is None:
+        merge_key = lambda m, x, y, z: m
+
+    quads = []
+    # Iterate over the 3 normal axes: 0=X, 1=Y, 2=Z
+    for n in range(3):
+        t = (n + 1) % 3  # Tangent axis
+        b = (n + 2) % 3  # Bitangent axis
+        
+        # Dimensions for the 2D slice
+        dim_t = dims[t]
+        dim_b = dims[b]
+        dim_n = dims[n]
+        
+        # Initialize mask for this normal direction
+        # Mask stores the merge key if visible and unprocessed, else 0
+        mask = [0] * (dim_t * dim_b)
+        
+        # Iterate through each slice along the normal axis
+        for s in range(dim_n):
+            # 1. Build Visibility Mask for slice s
+            for y in range(dim_b):
+                for x in range(dim_t):
+                    # Construct full 3D coordinates
+                    coords = [0, 0, 0]
+                    coords[n] = s
+                    coords[t] = x
+                    coords[b] = y
+                    
+                    # Get voxel at current position
+                    voxel_val = volume(*coords)
+                    
+                    # Determine neighbor in normal direction
+                    # Check positive direction (s+1)
+                    neighbor_val = None
+                    if s + 1 < dim_n:
+                        coords_next = coords.copy()
+                        coords_next[n] = s + 1
+                        neighbor_val = volume(*coords_next)
+                    elif boundary_policy == "solid":
+                        neighbor_val = 0 # Assuming 0 is air/empty, solid is non-zero? 
+                                         # Or simply treat boundary as different to emit face.
+                                         # Standard: boundary is air. If voxel is solid, it's exposed.
+                    
+                    # If neighbor is out of bounds and policy is air, it's exposed if voxel is solid
+                    # Simplified logic: Face is exposed if voxel != neighbor
+                    # Handle boundary explicitly
+                    if neighbor_val is None:
+                        if boundary_policy == "air":
+                            # Neighbor is air. If voxel is solid (non-zero), it's exposed.
+                            # We assume 0 is air.
+                            if voxel_val != 0:
+                                mask[y * dim_t + x] = merge_key(voxel_val, *coords)
+                            else:
+                                mask[y * dim_t + x] = 0
+                        else: # solid
+                            # Neighbor is solid. If voxel is solid, no face.
+                            # If voxel is air, no face (internal air).
+                            # Usually greedy meshing only meshes solid blocks.
+                            mask[y * dim_t + x] = 0
+                    else:
+                        if voxel_val != neighbor_val:
+                            mask[y * dim_t + x] = merge_key(voxel_val, *coords)
+                        else:
+                            mask[y * dim_t + x] = 0
+
+            # 2. Greedy Expansion on the 2D Mask
+            for y in range(dim_b):
+                for x in range(dim_t):
+                    idx = y * dim_t + x
+                    key = mask[idx]
+                    
+                    if key == 0:
+                        continue
+                    
+                    # Start of a new quad
+                    w = 1
+                    # Expand width
+                    while x + w < dim_t and mask[y * dim_t + (x + w)] == key:
+                        w += 1
+                    
+                    h = 1
+                    # Expand height
+                    while y + h < dim_b:
+                        # Check if the entire row segment of width w matches key
+                        row_match = True
+                        for k in range(w):
+                            if mask[(y + h) * dim_t + (x + k)] != key:
+                                row_match = False
+                                break
+                        if not row_match:
+                            break
+                        h += 1
+                    
+                    # Emit Quad
+                    # Origin in 3D space
+                    origin = [0, 0, 0]
+                    origin[n] = s
+                    origin[t] = x
+                    origin[b] = y
+                    
+                    quads.append({
+                        'origin': origin,
+                        'normal': n,
+                        'width': w,
+                        'height': h
+                    })
+                    
+                    # Mark cells as processed (set to 0)
+                    for dy in range(h):
+                        for dx in range(w):
+                            mask[(y + dy) * dim_t + (x + dx)] = 0
+                            
+    return quads
+```
+
+**Parameters:**
+*   `boundary_policy`: "air" (default) or "solid". Determines if the outer surface of the volume is meshed [S13, unofficial].
+*   `merge_key`: Function to determine merge compatibility. Default is material ID equality [S13, unofficial].
+
+**Edge Cases:**
+*   **Precision:** Integer coordinates are used; no floating-point errors in topology [S27, unofficial].
+*   **Boundaries:** Out-of-bounds neighbors must be handled consistently to avoid missing outer faces or generating internal ones [S13, unofficial].
+*   **Degenerate Input:** Empty volumes produce no quads. Fully solid volumes produce 6 quads (one per face of the bounding box) if `boundary_policy` is "air" [S13, unofficial].
+
+## Subtopics
+
+### [Voxel Mesh Generation (Run-based Greedy Meshing)](3127-voxel-mesh-generation-run-based-greedy-meshing.md)
+A CPU-based variant that combines adjacent faces into runs along X and Y axes, optimizing for generation speed over minimal triangle count. It produces ~20% more triangles than standard greedy meshing but runs ~390% faster, suitable for frequent chunk regeneration in multiplayer games.
+
+### [Chunked Voxel Mesh Generation with Face Culling and Quad Expansion](3133-chunked-voxel-mesh-generation-with-face-culling-and-quad-exp.md)
+Handles neighbor chunk references for cross-chunk visibility and uses packed integer formats for vertex attributes. Supports multiple voxel types and ambient occlusion, unlike binary methods.
+
+### [Binary Greedy Meshing with Packed Quads](3312-binary-greedy-meshing-with-packed-quads.md)
+Operates on packed binary planes (1 bit per voxel) using CPU-native bitwise operations (trailing zeros, shifts) for greedy expansion. Significantly faster than branching logic but limited to binary occupancy.
+
+### [Greedy Meshing for Voxel Faces](3367-greedy-meshing-for-voxel-faces.md)
+Merges faces based on multiple attributes (material, transparency) using custom equality checks, allowing complex culling and attribute-based optimization beyond simple voxel existence.
+
+### [Integrating AO with Greedy Meshing](5550-integrating-ao-with-greedy-meshing.md)
+Enforces visual continuity of lighting by ensuring merged quads accurately represent occlusion values. Uses specific merge rules or shader-based reconstruction to handle AO variation across unit faces.
+
+### [Greedy Meshing with Vertex Pooling](6808-greedy-meshing-with-vertex-pooling.md)
+Combines greedy meshing with memory management for vertex buffers. Aggregates quads from multiple chunks into contiguous memory buckets, reducing draw calls by an order of magnitude via indirect draw commands.
+
+### [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md)
+Generates static meshes by emitting geometry only for faces adjacent to empty space. Does not merge adjacent coplanar faces into larger quads, reducing vertex count compared to naive rendering but not achieving the same reduction as greedy meshing.
+
+### SBUG Mesh Entry Point
+A specific implementation entry point defining `MAX_FACE_QUADS` and initializing output buffers for 6 face directions, calling `mesh_face_columns_all_x_slices` to perform the meshing [S40, unofficial].
+
+### 4D Greedy Meshing
+Applies greedy meshing to 4D voxel worlds by sweeping in lattice space (4D) rather than slice space (3D). Exploits the convexity of preimages under linear maps to merge coplanar faces in higher dimensions, achieving 5.3× fewer triangles than naive per-face meshing [S41, unofficial].
+
+### VBO Indexing Optimization
+Post-processing step applied after greedy meshing to reduce vertex count from 6 vertices per face (two triangles) to 4 vertices per face (indexed quad), further reducing quad count by 1/3 [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(V)$ where $V$ is the number of voxels, as each voxel is visited a constant number of times (once per axis slice) [S1, S7, unofficial].
+*   **Memory Complexity:** $O(D_t \times D_b)$ for the 2D mask per axis, plus output storage for quads. The mask is reused or reallocated per slice [S7, unofficial].
+*   **Performance:** Reduces triangle count by 5–15× compared to naive per-face meshing [S30, unofficial]. VBO indexing can further reduce vertex count by 1/3 [S4, unofficial].
+*   **Strengths:** Simple to implement, fast generation, significant reduction in draw calls and vertex count [S1, S4, unofficial].
+*   **Limitations:** Does not guarantee minimal triangle count (greedy choice is local). Merging opaque faces may obscure transparency if not handled carefully (transparent faces often kept unit-sized) [S36, unofficial]. Performance can degrade with highly complex, non-uniform textures if `merge_key` is expensive [S13, unofficial].
+*   **When to Use:** Static or semi-static voxel worlds where mesh generation cost is acceptable and draw call reduction is critical [S2, S4, unofficial].
+*   **When Not to Use:** Highly dynamic worlds requiring frequent per-voxel updates where the cost of rebuilding the mesh outweighs rendering benefits, or when smooth geometry is required (use Marching Cubes instead) [S3, S33, unofficial].
+
+## Background
+Greedy Meshing was popularized by Mikola Lysenko in his 2012 article "Meshing in a Minecraft Game" [S5, unofficial][S29]. It builds on the concept of face culling by adding a greedy 2D rectangle expansion step to merge adjacent coplanar faces. The algorithm is widely used in voxel engines like Minecraft clones and procedural terrain generators to optimize rendering performance [S1, S3, S5, unofficial]. Variants have been developed to support multiple voxel types, ambient occlusion, and higher-dimensional data [S2, S3, S41, unofficial].
+
+## Sources
+[S1] Are there other/better voxel meshing algorithm than Greedy Meshing, https://stackoverflow.com/questions/72388961/are-there-other-better-voxel-meshing-algorithm-than-greedy-meshing, fetched 2026-10-26 (unofficial)
+[S2] Voxel Face Crawling (Mesh simplification, possibly using greedy), https://gamedev.stackexchange.com/questions/58527/voxel-face-crawling-mesh-simplification-possibly-using-greedy, fetched 2026-10-26 (unofficial)
+[S3] Meshing in a voxel game, https://stackoverflow.com/questions/49057456/meshing-in-a-voxel-game, fetched 2026-10-26 (unofficial)
+[S4] Homebrew Voxel Engine, http://weigert.vsos.ethz.ch/2019/10/27/homebrew-voxel-engine/, fetched 2026-10-26 (unofficial)
+[S5] Presentation on the noa voxel game engine, made and presented in-engine (2015), http://andyhall.github.io/noa-lt/, fetched 2026-10-26 (unofficial)
+[S6] roboleary/GreedyMesh, https://github.com/roboleary/GreedyMesh, fetched 2026-10-26 (unofficial)
+[S7] AThilenius/greedy_meshing, https://github.com/AThilenius/greedy_meshing, fetched 2026-10-26 (unofficial)
+[S8] ninthworld/GreedyMeshing, https://github.com/ninthworld/GreedyMeshing, fetched 2026-10-26 (unofficial)
+[S9] gilchristb78/Greedy-Meshing-Reloaded, https://github.com/gilchristb78/Greedy-Meshing-Reloaded, fetched 2026-10-26 (unofficial)
+[S10] Armen138/greedy_quads_webgl, https://github.com/Armen138/greedy_quads_webgl, fetched 2026-10-26 (unofficial)
+[S11] RandomGamingDev/greedy-meshing-js-demo, https://github.com/RandomGamingDev/greedy-meshing-js-demo, fetched 2026-10-26 (unofficial)
+[S12] lazergenixdev/First-Voxel-Engine, https://github.com/lazergenixdev/First-Voxel-Engine, fetched 2026-10-26 (unofficial)
+[S13] m2-md/voxel-greedy-meshing-typescript, https://github.com/m2-md/voxel-greedy-meshing-typescript, fetched 2026-10-26 (unofficial)
+[S14] PRoGG1111/voxel-forge, https://github.com/PRoGG1111/voxel-forge, fetched 2026-10-26 (unofficial)
+[S15] nwfella/GreedMesh, https://github.com/nwfella/GreedMesh, fetched 2026-10-26 (unofficial)
+[S16] Add foundational voxel engine: generic, terrain, and smooth voxel support, https://github.com/Five-Squared-Interactive/StraightFour/pull/40, fetched 2026-10-26 (unofficial)
+[S17] jameshiew/infinigen, https://github.com/jameshiew/infinigen, fetched 2026-10-27 (unofficial)
+[S18] rpereira-dev/CubeEngine, https://github.com/rpereira-dev/CubeEngine, fetched 2026-10-27 (unofficial)
+[S19] Optimising Voxel World Rendering, https://gamedev.stackexchange.com/questions/117398/optimising-voxel-world-rendering, fetched 2026-10-27 (unofficial)
+[S20] Greedy Meshing Algorithm | vercidium-patreon/meshing | DeepWiki, https://deepwiki.com/vercidium-patreon/meshing/4.1-greedy-meshing-algorithm, fetched 2026-10-27
+[S21] Greedy Meshing for Vertex Colored Voxels In Unity, https://eddieabbondanz.io/post/voxel/greedy-mesh/, fetched 2026-10-27 (unofficial)
+[S22] GitHub - BertilBraun/Greedy-Meshing-in-Python: A simple 2D and 3D ..., https://github.com/BertilBraun/Greedy-Meshing-in-Python, fetched 2026-10-27 (unofficial)
+[S23] Greedy Meshing Algorithm for Voxel Terrain in Unity, https://unityqueen.com/2026/07/01/greedy-meshing-algorithm-for-voxel-terrain-in-unity/, fetched 2026-10-27 (unofficial)
+[S24] Greedy Meshing Voxels - Community Resources - Roblox, https://devforum.roblox.com/t/greedy-meshing-voxels/1139881, fetched 2026-10-27 (unofficial)
+[S25] Optimizing Voxels - Greedy Meshing pt. 1 - zenny3d.com, https://zenny3d.com/blog/2025/optimizing-voxels-greedy-meshing-pt.-1.html, fetched 2026-10-27 (unofficial)
+[S26] Greedy meshing for complex voxel data, https://hub.jmonkeyengine.org/t/greedy-meshing-for-complex-voxel-data/28017, fetched 2026-10-27 (unofficial)
+[S27] Greedy Meshing Algorithm, https://github.com/WrackedFella/moho/issues/26, fetched 2026-10-27 (unofficial)
+[S28] GitHub - bonsairobo/block-mesh-rs: Generate voxel block meshes in Rust ..., https://github.com/bonsairobo/block-mesh-rs, fetched 2026-10-27 (unofficial)
+[S29] block_mesh - Rust - Docs.rs, https://docs.rs/block-mesh/latest/block_mesh/, fetched 2026-10-27
+[S30] Build a 3D Voxel Engine in WebGL | Tutorials, https://www.mysimulator.uk/content/tutorials/voxel-engine.html, fetched 2026-10-27 (unofficial)
+[S31] GreedyMesher: voxel mesh compression for Metal instanced rendering, https://github.com/plagness/VoxelKit/issues/13, fetched 2026-10-27 (unofficial)
+[S32] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)
+[S33] kotychok/mutiny, https://github.com/kotychok/mutiny, fetched 2026-10-27 (unofficial)
+[S34] Greedy Meshing - GitHub, https://github.com/programmer1o1/GreedyMeshingMod, fetched 2026-10-27 (unofficial)
+[S35] greedy_quads fn block_mesh::greedy_quads, https://docs.rs/block-mesh/latest/block_mesh/fn.greedy_quads.html, fetched 2026-10-27
+[S36] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)
+[S37] HawkDev15/VoxelWorld, https://github.com/HawkDev15/VoxelWorld, fetched 2026-10-28 (unofficial)
+[S38] GitHub - nicolas-goyon/Voxel-Mesh-Optimization-Library, https://github.com/nicolas-goyon/Voxel-Mesh-Optimization-Library, fetched 2026-10-29 (unofficial)
+[S39] Greedy meshing, visually, https://fluff.blog/2023/04/24/greedy-meshing-visually.html, fetched 2026-10-30 (unofficial)
+[S40] dmadevice/streaming-binary-greedy-meshing, https://github.com/dmadevice/streaming-binary-greedy-meshing, fetched 2026-10-27 (unofficial)
+[S41] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)

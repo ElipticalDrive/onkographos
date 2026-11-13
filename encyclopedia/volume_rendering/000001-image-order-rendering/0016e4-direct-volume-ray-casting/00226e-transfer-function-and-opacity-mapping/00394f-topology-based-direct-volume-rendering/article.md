@@ -1,54 +1,87 @@
 # Topology-Based Direct Volume Rendering
-
 Also called: Topology in direct volume rendering
-
 ## Overview
-Topology-Based Direct Volume Rendering applies topological segmentation to scalar fields to guide direct volume rendering attributes (opacity, color), rather than relying solely on indirect mesh visualization [S1, unofficial]. It solves the problem of visually distinguishing distinct topological objects (e.g., separate lobes or voids) within a continuous scalar field by assigning rendering properties based on structural boundaries identified via contour trees or volume skeleton trees [S1, unofficial]. It sets itself apart from its siblings by using topological persistence and connectivity metrics to modulate opacity, ensuring outer objects do not obscure inner features, whereas methods like [Silhouette Shading](8222-silhouette-shading.md) focus on gradient-based edge enhancement and [SDF-based Opacity Derivation via Logistic CDF](3233-sdf-based-opacity-derivation-via-logistic-cdf.md) focus on distance-based transitions.
-
+Topology-Based Direct Volume Rendering applies topological segmentation to scalar fields to guide direct volume rendering attributes (opacity, color), rather than relying solely on indirect mesh visualization [S1, unofficial]. It solves the problem of visually distinguishing complex, overlapping topological structures (such as extrema and saddles) by using topological features to modulate the transfer function, allowing inner features to remain visible while outer structures are attenuated [S1, unofficial]. It sets itself apart from its siblings by deriving opacity and color weights from global topological connectivity (e.g., contour tree branches) rather than local scalar values or gradients alone.
 ## How it works
 **Inputs and Outputs**:
-- Input: Scalar field $V(\mathbf{x})$, topological segmentation data (e.g., contour tree branches, persistence pairs), and a base transfer function $T(V)$.
-- Output: Compositing tuple $(\mathbf{c}_i, \alpha_i)$ for each sample point.
+- Input: Scalar volume data $V$, camera parameters, and a topological segmentation structure (e.g., contour tree or volume skeleton tree) derived from $V$.
+- Output: Final image with pixel colors $\mathbf{C}_{out}$ and accumulated opacity $\alpha_{out}$.
 
 **Data Structures**:
-- **Contour Tree / Skeleton Tree**: A graph structure where nodes represent critical points (minima, maxima, saddles) and edges represent topological features (branches). Each node/edge stores topological attributes such as persistence, volume, or occlusion status [S1, unofficial].
-- **Segmentation Map**: A label field or lookup table mapping spatial regions or scalar ranges to specific topological objects [S1, unofficial].
+- **Topological Segmentation**: A graph or tree structure (e.g., contour tree) where nodes represent critical points (minima, maxima, saddles) and edges represent topological connections (branches) between them. Each node/edge is associated with a topological attribute (e.g., persistence, number of equal-valued contours, occlusion level) [S1, unofficial].
+- **Transfer Function Map**: A mapping from topological attributes to optical properties $(\mathbf{c}, \alpha)$.
 
 **Steps**:
-1. **Topological Segmentation**: Compute the contour tree or volume skeleton tree of the scalar field $V$. Identify boundaries between distinct topological objects. Assign each voxel or region a topological identifier (e.g., branch ID) and compute topological attributes such as persistence, number of equal-valued contours, or occlusion level [S1, unofficial].
-2. **Attribute Assignment**: Map topological attributes to rendering properties. For example, Takeshima et al. assign lower opacity to outermost objects (those with higher occlusion or lower persistence) to prevent them from obscuring central features [S1, unofficial]. This creates a topological opacity modifier $M_{topo}$.
-3. **Opacity Calculation**: Compute the base opacity $\alpha_{base}$ using the parent method's transfer function $T(V)$ and opacity correction (e.g., Beer-Lambert law) [S2789]. Apply the topological modifier: $\alpha_{final} = \alpha_{base} \cdot M_{topo}$.
-4. **Color Assignment**: Assign color $\mathbf{c}$ based on the scalar value $V$ and potentially topological region (e.g., different colors for different branches) [S1, unofficial].
-5. **Compositing**: Perform standard front-to-back or back-to-front compositing using $(\mathbf{c}_i, \alpha_i)$ [S2789].
+1. **Topological Segmentation**: Compute a topological structure (e.g., contour tree) for the scalar field $V$. Identify boundaries between objects based on connectivity in the topology [S1, unofficial].
+2. **Attribute Assignment**: For each voxel or topological feature, assign rendering attributes based on its topological properties. For example, Takeshima et al. use the number of equal-valued contours and occlusion to determine opacity [S1, unofficial].
+3. **Direct Volume Rendering**: Perform standard direct volume ray casting. For each sample point $\mathbf{p}_i$ along a ray:
+   a. Retrieve the scalar value $V(\mathbf{p}_i)$.
+   b. Determine the topological attribute $A(\mathbf{p}_i)$ associated with the feature containing $\mathbf{p}_i$.
+   c. Map $A(\mathbf{p}_i)$ to opacity $\alpha_i$ and color $\mathbf{c}_i$ using the transfer function.
+   d. Composite the sample using the front-to-back equation.
 
 **Formulas**:
-- Topological Opacity Modifier: $M_{topo} = f(\text{persistence}, \text{occlusion}, \dots)$ [S1, unofficial].
-- Final Opacity: $\alpha_i = (1 - e^{-\sigma_i \Delta t}) \cdot M_{topo}(\text{topo\_id}_i)$ [S2789, S1, unofficial].
+- Opacity assignment example (Takeshima et al.): $\alpha_i = f(\text{occlusion}, \text{contour count})$, where outermost objects have lower $\alpha$ [S1, unofficial].
+- Standard compositing:
+  $$
+  \mathbf{C}_{out} = \sum_{i=1}^{N} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+  $$
+  $$
+  \alpha_{out} = 1 - \prod_{i=1}^{N} (1 - \alpha_i)
+  $$
 
 **Parameters**:
-- Persistence threshold: Used to prune insignificant topological features. Not given in the sources.
-- Occlusion metric: Definition varies by implementation. Not given in the sources.
+- Topological simplification threshold: Controls the granularity of the contour tree/skeleton. Not given in the sources.
+- Occlusion weight: Balances the influence of occlusion on opacity. Not given in the sources.
 
 **Edge Cases and Pitfalls**:
-- **Degenerate Topology**: Flat regions or constant scalar values may produce ambiguous contour tree structures. [G] Handle by assigning a default topological ID or treating as a single object.
-- **Performance**: Computing contour trees for large volumes is expensive. [S1, unofficial] Precomputation is often required.
-- **Precision**: Topological attributes are sensitive to noise. [G] Apply smoothing or persistence-based simplification before segmentation.
+- **Complex Topology**: Highly complex scalar fields may produce dense contour trees, increasing computational cost for segmentation.
+- **Attribute Ambiguity**: Defining a robust mapping from topological attributes to visual properties can be subjective.
+- **Dynamic Data**: Recomputing topology for time-varying data is expensive.
 
+**Pseudocode**:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing
+contour_tree = compute_contour_tree(volume_data)
+topological_attributes = assign_topological_attributes(contour_tree, volume_data)
+
+# Rendering
+for each pixel (x, y):
+    ray = create_ray(x, y, camera)
+    samples = sample_ray(ray, volume_data)
+    acc_color = (0, 0, 0)
+    acc_alpha = 0
+    
+    for sample in samples:
+        scalar_val = sample.value
+        topo_attr = get_topological_attribute(sample.position, topological_attributes)
+        
+        # Map topological attribute to optical properties
+        opacity = map_topo_to_opacity(topo_attr)
+        color = map_topo_to_color(topo_attr)
+        
+        # Front-to-back compositing
+        weight = (1 - acc_alpha) * opacity
+        acc_color += weight * color
+        acc_alpha += weight
+        
+    set_pixel_color(x, y, acc_color)
+```
 ## Subtopics
 
 ### [Hardware-Accelerated Topological Volume Rendering](11664-hardware-accelerated-topological-volume-rendering.md)
-Performs gradient reversal and tube blending directly on the GPU using texture lookups, enabling interactive manipulation of topological simplifications like branch pruning. Choose when real-time interaction with topological features is required.
+Applies topological segmentation to guide rendering attributes by dynamically rendering "tubes" between saddles and extrema in the fragment shader, enabling real-time interaction with topological simplifications like branch pruning.
 
 ## Operating characteristics
-- **Time Complexity**: Precomputation of contour tree is $O(N \log N)$ or $O(N)$ depending on algorithm, where $N$ is voxel count. Rendering is $O(R)$ where $R$ is ray samples, with minor overhead for topological lookup [S1, unofficial].
-- **Memory Complexity**: Requires storage for the contour tree/skeleton and segmentation map. Not given in the sources.
-- **Strengths**: Provides semantically meaningful segmentation without explicit mesh extraction; enhances feature visibility by modulating opacity based on structural importance [S1, unofficial].
-- **Limitations**: Precomputation cost; sensitivity to noise; complex to implement topological queries in real-time without hardware acceleration [S1, unofficial].
-- **When to use**: When understanding the connectivity and relative importance of topological features is more important than precise surface geometry.
-- **When not to use**: For real-time rendering of very large datasets without precomputation or hardware support.
-
+- **Time Complexity**: Dominated by the topological segmentation step (e.g., contour tree construction), which is typically $O(N \log N)$ or worse depending on the algorithm, where $N$ is the number of voxels. Rendering itself is $O(R \cdot S)$, where $R$ is rays and $S$ is samples per ray.
+- **Memory Complexity**: Requires storage for the volume data and the topological structure (contour tree/skeleton), which can be significant for large datasets.
+- **Strengths**: Provides clear visual separation of topological features; allows intuitive control over visibility based on structural importance (e.g., persistence).
+- **Limitations**: Computationally expensive preprocessing; static topology may not suit dynamic data without efficient update mechanisms.
+- **When to Use**: When the user needs to understand the structural connectivity and hierarchy of features in a scalar field.
+- **When Not to Use**: For real-time visualization of very large, dynamic datasets where topology computation is prohibitive.
 ## Background
-Originated from the application of topological data analysis to volume visualization. Takeshima et al. [44] (cited in [S1, unofficial]) demonstrated using topological attributes like occlusion and contour count to assign opacity levels. The approach bridges the gap between indirect mesh-based topological visualization and direct volume rendering [S1, unofficial].
-
+Originating from the need to visualize complex scalar fields beyond simple isosurfaces, this method was discussed in the context of topological visualization techniques for volume multifield data [S1, unofficial]. Takeshima et al. [44] (cited in [S1, unofficial]) pioneered the use of topological attributes like occlusion and contour counts for opacity assignment in direct volume rendering. The approach contrasts with mesh-based topological visualization by integrating topological information directly into the ray casting process.
 ## Sources
 [S1] Chapter Topological Visualisation Techniques for Volume Multifield Data, https://archive.org/details/oapen-20.500.12657-49310, fetched 2026-10-27 (unofficial)

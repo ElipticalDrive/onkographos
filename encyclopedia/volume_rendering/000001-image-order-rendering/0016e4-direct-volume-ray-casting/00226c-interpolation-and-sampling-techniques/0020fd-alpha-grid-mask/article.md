@@ -3,29 +3,36 @@
 Also called: Alpha Grid Mask Sampling, Alpha Volume Sampling
 
 ## Overview
-The Alpha Grid Mask is a module that stores a 3D alpha volume and provides efficient sampling of alpha values at arbitrary 3D coordinates using trilinear interpolation [S1, unofficial][S2, unofficial]. It serves as the core sampling primitive for volume rendering to incorporate spatially varying opacity constraints derived from external supervision or geometry masks [S2, unofficial].
+Alpha Grid Mask is a technique for sampling opacity values from a precomputed 3D alpha volume at arbitrary 3D coordinates using grid sampling with normalized coordinates [S1, unofficial][S2, unofficial][S3, unofficial]. It enables volume rendering to incorporate spatially varying opacity constraints derived from external supervision or geometry masks by filtering rays based on opacity [S2, unofficial]. It differs from standard interpolation methods by specifically targeting alpha/opacity values for ray filtering rather than color or density, and it relies on PyTorch's `grid_sample` infrastructure for efficient GPU-accelerated trilinear interpolation [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A set of 3D sample positions $\mathbf{p}_{sampled}$ (shape $[N, 3]$) in world or canonical space, and a precomputed 3D alpha volume tensor [S2, unofficial].
-*   **Output:** A tensor of sampled alpha values $\alpha$ (shape $[N]$) representing the opacity at the query points [S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A set of 3D sample positions `xyz_sampled` (shape $[N, 3]$ or broadcastable), a precomputed 3D alpha volume tensor, and an Axis-Aligned Bounding Box (AABB) defining the spatial extent of the volume.
+*   **Output:** A tensor of sampled alpha values corresponding to the input positions.
 
-**Data Structures**
-The module maintains the following state variables:
-*   `device`: The torch device (e.g., 'cuda') where the volume resides [S1, unofficial].
-*   `aabb`: A tensor of shape $[2, 3]$ defining the axis-aligned bounding box of the volume, where `aabb[0]` is the minimum corner and `aabb[1]` is the maximum corner [S1, unofficial].
-*   `aabbSize`: A tensor of shape $[3]$, computed as `aabb[1] - aabb[0]` [S1, unofficial].
-*   `invgridSize`: A tensor of shape $[3]$, computed as `2.0 / aabbSize` [S1, unofficial].
-*   `alpha_volume`: The 3D alpha volume tensor. Sources describe the layout as $[1, 1, D, H, W]$ or $[1, 1, H, W, D]$ [S1, unofficial][S2, unofficial].
-*   `gridSize`: A LongTensor of shape $[3]$ containing the dimensions $(D, H, W)$ of the alpha volume [S1, unofficial][S2, unofficial].
+**Data Structures:**
+The method maintains a module or class instance with the following fields [S2, unofficial][S3, unofficial]:
+*   `device`: The torch device (e.g., 'cuda') for tensor operations [S1, unofficial].
+*   `aabb`: A tensor of shape $[2, 3]$ defining the minimum and maximum coordinates of the bounding box [S1, unofficial][S2, unofficial].
+*   `aabbSize`: A tensor of shape $[3]$, computed as `self.aabb[1] - self.aabb[0]` [S2, unofficial][S3, unofficial].
+*   `invgridSize`: A scalar or tensor representing the inverse grid size scaling factor. Defined as `2.0 / self.aabbSize` [S1, unofficial][S2, unofficial]. Note: Sources indicate this is computed as `1.0/self.aabbSize * 2` [S2, unofficial]. If `aabbSize` is shape $[3]$, `invgridSize` becomes shape $[3]$ to allow broadcasting during normalization [S2, unofficial].
+*   `alpha_volume`: A 3D tensor of alpha values. The internal storage shape is typically $[1, 1, H, W, D]$ or $[1, 1, D, H, W]$ depending on the specific implementation variant, viewed from original dimensions [S2, unofficial][S3, unofficial].
+*   `gridSize`: A LongTensor of shape $[3]$ containing the dimensions of the alpha volume [S2, unofficial][S3, unofficial].
 
-**Algorithm Steps**
-1.  **Normalize Coordinates:** Map the input sample positions $\mathbf{p}_{sampled}$ from the world space defined by `aabb` to the normalized range $[-1, 1]$ required by the interpolation function: $\mathbf{p}_{norm} = (\mathbf{p}_{sampled} - \text{aabb}[0]) \times \text{invgridSize} - 1$ [S2, unofficial]. If `invgridSize` is a vector $[3]$, this operation broadcasts correctly across the 3 dimensions of $\mathbf{p}_{sampled}$ [S1, unofficial].
-2.  **Reshape for Interpolation:** Reshape $\mathbf{p}_{norm}$ to match the input format expected by the interpolation routine [S1, unofficial].
-3.  **Sample Alpha Values:** Perform trilinear interpolation of the alpha values from the volume at the specified coordinates [S2, unofficial].
-4.  **Reshape Output:** Flatten the output tensor to $[N]$ [S1, unofficial].
+**Steps:**
+1.  **Normalization:** Convert the input 3D coordinates `xyz_sampled` from world/AABB space to the normalized $[-1, 1]$ range required by `grid_sample`. The formula is [S1, unofficial][S2, unofficial][S3, unofficial]:
+    $$
+    \text{xyz}_{\text{norm}} = (\text{xyz}_{\text{sampled}} - \text{aabb}_{\min}) \times \text{invgridSize} - 1
+    $$
+    Where $\text{aabb}_{\min}$ is `self.aabb[0]` and $\text{invgridSize}$ is `2.0 / (aabb_{\max} - aabb_{\min})` [S1, unofficial][S2, unofficial].
+2.  **Reshaping:** Reshape the normalized coordinates tensor to match the expected input format for `grid_sample`. The required shape is $[1, N, 1, 1, 3]$ where $N$ is the number of samples [S1, unofficial][S2, unofficial][S3, unofficial].
+3.  **Sampling:** Call `F.grid_sample` on the `alpha_volume` with the reshaped coordinates. The parameters are:
+    *   `input`: `self.alpha_volume`
+    *   `grid`: The reshaped normalized coordinates
+    *   `align_corners=True`: Ensures the corners of the grid align with the corners of the sampled output [S1, unofficial][S2, unofficial][S3, unofficial].
+4.  **Reshaping Output:** Reshape the output tensor from $[1, 1, 1, N]$ back to $[N]$ to return the sampled alpha values [S1, unofficial][S2, unofficial][S3, unofficial].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -33,169 +40,116 @@ import torch
 import torch.nn.functional as F
 
 class AlphaGridMask:
-    def __init__(self, alpha_volume, aabb, gridSize):
+    def __init__(self, alpha_volume, aabb, device='cuda'):
         """
-        Initialize the Alpha Grid Mask.
+        Initialize the Alpha Grid Mask sampler.
         
         Args:
-            alpha_volume: Tensor of shape [1, 1, D, H, W] or [1, 1, H, W, D] containing alpha values.
-            aabb: Tensor of shape [2, 3] with [min_corner, max_corner].
-            gridSize: LongTensor of shape [3] with dimensions [D, H, W].
+            alpha_volume: Tensor of shape [1, 1, H, W, D] or [1, 1, D, H, W] containing alpha values.
+            aabb: Tensor of shape [2, 3] with [min_coords, max_coords].
+            device: Torch device.
         """
-        self.alpha_volume = alpha_volume
-        self.aabb = aabb
-        self.gridSize = gridSize
-        self.device = alpha_volume.device
-        
-        # Compute aabbSize
-        self.aabbSize = self.aabb[1] - self.aabb[0]  # Shape [3]
-        
-        # Compute invgridSize
-        self.invgridSize = 2.0 / self.aabbSize  # Shape [3]
+        self.device = device
+        self.aabb = aabb.to(device)
+        self.aabbSize = self.aabb[1] - self.aabb[0]
+        # invgridSize is computed per dimension to allow broadcasting
+        self.invgridSize = 2.0 / self.aabbSize 
+        self.alpha_volume = alpha_volume.to(device)
+        self.gridSize = torch.tensor(self.alpha_volume.shape[-3:], dtype=torch.long, device=device)
 
     def normalize_coord(self, xyz_sampled):
         """
-        Normalize coordinates from world space to [-1, 1] space.
+        Normalize coordinates to [-1, 1] range.
         
         Args:
-            xyz_sampled: Tensor of shape [N, 3] or [B, N, 3].
+            xyz_sampled: Tensor of shape [N, 3] or broadcastable.
             
         Returns:
             Normalized coordinates in [-1, 1].
         """
-        # xyz_sampled: [..., 3]
-        # aabb[0]: [3]
-        # invgridSize: [3]
-        
-        # Step 1: Offset
-        offset = xyz_sampled - self.aabb[0]  # [..., 3]
-        
-        # Step 2: Scale
-        # Broadcasting handles [..., 3] * [3]
-        scaled = offset * self.invgridSize  # [..., 3]
-        
-        # Step 3: Shift to [-1, 1]
-        normalized = scaled - 1.0  # [..., 3]
-        
-        return normalized
-
-    def trilinear_interpolate(self, volume, coords):
-        """
-        Perform trilinear interpolation on a 3D volume.
-        
-        Args:
-            volume: Tensor of shape [D, H, W] or [1, 1, D, H, W].
-            coords: Tensor of shape [N, 3] in normalized [-1, 1] space.
-            
-        Returns:
-            Tensor of shape [N] with interpolated values.
-        """
-        # Extract dimensions
-        if volume.dim() == 5:
-            volume = volume.squeeze(0).squeeze(0)  # [D, H, W]
-        d, h, w = volume.shape
-        
-        # Map normalized coords [-1, 1] to voxel indices [0, size-1]
-        voxel_coords = (coords + 1.0) * 0.5
-        voxel_x = voxel_coords[..., 0] * (w - 1)
-        voxel_y = voxel_coords[..., 1] * (h - 1)
-        voxel_z = voxel_coords[..., 2] * (d - 1)
-
-        # Floor and ceil indices
-        ix0 = voxel_x.long()
-        iy0 = voxel_y.long()
-        iz0 = voxel_z.long()
-        ix1 = ix0 + 1
-        iy1 = iy0 + 1
-        iz1 = iz0 + 1
-
-        # Clamp indices to volume bounds
-        ix0 = ix0.clamp(0, w - 1)
-        ix1 = ix1.clamp(0, w - 1)
-        iy0 = iy0.clamp(0, h - 1)
-        iy1 = iy1.clamp(0, h - 1)
-        iz0 = iz0.clamp(0, d - 1)
-        iz1 = iz1.clamp(0, d - 1)
-
-        # Fractional parts
-        fx = voxel_x - ix0.float()
-        fy = voxel_y - iy0.float()
-        fz = voxel_z - iz0.float()
-
-        # Fetch 8 corners
-        v000 = volume[iz0, iy0, ix0]
-        v001 = volume[iz0, iy0, ix1]
-        v010 = volume[iz0, iy1, ix0]
-        v011 = volume[iz0, iy1, ix1]
-        v100 = volume[iz1, iy0, ix0]
-        v101 = volume[iz1, iy0, ix1]
-        v110 = volume[iz1, iy1, ix0]
-        v111 = volume[iz1, iy1, ix1]
-
-        # Interpolate along X
-        c00 = v000 * (1 - fx) + v001 * fx
-        c01 = v010 * (1 - fx) + v011 * fx
-        c10 = v100 * (1 - fx) + v101 * fx
-        c11 = v110 * (1 - fx) + v111 * fx
-
-        # Interpolate along Y
-        c0 = c00 * (1 - fy) + c10 * fy
-        c1 = c01 * (1 - fy) + c11 * fy
-
-        # Interpolate along Z
-        alpha = c0 * (1 - fz) + c1 * fz
-        return alpha
+        # (xyz - min) * (2 / size) - 1
+        return (xyz_sampled - self.aabb[0]) * self.invgridSize - 1
 
     def sample_alpha(self, xyz_sampled):
         """
-        Sample alpha values from the volume at given 3D coordinates.
+        Sample alpha values from the precomputed alpha volume.
         
         Args:
-            xyz_sampled: Tensor of shape [N, 3] containing sample positions.
+            xyz_sampled: Tensor of shape [N, 3] containing 3D coordinates.
             
         Returns:
             Tensor of shape [N] containing sampled alpha values.
         """
-        # Normalize coordinates
-        xyz_norm = self.normalize_coord(xyz_sampled)  # [N, 3]
+        # 1. Normalize coordinates
+        xyz_norm = self.normalize_coord(xyz_sampled)
         
-        # Reshape for grid_sample: [1, N, 1, 1, 3]
-        xyz_reshaped = xyz_norm.view(1, -1, 1, 1, 3)  # [1, N, 1, 1, 3]
+        # 2. Reshape for grid_sample: [1, N, 1, 1, 3]
+        # grid_sample expects input [N, H, W, D] or [N, C, H, W, D] and grid [N, H_out, W_out, D_out, 3]
+        # Here we treat N as the batch dimension for grid_sample, but grid_sample expects batch dim first.
+        # The standard usage in the source reshapes to [1, -1, 1, 1, 3] assuming the input xyz_sampled
+        # is flattened into a single batch of size N.
+        xyz_reshaped = xyz_norm.view(1, -1, 1, 1, 3)
         
-        # Sample using PyTorch's grid_sample (align_corners=True preserves boundaries)
-        # alpha_volume shape: [1, 1, D, H, W]
-        # grid_sample output shape: [1, 1, 1, 1, N]
+        # 3. Sample using grid_sample with align_corners=True
+        # alpha_volume shape: [1, 1, H, W, D]
+        # grid_sample output shape: [1, 1, 1, N]
         alpha_vals = F.grid_sample(
             self.alpha_volume, 
             xyz_reshaped, 
             align_corners=True
         )
         
-        # Reshape output to [N]
-        alpha_vals = alpha_vals.view(-1)  # [N]
-        
-        return alpha_vals
+        # 4. Reshape output to [N]
+        return alpha_vals.view(-1)
 ```
 
-**Parameters**
-*   `align_corners`: Set to `True` [S1, unofficial]. This ensures that the corner pixels of the input grid are preserved in the output, which is critical for accurate coordinate mapping in bounded volumes.
+**Parameters:**
+*   `device`: The computational device (e.g., 'cuda') [S1, unofficial].
+*   `aabb`: Axis-aligned bounding box defining the spatial domain [S1, unofficial].
+*   `alpha_volume`: The 3D tensor storing the alpha values [S1, unofficial].
+*   `align_corners`: Boolean, set to `True` in all cited implementations [S1, unofficial][S2, unofficial][S3, unofficial].
 
-**Edge Cases and Pitfalls**
-*   **Coordinate Normalization:** The `invgridSize` calculation involves division by `aabbSize` [S1, unofficial]. If `aabbSize` is a tensor of shape $[3]$, `invgridSize` becomes a tensor of shape $[3]$, and the normalization formula relies on broadcasting [S1, unofficial].
-*   **Out-of-Bounds Sampling:** Points outside the `aabb` will be mapped to coordinates outside $[-1, 1]$. Implementers should clamp or mask these points before sampling to avoid out-of-bounds errors [G].
-*   **Memory Layout:** The `alpha_volume` layout is specified as $[1, 1, H, W, D]$ in one source and $[1, 1, D, H, W]$ in another [S1, unofficial][S2, unofficial]. Ensure the volume tensor matches the expected layout of the interpolation function [S1, unofficial][S2, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Coordinate Bounds:** Coordinates outside the AABB will be clamped or extrapolated depending on `grid_sample`'s padding mode (default is zeros, but `align_corners` affects boundary behavior) [S2, unofficial].
+*   **`invgridSize` Shape:** If `aabbSize` is a tensor of shape $[3]$, `invgridSize` will also be shape $[3]$. The normalization formula relies on broadcasting `xyz_sampled` (shape $[N, 3]$) with `invgridSize` (shape $[3]$) [S2, unofficial].
+*   **Tensor Reshaping:** The input `xyz_sampled` must be correctly reshaped to $[1, N, 1, 1, 3]$ to match `grid_sample`'s expected grid format [S1, unofficial][S2, unofficial].
 
 ## Subtopics
 
 ### [Sample Opacities from Mask](2510-sample-opacities-from-mask.md)
-This method samples opacity values from a precomputed 3D alpha mask volume for a set of 3D point positions, mapping the raw mask values to a specified opacity range. It serves as the core sampling primitive for the Alpha Grid Mask module, enabling volume rendering to incorporate spatially varying opacity constraints derived from external supervision or geometry masks.
+Samples opacity values from a precomputed 3D alpha mask volume for a set of 3D point positions, mapping raw mask values to a specified opacity range. Enables volume rendering to incorporate spatially varying opacity constraints derived from external supervision or geometry masks.
+
+### [Interpolation Methods](10526-interpolation-methods.md)
+General methods for interpolating values from discrete samples, including linear, cubic, and higher-order kernels.
+
+### [Plane-Based Sampling](13531-plane-based-sampling.md)
+Sampling techniques that project volume data onto 2D planes for efficient rendering.
+
+### [MLS Volume Reconstruction](9796-mls-volume-reconstruction.md)
+Moving Least Squares based volume reconstruction for smoother interpolation.
+
+### [Space Warping (Log+Warp)](5815-space-warping-log-warp.md)
+Warping coordinates to handle non-uniform sampling or specific geometric distortions.
+
+### [Sampling and Jittering](2516-sampling-and-jittering.md)
+Techniques for adding jitter to sample positions to reduce aliasing.
+
+### [Depth to Distance Conversion](2428-depth-to-distance-conversion.md)
+Converting depth values to physical distances for sampling.
 
 ## Operating characteristics
-Not given in the sources.
+*   **Time Complexity:** $O(N)$ where $N$ is the number of sample points, as each point requires a constant-time lookup and interpolation via `grid_sample` [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** $O(H \times W \times D)$ for storing the alpha volume, where $H, W, D$ are the dimensions of the volume grid [S2, unofficial][S3, unofficial].
+*   **Performance:** Highly efficient on GPU due to the use of PyTorch's optimized `grid_sample` kernel [S2, unofficial].
+*   **Strengths:** Simple to implement, leverages existing deep learning frameworks, efficient for large numbers of samples [S1, unofficial][S2, unofficial].
+*   **Limitations:** Requires precomputation of the alpha volume, limited to trilinear interpolation unless modified [S3, unofficial].
+*   **When to Use:** When ray filtering based on opacity is required and the opacity field is known in advance [S2, unofficial].
+*   **When Not to Use:** When dynamic opacity changes are needed per frame without recomputing the volume, or when higher-order interpolation is required [S3, unofficial].
 
 ## Background
-The Alpha Grid Mask is a component used in tensor-based radiance field representations, specifically within the TensoRF framework presented at ECCV 2022 [S1, unofficial]. It is also referenced in the context of Collaborative Neural Radiance Fields for Novel View Synthesis [S2, unofficial].
+Alpha Grid Mask is used in neural radiance field (NeRF) and tensor factorization based rendering methods to incorporate opacity masks for better scene representation and ray filtering [S1, unofficial][S2, unofficial][S3, unofficial]. It is commonly found in implementations of TensorRF and related architectures where spatial constraints are applied to the alpha channel [S1, unofficial][S2, unofficial].
 
 ## Sources
-[S1] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
-[S2] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+[S2] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

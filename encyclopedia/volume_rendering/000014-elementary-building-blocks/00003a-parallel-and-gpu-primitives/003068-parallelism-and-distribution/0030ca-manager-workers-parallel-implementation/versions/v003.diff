@@ -1,0 +1,160 @@
+--- v002.md
++++ v003.md
+@@ -18,8 +18,5 @@
+     *   `block_id`: (Optional) Identifier for the data sub-block in EXTRACT tasks [S1].
+ *   **Worker State:** Each worker maintains a local surface mesh (initially empty) [S1, S2].
+-*   **Manager State:** The manager maintains a global view of:
+-    *   Extracted blocks [S1].
+-    *   Worker surface availability [S1].
+-    *   Topological neighbors of workers/blocks [S1].
++*   **Manager State:** The manager maintains a global view of extracted blocks, worker surface availability, and topological neighbors of workers/blocks [S1].
+ 
+ **Parameters:**
+@@ -32,16 +29,16 @@
+ 
+ 2.  **Worker Loop:** Each worker executes the following logic [S1, S2]:
+-    *   Request a task from the manager.
++    *   Request a task from the manager [S1].
+     *   Execute the task based on its type:
+-        *   **EXTRACT:** Perform the core computation (e.g., `tandem(E0)`) on the assigned sub-block. Append the resulting local surface to the worker's current mesh. Note: For block borders, a "time lag" method may be used to prevent edge collapse by preserving vertices on boundaries before simplification [S1].
++        *   **EXTRACT:** Perform the core computation (e.g., `tandem(E0)`) on the assigned sub-block. Append the resulting local surface to the worker's current mesh. For block borders, a "time lag" method is applied to prevent edge collapse by preserving vertices on boundaries before simplification [S1].
+         *   **SEND:** Send the current accumulated surface mesh to the specified `target_id`. Clear the local surface memory after sending [S1].
+-        *   **MERGE:** Receive a surface mesh from another worker (or the manager) and merge it with the current local surface. Simplify the combined surface and dump finished components if applicable [S1].
++        *   **MERGE:** Receive a surface mesh from another worker and merge it with the current local surface. Simplify the combined surface and dump finished components if applicable [S1].
+         *   **FINISHED:** Set a local `finished` flag to true and terminate the loop [S1].
+ 
+ 3.  **Manager Loop:** The manager iterates until all data is processed and all workers are finished [S1, S2]:
+-    *   Wait for a task request from a worker with ID `id`.
++    *   Wait for a task request from a worker with ID `id` [S1].
+     *   Check conditions in priority order [S1]:
+-        1.  **Has Surface:** If the worker `id` currently holds a surface mesh that needs aggregation, send a `MERGE` task. This task likely includes the ID of the worker to merge with (determined by the manager's knowledge of topology) [S1].
+-        2.  **Has Neighbor:** If the worker has no surface but has topological neighbors that might hold relevant data, send a `SEND` task with a `target_id` to forward its current (empty or partial) state or request data [S1]. *Note: Sources indicate SEND is used to send current mesh to target; the logic implies routing intermediate results.*
++        1.  **Has Surface:** If the worker `id` currently holds a surface mesh that needs aggregation, send a `MERGE` task [S1].
++        2.  **Has Neighbor:** If the worker has no surface but has topological neighbors, send a `SEND` task with a `target_id` to forward its current state [S1].
+         3.  **Has Block:** If there are un-extracted data blocks, send an `EXTRACT` task assigning a specific block to the worker [S1].
+         4.  **Else:** Send a `FINISHED` task to terminate the worker [S1].
+@@ -50,71 +47,70 @@
+ 
+ ```python
+-# Worker Process
++class Task:
++    def __init__(self, type, worker_id=None, target_id=None, block_id=None):
++        self.type = type
++        self.worker_id = worker_id
++        self.target_id = target_id
++        self.block_id = block_id
++
++class Mesh:
++    def __init__(self):
++        self.triangles = []
++    def append(self, other):
++        self.triangles.extend(other.triangles)
++    def merge(self, other):
++        self.triangles.extend(other.triangles)
++    def simplify(self):
++        pass # Simplification logic [S1]
++    def dump_finished(self):
++        pass # Dump logic [S1]
++
++def tandem_extraction(block_id, E0):
++    # Executes extended tandem algorithm on block [S1]
++    return Mesh()
++
++def find_neighbor(worker_id, topology):
++    # Returns a neighbor ID or None [G]
++    return topology.get(worker_id, [None])[0]
++
+ def worker_process(worker_id, task_queue):
+     finished = False
+-    local_surface = EmptyMesh()
+-    
++    local_surface = Mesh()
+     while not finished:
+-        # Block until a task is received from the manager
+         task = task_queue.receive()
+-        
+         if task.type == "EXTRACT":
+-            # Extract surface from the assigned sub-block
+-            # E0 is the extraction algorithm (e.g., extended tandem)
+-            new_mesh = extract_surface(task.block_id, algorithm=E0)
++            new_mesh = tandem_extraction(task.block_id, E0)
+             local_surface.append(new_mesh)
+-            
+         elif task.type == "SEND":
+-            # Send current surface to target worker
+-            # The manager determines the target_id based on topology
+             task_queue.send(task.target_id, local_surface)
+-            local_surface = EmptyMesh() # Clear memory
+-            
++            local_surface = Mesh()
+         elif task.type == "MERGE":
+-            # Receive mesh from another worker and merge
+             incoming_mesh = task_queue.receive_mesh()
+             local_surface.merge(incoming_mesh)
+-            # Simplify and dump finished components if needed
+             local_surface.simplify()
+-            
++            local_surface.dump_finished()
+         elif task.type == "FINISHED":
+             finished = True
+ 
+-# Manager Process
+-def manager_process(worker_ids, data_blocks, task_queues):
+-    # Global state maintained by manager
+-    extracted_blocks = set()
++def manager_process(worker_ids, data_blocks, task_queues, topology):
++    extracted_blocks = set(data_blocks)
+     worker_surfaces = {wid: None for wid in worker_ids}
+-    # Topology map: which workers/blocks are neighbors
+-    topology = build_topology(data_blocks) 
+-    
+     finished_workers = set()
+-    
++
+     while len(finished_workers) < len(worker_ids):
+-        # Wait for any worker to request a task
+-        requesting_worker_id = task_queue.wait_for_request()
+-        
+-        # Priority 1: Merge if worker has surface
++        requesting_worker_id = task_queue_manager.wait_for_request()
++
+         if worker_surfaces[requesting_worker_id] is not None:
+-            # Find a target to merge with (e.g., a neighbor or the manager)
+-            target_id = find_merge_target(requesting_worker_id, topology)
++            target_id = find_neighbor(requesting_worker_id, topology)
+             task = Task(type="MERGE", target_id=target_id)
+             task_queues[requesting_worker_id].send(task)
+-            
+-        # Priority 2: Send if worker has neighbor but no surface to merge?
+-        # Note: Source logic says "If has neighbor(id) then send SEND".
+-        # This implies routing or handoff even if surface is empty or being prepared.
+-        elif has_neighbor(requesting_worker_id, topology):
++        elif find_neighbor(requesting_worker_id, topology) is not None:
+             target_id = find_neighbor(requesting_worker_id, topology)
+             task = Task(type="SEND", target_id=target_id)
+             task_queues[requesting_worker_id].send(task)
+-            
+-        # Priority 3: Extract if blocks remain
+-        elif len(extracted_blocks) < len(data_blocks):
+-            block_id = get_next_unextracted_block(data_blocks, extracted_blocks)
++        elif len(extracted_blocks) > 0:
++            block_id = extracted_blocks.pop()
+             task = Task(type="EXTRACT", block_id=block_id)
+             task_queues[requesting_worker_id].send(task)
+-            
+-        # Priority 4: Finish
+         else:
+             task = Task(type="FINISHED")
+@@ -134,9 +130,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the task scheduler's efficiency and network latency. The manager's decision loop is $O(1)$ per request, but global state updates are required.
+-*   **Memory Complexity:** Distributed across workers. Each worker stores only its local surface mesh, reducing peak memory usage compared to brute-force approaches [S1]. The manager stores global metadata, which is minimal.
++*   **Time Complexity:** Not given in the sources. The manager's decision loop performs constant-time checks per request, but global state updates are required [G].
++*   **Memory Complexity:** Memory usage is distributed across workers, with each worker storing only its local surface mesh, reducing peak memory usage compared to brute-force approaches [S1]. The manager stores global metadata, which is minimal [G].
+ *   **Performance:** Critical bottleneck is often I/O (reading large datasets) rather than computation [S3, unofficial]. The architecture allows for efficient load balancing on clusters with varying processor availability [S1, S2].
+ *   **Strengths:** Adaptable to dynamic cluster resources; simple worker implementation; no shared memory requirements between workers [S1, S2][S3, unofficial].
+-*   **Limitations:** Manager becomes a bottleneck if task requests are frequent; network overhead for sending meshes; OS scheduler limitations in Python variant [S3, unofficial].
++*   **Limitations:** Manager becomes a bottleneck if task requests are frequent; network overhead for sending meshes [G]. OS scheduler performance limits and OS-defined process number limits restrict the Python variant [S3, unofficial].
+ 
+ ## Background

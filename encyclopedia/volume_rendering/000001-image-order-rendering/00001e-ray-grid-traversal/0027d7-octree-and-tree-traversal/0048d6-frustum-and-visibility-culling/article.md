@@ -1,114 +1,42 @@
 # Frustum and Visibility Culling
 
-Also called: Implicit Frustum Culling, Ray-Determined Visibility
+Also called: Frustum Culling, Visibility Culling, Frustum-Occlusion Culling
 
 ## Overview
-Frustum and Visibility Culling is a visibility optimization technique used in ray-guided volume rendering where the working set of data (bricks or voxels) is determined implicitly during the ray traversal process itself [S1, unofficial]. Unlike traditional methods that require explicit pre-passes to cull objects against the view frustum or occlusion buffers, this approach leverages the fact that rays originating from the camera only intersect visible geometry [S1, unofficial]. It sets itself apart from its siblings by eliminating the overhead of separate culling stages, allowing rays to directly write out the list of required bricks in front-to-back order [S1, unofficial].
+Frustum and Visibility Culling determines the subset of a hierarchical volume structure (such as an octree or bounding-sphere tree) that intersects the camera's view frustum, thereby reducing the working set for rendering. It distinguishes itself from sibling methods by decoupling geometric visibility determination from the actual ray traversal or rasterization, often serving as a pre-pass or integrated filter to prioritize data loading and cull empty space before expensive sampling occurs.
 
-## How it works
-**Inputs and Outputs:**
-- **Input:** Camera parameters (position, orientation, frustum planes), ray origins and directions (one per pixel or sample), and the hierarchical volume data structure (e.g., octree with brick metadata).
-- **Output:** A list of intersected bricks/voxels for each ray, or the final rendered image if compositing is performed immediately.
+## Shared principles
+All methods in this family share the core mechanism of hierarchical descent and ascent. The traversal begins at the root of the octree and determines which of the eight children (octants) the ray intersects. This is typically done by comparing the ray's position relative to the center of the current node's bounding box [S1, unofficial][S2, unofficial][S6, S8, unofficial].
 
-**Data Structures:**
-- **Ray Buffer:** A buffer storing ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for each pixel/sample.
-- **Brick List/Buffer:** A structure (e.g., using `GL_ARB_shader_storage_buffer_object`) to store the indices of bricks intersected by each ray [S1, unofficial].
-- **Octree/Brick Hierarchy:** Nodes containing bounding boxes and occupancy flags.
+1.  **Child Selection:** For a node with center $\mathbf{c}$ and half-extent $s$, the ray position $\mathbf{p}$ determines the child index $k \in \{0, \dots, 7\}$:
+    $$
+    k = 4 \cdot \mathbb{I}(p_x \ge c_x) + 2 \cdot \mathbb{I}(p_y \ge c_y) + 1 \cdot \mathbb{I}(p_z \ge c_z)
+    $$
+    where $\mathbb{I}(\cdot)$ is the indicator function [S1, unofficial][S2, unofficial][S6, S8, unofficial].
 
-**Steps:**
-1. **Ray Generation:** Generate rays from the camera through each pixel.
-2. **Traversal:** For each ray, traverse the octree hierarchy starting from the root.
-3. **Intersection Test:** At each node, test if the ray intersects the node's bounding box. If not, skip the subtree.
-4. **Frustum Check (Implicit):** Since rays are generated from the camera, any node intersected by a ray is, by definition, within the view frustum. No explicit plane tests are needed [S1, unofficial].
-5. **Occlusion Check (Implicit):** As rays traverse front-to-back, they accumulate opacity. If a ray is fully opaque before reaching a node, the node is skipped. This provides implicit occlusion culling without extra buffers [S1, unofficial].
-6. **Leaf Sampling:** Upon reaching a leaf node (brick), sample the volume data.
-7. **Working Set Recording:** Record the intersected brick indices in the output buffer [S1, unofficial].
+2.  **Empty Space Skipping:** If the selected child is marked as empty (or uniform), the traversal skips the subtree. This is achieved by advancing the ray parameter $t$ to the exit of the current node or using neighbor pointers to jump to the next potentially occupied node [S1, S6, S8, unofficial][G].
 
-**Formulas:**
-- Ray intersection with AABB (Axis-Aligned Bounding Box):
-  $$
-  t_{min} = \max \left( \frac{b_{min,x} - o_x}{d_x}, \frac{b_{min,y} - o_y}{d_y}, \frac{b_{min,z} - o_z}{d_z} \right)
-  $$
-  $$
-  t_{max} = \min \left( \frac{b_{max,x} - o_x}{d_x}, \frac{b_{max,y} - o_y}{d_y}, \frac{b_{max,z} - o_z}{d_z} \right)
-  $$
-  Intersection occurs if $t_{min} \le t_{max}$ and $t_{max} > 0$.
+3.  **Leaf Handling:** Upon reaching a leaf node, the method typically switches to a fixed-step traversal (like DDA) within the leaf's voxel grid to sample the volume data [S1, S6, S8, unofficial][G].
 
-**Parameters:**
-- Ray step size: Determined by leaf node size or brick resolution.
-- Opacity threshold: For early ray termination.
-
-**Edge Cases:**
-- **Degenerate Rays:** Rays with zero length or direction should be handled or skipped.
-- **Precision Issues:** Near-zero $t$ values may cause self-intersection artifacts; use a small epsilon.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_volume(rays, octree, brick_data):
-    # rays: list of (origin, direction) tuples
-    # octree: root node of the octree
-    # brick_data: dictionary mapping brick_id to voxel data
-    
-    for ray in rays:
-        o, d = ray
-        t = 0.0
-        current_node = octree
-        accumulated_opacity = 0.0
-        
-        while current_node is not None:
-            # Check if ray intersects current node's bounding box
-            if not ray_aabb_intersect(o, d, current_node.bbox):
-                current_node = None
-                continue
-            
-            # Implicit Frustum Culling: Ray is already within frustum
-            # Implicit Occlusion Culling: Check accumulated opacity
-            if accumulated_opacity >= 1.0:
-                current_node = None
-                continue
-            
-            # If leaf node, sample and record
-            if current_node.is_leaf:
-                brick_id = current_node.brick_id
-                # Sample volume data
-                color, opacity = sample_brick(brick_id, o, d, t, brick_data)
-                # Composite
-                # ...
-                # Record brick in working set
-                working_set.append(brick_id)
-                current_node = None
-            else:
-                # Traverse children
-                # Determine which child to visit first (front-to-back)
-                child = get_frontmost_child(current_node, o, d)
-                current_node = child
-                # Update t if needed (e.g., if child is further away)
-        
-        # End of ray
-```
+4.  **Backtracking:** Because octrees are sparse and irregular, traversal often requires backtracking to the parent node when a ray exits a subtree or encounters an empty branch. This is implemented using an explicit stack (on GPU) or recursion (on CPU) [S4, S6, S8, unofficial].
 
 ## Subtopics
 
 ### [Bounding-Sphere Tree Traversal with Frame-Rate Control](7227-bounding-sphere-tree-traversal-with-frame-rate-control.md)
-Uses adaptive bounding-sphere culling and frame-rate feedback for point-based splatting.
+This method traverses hierarchical bounding-sphere trees (specifically Shell and Solid structures) to render point-based volumetric primitives while maintaining real-time performance through adaptive frame-rate control. It distinguishes itself by decoupling geometric culling from rendering resolution, using screen-space splat size thresholds ($\delta_r, \delta_b$) to dynamically adjust traversal depth based on current frame rates, rather than relying solely on geometric distance or fixed LOD levels. It builds on [Bounding-Sphere Tree Traversal with Frame-Rate Control](7227-bounding-sphere-tree-traversal-with-frame-rate-control.md).
 
 ### [Frustum Culling Integration](8798-frustum-culling-integration.md)
-Filters 3D Gaussian Splatting elements based on user pose for progressive loading.
+Frustum Culling Integration is a technique used in progressive volume rendering (specifically for Gaussian Splatting) to prioritize the loading and rendering of splats visible to the user by applying frustum culling. It is applied after global ordering is determined to refine the selection of data based on the current viewpoint. It sets itself apart from the base octree-only approach by leveraging user-specific view information to improve foreground quality, whereas the octree-only method provides a good scene representation without requiring such knowledge. It builds on [Frustum and Visibility Culling](12355-frustum-and-visibility-culling.md) by adding view-dependent filtering to the ordering pipeline.
 
 ### [Frustum-Occlusion Culling for Octree Traversal](12324-frustum-occlusion-culling-for-octree-traversal.md)
-Screen-space culling of octants based on projected area for voxel rasterization.
+This method identifies a set of potentially visible voxels by traversing an octree hierarchy against the camera's view frustum, automatically selecting the Level of Detail (LOD) based on screen projection size. It differs from sibling methods by combining visibility culling with implicit LOD termination during traversal, outputting a buffer of voxel attributes for subsequent hardware instancing rasterization. It builds on [Frustum-Occlusion Culling for Octree Traversal](12324-frustum-occlusion-culling-for-octree-traversal.md).
 
-## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of rays, but with a significantly reduced constant factor due to implicit culling. The traversal depth is logarithmic with respect to the volume size.
-- **Memory Complexity:** $O(M)$ where $M$ is the size of the octree and brick data. The working set buffer size depends on the visible portion of the volume.
-- **Performance:** Provides significant speedups by avoiding explicit culling passes and occlusion buffer updates [S1, unofficial]. Performance scales well with hardware acceleration (e.g., GPU) [S1, unofficial].
-- **Strengths:** Simple implementation, no extra passes, efficient use of hardware.
-- **Limitations:** Relies on the assumption that rays are generated from the camera; may not be suitable for non-camera-based ray tracing (e.g., global illumination) without modification.
+### Ray-Guided Volume Rendering
+Visibility is determined during ray traversal, providing implicit view frustum culling without extra steps [S1, unofficial]. It provides implicit occlusion culling without extra steps or occlusion buffers [S1, unofficial]. Rays determine the working set directly by writing out a list of bricks they require (intersect) in front-to-back order [S1, unofficial]. It uses modern OpenGL extensions such as GL_ARB_shader_storage_buffer_object [S1, unofficial]. Introduced by Crassin et al. in 2009 [S1, unofficial].
 
 ## Background
-Introduced by Crassin et al. in 2009, this method is part of the evolution of ray-guided volume rendering [S1, unofficial]. It builds on earlier bricked single-pass and multi-resolution techniques [S1, unofficial].
+The concept of culling against the view frustum is fundamental to computer graphics, originating in early 3D rendering systems. In the context of volume rendering, early approaches like "Bricked single-pass ray-casting" and "Level-Of-Detail Volume Rendering via 3D Textures" (Weiler et al., 2000) utilized view frustum culling to manage large datasets [S1, unofficial]. The integration of visibility determination directly into the ray traversal process, known as Ray-Guided Volume Rendering, was introduced by Crassin et al. in 2009, allowing for implicit culling without separate pre-passes [S1, unofficial]. Modern implementations often combine these techniques with hierarchical data structures like octrees and bounding-sphere trees to optimize performance for large-scale scientific visualization [S1, unofficial].
 
 ## Sources
+
 [S1] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)

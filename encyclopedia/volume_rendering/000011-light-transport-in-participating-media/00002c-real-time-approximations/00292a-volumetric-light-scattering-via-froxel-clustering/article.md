@@ -3,110 +3,127 @@
 Also called: scatter local lights in the volumetric fog volume
 
 ## Overview
-A rendering technique that computes volumetric light scattering for local lights (point and spot) within a fog volume by evaluating light contributions at froxel midpoints using clustered light lists, skipping the sun and non-volumetric lights [S1, unofficial]. It differs from [Voxel Cone Tracing](1454-voxel-cone-tracing.md) by avoiding ray marching through the volume for scattering, instead relying on pre-clustered light lists and a single sample per light per froxel [G], and from [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md) by specifically targeting local light scattering rather than general volume density rendering [G].
+Volumetric Light Scattering via Froxel Clustering is a real-time rendering technique that computes light scattering for local lights (point and spot) within a participating media volume by evaluating contributions at the midpoints of a 3D froxel grid [S1, unofficial]. It differs from [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md) by explicitly clustering lights per froxel to optimize the evaluation of the scattering integral for multiple local sources, while skipping the sun and non-volumetric lights [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Froxel grid data (midpoints, cluster assignments) [S1, unofficial].
-- Light list data (structured as `LightGpu`, containing radiance, direction, range, shadow map reference, and flags) [S1, unofficial].
-- Scene parameters: `fog_anisotropy`, `sun_light` index, `far_distance`, `max_distance` [S1, unofficial].
-
-**Outputs:**
-- Scattered radiance contribution per froxel [S1, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:** A 3D froxel grid representing the view frustum, a list of scene lights, the camera's view/projection matrices, and fog parameters (albedo, anisotropy).
+*   **Outputs:** The accumulated scattered radiance for each froxel.
 
 **Data Structures:**
-- `Light`: Contains radiance, direction, range, shadow map reference, and a boolean flag `volumetric` packed as `LIGHT_VOLUMETRIC` in `LightGpu.flags` [S1, unofficial]. Constructors for directional, point, and spot lights set `volumetric` to true; a bare `Light{}` leaves it false, preventing scattering [S1, unofficial].
-- `Froxel`: Represents a spatial cell with an associated cluster cell index [S1, unofficial].
-- `Cluster`: Maps froxels to lists of lights [S1, unofficial].
+*   **Light Struct:** Contains a boolean flag `LIGHT_VOLUMETRIC`. Constructors for directional, point, and spot lights set this to `true`. A zero-initialized `Light` struct has this flag `false` [S1, unofficial].
+*   **Froxel Grid:** A regular 3D grid partitioning the view frustum. Each cell stores a compact offset into a global flat light list [S1, unofficial].
+*   **Light List:** A global buffer containing indices of lights affecting specific froxels.
 
-**Steps:**
-1. **Froxel Processing:** For each froxel, determine its midpoint in world space and identify the cluster cell corresponding to this midpoint [S1, unofficial]. Retrieve the list of lights associated with this cluster cell; if the froxel is outside the defined cluster grid or the cluster cell is overflowing, fall back to walking the complete flat light list [S1, unofficial].
-2. **Light Filtering:** Iterate through the retrieved light list [S1, unofficial].
-   a. **Sun Skip:** If the light index corresponds to the sun (`index + 1 == sun_light`), skip this light as the sun is handled separately [S1, unofficial].
-   b. **Volumetric Flag Check:** If the light's `volumetric` flag (`LIGHT_VOLUMETRIC`) is false, skip this light [S1, unofficial].
-   c. **Radiance Check:** If the light's `sample_light` radiance is zero, skip this light [S1, unofficial].
-3. **Scattering Calculation:** For each remaining light:
-   a. Compute the dot product between the froxel-to-camera ray direction (`ray`) and the light direction (`light_dir`) [S1, unofficial].
-   b. Evaluate the Henyey-Greenstein phase function: $HG = \text{HenyeyGreenstein}(\text{dot}(\text{ray}, \text{light\_dir}), \text{fog\_anisotropy})$ [S1, unofficial].
-   c. Determine visibility: if the light casts shadows, perform one shadow visibility sample using a zero-normal vector ($\mathbf{n} = \mathbf{0}$); otherwise, visibility is 1 [S1, unofficial].
-   d. Compute the contribution:
-      $$ \text{Contribution} = \text{albedo} \times HG \times \text{radiance} \times \text{visibility} $$
-   e. Add this contribution to the froxel's accumulated radiance [S1, unofficial].
+**Algorithm Steps:**
+1.  **Grid Construction:** Partition the view frustum into froxels [S1, unofficial].
+2.  **Light Assignment:** Assign lights to froxels based on spatial overlap [S1, unofficial].
+3.  **Shader Execution (Per Froxel):**
+    a.  Determine the froxel's midpoint in world space.
+    b.  Perform a cluster lookup to retrieve the list of lights affecting this froxel. If the froxel is outside the cluster grid or the cell is overflowing, walk the complete flat light list [S1, unofficial].
+    c.  Initialize accumulated radiance to zero.
+    d.  Iterate through the retrieved light list:
+        i.  Check if the light is the sun (identified by index + 1 == sun_light index). If so, skip it, as the sun is handled separately [S1, unofficial].
+        ii. Check if the light has the `LIGHT_VOLUMETRIC` flag set. If not, skip it [S1, unofficial].
+        iii. Check if the light's `sample_light` radiance is zero. If so, skip it [S1, unofficial].
+        iv. For remaining lights, compute the scattering contribution using the formula below.
+4.  **Accumulation:** Sum the contributions from all valid lights.
+
+**Formula:**
+The contribution $C$ of a single light is calculated as:
+$$ C = \text{albedo} \times \text{HG}(\text{dot}(\text{ray}, \text{light\_dir}), \text{fog\_anisotropy}) \times \text{radiance} \times \text{visibility} $$
+
+Where:
+*   $\text{albedo}$: The fog's albedo (scattering color).
+*   $\text{HG}(\mu, g)$: The Henyey-Greenstein phase function, where $\mu = \text{dot}(\text{ray}, \text{light\_dir})$ and $g$ is $\text{fog\_anisotropy}$ [S1, unofficial].
+*   $\text{radiance}$: The light's radiance value.
+*   $\text{visibility}$: $1.0$ if the light does not cast shadows. If the light casts shadows, visibility is determined by a single shadow sample taken with a zero normal vector ($\vec{n} = \vec{0}$) [S1, unofficial].
+
+**Parameters:**
+*   `fog_anisotropy`: The anisotropy parameter for the Henyey-Greenstein phase function. Typical values depend on the desired fog density and scattering directionality [S1, unofficial].
+*   `LIGHT_VOLUMETRIC`: Boolean flag controlling whether a light contributes to volumetric scattering [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-LIGHT_VOLUMETRIC = 1  # Bit flag for volumetric scattering
+def compute_volumetric_scattering(froxel_midpoint, froxel_cell, cluster_grid, flat_light_list, sun_light_index, fog_albedo, fog_anisotropy):
+    # Step 1: Retrieve light list
+    if froxel_cell is within cluster_grid bounds and froxel_cell is not overflowing:
+        light_indices = cluster_grid[froxel_cell].get_light_list()
+    else:
+        light_indices = flat_light_list # Walk complete list
 
-def heney_greenstein(cos_theta, g):
-    """Standard Henyey-Greenstein phase function [G]."""
-    if g == 0.0:
-        return 1.0 / (4.0 * 3.141592653589793)
-    denom = 4.0 * 3.141592653589793 * (1.0 + g * g - 2.0 * g * cos_theta) ** 1.5
-    return (1.0 - g * g) / denom
+    accumulated_radiance = vec3(0.0)
 
-def sample_shadow_map(light, point):
-    """Returns a single shadow visibility sample [G]."""
-    # Standard shadow map lookup; returns value in [0.0, 1.0]
-    return 1.0
+    # Step 2: Iterate lights
+    for light_idx in light_indices:
+        light = get_light(light_idx)
 
-def process_froxel_scattering(froxel, cluster_grid, flat_light_list, sun_light_index, fog_anisotropy, albedo, camera_pos):
-    # 1. Retrieve light list based on cluster cell
-    cell_id = froxel.cluster_cell_id
-    grid_max = cluster_grid.max_cell
-    outside_grid = (cell_id.x < 0 or cell_id.x >= grid_max.x or
-                    cell_id.y < 0 or cell_id.y >= grid_max.y or
-                    cell_id.z < 0 or cell_id.z >= grid_max.z)
-    overflow = cluster_grid.cells[cell_id].is_overflow if not outside_grid else True
-
-    light_list = flat_light_list if outside_grid or overflow else cluster_grid.cells[cell_id].lights
-
-    accumulated = 0.0
-    ray_dir = normalize(froxel.midpoint - camera_pos)
-
-    # 2. Filter and accumulate
-    for light in light_list:
-        if light.index + 1 == sun_light_index:
-            continue
-        if not (light.flags & LIGHT_VOLUMETRIC):
-            continue
-        if light.sample_light_radiance == 0.0:
+        # Skip Sun
+        if light_idx + 1 == sun_light_index:
             continue
 
-        dot_val = dot(ray_dir, normalize(light.direction))
-        hg = heney_greenstein(dot_val, fog_anisotropy)
+        # Skip non-volumetric lights
+        if not light.flags.LIGHT_VOLUMETRIC:
+            continue
 
-        visibility = sample_shadow_map(light, froxel.midpoint) if light.casts_shadow else 1.0
-        accumulated += albedo * hg * light.sample_light_radiance * visibility
+        # Skip zero radiance lights
+        if light.sample_light().radiance == 0.0:
+            continue
 
-    return accumulated
+        # Compute Contribution
+        ray_dir = normalize(froxel_midpoint - camera_position) # Assuming ray from camera to froxel
+        light_dir = normalize(light.position - froxel_midpoint)
+        
+        dot_product = dot(ray_dir, light_dir)
+        hg_phase = heney_greenstein(dot_product, fog_anisotropy)
+        
+        radiance = light.sample_light().radiance
+        
+        # Visibility: 1 if no shadow, else 1 shadow sample with zero normal
+        if light.casts_shadow:
+            visibility = sample_shadow(light, froxel_midpoint, vec3(0.0))
+        else:
+            visibility = 1.0
+
+        contribution = fog_albedo * hg_phase * radiance * visibility
+        accumulated_radiance += contribution
+
+    return accumulated_radiance
 ```
 
-**Parameters:**
-- `fog_anisotropy`: The anisotropy parameter for the Henyey-Greenstein phase function [S1, unofficial].
-- `LIGHT_VOLUMETRIC`: A boolean flag on the `Light` struct [S1, unofficial].
-- `sun_light_index`: The index of the sun light in the light list, used to skip it [S1, unofficial].
-- `far_distance`: Controls the depth of the cluster grid; froxels beyond this distance may fall back to the flat list [S1, unofficial].
-- `max_distance`: The maximum range of lights considered [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- **Flat List Fallback:** Froxels outside the cluster grid or in overflowing cells walk the complete flat light list, which is significantly more expensive [S1, unofficial]. The share of these froxels depends on `far_distance` and `max_distance` [S1, unofficial]. For a 60° vertical FOV and near plane 0.1, at `far_distance` 200, 22.6% of froxels fall back; at 500, 51.0% fall back; at 1000, 65.4% fall back [S1, unofficial].
-- **Opt-Out Cost:** Opting a light out of volumetric scattering (setting `LIGHT_VOLUMETRIC` to false) saves radiance and shadow sample computation but does not save the per-light list walk cost [S1, unofficial].
-- **Sun Handling:** The sun must be skipped in this loop as it is handled separately to avoid double counting [S1, unofficial].
+*   **Opting Out:** Setting `LIGHT_VOLUMETRIC` to false saves radiance and shadow sample computation but does not save the cost of walking the per-light list [S1, unofficial].
+*   **Fallback Performance:** Froxels outside the cluster grid fall back to a flat light list. The percentage of such froxels increases with `far_distance`. For a 60° vertical FOV and near plane 0.1, at `far_distance` 200, 22.6% of froxels fall outside the grid; at 500, 51.0%; at 1000, 65.4% [S1, unofficial].
+*   **Sun Handling:** The sun is explicitly skipped in the loop to avoid double-counting, as it is added separately [S1, unofficial].
+
+## Subtopics
+
+### [Froxel Light Assignment](13184-froxel-light-assignment.md)
+The core data-structure preparation step that maps scene lights to a 3D grid of froxels by determining spatial associations and computing compact offsets for variable-length light lists. Choose this when optimizing the build phase of clustered lighting for participating media.
+
+### [Froxel Grid Construction](13185-froxel-grid-construction.md)
+The process of partitioning the 3D view frustum into a regular 3D grid of voxels (froxels) to spatially organize lights. Choose this when defining the spatial discretization for clustered volumetric rendering, specifically targeting participating media by evaluating at froxel midpoints.
 
 ## Operating characteristics
-- **Time Complexity:** $O(F \cdot L_{avg})$, where $F$ is the number of froxels and $L_{avg}$ is the average number of lights per cluster cell [G]. If fallback occurs, complexity increases to $O(F \cdot L_{total})$ for affected froxels [G].
-- **Memory Complexity:** $O(L_{total})$ for the flat light list, plus $O(C)$ for cluster structures, where $C$ is the number of cluster cells [G].
-- **Measured Performance:** On RTX 4090 at 1440p, 64 lamps at default 14m range cost 0.0983ms (noon), comparable to 4 lamps everywhere (0.0829ms) [S1, unofficial]. On lavapipe (Linux, WSL) at 1280x720, 64 lamps in Layout A cost 19.56ms (main view), dropping to 9.89ms if opted out [S1, unofficial]. At 1440p, lamps add about 4.5 µs each per froxel pass when every lamp reaches every cell [S1, unofficial].
-- **Scaling:** Performance degrades linearly with the number of lights per cell [S1, unofficial]. Raising `far_distance` reduces the fallback share but increases the cluster grid size; raising `far_distance` to 200 cut the 64-lamp default-range case from 8.1 to 5.3 ms on lavapipe [S1, unofficial].
-- **Strengths:** Efficient for scenes with many local lights by leveraging spatial clustering [G]. Simple implementation compared to full ray marching [G].
-- **Limitations:** Approximate (single sample per light) [G]. Fallback to flat list can be costly if cluster grid is small relative to scene depth [S1, unofficial]. Does not handle multiple scattering orders beyond the single sample approximation [G].
-- **When to Use:** Real-time volumetric fog with many local lights where performance is critical and high-fidelity multiple scattering is not required [G].
-- **When Not to Use:** Scenes requiring high-fidelity multiple scattering, or where the number of lights is very small (overhead of clustering may not be justified) [G].
+**Time and Memory Complexity:**
+*   **Time:** Complexity is proportional to the number of froxels multiplied by the average number of lights per froxel. At 1440p on an RTX 4090, 64 lamps at a default 14m range cost approximately 0.0983ms, comparable to 4 lamps everywhere (0.0829ms) [S1, unofficial]. On lavapipe (1280x720), 64 lamps in Layout A cost 19.56ms, dropping to 9.89ms if opted out [S1, unofficial].
+*   **Memory:** Requires storage for the froxel grid, cluster offsets, and the flat light list. The `LightGpu` structure size remains unchanged as `LIGHT_VOLUMETRIC` is packed into existing flags [S1, unofficial].
+
+**Scaling:**
+*   Performance scales with the number of lights and the density of the froxel grid. Increasing `far_distance` significantly increases the number of froxels falling back to the flat list, degrading performance if not managed by increasing `max_distance` [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Efficiently handles multiple local lights in volumetric fog using existing clustered lighting infrastructure. Low overhead for scenes with few volumetric lights.
+*   **Limitations:** Fallback to flat lists for distant froxels can become a bottleneck. Does not handle the sun (handled separately). Opting out of scattering does not reduce list traversal cost [S1, unofficial].
+
+**When to Use:**
+*   Use for real-time volumetric fog with multiple local lights (point/spot) where performance is critical and the sun is handled via a separate pass.
+*   Avoid when the scene requires complex multiple scattering solutions or when the majority of froxels fall outside the cluster grid due to large `far_distance` settings [S1, unofficial].
 
 ## Background
-This method was introduced as part of a feature to scatter local lights in the volumetric fog volume within the C3D engine [S1, unofficial]. It was developed by fesoliveira014 and merged into the main branch on October 12, 2026 [S1, unofficial]. It builds on the existing froxel and cluster infrastructure used for surface rendering [S1, unofficial].
+This method was introduced as part of a feature update to scatter local lights in the volumetric fog volume, specifically addressing issue #357 [S1, unofficial]. It was implemented by fesoliveira014 and merged into the main branch of the c3d.c3l repository on October 12, 2026 [S1, unofficial]. The implementation builds on existing clustered lighting principles and integrates with the engine's light serialization (version 2) and GPU data structures [S1, unofficial].
 
 ## Sources
 [S1] Render: scatter local lights in the volumetric fog volume, https://github.com/fesoliveira014/c3d.c3l/pull/458, fetched 2026-10-26 (unofficial)

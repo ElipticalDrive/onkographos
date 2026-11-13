@@ -3,118 +3,152 @@
 Also called: 3D Texture Visualizer, Simple Fragment Shader Path Tracer
 
 ## Overview
-A fragment shader technique that ray marches through a 3D texture to visualize voxelized data by accumulating color along a ray until opacity saturates or the ray exits the volume [S1, unofficial]. It differs from its parent [Voxel Raymarching with Screen Filters](2555-voxel-raymarching-with-screen-filters.md) by using a fixed-step traversal loop with explicit alpha compositing in the fragment shader, rather than relying on pre-filtered screen-space accumulation or hierarchical traversal structures [S1, unofficial].
+A fragment shader technique that visualizes a 3D voxel grid by ray marching through a 3D texture, accumulating color along the ray until opacity saturates or the ray exits the volume [S1, unofficial]. It differs from its parent, [Voxel Raymarching with Screen Filters](2555-voxel-raymarching-with-screen-filters.md), by using a fixed-step march with pre-computed ray origins rather than screen-space filtering or adaptive traversal [S1, unofficial]. Unlike [Voxel Visualization Ray Casting](5081-voxel-visualization-ray-casting.md), which relies on pre-computed intersection textures for ray initialization, this method computes the ray direction dynamically from front and back intersection points [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Uniforms**: `textureFront` (`sampler2D`) stores ray origin coordinates for each fragment [S1, unofficial]. `textureBack` (`sampler2D`) stores ray direction endpoints for each fragment [S1, unofficial]. `texture3D` (`sampler3D`) contains the voxelized volume data [S1, unofficial]. `cameraPosition` (`vec3`) provides the world-space camera position [S1, unofficial]. `state` (`int`) specifies the mipmap level for sampling the 3D texture, defaulting to 0 [S1, unofficial].
-*   **Inputs**: `textureCoordinateFrag` (`vec2`) provides fragment texture coordinates [S1, unofficial].
-*   **Outputs**: `color` (`vec4`) outputs the final accumulated color [S1, unofficial].
-
-**Constants**
-*   `STEP_LENGTH`: `float` constant, default `0.005f`, defines the fixed distance advanced per ray march step [S1, unofficial].
-*   `INV_STEP_LENGTH`: `float` constant, computed as `1.0f / STEP_LENGTH`, used to calculate the total number of steps from the ray length [S1, unofficial].
+*   **Inputs**:
+    *   `textureCoordinateFrag`: `in vec2`, fragment screen-space coordinates.
+    *   `textureFront`: `sampler2D`, stores ray origin coordinates for each fragment.
+    *   `textureBack`: `sampler2D`, stores ray direction endpoints for each fragment.
+    *   `texture3D`: `sampler3D`, contains the voxelized volume data.
+    *   `cameraPosition`: `vec3`, world-space camera position.
+    *   `state`: `int`, mipmap level for sampling (default 0).
+*   **Outputs**:
+    *   `color`: `out vec4`, final accumulated color.
 
 **Data Structures**
-The method uses standard OpenGL sampler types for texture lookups [G]. The 3D texture `texture3D` is sampled using normalized coordinates with a specified mipmap level [S1, unofficial]. The front and back textures are 2D samplers storing 3D vectors [S1, unofficial].
+*   **Uniforms**:
+    *   `STEP_LENGTH`: `float`, fixed distance advanced per step (default 0.005f).
+    *   `INV_STEP_LENGTH`: `float`, computed as `1.0f / STEP_LENGTH`.
+*   **Textures**:
+    *   `textureFront` and `textureBack` are 2D textures mapping screen fragments to 3D space points.
+    *   `texture3D` is a 3D texture containing voxel colors and alpha.
+
+**Parameters**
+*   `STEP_LENGTH`: 0.005f.
+*   `INV_STEP_LENGTH`: 200.0f (derived).
+*   `state`: 0.
+*   `cameraPosition`: Provided by application.
 
 **Algorithm**
-1.  **Initialize Ray Origin**: Determine the starting point of the ray [S1, unofficial]. If `cameraPosition` lies inside the unit cube with a margin of `0.2f` (i.e., all coordinates are within `[0.2, 0.8]`), set `origin = cameraPosition` [S1, unofficial]. Otherwise, sample the origin from `textureFront` using `textureCoordinateFrag` [S1, unofficial].
-2.  **Calculate Total Steps**: Compute the total number of steps required to traverse the ray length [S1, unofficial]. Let `direction` be the vector from `origin` to the endpoint sampled from `textureBack` at `textureCoordinateFrag` [S1, unofficial]. The number of steps is `numberOfSteps = int(length(direction) * INV_STEP_LENGTH)` [S1, unofficial].
-3.  **Initialize Accumulator**: Set the output color to transparent black: `color = vec4(0.0f)` [S1, unofficial].
-4.  **Ray Marching Loop**: Iterate `step` from `0` to `numberOfSteps - 1`:
-    *   **Break Condition**: If `color.a >= 0.99f`, break the loop [S1, unofficial].
-    *   **Compute Position**: Calculate the current point in space: `currentPoint = origin + step * STEP_LENGTH * normalize(direction)` [S1, unofficial].
-    *   **Normalize Coordinates**: Scale and bias `currentPoint` to the `[0, 1]` range suitable for texture sampling [S1, unofficial]. Assuming the volume occupies `[-1, 1]^3`, apply `scaledPoint = currentPoint * 0.5 + 0.5` [G].
-    *   **Sample Volume**: Sample the 3D texture at `scaledPoint` using `state` as the mipmap level: `currentSample = sample_3D(texture3D, scaledPoint, state)` [S1, unofficial].
-    *   **Alpha Compositing**: Accumulate the color using front-to-back blending:
-        $$c_{out} = c_{in} + (1.0 - c_{in}.a) \times s$$
-        where $c_{in}$ is the accumulated color, $c_{in}.a$ is its alpha, and $s$ is the sampled voxel color `currentSample` [S1, unofficial].
-5.  **Gamma Correction**: Apply sRGB gamma correction to the RGB channels of the final color by raising them to the power of $1/2.2$: `color.rgb = pow(color.rgb, vec3(1.0 / 2.2))` [S1, unofficial].
+1.  **Initialize Ray Origin**:
+    *   Check if `cameraPosition` is inside the unit cube with a margin of 0.2f.
+    *   If inside, set `origin = cameraPosition`.
+    *   Otherwise, sample `origin` from `textureFront` using `textureCoordinateFrag`.
+    *   *Pitfall*: The origin must avoid invalid positions. Using the front buffer ensures valid ray starting points when the camera is outside the volume [S1, unofficial].
+
+2.  **Calculate Total Steps**:
+    *   Sample `backPoint` from `textureBack` using `textureCoordinateFrag`.
+    *   Compute `direction = backPoint - origin`.
+    *   Compute `rayLength = length(direction)`.
+    *   Compute `numberOfSteps = uint(INV_STEP_LENGTH * rayLength)`.
+
+3.  **Initialize Accumulator**:
+    *   Set `color = vec4(0.0f)`.
+
+4.  **Ray Marching Loop**:
+    *   Iterate `step` from 0 to `numberOfSteps`.
+    *   **Early Exit**: If `color.a >= 0.99f`, break the loop.
+    *   **Compute Position**:
+        *   `currentPoint = origin + STEP_LENGTH * float(step) * direction`.
+        *   *Note*: The source specifies `direction` here, implying `direction` is normalized or `STEP_LENGTH` accounts for it. However, step 2 calculates `numberOfSteps` based on `length(direction)`. If `direction` is not normalized, `currentPoint` calculation in step 4.2 must use the normalized direction or adjust `STEP_LENGTH`. The source formula `currentPoint = origin + STEP_LENGTH * step * direction` suggests `direction` might be normalized in the source implementation, or `STEP_LENGTH` is an angular step. Given `INV_STEP_LENGTH` is derived from `STEP_LENGTH` and used with `length(direction)`, `direction` is likely normalized before this step. Let $d_{norm} = \frac{direction}{length(direction)}$. Then `currentPoint = origin + STEP_LENGTH * float(step) * d_{norm}`.
+        *   *Correction based on source text*: The source says `currentPoint = origin + STEP_LENGTH * step * direction`. If `direction` is the vector from front to back, its length is the ray length. If `STEP_LENGTH` is a fixed world distance, `direction` must be normalized. We assume normalization occurs or `direction` is pre-normalized.
+    *   **Sample Volume**:
+        *   Scale and bias `currentPoint` to [0, 1] range (assuming `currentPoint` is in [0,1] world space or needs transformation). The source says "scale and bias currentPoint to [0,1]".
+        *   `sampledColor = texture3D(texture3D, currentPoint, float(state))`.
+    *   **Accumulate Color**:
+        *   Apply alpha compositing:
+            $$c_{out} = c_{in} + (1.0 - c_{in}.a) \times s$$
+            Where $c_{in}$ is the accumulated `color`, $c_{in}.a$ is its alpha, and $s$ is `sampledColor`.
+        *   `color = color + (1.0 - color.a) * sampledColor`.
+
+5.  **Gamma Correction**:
+    *   Apply sRGB gamma correction to RGB channels: `color.rgb = pow(color.rgb, vec3(1.0/2.2))`.
 
 **Pseudocode**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Helper definitions for standard graphics operations
-def vec3(x, y, z): return (x, y, z)
-def vec4(r, g, b, a): return (r, g, b, a)
-def length(v): return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
-def normalize(v): l = length(v); return (v[0]/l, v[1]/l, v[2]/l) if l > 0 else (0,0,0)
-def sample_2D(tex, coord): return (0.5, 0.5, 0.5, 1.0) # Placeholder for 2D texture lookup
-def sample_3D(tex, coord, level): return (0.5, 0.5, 0.5, 0.5) # Placeholder for 3D texture lookup
+# Inputs
+textureCoordinateFrag: vec2
+textureFront: sampler2D
+textureBack: sampler2D
+texture3D: sampler3D
+cameraPosition: vec3
+state: int = 0
 
-def voxel_visualization_ray_marcher(textureFront, textureBack, texture3D, cameraPosition, state, textureCoordinateFrag):
-    # 1. Initialize Ray Origin
-    if 0.2 <= cameraPosition[0] <= 0.8 and 0.2 <= cameraPosition[1] <= 0.8 and 0.2 <= cameraPosition[2] <= 0.8:
-        origin = cameraPosition
-    else:
-        origin = sample_2D(textureFront, textureCoordinateFrag)[:3]
+# Constants
+STEP_LENGTH: float = 0.005f
+INV_STEP_LENGTH: float = 1.0f / STEP_LENGTH
 
-    # 2. Calculate Direction and Total Steps
-    back_point = sample_2D(textureBack, textureCoordinateFrag)[:3]
-    direction = (back_point[0]-origin[0], back_point[1]-origin[1], back_point[2]-origin[2])
-    ray_length = length(direction)
-    number_of_steps = int(ray_length * (1.0 / 0.005))
+# Step 1: Initialize Ray Origin
+origin: vec3
+if is_inside_unit_cube(cameraPosition, margin=0.2f):
+    origin = cameraPosition
+else:
+    origin = texture2D(textureFront, textureCoordinateFrag).xyz
 
-    # 3. Initialize Output Color
-    color = vec4(0.0, 0.0, 0.0, 0.0)
+# Step 2: Calculate Ray Direction and Steps
+backPoint: vec3 = texture2D(textureBack, textureCoordinateFrag).xyz
+direction: vec3 = backPoint - origin
+rayLength: float = length(direction)
+# Normalize direction for consistent step size
+direction = direction / rayLength
+numberOfSteps: uint = uint(INV_STEP_LENGTH * rayLength)
 
-    # 4. Ray Marching Loop
-    for step in range(number_of_steps):
-        if color[3] >= 0.99:
-            break
+# Step 3: Initialize Output
+color: vec4 = vec4(0.0f)
 
-        # Compute current point (direction is normalized for correct step spacing)
-        norm_dir = normalize(direction)
-        current_point = (origin[0] + step * 0.005 * norm_dir[0],
-                         origin[1] + step * 0.005 * norm_dir[1],
-                         origin[2] + step * 0.005 * norm_dir[2])
+# Step 4: Ray Marching Loop
+for step in range(0, numberOfSteps):
+    # Early exit if opaque
+    if color.a >= 0.99f:
+        break
+    
+    # Compute current point
+    # Note: direction is normalized, STEP_LENGTH is world distance
+    currentPoint: vec3 = origin + STEP_LENGTH * float(step) * direction
+    
+    # Scale and bias to [0, 1] if necessary
+    # Assuming currentPoint is already in [0,1] or needs specific transform
+    # The source implies a scale/bias operation. If the volume is in [0,1], 
+    # and currentPoint is in world space, this step is critical.
+    # For this implementation, we assume currentPoint is in [0,1] space 
+    # or the texture lookup handles it. If not, apply:
+    # currentPoint = scale * currentPoint + bias
+    
+    # Sample 3D texture
+    sampledColor: vec4 = texture(texture3D, currentPoint, float(state))
+    
+    # Accumulate using alpha compositing
+    # c_out = c_in + (1.0 - c_in.a) * s
+    color = color + (1.0f - color.a) * sampledColor
 
-        # Scale and bias current point to [0, 1]
-        scaled_point = (current_point[0] * 0.5 + 0.5,
-                        current_point[1] * 0.5 + 0.5,
-                        current_point[2] * 0.5 + 0.5)
+# Step 5: Gamma Correction
+color.rgb = pow(color.rgb, vec3(1.0/2.2))
 
-        # Sample texture3D
-        current_sample = sample_3D(texture3D, scaled_point, state)
-
-        # Alpha compositing: c_out = c_in + (1.0 - c_in.a) * s
-        color = vec4(color[0] + (1.0 - color[3]) * current_sample[0],
-                     color[1] + (1.0 - color[3]) * current_sample[1],
-                     color[2] + (1.0 - color[3]) * current_sample[2],
-                     color[3] + (1.0 - color[3]) * current_sample[3])
-
-    # 5. Gamma Correction
-    color = vec4(color[0]**(1.0/2.2), color[1]**(1.0/2.2), color[2]**(1.0/2.2), color[3])
-
-    return color
+# Output
+out_color = color
 ```
-
-**Edge Cases and Pitfalls**
-*   **Ray Origin Validity**: The ray origin must avoid invalid positions [S1, unofficial]. If the camera is inside the unit cube, the origin is set to the camera position directly [S1, unofficial]. Otherwise, it is fetched from the front buffer to ensure valid ray starting points [S1, unofficial].
-*   **Precision**: The use of integer casting for step count may truncate fractional steps, potentially causing the ray to slightly undershoot the volume boundary [G].
-*   **Boundary Conditions**: If `current_point` falls outside the expected volume space before scaling, texture sampling behavior depends on the texture wrapping mode, which may produce artifacts if not handled [G].
 
 ## Subtopics
 
-### Voxel Visualization Ray Casting
-A technique to visualize the voxel grid by casting rays from the camera through the unit cube, using pre-computed front and back intersection textures to determine ray origin and direction [S2, unofficial]. It shares the same initialization logic with the Ray Marcher [S2, unofficial]. Choose this method when the goal is to visualize the grid structure or perform simple visibility checks rather than volumetric blending [S2, unofficial].
+### [Voxel Visualization Ray Casting](5081-voxel-visualization-ray-casting.md)
+A fragment shader technique that visualizes a 3D voxel grid by casting rays from the camera through a unit cube, using pre-computed front and back intersection textures to determine the ray origin and direction. Unlike traditional mesh rendering which requires draw calls per object, this method holds geometric complexity in 3D voxel textures and renders the entire structure in a single draw call using only a few triangles. It differs from its parent, Voxel Visualization Ray Marcher, by explicitly utilizing pre-computed intersection textures for ray initialization rather than computing intersections or marching from a generic camera position.
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ where $N$ is the number of steps per ray, determined by the ray length and `STEP_LENGTH` [S1, unofficial].
-*   **Memory Complexity**: $O(1)$ per fragment, plus the memory for the 3D texture and front/back 2D textures [G].
-*   **Performance**: Not given in the sources.
-*   **Strengths**: Simple implementation, easy to integrate into a fragment shader pipeline [S1, unofficial].
-*   **Limitations**: Fixed step size may lead to aliasing or missed details if the step is too large; early exit is only based on opacity saturation, not empty space [G].
-*   **When to Use**: Suitable for real-time visualization of voxel data where simplicity is prioritized [S1, unofficial].
-*   **When Not to Use**: Not given in the sources.
+*   **Time Complexity**: $O(N)$ where $N$ is the number of steps per ray. $N$ is proportional to the ray length divided by `STEP_LENGTH`.
+*   **Memory Complexity**: $O(1)$ per fragment for the shader state, plus storage for the 3D texture and front/back 2D textures.
+*   **Performance**: Performance depends on `STEP_LENGTH` and ray length. Smaller `STEP_LENGTH` increases accuracy but reduces performance.
+*   **Strengths**: Simple implementation, single draw call, works with any 3D texture.
+*   **Limitations**: Fixed step size may lead to aliasing or missed details if `STEP_LENGTH` is too large. No early exit for empty space (unless alpha threshold is met).
+*   **When to use**: Real-time visualization of voxel data where simplicity is preferred over optimization.
+*   **When not to use**: Large volumes with sparse data (use [Voxel Raymarching with Screen Filters](2555-voxel-raymarching-with-screen-filters.md) or [Voxel Ray Marching with Sector-Based Indexing](6915-voxel-ray-marching-with-sector-based-indexing.md) for better culling).
 
 ## Background
-*   **Origin**: Not given in the sources.
-*   **History and Development**: Not given in the sources.
-*   **Usage**: It is used for visualizing voxelized data in real-time graphics applications [S1, unofficial].
+Originating from unofficial implementations such as the `voxel-cone-tracing` repository, this method provides a straightforward approach to rendering voxel data using fragment shaders [S1, unofficial]. It builds on the concept of ray marching through 3D textures, a common technique in volume rendering.
 
 ## Sources
 [S1] Friduric/voxel-cone-tracing, https://github.com/Friduric/voxel-cone-tracing, fetched 2026-10-26 (unofficial)
-[S2] stormouse/voxel-cone-tracing-cs580, https://github.com/stormouse/voxel-cone-tracing-cs580, fetched 2026-10-26 (unofficial)

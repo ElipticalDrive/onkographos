@@ -1,149 +1,107 @@
 # Chunk-based Voxel World Generation
 
-Also called: Density-based voxel placement, Simplex noise terrain generation, Terrain Generation
+Also called: Density-based voxel placement, Simplex noise terrain generation
 
 ## Overview
-This method generates a 3D voxel world by sampling 3D simplex noise to determine surface height and internal density, filtering blocks against a water level threshold and a density cutoff [S1, unofficial]. It builds on [Chunk-Based Voxel Terrain Generation](4140-chunk-based-voxel-terrain-generation.md) by defining the specific procedural noise sampling and block placement rules used within each chunk [G].
+Chunk-based Voxel World Generation is a procedural technique that constructs a 3D voxel world by sampling 3D noise functions to determine block density and height, then filtering these values against thresholds to place solid blocks. It differs from static generation by organizing the output into fixed-size chunks, enabling efficient memory management and localized updates, and from pure implicit volumes by explicitly discretizing the space into a grid of binary or typed voxels rather than a continuous field.
 
 ## How it works
-**Inputs:**
-- `worldSize`: Total world dimensions in blocks (integer).
-- `chunkSize`: Blocks per chunk dimension (integer).
-- `blockSize`: World units per block (float).
-- `waterlevel`: Y-coordinate threshold below which blocks are not generated (float).
-- `density_threshold`: Minimum simplex noise value to place a block (float).
-- `noise_scale_x`: X coordinate divisor for height noise (float).
-- `noise_scale_y`: Y coordinate divisor for density noise (float).
-- `seed`: Random seed for noise initialization.
+**Inputs and Outputs**
+*   **Inputs:** World dimensions (`worldSize`), chunk dimensions (`chunkSize`), block physical size (`blockSize`), water level threshold (`waterlevel`), density cutoff threshold (`density_threshold`), noise scale divisors (`noise_scale_x`, `noise_scale_y`), and a random seed for noise initialization.
+*   **Outputs:** A collection of chunks, where each chunk contains a sparse or dense array of block positions and types.
 
-**Outputs:**
-- A collection of active chunks, each containing a 3D array of voxel IDs (block types).
+**Data Structures**
+*   **Chunk:** A container holding a list of active blocks. In some implementations, chunks are indexed in a flat array or map (`chunkIdMap`) to avoid sparse allocation overhead [S1, unofficial].
+*   **Block:** Defined by its 3D integer coordinates $(x, y, z)$ and an optional color/type identifier [S1, unofficial].
+*   **Voxel Array:** A 3D array `self.voxels` of size `[WORLD_VOL, CHUNK_VOL]` of type `uint8` may be used to store block IDs directly, indexed by chunk and local position [S2, unofficial].
 
-**Data Structures:**
-- `Chunk`: Contains a 3D array `voxels` of size `[chunkSize, chunkSize, chunkSize]` of type `uint8` (or equivalent block ID type) [S2, unofficial].
-- `World`: Contains a map or array of `Chunk` objects indexed by chunk coordinates, plus a `chunkIdMap` tracking active chunks [S1, unofficial].
-- `Block`: Represents a single voxel with position `(x, y, z)` and color/type [S1, unofficial].
+**Parameters**
+*   `worldSize`: 192 (blocks) [S1, unofficial].
+*   `chunkSize`: 16 (blocks per dimension) [S1, unofficial].
+*   `blockSize`: 0.1 (world units per block) [S1, unofficial].
+*   `waterlevel`: 0 (Y-coordinate threshold) [S1, unofficial].
+*   `density_threshold`: 0.5 (minimum simplex noise value) [S1, unofficial].
+*   `noise_scale_x`: 100 (X divisor for height noise) [S1, unofficial].
+*   `noise_scale_y`: 100 (Y divisor for density noise) [S1, unofficial].
 
-**Parameters (Typical Values from [S1, unofficial]):**
-- `worldSize = 192`
-- `chunkSize = 16`
-- `blockSize = 0.1`
-- `waterlevel = 0`
-- `density_threshold = 0.5`
-- `noise_scale_x = 100`
-- `noise_scale_y = 100`
+**Algorithm Steps**
+1.  **Initialize:** Set random seed for the noise function. Initialize chunk storage structures (e.g., `chunks`, `chunkIdMap`) [S1, unofficial].
+2.  **Iterate World Grid:** Loop $x$ from $0$ to `worldSize`-1 and $z$ from $0$ to `worldSize`-1 [S1, unofficial].
+3.  **Calculate Height:** Compute the surface height $H$ using 3D simplex noise:
+    $$ H = \text{simplex3}\left(\frac{x}{\text{noise\_scale\_x}}, \frac{x}{200}, \frac{z}{\text{noise\_scale\_x}}\right) \times \text{worldSize} $$
+    Note: The second coordinate uses a fixed divisor of 200 in the reference implementation, distinct from `noise_scale_x` [S1, unofficial].
+4.  **Iterate Vertical Column:** Loop $y$ from $0$ to $\lfloor H \rfloor$-1 [S1, unofficial].
+5.  **Apply Water Level:** If $y \ge \text{waterlevel}$, proceed to density check; otherwise, skip or mark as empty/water [S1, unofficial].
+6.  **Calculate Density:** Compute density $D$ using a separate 3D simplex noise evaluation:
+    $$ D = \text{simplex3}\left(\frac{x}{\text{noise\_scale\_x}}, \frac{y}{\text{noise\_scale\_y}}, \frac{z}{\text{noise\_scale\_x}}\right) $$
+7.  **Place Block:** If $D > \text{density\_threshold}$, create a block at $(x, y, z)$ and add it to the appropriate chunk [S1, unofficial].
+8.  **Rebuild Chunks:** After iterating all world coordinates, iterate through the `chunkIdMap` and trigger a rebuild operation for each valid chunk to generate mesh data [S1, unofficial].
 
-**Steps:**
-1. Initialize the noise generator with a random seed [S1, unofficial].
-2. Initialize the world data structure, including a map of chunk IDs to `Chunk` objects and an active chunk list [S1, S2, unofficial].
-3. Iterate through every block coordinate `(x, z)` in the horizontal plane from `0` to `worldSize - 1` [S1, unofficial].
-4. Calculate the surface height `H` for column `(x, z)` using a 3D simplex noise function:
-   $$ H = \text{simplex3}\left(\frac{x}{\text{noise\_scale\_x}}, \frac{x}{2 \cdot \text{noise\_scale\_x}}, \frac{z}{\text{noise\_scale\_x}}\right) \cdot \text{worldSize} $$
-   Note: The source code uses `x/200` for the second coordinate, which corresponds to `x/(2*noise_scale_x)` [S1, unofficial].
-5. Iterate through every block coordinate `y` from `0` to `H - 1` [S1, unofficial].
-6. Check if `y >= waterlevel`. If false, skip this block [S1, unofficial].
-7. Calculate the internal density `D` for block `(x, y, z)` using a separate 3D simplex noise function:
-   $$ D = \text{simplex3}\left(\frac{x}{\text{noise\_scale\_y}}, \frac{y}{\text{noise\_scale\_y}}, \frac{z}{\text{noise\_scale\_y}}\right) $$
-   The source uses `noise_scale_y` (100) for all axes in the density calculation [S1, unofficial].
-8. If `D > density_threshold`, mark block `(x, y, z)` as solid [S1, unofficial].
-9. After iterating all `x, z, y`, group the solid blocks into chunks based on their coordinates [S1, unofficial].
-10. For each chunk containing solid blocks, rebuild its mesh or finalize its data structure [S1, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_world(world_size, chunk_size, block_size, water_level, density_threshold, noise_scale):
-    # Initialize noise generator with a random seed [S1, unofficial]
-    noise_seed = random.random()
+def generate_world(world_size, chunk_size, block_size, water_level, density_threshold, noise_scale_x, noise_scale_y):
+    # Initialize noise seed
+    noise.seed(random())
     
-    # Data structures: map chunk_id to Chunk object, track active chunks [S1, S2, unofficial]
+    # Initialize storage
     chunks = {}
-    active_chunks = []
+    chunk_id_map = []
     
-    # Helper: standard 3D simplex noise evaluator [G]
-    def simplex3(x, y, z):
-        # Implementation of 3D simplex noise is assumed [G]
-        pass
-    
-    # Helper: Chunk data structure [S2, unofficial]
-    class Chunk:
-        def __init__(self, size):
-            self.voxels = [[0] * size for _ in range(size)]
-            self.size = size
-        def set_voxel(self, lx, ly, lz, value):
-            self.voxels[lx][ly][lz] = value
-        def rebuild_mesh(self):
-            pass # Mesh generation logic [G]
-    
-    # Iterate over horizontal plane [S1, unofficial]
+    # Iterate over X and Z dimensions
     for x in range(world_size):
         for z in range(world_size):
-            # Calculate height using simplex3 with specific scaling [S1, unofficial]
-            height_noise_x = x / noise_scale
-            height_noise_y = x / (2 * noise_scale)
-            height_noise_z = z / noise_scale
+            # Calculate height using simplex noise
+            # Note: Second parameter uses fixed divisor 200 as per source [S1, unofficial]
+            height_noise = noise.simplex3(x / noise_scale_x, x / 200, z / noise_scale_x)
+            height = height_noise * world_size
             
-            height = simplex3(height_noise_x, height_noise_y, height_noise_z) * world_size
-            
-            # Iterate vertical column [S1, unofficial]
+            # Iterate Y from 0 to height
             for y in range(int(height)):
-                # Water level check [S1, unofficial]
-                if y < water_level:
-                    continue
-                
-                # Density calculation [S1, unofficial]
-                density_noise_x = x / noise_scale
-                density_noise_y = y / noise_scale
-                density_noise_z = z / noise_scale
-                
-                density = simplex3(density_noise_x, density_noise_y, density_noise_z)
-                
-                # Block placement check [S1, unofficial]
-                if density > density_threshold:
-                    # Calculate chunk coordinates and local index [S2, unofficial]
-                    cx, cy, cz = x // chunk_size, y // chunk_size, z // chunk_size
-                    chunk_id = (cx, cy, cz)
-                    lx, ly, lz = x % chunk_size, y % chunk_size, z % chunk_size
+                # Apply water level threshold
+                if y >= water_level:
+                    # Calculate density using separate noise function
+                    density_noise = noise.simplex3(x / noise_scale_x, y / noise_scale_y, z / noise_scale_x)
                     
-                    if chunk_id not in chunks:
-                        chunks[chunk_id] = Chunk(chunk_size)
-                        active_chunks.append(chunk_id)
-                    
-                    chunks[chunk_id].set_voxel(lx, ly, lz, 1) # 1 represents solid block
-
-    # Rebuild meshes for all active chunks [S1, unofficial]
-    for chunk_id in active_chunks:
-        chunks[chunk_id].rebuild_mesh()
+                    # Place block if density exceeds threshold
+                    if density_noise > density_threshold:
+                        block = Block(pos=(x, y, z), color=DEFAULT_COLOR)
+                        chunk_id = get_chunk_id(x, y, z, chunk_size)
+                        
+                        if chunk_id not in chunks:
+                            chunks[chunk_id] = []
+                            chunk_id_map.append(chunk_id)
+                            
+                        chunks[chunk_id].append(block)
+    
+    # Rebuild meshes for all active chunks
+    for chunk_id in chunk_id_map:
+        rebuild_chunk(chunk_id, chunks[chunk_id])
 ```
 
-**Edge Cases and Pitfalls:**
-- **Precision:** Simplex noise values are typically in `[-1, 1]`. The height calculation multiplies by `worldSize`, so the noise amplitude directly scales the world height [S1, unofficial].
-- **Water Level:** Blocks below `waterlevel` are skipped entirely [S1, unofficial].
-- **Density Threshold:** A threshold of `0.5` is used in the source. Since simplex noise is centered around 0, this creates sparse terrain [S1, unofficial].
+**Edge Cases and Pitfalls**
+*   **Precision:** Floating-point noise values must be compared carefully against thresholds. The threshold 0.5 is arbitrary and affects terrain porosity [S1, unofficial].
+*   **Boundaries:** The loops are bounded by `worldSize`. Infinite worlds require chunk-based generation with dynamic coordinate scaling [S2, unofficial].
+*   **Degenerate Input:** If `worldSize` is small, noise artifacts may dominate. If `density_threshold` is too high, the world may be empty.
 
 ## Subtopics
 
-### Heightmap-based Generation
-Uses a 2D noise function to determine height, then fills columns. Simpler but cannot generate overhangs or caves [G]. Choose when performance is critical and terrain is flat [G].
+### [Chunk System (Dynamic Loading)](13544-chunk-system-dynamic-loading.md)
+Manages the lifecycle of chunks based on camera position, enabling infinite worlds by loading/unloading data on demand.
 
-### Fractal Brownian Motion (FBM)
-Uses octaved noise for more detailed terrain [G]. Choose when higher visual fidelity is needed [G]. Adds complexity to noise evaluation [G].
-
-### Marching Cubes
-Converts voxel data to smooth meshes [G]. Choose when smooth surfaces are required instead of blocky voxels [G].
+### [Chunk-Based Voxel Terrain Generation](4140-chunk-based-voxel-terrain-generation.md)
+The parent method, which adds octaved noise, biome logic, and run-length encoding to the basic chunk generation.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
-- **Strengths:** Simple to implement; allows for caves and overhangs; easy to modify terrain by adjusting noise parameters [G].
-- **Limitations:** Noisy terrain at high frequencies; requires careful tuning of noise scales and thresholds; memory usage can be high for large worlds if not chunked efficiently [G].
-- **When to Use:** Small to medium worlds; educational purposes; games with blocky aesthetics [G].
-- **When Not to Use:** Large-scale worlds requiring high performance; smooth terrain requirements; complex geological features [G].
+*   **Time Complexity:** $O(W^2 \cdot H)$, where $W$ is `worldSize` and $H$ is the average height. Each voxel is evaluated once.
+*   **Memory Complexity:** Proportional to the number of placed blocks. Sparse storage (lists of blocks) is more efficient than dense 3D arrays for low-density worlds [S1, unofficial].
+*   **Performance:** The reference implementation uses JavaScript and WebGL, suitable for small worlds (192x192) [S1, unofficial]. Larger worlds require optimization such as culling or GPU-based generation.
+*   **Strengths:** Simple to implement; deterministic with seed; easy to modify thresholds for different terrains.
+*   **Limitations:** Single-octave noise produces smooth but potentially monotonous terrain; no biome variation or surface detail beyond density [S1, unofficial].
 
 ## Background
-This method originates from early WebGL voxel engines, specifically the "vox2" project by Nergal (2014) [S1, unofficial]. It was designed as a proof-of-concept for using bit-operations to reduce memory usage in JavaScript [S1, unofficial]. The technique uses 3D simplex noise for both height and density, a common approach in procedural generation to create natural-looking terrain with internal structures [G].
+Originating from early WebGL voxel engine experiments around 2014, this method was demonstrated in the "vox2" project by Nergal (Lallassu) [S1, unofficial]. It serves as a foundational technique for procedural voxel worlds, preceding more complex systems that incorporate multi-octave noise and biome systems.
 
 ## Sources
 [S1] Show HN: Basic voxel engine in WebGL/JavaScript with full source, https://github.com/Lallassu/vox2, fetched 2026-10-26 (unofficial)

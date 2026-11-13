@@ -2,101 +2,122 @@
 
 
 ## Overview
-The Color Network Architecture is a Multi-Layer Perceptron (MLP) module used in neural rendering to predict the final RGB color of a ray at a specific 3D point, conditioned on the viewing direction and local geometric features. It solves the problem of view-dependent appearance synthesis by mapping high-dimensional input vectors to a 3D color space [S1]. It differs from its parent, [MLPRender_Fea](2414-mlprender-fea.md), by explicitly defining a three-layer fully connected structure with specific input dimensionality (position, view direction, and feature vectors) and activation functions, serving as the foundational blueprint for subsequent variants like [Neural Textures Architecture](9534-neural-textures-architecture.md) and [Decomposition Network](12532-decomposition-network.md).
+The Color Network Architecture is a Multi-Layer Perceptron (MLP) module within neural rendering pipelines that predicts RGB color from input features, view directions, and positions [S1]. It solves the problem of view-dependent appearance synthesis by mapping latent geometric and radiance features to final pixel values [S1]. It differs from its parent, [MLPRender_Fea](2414-mlprender-fea.md), by explicitly defining a three-layer fully connected structure with specific input dimensionality for position, view direction, and feature vectors, using ReLU activations for hidden layers and sigmoid for the output [S1].
 
 ## How it works
 **Inputs and Outputs:**
-The network takes three input components concatenated into a single vector:
-1.  **Position ($p$):** 3-dimensional coordinates of the query point in 3D space.
-2.  **View Direction ($d$):** 2-dimensional spherical coordinate representation of the camera viewing direction.
-3.  **Feature ($f$):** 12-dimensional feature vector extracted from a preceding geometry or feature encoding network (e.g., an SDF MLP or voxel grid).
-
-The output is a 3-dimensional vector representing the predicted RGB color values.
+*   **Position ($p$):** 3-dimensional vector (x, y, z) [S1].
+*   **View Direction ($d$):** 2-dimensional vector (azimuth, elevation) [S1].
+*   **Feature ($f$):** 12-dimensional vector representing latent radiance/geometry information [S1].
+*   **Output ($c$):** 3-dimensional vector representing RGB color values [S1].
 
 **Data Structures:**
-The architecture consists of three fully connected (FC) layers.
-*   **Layer 1:** Input dimension 18 ($3+2+12$), Output dimension 128.
-*   **Layer 2:** Input dimension 128, Output dimension 128.
-*   **Layer 3:** Input dimension 128, Output dimension 128.
-*   **Output Layer:** Input dimension 128, Output dimension 3.
-
-**Numbered Steps:**
-1.  **Input Concatenation:** Concatenate the position vector $p \in \mathbb{R}^3$, view direction vector $d \in \mathbb{R}^2$, and feature vector $f \in \mathbb{R}^{12}$ to form the input vector $x \in \mathbb{R}^{18}$.
-2.  **First Hidden Layer:** Apply a linear transformation $W_1 x + b_1$ followed by a Rectified Linear Unit (ReLU) activation.
-    $$ h_1 = \text{ReLU}(W_1 x + b_1) $$
-    where $W_1 \in \mathbb{R}^{128 \times 18}$ and $b_1 \in \mathbb{R}^{128}$.
-3.  **Second Hidden Layer:** Apply a linear transformation to $h_1$ followed by ReLU.
-    $$ h_2 = \text{ReLU}(W_2 h_1 + b_2) $$
-    where $W_2 \in \mathbb{R}^{128 \times 128}$ and $b_2 \in \mathbb{R}^{128}$.
-4.  **Third Hidden Layer:** Apply a linear transformation to $h_2$ followed by ReLU.
-    $$ h_3 = \text{ReLU}(W_3 h_2 + b_3) $$
-    where $W_3 \in \mathbb{R}^{128 \times 128}$ and $b_3 \in \mathbb{R}^{128}$.
-5.  **Output Layer:** Apply a linear transformation to $h_3$ to produce the raw color logits, followed by a Sigmoid activation function to constrain the output to the range $(0, 1)$.
-    $$ c = \sigma(W_4 h_3 + b_4) $$
-    where $W_4 \in \mathbb{R}^{3 \times 128}$ and $b_4 \in \mathbb{R}^{3}$. The result $c$ is the predicted RGB color.
+The network consists of three fully connected (FC) layers. Each hidden layer has a width of 128 neurons [S1].
 
 **Parameters:**
-*   Hidden layer width: 128 neurons per layer [S1].
-*   Number of hidden layers: 3 [S1].
-*   Activation functions: ReLU for hidden layers, Sigmoid for the final output [S1].
+*   Hidden layer width: 128 [S1].
+*   Activation function (hidden): Rectified Linear Unit (ReLU) [S1].
+*   Activation function (output): Sigmoid [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Output Range:** The Sigmoid activation ensures the color values are normalized between 0 and 1, which is suitable for standard RGB representation but may require scaling if the training data uses a different range [S1].
-*   **Input Dimensionality:** The architecture assumes a fixed 12-dimensional feature input. If the preceding feature encoder produces a different dimensionality, the input concatenation step must be adjusted, or the feature vector must be projected to 12 dimensions [S1].
+**Steps:**
+1.  **Concatenation:** Concatenate the position vector $p \in \mathbb{R}^3$, view direction vector $d \in \mathbb{R}^2$, and feature vector $f \in \mathbb{R}^{12}$ into a single input vector $x \in \mathbb{R}^{17}$ [S1].
+    $$ x = [p, d, f] $$
+2.  **First Hidden Layer:** Apply a fully connected layer with 128 output units to $x$, followed by ReLU activation [S1].
+    $$ h_1 = \text{ReLU}(W_1 x + b_1) $$
+    where $W_1 \in \mathbb{R}^{128 \times 17}$ and $b_1 \in \mathbb{R}^{128}$.
+3.  **Second Hidden Layer:** Apply a fully connected layer with 128 output units to $h_1$, followed by ReLU activation [S1].
+    $$ h_2 = \text{ReLU}(W_2 h_1 + b_2) $$
+    where $W_2 \in \mathbb{R}^{128 \times 128}$ and $b_2 \in \mathbb{R}^{128}$.
+4.  **Third Hidden Layer:** Apply a fully connected layer with 128 output units to $h_2$, followed by ReLU activation [S1].
+    $$ h_3 = \text{ReLU}(W_3 h_2 + b_3) $$
+    where $W_3 \in \mathbb{R}^{128 \times 128}$ and $b_3 \in \mathbb{R}^{128}$.
+5.  **Output Layer:** Apply a fully connected layer with 3 output units to $h_3$, followed by Sigmoid activation to constrain color values to the range $(0, 1)$ [S1].
+    $$ c = \sigma(W_4 h_3 + b_4) $$
+    where $W_4 \in \mathbb{R}^{3 \times 128}$ and $b_4 \in \mathbb{R}^{3}$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import torch.nn as nn
+import math
 
-class ColorNetwork(nn.Module):
+def sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def relu(x):
+    return max(0.0, x)
+
+class ColorNetwork:
     def __init__(self):
-        super(ColorNetwork, self).__init__()
-        # Input: 3 (pos) + 2 (view) + 12 (feature) = 17? 
-        # Note: Source [S1] states input dimensions are 33, 27, 12 for a different variant (Neural Deformable Voxel Grid) 
-        # but explicitly says "For the color network F_theta_c2... dimensions of position, view direction, and feature are 3, 2 and 12" in the text description of Fig 1(b).
-        # However, the text also says "For the input layer, the dimensions of position, view direction, and feature are 33, 27 and 12" for the deformation network.
-        # Let's re-read carefully: "For the color network F_theta_c2, we use three layers of fully connected layer with the width set to 128. 
-        # For the input layer, the dimensions of position, view direction, and feature are 33, 27 and 12." 
-        # Wait, the text says: "For the deformation network F_theta_d1... dimensions of position, time and feature are 33, 11 and 44."
-        # Then: "For the color network F_theta_c2... dimensions of position, view direction, and feature are 33, 27 and 12."
-        # This implies the position and view direction inputs are POSITIVELY ENCODED to 33 and 27 dimensions respectively.
-        # The prompt's parent article [MLPRender_Fea] says "positional encoding applied to features and view direction, but NOT position".
-        # Source [S1] text says: "dimensions of position, view direction, and feature are 33, 27 and 12".
-        # This contradicts the parent article's "NOT position" claim if we assume the 33/27 are encoded.
-        # However, the prompt asks to implement based on the article. The article [S1] explicitly lists input dimensions as 33, 27, 12.
-        # I must follow the source [S1] for the specific architecture details of F_theta_c2.
+        # Initialize weights and biases for 3 hidden layers (width 128) and output layer (width 3)
+        # Input dim: 17 (3 pos + 2 view + 12 feature)
+        # Layer 1: 17 -> 128
+        self.W1 = [[0.0 for _ in range(17)] for _ in range(128)]
+        self.b1 = [0.0 for _ in range(128)]
         
-        self.fc1 = nn.Linear(33 + 27 + 12, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.fc3 = nn.Linear(128, 128)
-        self.fc4 = nn.Linear(128, 3)
+        # Layer 2: 128 -> 128
+        self.W2 = [[0.0 for _ in range(128)] for _ in range(128)]
+        self.b2 = [0.0 for _ in range(128)]
         
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
+        # Layer 3: 128 -> 128
+        self.W3 = [[0.0 for _ in range(128)] for _ in range(128)]
+        self.b3 = [0.0 for _ in range(128)]
+        
+        # Output Layer: 128 -> 3
+        self.W4 = [[0.0 for _ in range(128)] for _ in range(3)]
+        self.b4 = [0.0 for _ in range(3)]
 
-    def forward(self, pos_encoded, view_encoded, feature):
-        # pos_encoded: shape (..., 33)
-        # view_encoded: shape (..., 27)
-        # feature: shape (..., 12)
+    def forward(self, position, view_dir, feature):
+        # 1. Concatenate inputs
+        # position: 3, view_dir: 2, feature: 12 -> total 17
+        x = position + view_dir + feature
         
-        x = torch.cat([pos_encoded, view_encoded, feature], dim=-1)
-        
-        h1 = self.relu(self.fc1(x))
-        h2 = self.relu(self.fc2(h1))
-        h3 = self.relu(self.fc3(h2))
-        
-        color = self.sigmoid(self.fc4(h3))
+        # 2. First hidden layer
+        h1 = [0.0] * 128
+        for i in range(128):
+            val = self.b1[i]
+            for j in range(17):
+                val += self.W1[i][j] * x[j]
+            h1[i] = relu(val)
+            
+        # 3. Second hidden layer
+        h2 = [0.0] * 128
+        for i in range(128):
+            val = self.b2[i]
+            for j in range(128):
+                val += self.W2[i][j] * h1[j]
+            h2[i] = relu(val)
+            
+        # 4. Third hidden layer
+        h3 = [0.0] * 128
+        for i in range(128):
+            val = self.b3[i]
+            for j in range(128):
+                val += self.W3[i][j] * h2[j]
+            h3[i] = relu(val)
+            
+        # 5. Output layer with sigmoid
+        color = [0.0] * 3
+        for i in range(3):
+            val = self.b4[i]
+            for j in range(128):
+                val += self.W4[i][j] * h3[j]
+            color[i] = sigmoid(val)
+            
         return color
 ```
-*Note: The pseudocode above reflects the specific input dimensions (33, 27, 12) cited in Source [S1] for the $F_{\theta_{c2}}$ network. The positional encoding for position and view direction is assumed to be handled prior to this network, as indicated by the input dimensions being larger than the raw 3D/2D coordinates.*
+
+**Edge Cases and Pitfalls:**
+*   **Output Range:** The sigmoid activation ensures color values are strictly between 0 and 1. If linear RGB values outside this range are required, the output activation must be modified [S1].
+*   **Input Dimensionality:** The architecture assumes fixed input dimensions (3, 2, 12). Deviations require adjusting the first weight matrix $W_1$ [S1].
 
 ## Subtopics
 
 ### [Neural Textures Architecture](9534-neural-textures-architecture.md)
 Neural Textures is a view synthesis method that extends traditional 2D RGB texture maps into high-dimensional Neural Feature Maps associated with an explicit 3D mesh model. It solves the problem of view-dependent appearance rendering by decoupling geometry (stored as a mesh) from appearance (stored as learnable features), allowing for real-time rendering and efficient training compared to implicit neural fields. It differs from its parent, the Color Network Architecture, by explicitly utilizing UV-parameterized feature maps on a mesh rather than querying a continuous MLP at arbitrary 3D coordinates.
+
+### [Intrinsic Color Decomposition Network](9940-intrinsic-color-decomposition-network.md)
+The Intrinsic Color Decomposition Network disentangles color-shape ambiguities by predicting separate albedo (view-invariant) and shading (view-dependent) components, which are summed to produce the final color. Unlike standard NeRF architectures that use a single view-dependent MLP for color, this method improves extrapolation performance in novel view synthesis by allowing the view-independent factor to provide reasonable predictions when facing large viewing direction shifts.
 
 ### [Decomposition Network](12532-decomposition-network.md)
 The Decomposition Network is a multi-layer perceptron (MLP) architecture used within neural fields to simultaneously reconstruct geometry and decompose material properties (diffuse color, roughness) from multi-view images. It distinguishes itself from standard NeRF architectures by explicitly optimizing for physically-based rendering (PBR) parameters rather than just color, employing a specialized loss schedule to handle the instability of normal estimation and BRDF fitting during early training stages.
@@ -105,39 +126,30 @@ The Decomposition Network is a multi-layer perceptron (MLP) architecture used wi
 The Squeeze-and-Excitation (SE) Module is a channel attention mechanism used to dynamically recalibrate feature responses by explicitly modeling interdependencies between channels. In the context of Mixer-NeRF, it is placed between the sampling layer and the inference layer to filter out redundant information and highlight important features, thereby improving detail restoration and color accuracy in complex, high-texture scenes. It distinguishes itself from sibling architectures like Neural Textures or Decomposition Networks by focusing specifically on channel-wise feature weighting rather than spatial decomposition or texture synthesis.
 
 ### EC-deep
-**Definition:** An alternative model architecture to RenderNet, used for comparison [S2, unofficial].
-**Layout:**
-1.  **Input Processing:** Lighting and pose parameters are fed through separate fully-connected layers to map each to a 512-dimensional vector [S2, unofficial].
-2.  **Input Concatenation:** The two 512-dimensional vectors are concatenated to form a latent vector [S2, unofficial].
-3.  **FC Layers:** The concatenated vector is fed through two fully-connected layers to map to a 1024-dimensional vector, followed by another fully-connected layer to map to an $(8 \times 8 \times 512)$-dimensional vector [S2, unofficial].
-4.  **Reshape:** The output is reshaped into a tensor of size $8 \times 8 \times 512$ [S2, unofficial].
-5.  **Decoder:** The decoder replaces each non-strided convolution in the baseline EC model with two 2D residual blocks [S2, unofficial].
-
-### Intrinsic Color Decomposition Network
-**Definition:** A color network design that disentangles color-shape ambiguities by predicting separate albedo (view-invariant) and shading (view-dependent) components, which are summed to produce the final color [S3].
-**Formula:**
-The final color $C$ is computed as:
-$$ C = \Phi(C_a + C_s) $$
-where $\Phi$ is the Sigmoid function, $C_a$ is the albedo RGB vector, and $C_s$ is the shading scalar [S3].
-**Layout:**
-*   **Albedo Branch:** Input consists of point locations and SDF MLP features. Output is $C_a \in \mathbb{R}^3$ (RGB, view-invariant). Uses two hidden layers [S3].
-*   **Shading Branch:** Input consists of point locations, SDF MLP features, reflection direction, and view direction. Output is $C_s \in \mathbb{R}$ (gray, view-dependent). Uses two hidden layers [S3].
-**Pitfalls:** Flat surfaces tend to be carved away when using this decomposition, potentially due to instability in the dot product computation for reflection [S3].
+EC-deep is an alternative model for comparison against RenderNet [S2, unofficial]. Lighting and pose parameters are fed through fully-connected layers to map each to a 512-dimensional vector [S2, unofficial]. These two vectors are concatenated to form a latent vector [S2, unofficial]. This vector is fed through 2 fully-connected layers to map to a 1024-dimensional vector, then another FC layer to an $(8 \times 8 \times 512)$-dimensional vector [S2, unofficial]. The output is reshaped to a tensor of size $8 \times 8 \times 512$ before being fed to the decoder [S2, unofficial]. The decoder replaces each non-strided convolution in EC with two 2D residual blocks [S2, unofficial].
 
 ### Per-Image Latent Embedding
-**Definition:** An addition to the color network using per-image latent embeddings to model exposure variation across frames in datasets with wild capture conditions [S3].
-**Context:** This variant is applied to the Tanks and Temples dataset to reduce floating objects caused by exposure differences [S3].
+An addition to the color network using per-image latent embeddings to model exposure variation across frames in datasets with wild capture conditions [S3]. This modification helps reduce floating artifacts caused by exposure differences [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of hidden layers and the width of the layers. For the standard architecture, it involves 4 matrix multiplications per query point.
-*   **Memory Complexity:** The weights are $W_1 (128 \times 18)$, $W_2 (128 \times 128)$, $W_3 (128 \times 128)$, and $W_4 (3 \times 128)$. Total parameters are approximately $2304 + 16384 + 16384 + 384 = 35,456$ weights plus biases.
-*   **Strengths:** Simple to implement and train; effectively models view-dependent effects when combined with appropriate feature inputs [S1].
-*   **Limitations:** The standard architecture may suffer from color-shape ambiguities, which some variants attempt to mitigate through decomposition [S3]. The reliance on fixed input dimensions (e.g., 33, 27, 12) requires consistent preprocessing of inputs [S1].
-*   **When to use:** When a lightweight, view-dependent color prediction is needed for a neural field or voxel grid representation [S1].
-*   **When not to use:** When explicit physical decomposition of albedo and shading is required, or when real-time rendering on explicit meshes is preferred over implicit querying [S1, S3].
+**Time and Memory Complexity:**
+The network has 3 hidden layers of width 128. The number of parameters is approximately $17 \times 128 + 128 + 128 \times 128 + 128 + 128 \times 128 + 128 + 128 \times 3 + 3 \approx 33,000$ parameters [S1]. Inference is fast as it involves only matrix multiplications and element-wise activations [S1].
+
+**Measured Performance:**
+Specific PSNR or training times for this exact architecture are not provided in the sources, though it is part of a system achieving competitive results on dynamic view synthesis tasks [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Lightweight, efficient for dynamic scenes when combined with deformation networks [S1].
+*   **Limitations:** The use of sigmoid activation limits output to $(0, 1)$, which may not support HDR or linear color spaces without post-processing [S1]. The fixed input dimensions limit flexibility [S1].
+
+**When to use:**
+Use when computational efficiency is critical and the scene can be represented with the specified input feature dimensions [S1].
+
+**When not to use:**
+Avoid if HDR output is required or if the input feature dimensionality differs significantly from 12 [S1].
 
 ## Background
-The Color Network Architecture, specifically denoted as $F_{\theta_{c2}}$, was introduced in the context of dynamic view synthesis using neural deformable voxel grids [S1]. It builds upon the general concept of using MLPs for color prediction in neural rendering, a technique popularized by NeRF [G]. The specific configuration of three hidden layers with width 128 and the use of positional encoding for position and view direction (resulting in 33 and 27 dimensions respectively) is detailed in the Neural Deformable Voxel Grid paper [S1]. Variants such as the Intrinsic Color Decomposition Network have been explored to address specific issues like color-shape ambiguity in high-fidelity reconstruction [S3].
+The Color Network Architecture, specifically denoted as $F_{\theta c2}$, originates from the work on Neural Deformable Voxel Grids for Fast Optimization of Dynamic View Synthesis [S1]. It was designed to work in conjunction with a deformation network to handle dynamic scenes [S1].
 
 ## Sources
 [S1] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26

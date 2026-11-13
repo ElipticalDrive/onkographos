@@ -1,21 +1,11 @@
 # Voxelization via Rasterization
 
-Also called: GPU Voxelization, Rasterization-based Voxelization
 
 ## Overview
-Voxelization via Rasterization converts 3D geometric primitives (typically triangle meshes) into a discrete 3D voxel grid by leveraging the graphics pipeline's rasterization hardware [S1, unofficial]. It solves the problem of efficiently generating volumetric representations for real-time applications by mapping screen-space coverage to voxel-space occupancy. It is distinguished from ray-marching or signed distance field (SDF) methods by its reliance on standard GPU rasterization primitives, making it highly parallelizable and compatible with existing graphics APIs, though it may require specific techniques like conservative rasterization to avoid gaps [S1, unofficial].
+Voxelization via Rasterization converts 3D geometric primitives (typically triangle meshes) into a discrete 3D voxel grid by leveraging the graphics pipeline's rasterization hardware [S1, unofficial]. It is distinguished from ray-marching or signed distance field (SDF) methods by its reliance on standard GPU rasterization primitives, though it may require specific techniques like conservative rasterization to avoid gaps [S1, unofficial].
 
 ## Shared principles
-The family shares the fundamental mechanism of converting scalar field data into geometric primitives that are submitted to the graphics pipeline [G].
-
-1.  **Primitive Generation**: Each occupied voxel is represented by one or more geometric primitives. The most common representation is a cube (6 faces, 8 vertices for shared shading, or 24 vertices for flat shading) or a set of quads representing visible faces [G].
-2.  **Coordinate Transformation**: Voxel indices $(i, j, k)$ are transformed into world space. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as:
-    $$
-    P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})
-    $$
-    For unit voxels, this simplifies to $P_{world} = I_{voxel} \times V_{size}$, where $V_{size}$ is the voxel dimension [G].
-3.  **Rasterization**: The generated primitives are transformed into clip space using the Model-View-Projection (MVP) matrix and rasterized. Visibility is determined by the depth buffer (z-buffer) or a back-to-front painter's algorithm if transparency is required [G].
-4.  **Culling**: To manage performance, frustum culling is applied to exclude voxels outside the camera view. Back-face culling is often enabled to discard faces oriented away from the camera, calculated by the dot product of the view-space normal and the view vector [G].
+This family builds on the shared mechanism of converting scalar field data into geometric primitives submitted to the graphics pipeline [G]. See [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md) for details on primitive generation, coordinate transformation, rasterization, and culling.
 
 ## Subtopics
 
@@ -42,7 +32,7 @@ This method leverages the DirectX 11.1 "Forced Sample Count" feature to perform 
 - **Comparison**: Unlike manual edge expansion, hardware conservative rasterization does not produce extra shaded pixels, so voxel-primitive intersection tests are not needed [S1, unofficial].
 
 ## Background
-The method originated from the need to efficiently voxelize triangle meshes for real-time global illumination and ray tracing on GPUs. Early implementations relied on standard rasterization, which suffered from gaps ("holes") when primitives fell between pixel centers or when projection directions changed. The introduction of conservative rasterization techniques, both manual (via geometry shader edge expansion) and hardware-supported (starting with NVIDIA's Maxwell architecture), provided robust solutions to these artifacts [S1, unofficial]. The technique is widely used in real-time rendering engines for voxel cone tracing, voxel-based lighting, and volumetric data visualization.
+The method originated from the need to efficiently voxelize triangle meshes for real-time global illumination and ray tracing on GPUs [G]. Early implementations relied on standard rasterization, which suffered from gaps ("holes") when primitives fell between pixel centers or when projection directions changed [S1, unofficial]. The introduction of conservative rasterization techniques, both manual (via geometry shader edge expansion) and hardware-supported (starting with NVIDIA's Maxwell architecture), provided robust solutions to these artifacts [S1, unofficial]. The technique is widely used in real-time rendering engines for voxel cone tracing, voxel-based lighting, and volumetric data visualization [G].
 
 ## Sources
 [S1] Basics of GPU Voxelization, https://developer.nvidia.com/content/basics-gpu-voxelization, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,148 @@
+# Local Histogram-based Classification Probability
+
+Also called: Classification Probability (Local Histogram-based Tissue Separation), neighborhood histogram classification
+
+## Overview
+Local Histogram-based Classification Probability is a method for separating overlapping tissues in volume rendering by using local histogram range weights as a second attribute alongside intensity [S1]. It allows a 2D Transfer Function to distinguish materials with identical intensity values but different neighborhood contexts, such as vessels and spongy bone in CT angiographies [S1]. Unlike standard intensity-based classification, this method computes a signed classification certainty $P$ derived from the narrowness of local intensity distributions, enabling the separation of materials that are indistinguishable by scalar value alone [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset (typically 12-bit precision) and a set of $n$ classification criteria $\Phi_i$, where each criterion defines a target intensity range (e.g., "vessel tissue") [S1].
+*   **Output:** A classification probability $P \in [-1.0, 1.0]$ stored alongside the voxel intensity, used to modulate opacity or color in the transfer function [S1].
+
+**Data Structures:**
+The method utilizes a 12-bit voxel data layout where the top 4 bits store the classification probability $P$ and the lower 8 bits store the original intensity value [S1]. This exploits unused precision in 12-bit datasets [S1]. For histogram computation, the volume is processed using block neighborhoods. The block size is $8^3$ voxels [S1]. Histograms are simplified into 12 piece-wise constant segments with a minimum width of 10 to preserve peak shapes efficiently [S1].
+
+**Parameters:**
+*   $\Phi_i$: The intensity range defining criterion $i$ (e.g., the mutual range of all vessels) [S1].
+*   $w_{Ai}, w_{Bi}$: Confidence levels for criterion $i$. $w_{Ai}$ is the range weight where classification as material A is confident, and $w_{Bi}$ is the range weight where classification as material B is confident. These values are not restricted to $[0, 1]$ [S1].
+*   $\lambda_i$: Weight for criterion $i$ in the final sum. The paper uses equal weighting $\lambda_i = 1/n$ such that $\sum \lambda_i = 1$ [S1].
+*   Block Size: $8^3$ voxels [S1].
+
+**Steps:**
+
+1.  **Compute Local Histograms:** For each voxel, compute the local histogram of intensities within its neighborhood. The neighborhood is defined by double block neighborhoods, where interpolation weights $c_1$ and $c_2$ are determined by the inverse distance to the center of each block ($d_1, d_2$) such that $c_1 + c_2 = 1$ and $c_1/c_2 = d_2/d_1$ [S1]. The histogram is simplified into 12 piece-wise constant segments [S1].
+
+2.  **Calculate Range Weight $w_r(\Phi_i)$:** For each criterion $\Phi_i$, calculate the range weight $w_r(\Phi_i)$, which represents the "narrowness" or density of the local histogram within the range $\Phi_i$ [S1].
+
+3.  **Compute Individual Certainty $p_i$:** For each criterion $i$, calculate the mean $\mu_i$ and delta $\delta_i$ of the confidence levels:
+    $$ \mu_i = \frac{w_{Ai} + w_{Bi}}{2} $$
+    $$ \delta_i = \frac{w_{Bi} - w_{Ai}}{2} $$
+    Then, calculate the signed classification certainty $p_i$ using the clamping function $C_2$ (clamping to $[-2.0, 2.0]$):
+    $$ p_i = C_2\left( \frac{w_r(\Phi_i) - \mu_i}{\delta_i} \right) $$
+    The sign of $p_i$ denotes the most likely tissue (e.g., negative for large vessels), and the magnitude denotes confidence [S1].
+
+4.  **Compute Total Probability $P$:** Calculate the weighted sum of individual certainties and clamp the result to $[-1.0, 1.0]$ using function $C_1$:
+    $$ P = C_1\left( \sum_{i=1}^n \lambda_i p_i \right) $$
+    where $\sum \lambda_i = 1$ [S1].
+
+5.  **Store Result:** Pack $P$ into the top 4 bits of the 12-bit voxel data, leaving the lower 8 bits for intensity [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_classification_probability(volume, criteria, block_size=8):
+    """
+    Computes local histogram-based classification probability for a volume.
+    
+    Args:
+        volume: 3D array of voxel intensities (12-bit).
+        criteria: List of tuples (Phi_i, w_Ai, w_Bi) for each tissue type.
+        block_size: Size of the block neighborhood (default 8).
+        
+    Returns:
+        P: 3D array of classification probabilities in [-1.0, 1.0].
+    """
+    height, width, depth = volume.shape
+    P = np.zeros((height, width, depth))
+    
+    # Precompute block centers and distances if using double block neighborhoods
+    # Note: The paper simplifies this by storing P in unused bits of 12-bit data.
+    # Here we compute P as a float for clarity, then pack it.
+    
+    for z in range(height):
+        for y in range(width):
+            for x in range(depth):
+                # 1. Get local neighborhood histogram
+                # Implementation detail: Use block-based histogram simplification
+                # with 12 segments and min width 10 [S1].
+                # For a voxel at (x,y,z), determine its block and neighbors.
+                # Interpolate block histograms using weights c1, c2 based on distance [S1].
+                local_hist = get_simplified_histogram(volume, x, y, z, block_size)
+                
+                total_certainty = 0.0
+                
+                for Phi, w_A, w_B in criteria:
+                    # 2. Calculate range weight wr(Phi)
+                    # wr is the density/narrowness within range Phi
+                    wr = calculate_range_weight(local_hist, Phi)
+                    
+                    # 3. Calculate mu and delta
+                    mu = (w_A + w_B) / 2.0
+                    delta = (w_B - w_A) / 2.0
+                    
+                    # Avoid division by zero if w_A == w_B
+                    if delta == 0:
+                        p_i = 0.0
+                    else:
+                        # 4. Calculate signed certainty p_i, clamped to [-2.0, 2.0]
+                        raw_p = (wr - mu) / delta
+                        p_i = clamp(raw_p, -2.0, 2.0)
+                    
+                    # 5. Accumulate with equal weight lambda_i = 1/n
+                    # lambda is handled by summing all p_i and dividing by n later
+                    total_certainty += p_i
+                
+                # 6. Average and clamp to [-1.0, 1.0]
+                n_criteria = len(criteria)
+                if n_criteria > 0:
+                    avg_p = total_certainty / n_criteria
+                    P[z, y, x] = clamp(avg_p, -1.0, 1.0)
+                else:
+                    P[z, y, x] = 0.0
+                    
+    return P
+
+def clamp(value, min_val, max_val):
+    return max(min_val, min(value, max_val))
+
+def get_simplified_histogram(volume, x, y, z, block_size):
+    """
+    Retrieves a simplified histogram for the voxel's neighborhood.
+    Uses double block neighborhoods with interpolation weights based on distance [S1].
+    Simplifies into 12 piece-wise constant segments with min width 10 [S1].
+    """
+    # [G] Placeholder for specific block interpolation logic.
+    # The paper [S1] references [LLYM04] for the simplification details.
+    # This function should return a histogram representation (e.g., array of bin counts).
+    pass
+
+def calculate_range_weight(histogram, phi_range):
+    """
+    Calculates the range weight wr(Phi) for a given histogram and range Phi.
+    This represents the 'narrowness' or density within the range.
+    """
+    # [G] Specific definition of 'range weight' depends on the histogram binning.
+    # Typically, this is the sum of histogram bins falling within phi_range,
+    # possibly normalized by the total histogram sum or range width.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on 12-bit data to store $P$ in the top 4 bits. Using lower precision formats may lose the classification probability entirely [S1].
+*   **Delta Zero:** If $w_{Ai} = w_{Bi}$, $\delta_i = 0$, leading to division by zero. The pseudocode handles this by setting $p_i = 0$ [S1].
+*   **Histogram Simplification:** The use of piece-wise constant segments with a minimum width of 10 is a simplification that may lose fine-grained histogram details but preserves peaks [S1].
+
+## Operating characteristics
+*   **Complexity:** The method requires computing local histograms for every voxel, which is computationally expensive. The use of block neighborhoods ($8^3$) and histogram simplification (12 segments) reduces this cost [S1].
+*   **Memory:** Requires storing the classification probability $P$ alongside intensity. In 12-bit data, this uses no additional memory by packing $P$ into unused bits [S1].
+*   **Strengths:** Effectively separates overlapping tissues (e.g., vessels and bone) that have identical intensity values but different local contexts [S1].
+*   **Limitations:** Requires manual definition of confidence levels ($w_{Ai}, w_{Bi}$) by the physician, which can be tedious [S1]. The simplification of histograms may lose some accuracy [S1].
+
+## Background
+The method was introduced by C. Lundström, P. Ljung, and A. Ynnerman in 2005 [S1]. It is based on the idea that neighborhood histogram analysis can extend the capabilities of transfer function design in medical volume rendering, particularly for CT angiographies [S1]. The approach is related to morphological filtering [S1].
+
+## Sources
+[S1] Extending and Simplifying Transfer Function Design in Medical Volume Rendering Using Local Histograms, https://doi.org/10.2312/vissym/eurovis05/263-270, fetched 2026-10-26

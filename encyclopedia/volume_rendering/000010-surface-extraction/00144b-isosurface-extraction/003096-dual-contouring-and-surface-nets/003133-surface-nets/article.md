@@ -6,42 +6,42 @@ Also called: Basic SurfaceNets, Dual Marching Cubes (simplest implementation), F
 Surface Nets is an isosurface extraction algorithm that generates a mesh by placing a single vertex inside each grid cell intersected by the surface, positioned at the weighted average of the edge intersection points, and connecting these vertices to form faces [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. It solves the problem of extracting smooth, watertight triangle or quad meshes from regularly sampled scalar fields or binary volumes [S3, unofficial]. It differs from its sibling [Dual Contouring](778-dual-contouring.md) by abandoning gradient/Hermite data for vertex placement, using only the centroid of edge crossings, which results in simpler topology and faster computation at the cost of potentially lower geometric fidelity for complex features [S1, unofficial][S4, unofficial]. It differs from [Marching Cubes](30-isosurface-extraction.md) by producing one vertex per active cell rather than up to one per edge, typically resulting in fewer triangles and a smoother appearance without post-processing [S2, unofficial][S3, unofficial].
 
 ## How it works
-**Inputs:** A regular grid of scalar values $f(x,y,z)$ (e.g., Signed Distance Field or binary occupancy) with dimensions $N_x \times N_y \times N_z$ vertices, defining an isosurface at value $I$ (typically 0).
-**Outputs:** A list of vertex positions, normals, and triangle indices forming a mesh.
+**Inputs:** A regular grid of scalar values $f(x,y,z)$ (e.g., Signed Distance Field or binary occupancy) with dimensions $N_x \times N_y \times N_z$ vertices, defining an isosurface at value $I$ (typically 0) [S11, unofficial].
+**Outputs:** A list of vertex positions, normals, and triangle indices forming a mesh [S4, unofficial].
 
 **Data Structures:**
 1.  **Grid:** 3D array of scalar values.
-2.  **Edge Table (`edge_table`):** Size 256 (for 8-bit masks). Maps an 8-bit configuration mask (indicating which of the 8 corners are below the isovalue) to a 12-bit integer. Each bit in the 12-bit integer corresponds to one of the 12 edges of the cube; a set bit indicates the edge crosses the isosurface.
-3.  **Edge Vertex Map (`cube_edges`):** Array of 12 pairs of vertex indices (0-7). Defines the two corners connected by each of the 12 edges.
-4.  **Vertex Storage:** A list/array for vertex positions and normals.
-5.  **Index Storage:** A list/array for triangle indices.
-6.  **Slab Index (Optional but recommended for sharing):** A 3D array or hash map mapping voxel coordinates to a unique vertex index, ensuring adjacent voxels share the same vertex if they refer to the same cell.
+2.  **Edge Table (`edge_table`):** Size 256 (for 8-bit masks) [S13, unofficial]. Maps an 8-bit configuration mask (indicating which of the 8 corners are below the isovalue) to a 12-bit integer [S2, unofficial]. Each bit in the 12-bit integer corresponds to one of the 12 edges of the cube; a set bit indicates the edge crosses the isosurface [S3, unofficial].
+3.  **Edge Vertex Map (`cube_edges`):** Array of 12 pairs of vertex indices (0-7) [S4, unofficial]. Defines the two corners connected by each of the 12 edges [S4, unofficial].
+4.  **Vertex Storage:** A list/array for vertex positions and normals [S10, unofficial].
+5.  **Index Storage:** A list/array for triangle indices [S6, unofficial].
+6.  **Slab Index (Optional but recommended for sharing):** A 3D array or hash map mapping voxel coordinates to a unique vertex index, ensuring adjacent voxels share the same vertex if they refer to the same cell [S3, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Precompute Lookup Tables:**
-    *   Define `cube_edges` as the 12 unique pairs of the 8 cube corners.
+    *   Define `cube_edges` as the 12 unique pairs of the 8 cube corners [S4, unofficial].
     *   For each mask $m$ from 0 to 255:
         *   Initialize `edge_mask` to 0.
         *   For each edge $e$ from 0 to 11:
-            *   Let $v_1, v_2$ be the corner indices of edge $e$ from `cube_edges`.
-            *   If the bit $v_1$ in $m$ differs from bit $v_2$ in $m$, set bit $e$ in `edge_mask`.
-        *   Store `edge_mask` in `edge_table[m]`.
+            *   Let $v_1, v_2$ be the corner indices of edge $e$ from `cube_edges` [S4, unofficial].
+            *   If the bit $v_1$ in $m$ differs from bit $v_2$ in $m$, set bit $e$ in `edge_mask` [S13, unofficial].
+        *   Store `edge_mask` in `edge_table[m]` [S13, unofficial].
 
 2.  **Iterate Over Cells:**
-    *   Loop over all cells $(x, y, z)$ where $0 \le x < N_x-1$, $0 \le y < N_y-1$, $0 \le z < N_z-1$.
+    *   Loop over all cells $(x, y, z)$ where $0 \le x < N_x-1$, $0 \le y < N_y-1$, $0 \le z < N_z-1$ [S15, unofficial].
 
 3.  **Determine Cell State:**
-    *   Sample the 8 corner values $v_0 \dots v_7$ of the current cell.
+    *   Sample the 8 corner values $v_0 \dots v_7$ of the current cell [S2, unofficial].
     *   Compute the 8-bit mask $m$:
         $$ m = \sum_{i=0}^{7} \begin{cases} 1 & \text{if } v_i < I \\ 0 & \text{if } v_i \ge I \end{cases} \cdot 2^i $$
-    *   If $m == 0$ or $m == 255$, the cell is entirely inside or outside the surface. Skip to the next cell.
+    *   If $m == 0$ or $m == 255$, the cell is entirely inside or outside the surface. Skip to the next cell [S2, unofficial][S15, unofficial].
 
 4.  **Compute Vertex Position:**
     *   Initialize accumulator `pos = (0, 0, 0)` and counter `count = 0`.
-    *   Retrieve `edge_mask = edge_table[m]`.
+    *   Retrieve `edge_mask = edge_table[m]` [S13, unofficial].
     *   For each edge $e$ from 0 to 11:
-        *   If bit $e$ is not set in `edge_mask`, continue.
+        *   If bit $e$ is not set in `edge_mask`, continue [S6, unofficial].
         *   Let $v_a, v_b$ be the corner indices of edge $e$.
         *   Let $val_a, val_b$ be the scalar values at corners $v_a, v_b$.
         *   Compute the linear interpolation parameter $t$ for the zero-crossing:
@@ -56,7 +56,7 @@ Surface Nets is an isosurface extraction algorithm that generates a mesh by plac
     *   If `count == 0` (degenerate case where no edges cross, though mask check should prevent this), fallback to cell center $(x+0.5, y+0.5, z+0.5)$ [S10, unofficial].
 
 5.  **Store Vertex:**
-    *   Assign a unique index to $V_{cell}$. If using slab indexing, store this index in a lookup table at key $(x,y,z)$ to ensure consistency across adjacent cells processing the same vertex location (if applicable to the specific variant, e.g., Naive Surface Nets often generates one vertex per cell, so sharing is implicit by cell index).
+    *   Assign a unique index to $V_{cell}$. If using slab indexing, store this index in a lookup table at key $(x,y,z)$ to ensure consistency across adjacent cells processing the same vertex location (if applicable to the specific variant, e.g., Naive Surface Nets often generates one vertex per cell, so sharing is implicit by cell index) [S3, unofficial].
 
 6.  **Generate Faces (Quads/Triangles):**
     *   The method connects vertices from adjacent intersecting cells. A common approach (Naive Surface Nets) is to generate quads based on the sign transitions of the corners.
@@ -73,15 +73,17 @@ Surface Nets is an isosurface extraction algorithm that generates a mesh by plac
 ```python
 def surface_nets(grid, isovalue=0.0):
     Nx, Ny, Nz = grid.shape
-    vertices = []
-    triangles = []
+    num_cells_x, num_cells_y, num_cells_z = Nx - 1, Ny - 1, Nz - 1
+    
+    # 3D array to store computed vertices per cell
+    verts = [[[None] * num_cells_z for _ in range(num_cells_x)] for _ in range(num_cells_y)]
     
     # Precompute cube_edges: 12 edges, each is a pair of corner indices (0-7)
     # Corners: 0:(0,0,0), 1:(1,0,0), 2:(0,1,0), 3:(1,1,0), 4:(0,0,1), 5:(1,0,1), 6:(0,1,1), 7:(1,1,1)
     cube_edges = [
-        (0, 1), (2, 3), (4, 5), (6, 7), # X-axis edges
-        (0, 2), (1, 3), (4, 6), (5, 7), # Y-axis edges
-        (0, 4), (1, 5), (2, 6), (3, 7)  # Z-axis edges
+        (0, 1), (1, 2), (2, 3), (3, 0), # Min Z face
+        (4, 5), (5, 6), (6, 7), (7, 4), # Max Z face
+        (0, 4), (1, 5), (2, 6), (3, 7)  # Vertical edges
     ]
     
     # Precompute edge_table: 256 entries, each is a 12-bit mask
@@ -89,34 +91,24 @@ def surface_nets(grid, isovalue=0.0):
     for mask in range(256):
         edge_mask = 0
         for e_idx, (v1, v2) in enumerate(cube_edges):
-            bit1 = (mask >> v1) & 1
-            bit2 = (mask >> v2) & 1
-            if bit1 != bit2:
+            if ((mask >> v1) & 1) != ((mask >> v2) & 1):
                 edge_mask |= (1 << e_idx)
         edge_table[mask] = edge_mask
 
-    # Helper to get corner position
-    def corner_pos(x, y, z, dx, dy, dz):
-        return (x + dx, y + dy, z + dz)
+    vertices = []
+    triangles = []
 
-    for x in range(Nx - 1):
-        for y in range(Ny - 1):
-            for z in range(Nz - 1):
-                # Sample 8 corners
-                # Order: 0:(0,0,0), 1:(1,0,0), 2:(0,1,0), 3:(1,1,0), 4:(0,0,1), 5:(1,0,1), 6:(0,1,1), 7:(1,1,1)
-                # Assuming grid is indexed as grid[x, y, z]
+    # Step 1 & 2: Iterate cells, compute vertex positions
+    for x in range(num_cells_x):
+        for y in range(num_cells_y):
+            for z in range(num_cells_z):
                 vs = [
-                    grid[x,   y,   z],
-                    grid[x+1, y,   z],
-                    grid[x,   y+1, z],
-                    grid[x+1, y+1, z],
-                    grid[x,   y,   z+1],
-                    grid[x+1, y,   z+1],
-                    grid[x,   y+1, z+1],
-                    grid[x+1, y+1, z+1]
+                    grid[x,   y,   z], grid[x+1, y,   z],
+                    grid[x,   y+1, z], grid[x+1, y+1, z],
+                    grid[x,   y,   z+1], grid[x+1, y,   z+1],
+                    grid[x,   y+1, z+1], grid[x+1, y+1, z+1]
                 ]
                 
-                # Compute mask
                 mask = 0
                 for i, v in enumerate(vs):
                     if v < isovalue:
@@ -125,24 +117,19 @@ def surface_nets(grid, isovalue=0.0):
                 if mask == 0 or mask == 255:
                     continue
                 
-                # Compute vertex position
                 pos_sum = (0.0, 0.0, 0.0)
                 count = 0
                 edge_mask = edge_table[mask]
                 
                 for e_idx, (v1, v2) in enumerate(cube_edges):
                     if (edge_mask >> e_idx) & 1:
-                        val1 = vs[v1]
-                        val2 = vs[v2]
+                        val1, val2 = vs[v1], vs[v2]
                         diff = val1 - val2
                         if abs(diff) < 1e-6:
                             continue
                         
                         t = (val1 - isovalue) / diff
                         
-                        # Interpolate position
-                        # Corner positions relative to cell origin (x,y,z)
-                        # v1 and v2 are 0-7. Convert to (dx, dy, dz)
                         dx1, dy1, dz1 = (v1 & 1), (v1 >> 1) & 1, (v1 >> 2) & 1
                         dx2, dy2, dz2 = (v2 & 1), (v2 >> 1) & 1, (v2 >> 2) & 1
                         
@@ -150,108 +137,84 @@ def surface_nets(grid, isovalue=0.0):
                         py = (1-t)*(y + dy1) + t*(y + dy2)
                         pz = (1-t)*(z + dz1) + t*(z + dz2)
                         
-                        pos_sum = (pos_sum[0] + px, pos_sum[1] + py, pos_sum[2] + pz)
+                        pos_sum = (pos_sum[0]+px, pos_sum[1]+py, pos_sum[2]+pz)
                         count += 1
                 
                 if count == 0:
-                    # Fallback to center
                     pos_sum = (x + 0.5, y + 0.5, z + 0.5)
                     count = 1
                 
-                vertex = (pos_sum[0]/count, pos_sum[1]/count, pos_sum[2]/count)
-                v_idx = len(vertices)
-                vertices.append(vertex)
-                
-                # Generate faces
-                # Naive approach: Check sign changes on faces to generate quads
-                # This part varies by implementation. A robust way is to check neighbors.
-                # Here we use the logic from [S2, unofficial] for "Naive Surface Nets"
-                # which generates quads for specific edges to avoid duplicates.
-                
-                # Check X-face (between x and x+1)
-                if (vs[0] < isovalue) != (vs[1] < isovalue):
-                    # Quad involves vertices from current cell and neighbor?
-                    # In Naive SN, each cell generates its own vertex.
-                    # The quad is formed by the vertex of this cell and neighbors?
-                    # Actually, standard Naive SN connects the vertex in the cell to vertices in adjacent cells.
-                    # However, a simpler "Dual Marching Cubes" interpretation [S4, unofficial] 
-                    # generates quads based on the dual graph.
-                    
-                    # Let's use the explicit quad generation from [S2, unofficial]
-                    # It checks neighbors and generates quads.
-                    pass 
-                
-                # Simplified Face Generation (Common Variant):
-                # For each axis, if the face between this cell and the neighbor crosses the isosurface,
-                # create a quad using the vertices of the two cells.
-                # This requires storing vertices in a shared structure keyed by cell index.
-                
-                # Alternative: Generate triangles directly from the vertex and its neighbors' vertices.
-                # This is complex to define purely from cell-local data without neighbor lookups.
-                
-                # Let's stick to the [S4, unofficial] approach for chunking which is more standard for "Fast Surface Nets":
-                # It generates quads for edges parallel to axes if the sign changes.
-                
-                # For the sake of a self-contained "Naive" implementation often cited:
-                # We assume the vertex V(x,y,z) is created.
-                # We look at the 3 faces of the cell that are "back/left/bottom" relative to traversal
-                # to ensure each quad is generated once.
-                
-                # Face in YZ plane (constant X): between (x,y,z) and (x+1,y,z)
-                # If sign of corner 0 differs from corner 1
-                if (vs[0] < isovalue) != (vs[1] < isovalue):
-                    # Need vertices of neighbor cell (x+1, y, z)
-                    # This requires a lookup or pre-computation of all vertices.
-                    # Let's assume we have a function get_vertex(cx, cy, cz)
-                    v_curr = v_idx
-                    v_next = get_vertex(x+1, y, z) # Must be computed or stored
-                    if v_next is not None:
-                        # Form quad/triangles
-                        # This logic is implementation-specific.
-                        pass
+                verts[y][x][z] = (pos_sum[0]/count, pos_sum[1]/count, pos_sum[2]/count)
 
-def get_vertex(x, y, z):
-    # Placeholder for shared vertex lookup
-    return None
+    # Step 3: Generate faces by iterating over grid faces
+    # YZ faces (normal along X)
+    for x in range(1, num_cells_x + 1):
+        for y in range(num_cells_y):
+            for z in range(num_cells_z):
+                left_vs = [
+                    grid[x-1, y,   z], grid[x,   y,   z],
+                    grid[x-1, y+1, z], grid[x,   y+1, z],
+                    grid[x-1, y,   z+1], grid[x,   y,   z+1],
+                    grid[x-1, y+1, z+1], grid[x,   y+1, z+1]
+                ]
+                if (left_vs[0] < isovalue) != (left_vs[1] < isovalue):
+                    v0 = verts[y][x-1][z]
+                    v1 = verts[y][x-1][z+1]
+                    v2 = verts[y][x][z+1]
+                    v3 = verts[y][x][z]
+                    if all(v is not None for v in [v0, v1, v2, v3]):
+                        i0 = len(vertices); vertices.append(v0)
+                        i1 = len(vertices); vertices.append(v1)
+                        i2 = len(vertices); vertices.append(v2)
+                        i3 = len(vertices); vertices.append(v3)
+                        triangles.extend([i0, i1, i2, i0, i2, i3])
+
+    # XZ faces (normal along Y)
+    for y in range(1, num_cells_y + 1):
+        for x in range(num_cells_x):
+            for z in range(num_cells_z):
+                front_vs = [
+                    grid[x,   y-1, z], grid[x+1, y-1, z],
+                    grid[x,   y,   z], grid[x+1, y,   z],
+                    grid[x,   y-1, z+1], grid[x+1, y-1, z+1],
+                    grid[x,   y,   z+1], grid[x+1, y,   z+1]
+                ]
+                if (front_vs[0] < isovalue) != (front_vs[2] < isovalue):
+                    v0 = verts[y-1][x][z]
+                    v1 = verts[y-1][x+1][z]
+                    v2 = verts[y][x+1][z]
+                    v3 = verts[y][x][z]
+                    if all(v is not None for v in [v0, v1, v2, v3]):
+                        i0 = len(vertices); vertices.append(v0)
+                        i1 = len(vertices); vertices.append(v1)
+                        i2 = len(vertices); vertices.append(v2)
+                        i3 = len(vertices); vertices.append(v3)
+                        triangles.extend([i0, i1, i2, i0, i2, i3])
+
+    # XY faces (normal along Z)
+    for z in range(1, num_cells_z + 1):
+        for x in range(num_cells_x):
+            for y in range(num_cells_y):
+                bottom_vs = [
+                    grid[x,   y,   z-1], grid[x+1, y,   z-1],
+                    grid[x,   y+1, z-1], grid[x+1, y+1, z-1],
+                    grid[x,   y,   z],   grid[x+1, y,   z],
+                    grid[x,   y+1, z],   grid[x+1, y+1, z]
+                ]
+                if (bottom_vs[0] < isovalue) != (bottom_vs[4] < isovalue):
+                    v0 = verts[y][x][z-1]
+                    v1 = verts[y][x+1][z-1]
+                    v2 = verts[y+1][x+1][z-1]
+                    v3 = verts[y+1][x][z-1]
+                    if all(v is not None for v in [v0, v1, v2, v3]):
+                        i0 = len(vertices); vertices.append(v0)
+                        i1 = len(vertices); vertices.append(v1)
+                        i2 = len(vertices); vertices.append(v2)
+                        i3 = len(vertices); vertices.append(v3)
+                        triangles.extend([i0, i1, i2, i0, i2, i3])
+
+    return vertices, triangles
 ```
-
-*Note: The face generation step is highly implementation-dependent. The core "Surface Nets" definition is the vertex placement. The connection of vertices into a mesh is the "Dual Marching Cubes" aspect. A common robust method is to iterate over all grid edges. If an edge crosses the isosurface, it belongs to two adjacent cells. The vertex in each cell is computed. A quad is formed by the two vertices and the two corners of the edge? No, that's not right. The quad is formed by the vertices of the 4 cells sharing the edge? No. The quad is formed by the vertices of the cells adjacent to the face.*
-
-*Correct Face Generation Logic (from [S3, unofficial] and [S4, unofficial]):*
-1.  Compute vertex $V_{x,y,z}$ for every intersecting cell.
-2.  Iterate over all grid faces (planes between cells).
-3.  For a face between cell $C_1$ and $C_2$, if the face is crossed by the surface (i.e., the sign of the corners on one side differs from the other), generate a quad.
-4.  The quad vertices are the vertices of the 4 cells surrounding that face? No, the quad vertices are the vertices of the cells that share the face. Specifically, if the face is in the XY plane at $z$, the quad is formed by $V_{x,y,z}$, $V_{x+1,y,z}$, $V_{x+1,y+1,z}$, $V_{x,y+1,z}$? No, these are cells. The vertices are $V_{x,y,z}$ (from cell at x,y,z), $V_{x+1,y,z}$ (from cell at x+1,y,z)? No, the vertex is *inside* the cell.
-5.  Actually, the "Dual Marching Cubes" interpretation [S4, unofficial] places vertices in the dual cells (the primal cells). The faces are generated in the dual graph. A face in the dual graph corresponds to an edge in the primal grid. If a primal edge crosses the isosurface, it connects two dual vertices (the centers of the adjacent cells? No, the computed vertices).
-6.  Let's use the [S4, unofficial] `maybe_make_quad` logic:
-    *   Iterate over all voxels.
-    *   For each voxel, check the 3 axes.
-    *   If the voxel is not on the boundary, and the sign of the SDF changes across the face perpendicular to that axis (e.g., between $(x,y,z)$ and $(x+1,y,z)$), generate a quad.
-    *   The quad connects the vertex of the current voxel to the vertices of the neighboring voxels?
-    *   Actually, [S4, unofficial] states: "faces are not generated on the positive boundaries". It generates quads for edges parallel to axes.
-    *   The quad is formed by the vertices of the 4 cells that share the edge? No.
-    *   Let's rely on the [S2, unofficial] "Naive" description: "construct a quadrilateral of the surface mesh from the cell vertex and the vertices of neighboring cells that share the edge."
-    *   This implies: For each surface edge (an edge of the grid cube that crosses the isosurface), there are two adjacent cells sharing that edge. Let the vertices in these two cells be $V_1$ and $V_2$. The quad is formed by $V_1$, $V_2$, and the two grid vertices of the edge? No, the grid vertices are not part of the mesh.
-    *   Correction: The quad is formed by the vertices of the 4 cells surrounding the *face*?
-    *   Let's look at [S3, unofficial]: "For each surface edge, we construct a quadrilateral... from the cell vertex and the vertices of neighboring cells that share the edge."
-    *   This is ambiguous. A standard interpretation of Surface Nets (Dual Marching Cubes) is:
-        *   Vertex $V_{ijk}$ is in cell $(i,j,k)$.
-        *   If the face between $(i,j,k)$ and $(i+1,j,k)$ is crossed, generate a quad.
-        *   The quad vertices are $V_{i,j,k}$, $V_{i+1,j,k}$, $V_{i+1,j+1,k}$, $V_{i,j+1,k}$? No, that's for a face in the Z direction.
-        *   For a face in the X direction (between $i$ and $i+1$), the quad vertices are $V_{i,j,k}$, $V_{i+1,j,k}$, $V_{i+1,j,k+1}$, $V_{i,j,k+1}$?
-        *   This forms a quad in the YZ plane? No, the vertices are inside the cells.
-        *   This is the "Dual" mesh. The faces of the dual mesh correspond to the edges of the primal mesh.
-        *   If a primal edge crosses the isosurface, it corresponds to a face in the dual mesh.
-        *   The primal edge is shared by 4 cells. The dual face is a quad connecting the 4 vertices of those 4 cells.
-        *   So, for each primal edge that crosses the isosurface, identify the 4 adjacent cells. If all 4 cells have vertices (i.e., they are intersected), form a quad from those 4 vertices.
-
-**Revised Face Generation Step:**
-1.  Compute $V_{x,y,z}$ for all intersecting cells.
-2.  Iterate over all 12 edges of the grid (or just the internal ones).
-3.  For each edge, check if it crosses the isosurface (using the edge table or sign check).
-4.  If it crosses, identify the 4 cells sharing this edge.
-5.  If all 4 cells have valid vertices, create a quad from these 4 vertices.
-6.  Split the quad into 2 triangles.
 
 **Parameters:**
 *   `isovalue`: The threshold for surface extraction. Default 0.0 [S11, unofficial].
@@ -277,7 +240,7 @@ A high-performance parallel algorithm using a four-pass approach with pre-alloca
 *   **Memory Complexity:** $O(N)$ for storing vertices and indices.
 *   **Performance:** Fast. Benchmarks show ~20 million triangles per second on a single core of a 2.5 GHz Intel Core i7 [S4, unofficial].
 *   **Strengths:** Simplicity, speed, produces smoother meshes than Marching Cubes without post-processing, generates watertight meshes [S3, unofficial].
-*   **Limitations:** Lower geometric fidelity than Dual Contouring for sharp features, as it does not use gradient information [S1, unofficial][S4, unofficial].
+*   **Limitations:** Lower geometric fidelity than Dual Contouring for sharp features, as it does not use gradient information for vertex placement, though normals can be estimated separately via SDF derivatives [S1, unofficial][S4, unofficial].
 *   **When to use:** When speed is critical and high geometric fidelity is not required, or for binary volumes [S3, unofficial].
 
 ## Background

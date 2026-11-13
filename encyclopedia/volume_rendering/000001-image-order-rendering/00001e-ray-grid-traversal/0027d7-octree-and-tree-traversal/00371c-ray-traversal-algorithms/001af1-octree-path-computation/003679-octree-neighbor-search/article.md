@@ -1,0 +1,96 @@
+# Octree Neighbor Search
+
+Also called: Get Neighbour Algorithm
+
+## Overview
+An algorithm to find the adjacent cell $a$ sharing a specific face $f$ with a given cell $c$ in a generalized octree, handling cases where the neighbor might be at a different subdivision level [S1]. It sets itself apart from sibling methods like [SVO Pathfinder with Lazy Theta* and LOS Recovery](7910-svo-pathfinder-with-lazy-theta-and-los-recovery.md) by focusing on immediate geometric adjacency verification rather than pathfinding or access prediction.
+
+## How it works
+**Inputs:** A cell $c$ and a face $f$ (direction) for which the neighbor is sought.
+**Outputs:** The adjacent cell $a$ sharing face $f$ with $c$, or null if no valid neighbor exists.
+
+**Data Structures:**
+*   **Cell Representation:** Defined by spatial coordinates and a Morton code (Z-order curve). The Morton code encodes the 3D position into a 1D integer, allowing bitwise operations for neighbor calculation [S1].
+*   **Level:** The subdivision depth of the cell.
+*   **Offset:** An integer variable tracking the search depth relative to the cell's level.
+
+**Steps:**
+1.  Determine the level of cell $c$, denoted as $L_c$ [S1].
+2.  Identify the coincident face $f'$ corresponding to the input face $f$. If $f$ is the $+x$ face, $f'$ is the $-x$ face of the neighbor [S1].
+3.  Initialize an offset variable $k = 1$ [S1].
+4.  Loop while $k \le L_c$:
+    a.  Compute the candidate neighbor's Morton code. This is done by obtaining the spatial coordinates of $c$, adding an offset in the direction of $f$, and converting the result back to a Morton code. Specifically, if no neighbor exists at the current level, the method looks up the parent cell by shifting the three least significant bits of the Morton code right by 3 bits (integer division by 8) [S1]. The function `GetAdjacentCellByFace(c, f, k)` performs this coordinate transformation and Morton code generation [S1].
+    b.  Check if the candidate cell $a$ exists in the octree structure using `Exists(a)` [S1].
+    c.  If $a$ exists:
+        i.  Retrieve the geometric limit of cell $c$ in the direction of face $f$, denoted $Limit_c$ [S1].
+        ii. Retrieve the geometric limit of cell $a$ in the direction of the coincident face $f'$, denoted $Limit_a$ [S1].
+        iii. If $Limit_c == Limit_a$, the cells share the exact same boundary plane. Return $a$ [S1].
+        iv. Else, the limits do not match (e.g., $c$ is smaller than $a$ or vice versa, or they are misaligned). Increment $k$ by 1 and continue the loop [S1].
+    d.  If $a$ does not exist, increment $k$ by 1 and continue the loop [S1].
+5.  If the loop completes without returning a cell, no valid neighbor exists [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GetNeighbor(c, f):
+    # c is the cell object, f is the face direction (e.g., +X, -Y, etc.)
+    level_c = GetLevel(c)
+    coincident_face = GetCoincidentFace(f)
+    offset = 1
+    
+    while offset <= level_c:
+        # GetAdjacentCellByFace computes the Morton code of the neighbor
+        # by adjusting spatial coordinates and handling parent shifts if needed.
+        # It effectively searches for a neighbor at a coarser granularity
+        # defined by the offset.
+        candidate_morton = GetAdjacentCellByFace(c, f, offset)
+        
+        if Exists(candidate_morton):
+            a = GetCellByMorton(candidate_morton)
+            
+            # Get geometric limits (e.g., min/max coordinates)
+            limit_c = GetCellLimitByFace(c, f)
+            limit_a = GetCellLimitByFace(a, coincident_face)
+            
+            # Verify exact boundary match
+            if limit_c == limit_a:
+                return a
+            else:
+                # Limits do not match; try a coarser neighbor or next level
+                offset = offset + 1
+        else:
+            # Candidate does not exist; try next offset
+            offset = offset + 1
+            
+    return None
+```
+
+**Parameters:**
+*   `offset`: Starts at 1. The maximum value is bounded by the depth of the octree, as anisotropic subdivision usually occurs at the deepest levels [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Anisotropic Subdivision:** The algorithm is designed for generalized octrees where cells may have different sizes. The offset loop handles cases where the neighbor is at a different subdivision level [S1].
+*   **Precision:** Geometric limit comparison must use exact equality. Floating-point errors in limit calculation could cause false negatives [S1].
+*   **Boundary Conditions:** If the cell is on the boundary of the domain, `Exists` will return false for external neighbors, and the loop will terminate correctly [S1].
+
+## Subtopics
+
+### [Indirect Neighbor Search](14139-indirect-neighbor-search.md)
+Indirect Neighbor Search computes the set of neighbors for the three faces of a cell $c$ that are not covered by direct neighbors. These neighbors are separated from $c$ by splitting planes located deeper in the octree hierarchy. While Direct Neighbor Search handles the immediate vicinity resulting from the last three splitting steps, Indirect Neighbor Search handles the remaining faces by traversing the tree structure to find cells or planes on the opposite side of bounding splitting planes. It is the second phase of the complete neighborhood computation in generalized octrees. See [Indirect Neighbor Search](14139-indirect-neighbor-search.md).
+
+### Hong Implicit Neighbor Octree
+Generates fragments corresponding to rays intersecting the cell. This approach is used for efficient classification of cells in volume rendering contexts, where sub-volumes are projected onto the image plane and fragments are generated for rays intersecting the cell [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The loop runs at most $L_c$ times, where $L_c$ is the level of the cell. In each iteration, geometric limit checks and existence checks are performed. The complexity is linear with respect to the cell's depth in the worst case [S1].
+*   **Memory Complexity:** Requires storage for the octree structure and spatial coordinates. No additional significant memory is allocated during the search [S1].
+*   **Strengths:** Handles generalized (anisotropic) octrees efficiently without requiring regular grid structures [S1].
+*   **Limitations:** Performance degrades if the octree has very deep levels and neighbors are sparse, requiring many offset increments [S1].
+
+## Background
+The algorithm was introduced by Ricardo Uribe Lobello, Florence Denis, and Florent Dupont in their work on adaptive surface extraction from anisotropic volumetric data using generalized octrees [S1]. It addresses the need for efficient neighbor access in non-uniform octrees where standard bitwise neighbor calculations fail due to varying cell sizes [S1].
+
+## Sources
+[S1] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

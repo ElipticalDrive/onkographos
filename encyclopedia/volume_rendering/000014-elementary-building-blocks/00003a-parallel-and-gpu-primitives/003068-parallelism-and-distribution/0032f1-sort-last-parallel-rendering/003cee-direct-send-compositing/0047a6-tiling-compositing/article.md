@@ -1,91 +1,107 @@
 # Tiling Compositing
+
 Also called: Linear Tiling, Staggered Tiling
 
 ## Overview
-Tiling Compositing is a parallel compositing strategy for distributed volume rendering where processing elements (PEs) hold tiles of the final image and pass partial results to adjacent PEs in a staggered, linear fashion to merge them into the final image [S1, unofficial]. It builds on [Direct Send Compositing](9377-direct-send-compositing.md) by organizing the compositing traffic into a linear chain of tiles rather than exchanging full-size images. Unlike the inverted binary tree method, which leaves many PEs idle in later cycles, tiling keeps all PEs working until the final image is completed [S1, unofficial].
+Tiling Compositing is a parallel compositing strategy for distributed volume rendering where processing elements (PEs) hold tiles of the final image and pass partial results to adjacent PEs in a staggered, linear fashion to merge them into the final image [S1, unofficial]. It solves the problem of global image assembly in a distributed memory system by avoiding the exchange of full-size images, instead exchanging only the specific tile assigned to each PE [S1, unofficial]. Unlike the inverted binary tree method, which leaves a majority of PEs idle during latter cycles, tiling keeps all PEs working on the problem until the final image is completed [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** $n$ processing elements (PEs), indexed $0$ to $n-1$. Each PE $i$ initially holds a tile $T_i$ of the final image.
-*   **Output:** Each PE $i$ holds the complete final image tile $F_i$ after $n-1$ cycles.
+*   **Input:** $n$ processing elements (PEs), indexed $0$ to $n-1$. Each PE $i$ initially holds a local tile $T_i$ of the final image, corresponding to the screen region it rendered.
+*   **Output:** A complete final image, where every PE holds the fully composited image (or a designated root PE holds it, depending on implementation; the text implies all PEs contribute to the final state).
 
 **Data Structures:**
-*   **Tile:** A rectangular subset of the final image. Size is not specified in the sources [G].
-*   **Message:** Contains a single tile.
+*   **Tile ($T_i$):** A 2D array of pixels representing a portion of the screen. The size of $T_i$ depends on the screen resolution and $n$. For typical views, a tile might be 100 pixels wide with 4 floating-point values per pixel, totaling ~150 KB [S3].
+*   **Message Buffer:** A temporary buffer to hold the incoming tile from a neighbor before compositing.
 
 **Parameters:**
 *   $n$: The number of processing elements in the system [S1, unofficial].
+*   Cycle count: $n-1$ cycles are required to complete the compositing [S1, unofficial].
 
 **Steps:**
-1.  Initialize each PE $i$ with its local tile $T_i$.
-2.  For cycle $c$ from $1$ to $n-1$:
-    1.  Each PE $i$ determines its neighbor for this cycle. Based on the description "PE 0 composites tile 0 on PE 1 with its tile 0, while PE 1 composites tile 1 on PE 2 with its tile 1", the communication pattern is a shift.
-        *   PE $i$ sends its current tile to PE $(i+1) \pmod n$? Or is it a linear shift? The text says "PE 0 composites tile 0 on PE 1 with its tile 0". This phrasing is ambiguous. Let's look closer: "PE 0 composites tile 0 on PE 1 with its tile 0". This likely means PE 0 takes the tile it *received* from PE 1 (which is tile 0 from PE 1's perspective? No, PE 1 has tile 1).
-        *   Let's re-read carefully: "PE 0 composites tile 0 on PE 1 with its tile 0". This implies PE 0 is acting on behalf of PE 1? Or is it a shift register?
-        *   Standard tiling in this context (Cray T3D paper) usually implies a linear shift. PE $i$ sends its tile to PE $i-1$ (or $i+1$).
-        *   The text says: "PE 0 composites tile 0 on PE 1 with its tile 0". This is syntactically confusing. It likely means: PE 0 receives a tile from PE 1. PE 0 composites this received tile with its own tile 0.
-        *   "PE 1 composites tile 1 on PE 2 with its tile 1". PE 1 receives a tile from PE 2. PE 1 composites this received tile with its own tile 1.
-        *   This suggests a direction: Tiles move from $i+1$ to $i$.
-        *   Cycle 1: PE $i$ receives tile from PE $i+1$. PE $i$ composites received tile with its own tile.
-        *   Cycle 2: PE $i$ receives tile from PE $i+1$ (which is now the composite from the previous step).
-        *   This continues for $n-1$ cycles.
-    2.  Each PE $i$ receives one message from its neighbor.
-    3.  Each PE $i$ composites the received tile with its local tile.
-    4.  Each PE $i$ sends its updated tile to its neighbor.
-3.  After $n-1$ cycles, each PE $i$ holds the fully composited tile $F_i$.
+1.  **Initialization:** Each PE $i$ holds its local tile $T_i$.
+2.  **Loop over Cycles:** Repeat for $c = 0$ to $n-2$:
+    a.  **Determine Direction:** In each cycle, PEs communicate with a specific neighbor. The text describes a staggered approach where PE $i$ composites its tile onto the tile held by PE $i+1$ (or vice versa, depending on the specific linear topology direction). Specifically, "during the first cycle, PE 0 composites tile 0 on PE 1 with its tile 0, while PE 1 composites tile 1 on PE 2 with its tile 1, and so on" [S1, unofficial]. This implies a shift operation where data moves across the linear array of PEs.
+    b.  **Communication:** Each PE sends its current tile to its neighbor and receives a tile from its neighbor. In each of the $n-1$ cycles, $n$ messages are sent across the network (each PE must receive one message) [S1, unofficial].
+    c.  **Compositing:** The PE composites the received tile with its local tile. The standard volume rendering compositing operation (e.g., front-to-back alpha compositing) is applied. If PE $i$ receives tile $T_{recv}$ and holds $T_{local}$, the new $T_{local}$ becomes $T_{local} \oplus T_{recv}$, where $\oplus$ denotes the compositing operator.
+3.  **Termination:** After $n-1$ cycles, all tiles have been propagated and composited across the network.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Each PE runs this code
-# PE_ID is the index of this processing element (0 to n-1)
-# Local_Tile is the initial tile held by this PE
+# Assume PEs are arranged in a linear ring or line 0..n-1
+# Each PE has a local tile 'my_tile'
+# 'send_to(i)' sends data to PE i
+# 'recv_from(i)' receives data from PE i
+# 'composite(tile1, tile2)' returns the alpha-composited result
 
-for cycle in range(1, n):
-    # Determine neighbor. Based on "PE 0 composites tile 0 on PE 1 with its tile 0",
-    # it implies PE 0 interacts with PE 1.
-    # If PE 0 composites "tile 0 on PE 1", it might mean it composites the tile 
-    # that belongs to PE 1? Or the tile received from PE 1?
-    # The text says "PE 0 composites tile 0 on PE 1 with its tile 0".
-    # This is very poorly phrased. Let's assume standard linear shift.
-    # Usually, in tiling, data shifts across the mesh.
-    # Let's assume a linear array where PE i sends to PE i-1 and receives from PE i+1.
+def tiling_compositing(n, my_id, my_tile):
+    current_tile = my_tile
     
-    neighbor = (PE_ID + 1) % n  # Neighbor sending data to this PE
-    
-    # Receive tile from neighbor
-    received_tile = receive_from(neighbor)
-    
-    # Composite received tile with local tile
-    # The order of compositing (front-to-back or back-to-front) depends on the 
-    # volume rendering technique, but the operation is a merge.
-    Local_Tile = composite(Local_Tile, received_tile)
-    
-    # Send updated tile to the next neighbor in the chain?
-    # The text says "n messages are sent across the network (each PE must receive one message)".
-    # This implies a ring or a linear shift where everyone sends and receives.
-    send_to((PE_ID - 1) % n, Local_Tile)
-
-# After n-1 cycles, Local_Tile is the final composited tile for this PE
+    # n-1 cycles required
+    for cycle in range(n - 1):
+        # Determine neighbor based on cycle and topology
+        # The text specifies a staggered linear shift.
+        # In cycle 0, PE 0 sends to PE 1, PE 1 sends to PE 2, etc.
+        # This implies a direction. Let's assume a linear shift right (i -> i+1)
+        # or left. The text says "PE 0 composites tile 0 on PE 1 with its tile 0".
+        # This phrasing is slightly ambiguous: does PE 0 send to PE 1, or does PE 1 send to PE 0?
+        # "PE 0 composites tile 0 on PE 1 with its tile 0" suggests PE 0's tile is applied TO PE 1's tile.
+        # So PE 0 sends to PE 1.
+        
+        # Neighbor to send to and receive from
+        # In a linear array, if we shift right:
+        # PE i sends to (i+1) % n and receives from (i-1) % n
+        # However, the text says "staggered approach". 
+        # Let's stick to the explicit example: PE 0 -> PE 1, PE 1 -> PE 2.
+        
+        neighbor_send = (my_id + 1) % n
+        neighbor_recv = (my_id - 1) % n
+        
+        # Send current tile to neighbor
+        send_to(neighbor_send, current_tile)
+        
+        # Receive tile from neighbor
+        received_tile = recv_from(neighbor_recv)
+        
+        # Composite received tile with current tile
+        # The order of compositing matters (front-to-back).
+        # Assuming the received tile is "behind" or "in front" depending on view.
+        # Standard compositing:
+        current_tile = composite(current_tile, received_tile)
+        
+    return current_tile
 ```
-*Note: The exact neighbor logic (ring vs linear boundary) is not fully specified for $n$ PEs. The text implies a "staggered" approach. The pseudocode above assumes a ring topology to keep all PEs busy. If it is a linear chain, boundary PEs might have different behavior, but the text says "all PEs working", suggesting a ring or a specific staggered pattern that avoids idle PEs.*
+*Note: The exact direction (left vs right shift) and compositing order (which tile is foreground/background) depend on the specific volume rendering pipeline and view direction, but the linear propagation pattern is fixed by the algorithm [S1, unofficial].*
 
 **Edge Cases and Pitfalls:**
-*   **Network Contention:** With $n$ messages sent in every cycle, network contention becomes a severe concern [S1, unofficial].
-*   **Memory Contention:** The staggered nature eliminates memory contention [S1, unofficial].
-*   **Small $n$:** For $n \le 8$, there is no discernible difference in compositing times compared to the inverted binary tree method [S1, unofficial].
+*   **Network Contention:** Network contention becomes a severe concern due to the high volume of traffic: $n$ messages are sent across the network in every cycle [S1, unofficial].
+*   **Memory Contention:** Memory contention is eliminated by the staggered nature of the tiling approach [S1, unofficial].
+*   **Small $n$:** For 8 or fewer PEs, there is no discernible difference in compositing times compared to the inverted binary tree method [S1, unofficial].
+
+## Subtopics
+
+### Hybrid Extensions (Stacked Tiles)
+A technique that generalizes screen tiles to be composites of multiple stacked tiles, adding an additional composite phase at the end of rendering algorithms to allow machines with many nodes to maintain larger tiles and minimize volume data replication during redistribution [S2, unofficial]. It involves generalizing the notion of tiles so that each screen tile is the composite of multiple stacked tiles, and adding an additional composite phase to the end of base algorithms [S2, unofficial]. This technique allows machines with large numbers of nodes to maintain larger tiles, thereby minimizing the replication of volume data during redistribution compared to using smaller tiles [S2, unofficial].
+
+### Two-Step Global Gather (Projection then Composition)
+A method to perform the global gather operation with minimal communication by keeping volume blocks stationary (except for load balancing) and transferring the 2D tiles generated by projection, rather than transferring 3D volume blocks [S3]. Step 1 (Projection): Each node generates projected two-dimensional tiles from the blocks it holds. Step 2 (Composition): Overlapping sets of tiles are collected at some location to be composited together. An image partition is used to assign single large regions of the screen to processors for the composition step; each processor receives a copy of all tiles that overlap its region of the screen [S3]. This method transfers tiles rather than blocks because typical blocks (2-4 MB) are larger than typical tiles (150 KB) [S3]. It differs from the alternative image partition method where volume blocks are sent to nodes, which may require the entire dataset to move for each frame [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(n)$ cycles, where $n$ is the number of PEs [S1, unofficial].
-*   **Memory Complexity:** Each PE stores one tile at a time. No additional large buffers are required [S1, unofficial].
-*   **Network Traffic:** $n$ messages are sent across the network in every cycle [S1, unofficial].
-*   **Performance:** As the number of PEs increases, the tiling approach is superior to the inverted binary tree method [S1, unofficial]. For a fixed raster size, network latency associated with the high volume of traffic is a limiting factor [S1, unofficial].
-*   **Strengths:** Keeps all PEs working until the final image is completed; eliminates memory contention [S1, unofficial].
-*   **Limitations:** High network traffic leads to severe network contention [S1, unofficial].
+*   **Time Complexity:** The algorithm requires $n-1$ communication cycles, where $n$ is the number of PEs [S1, unofficial].
+*   **Memory Complexity:** Each PE stores only its local tile and a small message buffer, eliminating memory contention [S1, unofficial].
+*   **Network Traffic:** $n$ messages are sent across the network in every cycle, leading to high network occupancy [S1, unofficial].
+*   **Performance:** For 8 or fewer PEs, there is no discernible difference in compositing times compared to the inverted binary tree method [S1, unofficial]. As the number of PEs increases, the tiling approach is superior because it keeps all PEs working, whereas the inverted binary tree leaves a majority of PEs idle during latter cycles [S1, unofficial].
+*   **Strengths:** Eliminates memory contention; maintains high PE utilization for large $n$ [S1, unofficial].
+*   **Limitations:** Severe network contention due to high message volume [S1, unofficial].
+*   **When to use:** Suitable for large-scale systems with many PEs where PE utilization is critical and network bandwidth is sufficient to handle the linear traffic pattern [S1, unofficial].
+*   **When not to use:** Unsuitable for small numbers of PEs (≤8) where the overhead is not justified, or in systems with severe network contention issues [S1, unofficial].
 
 ## Background
-Tiling Compositing was examined in the context of high-resolution interactive volume rendering on the Cray T3D [S1, unofficial]. It was compared against an inverted binary tree method for compositing partially completed raster images [S1, unofficial]. The approach was found to be intuitively appropriate for keeping all processing elements working on the problem until the final image is completed [S1, unofficial].
+Tiling Compositing was examined in the context of high-resolution interactive volume rendering on the Cray T3D [S1, unofficial]. It was compared against an inverted binary tree method for compositing partially completed raster images in a distributed memory environment [S1, unofficial]. The approach is intuitively appropriate for distributed systems as it leverages the spatial locality of the image tiles [S1, unofficial].
 
 ## Sources
 [S1] High Resolution Interactive Volume Rendering on the Cray T3D, https://www.cs.uaf.edu/~genetti/Research/Papers/CUG94/high.html, fetched 2026-10-27 (unofficial)
+[S2] DTIC ADA236632: Taxonomy and Algorithms for Volume Rendering on Multicomputers, https://archive.org/details/DTIC_ADA236632, fetched 2026-10-26 (unofficial)
+[S3] Exploiting deep parallel memory hierarchies for ray casting volume rendering, https://doi.org/10.1145/266638.266645, fetched 2026-10-26

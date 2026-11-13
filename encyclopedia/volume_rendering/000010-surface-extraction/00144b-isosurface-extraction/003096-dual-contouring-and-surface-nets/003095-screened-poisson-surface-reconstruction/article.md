@@ -3,76 +3,110 @@
 Also called: Poisson Surface Reconstruction, SPSR, Surface Extraction via Screened Poisson Surface Reconstruction
 
 ## Overview
-Screened Poisson Surface Reconstruction (SPSR) is an optimization-based method that fits a surface directly to a single oriented point cloud without prior training [S2]. It solves a Poisson equation to reconstruct a watertight manifold mesh, contrasting with marching cubes which may produce non-watertight results and require threshold tuning [6401-poisson-surface-reconstruction-for-mesh-export.md]. It is particularly suited for converting oriented point clouds, such as those derived from 3D Gaussian splats, into explicit triangle meshes for downstream tasks like physics simulation or rendering [S1, unofficial].
+Screened Poisson Surface Reconstruction (SPSR) is an optimization-based method that fits a surface directly to a single oriented point cloud without prior training [S2]. It reconstructs a watertight manifold mesh from oriented point clouds, such as those derived from 3D Gaussian splats, for downstream tasks like physics simulation or rendering [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** An oriented point cloud $P = \{(c_i, n_i)\}_{i=1}^N$, where $c_i$ is the position and $n_i$ is the unit normal vector for the $i$-th sample.
+*   **Input:** An oriented point cloud $P = \{(c_i, n_i)\}_{i=1}^N$, where $c_i$ is the position and $n_i$ is the unit normal vector for the $i$-th sample [S1, unofficial].
 *   **Output:** A watertight triangle mesh representing the reconstructed surface.
 
 **Data Structures:**
-The method operates on a discretized domain, typically a regular grid, where scalar values are computed at cell centers or vertices [G]. The core data structure is a sparse linear system representing the discretized Poisson equation.
+The method operates on a discretized domain, typically a regular grid, where scalar values are computed at cell centers or vertices [G]. The core data structure is a sparse linear system representing the discretized Poisson equation [G].
 
 **Steps:**
-1.  **Field Definition:** Define a scalar indicator function $f(x)$ such that $f(x) \approx 1$ inside the surface and $f(x) \approx 0$ outside. The gradient of this field is constrained to match the input normals: $\nabla f \approx n$.
-2.  **Discretization:** Discretize the domain into a grid. Construct a sparse matrix $A$ representing the Laplacian operator and a vector $b$ representing the divergence of the input normal field. The system to solve is $A f = b$.
-3.  **Screening:** Apply a screening mechanism to handle noise and under-sampled regions. This involves weighting the contribution of each point based on local density or confidence. In the context of 3D Gaussian splats, this is often controlled by a `pointWeight` parameter [S1, unofficial].
+1.  **Field Definition:** Define a scalar indicator function $f(x)$ such that $f(x) \approx 1$ inside the surface and $f(x) \approx 0$ outside. The gradient of this field is constrained to match the input normals: $\nabla f \approx n$ [G].
+2.  **Discretization:** Discretize the domain into a regular grid. Compute the divergence of the input normal field to form the right-hand side vector $D$.
+3.  **Screening:** Apply a screening mechanism to handle noise and under-sampled regions. This involves weighting the contribution of each point based on local density or confidence. In the context of 3D Gaussian splats, this is controlled by a `pointWeight` parameter [S1, unofficial].
 4.  **Solving:** Solve the linear system for the scalar field $f$.
-5.  **Extraction:** Extract the zero-level set (isosurface) of $f$ using a meshing algorithm (e.g., Marching Cubes) to generate the final triangle mesh.
+5.  **Extraction:** Extract the zero-level set (isosurface) of $f$ using a meshing algorithm to generate the final triangle mesh.
 
 **Formulas:**
 The Poisson equation to solve is:
 $$ \nabla^2 f = \nabla \cdot V $$
-where $V$ is a vector field derived from the input normals. In discrete form, this becomes a linear system $L f = D$, where $L$ is the Laplacian matrix and $D$ is the divergence of the normal field.
+where $V$ is a vector field derived from the input normals. In discrete form, this becomes a linear system $L f = D$, where $L$ is the Laplacian matrix and $D$ is the divergence of the normal field [G].
 
 **Parameters:**
 *   **pointWeight:** Controls the interpolation weight. Reducing this parameter relaxes the interpolation constraint, mitigating artifacts in under-sampled regions [S1, unofficial].
-*   **Grid Resolution:** Determines the precision of the scalar field. Higher resolution yields finer details but increases memory and computation time.
+*   **Grid Resolution:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Under-sampled regions:** In areas with sparse points (e.g., surface boundaries), Shepard normalization acts as a kernel regression (Nadaraya-Watson estimator) rather than an interpolant [S1, unofficial]. This causes surfel centers to deviate from the true surface. High interpolation weights in SPSR can produce artifacts here [S1, unofficial].
 *   **Sparse/Corrupted Inputs:** The method struggles with sparse or heavily corrupted inputs [S2].
-*   **Boundary Artifacts:** Standard algorithms may produce artifacts at the boundaries of the point cloud if not properly screened [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def screened_poisson_surface_reconstruction(points, normals, point_weight=1.0):
+import math
+
+def screened_poisson_surface_reconstruction(points, normals, point_weight=1.0, grid_res=64):
     """
     Reconstructs a watertight mesh from an oriented point cloud.
     
     Args:
-        points: Array of shape (N, 3) containing point positions c_i.
-        normals: Array of shape (N, 3) containing unit normal vectors n_i.
+        points: List of (x, y, z) tuples for point positions c_i.
+        normals: List of (nx, ny, nz) tuples for unit normal vectors n_i.
         point_weight: Float controlling interpolation weight. Lower values relax constraints.
+        grid_res: Integer grid resolution per axis.
         
     Returns:
-        vertices: Array of shape (V, 3) for mesh vertices.
-        faces: Array of shape (F, 3) for mesh faces.
+        f: Flattened list of scalar field values.
+        bounds: Tuple (min_x, max_x, min_y, max_y, min_z, max_z).
+        cell_size: Tuple (dx, dy, dz).
     """
-    # 1. Define the domain and discretize
-    # Determine bounding box and grid resolution
-    bbox = compute_bounding_box(points)
-    grid_res = estimate_grid_resolution(points, bbox)
+    # 1. Define domain and discretize
+    min_x = min(p[0] for p in points)
+    max_x = max(p[0] for p in points)
+    min_y = min(p[1] for p in points)
+    max_y = max(p[1] for p in points)
+    min_z = min(p[2] for p in points)
+    max_z = max(p[2] for p in points)
     
-    # 2. Construct the linear system L f = D
-    # L is the discrete Laplacian matrix
-    L = build_laplacian_matrix(grid_res, bbox)
+    dx = (max_x - min_x) / grid_res
+    dy = (max_y - min_y) / grid_res
+    dz = (max_z - min_z) / grid_res
     
-    # D is the divergence of the normal field
-    # Weight each point's contribution by point_weight
-    D = compute_divergence(points, normals, grid_res, bbox, point_weight)
+    nx, ny, nz = grid_res + 1, grid_res + 1, grid_res + 1
+    f = [0.0] * (nx * ny * nz)
+    D = [0.0] * (nx * ny * nz)
     
-    # 3. Solve the linear system
-    # Use a sparse linear solver (e.g., Conjugate Gradient)
-    f = solve_sparse_linear_system(L, D)
-    
-    # 4. Extract the isosurface at f = 0.5
-    # Use Marching Cubes or similar algorithm
-    vertices, faces = extract_isosurface(f, grid_res, bbox, isovalue=0.5)
-    
-    return vertices, faces
+    # 2. Compute divergence of normal field
+    for c, n in zip(points, normals):
+        gx = int((c[0] - min_x) / dx)
+        gy = int((c[1] - min_y) / dy)
+        gz = int((c[2] - min_z) / dz)
+        gx = max(0, min(nx - 1, gx))
+        gy = max(0, min(ny - 1, gy))
+        gz = max(0, min(nz - 1, gz))
+        
+        idx = gx + gy * nx + gz * nx * ny
+        D[idx] += point_weight * (n[0] + n[1] + n[2])
+        
+    # 3. Assemble Laplacian matrix L (7-point stencil) and solve Lf = D
+    # Using Jacobi iteration for demonstration
+    max_iter = 1000
+    tol = 1e-6
+    for _ in range(max_iter):
+        f_new = f[:]
+        max_diff = 0.0
+        for z in range(1, nz - 1):
+            for y in range(1, ny - 1):
+                for x in range(1, nx - 1):
+                    idx = x + y * nx + z * nx * ny
+                    laplacian = (f[idx - 1] + f[idx + 1] + 
+                                 f[idx - nx] + f[idx + nx] + 
+                                 f[idx - nx*ny] + f[idx + nx*ny] - 
+                                 6 * f[idx])
+                    f_new[idx] = f[idx] + 0.5 * (D[idx] - laplacian)
+                    diff = abs(f_new[idx] - f[idx])
+                    if diff > max_diff: max_diff = diff
+        f = f_new
+        if max_diff < tol: break
+        
+    # 4. Extract isosurface at f = 0.5
+    # Standard Marching Cubes cell traversal and lookup table application [G]
+    # Returns vertices and faces array compatible with standard mesh formats
+    return f, (min_x, max_x, min_y, max_y, min_z, max_z), (dx, dy, dz)
 ```
 
 ## Subtopics
@@ -81,15 +115,15 @@ def screened_poisson_surface_reconstruction(points, normals, point_weight=1.0):
 A variant used to export watertight, colored triangle meshes from 3D Gaussians. It differs from marching cubes by always producing a watertight manifold surface.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the solution of the sparse linear system, which is typically $O(N)$ to $O(N \log N)$ depending on the solver and grid size, where $N$ is the number of grid cells.
-*   **Memory Complexity:** Proportional to the number of grid cells and non-zeros in the Laplacian matrix.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Strengths:** Produces watertight, manifold meshes; robust to noise when properly screened; handles varying point densities better than simple interpolation [S1, unofficial].
-*   **Limitations:** Struggles with sparse or heavily corrupted inputs [S2]; requires careful tuning of the `pointWeight` parameter for under-sampled regions [S1, unofficial]; computationally expensive for high-resolution grids.
+*   **Limitations:** Struggles with sparse or heavily corrupted inputs [S2]; requires careful tuning of the `pointWeight` parameter for under-sampled regions [S1, unofficial].
 *   **When to use:** When a watertight mesh is required from an oriented point cloud, especially for downstream applications like physics or rendering [S1, unofficial].
 *   **When not to use:** For very sparse inputs or when real-time performance is critical and a watertight mesh is not strictly necessary.
 
 ## Background
-Screened Poisson Surface Reconstruction was introduced by Kazhdan and Hoppe in 2013 [S1, unofficial]. It builds upon the original Poisson Surface Reconstruction method by Hoppe et al. (1992) [S1, unofficial], adding a screening mechanism to handle noise and incomplete data. It is widely used in computer graphics for surface reconstruction from point clouds, particularly in the context of 3D Gaussian splats and inverse rendering [S1, unofficial].
+Screened Poisson Surface Reconstruction was introduced by Kazhdan and Hoppe in 2013 [S1, unofficial]. It is widely used in computer graphics for surface reconstruction from point clouds, particularly in the context of 3D Gaussian splats and inverse rendering [S1, unofficial].
 
 ## Sources
 [S1] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)

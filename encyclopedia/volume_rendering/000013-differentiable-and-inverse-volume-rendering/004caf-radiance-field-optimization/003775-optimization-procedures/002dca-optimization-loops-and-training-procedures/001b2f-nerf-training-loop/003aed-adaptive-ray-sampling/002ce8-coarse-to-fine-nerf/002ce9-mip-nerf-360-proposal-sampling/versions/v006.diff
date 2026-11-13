@@ -1,0 +1,393 @@
+--- v005.md
++++ v006.md
+@@ -1,127 +1,245 @@
+ # Mip-NeRF 360 Proposal Sampling
+ 
+-Also called: Mip-NeRF 360 Proposal Network, Modified Resampling, Proposal Sampling, Proposal sampler, midpoint resampling
++Also called: Proposal Sampling, Proposal sampler, Mip-NeRF 360 Proposal Network
+ 
+ ## Overview
+-Mip-NeRF 360 Proposal Sampling is an adaptive ray sampling strategy that uses a concurrently optimized proposal network to generate sample intervals concentrated in opaque regions, reducing aliasing and improving rendering quality in unbounded scenes [S1, S3]. It differs from standard uniform or hierarchical sampling by learning a density function $\Theta_{prop}$ to bound the weights produced by the main NeRF, and employs a midpoint resampling technique to mitigate aliasing artifacts caused by coarse histogram erosion [S1, S3].
++Mip-NeRF 360 Proposal Sampling is a multi-level volumetric rendering strategy that uses a cascade of proposal networks to sample ray intervals, dilating weights to reduce aliasing, and integrating positional encoding (IPE) via Gaussian casting [S3, unofficial]. It solves the problem of aliasing and inefficient sampling in unbounded scenes by learning a density function that guides the placement of fine samples toward opaque regions, while using a specific resampling procedure to ensure fine intervals cover the support of coarse histograms [S1]. It sets itself apart from standard NeRF by concurrently optimizing a small proposal network alongside the main radiance field and by using midpoints of sampled coarse values to define fine interval boundaries, reflecting boundary samples to handle edges [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Ray $r$, coarse NeRF $\Theta_{coarse}$ (or main NeRF $\Theta_{NeRF}$), proposal network $\Theta_{prop}$.
+-*   **Outputs:** A set of sample intervals (midpoints and endpoints) for volume rendering.
+-
+-**Data Structures:**
+-*   **Proposal Network ($\Theta_{prop}$):** A small Multi-Layer Perceptron (MLP) mapping 3D positions to density.
+-    *   Architecture: 4 layers, 256 hidden units [S3].
+-    *   Input: 3D position $\vec{p} \in \mathbb{R}^3$.
+-    *   Output: Density $\sigma \in \mathbb{R}$ [S3].
+-*   **Coarse Histogram:** Weights $w$ computed from coarse samples.
+-
+-**Formulas:**
+-The weight $w_i$ for a sample $i$ is calculated as [S3]:
+-$$ w_i = T_i(1 - \exp(-\sigma_i \delta_i)) $$
+-where $T_i$ is the transmittance up to sample $i$, $\sigma_i$ is the density, and $\delta_i$ is the distance between samples [S3].
+-
+-**Steps:**
+-1.  **Coarse Sampling:** Sample $N_c$ points uniformly along the ray $r$ using $\Theta_{coarse}$ to produce a set of weights $w \in \mathbb{R}^{N_c}$ [S3].
+-2.  **Proposal Network Optimization:** The proposal network $\Theta_{prop}: \mathbb{R}^3 \rightarrow \mathbb{R}, \vec{p} \mapsto \sigma$ is concurrently optimized with the main NeRF to bound the weights $w$ produced by $\Theta_{NeRF}$ [S3].
+-3.  **Resampling (Midpoint Resampling):**
+-    *   Sample $n$ sorted values from the coarse histogram weights [S1].
+-    *   Use the midpoints of each adjacent sample pair as the endpoints for the new set of "fine" intervals [S1].
+-    *   Reflect the first sample around the first endpoint and the last sample around the last endpoint to handle boundary conditions [S1].
+-    *   *Note:* This modified resampling reduces aliasing compared to using sampled points directly as endpoints, as it prevents the "erosion" of the coarse histogram where samples fail to span the extent of each bin [S1].
+-4.  **Final Rendering:** Perform one final NeRF round using the generated intervals to render the image [S2].
+-
+-**Parameters:**
+-*   **Proposal Network Size:** 4 layers, 256 hidden units [S3].
+-*   **Number of Proposal Rounds:** Two subsequent rounds of proposal sampling produce two sets of weights $\{\hat{w}_1, \hat{w}_2\}$ [S3].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Without reflection, the first and last intervals may be poorly defined. Reflecting the first/last sample around the first/last endpoint handles this [S1].
+-*   **Aliasing:** Direct use of coarse samples as endpoints can cause aliasing due to histogram erosion. Midpoint resampling mitigates this [S1].
+-
+-**Pseudocode:**
++The method consists of a proposal network $\Theta_{\text{prop}}$ and a main NeRF network $\Theta_{\text{NeRF}}$. The proposal network learns a mapping from 3D positions to density, $\Theta_{\text{prop}}: \mathbb{R}^3 \rightarrow \mathbb{R}, \vec{p} \mapsto \sigma$, which is optimized concurrently with the main NeRF to bound the weights produced by $\Theta_{\text{NeRF}}$ [S4]. The sampling process operates in levels. For each ray, the algorithm performs multiple rounds of proposal sampling followed by a final NeRF rendering round [S2].
++
++### Inputs and Outputs
++**Inputs:**
++- Ray origins, directions, near/far bounds.
++- Camera intrinsics (for ray warping).
++- Training fraction (for annealing).
++- Hyperparameters: `num_levels`, `num_prop_samples`, `num_nerf_samples`, `dilation_bias`, `dilation_multiplier`, `anneal_slope`, `resample_padding`, `single_jitter`, `stop_level_grad`, `near_anneal_rate`, `near_anneal_init` [S3, unofficial].
++
++**Outputs:**
++- Rendered color and auxiliary variables (depth, normal, etc.) for the final level.
++- History of distances and weights from all levels for gradient computation [S3, unofficial].
++
++### Data Structures
++- **Distances (`sdist`)**: Tensor of shape `(batch, 2 * num_samples + 1)` representing the endpoints of intervals in normalized distance space $s \in [0, 1]$. The values are sorted.
++- **Weights (`weights`)**: Tensor of shape `(batch, num_samples)` representing the opacity contribution of each interval.
++- **Proposal Network (`prop_mlp`)**: A small MLP with 4 layers and 256 hidden units, mapping 3D coordinates to density $\sigma$ [S4]. If `single_mlp` is True, this shares weights with `nerf_mlp` [S3, unofficial].
++- **Ray Warp Function (`s_to_t`)**: A mapping from normalized distance $s$ to metric distance $t$, computed using the ray distance function and near/far bounds [S3, unofficial].
++
++### Numbered Steps
++
++1.  **Initialization**:
++    - Compute the ray warp function `s_to_t` mapping normalized distance $s$ to metric distance $t$ [S3, unofficial].
++    - Initialize `init_s_near` to $0.0$ if `near_anneal_rate` is None, otherwise `init_s_near = clip(1 - train\_frac / near\_anneal\_rate, 0, near\_anneal\_init)` [S3, unofficial].
++    - Set `init_s_far` to $1.0$ [S3, unofficial].
++    - Concatenate `init_s_near` and `init_s_far` to form initial `sdist` with shape `(batch, 2)` [S3, unofficial].
++    - Initialize `weights` to ones with shape `(batch,)` [S3, unofficial].
++    - Set `prod_num_samples = 1` [S3, unofficial].
++
++2.  **Iterate over Levels**:
++    Loop over level index `i_level` from $0$ to `num_levels - 1`.
++    - Determine if current level is a proposal level: `is_prop = i_level < (num_levels - 1)` [S3, unofficial].
++    - Set `num_samples`: if `is_prop`, use `num_prop_samples` (default 64); else use `num_nerf_samples` (default 32) [S3, unofficial].
++
++3.  **Dilate Weights (if not first level)**:
++    - If `i_level > 0` and dilation is active (`dilation_bias > 0` or `dilation_multiplier > 0`):
++        - Calculate dilation factor: `dilation = dilation_bias + dilation_multiplier * (init_s_far - init_s_near) / prod_num_samples` [S3, unofficial].
++        - Update `prod_num_samples *= num_samples` [S3, unofficial].
++        - Dilate weights: Call `stepfun.max_dilate_weights(sdist, weights, dilation, domain=(init_s_near, init_s_far), renormalize=True)` [S3, unofficial].
++        - Slice `sdist` and `weights` to remove first and last elements: `sdist = sdist[..., 1:-1]`, `weights = weights[..., 1:-1]` [S3, unofficial].
++
++4.  **Compute Annealing Factor**:
++    - If `anneal_slope > 0`:
++        - Define bias function: $\text{bias}(x, s) = \frac{s \cdot x}{(s - 1) \cdot x + 1}$ [S3, unofficial].
++        - Compute `anneal = bias(train_frac, anneal_slope)` [S3, unofficial].
++    - Else, `anneal = 1.0` [S3, unofficial].
++
++5.  **Compute Resampling Logits**:
++    - Calculate logits for sampling new intervals:
++      $$ \text{logits\_resample}_i = \begin{cases} \text{anneal} \cdot \log(\text{weights}_i + \text{resample\_padding}) & \text{if } \text{sdist}_{i+1} > \text{sdist}_i \\ -\infty & \text{otherwise} \end{cases} $$
++      where `resample_padding` is added for stability (default 0.0) [S3, unofficial].
++
++6.  **Sample New Intervals (Resampling)**:
++    - Split RNG key [S3, unofficial].
++    - Call `stepfun.sample_intervals(key, sdist, logits_resample, num_samples, single_jitter=single_jitter, domain=(init_s_near, init_s_far), use_gpu_resampling=use_gpu_resampling)` [S3, unofficial].
++    - This function samples $n$ sorted values from the coarse histogram weights. It uses the midpoints of each adjacent sample pair as the endpoints of the new set of "fine" intervals. It reflects the first and last sample around the first and last endpoint to deal with boundary conditions [S1].
++    - If `stop_level_grad` is True, apply `sdist = jax.lax.stop_gradient(sdist)` [S3, unofficial].
++
++7.  **Convert to Metric Distance**:
++    - Compute `tdist = s_to_t(sdist)` [S3, unofficial].
++
++8.  **Cast Rays and Evaluate MLP**:
++    - Cast rays to Gaussians using `tdist`, origins, directions, and `ray_shape` (default 'cone') [S3, unofficial].
++    - Split RNG key [S3, unofficial].
++    - Evaluate MLP (`prop_mlp` if proposal, `nerf_mlp` if final):
++        - Input: Gaussian cast positions, view directions (if `use_viewdirs`), image plane, exposure [S3, unofficial].
++        - Output: Density $\sigma$ and RGB color [S3, unofficial].
++
++9.  **Compute Alpha Weights**:
++    - Compute weights using the formula:
++      $$ w_i = T_i (1 - \exp(-\sigma_i \delta_i)) $$
++      where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the transmittance, $\sigma_i$ is the density, and $\delta_i$ is the distance between sample points [S4].
++    - Call `compute_alpha_weights(density, tdist, directions, opaque_background)` [S3, unofficial].
++
++10. **Determine Background Color**:
++    - If `bg_intensity_range[0] == bg_intensity_range[1]`, `bg_rgbs` is that scalar [S3, unofficial].
++    - Else if `rng` is None, `bg_rgbs` is the midpoint [S3, unofficial].
++    - Else, sample `bg_rgbs` uniformly from the range [S3, unofficial].
++
++11. **Volumetric Rendering**:
++    - Call `volumetric_rendering(rgb, weights, tdist, bg_rgbs, far, compute_extras, extras)` [S3, unofficial].
++
++12. **Store History**:
++    - Append rendering to `renderings` [S3, unofficial].
++    - Copy `sdist` and `weights` to `ray_results` [S3, unofficial].
++    - Append `ray_results` to `ray_history` [S3, unofficial].
++
++### Pseudocode
++
+ ```python
+-def mip_neRF_360_proposal_sampling(ray, theta_coarse, theta_prop, n_samples):
+-    """
+-    ray: Ray object with origin and direction
+-    theta_coarse: Coarse NeRF MLP
+-    theta_prop: Proposal Network MLP (4 layers, 256 units)
+-    n_samples: Number of fine samples to generate
+-    """
+-    # Step 1: Coarse Sampling
+-    # Uniformly sample Nc points along the ray
+-    coarse_positions = sample_uniform_along_ray(ray, Nc=64) # Typical Nc not explicitly given, but implied by context
+-    coarse_densities = theta_prop(coarse_positions) # Or theta_coarse depending on implementation phase
+-    # Calculate weights w_i = T_i * (1 - exp(-sigma_i * delta_i))
+-    coarse_weights = compute_weights(coarse_positions, coarse_densities, ray)
+-    
+-    # Step 2: Resampling (Midpoint Resampling)
+-    # Sample n sorted values from coarse histogram weights
+-    # Note: The source describes sampling values from the histogram, 
+-    # effectively selecting indices or positions based on weight distribution.
+-    # For implementation, we assume we select n indices from the coarse samples
+-    # proportional to their weights, or simply sort the coarse samples by position
+-    # and select n points. The source says "sample n sorted values from coarse histogram weights".
+-    # This implies selecting n indices i_1, ..., i_n such that the weights are representative.
+-    # A common interpretation in this context is to select n points from the coarse set
+-    # based on the cumulative weight distribution.
+-    
+-    # Simplified interpretation: Select n indices from coarse samples based on weights
+-    indices = sample_indices_proportional_to_weights(coarse_weights, n_samples)
+-    selected_positions = coarse_positions[indices]
+-    selected_positions.sort()
+-    
+-    # Use midpoints of adjacent sample pairs as endpoints
+-    # If selected_positions has n elements, we get n-1 intervals?
+-    # The source says "use midpoints... as endpoints for n-1 fine intervals".
+-    # But we want n fine samples? Or n intervals?
+-    # Mip-NeRF 360 typically generates a set of intervals.
+-    # Let's assume we want n fine intervals.
+-    # The source says "sample n sorted values... use midpoints... for n-1 fine intervals".
+-    # This implies the output is n-1 intervals.
+-    
+-    endpoints = []
+-    for i in range(len(selected_positions) - 1):
+-        midpoint = (selected_positions[i] + selected_positions[i+1]) / 2
+-        endpoints.append(midpoint)
+-        
+-    # Handle boundaries by reflection
+-    first_endpoint = endpoints[0]
+-    last_endpoint = endpoints[-1]
+-    
+-    # Reflect first sample around first endpoint
+-    reflected_first = first_endpoint + (first_endpoint - selected_positions[0])
+-    # Reflect last sample around last endpoint
+-    reflected_last = last_endpoint + (last_endpoint - selected_positions[-1])
+-    
+-    # Adjust endpoints to include reflections?
+-    # The source says "reflect the first and last sample around the first and last endpoint".
+-    # This likely means the first interval starts at reflected_first and ends at first_endpoint?
+-    # Or the endpoints are adjusted.
+-    # Let's assume the intervals are defined by:
+-    # Interval 0: [reflected_first, first_endpoint]
+-    # Interval i: [endpoints[i-1], endpoints[i]]
+-    # Interval n-2: [endpoints[n-3], reflected_last]
+-    
+-    fine_intervals = []
+-    fine_intervals.append((reflected_first, first_endpoint))
+-    for i in range(len(endpoints) - 1):
+-        fine_intervals.append((endpoints[i], endpoints[i+1]))
+-    fine_intervals.append((endpoints[-1], reflected_last))
+-    
+-    # Step 3: Final Rendering
+-    # Render using the fine intervals
+-    # This involves sampling within these intervals and using theta_neRF
+-    return render_with_intervals(fine_intervals, theta_neRF)
++def mipnerf360_proposal_sampling(
++    rays,  # Object with origins, directions, near, far, viewdirs, imageplane, exposure_values
++    nerf_mlp,  # Main NeRF MLP
++    prop_mlp,  # Proposal MLP (or same as nerf_mlp)
++    config,  # Configuration object with hyperparameters
++    train_frac,  # Current training progress [0, 1]
++    rng  # Random key
++):
++    # 1. Initialization
++    s_to_t = construct_ray_warps(config.raydist_fn, rays.near, rays.far)
++    
++    if config.near_anneal_rate is None:
++        init_s_near = 0.0
++    else:
++        init_s_near = jnp.clip(1 - train_frac / config.near_anneal_rate, 0, config.near_anneal_init)
++    init_s_far = 1.0
++    
++    sdist = jnp.concatenate([jnp.full(rays.batch_size, init_s_near), 
++                             jnp.full(rays.batch_size, init_s_far)], axis=-1)
++    weights = jnp.ones(rays.batch_size)
++    prod_num_samples = 1
++    
++    renderings = []
++    ray_history = []
++    
++    # 2. Iterate over levels
++    for i_level in range(config.num_levels):
++        is_prop = i_level < (config.num_levels - 1)
++        num_samples = config.num_prop_samples if is_prop else config.num_nerf_samples
++        
++        # 3. Dilate weights (if not first level)
++        if i_level > 0 and (config.dilation_bias > 0 or config.dilation_multiplier > 0):
++            dilation = config.dilation_bias + config.dilation_multiplier * (init_s_far - init_s_near) / prod_num_samples
++            prod_num_samples *= num_samples
++            
++            sdist, weights = stepfun.max_dilate_weights(
++                sdist, weights, dilation, 
++                domain=(init_s_near, init_s_far), renormalize=True
++            )
++            sdist = sdist[..., 1:-1]
++            weights = weights[..., 1:-1]
++            
++        # 4. Compute Annealing Factor
++        if config.anneal_slope > 0:
++            bias = lambda x, s: (s * x) / ((s - 1) * x + 1)
++            anneal = bias(train_frac, config.anneal_slope)
++        else:
++            anneal = 1.0
++            
++        # 5. Compute Resampling Logits
++        # Ensure valid intervals
++        valid = sdist[..., 1:] > sdist[..., :-1]
++        logits_resample = jnp.where(
++            valid, 
++            anneal * jnp.log(weights + config.resample_padding), 
++            -jnp.inf
++        )
++        
++        # 6. Sample New Intervals
++        rng, key = jax.random.split(rng)
++        sdist = stepfun.sample_intervals(
++            key, sdist, logits_resample, num_samples,
++            single_jitter=config.single_jitter,
++            domain=(init_s_near, init_s_far),
++            use_gpu_resampling=config.use_gpu_resampling
++        )
++        
++        if config.stop_level_grad:
++            sdist = jax.lax.stop_gradient(sdist)
++            
++        # 7. Convert to Metric Distance
++        tdist = s_to_t(sdist)
++        
++        # 8. Cast Rays and Evaluate MLP
++        gaussians = render.cast_rays(tdist, rays.origins, rays.directions, rays.radii, config.ray_shape, diag=False)
++        
++        rng, key = jax.random.split(rng)
++        mlp = prop_mlp if is_prop else nerf_mlp
++        ray_results = mlp(
++            key, gaussians, 
++            viewdirs=rays.viewdirs if config.use_viewdirs else None,
++            imageplane=rays.imageplane,
++            glo_vec=None if is_prop else None, # glo_vec handled in full impl
++            exposure=rays.exposure_values
++        )
++        
++        # 9. Compute Alpha Weights
++        weights = render.compute_alpha_weights(
++            ray_results['density'], tdist, rays.directions,
++            opaque_background=config.opaque_background
++        )[0]
++        
++        # 10. Determine Background Color
++        if config.bg_intensity_range[0] == config.bg_intensity_range[1]:
++            bg_rgbs = config.bg_intensity_range[0]
++        elif rng is None:
++            bg_rgbs = (config.bg_intensity_range[0] + config.bg_intensity_range[1]) / 2
++        else:
++            rng, bg_key = jax.random.split(rng)
++            bg_rgbs = jax.random.uniform(bg_key, shape=weights.shape[:-1] + (3,), 
++                                         minval=config.bg_intensity_range[0], 
++                                         maxval=config.bg_intensity_range[1])
++            
++        # 11. Volumetric Rendering
++        rendering = render.volumetric_rendering(
++            ray_results['rgb'], weights, tdist, bg_rgbs, rays.far,
++            compute_extras=True, extras={}
++        )
++        
++        # 12. Store History
++        renderings.append(rendering)
++        ray_results['sdist'] = sdist
++        ray_results['weights'] = weights
++        ray_history.append(ray_results)
++        
++    return renderings, ray_history
+ ```
+ 
++### Parameters with Typical Values
++- `num_prop_samples`: 64 [S3, unofficial].
++- `num_nerf_samples`: 32 [S3, unofficial].
++- `num_levels`: 3 (2 proposals, 1 NeRF) [S3, unofficial].
++- `dilation_multiplier`: 0.5 [S3, unofficial].
++- `dilation_bias`: 0.0025 [S3, unofficial].
++- `anneal_slope`: 10 [S3, unofficial].
++- `stop_level_grad`: True [S3, unofficial].
++- `resample_padding`: 0.0 [S3, unofficial].
++- `single_jitter`: True [S3, unofficial].
++- `ray_shape`: 'cone' [S3, unofficial].
++- `near_anneal_init`: 0.95 [S3, unofficial].
++- `near_anneal_rate`: None (optional) [S3, unofficial].
++
++### Edge Cases and Pitfalls
++- **Boundary Conditions**: The resampling procedure reflects the first and last sample around the first and last endpoint to handle boundary conditions, preventing aliasing that occurs when samples do not span the extent of coarse histogram bins [S1].
++- **Precision**: `resample_padding` is added to weights before taking the log to prevent numerical instability when weights are zero or very small [S3, unofficial].
++- **Gradient Flow**: `stop_level_grad` prevents gradients from flowing back through the sampling process of previous levels, stabilizing training [S3, unofficial].
++- **Near Bound Annealing**: If `near_anneal_rate` is set, the near bound `init_s_near` anneals from 0 to `near_anneal_init` over the course of training, helping to stabilize early training [S3, unofficial].
++
+ ## Subtopics
+ 
+ ### [Dynamic Optimal Sampling Layer](8681-dynamic-optimal-sampling-layer.md)
+-The Dynamic Optimal Sampling Layer is a three-stage sampling strategy (coarse, optimal, fine) that inserts an optimal sampling layer between coarse and fine sampling to adaptively adjust the number and locations of new sample points based on priorities from the previous stage, targeting high-weight regions. It builds on Mip-NeRF 360 Proposal Sampling by replacing uniform or fixed-density refinement with a priority-driven allocation mechanism that uses dilation to expand coverage in high-density areas, thereby improving sampling efficiency and rendering quality in sparse reconstruction scenarios.
++The Dynamic Optimal Sampling Layer is a three-stage sampling strategy (coarse, optimal, fine) that inserts an optimal sampling layer between coarse and fine sampling to adaptively adjust the number and locations of new sample points based on priorities from the previous stage, targeting high-weight regions. It builds on [Mip-NeRF 360 Proposal Sampling](5408-mip-nerf-360-proposal-sampling.md) by replacing uniform or fixed-density refinement with a priority-driven allocation mechanism that uses dilation to expand coverage in high-density areas, thereby improving sampling efficiency and rendering quality in sparse reconstruction scenarios.
+ 
+ ### [NeRF-Casting Optimization and Representation](11489-nerf-casting-optimization-and-representation.md)
+-NeRF-Casting is a differentiable volume rendering method that extends NeRF with explicit reflection modeling to handle glossy surfaces and consistent view-dependent appearance. It solves the problem of inaccurate specular highlights and inconsistent reflections in standard neural radiance fields by introducing a reflection-dependent color MLP and a modified proposal sampling scheme. It builds on Mip-NeRF 360 Proposal Sampling and Zip-NeRF by adapting their adaptive sampling and hash grid structures to support reflected rays.
++NeRF-Casting is a differentiable volume rendering method that extends NeRF with explicit reflection modeling to handle glossy surfaces and consistent view-dependent appearance. It solves the problem of inaccurate specular highlights and inconsistent reflections in standard neural radiance fields by introducing a reflection-dependent color MLP and a modified proposal sampling scheme. It builds on [Mip-NeRF 360 Proposal Sampling](5408-mip-nerf-360-proposal-sampling.md) and [Zip-NeRF](https://arxiv.org/abs/2302.11423) by adapting their adaptive sampling and hash grid structures to support reflected rays.
+ 
+ ### [MCBlock](12607-mcblock.md)
+@@ -129,22 +247,22 @@
+ 
+ ### Inverse-Depth Uniform Sampling
+-Inverse-Depth Uniform Sampling is a sampling strategy for depth in the GeNeRF component, using uniform sampling in inverse-depth space [S4]. The number of inverse-depth samples is 64 for IBRNet and DBARF, and 128 for BARF and GARF [S4].
++Sampling strategy for depth in the GeNeRF component, using uniform sampling in inverse-depth space [S5]. Number of inverse-depth samples: 64 for IBRNet and DBARF. 128 for BARF and GARF [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The proposal network is small (4 layers, 256 units), making the sampling rounds efficient [S3].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Reduces aliasing compared to using sampled points directly as endpoints [S1]. Efficient due to the small size of the proposal network [S3].
+-*   **Limitations:** Not given in the sources.
+-*   **When to use:** Unbounded scenes where aliasing is a concern [S1].
+-*   **When not:** Not given in the sources.
++- **Time Complexity**: The proposal network is small (4 layers, 256 units) compared to the main NeRF MLP, making the sampling rounds efficient [S4]. The total time is proportional to the number of levels and samples per level.
++- **Memory Complexity**: Requires storing distances and weights for all levels. The proposal network uses significantly less memory than the main NeRF.
++- **Measured Performance**: In unbounded scenes, this method reduces aliasing compared to using sampled points directly as endpoints [S1]. The dilation helps reduce aliasing by expanding intervals in high-weight regions [S3, unofficial].
++- **Strengths**: Reduces aliasing in unbounded scenes; efficient due to small proposal network; handles boundary conditions well.
++- **Limitations**: Requires careful tuning of dilation and annealing parameters; may introduce artifacts if dilation is too high.
++- **When to use**: Unbounded scenes with large depth ranges; when aliasing is a concern.
++- **When not to use**: Bounded scenes with simple geometry where uniform sampling suffices; real-time applications where the overhead of multiple levels is prohibitive.
+ 
+ ## Background
+-Mip-NeRF 360 Proposal Sampling was introduced in the paper "Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields" [S1]. It builds on the original Mip-NeRF method [S1]. The proposal network $\Theta_{prop}$ is concurrently optimized with the main NeRF MLP [S3].
++Mip-NeRF 360 Proposal Sampling was introduced in "Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields" [S1]. It builds on the original Mip-NeRF by adding a proposal network to guide sampling in unbounded scenes. The method is implemented in the MultiNeRF codebase [S3, unofficial]. It is used in various NeRF variants, including Zip-NeRF [S2] and NeRF-Casting [S1].
+ 
+ ## Sources
+ [S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+ [S2] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
+-[S3] Analyzing the Internals of Neural Radiance Fields, https://doi.org/10.1109/cvprw63382.2024.00288, fetched 2026-10-26
+-[S4] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29+[S3] google-research/multinerf, https://github.com/google-research/multinerf, fetched 2026-10-26 (unofficial)
++[S4] Analyzing the Internals of Neural Radiance Fields, https://doi.org/10.1109/cvprw63382.2024.00288, fetched 2026-10-26
++[S5] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29

@@ -1,0 +1,122 @@
+# Ray Tracing-Based Image Warping for Remote Volume Rendering
+
+Also called: Object-space splatting with ray tracing, Sphere-based reprojection
+
+## Overview
+This method decouples volume rendering computation from display by transmitting object-space samples (position and color) from a server to a client, where they are rendered as semi-transparent spheres using first-hit ray tracing [S1, unofficial]. It replaces the rasterized point primitives of the base image-warping method to eliminate reprojection artifacts caused by fixed-size point primitives, effectively implementing a distance-aware splatting technique [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume data, camera parameters (origin $o$, direction $\tilde{d}$), and a representative depth heuristic value $t_i$ derived from the server-side ray marcher.
+*   **Output:** A stream of compacted object-space samples (packed 64-bit positions and radii) and associated volume-rendered colors sent to the client, which produces the final image via ray tracing.
+
+**Data Structures:**
+*   **Server Output Buffer:** A screen-sized buffer storing object-space samples. Each sample consists of:
+    *   A quantized 64-bit value packing the object-space coordinate $p$ and the footprint radius.
+    *   An associated volume-rendered color value.
+*   **Client Data Structure:** A list of semi-transparent spheres defined by center position $p$ and radius $r$, with a constant color attribute.
+
+**Steps:**
+1.  **Server: Ray Marching and Depth Estimation.** Render the volume using a ray marcher. For each pixel, determine a representative depth value $t_i$ using a heuristic (e.g., from Zellmann et al.) [S1, unofficial].
+2.  **Server: Compute Object-Space Coordinate.** Calculate the object-space coordinate $p$ for the representative depth using the formula:
+    $$ p = o + \tilde{d} t_i $$
+    where $o$ is the ray origin, $\tilde{d}$ is the direction vector, and $t_i$ is the ray parameter associated with the representative depth [S1, unofficial].
+3.  **Server: Assign Footprint Radius.** Determine the radius $r$ for the sample:
+    *   If the ray hit the volume and integrated a color with non-zero opacity: $r = 0.5 \times \text{voxel\_diagonal}$.
+    *   Otherwise: $r = 0$ [S1, unofficial].
+4.  **Server: Quantize and Pack.** Quantize the object-space coordinate $p$ and pack it together with the radius $r$ into a single 64-bit value [S1, unofficial].
+5.  **Server: Compact Buffer.** Move all samples with a radius of zero to one side of the buffer. Send only the samples with non-zero radius to the client to reduce bandwidth [S1, unofficial].
+6.  **Client: Receive Data.** Receive the buffers containing the packed object-space samples and their associated colors [S1, unofficial].
+7.  **Client: Build BVH.** Reinterpret the received object-space samples as semi-transparent spheres. Build a Bounding Volume Hierarchy (BVH) over these sphere positions using the LBVH algorithm [S1, unofficial].
+8.  **Client: Ray Trace.** Render the point cloud using first-hit ray tracing. Each sphere is colorized according to its designated pixel color with no additional shading [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Server Side
+def server_render(volume, camera_origin, camera_direction, voxel_size):
+    # 1. Ray Marching and Depth Estimation
+    # Assume ray_marcher returns a representative depth t_i for each pixel
+    # if a hit occurred, otherwise None.
+    t_i = ray_marcher_heuristic(volume, camera_origin, camera_direction)
+    
+    # 2. Compute Object-Space Coordinate
+    # p = o + d~ * t_i
+    p = camera_origin + (camera_direction * t_i)
+    
+    # 3. Assign Footprint Radius
+    # Check if ray hit volume and integrated non-zero opacity
+    hit_volume, integrated_color = ray_marcher_result(volume, camera_origin, camera_direction)
+    
+    if hit_volume and integrated_color.opacity > 0:
+        radius = 0.5 * (voxel_size * sqrt(3)) # Half voxel diagonal
+    else:
+        radius = 0
+        
+    # 4. Quantize and Pack
+    # Quantize p to fit into 64-bit structure along with radius
+    packed_sample = pack_64bit(p, radius)
+    
+    return packed_sample, integrated_color
+
+def server_compact_and_send(samples_with_colors):
+    # 5. Compact Buffer
+    valid_samples = []
+    for sample, color in samples_with_colors:
+        radius = extract_radius(sample)
+        if radius > 0:
+            valid_samples.append((sample, color))
+            
+    # Send only valid samples
+    send_network_stream(valid_samples)
+
+# Client Side
+def client_render(received_samples):
+    # 6. Receive Data
+    # received_samples is a list of (packed_sample, color)
+    
+    # 7. Build BVH
+    spheres = []
+    for packed_sample, color in received_samples:
+        p = extract_position(packed_sample)
+        r = extract_radius(packed_sample)
+        spheres.append(Sphere(center=p, radius=r, color=color))
+        
+    bvh = build_lbvh(spheres)
+    
+    # 8. Ray Trace
+    # For each pixel, cast ray and find first hit
+    for pixel in screen_pixels:
+        ray = Ray(origin=pixel.camera_origin, direction=pixel.camera_direction)
+        hit = bvh.first_hit(ray)
+        
+        if hit:
+            pixel.color = hit.sphere.color
+        else:
+            pixel.color = background_color
+```
+
+**Parameters:**
+*   **Footprint Radius:** Set to half the size of a voxel’s diagonal for valid volume hits; zero otherwise [S1, unofficial].
+*   **Data Packing:** Object space coordinate and radius are packed into 64 bits [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Rasterization Artifacts:** Fixed-size point primitives cause artifacts because their size does not vary with distance. This is avoided by using solid spheres where the footprint decreases with increasing distance to the viewer [S1, unofficial].
+*   **Multi-hit Ray Tracing:** Multi-hit ray tracing was experimented with but yielded mixed image quality results, so first-hit was chosen for simplicity and consistency [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Server-side complexity is dominated by volume ray marching. Client-side complexity includes LBVH construction and ray tracing. The sources report LBVH construction taking 11 ms and compaction taking 23 ms for a point cloud of 623,584 samples [S1, unofficial].
+*   **Memory Complexity:** The server sends only non-zero radius samples, reducing bandwidth. The client stores the BVH and sphere data.
+*   **Measured Performance:** On an NVIDIA RTX 2080 GPU, rendering five views with a viewport of $1024 \times 1024$ pixels resulted in frame rates ranging from 229 FPS to 408 FPS, depending on the view [S1, unofficial].
+*   **Strengths:** Eliminates reprojection artifacts associated with rasterized point primitives; reduces bandwidth by compacting zero-radius samples.
+*   **Limitations:** Requires real-time ray tracing hardware (e.g., NVIDIA RTX); LBVH construction adds latency on the client side.
+*   **When to use:** Remote volume rendering where visual quality (artifact-free reprojection) is prioritized over minimal client-side latency, and hardware supports real-time ray tracing.
+*   **When not to use:** Hardware without ray tracing support; scenarios where network bandwidth is extremely constrained and compaction is insufficient.
+
+## Background
+The method was proposed by Zellmann as an augmentation to the image-warping-based remote volume rendering algorithm by Zellmann et al. [ZAL12]. It shifts from an image-based approach to an object-order approach based on real-time ray tracing [S1, unofficial]. The implementation uses NVIDIA CUDA for rendering and Boost Asio for network communication [S1, unofficial].
+
+## Sources
+[S1] Augmenting Image Warping-Based Remote Volume Rendering with Ray Tracing, https://doi.org/10.48550/arxiv.2006.14726, fetched 2026-10-26 (unofficial)

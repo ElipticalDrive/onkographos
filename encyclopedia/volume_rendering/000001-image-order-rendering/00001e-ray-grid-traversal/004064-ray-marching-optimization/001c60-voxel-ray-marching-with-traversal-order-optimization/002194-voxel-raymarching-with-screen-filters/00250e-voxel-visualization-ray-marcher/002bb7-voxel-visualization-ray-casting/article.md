@@ -1,0 +1,119 @@
+# Voxel Visualization Ray Casting
+
+Also called: Voxel Ray Casting
+
+## Overview
+Voxel Visualization Ray Casting is a fragment shader technique that visualizes a 3D voxel grid by casting rays from the camera through a unit cube, using pre-computed front and back intersection textures to determine the ray origin and direction [S1, S2, unofficial]. Unlike traditional mesh rendering which requires draw calls per object, this method holds geometric complexity in 3D voxel textures and renders the entire structure in a single draw call using only a few triangles [S2, unofficial]. It differs from its parent, Voxel Visualization Ray Marcher, by explicitly utilizing pre-computed intersection textures for ray initialization rather than computing intersections or marching from a generic camera position [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `textureFront`: A 2D texture (GL_TEXTURE_2D, GL_RGB16F) storing the front intersection point of the ray with the unit cube for each screen coordinate [S1, unofficial].
+    *   `textureBack`: A 2D texture (GL_TEXTURE_2D, GL_RGB16F) storing the back intersection point of the ray with the unit cube for each screen coordinate [S1, unofficial].
+    *   `texture3D`: A 3D texture containing the voxel data (density, color, material index) [S1, S2, unofficial].
+    *   `textureCoordinateFrag`: The current fragment's texture coordinates (screen space UV) [S1, unofficial].
+    *   `cameraPosition`: The world-space position of the camera [S1, unofficial].
+    *   `STEP_LENGTH`: A constant defining the step size for ray traversal (typically 0.005f) [S1, unofficial].
+*   **Outputs:**
+    *   Fragment color, depth, and potentially normal data derived from the first voxel intersection [S2, unofficial].
+
+**Data Structures:**
+*   **FBO Structure:** The front and back textures are generated from a Framebuffer Object (FBO) containing width, height, a `textureBuffer` (GL_RGB16F), and a `renderBuffer` (GL_DEPTH_COMPONENT24) [S1, unofficial].
+*   **Texture Parameters:** GL_NEAREST filtering and GL_REPEAT wrapping are used for the intersection textures [S1, unofficial].
+
+**Steps:**
+1.  **Ray Initialization:** Determine the ray origin and direction based on the camera's position relative to the unit cube.
+    *   If the `cameraPosition` is inside the unit cube (checked with an epsilon of 0.2f), set the ray origin to `cameraPosition` [S1, unofficial].
+    *   Otherwise, sample the front intersection texture at the current fragment coordinates to get the origin: `origin = texture(textureFront, textureCoordinateFrag).xyz` [S1, unofficial].
+    *   Calculate the direction by sampling the back intersection texture and subtracting the origin: `direction = texture(textureBack, textureCoordinateFrag).xyz - origin` [S1, unofficial].
+2.  **Ray Marching:** Step along the ray direction using `STEP_LENGTH` [S1, unofficial].
+3.  **Intersection Test:** Sample the `texture3D` at the current ray position [S2, unofficial].
+4.  **Termination:** If an intersection is found (e.g., non-empty voxel), stop marching and return the color index, depth, and normal data [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+STEP_LENGTH = 0.005
+EPSILON_INSIDE = 0.2
+
+# Uniforms/Samplers
+# textureFront: sampler2D
+# textureBack: sampler2D
+# texture3D: sampler3D
+# cameraPosition: vec3
+# textureCoordinateFrag: vec2
+
+def voxel_visualization_ray_casting(textureCoordinateFrag, cameraPosition):
+    # Step 1: Ray Initialization
+    # Check if camera is inside the unit cube
+    # Note: The source implies a check against the unit cube bounds.
+    # Assuming standard unit cube [0,1]^3 or [-0.5, 0.5]^3.
+    # The source uses "inside the unit cube" with epsilon 0.2f.
+    # We assume the camera position is in the same coordinate space as the textures.
+    
+    is_inside = all(abs(cameraPosition) < EPSILON_INSIDE) # [G] Assuming centered unit cube for epsilon check
+    
+    if is_inside:
+        origin = cameraPosition
+    else:
+        # Sample front intersection from pre-computed texture
+        origin = texture(textureFront, textureCoordinateFrag).xyz
+        
+        # Sample back intersection from pre-computed texture
+        back_point = texture(textureBack, textureCoordinateFrag).xyz
+        direction = back_point - origin
+        direction = normalize(direction) # [G] Direction must be normalized for consistent step length
+    
+    # Step 2 & 3: Ray Marching and Intersection
+    current_pos = origin
+    max_steps = 1000 # [G] Limit to prevent infinite loops if ray escapes
+    
+    for i in range(max_steps):
+        # Sample voxel data
+        voxel_data = texture(texture3D, current_pos)
+        
+        # Check for intersection (e.g., non-zero density or specific marker)
+        # The source mentions "if an intersection is found, stop"
+        if is_voxel_active(voxel_data):
+            # Return color index, depth, normal
+            return get_color_index(voxel_data), length(current_pos - origin), get_normal(voxel_data)
+        
+        # Step forward
+        current_pos += direction * STEP_LENGTH
+        
+        # Boundary check (optional but recommended)
+        if not is_inside_unit_cube(current_pos):
+            break
+            
+    return background_color, 0.0, vec3(0.0)
+
+def is_voxel_active(voxel_data):
+    # Implementation depends on specific voxel encoding (e.g., density > 0)
+    return voxel_data.density > 0.0 # [G] Standard assumption for voxel activation
+```
+
+**Parameters:**
+*   `STEP_LENGTH`: 0.005f [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Camera Inside Volume:** The method explicitly handles the case where the camera is inside the unit cube by using the camera position as the origin, avoiding incorrect front-face intersections [S1, unofficial].
+*   **Precision:** The use of `GL_RGB16F` for intersection textures may introduce precision errors in ray origin/direction calculation, potentially causing gaps or artifacts in the voxel visualization [S1, unofficial].
+*   **Degenerate Input:** If the front/back textures are not correctly generated for the current camera view, rays may miss the volume entirely or intersect incorrectly [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of steps taken along the ray until an intersection is found or the ray exits the volume [S2, unofficial].
+*   **Memory Complexity:** Dominated by the storage of the 3D voxel texture and the two 2D intersection textures [S1, unofficial].
+*   **Performance:** Renders complex structures in a single draw call (e.g., 12 triangles for a sign that would otherwise require 891 draw calls for meshes) [S2, unofficial].
+*   **Strengths:** High performance for large voxel datasets; simple geometry (single quad) for rendering; easy integration with lighting models [S2, unofficial].
+*   **Limitations:** Step size is fixed, potentially leading to aliasing or missed thin structures if `STEP_LENGTH` is too large; requires pre-computation of intersection textures [S1, unofficial].
+*   **When to use:** Real-time visualization of voxel-based environments where geometry is dense and static or semi-static [S2, unofficial].
+*   **When not to use:** When high-precision ray tracing is required without aliasing, or when the volume is sparse and sparse traversal algorithms would be more efficient.
+
+## Background
+The technique is used in the game *Teardown*, where it allows for the real-time rendering of destructible voxel environments [S2, unofficial]. It was also implemented in the academic project "Voxel Cone Tracing" by stormouse for a computer graphics course (CS580) [S1, unofficial]. The method leverages the efficiency of fragment shaders to replace traditional mesh-based rendering for voxel data [S2, unofficial].
+
+## Sources
+[S1] stormouse/voxel-cone-tracing-cs580, https://github.com/stormouse/voxel-cone-tracing-cs580, fetched 2026-10-26 (unofficial)
+[S2] Teardown Render Techniques - GitHub Pages, https://zacxalot.github.io/rendering/9-teardown/, fetched 2026-10-29 (unofficial)

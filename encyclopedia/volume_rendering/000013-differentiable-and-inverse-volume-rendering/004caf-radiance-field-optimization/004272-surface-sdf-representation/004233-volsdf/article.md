@@ -3,74 +3,216 @@
 Also called: SDF-based Neural Volume Rendering, Volume Rendering of Neural Implicit Surfaces
 
 ## Overview
-VolSDF is a neural inverse rendering method that decouples geometric representation and appearance by modeling scene density as a function of a learnable Signed Distance Function (SDF) [S1][S2, unofficial]. It solves the problem of noisy, low-fidelity geometry reconstruction inherent in standard density-based NeRF approaches, where geometry is extracted via arbitrary level sets of generic density functions [S2, unofficial]. Unlike siblings that model geometry as a function of density, VolSDF provides a useful inductive bias for geometry, bounds opacity approximation error, and enables efficient unsupervised disentanglement of shape and appearance [S2, unofficial].
+VolSDF is a neural inverse rendering method that decouples geometric representation and appearance by modeling scene density as a function of a learnable Signed Distance Function (SDF) [S1][S2, unofficial]. It solves the problem of noisy, low-fidelity geometry reconstruction inherent in previous methods that modeled geometry as an arbitrary level set of a generic density function [S2, unofficial]. By parameterizing density via the Laplace CDF of the SDF, VolSDF provides a geometric inductive bias and theoretical upper bounds on opacity error, enabling stable convergence and high-quality surface extraction [S1][S2, unofficial].
 
 ## How it works
+VolSDF builds on [Radiance-field optimization](44-radiance-field-optimization.md) but replaces the generic density MLP with a geometry-aware parameterization. It uses two separate Multi-Layer Perceptrons (MLPs): one to predict the SDF $d_\phi(\mathbf{x})$ and a global geometry feature map $\mathbf{z}_\phi(\mathbf{x})$, and a second to predict radiance [S1].
+
 **Inputs and Outputs:**
-*   **Inputs:** A set of multi-view images with known camera poses.
-*   **Outputs:** A rendered image $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$, and implicitly, the scene geometry defined by the SDF $S(x)$ and appearance defined by radiance.
+*   **Inputs:** A set of $N$ calibrated images with known camera poses.
+*   **Outputs:** A rendered image for a target view, and a reconstructed 3D geometry (extracted from the SDF).
 
 **Data Structures:**
-The method uses two separate Multi-Layer Perceptrons (MLPs) [S1]:
-1.  **SDF Network:** Inputs a 3D point $x \in \mathbb{R}^3$. Outputs the scalar signed distance value $S(x)$.
-2.  **Radiance Network:** Inputs the 3D point $x$, the surface normal $n(x)$, and a view direction $v$. Outputs the color $\mathbf{c}(x, n, v)$.
-    *   *Note:* Some implementations (e.g., SupeRVol extension) may include a global geometry feature map $z_\phi: \Omega \to \mathbb{R}^{256}$ from the SDF network to the radiance network to aid disentanglement [S1].
-
-**Formulas:**
-The volume density $\sigma(x)$ is derived from the SDF $S(x)$ using the Cumulative Distribution Function (CDF) of the Laplace distribution with zero mean $\mu$ and scale parameter $\lambda$ [S2, unofficial]:
-
-$$
-\sigma(x) = \frac{1}{2} - \frac{1}{2} \text{erf}\left( \frac{S(x) - \mu}{\sqrt{2} \lambda} \right)
-$$
-
-where:
-*   $\sigma(x) \ge 0$ is the volume density.
-*   $S(x)$ is the learnable SDF.
-*   $\mu = 0$ is the mean [S2, unofficial].
-*   $\lambda$ is the scale parameter [S2, unofficial].
-*   $\text{erf}(\cdot)$ is the error function.
-
-The surface normal $n(x)$ is computed as the normalized gradient of the SDF [S1]:
-
-$$
-n(x) = \frac{\nabla S(x)}{\|\nabla S(x)\|}
-$$
-
-The rendered color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ is computed using the standard emission-absorption model [44-radiance-field-optimization.md]:
-
-$$
-\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
-$$
-
-where $\sigma_i = \sigma(x_i)$, $\mathbf{c}_i = \mathbf{c}(x_i, n(x_i), v)$, $\delta_i$ is the step size, and $T_i$ is the transmittance [44-radiance-field-optimization.md].
-
-**Numbered Steps:**
-1.  **Sample Points:** For a given ray $\mathbf{r}$, sample $N$ points $x_i$ along the ray. VolSDF employs an iterative sampling algorithm that leverages the error bound on opacity approximation to adaptively place samples, ensuring precise coupling of geometry and radiance [S2, unofficial].
-2.  **Compute SDF and Density:** For each sample point $x_i$, query the SDF network to get $S(x_i)$. Compute density $\sigma_i$ using the Laplace CDF formula.
-3.  **Compute Normal:** Compute the normal $n(x_i)$ by taking the numerical gradient of the SDF network output with respect to input $x_i$ [S1].
-4.  **Compute Radiance:** Query the radiance network with $x_i$, $n(x_i)$, and view direction $v$ to get color $\mathbf{c}_i$.
-5.  **Volume Rendering:** Accumulate transmittance $T_i$ and color $\hat{C}(\mathbf{r})$ using the standard volume rendering equation [44-radiance-field-optimization.md].
-6.  **Loss Calculation:** Compare $\hat{C}(\mathbf{r})$ with the ground truth image pixel. The loss drives the optimization of both the SDF network and the radiance network [S1].
+1.  **SDF Network ($d_\phi$):** An MLP taking position $\mathbf{x} \in \mathbb{R}^3$ as input, outputting a scalar SDF value $d \in \mathbb{R}$ and a global feature vector $\mathbf{z} \in \mathbb{R}^{256}$ [S1].
+2.  **Radiance Network ($r_\psi$):** An MLP taking the view direction $\mathbf{v}$, surface normal $\mathbf{n}$, and the global feature $\mathbf{z}$ as input, outputting the view-dependent radiance color $\mathbf{c} \in \mathbb{R}^3$ [S1].
 
 **Parameters:**
 *   $\mu$: Mean of the Laplace distribution, fixed at 0 [S2, unofficial].
-*   $\lambda$: Scale parameter of the Laplace distribution. Not given in the sources.
-*   $N$: Number of samples per ray. Not given in the sources.
+*   $\lambda$: Scale parameter of the Laplace distribution, a learnable scalar [S2, unofficial].
+
+**Formulas:**
+The volume density $\sigma(\mathbf{x})$ is derived from the SDF $S(\mathbf{x})$ (denoted as $d_\phi(\mathbf{x})$ in [S1]) using the Laplace CDF [S2, unofficial]:
+
+$$
+\sigma(\mathbf{x}) = \frac{1}{2} - \frac{1}{2} \text{erf}\left( \frac{S(\mathbf{x}) - \mu}{\sqrt{2} \lambda} \right)
+$$
+
+where $\text{erf}$ is the error function [S2, unofficial].
+
+Surface normals $\mathbf{n}(\mathbf{x})$ are computed as the normalized gradient of the SDF [S1]:
+
+$$
+\mathbf{n}(\mathbf{x}) = \frac{\nabla S(\mathbf{x})}{\|\nabla S(\mathbf{x})\|}
+$$
+
+**Rendering Pipeline:**
+For a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, the color $C(\mathbf{r})$ is computed via discrete quadrature approximation of the volume rendering integral [S1]:
+
+$$
+C(\mathbf{r}) \approx \sum_{i=1}^{m-1} \frac{(t_{i+1} - t_i)}{2} w(t_i) \mathbf{c}(\mathbf{r}(t_i), \mathbf{n}(\mathbf{r}(t_i)), \mathbf{v})
+$$
+
+where $w(t_i)$ is the weight (opacity contribution) of the sample at $t_i$, computed from the transmittance and density along the ray segment [S1]. The transmittance $T(t)$ is accumulated as $T(t) = \exp(-\int_{t_{near}}^t \sigma(\mathbf{r}(\tau)) d\tau)$ [S1].
+
+**Sampling Algorithm:**
+VolSDF employs an iterative sampling algorithm to approximate the volume rendering integral. This algorithm uses the bound on opacity approximation error to determine sample locations, ensuring accurate coupling of geometry and radiance [S2, unofficial]. The sampling is adaptive, concentrating samples near the surface where the SDF is close to zero.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sigmoid_erf(sdf, lambda_param):
+    """
+    Computes volume density from SDF using Laplace CDF.
+    Args:
+        sdf: float, the signed distance value.
+        lambda_param: float, the scale parameter (lambda).
+    Returns:
+        float, the volume density sigma.
+    """
+    # mu is fixed at 0
+    mu = 0.0
+    # erf is the error function
+    # sigma = 0.5 - 0.5 * erf((sdf - mu) / (sqrt(2) * lambda))
+    arg = (sdf - mu) / (math.sqrt(2) * lambda_param)
+    # Note: math.erf is standard in Python
+    sigma = 0.5 - 0.5 * math.erf(arg)
+    return sigma
+
+def compute_normal(sdf_network, x):
+    """
+    Computes surface normal by finite difference gradient of SDF.
+    Args:
+        sdf_network: callable, returns (sdf_value, global_feature) for position x.
+        x: array-like, position [x, y, z].
+    Returns:
+        array-like, normalized normal vector [nx, ny, nz].
+    """
+    eps = 1e-4
+    dx = [x[0] + eps, x[1], x[2]]
+    dy = [x[0], x[1] + eps, x[2]]
+    dz = [x[0], x[1], x[2] + eps]
+    
+    sdf_x, _ = sdf_network(dx)
+    sdf_y, _ = sdf_network(dy)
+    sdf_z, _ = sdf_network(dz)
+    sdf_0, _ = sdf_network(x)
+    
+    grad_x = (sdf_x - sdf_0) / eps
+    grad_y = (sdf_y - sdf_0) / eps
+    grad_z = (sdf_z - sdf_0) / eps
+    
+    grad = [grad_x, grad_y, grad_z]
+    norm = math.sqrt(sum(g*g for g in grad))
+    if norm == 0:
+        return [0, 0, 1] # Fallback
+    return [g / norm for g in grad]
+
+def render_ray(ray_origin, ray_direction, sdf_network, radiance_network, lambda_param, num_samples):
+    """
+    Renders a single ray using VolSDF parameterization.
+    Args:
+        ray_origin: array-like, [ox, oy, oz].
+        ray_direction: array-like, [dx, dy, dz].
+        sdf_network: callable, returns (sdf, feature) for position.
+        radiance_network: callable, returns color for (view_dir, normal, feature).
+        lambda_param: float, scale parameter.
+        num_samples: int, number of samples along the ray.
+    Returns:
+        float, rendered color (RGB).
+    """
+    # Define ray bounds (simplified: fixed near/far)
+    t_near = 0.0
+    t_far = 10.0
+    
+    t_values = [t_near + i * (t_far - t_near) / num_samples for i in range(num_samples + 1)]
+    
+    accumulated_transmittance = 1.0
+    accumulated_color = [0.0, 0.0, 0.0]
+    
+    for i in range(num_samples):
+        t_i = t_values[i]
+        t_next = t_values[i+1]
+        
+        # Sample position
+        pos = [ray_origin[j] + t_i * ray_direction[j] for j in range(3)]
+        
+        # Get SDF and feature
+        sdf_val, feature = sdf_network(pos)
+        
+        # Compute density
+        sigma = sigmoid_erf(sdf_val, lambda_param)
+        
+        # Compute segment length
+        delta_t = t_next - t_i
+        
+        # Approximate integral of sigma over segment (trapezoidal rule for transmittance calculation)
+        # T(t_next) = T(t_i) * exp(-sigma * delta_t)
+        # Weight w(t_i) = T(t_i) * (1 - exp(-sigma * delta_t))
+        
+        # For simplicity in this pseudocode, we use the weight formula from [S1]
+        # w(t_i) approximated by the contribution at t_i
+        # Note: [S1] uses quadrature: sum (t_{i+1}-t_i)/2 * w(t_i) * L(...)
+        # This implies w(t_i) is the opacity at t_i, and the integral is approximated by midpoint/trapezoidal.
+        
+        # Calculate transmittance at start of segment
+        # T_i = exp(-sum_{k=0}^{i-1} sigma_k * delta_t_k)
+        # We maintain accumulated_transmittance as T_i
+        
+        # Opacity contribution of this segment
+        # alpha = 1 - exp(-sigma * delta_t)
+        # weight = accumulated_transmittance * alpha
+        
+        # However, [S1] formula: L_p approx sum (t_{i+1}-t_i)/2 * w(t_i) * L(...)
+        # This suggests w(t_i) is the transmittance at t_i? Or the opacity weight?
+        # In standard volume rendering: C = sum T_i * (1 - exp(-sigma_i * delta_t_i)) * c_i
+        # [S1] notation w(t_i) likely refers to the weight term T(t_i)*(1-exp(-sigma*delta_t))
+        # But the factor (t_{i+1}-t_i)/2 suggests a quadrature rule for the integral of radiance.
+        # Let's stick to the standard interpretation of the quadrature rule provided in [S1]:
+        # The term w(t_i) is the weight of the sample.
+        
+        # Let's implement the standard volume rendering equation which VolSDF implements:
+        alpha = 1.0 - math.exp(-sigma * delta_t)
+        weight = accumulated_transmittance * alpha
+        
+        # Compute normal and radiance
+        normal = compute_normal(sdf_network, pos)
+        view_dir = ray_direction
+        color = radiance_network(view_dir, normal, feature)
+        
+        # Accumulate
+        for k in range(3):
+            accumulated_color[k] += weight * color[k]
+            
+        # Update transmittance
+        accumulated_transmittance *= (1.0 - alpha)
+        
+        if accumulated_transmittance < 1e-5:
+            break
+            
+    return accumulated_color
+```
 
 **Edge Cases and Pitfalls:**
-*   **Reflectance Limitations:** Standard VolSDF cannot recover reflectance properties (BRDF) because material and lighting are baked into the radiance network. Self-shadows are absent in specific colocated camera-light setups [S1].
-*   **Geometry Fidelity:** Previous methods using arbitrary level sets of generic density functions resulted in noisy, low-fidelity geometry. VolSDF mitigates this by using the SDF parameterization [S2, unofficial].
-*   **Gradient Stability:** The SDF provides a stable gradient signal for geometry, unlike raw density which can be ambiguous near surfaces [S2, unofficial].
+*   **Reflectance Limitations:** Standard VolSDF cannot recover reflectance properties (BRDF) because material and lighting are baked into the radiance network. Self-shadows are absent in the specific colocated camera-light setup typically used [S1].
+*   **Geometry Noise:** Previous methods using arbitrary level sets of generic density functions resulted in noisy, low-fidelity geometry. VolSDF mitigates this by using the SDF parameterization [S2, unofficial].
+*   **Precision:** The use of the error function and exponential decay requires careful handling of numerical precision, especially for large $\lambda$ or extreme SDF values [S2, unofficial].
+
+## Subtopics
+
+### NeuS
+Uses a similar SDF-based density parameterization but employs a differentiable renderer with a different sampling strategy and loss function (including a specific surface loss). Choose NeuS when a more robust surface loss is needed for thin structures. [Link](6060-neus.md)
+
+### Surface NeRF
+Extracts meshes from NeRF using a differentiable marching cubes approach on the density field, rather than optimizing an SDF directly. Choose Surface NeRF when you want to leverage the high-fidelity appearance of NeRF with mesh extraction. [Link](7385-surface-nerf.md)
+
+### Instant-NSR
+Uses a neural surface representation with a differentiable rasterizer for fast training. Choose Instant-NSR when training speed is critical and you can accept slightly lower geometric fidelity than VolSDF/NeuS. [Link](12440-instant-nsr.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of samples $N$ and the depth of the MLPs. The adaptive sampling algorithm may reduce $N$ compared to uniform sampling by focusing on high-error regions [S2, unofficial].
-*   **Memory Complexity:** Requires storing the weights of two MLPs (SDF and Radiance). No large voxel grids or feature maps are explicitly stored in the basic formulation, though feature maps can be used [S1].
-*   **Performance:** Outperformed relevant baselines (NeRF, NeRF++) on challenging scene multiview datasets (DTU and BlendedMVS) in terms of high-quality geometry reconstructions [S2, unofficial].
-*   **Strengths:** Theoretical upper bounds on opacity error; accurate sampling; disentanglement of shape and appearance; high-fidelity geometry.
-*   **Limitations:** Cannot recover physical reflectance properties in the standard formulation; requires differentiable volume rendering [S1].
+*   **Time Complexity:** Training time is comparable to NeRF but requires additional gradient computations for the SDF and normal estimation. The iterative sampling algorithm adds overhead compared to uniform sampling [S2, unofficial].
+*   **Memory Complexity:** Requires storing two MLPs (SDF and Radiance) and the global feature map. Memory usage is similar to NeRF [S1].
+*   **Measured Performance:** VolSDF outperformed relevant baselines (NeRF, NeRF++) on challenging scene multiview datasets (DTU and BlendedMVS) in terms of high-quality geometry reconstructions [S2, unofficial].
+*   **Strengths:** Provides a useful inductive bias for geometry, bounds opacity approximation error, and allows efficient unsupervised disentanglement of shape and appearance [S2, unofficial].
+*   **Limitations:** Cannot recover reflectance properties in its standard form; material and lighting are entangled [S1].
+*   **When to use:** When high-quality geometry reconstruction is the primary goal and the scene has complex lighting that can be approximated as diffuse or when using a colocated camera-light setup [S1][S2, unofficial].
+*   **When not to use:** When reflectance estimation or novel lighting synthesis is required without extending the model (e.g., to SupeRVol) [S1].
 
 ## Background
-VolSDF was introduced to address the limitations of neural volume rendering techniques where geometry was modeled using generic density functions, leading to noisy reconstructions [S2, unofficial]. It leverages the success of neural inverse rendering to decouple geometric representation and appearance [S1]. The method applies the CDF of the Laplace distribution to a learnable SDF to parameterize volume density [S2, unofficial].
+VolSDF was introduced by Lior Yariv et al. in the paper "Volume Rendering of Neural Implicit Surfaces" [S2, unofficial]. The method was developed to address the limitations of previous neural volume rendering techniques that modeled geometry as a function of volume density, which often led to noisy and low-fidelity reconstructions. By modeling density as a function of geometry (SDF), VolSDF provided a more stable and accurate representation of 3D shapes. The method has been extended in subsequent work, such as SupeRVol, to include super-resolution shape and reflectance estimation [S1].
 
 ## Sources
 [S1] SupeRVol: Super-Resolution Shape and Reflectance Estimation in Inverse Volume Rendering, https://arxiv.org/abs/2212.04968v2, fetched 2026-10-26

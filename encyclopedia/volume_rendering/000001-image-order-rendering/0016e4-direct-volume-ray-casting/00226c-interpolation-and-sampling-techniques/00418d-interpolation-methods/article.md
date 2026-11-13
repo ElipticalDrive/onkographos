@@ -3,14 +3,18 @@
 Also called: Interpolation Schemes
 
 ## Overview
-Interpolation Methods reconstruct a continuous scalar field from discrete voxel data to estimate values at arbitrary query positions during ray casting [S1, S2, S3, unofficial]. The choice of scheme defines the trade-off between computational complexity, spatial extent (number of neighbors), and frequency response (aliasing vs. blurring) [S1, S2, unofficial]. Unlike [Nearest Neighbor Sampling](11694-nearest-neighbor-sampling.md), which produces severe staircase artifacts, higher-order methods like [Trilinear Interpolation](13406-volumetric-ray-casting-with-trilinear-interpolation.md) and [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) provide smoother results, while [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md) achieves theoretical optimality by operating in the Fourier domain.
+Interpolation Methods reconstruct a continuous scalar field $V(\mathbf{p})$ from discrete voxel data $V_i$ to estimate values at arbitrary query positions $\mathbf{p}$ during ray casting [S1, S2, S3, unofficial]. The choice of scheme defines the trade-off between computational complexity, spatial extent (number of neighbors), and frequency response (aliasing vs. blurring) [S1, S2, unofficial]. Unlike [Nearest Neighbor Sampling](11694-nearest-neighbor-sampling.md), which produces severe staircase artifacts, higher-order methods like [Trilinear Interpolation](13406-volumetric-ray-casting-with-trilinear-interpolation.md) and [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) provide smoother results, while [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md) achieves theoretical optimality by operating in the Fourier domain.
 
 ## Shared principles
-All methods in this family map a query position $\mathbf{p}$ in voxel space to a scalar value $V(\mathbf{p})$ by combining a finite set of neighboring voxel values $V_i$ using a set of weights $w_i(\mathbf{p})$:
-$$
-V(\mathbf{p}) = \sum_{i} w_i(\mathbf{p}) V_i
-$$
-The weights are derived from a reconstruction kernel $h(\mathbf{z})$, where $\mathbf{z}$ is the distance from the query point to the sample center [G]. The choice of kernel defines the trade-off between computational complexity, spatial extent (number of neighbors), and frequency response (aliasing vs. blurring) [S1, unofficial][S2, unofficial].
+All methods in this family operate on the principle that a continuous function $V(\mathbf{p})$ must be approximated from a discrete set of samples $V_i$ located at grid positions $\mathbf{p}_i$. The core mechanism involves:
+
+1.  **Query Positioning**: Determining the 3D coordinate $\mathbf{p}$ along the ray $r(t) = \mathbf{o} + t\mathbf{d}$ where a value is needed. This may involve converting depth parameters to physical distances or warping coordinates for neural encodings.
+2.  **Kernel/Weight Application**: Computing weights $w_i(\mathbf{p})$ based on the distance between $\mathbf{p}$ and the sample centers $\mathbf{p}_i$. The interpolated value is:
+    $$
+    V(\mathbf{p}) = \sum_{i} w_i(\mathbf{p}) V_i
+    $$
+    The choice of kernel (e.g., linear, cubic, inverse distance) determines the spatial extent (number of neighbors) and frequency response (aliasing vs. blurring) [S1, unofficial][S2, unofficial][S10526].
+3.  **Coordinate Transformation**: Mapping world-space or camera-space coordinates to the local coordinate system of the volume data (e.g., normalized $[-1, 1]$ or $[0, 1]$ ranges) before interpolation [S2430].
 
 ## Subtopics
 
@@ -36,25 +40,22 @@ Nearest Neighbor Sampling is a voxel interpolation technique that retrieves the 
 Volumetric Ray Casting with Trilinear Interpolation is a direct volume rendering technique that visualizes scalar data stored in a voxel grid by casting rays through the volume and interpolating values at sample points using the 8 corners of the enclosing voxel cell. It differs from higher-order methods by using a simple, computationally inexpensive interpolation kernel that results in blocky artifacts but requires minimal memory and processing overhead.
 
 ### Svox1 Rendering Formula (Nearest-Neighbor)
-Implements the Svox1 rendering formula using nearest-neighbor interpolation with infinitely many steps. Includes forward, backward, and fused variants [S2, unofficial]. The implementation involves tensor operations for sparse grid specification, rays specification, and render options, supporting backward pass gradients for training [S2, unofficial].
+Implements the Svox1 rendering formula using nearest-neighbor interpolation with infinitely many steps. Includes forward, backward, and fused variants [S2, unofficial]. The implementation involves tensor operations on sparse grid specifications and ray specifications, supporting gradient computation for optimization [S2, unofficial].
 
 ### Joseph's Method
-A forward projection method for 2D easily extended to 3D, using bi-linear interpolation on intersection points and a compensation factor for rays deviating from the principal direction [S3, unofficial]. To implement:
-1. Determine the principal direction of the ray by comparing the absolute differences $|x_1-x_2|$, $|y_1-y_2|$, and $|z_1-z_2|$ [S3, unofficial].
-2. For the case where the principal direction is the x-axis ($|x_1-x_2|$ is largest), perform bi-linear interpolation on the intersection points of each $(y, z)$-plane of the sampling grid [S3, unofficial].
-3. Weight the sum of interpolations with the factor $\frac{\sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2 + (z_1 - z_2)^2}}{|x_1 - x_2|}$ to compensate for longer traversal of rays deviating from the principal direction [S3, unofficial].
-Joseph's method performs similarly to Köhler's method in accuracy, despite using a skewed interpolation kernel compared to Köhler's tri-linear kernel [S3, unofficial].
+A forward projection method for 2D easily extended to 3D, using bi-linear interpolation on intersection points and a compensation factor for rays deviating from the principal direction [S3, unofficial]. The method determines the principal direction of the ray by comparing the absolute differences $|x_1-x_2|$, $|y_1-y_2|$, and $|z_1-z_2|$ [S3, unofficial]. For the case where the principal direction is the x-axis ($|x_1-x_2|$ is largest), it performs bi-linear interpolation on the intersection points of each $(y, z)$-plane of the sampling grid [S3, unofficial]. The sum of these interpolations is weighted with the factor:
+$$
+\frac{\sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2 + (z_1 - z_2)^2}}{|x_1 - x_2|}
+$$
+to compensate for longer traversal of rays deviating from the principal direction [S3, unofficial]. Joseph's method performs similarly to Köhler's method in accuracy, despite using a skewed interpolation kernel compared to Köhler's tri-linear kernel [S3, unofficial].
 
 ### Higher-Order Interpolation via Template
-An extension of template-based ray casting that uses connected cells instead of connected voxels to support higher-order interpolation by taking multiple samples along continuous rays within each cell [S4, unofficial]. To implement:
-1. Take multiple samples at regular intervals along the continuous ray inside each cell [S4, unofficial].
-2. Precompute part of the interpolation function and store it in a table to allow for faster rendering times [S4, unofficial].
+An extension of template-based ray casting that uses connected cells instead of connected voxels to support higher-order interpolation by taking multiple samples along continuous rays within each cell [S4, unofficial]. The method takes multiple samples at regular intervals along the continuous ray inside each cell [S4, unofficial]. It precomputes part of the interpolation function and stores it in a table to allow for faster rendering times [S4, unofficial].
 
 ## Background
-Interpolation is fundamental to volume rendering, bridging the gap between discrete voxel data and continuous ray sampling. Early methods relied on nearest-neighbor sampling due to its simplicity, but this introduced significant aliasing and staircase artifacts [S1, unofficial]. The introduction of trilinear interpolation provided a smoother visual result at the cost of increased computational effort [S1, unofficial]. Joseph's method (1982) and Köhler's method (2000) refined forward projection techniques, with Köhler's approach separating volume construction from line integration using tri-linear interpolation [S3, unofficial]. Template-based ray casting was later extended to support higher-order interpolation by utilizing connected cells and precomputed interpolation tables [S4, unofficial]. Modern techniques like Lanczos resampling and gradient-based splatting address specific needs for sharpness and accurate shading in complex media [S1, unofficial][S2, unofficial].
+Interpolation is fundamental to volume rendering, bridging the gap between discrete voxel data and continuous ray sampling. Early methods relied on nearest-neighbor sampling for speed, but this introduced significant aliasing artifacts [S1, unofficial]. Trilinear interpolation became a standard for balancing quality and performance [S1, unofficial]. Advanced techniques like Joseph's method were developed for forward projection in tomography, offering better accuracy than Siddon's method by accounting for ray path geometry [S3, unofficial]. Template-based ray casting was extended to support higher-order interpolation by using connected cells and precomputed tables [S4, unofficial]. Modern approaches include gradient-based splatting for lighting [S1, unofficial] and shape-based interpolation for surface preservation [S1, unofficial].
 
 ## Sources
-
 [S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
 [S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
 [S3] 5 Forward Projection through Voxel Volumes, https://www.cvl.isy.liu.se/education/undergraduate/tsbb31/download/TurbellPhDCh5.pdf, fetched 2026-10-25 (unofficial)

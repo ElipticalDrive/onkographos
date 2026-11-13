@@ -4,31 +4,30 @@ Also called: MLS projection via Hermite Point Set Surfaces, Moving Least Squares
 
 ## Overview
 
-MLS Projection is an iterative algorithm that projects a query point onto a surface defined by a set of input points and their associated normals (Hermite data) by fitting a local quadratic function [S2, unofficial]. It solves the problem of robustly estimating the surface position and normal at arbitrary locations in the presence of noise or sparse sampling, which is critical for generating high-quality implicit fields in surface reconstruction pipelines [S3]. Unlike standard isosurface extraction methods that rely on grid-based scalar values, MLS Projection operates directly on unstructured point sets, using weighted averages of neighbor projections to converge to the implicit surface [S2, unofficial]. It is distinguished from its siblings in the Dual Contouring family by its reliance on local geometric fitting rather than global optimization or grid-based marching, making it suitable for hybrid approaches where grid vertices are projected onto a point-set-defined surface [S2, unofficial].
+MLS Projection is an iterative algorithm that projects a query point onto a surface defined by a point set with associated normals (Hermite data) using Moving Least Squares [S2, unofficial]. Implementations vary between computing a weighted average of neighbor projections onto tangent planes and solving a local quadratic least-squares fit [S2, unofficial]. The method smooths noisy input data by evaluating a fitted polynomial at the query point, making it suitable for surface reconstruction from unstructured point clouds [S3]. Unlike grid-based isosurface extractors, it operates directly on point sets, often serving as a projection step in hybrid pipelines that combine point-set fitting with grid-based mesh extraction [S2, unofficial].
 
 ## How it works
 
 **Inputs and Outputs:**
-*   **Input:** A set of points $P_{input}$ with associated normals $N_{input}$, a query point $q$, a number of nearest neighbors $knn$, a kernel radius $radius$, a kernel type $kernel\_type$, and a maximum number of iterations $numberOfIterations$.
-*   **Output:** A projected point $p_{out}$ on the surface and its corresponding normal $n_{out}$.
+*   **Input:** A set of points $P_{input}$ with associated normals $N_{input}$, a query point $q$, a number of nearest neighbors $knn$, a kernel radius $radius$, a kernel type $kernel\_type$, and a maximum number of iterations $numberOfIterations$ [S2, unofficial].
+*   **Output:** A projected point $p_{out}$ on the surface and its corresponding normal $n_{out}$ [S2, unofficial].
 
 **Data Structures:**
-*   **Point Set:** Two arrays of 3D vectors, `inputPositions` and `inputNormals`, indexed by integer IDs.
-*   **K-D Tree:** A spatial index (`inputPointsetKdTree`) built on `inputPositions` to support $k$-nearest neighbor queries.
-*   **Accumulators:** Floating-point scalars and 3D vectors used to store weighted sums during the fitting process.
+*   **Point Set:** Two arrays of 3D vectors, `inputPositions` and `inputNormals`, indexed by integer IDs [S2, unofficial].
+*   **K-D Tree:** A spatial index (`inputPointsetKdTree`) built on `inputPositions` to support $k$-nearest neighbor queries [S2, unofficial].
+*   **Accumulators:** Floating-point scalars and 3D vectors used to store weighted sums during the fitting process [S2, unofficial].
 
 **Parameters:**
 *   $knn$: Number of nearest neighbors. Default: 20 [S2, unofficial].
-*   $radius$: Radius for the kernel function. [S2, unofficial].
+*   $radius$: Radius for the kernel function [S2, unofficial].
 *   $kernel\_type$: Selector for the kernel function (0=Gaussian, 1=Wendland, 2=Singular) [S2, unofficial].
-*   $numberOfIterations$: Loop count for convergence. [S2, unofficial].
+*   $numberOfIterations$: Loop count for convergence [S2, unofficial].
 
 **Step-by-Step Method:**
 
-1.  **Initialization:** Set the current point $q_{curr} = q$ and normal $n_{curr}$ (initially undefined or derived from local geometry if available, but typically the iteration refines the position first). Initialize output $p_{out} = q_{curr}$.
-
+1.  **Initialization:** Set the current point $q_{curr} = q$ and normal $n_{curr} = \mathbf{0}$. Initialize output $p_{out} = q_{curr}$ [S2, unofficial].
 2.  **Iteration Loop:** For $iter$ from 0 to $numberOfIterations - 1$:
-    a.  **Neighbor Search:** Find the $knn$ nearest neighbors of $q_{curr}$ in the point set using the K-D tree. Retrieve their indices $id_{neighbors}$ and squared distances $d^2_{i}$.
+    a.  **Neighbor Search:** Find the $knn$ nearest neighbors of $q_{curr}$ in the point set using the K-D tree. Retrieve their indices $id_{neighbors}$ and squared distances $d^2_{i}$ [S2, unofficial].
     b.  **Accumulator Initialization:** Initialize accumulators:
         *   $sum\_weight = 0$
         *   $sum\_weighted\_neighbors = \mathbf{0}$
@@ -36,46 +35,45 @@ MLS Projection is an iterative algorithm that projects a query point onto a surf
         *   $sum\_1 = 0$
         *   $sum\_2 = \mathbf{0}$
         *   $sum\_3 = \mathbf{0}$
-        *   $sum\_4 = 0$
+        *   $sum\_4 = 0$ [S2, unofficial].
     c.  **Weighted Accumulation:** For each neighbor $i$ from 0 to $knn-1$:
-        *   Get neighbor position $p_i = inputPositions[id_{neighbors}[i]]$.
-        *   Get neighbor normal $n_i = inputNormals[id_{neighbors}[i]]$.
-        *   Compute distance $r_i = \sqrt{d^2_{i}}$.
-        *   Compute weight $w_i = K(r_i, radius, kernel\_type)$, where $K$ is the kernel function (see Kernel Functions for MLS).
+        *   Get neighbor position $p_i = inputPositions[id_{neighbors}[i]]$ [S2, unofficial].
+        *   Get neighbor normal $n_i = inputNormals[id_{neighbors}[i]]$ [S2, unofficial].
+        *   Compute distance $r_i = \sqrt{d^2_{i}}$ [G].
+        *   Compute weight $w_i = K(r_i, radius, kernel\_type)$, where $K$ is the kernel function (see Kernel Functions for MLS) [S2, unofficial].
         *   Update accumulators:
-            *   $sum\_weight \leftarrow sum\_weight + w_i$
-            *   $sum\_1 \leftarrow sum\_1 + w_i \cdot (p_i \cdot n_i)$
-            *   $sum\_2 \leftarrow sum\_2 + w_i \cdot p_i$
-            *   $sum\_3 \leftarrow sum\_3 + w_i \cdot n_i$
-            *   $sum\_4 \leftarrow sum\_4 + w_i \cdot (p_i \cdot p_i)$
+            *   $sum\_weight \leftarrow sum\_weight + w_i$ [S2, unofficial].
+            *   $sum\_1 \leftarrow sum\_1 + w_i \cdot (p_i \cdot n_i)$ [S2, unofficial].
+            *   $sum\_2 \leftarrow sum\_2 + w_i \cdot p_i$ [S2, unofficial].
+            *   $sum\_3 \leftarrow sum\_3 + w_i \cdot n_i$ [S2, unofficial].
+            *   $sum\_4 \leftarrow sum\_4 + w_i \cdot (p_i \cdot p_i)$ [S2, unofficial].
     d.  **Polynomial Coefficient Calculation:** Solve for the coefficients of the local quadratic approximation $f(x) = u_0 + u_{123} \cdot x + u_4 (x \cdot x)$:
-        *   $u_4 = 0.5 \cdot \frac{sum\_1 - \frac{sum\_2 \cdot sum\_3}{sum\_weight}}{sum\_4 - \frac{sum\_2 \cdot sum\_2}{sum\_weight}}$
-        *   $u_{123} = \frac{sum\_3 - 2 \cdot u_4 \cdot sum\_2}{sum\_weight}$
-        *   $u_0 = -\frac{sum\_2 \cdot u_{123} + u_4 \cdot sum\_4}{sum\_weight}$
+        *   $u_4 = 0.5 \cdot \frac{sum\_1 - \frac{sum\_2 \cdot sum\_3}{sum\_weight}}{sum\_4 - \frac{sum\_2 \cdot sum\_2}{sum\_weight}}$ [S2, unofficial].
+        *   $u_{123} = \frac{sum\_3 - 2 \cdot u_4 \cdot sum\_2}{sum\_weight}$ [S2, unofficial].
+        *   $u_0 = -\frac{sum\_2 \cdot u_{123} + u_4 \cdot sum\_4}{sum\_weight}$ [S2, unofficial].
     e.  **Normal and Position Update:**
-        *   Compute the gradient (normal) at the current point: $g = u_{123} + 2 \cdot u_4 \cdot q_{curr}$.
-        *   Normalize: $n_{curr} = \frac{g}{\|g\|}$.
-        *   Compute the function value: $val = u_0 + u_{123} \cdot q_{curr} + u_4 \cdot (q_{curr} \cdot q_{curr})$.
-        *   Project along the normal to reduce the function value: $q_{next} = q_{curr} - val \cdot n_{curr}$.
-    f.  **State Update:** Set $q_{curr} = q_{next}$.
+        *   Compute the gradient (normal) at the current point: $g = u_{123} + 2 \cdot u_4 \cdot q_{curr}$ [S2, unofficial].
+        *   Normalize: $n_{curr} = \frac{g}{\|g\|}$ [S2, unofficial].
+        *   Compute the function value: $val = u_0 + u_{123} \cdot q_{curr} + u_4 \cdot (q_{curr} \cdot q_{curr})$ [S2, unofficial].
+        *   Project along the normal to reduce the function value: $q_{next} = q_{curr} - val \cdot n_{curr}$ [S2, unofficial].
+    f.  **State Update:** Set $q_{curr} = q_{next}$ [S2, unofficial].
+3.  **Final Output:** Set $p_{out} = q_{curr}$ and $n_{out} = n_{curr}$ [S2, unofficial].
 
-3.  **Final Output:** Set $p_{out} = q_{curr}$ and $n_{out} = n_{curr}$.
-
-**Alternative Iterative Projection (Simpler Variant):**
+**Alternative Iterative Projection (Tangent-Plane Variant):**
 Some implementations use a simpler projection step without full polynomial solving, focusing on projecting onto tangent planes:
-1.  Initialize $q_{curr} = q$.
+1.  Initialize $q_{curr} = q$ [S2, unofficial].
 2.  For each iteration:
-    a.  Find $knn$ neighbors.
-    b.  Initialize $sum\_w = 0$, $sum\_p = \mathbf{0}$, $sum\_n = \mathbf{0}$.
+    a.  Find $knn$ neighbors [S2, unofficial].
+    b.  Initialize $sum\_w = 0$, $sum\_p = \mathbf{0}$, $sum\_n = \mathbf{0}$ [S2, unofficial].
     c.  For each neighbor $i$:
-        *   $p_i, n_i$ from neighbors.
-        *   Project $q_{curr}$ onto neighbor's tangent plane: $proj_i = q_{curr} - ((q_{curr} - p_i) \cdot n_i) n_i$.
-        *   $w_i = K(\|q_{curr} - p_i\|, radius, kernel\_type)$.
-        *   $sum\_w += w_i$, $sum\_p += w_i \cdot proj_i$, $sum\_n += w_i \cdot n_i$.
-    d.  $q_{next} = sum\_p / sum\_w$.
-    e.  $n_{next} = sum\_n / \|sum\_n\|$.
-    f.  $q_{curr} = q_{next}$.
-3.  Output $q_{curr}, n_{next}$. [S2, unofficial].
+        *   $p_i, n_i$ from neighbors [S2, unofficial].
+        *   Project $q_{curr}$ onto neighbor's tangent plane: $proj_i = q_{curr} - ((q_{curr} - p_i) \cdot n_i) n_i$ [S2, unofficial].
+        *   $w_i = K(\|q_{curr} - p_i\|, radius, kernel\_type)$ [S2, unofficial].
+        *   $sum\_w += w_i$, $sum\_p += w_i \cdot proj_i$, $sum\_n += w_i \cdot n_i$ [S2, unofficial].
+    d.  $q_{next} = sum\_p / sum\_w$ [S2, unofficial].
+    e.  $n_{next} = sum\_n / \|sum\_n\|$ [S2, unofficial].
+    f.  $q_{curr} = q_{next}$ [S2, unofficial].
+3.  Output $q_{curr}, n_{next}$ [S2, unofficial].
 
 **Parabolic Case Handling:**
 If the local quadratic form has one zero eigenvalue ($\lambda_1 > 0, \lambda_2 = 0$), the surface is parabolic. The transformation from canonical form $p(\bar{x}, \bar{y}) = \bar{x}^2$ to the function $f$ is given by:
@@ -94,15 +92,15 @@ where $e_1 = (e_{11}, e_{12})$ is the first normalized eigenvector [S1, unoffici
 ```python
 import numpy as np
 
-def get_kernel(kernel_type, r, h):
-    if kernel_type == 0: # Gaussian
+def get_kernel(kernel_type, r, h, w=2.0):
+    if kernel_type == 0:  # Gaussian
         return np.exp(-(r**2) / (h**2))
-    elif kernel_type == 1: # Wendland
+    elif kernel_type == 1:  # Wendland
         if r < h:
             return (1 - r/h)**4 * (1 + 4*r/h)
         return 0.0
-    elif kernel_type == 2: # Singular
-        return (r/h)**(-2) # w=2 assumed if not specified, or use parameter
+    elif kernel_type == 2:  # Singular
+        return (r/h)**(-w)
     return 1.0
 
 def mls_projection(query_point, input_positions, input_normals, kdtree, 
@@ -111,10 +109,10 @@ def mls_projection(query_point, input_positions, input_normals, kdtree,
     Projects query_point onto the surface defined by input_positions/normals.
     """
     current_point = np.array(query_point, dtype=float)
+    current_normal = np.zeros(3)
     
     for _ in range(num_iterations):
         # 1. Find neighbors
-        # Assuming kdtree.knearest returns indices and squared distances
         indices, sq_dists = kdtree.knearest(current_point, knn)
         
         sum_weight = 0.0
@@ -138,33 +136,22 @@ def mls_projection(query_point, input_positions, input_normals, kdtree,
             sum_4 += w * np.dot(p_i, p_i)
             
         # 2. Solve for coefficients
-        # u4 = 0.5 * (sum_1 - (sum_2 . sum_3)/sum_weight) / (sum_4 - (sum_2 . sum_2)/sum_weight)
         denom_u4 = sum_4 - np.dot(sum_2, sum_2) / sum_weight
         if abs(denom_u4) < 1e-9:
-            # Degenerate case, fallback or break
-            break
+            break  # Degenerate case
             
         u4 = 0.5 * (sum_1 - np.dot(sum_2, sum_3) / sum_weight) / denom_u4
-        
-        # u123 = (sum_3 - 2*u4*sum_2) / sum_weight
         u123 = (sum_3 - 2 * u4 * sum_2) / sum_weight
-        
-        # u0 = -(sum_2 . u123 + u4*sum_4) / sum_weight
         u0 = -(np.dot(sum_2, u123) + u4 * sum_4) / sum_weight
         
         # 3. Update point and normal
-        # Normal is gradient of f(x) = u0 + u123.x + u4(x.x)
-        # grad f = u123 + 2*u4*x
         grad = u123 + 2 * u4 * current_point
         norm_len = np.linalg.norm(grad)
         if norm_len < 1e-9:
             break
         current_normal = grad / norm_len
         
-        # Function value
         f_val = u0 + np.dot(u123, current_point) + u4 * np.dot(current_point, current_point)
-        
-        # Project
         current_point = current_point - f_val * current_normal
         
     return current_point, current_normal
@@ -197,7 +184,7 @@ The choice affects the smoothness and locality of the fit; Gaussian is smooth bu
 
 ## Background
 
-MLS Projection originated from the Moving Least Squares method for surface reconstruction from point clouds [S3]. It was adapted for Hermite Point Set Surfaces (HPSS) to handle point sets with normals, providing a robust way to project points onto the implicit surface defined by the data [S2, unofficial]. The method is a key component in multiresolution modeling and surface reconstruction pipelines, often used in conjunction with Dual Contouring to generate meshes from implicit fields derived from point clouds [S2, unofficial]. The parabolic case handling was detailed in multiresolution modeling literature to ensure correct triangulation of cluster regions [S1, unofficial].
+MLS Projection originated from the Moving Least Squares method for surface reconstruction from point clouds [S3]. It was adapted for Hermite Point Set Surfaces (HPSS) to handle point sets with normals, providing a robust way to project points onto the implicit surface defined by the data [S2, unofficial]. The method appears in multiresolution modeling frameworks where it is combined with grid-based mesh extraction techniques like Dual Contouring [S2, unofficial]. The parabolic case handling was detailed in multiresolution modeling literature to ensure correct triangulation of cluster regions [S1, unofficial].
 
 ## Sources
 
