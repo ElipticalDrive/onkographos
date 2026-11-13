@@ -3,25 +3,24 @@
 Also called: NeRF editing constraints
 
 ## Overview
-This article documents the specific failure modes and resource constraints of the RePaint-NeRF method [S1], which performs NeRF editing via semantic masks and diffusion model guidance. It addresses the limitations where the target object shape drastically differs from the source, restricted view angles cause geometric artifacts at image edges, and the process is computationally prohibitive for large scenes.
+This article documents the known limitations of the RePaint-NeRF framework, a method for editing radiance fields using semantic masks and 2D diffusion model guidance. It addresses the primary failure modes of this specific approach, including high computational costs, geometric inconsistencies during drastic shape changes, and view-dependent artifacts at image peripheries. These constraints distinguish RePaint-NeRF from more scalable or geometrically robust siblings like [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md) or [Blended-NeRF](12273-blended-nerf.md), which may employ different priors or representations to mitigate these specific issues.
 
 ## Shared principles
 Not given in the sources.
 
 ## Subtopics
-Not given in the sources.
+
+### Computational Complexity
+The RePaint-NeRF framework is both time and memory intensive. The optimization process requires iterative sampling and gradient computation through a pre-trained 2D diffusion model, which is significantly more expensive than standard NeRF training. Generating a high-quality 3D model at the object level takes more than 30 minutes [S1]. Consequently, the method does not scale to larger resolutions or complex scenes [S1].
+
+### Geometric Consistency in Drastic Edits
+The training process struggles when the target object shape differs significantly from the source object. The method relies on regenerating the masked part via gradient guidance, which can fail to fully replace the original geometry if the semantic shift is too large. For example, changing a hotdog to a cup may result in an incomplete edit where residual features of the original object remain [S1].
+
+### View-Dependent Artifacts
+The method is sensitive to camera angles, leading to geometric artifacts at image edges. Objects generated at the periphery of the view may incorrectly combine features from multiple source objects due to the limited contextual information available in the 2D projection. For instance, a generated daisy at the edge of a view might be composed of two orchids, whereas the same generation in the center appears normal [S1].
 
 ## Background
-The RePaint-NeRF framework was proposed to edit NeRF content using text prompts by regenerating masked parts through gradient guidance from a pre-trained 2D diffusion model [S1]. It incorporates background prompts and CLIP loss to handle invisible backgrounds, and uses depth information for semantic mask acquisition [S1].
-
-### Computational Cost
-The method is described as time-consuming and space-consuming [S1]. Generating a relatively high-quality 3D model at the object level requires more than 30 minutes [S1]. Due to these resource demands, the method cannot be extended to larger resolutions of data or larger scenes [S1]. While other works have addressed time problems in similar frameworks like DreamFusion, the object-level generation time remains a bottleneck [S1].
-
-### Shape Fidelity
-The training process struggles when the new object shape is hugely different from the old one [S1]. In such cases, the model finds it difficult to complete the edit, leading to incomplete transformations [S1]. For example, changing a cup to a hotdog may result in an incomplete change [S1].
-
-### View Angle Constraints
-The shape of the generation is influenced by angle constraints [S1]. Generated objects at the periphery of the view may incorrectly combine features from multiple source objects [S1]. For instance, a generated daisy on the edge of the view might be composed of two orchids, whereas a daisy in the central location appears normal [S1].
+RePaint-NeRF was proposed in 2023 as a framework for editing NeRFs using text prompts and semantic masks [S1]. It utilizes a pre-trained 2D diffusion model to guide the regeneration of masked regions, incorporating background prompts and CLIP loss to handle invisible backgrounds, along with depth information for semantic mask acquisition [S1]. The limitations described herein are derived directly from the authors' evaluation of the method's performance on object-level edits [S1].
 
 ## Sources
 [S1] RePaint-NeRF: NeRF Editting via Semantic Masks and Diffusion Models, https://doi.org/10.24963/ijcai.2023/201, fetched 2026-10-26

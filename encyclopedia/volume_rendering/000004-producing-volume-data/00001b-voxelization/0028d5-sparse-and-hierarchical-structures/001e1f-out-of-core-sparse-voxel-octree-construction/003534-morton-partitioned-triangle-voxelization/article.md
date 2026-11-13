@@ -25,36 +25,8 @@ Morton-Partitioned Triangle Voxelization is a streaming voxelization pipeline th
 **Algorithm Steps:**
 
 1.  **Preprocessing:** Load the mesh. Compute its bounding box $B_{mesh}$. Cubify $B_{mesh}$ to ensure equal dimensions along all axes. Translate all mesh vertices so that the minimum bounds of the cubified box are at the origin $(0,0,0)$ [S1, unofficial]. This prevents voxelization errors caused by non-cube bounding boxes or negative coordinates [S1, unofficial].
-2.  **Partition Sizing:** Calculate the number of partitions ($numPartitions$) based on $gridSize$ and $m_{MemoryLimit}$.
-    *   Initial memory estimate: $size = (gridSize^3 \times sizeof(char)) / 1024^2$ MB [S1, unofficial].
-    *   While $size > m_{MemoryLimit}$, divide $size$ by 8 and multiply $numPartitions$ by 8 [S1, unofficial].
-    *   Compute unit length: $unitLength = (maxX - minX) / gridSize$ [S1, unofficial].
-    *   Compute voxels per partition: $morton\_partition = gridSize^3 / numPartitions$ [S1, unofficial].
-3.  **Partition Iteration:** For each partition index $i$ from $0$ to $numPartitions - 1$:
-    *   **Compute World Bounds:**
-        *   Decode Morton codes for the start and end of the partition's voxel range:
-            $mcMin = m.decodeMortonMagic(morton\_partition \times i)$
-            $mcMax = m.decodeMortonMagic(morton\_partition \times (i+1) - 1)$ [S1, unofficial].
-        *   Compute world-space bounding box for the partition:
-            $minx = unitLength \times mcMin.m_x$
-            $maxx = unitLength \times (mcMax.m_x + 1)$
-            $miny = unitLength \times mcMin.m_y$
-            $maxy = unitLength \times (mcMax.m_y + 1)$
-            $minz = unitLength \times mcMin.m_z$
-            $maxz = unitLength \times (mcMax.m_z + 1)$ [S1, unofficial].
-    *   **Triangle Assignment:** Identify triangles whose AABB overlaps with the partition's world-space bounding box. If no triangles overlap, skip this partition [S1, unofficial].
-    *   **Voxelization:**
-        *   Allocate a voxel array `m_Voxels` of size $morton\_partition$ [S1, unofficial].
-        *   Compute inverse scale: $M = 1.0f / unitLength$ [S1, unofficial].
-        *   For each assigned triangle:
-            *   Get its bounding box $B_{tri}$ [S1, unofficial].
-            *   Compute voxel-space bounds:
-                $LX = B_{tri}.minX() \times M$
-                $LY = B_{tri}.minY() \times M$
-                (and similarly for max bounds) [S1, unofficial].
-            *   Perform Schwarz's triangle-box overlap tests to determine which voxels in the current partition are intersected by the triangle [S1, unofficial].
-            *   Mark the corresponding voxels in `m_Voxels` [S1, unofficial].
-    *   **Octree Construction:** Process the `m_Voxels` array to build the octree structure for this partition, handling empty and full nodes efficiently (e.g., using `FastAddEmptyVoxel` and `Refine`) [S1, unofficial].
+2.  **Partition Sizing:** Calculate the number of partitions ($numPartitions$) based on $gridSize$ and $m_{MemoryLimit}$ [S1, unofficial]. Initial memory estimate: $size = (gridSize^3 \times sizeof(char)) / 1024^2$ MB [S1, unofficial]. While $size > m_{MemoryLimit}$, divide $size$ by 8 and multiply $numPartitions$ by 8 [S1, unofficial]. Compute unit length: $unitLength = (maxX - minX) / gridSize$ [S1, unofficial]. Compute voxels per partition: $morton\_partition = gridSize^3 / numPartitions$ [S1, unofficial].
+3.  **Partition Iteration:** For each partition index $i$ from $0$ to $numPartitions - 1$: [S1, unofficial]. Compute world bounds: decode Morton codes for the start and end of the partition's voxel range: $mcMin = m.decodeMortonMagic(morton\_partition \times i)$ and $mcMax = m.decodeMortonMagic(morton\_partition \times (i+1) - 1)$ [S1, unofficial]. Compute world-space bounding box for the partition: $minx = unitLength \times mcMin.m_x$, $maxx = unitLength \times (mcMax.m_x + 1)$, $miny = unitLength \times mcMin.m_y$, $maxy = unitLength \times (mcMax.m_y + 1)$, $minz = unitLength \times mcMin.m_z$, $maxz = unitLength \times (mcMax.m_z + 1)$ [S1, unofficial]. Triangle Assignment: Identify triangles whose AABB overlaps with the partition's world-space bounding box; if no triangles overlap, skip this partition [S1, unofficial]. Voxelization: Allocate a voxel array `m_Voxels` of size $morton\_partition$ [S1, unofficial]. Compute inverse scale: $M = 1.0f / unitLength$ [S1, unofficial]. For each assigned triangle, get its bounding box $B_{tri}$ [S1, unofficial]. Compute voxel-space bounds: $LX = B_{tri}.minX() \times M$, $LY = B_{tri}.minY() \times M$ (and similarly for max bounds) [S1, unofficial]. Perform Schwarz's triangle-box overlap tests to determine which voxels in the current partition are intersected by the triangle [S1, unofficial]. Mark the corresponding voxels in `m_Voxels` [S1, unofficial]. Octree Construction: Process the `m_Voxels` array to build the octree structure for this partition, handling empty and full nodes efficiently (e.g., using `FastAddEmptyVoxel` and `Refine`) [S1, unofficial].
 4.  **Finalization:** After all partitions are processed, finalize the octree structure and write it to disk [S1, unofficial].
 
 **Pseudocode:**
@@ -62,12 +34,39 @@ Morton-Partitioned Triangle Voxelization is a streaming voxelization pipeline th
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def morton_partitioned_voxelization(mesh, gridSize, memoryLimitMB):
+def morton_partitioned_voxelization(mesh_vertices, mesh_triangles, gridSize, memoryLimitMB):
     # Step 1: Preprocessing
-    bbox = compute_bounding_box(mesh.vertices)
-    cubify_bbox(bbox) # Ensure max - min is equal for x, y, z
-    translate_vertices(mesh.vertices, -bbox.min) # Shift min to origin
-    
+    # Compute bounding box
+    minX = min(v.x for v in mesh_vertices)
+    minY = min(v.y for v in mesh_vertices)
+    minZ = min(v.z for v in mesh_vertices)
+    maxX = max(v.x for v in mesh_vertices)
+    maxY = max(v.y for v in mesh_vertices)
+    maxZ = max(v.z for v in mesh_vertices)
+
+    # Cubify bounding box to ensure equal dimensions along all axes
+    extentX = maxX - minX
+    extentY = maxY - minY
+    extentZ = maxZ - minZ
+    maxExtent = max(extentX, extentY, extentZ)
+    # Adjust bounds to form a cube
+    minX -= (maxExtent - extentX) / 2.0
+    maxX += (maxExtent - extentX) / 2.0
+    minY -= (maxExtent - extentY) / 2.0
+    maxY += (maxExtent - extentY) / 2.0
+    minZ -= (maxExtent - extentZ) / 2.0
+    maxZ += (maxExtent - extentZ) / 2.0
+
+    # Translate vertices so minimum bounds are at origin
+    for v in mesh_vertices:
+        v.x -= minX
+        v.y -= minY
+        v.z -= minZ
+    minX, minY, minZ = 0.0, 0.0, 0.0
+    maxX -= minX
+    maxY -= minY
+    maxZ -= minZ
+
     # Step 2: Partition Sizing
     # sizeof(char) assumed for voxel storage
     size_mb = (gridSize ** 3 * 1) / (1024 ** 2)
@@ -75,16 +74,16 @@ def morton_partitioned_voxelization(mesh, gridSize, memoryLimitMB):
     while size_mb > memoryLimitMB:
         size_mb /= 8
         numPartitions *= 8
-        
-    unitLength = (bbox.max.x - bbox.min.x) / gridSize
-    morton_partition = (gridSize ** 3) / numPartitions
-    
+
+    unitLength = (maxX - minX) / gridSize
+    morton_partition = (gridSize ** 3) // numPartitions
+
     # Step 3: Partition Iteration
     for i in range(numPartitions):
         # Compute Morton bounds
         mcMin = decode_morton(morton_partition * i)
         mcMax = decode_morton(morton_partition * (i + 1) - 1)
-        
+
         # Compute world-space bounds for partition
         part_min_x = unitLength * mcMin.x
         part_max_x = unitLength * (mcMax.x + 1)
@@ -92,19 +91,22 @@ def morton_partitioned_voxelization(mesh, gridSize, memoryLimitMB):
         part_max_y = unitLength * (mcMax.y + 1)
         part_min_z = unitLength * mcMin.z
         part_max_z = unitLength * (mcMax.z + 1)
-        
+
         part_bbox = BBox(part_min_x, part_min_y, part_min_z, part_max_x, part_max_y, part_max_z)
-        
+
         # Triangle Assignment
-        assigned_tris = [t for t in mesh.triangles if aabb_overlap(t.bbox, part_bbox)]
-        
+        assigned_tris = []
+        for tri in mesh_triangles:
+            if aabb_overlap(tri.bbox, part_bbox):
+                assigned_tris.append(tri)
+
         if not assigned_tris:
             continue
-            
+
         # Voxelization
-        voxels = allocate_array(morton_partition) # Initialize to empty
+        voxels = [0] * morton_partition
         M = 1.0 / unitLength
-        
+
         for tri in assigned_tris:
             tri_bbox = tri.bbox
             # Voxel space bounds
@@ -114,15 +116,50 @@ def morton_partitioned_voxelization(mesh, gridSize, memoryLimitMB):
             hx = tri_bbox.max.x * M
             hy = tri_bbox.max.y * M
             hz = tri_bbox.max.z * M
-            
-            # Mark voxels using Schwarz's triangle-box test
-            mark_voxels(voxels, lx, ly, lz, hx, hy, hz, morton_partition, gridSize)
-            
+
+            # Mark voxels using Schwarz's triangle-box overlap tests
+            for z in range(int(lz), int(hz) + 1):
+                for y in range(int(ly), int(hy) + 1):
+                    for x in range(int(lx), int(hx) + 1):
+                        # Standard triangle-box intersection test (Schwarz's method)
+                        if triangle_box_intersect(tri, x, y, z, unitLength):
+                            voxels[encode_morton(x, y, z)] = 1
+
         # Build Octree for this partition
-        build_octree_partition(voxels, morton_partition, gridSize)
-        
+        # Process voxels array to construct octree nodes, handling empty/full nodes efficiently
+        # (Implementation details for octree construction are not specified in the sources)
+
     # Step 4: Finalization
-    finalize_octree()
+    # Write the constructed octree structure to disk
+    # (Implementation details for finalization are not specified in the sources)
+
+# Helper: Standard 3D Morton decode for 10-bit coordinates [G]
+def decode_morton(code):
+    x = code & 0x39999999
+    x = (x ^ (x >> 2)) & 0x03030303
+    x = (x ^ (x >> 4)) & 0x0F00F00F
+    x = (x ^ (x >> 8)) & 0x00FF00FF
+    y = (code >> 1) & 0x39999999
+    y = (y ^ (y >> 2)) & 0x03030303
+    y = (y ^ (y >> 4)) & 0x0F00F00F
+    y = (y ^ (y >> 8)) & 0x00FF00FF
+    z = (code >> 2) & 0x39999999
+    z = (z ^ (z >> 2)) & 0x03030303
+    z = (z ^ (z >> 4)) & 0x0F00F00F
+    z = (z ^ (z >> 8)) & 0x00FF00FF
+    return MortonCoords(x, y, z)
+
+# Helper: Standard AABB overlap test [G]
+def aabb_overlap(a, b):
+    return a.min.x <= b.max.x and a.max.x >= b.min.x and \
+           a.min.y <= b.max.y and a.max.y >= b.min.y and \
+           a.min.z <= b.max.z and a.max.z >= b.min.z
+
+# Helper: Standard triangle-box intersection [G]
+def triangle_box_intersect(tri, x, y, z, unitLength):
+    # Placeholder for Schwarz's triangle-box overlap test logic
+    # Returns True if triangle intersects voxel (x,y,z)
+    return False
 ```
 
 **Parameters:**
@@ -134,13 +171,13 @@ def morton_partitioned_voxelization(mesh, gridSize, memoryLimitMB):
 *   Coordinate system mismatches or negative bounds cause incorrect voxel mapping. Handled by translating all vertices so the minimum bounds are at the origin [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of triangles and voxels, but partitioned. The Morton ordering allows efficient spatial locality during voxel marking and octree construction.
-*   **Memory Complexity:** Logarithmic in the size of the SVO. By processing partitions sequentially, the peak memory usage is bounded by the size of one partition plus the octree structure built so far, rather than the entire voxel grid [S1, unofficial].
-*   **Strengths:** Enables construction of very large SVOs that would otherwise exceed RAM. Morton ordering ensures spatial coherence, which is beneficial for compression and traversal.
-*   **Limitations:** Requires careful tuning of $gridSize$ and $m_{MemoryLimit}$. Morton decoding/encoding adds computational overhead. Precision issues may arise if $gridSize$ is very large or coordinates are not properly normalized.
+*   **Time Complexity:** Linear with respect to the number of triangles and voxels, but partitioned [S1, unofficial]. The Morton ordering allows efficient spatial locality during voxel marking and octree construction [G].
+*   **Memory Complexity:** Logarithmic in the size of the SVO [S1, unofficial]. By processing partitions sequentially, the peak memory usage is bounded by the size of one partition plus the octree structure built so far, rather than the entire voxel grid [S1, unofficial].
+*   **Strengths:** Enables construction of very large SVOs that would otherwise exceed RAM [S1, unofficial]. Morton ordering ensures spatial coherence, which is beneficial for compression and traversal [G].
+*   **Limitations:** Requires careful tuning of $gridSize$ and $m_{MemoryLimit}$ [S1, unofficial]. Morton decoding/encoding adds computational overhead [G]. Precision issues may arise if $gridSize$ is very large or coordinates are not properly normalized [G].
 
 ## Background
-This method originates from Giles Penfold's Master's Thesis on Sparse Voxel Octrees [S1, unofficial]. It was developed to address the memory constraints of building large-scale SVOs from triangle meshes, providing a practical out-of-core solution. The implementation details are found in the associated GitHub repository [S1, unofficial].
+The method is implemented in the MasterThesisSVO repository [S1, unofficial]. It was developed to address the memory constraints of building large-scale SVOs from triangle meshes, providing a practical out-of-core solution [S1, unofficial].
 
 ## Sources
 [S1] GilesPenfold/MasterThesisSVO, https://github.com/GilesPenfold/MasterThesisSVO, fetched 2026-10-26 (unofficial)

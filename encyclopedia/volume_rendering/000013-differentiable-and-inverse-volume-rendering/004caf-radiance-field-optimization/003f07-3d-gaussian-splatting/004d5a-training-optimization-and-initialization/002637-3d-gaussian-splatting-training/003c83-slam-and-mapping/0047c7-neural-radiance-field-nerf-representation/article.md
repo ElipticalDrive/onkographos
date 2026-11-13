@@ -1,83 +1,201 @@
 # Neural Radiance Field (NeRF) Representation
 
-Also called: Neural Radiance Field
+Also called: Neural Radiance Fields, Implicit Neural Radiance Fields
 
 ## Overview
-NeRF represents a 3D scene as a continuous volumetric function that maps 5D coordinates (3D position and 2D viewing direction) to 4D output values (3D color and 1D volume density) using a multilayer perceptron (MLP) [S1, unofficial]. It solves the problem of novel view synthesis by optimizing this implicit representation to match a set of input images with known camera poses, enabling the rendering of photorealistic images from viewpoints not present in the training data [S1, unofficial]. Unlike explicit representations such as [3D Gaussian Splatting](12052-3d-gaussian-splatting.md) which store millions of discrete blobs, NeRF stores the scene implicitly within a neural network, resulting in significantly lower memory usage but requiring ray marching and network evaluation for rendering [S1, unofficial].
+Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function parameterized by a multi-layer perceptron (MLP), enabling the synthesis of novel views from a sparse set of input images by solving the volume rendering integral [S1, unofficial][S2]. Unlike explicit representations such as [3D Gaussian Splatting](12052-3d-gaussian-splatting-optimization.md) which store millions of discrete blobs, NeRF stores the scene implicitly within a neural network, allowing for high-fidelity, view-dependent appearance modeling with significantly lower memory footprint, albeit at the cost of slower rendering and training times [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $N$ training images $I_n$ with corresponding camera poses $T_n$ (extrinsics) and intrinsics.
-*   **Outputs:** A trained MLP $\mathcal{F}_\Theta$ that approximates the scene function, and rendered images from novel viewpoints.
+*   **Inputs:** A set of $N$ calibrated images $\{I_i\}$ with corresponding camera poses $\{T_i\}$ (extrinsics and intrinsics).
+*   **Outputs:** A continuous function $F_\Theta$ that maps a 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$ to a volume density $\sigma \in \mathbb{R}$ and an emitted color $\mathbf{c} \in \mathbb{R}^3$.
 
 **Data Structures:**
-The core data structure is a Multilayer Perceptron (MLP).
-*   **Position Network:** Takes a 3D point $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$.
-    *   Input: Concatenation of $\mathbf{x}$ and $\mathbf{d}$.
-    *   Hidden layers: Typically 8 fully connected layers with 256 units each, using ReLU activation.
-    *   Skip connections: Inputs $\mathbf{x}$ are concatenated into hidden layers at indices 4 and 8 to preserve high-frequency details [S1, unofficial].
-    *   Output: Intermediate feature vector $\mathbf{h}$ and volume density $\sigma$.
-*   **Color Network:** Takes the feature vector $\mathbf{h}$ and viewing direction $\mathbf{d}$.
-    *   Input: Concatenation of $\mathbf{h}$ and $\mathbf{d}$.
-    *   Hidden layers: Typically 1 fully connected layer with 128 units, using ReLU activation.
-    *   Output: View-dependent color $\mathbf{c} \in \mathbb{R}^3$ (RGB).
+The core data structure is a Multi-Layer Perceptron (MLP) with parameters $\Theta$.
+*   **Position Encoding:** Raw coordinates are not fed directly. Instead, positional encoding $\gamma(\mathbf{x})$ is applied to high-frequency coordinates to help the network learn high-frequency details.
+    *   $\gamma(\mathbf{x}) = [\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x})]^T$
+    *   Where $L$ is the number of frequency bands.
+*   **Network Architecture (Standard NeRF):**
+    *   **Position Network:** Takes encoded position $\gamma(\mathbf{x})$ and outputs an intermediate feature vector $\mathbf{b}$.
+    *   **Density Head:** Takes $\mathbf{b}$ and outputs volume density $\sigma$.
+    *   **Viewing Direction Network:** Takes encoded position $\gamma(\mathbf{x})$, viewing direction $\gamma(\mathbf{d})$, and feature $\mathbf{b}$ to output color $\mathbf{c}$.
 
-**Position Encoding:**
-To enable the MLP to learn high-frequency details, input coordinates are mapped to higher dimensions using positional encoding $\gamma$. For a coordinate $x$, the encoding is:
-$$ \gamma(x) = \left( \sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x) \right) $$
-where $L$ is the number of frequencies. This is applied to both $\mathbf{x}$ and $\mathbf{d}$ before entering the network [S1, unofficial].
+**Numbered Steps:**
 
-**Rendering (Volume Rendering):**
-To render a pixel, a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is cast from the camera origin $\mathbf{o}$ through the pixel center. The ray is sampled at $K$ points along its length within the scene bounds. The color $C(\mathbf{r})$ is computed via differentiable volume rendering:
-$$ C(\mathbf{r}) = \sum_{i=1}^{K} T_i \left( 1 - \exp(-\sigma_i \delta_i) \right) \mathbf{c}_i $$
-where:
-*   $\sigma_i$ is the volume density at sample point $i$.
-*   $\mathbf{c}_i$ is the color at sample point $i$.
-*   $\delta_i$ is the distance between sample point $i$ and $i+1$.
-*   $T_i$ is the accumulated transmittance up to point $i$:
-    $$ T_i = \exp\left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right) $$
-    $T_i$ represents the probability that the ray travels from the camera to point $i$ without being absorbed or scattered [S1, unofficial].
+1.  **Ray Casting:** For each pixel in a target image, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera center and $\mathbf{d}$ is the unit direction vector.
+2.  **Sampling:** Sample $K$ points along the ray within the scene bounds $[t_n, t_f]$ (near and far planes). Let the sampled points be $t_1, t_2, \dots, t_K$.
+3.  **Network Query:** For each sample point $t_k$, compute position $\mathbf{x}_k = \mathbf{r}(t_k)$ and direction $\mathbf{d}$. Query the MLP to get density $\sigma_k = \sigma(\mathbf{x}_k; \Theta)$ and color $\mathbf{c}_k = \mathbf{c}(\mathbf{x}_k, \mathbf{d}; \Theta)$.
+4.  **Alpha Compositing (Volume Rendering):** Compute the final pixel color $C(\mathbf{r})$ by integrating the radiance along the ray, weighted by the probability that the ray terminates at each sample.
+    *   Compute the weight $w_k$ for each sample:
+        $$ w_k = \alpha_k \prod_{j=1}^{k-1} (1 - \alpha_j) $$
+    *   Where $\alpha_k = 1 - \exp(-\sigma_k \delta_k)$ is the opacity of the segment, and $\delta_k = t_{k+1} - t_k$ is the distance between samples.
+    *   The final color is:
+        $$ C(\mathbf{r}) = \sum_{k=1}^{K} w_k \mathbf{c}_k $$
+5.  **Loss Calculation:** Compare the rendered image $I_{rendered}$ with the ground truth image $I_{gt}$ using a combination of L1 loss and Structural Similarity (SSIM) index [S1, unofficial].
+    $$ L = (1 - \lambda) L_{L1} + \lambda L_{SSIM} $$
+6.  **Optimization:** Update network parameters $\Theta$ using gradient descent (e.g., Adam) to minimize the loss.
 
-**Training Steps:**
-1.  **Initialization:** Initialize the MLP weights randomly.
-2.  **Sampling:** For each training image, cast rays through each pixel. Sample points along each ray using uniform sampling or stratified sampling.
-3.  **Query:** Pass sample points and viewing directions through the MLP to get $\sigma_i$ and $\mathbf{c}_i$.
-4.  **Rendering:** Compute the rendered pixel color $C(\mathbf{r})$ using the volume rendering equation.
-5.  **Loss Calculation:** Compare the rendered image with the ground truth image $I_{gt}$ using a loss function $L$. The standard loss combines L1 loss and Structural Similarity (SSIM):
-    $$ L = (1 - \alpha) L_{1} + \alpha L_{SSIM} $$
-    where $\alpha$ is a weight (typically 0.2) [S1, unofficial].
-6.  **Optimization:** Backpropagate the loss through the differentiable volume rendering process to update the MLP weights $\Theta$ using an optimizer like Adam [S1, unofficial].
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, num_bands):
+        super().__init__()
+        self.num_bands = num_bands
+
+    def forward(self, x):
+        # x shape: (..., 3)
+        freq_bands = 2.0 ** torch.linspace(0, self.num_bands - 1, self.num_bands).to(x.device)
+        # Expand dimensions for broadcasting
+        freq_bands = freq_bands.view(1, -1, 1)
+        scaled_x = x.unsqueeze(-2) * freq_bands * math.pi
+        
+        encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+        return torch.cat([x, encoded], dim=-1)
+
+class NeRF(nn.Module):
+    def __init__(self, D=8, W=256, skip=[4], input_ch=3, input_ch_dir=3, multires=10, multires_view=4):
+        super().__init__()
+        self.D = D
+        self.W = W
+        self.skip = skip
+        self.input_ch = input_ch
+        self.input_ch_dir = input_ch_dir
+        self.multires = multires
+        self.multires_view = multires_view
+        
+        # Positional Encoders
+        self.pos_enc = PositionalEncoding(multires)
+        self.dir_enc = PositionalEncoding(multires_view)
+        
+        # Position Network
+        self.pos_net = nn.ModuleList()
+        self.pos_net.append(nn.Linear(input_ch + input_ch * 2 * multires, W))
+        for i in range(1, D):
+            if i in skip:
+                self.pos_net.append(nn.Linear(W + input_ch + input_ch * 2 * multires, W))
+            else:
+                self.pos_net.append(nn.Linear(W, W))
+            self.pos_net.append(nn.ReLU())
+            
+        # Density Head
+        self.sigma_head = nn.Linear(W, 1)
+        
+        # Viewing Direction Network
+        self.dir_net = nn.ModuleList()
+        self.dir_net.append(nn.Linear(W + input_ch_dir + input_ch_dir * 2 * multires_view + W, W // 2))
+        self.dir_net.append(nn.ReLU())
+        for i in range(1, 3):
+            self.dir_net.append(nn.Linear(W // 2, W // 2))
+            self.dir_net.append(nn.ReLU())
+        self.color_head = nn.Linear(W // 2, 3)
+
+    def forward(self, x, d):
+        # x: (N, 3), d: (N, 3)
+        x_enc = self.pos_enc(x)
+        d_enc = self.dir_enc(d)
+        
+        # Position Network
+        h = x_enc
+        for i, layer in enumerate(self.pos_net):
+            if i in self.skip:
+                h = torch.cat([h, x_enc], dim=-1)
+            h = layer(h)
+            if i < len(self.pos_net) - 1:
+                h = torch.relu(h)
+                
+        sigma = torch.relu(self.sigma_head(h)) # Density
+        
+        # View Dependent Color
+        h_view = torch.cat([h, d_enc], dim=-1)
+        for i, layer in enumerate(self.dir_net):
+            h_view = layer(h_view)
+        color = torch.sigmoid(self.color_head(h_view))
+        
+        return sigma, color
+
+def render_ray(ray_o, ray_d, t_near, t_far, num_samples, nerf_model):
+    """
+    Renders a single ray using volume rendering.
+    ray_o: (3,)
+    ray_d: (3,)
+    t_near, t_far: scalars
+    num_samples: int
+    """
+    # Sample points along the ray
+    t_vals = torch.linspace(0., 1., num_samples)
+    t = t_near * (1. - t_vals) + t_far * t_vals
+    points = ray_o.unsqueeze(0) + t.unsqueeze(1) * ray_d.unsqueeze(0) # (1, N, 3)
+    
+    # Query NeRF
+    sigma, color = nerf_model(points, ray_d.unsqueeze(0).expand_as(points))
+    
+    # Compute deltas
+    deltas = t[1:] - t[:-1]
+    delta_inf = 1e10
+    deltas = torch.cat([deltas, delta_inf], dim=0) # (N,)
+    
+    # Compute alpha
+    alpha = 1. - torch.exp(-sigma * deltas) # (N,)
+    
+    # Compute weights
+    transmittance = torch.cumprod(1. - alpha + 1e-10, dim=0) # (N,)
+    weights = alpha * transmittance / (1. - alpha + 1e-10) # (N,)
+    # Handle first element where transmittance is 1
+    weights[0] = alpha[0]
+    
+    # Composite color
+    final_color = torch.sum(weights.unsqueeze(-1) * color, dim=0) # (3,)
+    
+    return final_color
+
+```
 
 **Parameters:**
-*   Number of samples per ray ($K$): Typically 128–256 for uniform sampling, or more for hierarchical sampling.
-*   MLP hidden units: 256 (position network), 128 (color network).
-*   Number of hidden layers: 8 (position), 1 (color).
-*   Position encoding frequencies ($L$): Typically 10.
+*   **Number of Samples ($K$):** Typically 128–256 per ray for training; higher for high-quality inference [S1, unofficial].
+*   **Network Depth/Width:** Standard NeRF uses 8 layers with 256 units per layer [S1, unofficial].
+*   **Positional Encoding Bands ($L$):** Typically 10 bands for position, 4 for view direction [S1, unofficial].
+*   **Learning Rate:** $5 \times 10^{-4}$ for the first 100k steps, then $5 \times 10^{-5}$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision issues can arise when computing transmittance $T_i$ for very long rays or very small densities, potentially leading to NaNs or artifacts [G].
-*   **Boundaries:** The scene bounds must be carefully defined. Points outside the bounds should be assigned zero density or handled via a bounding box [G].
-*   **Degenerate Input:** If camera poses are inaccurate, the optimization may fail to converge or produce blurry artifacts [S1, unofficial].
+*   **Precision:** Floating-point precision issues can arise when computing transmittance for very small densities or large distances, leading to NaNs. A small epsilon ($10^{-10}$) is added to denominators [G].
+*   **Boundaries:** Incorrect near/far plane estimation leads to artifacts. The scene bounds must tightly enclose the geometry of interest [S1, unofficial].
+*   **Degenerate Input:** If camera poses are inaccurate (e.g., from poor Structure from Motion), the network may learn inconsistent geometry or "ghosting" artifacts [S1, unofficial].
 
 ## Subtopics
 
 ### [Scene NeRF](12484-scene-nerf.md)
-Scene NeRF isolates and renders the static background of a scene by training a NeRF exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space.
+Scene NeRF isolates the static background by training a NeRF exclusively on pixels identified as background via human segmentation masks, excluding dynamic foreground elements [12484-scene-nerf.md]. It employs an emptiness regularizer to prevent artifacts in empty space, distinguishing it from standard NeRF which blends all pixels [12484-scene-nerf.md].
 
 ### [NeRF-OSR](14477-nerf-osr.md)
-NeRF-OSR is a neural radiance field approach for outdoor scene relighting that learns a neural representation of scene geometry, diffuse albedo, and illumination-dependent shadows from a set of images capturing the same site from different viewpoints and at different times, enabling simultaneous editing of both the scene’s lighting and viewpoint. Unlike standard NeRF which learns a Lambertian model under fixed lighting, NeRF-OSR decomposes the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance, trained in a self-supervised manner from outdoor data captured from various viewpoints and at different illuminations. It sets itself apart from siblings like [Scene NeRF](12484-scene-nerf.md) by providing explicit intrinsic decomposition (albedo, geometry, lighting) rather than just view-dependent appearance, allowing for physical relighting and albedo editing.
+NeRF-OSR extends NeRF for outdoor scene relighting by decomposing the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance [14477-nerf-osr.md]. Unlike standard NeRF, it enables physical relighting and albedo editing by learning illumination-dependent shadows from images captured at different times and viewpoints, trained in a self-supervised manner [14477-nerf-osr.md].
+
+### SLAIM
+SLAIM is a SLAM method that introduces a coarse-to-fine tracking pipeline and improves photometric bundle adjustment for NeRF-based mapping [S2]. It maintains NeRF’s original volume density formulation while introducing a KL regularization over the ray termination distribution to address high-frequency renderings hindering image alignment [S2].
+
+### SNI-SLAM
+SNI-SLAM is a dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping [S2]. It introduces a hierarchical semantic encoding and cross-attention mechanism to enable mutual reinforcement between appearance, geometry, and semantics modalities, using a novel one-way decoder design to enhance inter-modal information flow [S2].
+
+### KN-SLAM
+KN-SLAM is a NeRF-based SLAM method that integrates local feature correspondences for coarse pose initialization and joint optimization [S2]. It uses global image features and local matches for explicit loop detection, followed by pose graph optimization and global refinement of the neural map to ensure consistency [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is slow, often taking several hours to days, as the MLP must be queried for every sample point on every ray for every training image [S1, unofficial].
-*   **Memory Complexity:** Memory usage is low, typically a few megabytes, as only the MLP weights are stored [S1, unofficial].
-*   **Rendering Speed:** Rendering is slow, taking seconds per image, because it requires evaluating the MLP hundreds of times per pixel and performing volume integration [S1, unofficial].
-*   **Strengths:** High-quality novel view synthesis, implicit representation handles complex geometry and fine details well, view-dependent effects (specularities) are naturally modeled.
-*   **Limitations:** Slow training and rendering, cannot easily extract a clean surface or mesh, prone to floating artifacts and aliasing when zooming in or out, requires accurate camera poses [S1, unofficial].
-*   **When to use:** When high-quality novel views are needed and real-time rendering is not required, or when memory is constrained.
-*   **When not to use:** When real-time rendering is required (use [3D Gaussian Splatting](12052-3d-gaussian-splatting.md) instead), or when a clean mesh is needed.
+*   **Time Complexity:** Training is computationally expensive, often taking several hours to converge due to the need to query the MLP for every sample along every ray in every training image [S1, unofficial]. Rendering is slow, typically taking seconds per image, as it requires evaluating the network for hundreds of points per pixel [S1, unofficial].
+*   **Memory Complexity:** Memory usage is low, typically a few megabytes, as the scene is stored only in the weights of the neural network [S1, unofficial].
+*   **Performance:** High-fidelity novel view synthesis with realistic lighting and reflections. However, it does not support real-time rendering on standard hardware without acceleration techniques (e.g., voxel grids, hash tables) [S1, unofficial].
+*   **Strengths:** Implicit representation handles complex geometry and view-dependent effects naturally; compact storage.
+*   **Limitations:** Slow training and rendering; difficulty in extracting explicit meshes; prone to floating artifacts and aliasing if not regularized [S1, unofficial].
+*   **When to Use:** When high visual fidelity is required and real-time performance is not critical, or when memory bandwidth is limited.
+*   **When Not to Use:** For real-time applications (VR, gaming) or large-scale dynamic scenes where explicit representations like [3D Gaussian Splatting](12052-3d-gaussian-splatting-optimization.md) are preferred [S1, unofficial].
 
 ## Background
-NeRF was introduced by Mildenhall et al. at SIGGRAPH 2020 [S1, unofficial][S2]. It revolutionized the field of novel view synthesis by demonstrating that a simple MLP could learn a high-quality implicit representation of a scene from unstructured images. The method builds on the principles of volume rendering and positional encoding. It is widely used in virtual reality, film, robotics, mapping, digital humans, ecommerce, and cultural heritage [S1, unofficial].
+Neural Radiance Fields were introduced by Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng in their 2020 paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" [S2]. The method revolutionized novel view synthesis by demonstrating that a simple MLP could learn a continuous 5D function (3D position + 2D viewing direction) that implicitly encodes both geometry and appearance. It builds on earlier work in volumetric rendering and neural implicit representations [S2].
 
 ## Sources
 [S1] Gaussian Splatting Explained: Real-Time 3D from Photos (with a Real Demo), https://www.youtube.com/watch?v=HABVlXlRqOs, fetched 2026-10-27 (unofficial)

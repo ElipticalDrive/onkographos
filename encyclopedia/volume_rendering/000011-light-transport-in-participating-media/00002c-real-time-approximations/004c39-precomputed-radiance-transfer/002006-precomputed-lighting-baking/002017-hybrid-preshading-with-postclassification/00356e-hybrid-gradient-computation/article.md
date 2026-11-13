@@ -6,52 +6,22 @@ Also called: Adaptive Gradient Flipping
 A technique to compute gradient directions for lighting that adaptively align with post-classified density variations while using pre-computed gradient directions for sampling, avoiding the need for two-sided lighting [S1]. It differs from standard pre-classified gradients by flipping normals to ensure single-sided lighting correctly illuminates low-scalar-value regions (like dentin) without lighting back-facing surfaces [S1].
 
 ## How it works
-**Inputs:**
-*   Original scalar field $V$.
-*   Pre-computed gradient field $\nabla V$.
-*   Post-classification transfer function $T(\cdot)$ mapping scalar values to opacity.
-*   2D Lookup Table (LUT) for lighting transfer, with an alpha channel reserved for gradient flip logic.
-
-**Outputs:**
-*   Adaptive gradient direction $\mathbf{g}_{hybrid}$ for each sample point.
-*   Pre-computed difference value stored in the LUT alpha channel.
-
-**Data Structures:**
-*   **Pre-computed Gradient Field:** A 3D vector field where each voxel stores the normalized gradient $\mathbf{n} = \frac{\nabla V}{\|\nabla V\|}$.
-*   **2D LUT:** A texture used for lighting transfer. The alpha channel $\alpha_{lut}$ stores the pre-computed density difference used for the flip decision.
-
+**Inputs:** Original scalar field $V$, post-classification transfer function (implicit in post-classified sample densities), and a 2D lookup table (LUT) for lighting transfer with an alpha channel reserved for gradient flip logic [S1].
+**Outputs:** Adaptive gradient direction $\mathbf{g}_{hybrid}$ for each sample point [S1].
+**Data Structures:** A 3D vector field storing the normalized pre-computed gradient direction $\mathbf{n}_{pre}$ at each voxel, and a 2D LUT texture where the alpha channel stores the pre-computed density difference for the flip decision [S1].
 **Steps:**
-1.  **Precompute Gradients:** Calculate the gradient $\nabla V$ of the original scalar field at all voxel centers. Normalize these to unit vectors to form the pre-computed gradient direction field $\mathbf{n}_{pre}$ [S1].
-2.  **Pre-compute Flip Logic:** For every voxel (or representative sample point), perform the following offline to populate the LUT alpha channel:
-    a. Let $\mathbf{n}_{pre}$ be the normalized pre-computed gradient direction at position $\mathbf{p}$.
-    b. Define a step size $\Delta s$ (implementation detail not specified in sources, typically small relative to voxel size) [G].
-    c. Sample the scalar field at two points along the linearly interpolated normalized direction:
-       $$ \mathbf{p}_1 = \mathbf{p} - \Delta s \cdot \mathbf{n}_{pre} $$
-       $$ \mathbf{p}_2 = \mathbf{p} + \Delta s \cdot \mathbf{n}_{pre} $$
-    d. Interpolate the scalar values $v_1 = V(\mathbf{p}_1)$ and $v_2 = V(\mathbf{p}_2)$ [S1].
-    e. Apply the post-classification transfer function to get opacities: $o_1 = T(v_1)$ and $o_2 = T(v_2)$ [S1].
-    f. Compute the difference: $\Delta o = o_2 - o_1$ [S1].
-    g. Store $\Delta o$ in the alpha channel of the 2D LUT at the coordinate corresponding to the lighting transfer function input (e.g., view direction or scalar value) [S1].
-3.  **Runtime Gradient Adaptation:** During volume rendering, for each sample point $\mathbf{p}$:
-    a. Retrieve the pre-computed gradient direction $\mathbf{n}_{pre}$ from the gradient field [S1].
-    b. Retrieve the pre-computed difference $\Delta o$ from the alpha channel of the 2D LUT, indexed by the current lighting transfer function parameters (e.g., view direction) [S1].
-    c. Determine the adaptive direction $\mathbf{g}_{hybrid}$:
-       $$ \mathbf{g}_{hybrid} = \begin{cases} \mathbf{n}_{pre} & \text{if } \Delta o \ge 0 \\ -\mathbf{n}_{pre} & \text{if } \Delta o < 0 \end{cases} $$
-       This flips the direction if the pre-computed direction points opposite to the maximum variation in post-classified density [S1].
-    d. Use $\mathbf{g}_{hybrid}$ for lighting calculations (e.g., normal-based shading) [S1].
-
-**Pitfalls:**
-*   Pre-classified and post-classified gradients are rarely parallel, so the resulting hybrid directions are not equivalent to true post-classified gradients [S1].
-*   The method relies on the assumption that the sign of the density difference along the pre-computed gradient direction is a sufficient proxy for the direction of maximum variation in post-classified density.
+1. Precompute the gradients of the original scalar field at all voxel centers and normalize them to form the pre-computed gradient direction field $\mathbf{n}_{pre}$ [S1].
+2. For every voxel (or representative sample point), perform the following offline to populate the LUT alpha channel: let $\mathbf{n}_{pre}$ be the normalized pre-computed gradient direction at position $\mathbf{p}$, read two additional scalar values along the linearly interpolated normalized direction, compute the difference between the post-classified sample densities at the start and end of the gradient step, and store the precomputed difference in the alpha channel of the 2D lookup table used for the lighting transfer function [S1].
+3. During volume rendering, for each sample point $\mathbf{p}$: retrieve the pre-computed gradient direction $\mathbf{n}_{pre}$ from the gradient field, retrieve the pre-computed difference from the alpha channel of the 2D LUT, and determine the adaptive direction $\mathbf{g}_{hybrid}$ using the formula:
+   $$ \mathbf{g}_{hybrid} = \begin{cases} \mathbf{n}_{pre} & \text{if the density difference sign matches the gradient direction} \\ -\mathbf{n}_{pre} & \text{otherwise} \end{cases} $$
+   This adaptively flips the direction if the sign of the density difference indicates the pre-computed direction points opposite to the maximum variation in post-classified density [S1]. Use $\mathbf{g}_{hybrid}$ for lighting calculations [S1].
+**Pitfalls:** Pre-classified and post-classified gradients are rarely parallel, so the resulting hybrid directions are not equivalent to true post-classified gradients [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Adds a constant-time lookup and conditional flip per sample during rendering. The pre-computation step is performed once offline.
-*   **Memory Complexity:** Requires storage for the pre-computed gradient field and an additional alpha channel in the 2D LUT for the pre-computed difference [S1].
-*   **Strengths:** Enables single-sided lighting to correctly illuminate surfaces that would otherwise be back-facing or inward-facing due to pre-classified gradient orientation (e.g., dentin in tooth models) [S1]. Avoids the visual artifacts of two-sided lighting where back-facing surfaces are incorrectly illuminated [S1].
-*   **Limitations:** The hybrid directions are approximations and not true post-classified gradients [S1]. Performance impact is minimal but depends on the cost of the pre-computation step for large datasets.
+The method adds a constant-time lookup and conditional flip per sample during rendering, while the pre-computation step is performed once offline [S1]. Memory complexity requires storage for the pre-computed gradient field and an additional alpha channel in the 2D LUT for the pre-computed difference [S1]. Strengths include enabling single-sided lighting to correctly illuminate surfaces that would otherwise be back-facing or inward-facing due to pre-classified gradient orientation (e.g., dentin in tooth models), and avoiding the visual artifacts of two-sided lighting where back-facing surfaces are incorrectly illuminated [S1]. Limitations are that the hybrid directions are approximations and not true post-classified gradients [S1].
 
 ## Background
-Originated in the context of volume rendering with lighting transfer functions, specifically addressing the issue where pre-classified gradients point opposite to the classified opacity distribution [S1]. It was introduced as a hybrid between pre-classified and post-classified gradient techniques [S1].
+The technique originated in the context of volume rendering with lighting transfer functions, specifically addressing the issue where pre-classified gradients point opposite to the classified opacity distribution [S1]. It was introduced as a hybrid between pre-classified and post-classified gradient techniques [S1].
 
 ## Sources
 [S1] PDF Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29

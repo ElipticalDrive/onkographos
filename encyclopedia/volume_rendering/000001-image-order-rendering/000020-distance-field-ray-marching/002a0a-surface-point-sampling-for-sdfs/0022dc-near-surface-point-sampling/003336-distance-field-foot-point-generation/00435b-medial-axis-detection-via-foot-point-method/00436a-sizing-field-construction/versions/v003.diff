@@ -1,0 +1,199 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # Sizing Field Construction
+ 
+-Also called: Lipschitz sizing field
+ 
+ ## Overview
+@@ -20,5 +19,5 @@
+ **Data Structures:**
+ *   Grid: 3D array of floats `h[Nx][Ny][Nz]` [G].
+-*   Hessian: 3x3 symmetric matrix per grid node for curvature calculation [S1].
++*   Hessian: 3×3 symmetric matrix per grid node for curvature calculation [S1].
+ *   LFS Field: 3D array of floats `lambda[Nx][Ny][Nz]` [S1].
+ 
+@@ -40,5 +39,5 @@
+     *   $\lambda(\mathbf{x})$: Local feature size at $\mathbf{x}$ [S1].
+     *   $\kappa_{max}(\mathbf{x})$: Maximum principal curvature at $\mathbf{x}$ [S1].
+-    *   $C$: Constant, typically $2\varepsilon$ [S1].
++    *   $C$: Constant, defined as $2\varepsilon$ [S1].
+ 
+ *   **Update Rule (Eq. 2):**
+@@ -54,13 +53,13 @@
+ 
+ **Parameters:**
+-*   $\varepsilon$: Sampling parameter. Controls the fraction of local feature size. Literature suggests $\varepsilon = 0.5$ as a loose upper bound [S1].
+-*   $\delta$: Gradient limit. Controls the smoothness of triangle size transition. $\delta < \varepsilon$ generally produces well-shaped triangles [S1].
++*   $\varepsilon$: Sampling parameter. Controls the sampling density relative to the local feature size [S1]. Literature suggests $\varepsilon = 0.5$ as a loose upper bound [S1].
++*   $\delta$: Gradient limit. Controls the smoothness of triangle size transition [S1]. $\delta < \varepsilon$ generally produces well-shaped triangles [S1].
+ *   $\Delta t$: Time step. Not explicitly defined in sources, but required for the iterative solver [G].
+ *   $\tau$: Convergence threshold. Default $10^{-5}$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Curvature:** If $\kappa_{max}(\mathbf{x}) = 0$, the radius of curvature is infinite. The `min` function with $\lambda(\mathbf{x})$ handles this, but numerical stability should be ensured [G].
+-*   **Boundary Conditions:** The method operates on a narrow band around the isosurface. Nodes outside this band may not be updated or initialized [S1].
+-*   **Convergence:** The iterative process must converge. If $\Delta t$ is too large, the update may oscillate or diverge [G].
++*   **Zero Curvature:** If $\kappa_{max}(\mathbf{x}) = 0$, the radius of curvature is infinite, but the $\min$ function with $\lambda(\mathbf{x})$ bounds the field [G].
++*   **Boundary Conditions:** The method operates on a narrow band around the isosurface, so grid nodes outside this band are not processed [S1].
++*   **Convergence:** The iterative process must converge; if $\Delta t$ is too large, the update may oscillate or diverge [G].
+ 
+ **Pseudocode:**
+@@ -69,107 +68,72 @@
+ import math
+ 
+-def compute_max_eigenvalue(H):
+-    """Compute the maximum eigenvalue of a 3x3 symmetric matrix using power iteration [G]."""
++def compute_max_curvature(H):
++    """Compute maximum principal curvature from 3x3 Hessian matrix [G]."""
+     v = [1.0, 0.0, 0.0]
+-    for _ in range(100):
+-        Hv = [
+-            H[0][0]*v[0] + H[0][1]*v[1] + H[0][2]*v[2],
+-            H[1][0]*v[0] + H[1][1]*v[1] + H[1][2]*v[2],
+-            H[2][0]*v[0] + H[2][1]*v[1] + H[2][2]*v[2]
+-        ]
++    for _ in range(50):
++        Hv = [H[0][0]*v[0] + H[0][1]*v[1] + H[0][2]*v[2],
++              H[1][0]*v[0] + H[1][1]*v[1] + H[1][2]*v[2],
++              H[2][0]*v[0] + H[2][1]*v[1] + H[2][2]*v[2]]
+         norm = math.sqrt(Hv[0]**2 + Hv[1]**2 + Hv[2]**2)
+         if norm == 0: return 0.0
+         v = [Hv[0]/norm, Hv[1]/norm, Hv[2]/norm]
+-    # Rayleigh quotient
+-    Hv = [
+-        H[0][0]*v[0] + H[0][1]*v[1] + H[0][2]*v[2],
+-        H[1][0]*v[0] + H[1][1]*v[1] + H[1][2]*v[2],
+-        H[2][0]*v[0] + H[2][1]*v[1] + H[2][2]*v[2]
+-    ]
++    Hv = [H[0][0]*v[0] + H[0][1]*v[1] + H[0][2]*v[2],
++          H[1][0]*v[0] + H[1][1]*v[1] + H[1][2]*v[2],
++          H[2][0]*v[0] + H[2][1]*v[1] + H[2][2]*v[2]]
+     return Hv[0]*v[0] + Hv[1]*v[1] + Hv[2]*v[2]
+ 
+ def compute_sizing_field(lambda_field, hessian_field, epsilon, delta, dt, tolerance=1e-5):
+-    """
+-    Computes the (epsilon, delta)-sizing field.
+-    
+-    Args:
+-        lambda_field: 3D array of local feature sizes.
+-        hessian_field: 3D array of 3x3 Hessian matrices.
+-        epsilon: Sampling parameter.
+-        delta: Gradient limit parameter.
+-        dt: Time step for iterative update.
+-        tolerance: Convergence threshold.
+-        
+-    Returns:
+-        h: 3D array of the sizing field.
+-    """
+     C = 2 * epsilon
+     Nx, Ny, Nz = lambda_field.shape
+-    h = [[0.0]*Nz for _ in range(Ny)]
+-    for i in range(Nx):
+-        for j in range(Ny):
+-            for k in range(Nz):
+-                h[j][i][k] = 0.0
+-                
++    h = [[[0.0]*Nz for _ in range(Ny)] for _ in range(Nx)]
++
+     # Step 1 & 2: Initialize field
+     for i in range(Nx):
+         for j in range(Ny):
+             for k in range(Nz):
+-                H = hessian_field[i][j][k]
+-                kappa_max = compute_max_eigenvalue(H)
+-                
+-                if kappa_max < 1e-10:
+-                    radius_curv = 1e10
+-                else:
+-                    radius_curv = 1.0 / kappa_max
+-                
+-                h[j][i][k] = C * min(lambda_field[i][j][k], radius_curv)
+-    
++                kappa_max = compute_max_curvature(hessian_field[i][j][k])
++                radius_curv = 1.0 / abs(kappa_max) if abs(kappa_max) > 1e-10 else float('inf')
++                h[i][j][k] = C * min(lambda_field[i][j][k], radius_curv)
++
+     # Step 3 & 4: Iterative gradient limiting
+     while True:
+         max_rel_change = 0.0
+-        h_new = [[0.0]*Nz for _ in range(Ny)]
++        h_new = [[[0.0]*Nz for _ in range(Ny)] for _ in range(Nx)]
+         for i in range(Nx):
+             for j in range(Ny):
+                 for k in range(Nz):
+                     # Forward differences
+-                    dx_plus = h[j][i+1][k] - h[j][i][k] if i < Nx-1 else 0.0
+-                    dy_plus = h[j+1][i][k] - h[j][i][k] if j < Ny-1 else 0.0
+-                    dz_plus = h[j][i][k+1] - h[j][i][k] if k < Nz-1 else 0.0
+-                    
++                    dx_p = h[i+1][j][k] - h[i][j][k] if i < Nx-1 else 0.0
++                    dy_p = h[i][j+1][k] - h[i][j][k] if j < Ny-1 else 0.0
++                    dz_p = h[i][j][k+1] - h[i][j][k] if k < Nz-1 else 0.0
+                     # Backward differences
+-                    dx_minus = h[j][i][k] - h[j][i-1][k] if i > 0 else 0.0
+-                    dy_minus = h[j][i][k] - h[j-1][i][k] if j > 0 else 0.0
+-                    dz_minus = h[j][i][k] - h[j][i][k-1] if k > 0 else 0.0
+-                    
+-                    # Gradient magnitude delta_plus
+-                    term_x = max(dx_plus, 0.0)**2 + min(dx_minus, 0.0)**2
+-                    term_y = max(dy_plus, 0.0)**2 + min(dy_minus, 0.0)**2
+-                    term_z = max(dz_plus, 0.0)**2 + min(dz_minus, 0.0)**2
+-                    
+-                    delta_plus = math.sqrt(term_x + term_y + term_z)
+-                    
++                    dx_m = h[i][j][k] - h[i-1][j][k] if i > 0 else 0.0
++                    dy_m = h[i][j][k] - h[i][j-1][k] if j > 0 else 0.0
++                    dz_m = h[i][j][k] - h[i][j][k-1] if k > 0 else 0.0
++
++                    # Gradient magnitude
++                    grad_mag = math.sqrt(max(dx_p, 0.0)**2 + min(dx_m, 0.0)**2 +
++                                         max(dy_p, 0.0)**2 + min(dy_m, 0.0)**2 +
++                                         max(dz_p, 0.0)**2 + min(dz_m, 0.0)**2)
++
+                     # Update rule
+-                    update = dt * min(0.0, delta - delta_plus)
+-                    h_new[j][i][k] = h[j][i][k] + update
+-                    
+-                    # Track max relative change
+-                    current_val = h[j][i][k]
+-                    if abs(current_val) > 1e-10:
+-                        rel_change = abs(update / current_val)
+-                    else:
+-                        rel_change = abs(update)
++                    update = dt * min(0.0, delta - grad_mag)
++                    h_new[i][j][k] = h[i][j][k] + update
++
++                    # Convergence tracking
++                    current_val = h[i][j][k]
++                    rel_change = abs(update / current_val) if abs(current_val) > 1e-10 else abs(update)
+                     if rel_change > max_rel_change:
+                         max_rel_change = rel_change
+-        
+-        # Update grid
++
++        # Swap buffers
+         for i in range(Nx):
+             for j in range(Ny):
+                 for k in range(Nz):
+-                    h[j][i][k] = h_new[j][i][k]
+-        
++                    h[i][j][k] = h_new[i][j][k]
++
+         if max_rel_change < tolerance:
+             break
+-            
++
+     return h
+ ```
+@@ -178,8 +142,8 @@
+ 
+ ### Local Feature Size (LFS) Estimation
+-Provides the $\lambda(\mathbf{x})$ field used in the initialization. It is derived from the medial axis and represents the distance to the nearest feature [G]. [LFS Estimation](link-to-lfs-article.md).
++Provides the $\lambda(\mathbf{x})$ field used in the initialization [S1]. [LFS Estimation](link-to-lfs-article.md).
+ 
+ ### Curvature Computation
+-The method for computing $\kappa_{max}$ from the Hessian of the implicit function [S1]. [Curvature Computation](link-to-curvature-article.md).
++Computes $\kappa_{max}$ from the Hessian of $F$ [S1]. [Curvature Computation](link-to-curvature-article.md).
+ 
+ ## Operating characteristics

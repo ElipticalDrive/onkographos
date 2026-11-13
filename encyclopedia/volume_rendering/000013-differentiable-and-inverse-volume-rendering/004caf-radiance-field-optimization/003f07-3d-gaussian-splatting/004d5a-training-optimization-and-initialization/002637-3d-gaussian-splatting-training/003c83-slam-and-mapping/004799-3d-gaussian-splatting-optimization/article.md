@@ -1,59 +1,37 @@
 # 3D Gaussian Splatting optimization
-
 Also called: 3DGS optimization, Gaussian SLAM optimization
 
 ## Overview
-This family encompasses methods that optimize a scene representation $\mathcal{R}$ composed of 3D Gaussians $\mathcal{G}$ and camera poses $\mathbf{T}_t$ to minimize the difference between rendered outputs and captured sensor data. It distinguishes itself from sibling methods like [Mapping Strategies](9321-mapping-strategies.md) and [Semantic-aware mapping](12053-semantic-aware-mapping.md) by explicitly leveraging the differentiable rasterization of 3D Gaussians for simultaneous localization and mapping (SLAM) or pose estimation, often utilizing specific densification, regularization, or keyframe management strategies to handle the dynamic nature of the Gaussian set.
+This family encompasses methods that optimize a scene representation composed of 3D Gaussians and camera poses to minimize photometric and geometric residuals between rendered views and captured sensor data. It distinguishes itself from sibling methods like [Mapping Strategies](9321-mapping-strategies.md) and [Neural Radiance Field (NeRF) Representation](12096-neural-radiance-field-nerf-representation.md) by using explicit, differentiable Gaussian primitives rather than implicit neural fields or voxel grids, allowing for real-time rendering and direct gradient-based optimization of geometry and appearance.
 
 ## Shared principles
-All methods in this family share the core objective of optimizing a scene representation $\mathcal{R}$ (composed of 3D Gaussians $\mathcal{G}$ or hybrid neural fields) and camera poses $\mathbf{T}_t$ to minimize the difference between rendered outputs and captured sensor data.
+The core mechanism involves a coupled optimization loop where the scene representation $\mathcal{R}$ (a set of 3D Gaussians $\mathcal{G}$) and camera poses $\mathbf{T}_t$ are jointly or alternately optimized. Each Gaussian $i$ is defined by mean position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (parameterized by scale $\mathbf{s}_i \in \mathbb{R}^3$ and rotation $\mathbf{R}_i \in SO(3)$), opacity $\alpha_i \in [0, 1]$, and color $c_i$.
 
-**Scene Representation:**
-The scene is typically represented as a collection of 3D Gaussians. Each Gaussian $i$ is defined by:
-*   Mean position $\mu_i \in \mathbb{R}^3$.
-*   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$, parameterized by scale $\mathbf{s}_i \in \mathbb{R}^3$ and rotation $\mathbf{R}_i \in SO(3)$.
-*   Opacity $\alpha_i \in [0, 1]$.
-*   Color $c_i$, which may be view-dependent (Spherical Harmonics) or view-independent.
-
-**Optimization Objective:**
-The total loss $L$ typically combines photometric and geometric terms:
+The optimization objective minimizes a loss function $L$:
 $$ L = L_{photo} + \lambda L_{depth} + L_{reg} $$
-where:
-*   $L_{photo} = || I_{rendered} - I_{captured} ||_1$ measures color difference.
-*   $L_{depth} = || D_{rendered} - D_{captured} ||_1$ measures depth difference (if depth is available).
-*   $L_{reg}$ includes regularization terms such as scale isotropy to prevent degenerate Gaussians.
+where $L_{photo} = || I_{rendered} - I_{captured} ||_1$ measures color difference, $L_{depth} = || D_{rendered} - D_{captured} ||_1$ measures depth difference (if available), and $L_{reg}$ includes regularization terms such as scale isotropy to prevent degenerate Gaussians.
 
-**Tracking and Mapping Loop:**
-1.  **Initialization:** Gaussians are initialized from the first frame's depth or point cloud.
-2.  **Tracking:** Camera pose $\mathbf{T}_t$ is estimated relative to the current map, often using Iterative Closest Point (ICP) or photometric optimization.
-3.  **Rendering:** The current view is rendered using differentiable rasterization.
-4.  **Densification/Mapping:** New Gaussians are added or existing ones are pruned based on reconstruction error, depth consistency, or uncertainty.
-5.  **Optimization:** Parameters are updated via gradient descent.
-
-**Key Challenges:**
-*   **Duplicate Densification:** Avoiding the creation of redundant Gaussians in already well-reconstructed areas.
-*   **Map Drift:** Accumulation of pose errors over time, mitigated by loop closure or global optimization.
-*   **Degeneracy:** Gaussians becoming overly anisotropic, requiring scale regularization.
+Key challenges include avoiding duplicate densification in well-reconstructed areas, mitigating map drift from accumulated pose errors, and preventing Gaussian degeneracy (overly anisotropic scales) through regularization.
 
 ## Subtopics
 
-### [SplaTAM](9193-splatam.md)
-SplaTAM is an online RGB-D SLAM method that represents the scene as a collection of 3D Gaussians, enabling simultaneous localization and mapping. It distinguishes itself from sibling methods like Gaussian-SLAM by using view-independent colors and a specific densification mask to prevent duplicate Gaussian creation, relying on depth and photometric ICP for tracking.
+### SplaTAM
+[See SplaTAM](9193-splatam.md)
 
 ### [Gaussian-SLAM](9195-gaussian-slam.md)
-Gaussian-SLAM is a keyframe-based Simultaneous Localization and Mapping (SLAM) method that represents the scene as a collection of 3D Gaussians and employs sub-map fusion to maintain consistency. It distinguishes itself from sibling methods like SplaTAM, which uses continuous depth and photometric ICP for online tracking, by structuring the map into discrete keyframes that are fused, offering a robust alternative for scenarios requiring explicit keyframe management.
+[See Gaussian-SLAM](9195-gaussian-slam.md)
 
 ### [Gaussian Splatting SLAM](10078-gaussian-splatting-slam.md)
-Gaussian Splatting SLAM is a simultaneous localization and mapping method that optimizes a dynamic set of 3D Gaussians and camera poses to minimize photometric and geometric residuals between rendered views and captured sensor data. It distinguishes itself from siblings like [SplaTAM](9193-splatam.md) and [Gaussian-SLAM](9195-gaussian-slam.md) by explicitly introducing an isotropic scale regularization loss to stabilize localization and mapping, and by employing specific learning rate adjustments and iteration limits for tracking and mapping phases.
+[See Gaussian Splatting SLAM](10078-gaussian-splatting-slam.md)
 
 ### [Differentiable Pose Estimation](12756-differentiable-pose-estimation.md)
-Differentiable Pose Estimation optimizes camera poses by back-propagating gradients from a photometric loss through a differentiable 3D Gaussian Splatting renderer. It solves the problem of estimating camera motion, particularly in motion-blurred scenarios, by treating pose estimation as a gradient descent problem on the Gaussian scene parameters. It sets itself apart from sibling methods like [SplaTAM](9193-splatam.md) and [Gaussian-SLAM](9195-gaussian-slam.md) by explicitly deriving and utilizing the analytical gradient of the loss with respect to the camera pose transformation, rather than relying solely on iterative closest point (ICP) or heuristic tracking loops.
+[See Differentiable Pose Estimation](12756-differentiable-pose-estimation.md)
 
 ### GS-SLAM
-GS-SLAM is a SLAM method that proposes an adaptive 3D Gaussian expanding strategy to add new 3D Gaussians into the training stage and delete unreliable ones with captured depths and rendered opacity values [S1]. On the Replica dataset, GS-SLAM achieves PSNR 31.56, SSIM 0.97, and LPIPS 0.094 [S1].
+GS-SLAM is a SLAM method that proposes an adaptive 3D Gaussian expanding strategy to add new 3D Gaussians into the training stage and delete unreliable ones using captured depths and rendered opacity values [S1]. On the Replica dataset, GS-SLAM achieves PSNR 31.56, SSIM 0.97, and LPIPS 0.094 [S1].
 
 ## Background
-The optimization of 3D Gaussian Splatting for SLAM and mapping emerged as a response to the limitations of implicit representation-based methods and continuous field assumptions. Early methods like NICE-SLAM and Vox-Fusion achieved moderate performance on datasets like Replica, with PSNR scores around 24 [S1]. The introduction of 3D Gaussian Splatting allowed for faster rendering and explicit scene representation. GS-SLAM [180] was among the first to propose an adaptive 3D Gaussian expanding strategy for SLAM, achieving a PSNR of 31.56 on the Replica dataset [S1]. Subsequent methods like SplaTAM [181] introduced view-independent colors and densification masks to prevent duplicate densification, improving PSNR to 34.11 [S1]. GaussianSplattingSLAM [182] and Gaussian-SLAM [183] further stabilized localization by introducing extra scale regularization loss to encourage isotropic Gaussians, with GaussianSplattingSLAM achieving a PSNR of 38.90 on Replica [S1]. Other variants like LIVGaussMap [184] use LiDAR for initialization, while SGS-SLAM [185], NEDS-SLAM [186], and SemGauss-SLAM [187] explore semantic and geometric constraints [S1].
+The family originates from the integration of 3D Gaussian Splatting [G] into Simultaneous Localization and Mapping (SLAM) frameworks. Early works like GS-SLAM [180] introduced adaptive densification, while SplaTAM [181] addressed duplicate densification via view-independent colors and masks. GaussianSplattingSLAM [182] and Gaussian-SLAM [183] introduced isotropic scale regularization to stabilize optimization [S1]. Other variants include LIVGaussMap [184] for LiDAR initialization, and SGS-SLAM [185], NEDS-SLAM [186], and SemGauss-SLAM [187] for specialized mapping tasks [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

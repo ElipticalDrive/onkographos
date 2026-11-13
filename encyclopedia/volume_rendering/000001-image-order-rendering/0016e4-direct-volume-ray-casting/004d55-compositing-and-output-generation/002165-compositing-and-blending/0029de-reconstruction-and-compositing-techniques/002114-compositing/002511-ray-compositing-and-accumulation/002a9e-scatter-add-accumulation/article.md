@@ -19,11 +19,11 @@ Scatter-Add Accumulation aggregates weighted feature values and weights into per
    $$ \text{output} = \mathbf{0} $$
 2. **Compute Weighted Features:** If `values` is provided, compute the weighted contribution for each sample [S1, unofficial].
    $$ \text{weighted}[m, c] = \text{weights}[m] \times \text{values}[m, c] $$
-   where $m \in [0, M)$ and $c \in [0, C)$. The result is an array of shape $[M, C]$.
+   where $m \in [0, M)$ and $c \in [0, C)$. The result is an array of shape $[M, C]$ [S1, unofficial].
 3. **Perform Scatter-Add:** Accumulate the weighted values into the output buffer using the ray indices [S1, unofficial].
-   $$ \text{output}[\text{ray\_indices}] \mathrel{+}= \text{weighted} $$
+   $$ \text{output}[\text{ray\_indices}[m], c] \mathrel{+}= \text{weighted}[m, c] $$
 4. **Weight-Only Accumulation:** If `values` is `None`, accumulate only the weights into a buffer of shape $[n\_rays, 1]$ [S1, unofficial].
-   $$ \text{output}[\text{ray\_indices}] \mathrel{+}= \text{weights}[:, \text{None}] $$
+   $$ \text{output}[\text{ray\_indices}[m], 0] \mathrel{+}= \text{weights}[m] $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -31,15 +31,20 @@ Scatter-Add Accumulation aggregates weighted feature values and weights into per
 ```python
 def scatter_add_accumulation(weights, values, ray_indices, n_rays, C):
     # Initialize output buffer of shape [n_rays, C] with zeros
-    output = zeros((n_rays, C), dtype=float32)
+    output = [[0.0] * C for _ in range(n_rays)]
+    M = len(weights)
     if values is not None:
         # Compute weighted features: weights broadcast to [M, 1]
-        weighted = weights[:, None] * values  # Shape [M, C]
+        weighted = [[weights[m] * values[m][c] for c in range(C)] for m in range(M)]
         # Accumulate weighted values using scatter-add
-        output = output.at[ray_indices].add(weighted)
+        for m in range(M):
+            r = ray_indices[m]
+            for c in range(C):
+                output[r][c] += weighted[m][c]
     else:
         # Weight-only accumulation into a [n_rays, 1] buffer
-        output = output.at[ray_indices].add(weights[:, None])
+        for m in range(M):
+            output[ray_indices[m]][0] += weights[m]
     return output
 ```
 
@@ -57,15 +62,15 @@ def scatter_add_accumulation(weights, values, ray_indices, n_rays, C):
 A multipass approach for volumetric light scattering where pixel shader summation is performed by accumulating results from concentric rectangular bands emanating from the light source into successive outer bands [S3, book]. The accumulation formula is $L_i(s, \theta, \phi) = L_{i-1}(s, \theta, \phi) + L_i(s, \theta, \phi)$, where $L$ represents accumulated light and $i$ is the band index [S3, book]. This method is described as the minimal required sampling and computation limit, though it may not be best suited to current hardware design compared to single-pass execution [S3, book].
 
 ## Operating characteristics
-- Time complexity: Not given in the sources.
+- Time complexity: Not given in the sources. [G]
 - Memory complexity: $O(n\_rays \times C)$ for the output buffer [S1, unofficial].
 - Strengths: Handles unordered samples; supports both feature and weight-only accumulation [S1, unofficial].
-- Limitations: Not given in the sources.
-- When to use: Not given in the sources.
-- When not to use: Not given in the sources.
+- Limitations: Not given in the sources. [G]
+- When to use: Not given in the sources. [G]
+- When not to use: Not given in the sources. [G]
 
 ## Background
-The method is also known as Accumulation Renderer or accumulate_along_rays [S2, unofficial]. It is used in differentiable rendering frameworks that support array programming and automatic differentiation [S1, unofficial]. Not given in the sources.
+The method is also known as Accumulation Renderer or accumulate_along_rays [S2, unofficial]. It is used in differentiable rendering frameworks that support array programming and automatic differentiation [S1, unofficial]. Not given in the sources. [G]
 
 ## Sources
 [S1] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,116 @@
+# Parallel Bricking
+
+Also called: Bricking with Parallel Volume Rendering
+
+## Overview
+Parallel Bricking is a method for rendering volumetric datasets that exceed the memory capacity of the rendering hardware by partitioning the data into smaller blocks (bricks), rendering each block independently, and composing the final image via back-to-front compositing [S1, S2, unofficial]. It differs from single-pass volume rendering by enabling the visualization of arbitrarily large datasets through spatial decomposition, trading off increased rendering time and potential edge artifacts for the ability to process data larger than available GPU or dedicated volume memory [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volumetric dataset (supervolume) of arbitrary dimensions $D_x \times D_y \times D_z$ and a rendering configuration (camera, transfer function).
+- Output: A final 2D image composed of the rendered bricks.
+
+**Data Structures:**
+The supervolume is partitioned into a grid of bricks. Each brick is a sub-volume with dimensions $B_x \times B_y \times B_z$.
+- Brick Size: Limited by hardware constraints. For VolumePro hardware, $B_x, B_y, B_z \le 256$ voxels [S2, unofficial].
+- Memory Management: Bricks are swapped between host memory and device memory (e.g., 128 MB volume memory on VolumePro) as needed [S2, unofficial].
+
+**Steps:**
+1. **Partitioning:** The supervolume is divided into non-overlapping or overlapping blocks (subvolumes) such that each block fits within the hardware's maximum dimension limit (e.g., 256 voxels per dimension) [S2, unofficial].
+2. **Data Handling:** Data duplication is handled at the boundaries between blocks to ensure continuity or to facilitate specific rendering techniques [S2, unofficial].
+3. **Independent Rendering:** Each brick is rendered independently. This can be done in separate passes on a single GPU or in parallel processes across multiple GPUs/CPU cores [S1, S2, unofficial].
+4. **Compositing:** The resulting images (or base planes) from each brick are blended into the final image in back-to-front order [S1, S2, unofficial].
+5. **Swapping:** If the supervolume exceeds available device memory, bricks are swapped to and from host memory during the rendering process [S2, unofficial].
+
+**Pitfalls:**
+- **Seam Artifacts:** Discontinuous data sampling and gradient computation at the edges of the blocks can cause visible seams, lowering composite image quality [S1, unofficial].
+- **Performance:** Rendering time increases significantly for large supervolumes due to limited PCI download bandwidth and the overhead of swapping bricks [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_bricking_render(supervolume, camera, transfer_function):
+    # 1. Partition the supervolume into bricks
+    # Determine brick dimensions based on hardware limits (e.g., max 256 voxels)
+    brick_dims = get_hardware_max_dimensions() # e.g., (256, 256, 256)
+    bricks = partition_volume(supervolume, brick_dims)
+    
+    # 2. Handle data duplication at boundaries if necessary
+    # This step ensures continuity or supports specific rendering algorithms
+    bricks = handle_boundary_duplication(bricks)
+    
+    # 3. Render each brick independently
+    rendered_bricks = []
+    for brick in bricks:
+        # Swap brick to device memory if not already present
+        load_to_device(brick)
+        
+        # Render the brick using the camera and transfer function
+        # This produces a 2D image or intermediate base planes
+        brick_image = render_single_brick(brick, camera, transfer_function)
+        
+        # Swap brick back to host memory if needed
+        unload_from_device(brick)
+        
+        rendered_bricks.append(brick_image)
+        
+    # 4. Compositing: Blend results in back-to-front order
+    # The order depends on the camera view direction
+    final_image = composite_back_to_front(rendered_bricks, camera)
+    
+    return final_image
+
+def partition_volume(volume, brick_dims):
+    """
+    Splits the volume into bricks of size brick_dims.
+    Returns a list of bricks.
+    """
+    # Implementation details depend on the specific partitioning strategy
+    # (e.g., grid-based, hierarchical)
+    # Not given in the sources. [G]
+    pass
+
+def handle_boundary_duplication(bricks):
+    """
+    Handles data duplication at the edges of bricks to mitigate seams.
+    Not given in the sources. [G]
+    """
+    pass
+
+def render_single_brick(brick, camera, transfer_function):
+    """
+    Renders a single brick.
+    """
+    # Standard volume rendering algorithm (e.g., ray casting)
+    # Not given in the sources. [G]
+    pass
+
+def composite_back_to_front(images, camera):
+    """
+    Blends the rendered images in back-to-front order.
+    """
+    # Standard alpha compositing
+    # Not given in the sources. [G]
+    pass
+```
+
+## Subtopics
+
+### Supervolume Rendering
+A software-based method for rendering volumes larger than the hardware limit (256 voxels per dimension) by partitioning the volume into smaller blocks (subvolumes), rendering them independently, and blending the results in software [S2, unofficial]. It is chosen when the dataset exceeds the fixed hardware constraints of dedicated volume rendering cards like VolumePro [S2, unofficial]. It handles data duplication and block swapping automatically [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Rendering time increases with the size of the supervolume due to the limited PCI download bandwidth and the overhead of swapping bricks [S2, unofficial].
+- **Memory Complexity:** The method allows rendering of arbitrarily large supervolumes by swapping bricks to/from host memory, limited only by host memory capacity and PCI bandwidth [S2, unofficial].
+- **Strengths:** Enables visualization of datasets larger than available GPU or dedicated volume memory [S1, S2, unofficial].
+- **Limitations:** Visible seam artifacts at block boundaries due to discontinuous sampling and gradient computation [S1, unofficial]. Performance is bottlenecked by PCI bandwidth for large datasets [S2, unofficial].
+- **When to use:** When the volumetric dataset exceeds the memory capacity of the rendering hardware [S1, S2, unofficial].
+- **When not to use:** When high visual quality without seams is critical and the dataset is small enough to fit in memory, or when real-time performance is required for very large datasets due to PCI bandwidth limitations [S1, S2, unofficial].
+
+## Background
+Parallel Bricking, specifically in the context of Supervolume Rendering, was developed to address the limitations of early dedicated volume rendering hardware, such as the VolumePro card, which could only render volumes with a maximum of 256 voxels per dimension in one pass [S2, unofficial]. The method involves software-based partitioning and compositing to overcome these hardware constraints [S2, unofficial]. The issue of seam artifacts in parallel rendered volumes was highlighted in discussions around ParaView's parallel volume rendering capabilities [S1, unofficial].
+
+## Sources
+[S1] Correcting Sampling Seams in Parallel Rendered Volumes, https://www.kitware.com/sampling-seams-in-parallel-rendered-volumes/, fetched 2026-10-29 (unofficial)
+[S2] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

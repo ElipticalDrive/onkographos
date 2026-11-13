@@ -1,44 +1,35 @@
 # Quadratic Scale Hemisphere Sampling
 Also called: Halton Hemisphere Sampling with Quadratic Scale, SSAO Sample Generation
 ## Overview
-Quadratic Scale Hemisphere Sampling generates a set of 3D sample vectors for screen-space ambient occlusion (SSAO) by mapping a 3D Halton sequence to a hemisphere and applying a quadratic scale distribution [S1, unofficial]. It differs from its parent, [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md), by using a deterministic low-discrepancy sequence (Halton) rather than independent random numbers, and from its sibling, [Cosine-Weighted Hemisphere Sampling](2283-cosine-weighted-hemisphere-sampling.md), by applying a specific quadratic bias to the sample radius to concentrate samples near the origin while maintaining uniform angular coverage [S1, unofficial].
+Quadratic Scale Hemisphere Sampling generates a set of 3D sample vectors for screen-space ambient occlusion (SSAO) by mapping a 3D Halton sequence to a hemisphere and applying a quadratic scale distribution [S1, unofficial]. It differs from its parent, [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md), by using a deterministic low-discrepancy sequence rather than independent random numbers, and from its sibling, [Cosine-Weighted Hemisphere Sampling](2283-cosine-weighted-hemisphere-sampling.md), by applying a quadratic bias to the sample radius [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- Input: $n$, the number of samples to generate.
-- Output: A list of $n$ 3D direction vectors, each scaled between 0.1 and 1.0, oriented in the upper hemisphere relative to a local normal.
+- Input: $n$, the number of samples to generate [S1, unofficial].
+- Output: A `std::vector` of $n$ 3D vectors (`glm::vec3` or equivalent), each representing a unit direction in the upper hemisphere ($Z \ge 0$) scaled between $0.1$ and $1.0$ [S1, unofficial].
 
 **Data Structures:**
-- Halton Sequence State: A 3-dimensional Halton sequence generator initialized with base 2, 3, and 5 (standard for 3D).
-- Output Vector: A dynamic array or `std::vector` of 3D vectors (`glm::vec3` or equivalent).
+- Halton Sequence State: A 3-dimensional Halton sequence generator initialized with dimension 3 [S1, unofficial].
+- Output Vector: A dynamic array or `std::vector` of 3D vectors [S1, unofficial].
 
 **Steps:**
-1. Initialize a 3D Halton sequence generator.
-2. Create an empty output vector.
+1. Initialize a 3D Halton sequence generator [S1, unofficial].
+2. Clear the output vector [S1, unofficial].
 3. Loop $i$ from $0$ to $n-1$:
-   a. Retrieve the next 3D vector $\mathbf{p}$ from the Halton sequence. Each component $p_x, p_y, p_z \in [0, 1)$.
-   b. Map $\mathbf{p}$ to the range $[-1, 1]$ using the transformation:
-      $$ \mathbf{v} = 2.0 \cdot (\mathbf{p} - 0.5) $$
-   c. Force the $z$-component to be non-negative to restrict sampling to the upper hemisphere:
-      $$ v_z = |v_z| $$
-   d. Normalize $\mathbf{v}$ to unit length to get the direction $\mathbf{d}$:
-      $$ \mathbf{d} = \frac{\mathbf{v}}{\|\mathbf{v}\|} $$
-   e. Compute the linear index scale factor based on the sample index:
-      $$ s_{linear} = \frac{i}{n} $$
-   f. Apply quadratic mixing to determine the final scale $s$:
-      $$ s = \text{mix}(0.1, 1.0, s_{linear}^2) $$
-      Where $\text{mix}(a, b, t) = a + t(b - a)$. Thus:
-      $$ s = 0.1 + s_{linear}^2 \cdot (1.0 - 0.1) = 0.1 + 0.9 \cdot \left(\frac{i}{n}\right)^2 $$
-   g. Scale the direction vector:
-      $$ \mathbf{s}_i = s \cdot \mathbf{d} $$
-   h. Append $\mathbf{s}_i$ to the output vector.
+   a. Call `hs.getNext()` to retrieve a 3D vector $\mathbf{p}$ with components in $[0, 1]$ [S1, unofficial].
+   b. Map $\mathbf{p}$ to $[-1, 1]$ by subtracting $0.5$ and multiplying by $2.0$: $\mathbf{v} = 2.0 \cdot (\mathbf{p} - 0.5)$ [S1, unofficial].
+   c. Force the $z$-component to be non-negative using the absolute value: $v_z = |v_z|$ [S1, unofficial].
+   d. Normalize $\mathbf{v}$ to unit length to obtain the direction $\mathbf{d}$: $\mathbf{d} = \mathbf{v} / \|\mathbf{v}\|$ [S1, unofficial].
+   e. Compute the linear index scale: $s_{\text{linear}} = i / n$ [S1, unofficial].
+   f. Apply quadratic mixing to determine the final scale: $s = \text{mix}(0.1, 1.0, s_{\text{linear}}^2)$ [S1, unofficial].
+   g. Multiply the normalized direction by the scale: $\mathbf{s}_i = s \cdot \mathbf{d}$ [S1, unofficial].
+   h. Append $\mathbf{s}_i$ to the output vector [S1, unofficial].
 
 **Parameters:**
-- $n$: Number of samples. Controls the density of the hemisphere sampling. Typical values depend on the SSAO kernel size, often ranging from 16 to 64.
+- $n$: Number of samples to generate. Controls the density of the hemisphere sampling [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Hemisphere Constraint:** Forgetting to force $z \ge 0$ results in sampling the full sphere, which is incorrect for SSAO occlusion calculations that require directions pointing away from the surface [S1, unofficial].
-- **Halton Dimension:** The Halton sequence must be initialized with dimension 3 to provide the $x, y, z$ components for the initial vector generation [S1, unofficial].
-- **Precision:** The quadratic scaling $s_{linear}^2$ concentrates more samples near the origin (scale 0.1) for early indices and spreads them out towards scale 1.0 for later indices. This is a specific bias not present in uniform hemisphere sampling.
+- Hemisphere Constraint: Forgetting to force $Z \ge 0$ results in sampling the full sphere instead of the hemisphere required for SSAO occlusion calculations [S1, unofficial].
+- Halton Dimension: The Halton sequence must be initialized with dimension 3 to provide the $x, y, z$ components for the initial vector generation [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -46,37 +37,51 @@ Quadratic Scale Hemisphere Sampling generates a set of 3D sample vectors for scr
 ```python
 def quadratic_scale_hemisphere_sampling(n):
     """
-    Generates n sample vectors for SSAO using Halton sequence and quadratic scaling.
+    Generates n sample vectors for SSAO using a 3D Halton sequence and quadratic scaling.
     Returns a list of 3D vectors.
     """
-    # Initialize Halton sequence generator for 3 dimensions
-    # Base primes: 2, 3, 5
-    halton_gen = HaltonSequence3D()
-    
+    # Standard Halton sequence generator for bases 2, 3, 5 [G]
+    def halton_sequence(index, base):
+        result = 0.0
+        f = 1.0
+        i = index
+        while i > 0:
+            f = f / base
+            result = result + f * (i % base)
+            i = i // base
+        return result
+
     samples = []
-    
     for i in range(n):
         # Get next 3D vector from Halton sequence [0, 1)
-        p = halton_gen.next()
-        
+        p_x = halton_sequence(i, 2)
+        p_y = halton_sequence(i, 3)
+        p_z = halton_sequence(i, 5)
+        p = (p_x, p_y, p_z)
+
         # Map to [-1, 1]
-        v = 2.0 * (p - 0.5)
-        
+        v = (2.0 * (p[0] - 0.5), 2.0 * (p[1] - 0.5), 2.0 * (p[2] - 0.5))
+
         # Force Z >= 0 for hemisphere
-        v.z = abs(v.z)
-        
+        v_z = abs(v[2])
+        v = (v[0], v[1], v_z)
+
         # Normalize to unit direction
-        d = normalize(v)
-        
+        length = (v[0]**2 + v[1]**2 + v_z**2)**0.5
+        if length == 0:
+            d = (0.0, 0.0, 1.0) # Guard against zero vector [G]
+        else:
+            d = (v[0]/length, v[1]/length, v_z/length)
+
         # Compute quadratic scale
         linear_scale = i / n
         quadratic_scale = linear_scale * linear_scale
         final_scale = 0.1 + 0.9 * quadratic_scale
-        
+
         # Scale the direction
-        sample = final_scale * d
+        sample = (final_scale * d[0], final_scale * d[1], final_scale * d[2])
         samples.append(sample)
-        
+
     return samples
 ```
 ## Subtopics
@@ -86,28 +91,24 @@ Generates a fixed set of 3D direction vectors for screen-space ambient occlusion
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- Time: $O(n)$ to generate $n$ samples, assuming $O(1)$ per Halton sequence step.
-- Memory: $O(n)$ to store the output vectors.
+- Time: $O(n)$ to generate $n$ samples [G].
+- Memory: $O(n)$ to store the output vectors [G].
 
 **Measured Performance:**
 - Not given in the sources.
 
 **Scaling:**
-- The number of samples $n$ directly scales the output size. The quadratic scaling factor is computed per sample, so the distribution shape remains consistent regardless of $n$.
+- The number of samples $n$ directly controls the density of the hemisphere sampling [S1, unofficial].
 
 **Strengths and Limitations:**
-- Strengths: Deterministic output (good for debugging and reproducibility), low-discrepancy coverage reduces clustering artifacts compared to pure random sampling, quadratic scaling provides a specific bias towards the origin which can be beneficial for SSAO.
-- Limitations: The Halton sequence can exhibit visible patterns if not properly scrambled or if $n$ is small. The quadratic scaling is a specific heuristic and may not be optimal for all scenes.
+- Not given in the sources.
 
 **When to Use:**
-- Use for SSAO when deterministic, low-discrepancy sampling is preferred and a bias towards the origin is desired.
+- Not given in the sources.
 
 **When Not to Use:**
-- Use [Cosine-Weighted Hemisphere Sampling](2283-cosine-weighted-hemisphere-sampling.md) if the goal is to sample directions weighted by the cosine of the angle with the normal, which is more physically accurate for diffuse lighting.
-- Use [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md) if simplicity and no sequence state management are preferred.
-
+- Not given in the sources.
 ## Background
-The method is described in the context of screen-space ambient occlusion (SSAO) sample generation in the `ssvdag` repository [S1, unofficial]. It combines a 3D Halton sequence with a quadratic scaling factor to produce sample vectors for SSAO kernels.
-
+The method is described in the `ssvdag` repository for generating 3D sample vectors for screen-space ambient occlusion (SSAO) using a Halton sequence and quadratic scaling [S1, unofficial].
 ## Sources
 [S1] ajaspe/ssvdag, https://github.com/ajaspe/ssvdag, fetched 2026-10-24 (unofficial)

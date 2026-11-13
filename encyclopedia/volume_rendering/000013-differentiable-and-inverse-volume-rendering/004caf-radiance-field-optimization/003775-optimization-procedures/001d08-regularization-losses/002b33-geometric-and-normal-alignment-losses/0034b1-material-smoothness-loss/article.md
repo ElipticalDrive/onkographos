@@ -3,17 +3,17 @@
 Also called: Lmat
 
 ## Overview
-Material Smoothness Loss is a regularization term applied to material fields to enforce spatial smoothness by penalizing color differences between neighboring surface points [S1]. It addresses the ambiguity between material properties and illumination in inverse rendering by constraining material gradients to correspond with image edges, thereby preventing noisy and inconsistent material reconstructions [S1, S2]. It differs from standard smoothness losses by utilizing image gradients as bilateral weights to preserve material boundaries where the image shows sharp transitions [S1, S2].
+Material Smoothness Loss is a regularization term applied to material fields to enforce spatial smoothness by penalizing differences in material parameters between neighboring surface points [S1]. A specific variant, the BRDF Smoothness Loss, enforces smoothness of BRDF parameters using a normalized difference weighted by pseudo-albedo gradients [S2]. It differs from standard smoothness losses by incorporating a bilateral weight derived from rendered color and irradiance to modulate the penalty [S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Material parameters $\boldsymbol{\beta}$ (e.g., roughness, specular tint) defined at surface points $\mathbf{x}_{\text{surf}}$; perturbation vector $\boldsymbol{\xi}$; pseudo-albedo $\mathbf{a}_{\text{pseudo}}$ derived from rendered color and irradiance; weighting coefficient $C_{\text{BRDF}}$; sample weights $w_k$.
-*   **Outputs:** Scalar loss value $\mathcal{L}_{\text{mat}}$ (or $\mathcal{L}_{\text{BRDF}}$ in specific variants) used for gradient-based optimization.
+*   **Inputs:** Material parameters $\boldsymbol{\beta}$ (e.g., roughness, specular tint) defined at surface points $\mathbf{x}_{\text{pos}}$; perturbation vector $\boldsymbol{\xi}$; pseudo-albedo $\mathbf{a}_{\text{pseudo}}$ derived from rendered color and irradiance; weighting coefficient $C_{\text{BRDF}}$; sample weights $w_k$ [S1, S2].
+*   **Outputs:** Scalar loss value $\mathcal{L}_{\text{BRDF}}$ used for gradient-based optimization [S2].
 
 **Data Structures:**
-*   Material parameters $\boldsymbol{\beta}$: Vector or tensor representing BRDF parameters at each sampled point.
-*   Surface points $\mathbf{x}_{\text{surf}}$: 3D coordinates of points on the reconstructed geometry.
-*   Perturbation $\boldsymbol{\xi}$: 3D vector sampled from a Gaussian distribution.
+*   Material parameters $\boldsymbol{\beta}$: Tensor of shape $(N, D)$ representing BRDF parameters at $N$ sampled points [S2].
+*   Surface points $\mathbf{x}_{\text{pos}}$: Tensor of shape $(N, 3)$ containing 3D coordinates [S2].
+*   Perturbation $\boldsymbol{\xi}$: Tensor of shape $(N, 3)$ sampled from a Gaussian distribution [S2].
 
 **Steps:**
 1.  **Sample Perturbations:** For each surface point $\mathbf{x}_{\text{pos}_k}$, sample a perturbation vector $\boldsymbol{\xi}$ from a normal distribution $\mathcal{N}(\mathbf{0}, \epsilon \mathrm{I})$ [S2].
@@ -21,7 +21,7 @@ Material Smoothness Loss is a regularization term applied to material fields to 
     $$
     \Delta \boldsymbol{\beta}_k = \left| \frac{\boldsymbol{\beta}(\mathbf{x}_{\text{pos}_k}) - \boldsymbol{\beta}(\mathbf{x}_{\text{pos}_k} + \boldsymbol{\xi})}{\operatorname{max}(\boldsymbol{\beta}(\mathbf{x}_{\text{pos}_k}), \boldsymbol{\beta}(\mathbf{x}_{\text{pos}_k} + \boldsymbol{\xi}))} \right|
     $$
-    where the division and max are element-wise operations [S2].
+    where the division, absolute value, and max are element-wise operations [S2].
 3.  **Compute Pseudo-Albedo:** Calculate the pseudo-albedo $\mathbf{a}_{\text{pseudo}}$ at both the original point and the perturbed point to serve as the bilateral weight [S2]:
     $$
     \mathbf{a}_{\text{pseudo}}(\mathbf{x}) = \frac{\mathbf{c}(\mathbf{x}, \mathbf{d}_{\text{out}})}{\mathbf{c}_{\text{irradiance}}(\mathbf{x}, \mathbf{d}_{\text{out}})}
@@ -31,7 +31,7 @@ Material Smoothness Loss is a regularization term applied to material fields to 
     $$
     \lambda(\mathbf{x}, \mathbf{x} + \boldsymbol{\xi}) = | \mathbf{a}_{\text{pseudo}}(\mathbf{x}_{\text{pos}_k}) - \mathbf{a}_{\text{pseudo}}(\mathbf{x}_{\text{pos}_k} + \boldsymbol{\xi}) |
     $$
-    This weight preserves material boundaries where the image shows sharp transitions [S1, S2].
+    [S2].
 5.  **Aggregate Loss:** Sum the weighted material differences over all sampled points $k$ with weights $w_k$:
     $$
     \mathcal{L}_{\text{BRDF}} = C_{\text{BRDF}} \sum_{k} w_k \Delta \boldsymbol{\beta}_k \lambda(\mathbf{x}, \mathbf{x} + \boldsymbol{\xi})
@@ -46,66 +46,38 @@ Material Smoothness Loss is a regularization term applied to material fields to 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def material_smoothness_loss(material_params, surface_points, pseudo_albedo, weights, epsilon, coefficient):
+def material_smoothness_loss(beta_orig, beta_pert, pseudo_albedo_orig, pseudo_albedo_pert, weights, epsilon, coefficient):
     """
-    Computes the Material Smoothness Loss.
+    Computes the Material Smoothness Loss (BRDF variant).
     
     Args:
-        material_params: Tensor of shape (N, D) containing BRDF parameters beta at N points.
-        surface_points: Tensor of shape (N, 3) containing 3D coordinates x_pos.
-        pseudo_albedo: Tensor of shape (N, 3) containing pseudo-albedo values a_pseudo.
+        beta_orig: Tensor of shape (N, D) containing BRDF parameters beta at N points.
+        beta_pert: Tensor of shape (N, D) containing BRDF parameters at (x_pos + xi).
+        pseudo_albedo_orig: Tensor of shape (N, 3) containing pseudo-albedo at N points.
+        pseudo_albedo_pert: Tensor of shape (N, 3) containing pseudo-albedo at (x_pos + xi).
         weights: Tensor of shape (N,) containing sample weights w_k.
-        epsilon: Float, standard deviation for perturbation noise.
+        epsilon: Float, standard deviation for perturbation noise (used for sampling, not in forward pass).
         coefficient: Float, scaling factor C_BRDF.
         
     Returns:
         Scalar loss value.
     """
     import torch
-    import torch.distributions as distributions
     
-    N = surface_points.shape[0]
+    # [G] beta_pert and pseudo_albedo_pert are obtained by querying the material/irradiance fields 
+    # at positions (surface_points + xi) using the reparameterization trick for differentiability.
     
-    # Step 1: Sample perturbation vector xi from N(0, epsilon * I)
-    # Note: In practice, xi might be sampled once per batch or per point.
-    # Here we assume xi is sampled for each point independently for the loss term.
-    # To ensure differentiability, we use the reparameterization trick.
-    noise = torch.randn_like(surface_points) * epsilon
-    xi = noise
-    
-    # Step 2: Evaluate material difference
-    # Get material params at perturbed points
-    beta_original = material_params
-    beta_perturbed = material_params + (material_params * 0) # Placeholder for actual evaluation at x + xi
-    # Note: In a real implementation, beta_perturbed would be obtained by querying the material field
-    # at positions (surface_points + xi). Assuming a function `query_material(pos)` exists:
-    # beta_perturbed = query_material(surface_points + xi)
-    # For the sake of the formula structure provided in sources, we denote the values.
-    # Since we cannot call external APIs, we assume beta_perturbed is available.
-    # [G] In a typical implementation, beta_perturbed is retrieved from the neural network
-    # representing the material field at the perturbed coordinates.
-    
-    # Element-wise max and difference
-    # max(beta_orig, beta_pert) element-wise
-    max_beta = torch.maximum(beta_original, beta_perturbed)
-    # Avoid division by zero
-    max_beta = torch.clamp(max_beta, min=1e-6)
-    
-    diff_beta = torch.abs(beta_original - beta_perturbed)
+    # Step 2: Normalized material difference
+    max_beta = torch.maximum(beta_orig, beta_pert)
+    max_beta = torch.clamp(max_beta, min=1e-6) # Avoid division by zero
+    diff_beta = torch.abs(beta_orig - beta_pert)
     normalized_diff = diff_beta / max_beta
     
-    # Step 3 & 4: Compute Bilateral Weight lambda
-    # Pseudo-albedo at perturbed points
-    # [G] Similarly, pseudo_albedo_perturbed would be computed at (x + xi)
-    pseudo_albedo_perturbed = pseudo_albedo + (pseudo_albedo * 0) # Placeholder
+    # Step 4: Bilateral weight
+    lambda_weight = torch.abs(pseudo_albedo_orig - pseudo_albedo_pert)
     
-    lambda_weight = torch.abs(pseudo_albedo - pseudo_albedo_perturbed)
-    
-    # Step 5: Aggregate Loss
-    # Element-wise multiplication of normalized_diff, lambda_weight, and weights
+    # Step 5: Aggregate loss
     loss_per_point = normalized_diff * lambda_weight * weights.unsqueeze(1)
-    
-    # Sum over all points and dimensions, then scale
     loss = coefficient * torch.sum(loss_per_point)
     
     return loss
@@ -114,18 +86,18 @@ def material_smoothness_loss(material_params, surface_points, pseudo_albedo, wei
 ## Subtopics
 
 ### [Bilateral Smoothness Regularization](10915-bilateral-smoothness-regularization.md)
-Bilateral Smoothness Regularization is a geometric and normal alignment loss applied to material fields to enforce spatial smoothness of BRDF parameters (such as roughness and specular tint) weighted by image gradients. It alleviates the ambiguity between material and illumination by constraining material gradients to correspond with image edges, preventing noisy, inconsistent material reconstructions. It differs from standard smoothness losses by using the image gradient as a bilateral weight, preserving material boundaries where the image shows sharp transitions. See [Bilateral Smoothness Regularization](10915-bilateral-smoothness-regularization.md).
+Bilateral Smoothness Regularization is a geometric and normal alignment loss applied to material fields to enforce spatial smoothness of BRDF parameters (such as roughness and specular tint) weighted by image gradients. It alleviates the ambiguity between material and illumination by constraining material gradients to correspond with image edges, preventing noisy, inconsistent material reconstructions. It differs from standard smoothness losses by using the image gradient as a bilateral weight, preserving material boundaries where the image shows sharp transitions.
 
 ## Operating characteristics
 *   **Time Complexity:** Linear with respect to the number of sampled surface points $N$, as it involves a summation over $k$ points [S2].
-*   **Memory Complexity:** Linear with respect to $N$ for storing material parameters and pseudo-albedo values at sampled points.
-*   **Strengths:** Effectively reduces noise in reconstructed material fields and prevents overfitting to illumination variations by leveraging image structure [S1, S2].
-*   **Limitations:** Requires accurate estimation of pseudo-albedo and irradiance, which may be sensitive to errors in the lighting or geometry models [S2]. The choice of $\epsilon$ and $C_{\text{BRDF}}$ is dataset-dependent [S2].
-*   **When to use:** When reconstructing materials from multi-view images where illumination ambiguity is a concern, particularly for reflective surfaces [S1].
-*   **When not to use:** When computational resources are extremely limited and the overhead of computing pseudo-albedo and perturbations is prohibitive, or when the scene has uniform material properties where smoothness constraints are less critical.
+*   **Memory Complexity:** Linear with respect to $N$ for storing material parameters and pseudo-albedo values at sampled points [G].
+*   **Strengths:** Effectively reduces noise in reconstructed material fields by enforcing spatial smoothness [S1, S2].
+*   **Limitations:** Depends on accurate pseudo-albedo estimation; hyperparameters $\epsilon$ and $C_{\text{BRDF}}$ are dataset-dependent [S2].
+*   **When to use:** When reconstructing materials from multi-view images and spatial smoothness of BRDF parameters is desired [S1, S2].
+*   **When not to use:** When the scene contains highly heterogeneous materials where smoothness constraints would blur distinct material boundaries [G].
 
 ## Background
-Material Smoothness Loss was introduced in the context of inverse rendering by optimizing cascaded tensorial radiance fields, lighting, and materials from multi-view images [S1]. It is cited as a method to regularize materials in hybrid stages of optimization [S1]. A variant of this loss, specifically tailored for BRDF smoothness, was further detailed in the Flash Cache method for reducing bias in radiance cache based inverse rendering [S2].
+The loss was introduced to regularize material fields in inverse rendering from multi-view images [S1]. A variant enforcing BRDF smoothness using pseudo-albedo weighting was later detailed for radiance cache-based inverse rendering [S2].
 
 ## Sources
 [S1] IRCasTRF: Inverse Rendering by Optimizing Cascaded Tensorial Radiance Fields, Lighting, and Materials From Multi-view Images, https://doi.org/10.1145/3581783.3612010, fetched 2026-10-27

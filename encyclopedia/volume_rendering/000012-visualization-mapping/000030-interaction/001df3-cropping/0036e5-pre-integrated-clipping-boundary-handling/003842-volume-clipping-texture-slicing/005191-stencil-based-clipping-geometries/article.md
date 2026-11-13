@@ -1,0 +1,103 @@
+# Stencil-based Clipping Geometries
+
+Also called: Clipping geometries and Stenciling
+
+## Overview
+Stencil-based clipping is a hardware-accelerated method for volume clipping that uses the OpenGL stencil buffer to restrict rendering to pixels inside or outside an arbitrary closed surface geometry [S1, unofficial]. It sets apart from sibling methods by decoupling the clipping boundary definition from the volume data itself, allowing any triangle mesh to act as a clipper without voxelization or ray-casting overhead [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A closed surface geometry defined by a list of triangles [S1, unofficial].
+- A current slicing plane position and orientation [S1, unofficial].
+- The volume texture data [S1, unofficial].
+- Stencil buffer configuration [S1, unofficial].
+
+**Outputs:**
+- A rendered slice where pixels are either accepted or rejected based on their intersection with the clipping geometry's cross-section [S1, unofficial].
+
+**Data Structures:**
+- **Stencil Buffer:** A per-pixel integer buffer. The number of bits determines the maximum number of distinct clipping operations that can be tracked without clearing the buffer [S1, unofficial].
+- **Clipping Geometry:** A list of triangles representing a closed surface [S1, unofficial].
+
+**Parameters:**
+- **Stencil Bits:** Hardware-dependent. Determines how many slices can be processed without clearing the buffer [S1, unofficial].
+- **Stencil Test Function:** Configured to accept or reject pixels based on the initialized stencil buffer state [S1, unofficial].
+
+**Steps:**
+1. **Enable Clipping Plane:** Enable an additional clipping plane in the rasterization stage with the same orientation and position as the current slicing plane [S1, unofficial].
+2. **Render Back Faces:** Render the back faces of the clipping object (closed triangle surface) in polygon mode. This sets the stencil buffer for pixels covered by the cross-section without altering frame buffer color values [S1, unofficial].
+3. **Correct Stencil Errors:** Render front faces into pixels where the stencil buffer was already set. Clear the stencil buffer entry for these pixels if the pixel passes the depth test. This corrects erroneous stencil entries caused by back-face-only rendering, as a front face always exists in front of an erroneously written back face due to topology [S1, unofficial].
+4. **Render Volume:** Render the textured volume polygon. Configure the stencil test to accept or reject pixels based on the initialized stencil buffer, restricting drawing to pixels inside or outside the cross-section [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stencil_clip_volume_slice(clipping_mesh, slicing_plane, volume_texture, stencil_bits):
+    """
+    Renders a volume slice clipped by an arbitrary closed surface using the stencil buffer.
+    
+    Args:
+        clipping_mesh: List of triangles defining the closed surface.
+        slicing_plane: Plane equation (normal, distance) matching the current slice.
+        volume_texture: Texture data for the volume.
+        stencil_bits: Number of bits in the stencil buffer.
+    """
+    # Step 1: Enable clipping plane
+    glEnable(GL_CLIP_PLANE)
+    set_clip_plane(slicing_plane)
+    
+    # Step 2: Render back faces to set stencil buffer
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE) # Replace stencil value on pass
+    glStencilFunc(GL_ALWAYS, 1, 0xFF)         # Always pass stencil test, write 1
+    glCullFace(GL_FRONT)                      # Cull front faces, render back faces
+    glDisable(GL_COLOR_BUFFER_BIT)            # Do not alter color buffer
+    glDisable(GL_DEPTH_BUFFER_BIT)            # Depth test irrelevant for setting stencil
+    render_mesh(clipping_mesh)
+    glEnable(GL_COLOR_BUFFER_BIT)
+    glEnable(GL_DEPTH_BUFFER_BIT)
+    
+    # Step 3: Correct stencil errors by rendering front faces
+    glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO)    # Zero stencil value on pass
+    glStencilFunc(GL_EQUAL, 1, 0xFF)          # Only affect pixels where stencil is 1
+    glCullFace(GL_BACK)                       # Cull back faces, render front faces
+    glDisable(GL_COLOR_BUFFER_BIT)
+    glDisable(GL_DEPTH_BUFFER_BIT)
+    render_mesh(clipping_mesh)
+    glEnable(GL_COLOR_BUFFER_BIT)
+    glEnable(GL_DEPTH_BUFFER_BIT)
+    
+    # Step 4: Render volume with stencil test
+    glStencilFunc(GL_EQUAL, 1, 0xFF)          # Accept pixels where stencil is 1 (inside)
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP)    # Do not modify stencil during volume render
+    render_volume_slice(volume_texture, slicing_plane)
+    
+    # Disable clipping plane for next operations
+    glDisable(GL_CLIP_PLANE)
+```
+
+**Edge Cases and Pitfalls:**
+- **Complex Geometries:** Rendering only back faces fails to determine the cross-section exactly for complex geometries [S1, unofficial]. This is corrected by the front-face pass [S1, unofficial].
+- **Stencil Buffer Overflow:** The number of slices that can be processed without clearing the buffer depends on the number of stencil bits provided by the visual hardware [S1, unofficial].
+
+## Subtopics
+
+### Multi-Slice Stenciling
+Uses different stencil planes to process multiple slices without clearing the buffer, limited by stencil bit depth [S1, unofficial].
+
+### Arbitrary Geometry Support
+Allows any closed triangle mesh to define the clip boundary, supporting transformations without additional overhead [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** O(N) where N is the number of triangles in the clipping mesh, plus O(M) for volume rendering, where M is the number of pixels in the slice [S1, unofficial].
+- **Memory Complexity:** O(1) per pixel for the stencil buffer, plus O(T) for the clipping mesh, where T is the number of triangles [S1, unofficial].
+- **Strengths:** Independent of the used geometry, allowing arbitrary shapes to be specified [S1, unofficial]. Transformations of the geometry can be handled without any additional overhead [S1, unofficial].
+- **Limitations:** Limited by the number of stencil bits for multi-slice operations [S1, unofficial]. Requires hardware support for stencil buffer operations [S1, unofficial].
+- **When to Use:** When arbitrary closed surface geometries are needed for clipping, and hardware stencil support is available [S1, unofficial].
+- **When Not to Use:** When high precision is required for complex geometries without the correction step, or when stencil buffer bits are insufficient for the number of slices [S1, unofficial].
+
+## Background
+The method was described by Meissner in the context of volume visualization and rendering techniques [S1, unofficial]. It leverages existing OpenGL rasterization features to provide a flexible tool for carving portions out of the data in an intuitive way [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

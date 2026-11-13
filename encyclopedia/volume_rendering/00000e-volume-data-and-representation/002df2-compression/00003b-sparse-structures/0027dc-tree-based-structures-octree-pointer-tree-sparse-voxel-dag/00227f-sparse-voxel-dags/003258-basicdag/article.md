@@ -3,33 +3,33 @@
 Also called: BaseDAG
 
 ## Overview
-BasicDAG is a sparse voxel directed acyclic graph (DAG) structure that stores node indices in a flat, contiguous array to enable fast, cache-friendly traversal and leaf extraction [S1, unofficial]. It differs from sibling variants by decoupling the geometric DAG structure from color data storage strategies, relying on a simple static array layout for node indexing rather than complex pointer trees or hash maps [S1, unofficial].
+BasicDAG is a sparse voxel directed acyclic graph (DAG) structure that stores node indices in a flat, contiguous array to enable fast traversal and leaf extraction [S1, unofficial]. It differs from sibling variants by decoupling the geometric DAG structure from color data storage strategies, relying on a simple static array layout for node indexing rather than complex pointer trees or hash maps [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of voxel data to be compressed into a DAG structure.
-*   **Output:** A `StaticArray<uint32>` named `data` containing the node indices.
+*   **Input:** A set of voxel data to be compressed into a DAG structure [S1, unofficial].
+*   **Output:** A `StaticArray<uint32>` named `data` containing the node indices [S1, unofficial].
 
 **Data Structures:**
 The core data structure is a flat array:
-*   `data`: `StaticArray<uint32>`. Stores node indices sequentially in memory. The size of this array depends on the number of nodes in the DAG.
+*   `data`: `StaticArray<uint32>` storing node indices sequentially in memory [S1, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Node Retrieval:** To access a specific node at a given level and index, the structure uses direct array indexing.
+1.  **Node Retrieval:** `get_node(level, index)` returns the node index at the given position by directly indexing the flat array [S1, unofficial].
     *   Formula: $N = \text{data}[index]$
-    *   Where $N$ is the node index (or identifier) at the specified position.
+    *   Where $N$ is the node index at the specified position [S1, unofficial].
 
-2.  **Child Index Computation:** To find the index of a specific child of a node, the structure adds a precomputed offset to the parent's index.
+2.  **Child Index Computation:** `get_child_index(level, index, childMask, child)` computes the child node index by adding a precomputed offset to the parent index [S1, unofficial].
     *   Formula: $C = \text{data}[index + \text{Utils::child\_offset}(childMask, child)]$
-    *   Where $C$ is the child node index.
-    *   $childMask$ is a bitmask representing the existence of children.
-    *   $child$ is the identifier of the specific child (e.g., 0-7 for an octree child).
-    *   $\text{Utils::child\_offset}$ is a helper function that calculates the displacement in the flat array based on the child's position and the parent's mask.
+    *   Where $C$ is the child node index [S1, unofficial].
+    *   $childMask$ is a bitmask representing the existence of children [S1, unofficial].
+    *   $child$ is the identifier of the specific child (e.g., 0-7 for an octree child) [S1, unofficial].
+    *   $\text{Utils::child\_offset}$ is a helper function that calculates the displacement in the flat array based on the child's position and the parent's mask [S1, unofficial].
 
-3.  **Leaf Extraction:** A leaf node is represented by two consecutive `uint32` values in the `data` array.
+3.  **Leaf Extraction:** `get_leaf(index)` extracts a leaf node by reading two consecutive `uint32` values from the array [S1, unofficial].
     *   Formula: $\text{Leaf} = \{ \text{data}[index], \text{data}[index + 1] \}$
-    *   The first value typically represents geometric information (e.g., density or material ID), and the second represents color or additional attributes, depending on the specific color storage variant used (see Subtopics).
+    *   The two values store the leaf attributes, with color handling delegated to specific storage variants [S1, unofficial].
 
 **Pseudocode:**
 
@@ -38,72 +38,50 @@ The core data structure is a flat array:
 ```python
 class BasicDAG:
     def __init__(self, data_array):
-        # data_array is a list or array of uint32 values
         self.data = data_array
 
     def get_node(self, level, index):
-        """
-        Returns the node index at the given position.
-        Note: 'level' is not used in the indexing formula provided in sources,
-        implying direct index-based access or that level is implicit in the traversal context.
-        """
         return self.data[index]
 
-    def get_child_index(self, index, child_mask, child_id):
-        """
-        Computes the child node index by adding a precomputed offset to the parent index.
-        """
-        # Calculate offset based on child_mask and child_id
-        # The exact implementation of Utils::child_offset is not provided in sources.
-        # It is assumed to return an integer offset.
-        offset = self._compute_child_offset(child_mask, child_id)
+    def get_child_index(self, level, index, child_mask, child):
+        # The sources specify adding a precomputed offset: data[index + Utils::child_offset(childMask, child)]
+        # The exact implementation of Utils::child_offset is not provided in the sources.
+        offset = self._child_offset(child_mask, child)
         return self.data[index + offset]
 
     def get_leaf(self, index):
-        """
-        Extracts a leaf node by reading two consecutive uint32 values.
-        Returns a tuple (value1, value2).
-        """
-        val1 = self.data[index]
-        val2 = self.data[index + 1]
-        return (val1, val2)
+        return (self.data[index], self.data[index + 1])
 
-    def _compute_child_offset(self, child_mask, child_id):
-        """
-        Placeholder for Utils::child_offset.
-        In a real implementation, this would map the child_id and mask to a specific
-        index offset in the flat array.
-        """
+    def _child_offset(self, child_mask, child):
         # Not given in the sources.
-        # This function must be implemented to support the get_child_index logic.
         pass
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Array Bounds:** Accessing `data[index + 1]` for leaf extraction requires ensuring that `index + 1` is within the bounds of the `data` array. If the array size is not a multiple of 2 or if the last element is not part of a leaf pair, this may cause out-of-bounds errors.
-*   **Offset Calculation:** The correctness of `get_child_index` relies entirely on the correctness of `Utils::child_offset`. If this helper is not implemented correctly, traversal will fail.
-*   **Color Decoupling:** BasicDAG itself does not store color data in the main `data` array. Color storage is handled by specific variants (see Subtopics). Implementers must ensure they use the correct variant for their color storage needs.
+*   **Array Bounds:** Accessing `data[index + 1]` for leaf extraction requires ensuring that `index + 1` is within the bounds of the `data` array [S1, unofficial].
+*   **Offset Calculation:** The correctness of `get_child_index` relies entirely on the correctness of `Utils::child_offset` [S1, unofficial].
+*   **Color Decoupling:** BasicDAG itself does not store color data in the main `data` array [S1, unofficial].
 
 ## Subtopics
 
 ### [BasicDAGUncompressedColors](6741-basicdaguncompressedcolors.md)
-Stores color values in a flat, uncompressed array indexed by leaf count. Decouples color from geometry, allowing simple direct indexing but requiring separate traversal logic for color retrieval.
+Stores color values in a flat, uncompressed array indexed by leaf count. It sets itself apart by decoupling color storage from the geometric DAG structure for simple direct indexing, and should be chosen when straightforward color retrieval is prioritized over integrated memory layouts [6741-basicdaguncompressedcolors.md].
 
 ### [BasicDAGColorsBase](6742-basicdagcolorsbase.md)
-The foundational class for managing color data. Enforces a specific memory layout where leaf counts are stored in a dedicated array, keeping the core DAG structure compact.
+Manages color information by maintaining a separate, compact representation of leaf counts for upper-level nodes. It differs from siblings by providing a standardized, minimal interface for leaf count management rather than storing raw color data, making it suitable when memory fragmentation and traversal efficiency are primary concerns [6742-basicdagcolorsbase.md].
 
 ### [Mixture Graph](11065-mixture-graph.md)
-Compresses segmentation histograms by factorizing normalized mixture vectors into a DAG of linear interpolations. Allows for pre-filtered anti-aliasing and interactive rendering.
+Compresses segmentation histograms by factorizing normalized mixture vectors into a DAG of linear interpolations. It sets itself apart by storing dynamic mixtures of multiple colors that update efficiently in parallel, and should be chosen when interactive rendering and pre-filtered anti-aliasing are required [11065-mixture-graph.md].
 
 ## Operating characteristics
-*   **Time Complexity:** Node retrieval is $O(1)$ due to direct array indexing. Child index computation is $O(1)$ assuming constant-time offset calculation. Leaf extraction is $O(1)$.
-*   **Memory Complexity:** The `data` array stores one `uint32` per node. The total memory usage is proportional to the number of nodes in the DAG. Color storage is separate, so total memory is $O(N_{nodes}) + O(N_{leaves})$ depending on the color variant.
-*   **Strengths:** Simple implementation, cache-friendly due to flat array layout, fast traversal for node access.
-*   **Limitations:** Requires careful management of the flat array layout and offset calculations. Color data is not integrated into the main structure, requiring additional logic for color retrieval.
-*   **When to Use:** When a simple, fast, and cache-friendly DAG structure is needed, and color storage can be handled separately or via a specific variant.
+*   **Time Complexity:** Node retrieval and child index computation are $O(1)$ due to direct array indexing and precomputed offsets [S1, unofficial].
+*   **Memory Complexity:** The `data` array stores one `uint32` per node, resulting in $O(N)$ memory usage where $N$ is the number of nodes [S1, unofficial].
+*   **Strengths:** Simple flat array layout enables cache-friendly traversal and fast leaf extraction [S1, unofficial].
+*   **Limitations:** Requires external management of color data and correct offset calculation for child traversal [S1, unofficial].
+*   **When to Use:** Suitable for volume rendering pipelines requiring fast geometric traversal with decoupled color storage strategies [S1, unofficial].
 
 ## Background
-BasicDAG is part of the Sparse Voxel DAG family, which aims to compress volumetric data by sharing identical sub-volumes. The specific implementation details described here are derived from the Phyronnaz/HashDAG repository [S1, unofficial].
+BasicDAG is a member of the Sparse Voxel DAG family, which compresses volumetric data by sharing identical sub-volumes [S1, unofficial].
 
 ## Sources
 [S1] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)

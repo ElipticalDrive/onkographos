@@ -20,9 +20,9 @@ Local Sparse Volume Reconstruction regresses a local neural volume $V_t$ for eac
 4. **Local Volume $\mathcal{V}_t$**: The output volume with the same spatial layout as $\mathcal{U}_i$, containing the regressed local radiance field features [S1].
 
 **Parameters:**
-- $K$: Number of neighboring viewpoints used for reconstruction. Not given in the sources.
-- $G$: MLP for computing direction features. Architecture details not given in the sources.
-- $J$: Deep neural network for regressing the local volume from aggregated statistics. Architecture details not given in the sources.
+- $K$: Number of neighboring viewpoints used for reconstruction. Not given in the sources [S1].
+- $G$: MLP for computing direction features. Architecture details not given in the sources [S1].
+- $J$: Deep neural network for regressing the local volume from aggregated statistics. Architecture details not given in the sources [S1].
 
 **Steps:**
 1. **Extract 2D Image Features**: For each input image $I_t$ in the sequence, pass it through a deep 2D convolutional neural network to extract a 2D feature map $F_t$ [S1].
@@ -34,11 +34,10 @@ Local Sparse Volume Reconstruction regresses a local neural volume $V_t$ for eac
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def reconstruct_local_volume(images, neighbors, K, camera_intrinsics, camera_extrinsics, 
                              feature_extractor, direction_mlp, regressor, voxel_grid):
-    """
-    Reconstructs a local sparse volume for a target frame using K neighboring views.
-    """
     # Step 1: Extract 2D features for all K views
     feature_maps = [feature_extractor(img) for img in images]
 
@@ -67,37 +66,41 @@ def reconstruct_local_volume(images, neighbors, K, camera_intrinsics, camera_ext
             if v not in voxel_stats:
                 voxel_stats[v] = [zeros_like(U_i_v), zeros_like(U_i_v), 0]
             stats = voxel_stats[v]
-            stats[0] += U_i_v
-            stats[1] += U_i_v * U_i_v
+            stats[0] = [a + b for a, b in zip(stats[0], U_i_v)]
+            stats[1] = [a + b * b for a, b in zip(stats[1], U_i_v)]
             stats[2] += 1
 
     local_volume = {}
     for v, stats in voxel_stats.items():
         sum_feat, sum_sq_feat, count = stats
-        mean_feat = sum_feat / count
-        var_feat = (sum_sq_feat / count) - (mean_feat * mean_feat)
+        mean_feat = [s / count for s in sum_feat]
+        var_feat = [s / count - m * m for s, m in zip(sum_sq_feat, mean_feat)]
         input_to_J = concatenate(mean_feat, var_feat)
         local_volume[v] = regressor(input_to_J)
 
     return local_volume
 
-# Standard helper operations
 def project_2d(v, intr, extr):
-    cam_coord = extr @ v
-    u = intr @ cam_coord[:3]
-    return u[:2] / u[2]
+    v_h = v + (1.0,)
+    cam_coord = [sum(extr[i][j] * v_h[j] for j in range(4)) for i in range(4)]
+    u = [sum(intr[i][j] * cam_coord[j] for j in range(3)) for i in range(3)]
+    return (u[0] / u[2], u[1] / u[2])
 
 def sample_feature(F, u):
-    return F[u[1], u[0]]  # Bilinear interpolation assumed
+    # Bilinear interpolation assumed
+    return F[u[1], u[0]]
 
 def get_camera_center(extr):
-    return -extr[:3, :3].T @ extr[:3, 3]
+    R = extr[:3, :3]
+    t = extr[:3, 3]
+    return tuple(-sum(r * ti for r, ti in zip(R[:, j], t)) for j in range(3))
 
 def normalize(v):
-    return v / (v.norm() + 1e-8)
+    norm = math.sqrt(sum(c * c for c in v))
+    return tuple(c / (norm + 1e-8) for c in v)
 
 def concatenate(a, b):
-    return a + b  # Vector concatenation
+    return a + b
 
 def zeros_like(t):
     return [0.0] * len(t)
@@ -108,8 +111,8 @@ def zeros_like(t):
 - **Coordinate Frame**: Volumes are built in the canonical world coordinate frame, not the view's perspective coordinate. This is crucial for aligning with the global volume $V_g$ [S1].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources. Depends on the number of voxels, $K$, and the depth of networks $G$ and $J$. [S1]
-- **Memory Complexity**: Not given in the sources. Depends on the size of the bounding box and the sparsity of visible voxels. [S1]
+- **Time Complexity**: Not given in the sources [S1]. Depends on the number of voxels, $K$, and the depth of networks $G$ and $J$.
+- **Memory Complexity**: Not given in the sources [S1]. Depends on the size of the bounding box and the sparsity of visible voxels.
 - **Strengths**: Builds volumes in canonical space, facilitating global large-scale reconstruction and fusion [S1]. Uses mean and variance aggregation, which is robust to varying visibility and order of inputs [S1]. Incorporates viewing direction information to account for view-dependent effects [S1].
 - **Limitations**: Requires a sparse voxel grid and visibility checks, which may be computationally intensive to set up [S1]. Limited to local reconstruction per frame; requires a subsequent fusion step (e.g., GRU) for global consistency [S1].
 - **When to use**: For large-scale scene reconstruction from monocular video where global consistency is required, and when leveraging multi-view cues per frame is beneficial [S1].

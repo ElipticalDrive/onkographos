@@ -1,205 +1,203 @@
 # MagicaVoxel File Parsing
 
-Also called: MagicaVoxel .vox Loader, Magica Voxel format loader, .VOX File Parsing, VOX File Format Parsing, MV Chunk Format Parser, MV_VOX Format
+Also called: MV_VOX Format, .VOX File Parsing, MV Chunk Format Parser, MagicaVoxel .vox Loader, VOX File Format Parsing, VOX File Format Importer, Magica Voxel format loader
 
 ## Overview
-A loader for MagicaVoxel `.vox` files (versions 150 and 200) that parses models, palette, MATL materials, and the nTRN/nGRP/nSHP scene graph, converting visible faces into quads within a BVH [S1, unofficial]. It structures data into chunks containing tags, sizes, and child chunks [S2, unofficial]. Unlike raw voxel grids, this method extracts surface geometry (quads) for ray tracing while supporting complex scene hierarchies and coordinate transformations [S1, unofficial].
+A loader for MagicaVoxel `.vox` files (versions 150 and 200) that parses models, palette, MATL materials, and the nTRN/nGRP/nSHP scene graph, converting visible faces into quads within a BVH [S1, unofficial]. It structures data into chunks containing tags, sizes, and child chunks [S2, unofficial]. Unlike [Voxel File I/O (binvox/rawvox)](1698-voxel-file-i-o-binvox-rawvox.md) which uses dense or simple sparse grids, this method handles the hierarchical scene graph and chunk-based binary format specific to Magica Voxel [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A binary `.vox` file stream [S3, unofficial].
-- Output: A scene graph of quads organized in a BVH, a color palette, and material definitions [S1, unofficial].
+**Inputs and outputs:**
+Input is a binary buffer containing a `.vox` file. Output is a scene representation consisting of a palette, voxel data (coordinates and color indices), and a scene graph (transforms, groups, shapes) [S1, unofficial].
 
-**Data Structures:**
-The file is a tree of chunks where each chunk header consists of four 4-byte signed integers stored in little-endian order: `tag` (4 ASCII bytes identifying the chunk type), `contentSize` (size of the chunk's data in bytes), `childrenSize` (size of child chunks in bytes), and `end` (offset to the next chunk) [S3, unofficial]. Content follows immediately after the header, and children occupy the subsequent `childrenSize` bytes [S3, unofficial].
+**Data structures:**
 
-**Supported Chunks:**
-- `MAIN`: Root chunk with no data payload [S2, unofficial].
-- `PACK`: Contains a single 4-byte uint32 indicating the count of `XYZI` chunks (models) [S2, unofficial].
-- `SIZE`: Contains three 4-byte uint32s defining the dimensions $(W, H, D)$ of the following `XYZI` chunk [S2, unofficial].
-- `XYZI`: Represents a single model. Contains a 4-byte `numVoxels` count followed by `numVoxels` entries, each 4 bytes: 3 bytes for coordinates $(x, y, z)$ and 1 byte for a color index [S2, unofficial].
-- `RGBA`: The color palette. Contains up to 256 colors. Each color is 4 bytes (RGBA, 8-bit per channel) [S2, unofficial]. Index 0 uses the default palette, indices 1–255 are overwritten from the file, and the unused color at the end is skipped [S3, unofficial].
-- `nTRN`: Transform node containing translation and rotation data. Child is `nGRP` or `nSHP` [S2, unofficial].
-- `nGRP`: Group node. Children are `nTRN` nodes [S2, unofficial].
-- `nSHP`: Shape node. Leaf node containing a reference to a model index [S2, unofficial].
+1.  **Chunk Header:**
+    *   `id`: 4-byte integer (ASCII characters, e.g., 'XYZI').
+    *   `contentSize`: 4-byte integer (size of content in bytes).
+    *   `childrenSize`: 4-byte integer (size of child chunks in bytes).
+    *   `end`: 4-byte integer (offset to the next chunk, calculated as `current_pos + contentSize + childrenSize`) [S3, unofficial].
+    *   All integers are stored in little-endian order [S3, unofficial].
 
-**Numbered Steps:**
-1. **Parse Header:** Read 4-byte magic ID (`'VOX '`) and 4-byte version (150) [S3, unofficial].
-2. **Parse Palette:** Initialize default palette [G]. If `RGBA` chunk exists, overwrite indices 1–255 from file data, skipping the unused color at the end [S3, unofficial].
-3. **Parse Models:** Read `PACK` chunk for model count [S2, unofficial]. For each model, read `SIZE` chunk for dimensions $(W, H, D)$, then read `XYZI` chunk containing `numVoxels` followed by voxel data (3 bytes coordinates + 1 byte color index) [S2, unofficial][S3, unofficial].
-4. **Parse Scene Graph:** Recursively parse `MAIN` children. `nTRN` nodes contain translation/rotation transforms and have one child (`nGRP` or `nSHP`). `nGRP` nodes group children (all `nTRN`). `nSHP` nodes are leaves referencing a model index [S2, unofficial].
-5. **Convert to Geometry:** For each model, iterate voxels [S1, unofficial]. Determine visible faces (adjacent voxel is empty or transparent) [G]. Generate quad primitives.
-6. **Transform Coordinates:** Convert from MagicaVoxel's Z-up coordinate system to the renderer's Y-up system by applying instance transforms from `nTRN` nodes [S1, unofficial]. Internally, the Y and Z axes are swapped to match the renderer's coordinate space: `voxelSpriteSize = spriteSize(size.x, size.z, size.y)` [S3, unofficial].
-7. **Merge Glass:** Identify voxels with glass material properties and merge them into a single volume representation [S1, unofficial].
-8. **Mark Lights:** Identify emissive voxels and mark them as light sources [S1, unofficial].
-9. **Build BVH:** Insert all generated quads into a Bounding Volume Hierarchy for ray intersection testing [S1, unofficial].
+2.  **Voxel Data (XYZI Chunk):**
+    *   `numVoxels`: 4-byte integer.
+    *   `voxels`: Array of `numVoxels` voxels. Each voxel is 4 bytes: `x` (uint8), `y` (uint8), `z` (uint8), `colorIndex` (uint8) [S2, unofficial][S3, unofficial].
 
-**Formulas:**
-- 3D voxel grid index: $index = z \times height \times width + y \times width + x$, where width, height, depth correspond to $x, y, z$ dimensions respectively [S3, unofficial].
-- Coordinate limit: $\{(x_1, x_2, x_3) \in \mathbb{N}^3 \mid 0 \le x_i < 256, i = 1 \dots 3\}$ [S2, unofficial].
+3.  **Palette (RGBA Chunk):**
+    *   Array of 255 colors (indices 1–255), each 4 bytes (R, G, B, A uint8). Index 0 is reserved for the default palette [S2, unofficial][S3, unofficial].
 
-**Parameters:**
-- Palette Size: Up to 256 colors [S2, unofficial].
-- Coordinate Range: 0–255 per axis [S2, unofficial].
-- File Versions: 150 and 200 [S1, unofficial].
+4.  **Scene Graph Nodes:**
+    *   `nTRN`: Transform node (translation/rotation), contains child `nGRP` or `nSHP` [S2, unofficial].
+    *   `nGRP`: Group node, contains children `nTRN` [S2, unofficial].
+    *   `nSHP`: Shape node (model), leaf node, no children [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Coordinate Limit:** The 1-byte coordinate limit restricts single model size to $256^3$ voxels; scenes overcome this by using multiple models and transforms (nTRN/nGRP/nSHP) [S2, unofficial].
-- **Invalid Dimensions:** If $size.x \le 0$, $size.y \le 0$, or $size.z \le 0$, return `nullptr` with an error message [S3, unofficial].
-- **Negative Voxel Count:** If $numVoxels < 0$, return `nullptr` with an error message [S3, unofficial].
-- **Palette Index 0:** Index 0 uses the default palette rather than the file data [S3, unofficial].
+**Numbered steps:**
+
+1.  Read 4-byte magic ID. Verify it is `'VOX '` (0x564F5820) [S3, unofficial].
+2.  Read 4-byte version. Verify it is 150 (or 200 for extended features) [S1, unofficial][S3, unofficial].
+3.  Read the `MAIN` chunk.
+4.  Loop through sub-chunks until the end of the `MAIN` chunk is reached:
+    a.  Read chunk `id`, `contentSize`, `childrenSize`.
+    b.  Calculate `end` position: `current_pos + contentSize + childrenSize` [S3, unofficial].
+    c.  Process content based on `id`:
+        i.  If `SIZE`: Read `size.x`, `size.y`, `size.z` (3 integers) [S3, unofficial].
+        ii. If `XYZI`: Read `numVoxels`. Loop `i` from 0 to `numVoxels`: Read `x`, `y`, `z`, `colorIndex` (uint8 each). Store voxel [S4, unofficial].
+        iii. If `RGBA`: Loop `i` from 0 to `contentSize/4`: Read `r`, `g`, `b`, `a` (uint8 each). Add to palette [S4, unofficial].
+        iv. If `nTRN`, `nGRP`, `nSHP`: Parse scene graph nodes recursively [S1, unofficial].
+        v.  If unknown: Skip `contentSize` bytes [S4, unofficial].
+    d.  Jump to next chunk at `end` [S3, unofficial].
+5.  If palette is empty, fill with MagicaVoxel default palette (256 colors) [S4, unofficial].
+6.  Convert voxel coordinates to internal representation. Index calculation for 3D voxel grid: `index = z * height * width + y * width + x`, where `width`, `height`, `depth` correspond to `x`, `y`, `z` dimensions respectively [S3, unofficial].
+7.  Convert from MagicaVoxel's z-up coordinate system (X=Left, Y=Back, Z=Up) to the renderer's y-up system if necessary [S1, unofficial][S4, unofficial].
+8.  Convert visible faces into quad primitives [S1, unofficial].
+9.  Place quads in the scene using instance transforms [S1, unofficial].
+10. Merge glass voxels into a single volume representation [S1, unofficial].
+11. Mark emissive voxels as light sources [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import struct
-
-class Chunk:
-    def __init__(self, tag, content, children):
-        self.tag = tag
-        self.content = content
-        self.children = children
-
-def read_chunk(stream):
-    tag = stream.read(4)
-    content_size = int.from_bytes(stream.read(4), 'little')
-    children_size = int.from_bytes(stream.read(4), 'little')
-    end = int.from_bytes(stream.read(4), 'little')
-    content = stream.read(content_size)
-    children = []
-    if children_size > 0:
-        children_end = stream.tell() + children_size
-        while stream.tell() < children_end:
-            children.append(read_chunk(stream))
-    return Chunk(tag, content, children)
-
-def parse_vox(file_stream):
-    # 1. Parse Header
-    header = file_stream.read(8)
-    if header[:4] != b'VOX ': raise ValueError("Invalid VOX header")
-    version = int.from_bytes(header[4:8], 'little')
-    if version not in (150, 200): raise ValueError(f"Unsupported version {version}")
-
+def parse_vox_file(buffer):
+    # 1. Read header
+    magic = buffer.read(4)
+    if magic != b'VOX ':
+        raise ValueError("Invalid magic number")
+    
+    version = buffer.read_uint32()
+    if version not in (150, 200):
+        raise ValueError(f"Unsupported version: {version}")
+    
     # 2. Read MAIN chunk
-    main_chunk = read_chunk(file_stream)
+    main_chunk = read_chunk(buffer)
+    if main_chunk.id != b'MAIN':
+        raise ValueError("Expected MAIN chunk")
+    
+    palette = get_default_palette()
+    voxels = []
+    size = None
+    scene_graph = []
+    
+    # 3. Process sub-chunks
+    current_pos = buffer.tell()
+    while current_pos < main_chunk.end:
+        chunk = read_chunk(buffer)
+        
+        if chunk.id == b'SIZE':
+            size = (buffer.read_uint32(), buffer.read_uint32(), buffer.read_uint32())
+        elif chunk.id == b'XYZI':
+            num_voxels = buffer.read_uint32()
+            for _ in range(num_voxels):
+                x = buffer.read_uint8()
+                y = buffer.read_uint8()
+                z = buffer.read_uint8()
+                color_index = buffer.read_uint8()
+                voxels.append({'x': x, 'y': y, 'z': z, 'color_index': color_index})
+        elif chunk.id == b'RGBA':
+            num_colors = chunk.content_size // 4
+            for i in range(num_colors):
+                r = buffer.read_uint8()
+                g = buffer.read_uint8()
+                b = buffer.read_uint8()
+                a = buffer.read_uint8()
+                # Palette indices 1-255
+                palette[i + 1] = (r, g, b, a)
+        elif chunk.id in (b'nTRN', b'nGRP', b'nSHP'):
+            scene_graph.append(parse_scene_node(chunk, buffer))
+        else:
+            # Skip unknown chunk content
+            buffer.seek(chunk.content_size, 1)
+        
+        # Jump to next chunk
+        buffer.seek(chunk.end)
+        current_pos = buffer.tell()
+    
+    # 4. Handle default palette
+    if not any(palette):
+        palette = get_default_palette()
+    
+    # 5. Coordinate conversion (example: z-up to y-up)
+    # This step depends on the target renderer's coordinate system
+    converted_voxels = []
+    for v in voxels:
+        # MagicaVoxel: X=Left, Y=Back, Z=Up
+        # Target: Y=Up
+        converted_voxels.append({
+            'x': v['x'],
+            'y': v['z'],  # Z becomes Y
+            'z': v['y'],  # Y becomes Z
+            'color_index': v['color_index']
+        })
+    
+    return {
+        'size': size,
+        'voxels': converted_voxels,
+        'palette': palette,
+        'scene_graph': scene_graph
+    }
 
-    # 3. Parse Palette
-    palette = [(0, 0, 0, 0)] * 256  # [G] Default palette initialization
-    rgba_chunk = next((c for c in main_chunk.children if c.tag == b'RGBA'), None)
-    if rgba_chunk:
-        data = rgba_chunk.content
-        # RGBA chunk contains 255 colors (indices 1-255) + 1 unused color at the end
-        for i in range(0, 255 * 4, 4):
-            r, g, b, a = data[i], data[i+1], data[i+2], data[i+3]
-            palette[i // 4 + 1] = (r, g, b, a)
+def read_chunk(buffer):
+    id = buffer.read(4)
+    content_size = buffer.read_uint32()
+    children_size = buffer.read_uint32()
+    end = buffer.tell() + content_size + children_size
+    return {'id': id, 'content_size': content_size, 'children_size': children_size, 'end': end}
 
-    # 4. Parse Models
-    models = []
-    pack_chunk = next((c for c in main_chunk.children if c.tag == b'PACK'), None)
-    num_models = int.from_bytes(pack_chunk.content[:4], 'little') if pack_chunk else 0
-    child_idx = 0
-    for _ in range(num_models):
-        size_chunk = main_chunk.children[child_idx]
-        xyz_chunk = main_chunk.children[child_idx + 1]
-        child_idx += 2
-        if size_chunk.tag != b'SIZE' or xyz_chunk.tag != b'XYZI': break
-        dims = struct.unpack('<III', size_chunk.content[:12])
-        num_voxels = int.from_bytes(xyz_chunk.content[:4], 'little')
-        if num_voxels < 0: raise ValueError("Negative voxel count")
-        voxels = []
-        for i in range(4, 4 + num_voxels * 4, 4):
-            x, y, z, c = xyz_chunk.content[i], xyz_chunk.content[i+1], xyz_chunk.content[i+2], xyz_chunk.content[i+3]
-            voxels.append((x, y, z, c))
-        models.append({'dims': dims, 'voxels': voxels})
-
-    # 5. Parse Scene Graph & Build Geometry
-    quads = []
-    lights = []
-    glass_volume = []
-
-    def traverse_node(node, parent_transform):
-        if node.tag == b'nTRN':
-            transform = parse_transform(node.content)  # [G] Standard 4x4 matrix extraction
-            new_transform = multiply_transforms(parent_transform, transform)
-            traverse_node(node.children[0], new_transform)
-        elif node.tag == b'nGRP':
-            for child in node.children:
-                traverse_node(child, parent_transform)
-        elif node.tag == b'nSHP':
-            model_idx = int.from_bytes(node.content[:4], 'little')
-            model = models[model_idx]
-            model_quads = voxels_to_quads(model['voxels'], model['dims'], palette)
-            for quad in model_quads:
-                transformed_quad = apply_transform(quad, parent_transform)
-                quads.append(transformed_quad)
-            for v in model['voxels']:
-                c = palette[v[3]]
-                if is_glass(c): glass_volume.append(v)
-                if is_emissive(c): lights.append(v)
-
-    for child in main_chunk.children:
-        traverse_node(child, identity_transform())
-
-    # 6. Build BVH
-    bvh = build_bvh(quads)  # [G] Standard BVH construction algorithm
-    return {'bvh': bvh, 'lights': lights, 'glass_volume': glass_volume, 'palette': palette}
-
-def voxels_to_quads(voxels, dims, palette):
-    quads = []
-    voxel_set = set(voxels)
-    directions = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
-    for x, y, z, c in voxels:
-        color = palette[c]
-        if color[3] == 0: continue
-        for dx, dy, dz in directions:
-            nx, ny, nz = x + dx, y + dy, z + dz
-            if not (0 <= nx < dims[0] and 0 <= ny < dims[1] and 0 <= nz < dims[2]):
-                quads.append(create_quad(x, y, z, dx, dy, dz, color))
-            elif (nx, ny, nz, 0) not in voxel_set:
-                quads.append(create_quad(x, y, z, dx, dy, dz, color))
-    return quads
-
-def apply_transform(quad, transform):
-    # MagicaVoxel is Z-up, Renderer is Y-up
-    x, y, z = quad.center
-    new_x, new_y, new_z = x, z, -y
-    quad.center = (new_x, new_y, new_z)
-    return quad
-
-def get_default_palette(): return [(0,0,0,0)] * 256
-def parse_transform(data): return None  # [G] Standard matrix extraction
-def multiply_transforms(a, b): return None  # [G] Standard matrix multiplication
-def identity_transform(): return None  # [G] Standard identity matrix
-def is_glass(color): return False  # [G] Standard material property check
-def is_emissive(color): return False  # [G] Standard material property check
-def build_bvh(quads): return None  # [G] Standard BVH construction
-def create_quad(x, y, z, dx, dy, dz, color): return type('Quad', (), {'center': (x,y,z)})()  # [G] Standard primitive creation
+def get_default_palette():
+    # 256 colors, index 0 is default, 1-255 from file
+    return [None] * 256
 ```
+
+**Parameters:**
+*   `version`: Expected file version number is 150 [S3, unofficial].
+*   `bImportXForward`: Boolean flag to swap X and Y axes during import [S4, unofficial].
+*   `bImportMaterial`: Boolean flag to enable material and texture generation from the voxel palette [S4, unofficial].
+*   `bImportXYCenter`: Boolean flag to center the voxel grid on the XY plane [S4, unofficial].
+*   `BuildScale3D`: Scale factors applied to each voxel box during collision/physics setup [S4, unofficial].
+
+**Edge cases and pitfalls:**
+*   **Coordinate Limit:** Standard `.vox` files limit coordinates to 0-255 per axis because each coordinate component uses 1 byte. This restricts the space to $\{(x_1, x_2, x_3) \in \mathbb{N}^3 \mid 0 \le x_i < 256\}$ [S2, unofficial].
+*   **Invalid size:** If `size.x <= 0 || size.y <= 0 || size.z <= 0`, return error [S3, unofficial].
+*   **Negative voxel count:** If `numVoxels < 0`, return error [S3, unofficial].
+*   **Coordinate system mismatch:** MagicaVoxel uses X=Left, Y=Back, Z=Up. UE4 uses X=Forward, Y=Right, Z=Up. The importer handles this via `bImportXForward` flag which swaps axes and inverts X/Y during XYZI import [S4, unofficial].
 
 ## Subtopics
 
-### [MagicaVoxel File Output](1752-magicavoxel-file-output.md)
-Writes .vox files. Use when exporting.
+### MagicaVoxel File Output
+*   **What it is:** Method to write `.vox` files from internal representations.
+*   **What sets it apart:** It generates the chunk structure and binary layout required by MagicaVoxel.
+*   **When to choose it:** When exporting voxel data from a custom renderer or tool to MagicaVoxel.
+*   **Link:** [MagicaVoxel File Output](1752-magicavoxel-file-output.md)
 
-### [PLY File Parsing](2781-ply-file-parsing.md)
-Parses PLY meshes. Use for polygonal meshes.
+### PLY File Parsing
+*   **What it is:** Parser for PLY (Polygon File Format) files.
+*   **What sets it apart:** PLY is a general-purpose mesh format, not voxel-specific. It handles triangles/quads, not voxel grids.
+*   **When to choose it:** When importing mesh data that needs to be voxelized later.
+*   **Link:** [PLY File Parsing](2781-ply-file-parsing.md)
 
-### [Voxel File I/O](2786-voxel-file-i-o.md)
-General voxel I/O. Use for abstracting file formats.
+### Voxel File I/O
+*   **What it is:** General interface for reading/writing voxel data in various formats.
+*   **What sets it apart:** Abstracts the specific format details (binvox, rawvox, vox) into a common API.
+*   **When to choose it:** When building a generic voxel pipeline that supports multiple input formats.
+*   **Link:** [Voxel File I/O](2786-voxel-file-i-o.md)
 
 ## Operating characteristics
-- **Time Complexity:** Parsing is linear with respect to file size [G]. Converting voxels to quads is $O(N)$ where $N$ is the number of voxels [G]. Building the BVH is $O(N \log N)$ or $O(N)$ depending on the algorithm [G].
-- **Memory Complexity:** $O(N)$ to store voxels and quads [G]. Palette is constant size (256 colors) [G].
-- **Strengths:** Supports complex scenes with transforms and groups. Efficient surface extraction for ray tracing [S1, unofficial].
-- **Limitations:** Single model coordinate limit of $256^3$. No explicit compression for voxel data (XYZI is raw) [S2, unofficial].
-- **When to Use:** When loading models created in MagicaVoxel for ray-traced rendering [S1, unofficial].
-- **When Not to Use:** For large-scale voxel worlds without scene hierarchy, or when memory is extremely constrained and raw voxel grids are preferred [G].
+*   **Time complexity:** Linear with respect to the number of voxels and chunks. Parsing is dominated by reading the `XYZI` chunk [S3, unofficial].
+*   **Memory complexity:** Proportional to the number of voxels and the size of the palette (256 colors) [S2, unofficial].
+*   **Measured performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of voxels, but limited by the 256x256x256 coordinate space per model [S2, unofficial].
+*   **Strengths:** Handles complex scenes with transforms and groups [S1, unofficial]. Supports materials and emissive voxels [S1, unofficial].
+*   **Limitations:** Coordinate limit of 256 per axis per model [S2, unofficial]. Version 200 features may not be fully supported in all parsers [S4, unofficial].
+*   **When to use it:** When working with MagicaVoxel assets or needing to import voxel data with scene hierarchy.
+*   **When not:** When working with dense voxel grids or formats like binvox that do not support scene graphs [S2, unofficial].
 
 ## Background
-The `.vox` format was developed for the software Magica Voxel [S2, unofficial]. It structures data into chunks to describe voxelized models and scenes [S2, unofficial]. The format supports versions 150 and 200 [S1, unofficial].
+*   **Origin:** Developed for Magica Voxel by Ephtracy [S2, unofficial].
+*   **History:** The format has evolved from version 150 to 200, adding support for materials and extended features [S1, unofficial][S4, unofficial].
+*   **Usage:** Widely used in voxel art tools and indie game development [S4, unofficial].
 
 ## Sources
 [S1] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
 [S2] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
 [S3] JamesRandall/SimpleVoxelEngine, https://github.com/JamesRandall/SimpleVoxelEngine, fetched 2026-10-26 (unofficial)
+[S4] mik14a/VOX4U, https://github.com/mik14a/VOX4U, fetched 2026-10-26 (unofficial)

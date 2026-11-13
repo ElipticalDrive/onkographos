@@ -3,36 +3,22 @@
 Also called: Face-Reconstructed Void Ratio, Gauss Quadrature Face Reconstruction
 
 ## Overview
-Face-Reconstructed Gauss Smoothing is a post-processing technique applied to voxelized point cloud data to reduce discretization artifacts and produce a smoother scalar field (typically void ratio) [S1, unofficial]. It reconstructs a continuous quadratic polynomial within each voxel using the voxel's center value and averaged values from its six immediate neighbors, then samples this field at eight Gauss quadrature points to compute a final smoothed value [S1, unofficial]. It differs from simple averaging by incorporating second-order spatial derivatives (via quadratic terms) to better capture local gradients, and from higher-order finite element methods by using a fixed, low-degree polynomial basis defined by neighbor averages [S1, unofficial].
+Face-Reconstructed Gauss Smoothing is a post-processing technique for voxelized scalar fields that reduces discretization artifacts by reconstructing a continuous quadratic polynomial within each voxel and sampling it at Gauss quadrature points [S1, unofficial]. It differs from simple neighborhood averaging by incorporating second-order spatial variation via quadratic terms, and from higher-order finite element methods by using a fixed, low-degree polynomial basis defined by center and face values [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: `voxel_indices`: A $(N, 3)$ integer array of voxel coordinates for $N$ occupied voxels. `values_by_voxel`: A length-$N$ float array of scalar values (e.g., void ratio) at each voxel center. `dims`: A length-3 integer array defining the bounding box dimensions of the voxel grid.
-- Output: `smoothed_values`: A length-$N$ float array of smoothed scalar values.
+- Input: `voxel_indices`: A $(N, 3)$ integer array of voxel coordinates for $N$ occupied voxels. `values_by_voxel`: A length-$N$ float array of scalar values at each voxel center. `dims`: A length-3 integer array defining the bounding box dimensions of the voxel grid [S1, unofficial].
+- Output: `smoothed_values`: A length-$N$ float array of smoothed scalar values [S1, unofficial].
 
 **Data Structures:**
-- `compact_grid`: A 3D integer array of shape `dims`, initialized to -1. It maps voxel coordinates $(i, j, k)$ to the index in `values_by_voxel`.
-- `face_values`: A $(N, 6)$ float array. The 6 columns correspond to the face values in the directions: $-x, +x, -y, +y, -z, +z$.
+- `compact_grid`: A 3D integer array of shape `dims`, initialized to -1. It maps voxel coordinates $(i, j, k)$ to the index in `values_by_voxel` [S1, unofficial].
+- `face_values`: A $(N, 6)$ float array. The 6 columns correspond to the face values in the directions: $-x, +x, -y, +y, -z, +z$ [S1, unofficial].
 
 **Steps:**
-1. **Index Mapping:** Populate `compact_grid` such that `compact_grid[voxel_indices[n]] = n` for each voxel $n \in [0, N-1)$.
-2. **Face Value Computation:** For each of the 6 directions (axis $d \in \{0, 1, 2\}$, step $s \in \{-1, 1\}$):
-   - Calculate neighbor coordinates: `neighbor_indices = voxel_indices + [0, 0, 0]` with the $d$-th component incremented by $s$.
-   - Identify valid neighbors: Those where `0 <= neighbor_indices[:, d] < dims[d]`.
-   - Look up neighbor indices in `compact_grid`. If a neighbor exists and is occupied, its face value is the average of the current voxel's value and the neighbor's value: $v_{face} = 0.5 \cdot (v_{center} + v_{neighbor})$. If the neighbor is out of bounds or unoccupied, $v_{face} = v_{center}$.
-   - Store $v_{face}$ in the corresponding column of `face_values`.
-3. **Coefficient Calculation:** For each voxel, compute coefficients for the quadratic reconstruction function $f(\xi, \eta, \zeta) = e_0 + a_x \xi + b_x \xi^2 + a_y \eta + b_y \eta^2 + a_z \zeta + b_z \zeta^2$:
-   - Let $e_0$ be the center value.
-   - Let $e_{x-}, e_{x+}$ be the face values in the $-x$ and $+x$ directions.
-   - Let $e_{y-}, e_{y+}$ be the face values in the $-y$ and $+y$ directions.
-   - Let $e_{z-}, e_{z+}$ be the face values in the $-z$ and $+z$ directions.
-   - $a_x = 0.5 \cdot (e_{x+} - e_{x-})$
-   - $b_x = 0.5 \cdot (e_{x+} + e_{x-}) - e_0$
-   - $a_y = 0.5 \cdot (e_{y+} - e_{y-})$
-   - $b_y = 0.5 \cdot (e_{y+} + e_{y-}) - e_0$
-   - $a_z = 0.5 \cdot (e_{z+} - e_{z-})$
-   - $b_z = 0.5 \cdot (e_{z+} + e_{z-}) - e_0$
-4. **Gauss Quadrature Evaluation:** Evaluate the polynomial at the 8 Gauss points $(\xi, \eta, \zeta) = (\pm \frac{1}{\sqrt{3}}, \pm \frac{1}{\sqrt{3}}, \pm \frac{1}{\sqrt{3}})$. Sum the 8 results and divide by 8 to get the smoothed value.
+1. **Index Mapping:** Populate `compact_grid` such that `compact_grid[voxel_indices[n]] = n` for each voxel $n \in [0, N)$ [S1, unofficial].
+2. **Face Value Computation:** For each of the 6 directions (axis $d \in \{0, 1, 2\}$, step $s \in \{-1, 1\}$): calculate neighbor coordinates by incrementing the $d$-th component by $s$; identify valid neighbors where $0 \le \text{coord} < \text{dims}[d]$; look up neighbor indices in `compact_grid`; if a neighbor exists and is occupied, set $v_{\text{face}} = 0.5 \cdot (v_{\text{center}} + v_{\text{neighbor}})$; otherwise set $v_{\text{face}} = v_{\text{center}}$; store $v_{\text{face}}$ in the corresponding column of `face_values` [S1, unofficial].
+3. **Coefficient Calculation:** For each voxel, compute coefficients for the quadratic reconstruction function $f(\xi, \eta, \zeta) = e_0 + a_x \xi + b_x \xi^2 + a_y \eta + b_y \eta^2 + a_z \zeta + b_z \zeta^2$ using the center value $e_0$ and the 6 face values $e_{x\pm}, e_{y\pm}, e_{z\pm}$: $a_x = 0.5(e_{x+} - e_{x-})$, $b_x = 0.5(e_{x+} + e_{x-}) - e_0$, $a_y = 0.5(e_{y+} - e_{y-})$, $b_y = 0.5(e_{y+} + e_{y-}) - e_0$, $a_z = 0.5(e_{z+} - e_{z-})$, $b_z = 0.5(e_{z+} + e_{z-}) - e_0$ [S1, unofficial].
+4. **Gauss Quadrature Evaluation:** Evaluate the polynomial at the 8 Gauss points $(\xi, \eta, \zeta) = (\pm \frac{1}{\sqrt{3}}, \pm \frac{1}{\sqrt{3}}, \pm \frac{1}{\sqrt{3}})$; sum the 8 results and divide by 8 to obtain the smoothed value [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,28 +28,12 @@ import numpy as np
 import math
 
 def face_reconstructed_gauss_smooth_numpy(voxel_indices, values_by_voxel, dims):
-    """
-    Applies face-reconstructed Gauss smoothing to voxelized data.
-    
-    Args:
-        voxel_indices: (N, 3) int array of voxel coordinates.
-        values_by_voxel: (N,) float array of values at voxel centers.
-        dims: (3,) int array of grid dimensions.
-        
-    Returns:
-        smoothed_values: (N,) float array of smoothed values.
-    """
-    N = values_by_voxel.shape[0]
     shape = tuple(int(v) for v in dims)
-    
-    # Step 1: Create compact grid mapping
     compact_grid = np.full(shape, -1, dtype=np.int64)
     coords = tuple(voxel_indices[:, axis] for axis in range(3))
-    compact_grid[coords] = np.arange(N, dtype=np.int64)
-    
-    # Step 2: Compute face values
-    face_values = np.empty((N, 6), dtype=np.float64)
-    # Directions: (-x, +x, -y, +y, -z, +z)
+    compact_grid[coords] = np.arange(values_by_voxel.shape[0], dtype=np.int64)
+
+    face_values = np.empty((values_by_voxel.shape[0], 6), dtype=np.float64)
     directions = [
         (0, -1),
         (0, 1),
@@ -72,45 +42,25 @@ def face_reconstructed_gauss_smooth_numpy(voxel_indices, values_by_voxel, dims):
         (2, -1),
         (2, 1),
     ]
-    
+
     for face_index, (axis, step) in enumerate(directions):
-        # Calculate neighbor indices
         neighbor_indices = voxel_indices.copy()
         neighbor_indices[:, axis] += step
-        
-        # Check validity
         valid = (neighbor_indices[:, axis] >= 0) & (neighbor_indices[:, axis] < dims[axis])
-        
-        # Initialize face values to center values (handles boundary/unoccupied neighbors)
-        face_values[:, face_index] = values_by_voxel
-        
-        # Find valid neighbors and their compact indices
+        neighbor_compact = np.full(values_by_voxel.shape[0], -1, dtype=np.int64)
         valid_rows = np.where(valid)[0]
-        if valid_rows.size > 0:
-            lookup_coords = tuple(neighbor_indices[valid_rows, dim] for dim in range(3))
-            neighbor_compact_indices = compact_grid[lookup_coords]
-            
-            # Compute average for valid neighbors
-            has_neighbor = neighbor_compact_indices >= 0
-            if np.any(has_neighbor):
-                center_vals = values_by_voxel[valid_rows[has_neighbor]]
-                neighbor_vals = values_by_voxel[neighbor_compact_indices[has_neighbor]]
-                face_values[valid_rows[has_neighbor], face_index] = 0.5 * (center_vals + neighbor_vals)
-    
-    # Step 3 & 4: Evaluate at Gauss points
+        if valid_rows.size:
+            lookup = tuple(neighbor_indices[valid_rows, dim] for dim in range(3))
+            neighbor_compact[valid_rows] = compact_grid[lookup]
+        has_neighbor = neighbor_compact >= 0
+        face_values[:, face_index] = values_by_voxel
+        face_values[has_neighbor, face_index] = 0.5 * (
+            values_by_voxel[has_neighbor] + values_by_voxel[neighbor_compact[has_neighbor]]
+        )
+
     return evaluate_face_reconstruction_at_gauss_numpy(values_by_voxel, face_values)
 
 def evaluate_face_reconstruction_at_gauss_numpy(center_values, face_values):
-    """
-    Evaluates the face-reconstructed polynomial at 8 Gauss points and averages.
-    
-    Args:
-        center_values: (N,) float array.
-        face_values: (N, 6) float array. Columns: [-x, +x, -y, +y, -z, +z].
-        
-    Returns:
-        smoothed_values: (N,) float array.
-    """
     e0 = center_values
     ex_minus = face_values[:, 0]
     ex_plus = face_values[:, 1]
@@ -118,52 +68,41 @@ def evaluate_face_reconstruction_at_gauss_numpy(center_values, face_values):
     ey_plus = face_values[:, 3]
     ez_minus = face_values[:, 4]
     ez_plus = face_values[:, 5]
-    
-    # Coefficients
+
     ax = 0.5 * (ex_plus - ex_minus)
     bx = 0.5 * (ex_plus + ex_minus) - e0
     ay = 0.5 * (ey_plus - ey_minus)
     by = 0.5 * (ey_plus + ey_minus) - e0
     az = 0.5 * (ez_plus - ez_minus)
     bz = 0.5 * (ez_plus + ez_minus) - e0
-    
-    # Gauss points
+
     gp = 1.0 / math.sqrt(3.0)
-    
-    # Sum over 8 Gauss points
     total = np.zeros_like(e0)
     count = 0
-    
     for xi in (-gp, gp):
         for eta in (-gp, gp):
             for zeta in (-gp, gp):
-                # Polynomial evaluation
-                val = (e0 + 
-                       ax * xi + bx * xi * xi + 
-                       ay * eta + by * eta * eta + 
-                       az * zeta + bz * zeta * zeta)
-                total += val
+                total += (e0 + ax * xi + bx * xi * xi + ay * eta + by * eta * eta + az * zeta + bz * zeta * zeta)
                 count += 1
-                
     return total / float(count)
 ```
 
 **Parameters and Edge Cases:**
 - The Gauss points are fixed at $\pm \frac{1}{\sqrt{3}}$ in local voxel coordinates $[-1, 1]^3$ [S1, unofficial].
-- Boundary voxels: Neighbors outside the grid are treated as having the same value as the center voxel for face calculation purposes, effectively reflecting the boundary condition [S1, unofficial].
+- Boundary voxels: Neighbors outside the grid are treated as having the same value as the center voxel for face calculation purposes [S1, unofficial].
 - Unoccupied neighbors: If a neighbor coordinate is within bounds but not in the voxel list, it is treated as unoccupied, and the face value defaults to the center value [S1, unofficial].
-- Precision: Uses `float64` for intermediate calculations to maintain accuracy [S1, unofficial].
+- Typical parameter values: Not given in the sources.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of occupied voxels. The face computation involves constant-time lookups and arithmetic per voxel, and the Gauss evaluation involves a fixed 8-point loop per voxel.
-- **Memory Complexity:** $O(N + D_x D_y D_z)$ for the `compact_grid` and `face_values`. The grid size depends on the bounding box, which can be large if the point cloud is sparse.
-- **Strengths:** Provides a smooth, continuous approximation of the scalar field without requiring complex mesh generation. It is computationally efficient and easy to implement.
-- **Limitations:** The smoothing is local and may not capture large-scale trends as well as global smoothing methods. The choice of quadratic polynomial may introduce oscillations if the data is highly irregular.
-- **When to use:** When a smooth scalar field is needed for visualization or further processing of voxelized point cloud data, and computational efficiency is a priority.
-- **When not to use:** When high-fidelity representation of sharp gradients or discontinuities is required, as the smoothing will blur these features.
+- **Time Complexity:** $O(N)$ where $N$ is the number of occupied voxels; face computation uses constant-time lookups and arithmetic per voxel, and Gauss evaluation uses a fixed 8-point loop per voxel [S1, unofficial].
+- **Memory Complexity:** $O(N + D_x D_y D_z)$ for `compact_grid` and `face_values` [S1, unofficial].
+- **Strengths:** Provides a smooth, continuous approximation without mesh generation; computationally efficient [S1, unofficial].
+- **Limitations:** Local smoothing may not capture large-scale trends; quadratic basis may oscillate on highly irregular data [G].
+- **When to use:** When a smooth scalar field is needed for visualization or further processing of voxelized data with efficiency priorities [S1, unofficial].
+- **When not to use:** When high-fidelity representation of sharp gradients or discontinuities is required, as smoothing blurs these features [G].
 
 ## Background
-The method is described in the context of point cloud voxelization for computing void ratios in granular materials [S1, unofficial]. It builds on the concept of voxel-based void ratio computation, where the void ratio is calculated for each voxel based on the volume of particles within it [S1, unofficial]. The face-reconstructed Gauss smoothing is applied as a post-processing step to smooth the discrete void ratio field. The specific implementation is provided in an unofficial GitHub repository [S1, unofficial].
+The method is described in the context of point cloud voxelization for computing void ratios in granular materials [S1, unofficial]. It builds on voxel-based void ratio computation, where the void ratio is calculated as $e = (V_{\text{voxel}} - \sum V_{\text{spheres}}) / \sum V_{\text{spheres}}$ [S1, unofficial]. The smoothing is applied as a post-processing step to the discrete void ratio field [S1, unofficial].
 
 ## Sources
 [S1] SammySuliman/point-cloud-voxelization, https://github.com/SammySuliman/point-cloud-voxelization, fetched 2026-10-27 (unofficial)

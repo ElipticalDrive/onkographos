@@ -1,0 +1,191 @@
+--- v006.md
++++ v007.md
+@@ -18,14 +18,14 @@
+ **Numbered Steps:**
+ 
+-1.  **Initialization:** Initialize MPI communicator. Rank 0 reads command-line arguments (filename, partitioning type, step size, bounding box) and global volume dimensions [S3, S5, unofficial].
+-2.  **Transfer Function Loading:** All processes load opacity and color transfer functions from text files. These are parsed into local dictionaries or arrays. For opacity, keys are scalar values and values are opacities. For color, keys are scalar values and values are RGB triplets [S3, unofficial].
++1.  **Initialization:** Initialize MPI communicator [S5, unofficial]. Rank 0 reads command-line arguments (filename, partitioning type, step size, bounding box) and global volume dimensions [S3, S5, unofficial].
++2.  **Transfer Function Loading:** All processes load opacity and color transfer functions from text files [S3, unofficial]. These are parsed into local dictionaries or arrays [S3, unofficial]. For opacity, keys are scalar values and values are opacities [S3, unofficial]. For color, keys are scalar values and values are RGB triplets [S3, unofficial].
+ 3.  **Domain Decomposition:**
+-    *   **1D Decomposition:** The volume is split along the X-axis (or Y-axis). If $N$ processes are used, the X-dimension $X_{dim}$ is divided into chunks. Process $p$ receives X-range $[p \cdot chunk\_size, (p+1) \cdot chunk\_size)$. The last process receives the remainder to cover the full width. The Y and Z dimensions remain full [S3, S5, unofficial].
+-    *   **2D Decomposition:** The volume is split along X and Y axes. The number of processes $N$ is factorized into $N_x \times N_y$ such that $N_x \ge N_y$ and $N_x \approx N_y$ (square-ish grid) [S3, S5, unofficial]. Process $(p_x, p_y)$ receives a block defined by $[p_x \cdot chunk\_x, (p_x+1) \cdot chunk\_x)$ and $[p_y \cdot chunk\_y, (p_y+1) \cdot chunk\_y)$. The last blocks in each dimension receive the remainder [S3, unofficial]. (Note: [S5, unofficial] distributes the remainder to the first extra processes instead).
+-4.  **Data Distribution:** Rank 0 distributes the relevant sub-domains to all other processes. In C++, this involves iterating through the global data indices corresponding to the process's bounds and sending the flattened subset via `MPI_Send` [S4, unofficial]. In Python, `mpi4py` scatter or send operations are used [S3, S5, unofficial].
++    *   **1D Decomposition:** The volume is split along the X-axis (or Y-axis) [S3, unofficial]. If $N$ processes are used, the X-dimension $X_{dim}$ is divided into chunks [S3, unofficial]. Process $p$ receives X-range $[p \cdot chunk\_size, (p+1) \cdot chunk\_size)$ [S3, unofficial]. The last process receives the remainder to cover the full width [S3, unofficial]. The Y and Z dimensions remain full [S3, S5, unofficial].
++    *   **2D Decomposition:** The volume is split along X and Y axes [S3, unofficial]. The number of processes $N$ is factorized into $N_x \times N_y$ such that $N_x \ge N_y$ and $N_x \approx N_y$ (square-ish grid) [S3, S5, unofficial]. Process $(p_x, p_y)$ receives a block defined by $[p_x \cdot chunk\_x, (p_x+1) \cdot chunk\_x)$ and $[p_y \cdot chunk\_y, (p_y+1) \cdot chunk\_y)$ [S3, unofficial]. The last blocks in each dimension receive the remainder [S3, unofficial]. (Note: [S5, unofficial] distributes the remainder to the first extra processes instead).
++4.  **Data Distribution:** Rank 0 distributes the relevant sub-domains to all other processes [S3, unofficial]. In C++, this involves iterating through the global data indices corresponding to the process's bounds and sending the flattened subset via `MPI_Send` [S4, unofficial]. In Python, `mpi4py` scatter or send operations are used [S3, S5, unofficial].
+ 5.  **Ray Casting (Local Rendering):** Each process renders its assigned sub-domain independently:
+-    *   Iterate over each pixel $(x, y)$ in the local sub-image bounds.
+-    *   Initialize accumulated color $C' = (0,0,0)$ and accumulated opacity $A' = 0$.
+-    *   March along the Z-axis (depth) with step size $s$.
++    *   Iterate over each pixel $(x, y)$ in the local sub-image bounds [S3, unofficial].
++    *   Initialize accumulated color $C' = (0,0,0)$ and accumulated opacity $A' = 0$ [S3, unofficial].
++    *   March along the Z-axis (depth) with step size $s$ [S3, unofficial].
+     *   For each sample point $z_{sample}$:
+         *   Interpolate the scalar value $V$ from the local volume data using linear interpolation between adjacent slices [S3, unofficial].
+@@ -36,6 +36,6 @@
+         *   **Early Termination:** If $A'$ exceeds a threshold (e.g., 0.97 [S2, unofficial] or 1.0 [S3, unofficial]), terminate the ray for this pixel, increment the early termination counter, and break the Z-loop.
+ 6.  **Result Assembly:**
+-    *   **Global Reduction (Simple):** Each process sends its local sub-image and early termination count to Rank 0. Rank 0 assembles the final image by placing each sub-image in its correct spatial position based on the decomposition grid [S3, S5, unofficial].
+-    *   **Binary Swap (Optimized):** To avoid bottlenecking Rank 0, processes may use a binary swap reduction. Processes exchange partial images with partners in a tree-like structure ($\log_2 N$ steps), compositing received images onto their own [S4, unofficial].
++    *   **Global Reduction (Simple):** Each process sends its local sub-image and early termination count to Rank 0 [S3, unofficial]. Rank 0 assembles the final image by placing each sub-image in its correct spatial position based on the decomposition grid [S3, S5, unofficial].
++    *   **Binary Swap (Optimized):** To avoid bottlenecking Rank 0, processes may use a binary swap reduction [S4, unofficial]. Processes exchange partial images with partners in a tree-like structure ($\log_2 N$ steps), compositing received images onto their own [S4, unofficial].
+ 7.  **Finalization:** Rank 0 saves the assembled image to a file (e.g., PNG) and reports timing statistics [S3, unofficial].
+ 
+@@ -47,6 +47,32 @@
+ import bisect
+ 
++def find_best_split(num_processes):
++    best_split = (1, num_processes)
++    for i in range(1, int(np.sqrt(num_processes)) + 1):
++        if num_processes % i == 0:
++            j = num_processes // i
++            if i <= j:
++                best_split = (j, i)
++    return best_split
++
++def calculate_bounds(rank, size, x_dim, y_dim, z_dim, partitioning):
++    if partitioning == 1:
++        chunk_size = x_dim // size
++        start_x = rank * chunk_size
++        end_x = x_dim if rank == size - 1 else start_x + chunk_size
++        return start_x, x_dim, 0, y_dim
++    else:
++        num_splits_x, num_splits_y = find_best_split(size)
++        chunk_x = x_dim // num_splits_x
++        chunk_y = y_dim // num_splits_y
++        proc_x = rank % num_splits_x
++        proc_y = rank // num_splits_x
++        start_x = proc_x * chunk_x
++        end_x = x_dim if proc_x == num_splits_x - 1 else start_x + chunk_x
++        start_y = proc_y * chunk_y
++        end_y = y_dim if proc_y == num_splits_y - 1 else start_y + chunk_y
++        return start_x, end_x, start_y, end_y
++
+ def interpolate_volume(data, x, y, z, z_dim):
+-    """Linear interpolation of volume value at continuous z."""
+     z_idx = int(np.floor(z))
+     z_next = min(z_idx + 1, z_dim - 1)
+@@ -57,16 +83,10 @@
+ 
+ def interpolate_tf(tf_keys, tf_values, scalar_val):
+-    """Interpolate transfer function value."""
+     idx = bisect.bisect(tf_keys, scalar_val)
+-    if idx == 0:
+-        return tf_values[0]
+-    if idx >= len(tf_keys):
+-        idx = len(tf_keys) - 1
+-    k1 = tf_keys[idx-1]
+-    k2 = tf_keys[idx]
+-    v1 = tf_values[idx-1]
+-    v2 = tf_values[idx]
+-    if k2 == k1:
+-        return v1
++    if idx == 0: return tf_values[0]
++    if idx >= len(tf_keys): idx = len(tf_keys) - 1
++    k1, k2 = tf_keys[idx-1], tf_keys[idx]
++    v1, v2 = tf_values[idx-1], tf_values[idx]
++    if k2 == k1: return v1
+     alpha = (scalar_val - k1) / (k2 - k1)
+     return (1 - alpha) * v1 + alpha * v2
+@@ -86,12 +106,5 @@
+             z = 0.0
+             while z < z_dim:
+-                local_x = j
+-                local_y = i
+-                z_idx = int(np.floor(z))
+-                z_next = min(z_idx + 1, z_dim - 1)
+-                alpha_z = z - z_idx
+-                val1 = local_data[local_x, local_y, z_idx]
+-                val2 = local_data[local_x, local_y, z_next]
+-                scalar_val = (1 - alpha_z) * val1 + alpha_z * val2
++                scalar_val = interpolate_volume(local_data, j, i, z, z_dim)
+                 
+                 # Interpolate Color
+@@ -99,8 +112,6 @@
+                 if c_idx == len(color_keys): c_idx = len(color_keys) - 1
+                 if c_idx == 0: c_idx = 1
+-                k1_c = color_keys[c_idx-1]
+-                k2_c = color_keys[c_idx]
+-                v1_c = color_values[c_idx-1]
+-                v2_c = color_values[c_idx]
++                k1_c, k2_c = color_keys[c_idx-1], color_keys[c_idx]
++                v1_c, v2_c = color_values[c_idx-1], color_values[c_idx]
+                 if k2_c == k1_c:
+                     r, g, b = v1_c
+@@ -115,8 +126,6 @@
+                 if o_idx == len(opacity_keys): o_idx = len(opacity_keys) - 1
+                 if o_idx == 0: o_idx = 1
+-                k1_o = opacity_keys[o_idx-1]
+-                k2_o = opacity_keys[o_idx]
+-                v1_o = opacity_values[o_idx-1]
+-                v2_o = opacity_values[o_idx]
++                k1_o, k2_o = opacity_keys[o_idx-1], opacity_keys[o_idx]
++                v1_o, v2_o = opacity_values[o_idx-1], opacity_values[o_idx]
+                 if k2_o == k1_o:
+                     op = v1_o
+@@ -147,26 +156,31 @@
+     
+     # Load transfer functions (all ranks)
+-    # The sources do not give the exact file I/O and parsing boilerplate for TF loading.
++    # File I/O omitted; sources [S3, S5, unofficial] describe parsing text files into sorted key arrays.
++    color_keys = np.array([...])
++    color_values = np.array([...])
++    opacity_keys = np.array([...])
++    opacity_values = np.array([...])
+     
+     if rank == 0:
+-        # Load volume data and determine decomposition bounds
+-        # The sources do not give the exact file I/O and decomposition logic boilerplate.
++        # Load volume data from file (omitted for brevity)
++        volume_data = np.zeros((x_dim, y_dim, z_dim)) 
+         bounds_list = []
+         for r in range(size):
+-            # Calculate bounds for rank r based on partitioning type
+-            bounds_list.append((x_start, x_end, y_start, y_end))
++            bounds_list.append(calculate_bounds(r, size, x_dim, y_dim, z_dim, partitioning))
+         
+         # Scatter data and bounds
+         for r in range(size):
+-            comm.Send(local_data_for_rank_r, dest=r, tag=0)
+-            comm.Send(bounds_list[r], dest=r, tag=1)
++            xb, xe, yb, ye = bounds_list[r]
++            local_data = volume_data[xb:xe, yb:ye, :]
++            comm.Send(local_data, dest=r, tag=0)
++            comm.Send(np.array([xb, xe, yb, ye]), dest=r, tag=1)
+             
+         # Render own subdomain
+-        sub_img, sub_op, early_term = render_subdomain(...)
+-        # Gather results
++        sub_img, sub_op, early_term = render_subdomain(volume_data, 0, x_dim, 0, y_dim, z_dim, step_size, 
++                                                       color_keys, color_values, opacity_keys, opacity_values)
+         all_sub_imgs = [None] * size
+         all_sub_imgs[0] = sub_img
+         for r in range(1, size):
+-            recv_buf = np.empty(...)
++            recv_buf = np.empty((ye-yb, xe-xb, 3), dtype=np.float32)
+             comm.Recv(recv_buf, source=r, tag=2)
+             all_sub_imgs[r] = recv_buf
+@@ -175,6 +189,5 @@
+         save_image(final_image)
+     else:
+-        # Receive data and bounds
+-        local_data = np.empty(...)
++        local_data = np.empty((1, 1, 1), dtype=np.float32)
+         comm.Recv(local_data, source=0, tag=0)
+         bounds = np.empty(4, dtype=int)
+@@ -182,12 +195,7 @@
+         x_start, x_end, y_start, y_end = bounds
+         
+-        # Render
+-        sub_img, sub_op, early_term = render_subdomain(local_data, x_start, x_end, y_start, y_end, ...)
+-        
+-        # Send result to rank 0
++        sub_img, sub_op, early_term = render_subdomain(local_data, x_start, x_end, y_start, y_end, z_dim, step_size, 
++                                                       color_keys, color_values, opacity_keys, opacity_values)
+         comm.Send(sub_img, dest=0, tag=2)
+-
+-if __name__ == "__main__":
+-    main()
+ ```
+ 

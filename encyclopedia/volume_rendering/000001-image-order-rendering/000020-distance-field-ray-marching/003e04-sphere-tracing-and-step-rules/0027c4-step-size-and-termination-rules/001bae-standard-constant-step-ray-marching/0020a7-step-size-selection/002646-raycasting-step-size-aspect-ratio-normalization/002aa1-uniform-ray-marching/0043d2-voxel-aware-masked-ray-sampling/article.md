@@ -1,55 +1,32 @@
 # Voxel-Aware Masked Ray Sampling
 
-Also called: NSVF Hierarchical Ray Sampling with Voxel-Aware Masking, NSVF parallel ray sampling, NSVF voxel intersection sampling
+Also called: NSVF Hierarchical Ray Sampling with Voxel-Aware Masking, NSVF parallel ray sampling, NSVF voxel intersection sampling [S1, unofficial]
 
 ## Overview
-Voxel-Aware Masked Ray Sampling is a ray sampling strategy for sparse voxel fields that samples points only within intersected voxels, handling variable numbers of intersections per ray by padding and masking, and supporting hierarchical sampling ratios [S1, unofficial]. It differs from standard NeRF uniform or stratified sampling by using voxel-based intersection sampling with probabilities proportional to distance [S1, unofficial]. It builds on [Uniform Ray Marching](4810-uniform-ray-marching.md) by replacing fixed intervals with adaptive steps derived from voxel geometry.
+Voxel-Aware Masked Ray Sampling is a ray sampling strategy for sparse voxel fields that samples points only within intersected voxels, handling variable numbers of intersections per ray by padding and masking, and supporting hierarchical sampling ratios [S1, unofficial]. It differs from standard NeRF uniform or stratified sampling by using voxel-based intersection sampling with probabilities proportional to distance [S1, unofficial]. It builds on [Uniform Ray Marching](4810-uniform-ray-marching.md) by replacing fixed intervals with adaptive steps derived from voxel geometry [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Ray origins, ray directions, voxel grid structure (implicit in intersection logic), `chunk_size` (default 4096), `max_hits` (default 60), `raymarching_stepsize` (default 0.01), `fine_num_sample_ratio` (default 0), `inverse_distance_coarse_sampling` (default 'none'), `background_depth` (default 5.0).
-*   **Outputs:** Sampled depths (`sampled_dists`), sampled voxel indices (`sampled_idx`), sampled depths relative to voxel boundaries (`sampled_depth`), and compositing results (colors, depths, missed masks).
+*   **Inputs:** Ray origins, ray directions, voxel grid structure (implicit in intersection logic), `chunk_size` (default 4096), `max_hits` (default 60), `raymarching_stepsize` (default 0.01), `fine_num_sample_ratio` (default 0), `inverse_distance_coarse_sampling` (default 'none'), `background_depth` (default 5.0) [S1, unofficial].
+*   **Outputs:** Sampled depths (`sampled_dists`), sampled voxel indices (`sampled_idx`), sampled depths relative to voxel boundaries (`sampled_depth`), and compositing results (colors, depths, missed masks) [S1, unofficial].
 
 **Data Structures:**
-*   `intersection_outputs`: Dictionary containing:
-    *   `min_depth`: Tensor of minimum depths per ray.
-    *   `max_depth`: Tensor of maximum depths per ray.
-    *   `intersected_voxel_idx`: Tensor of intersected voxel indices.
-    *   `probs`: Tensor of sampling probabilities.
-    *   `steps`: Tensor of number of steps per ray.
-*   `all_results`: Dictionary in postprocessing containing:
-    *   `missed`: Tensor of size `(fullsize,)` indicating missed rays.
-    *   `colors`: Tensor of size `(fullsize, 3)`.
-    *   `depths`: Tensor of size `(fullsize,)`.
-    *   `normal`: Tensor of size `(fullsize, 3)` (optional).
-    *   `voxel_depth`: Tensor of size `(fullsize,)` (optional).
-    *   `voxel_edges`: Tensor of size `(fullsize, 3)` (optional).
-    *   `feat_n2`: Tensor of size `(fullsize,)` (optional).
+*   `intersection_outputs`: Dictionary containing `min_depth` (tensor), `max_depth` (tensor), `intersected_voxel_idx` (tensor), `probs` (tensor), `steps` (tensor) [S1, unofficial].
+*   `all_results`: Dictionary in postprocessing containing `missed` (size `fullsize`), `colors` (size `fullsize x 3`), `depths` (size `fullsize`), `normal` (size `fullsize x 3`, optional), `voxel_depth` (size `fullsize`, optional), `voxel_edges` (size `fullsize x 3`, optional), `feat_n2` (size `fullsize`, optional) [S1, unofficial].
 
 **Numbered Steps:**
 
-1.  **Parallel Chunking:** If the total number of rays `full_size` exceeds `chunk_size` (4096), split the input rays into chunks of size `chunk_size`. Process each chunk independently using the core sampling logic, then zip the results [S1, unofficial].
+1.  **Parallel Chunking:** If the total number of rays `full_size` exceeds `chunk_size` (4096), split the input rays into chunks of size `chunk_size` [S1, unofficial].
 2.  **Padding:** Find the maximum length `maxlen` among all processed chunks. Create a result tensor of shape `(full_size, maxlen)` filled with padding values. Copy each chunk's results into the corresponding row range [S1, unofficial].
-3.  **Mask Identification:** Identify rays that hit the maximum depth boundary by comparing `sampled_depth` to `MAX_DEPTH`. Create a boolean mask: `sampled_masks = (sampled_depth == MAX_DEPTH)` [S1, unofficial].
+3.  **Mask Identification:** Identify rays that hit the maximum depth boundary by comparing `sampled_depth` to `MAX_DEPTH`: `sampled_masks = sampled_depth.eq(MAX_DEPTH)` [S1, unofficial].
 4.  **Step Count Calculation:** Calculate the maximum number of valid steps across all rays by counting non-masked entries: `num_max_steps = (~sampled_masks).sum(-1).max()` [S1, unofficial].
-5.  **Truncation:** Truncate `sampled_depth` to `num_max_steps`: `sampled_depth = sampled_depth[:, :num_max_steps]` [S1, unofficial].
-6.  **Gathering and Masking:**
-    *   Gather `sampled_dists` using `ordered_index`. Fill masked positions with `0.0`. Truncate to `num_max_steps`: `sampled_dists = sampled_dists.gather(1, ordered_index).masked_fill_(sampled_masks, 0.0)[:, :num_max_steps]` [S1, unofficial].
-    *   Gather `sampled_idx` using `ordered_index`. Fill masked positions with `-1`. Truncate to `num_max_steps`: `sampled_idx = sampled_idx.gather(1, ordered_index).masked_fill_(sampled_masks, -1)[:, :num_max_steps]` [S1, unofficial].
-7.  **Distance Calculation:** Calculate distances between `min_depth` and `max_depth`. Mask out invalid voxels (where `pts_idx == -1`) by setting their distance to `0`: `dists = (max_depth - min_depth).masked_fill(pts_idx.eq(-1), 0)` [S1, unofficial].
+5.  **Truncation:** Truncate `sampled_depth` to the maximum valid step count: `sampled_depth = sampled_depth[:, :num_max_steps]` [S1, unofficial].
+6.  **Gathering and Masking:** Gather `sampled_dists` using `ordered_index` and fill masked positions with `0.0`, then truncate to `num_max_steps`: `sampled_dists = sampled_dists.gather(1, ordered_index).masked_fill_(sampled_masks, 0.0)[:, :num_max_steps]` [S1, unofficial]. Gather `sampled_idx` using `ordered_index` and fill masked positions with `-1`, then truncate to `num_max_steps`: `sampled_idx = sampled_idx.gather(1, ordered_index).masked_fill_(sampled_masks, -1)[:, :num_max_steps]` [S1, unofficial].
+7.  **Distance Calculation:** Calculate distances between `min_depth` and `max_depth`, masking out invalid voxels (`pts_idx.eq(-1)`) with `0`: `dists = (max_depth - min_depth).masked_fill(pts_idx.eq(-1), 0)` [S1, unofficial].
 8.  **Probability Normalization:** Compute probabilities for sampling steps by normalizing `dists` by their sum along the last dimension: `probs = dists / dists.sum(dim=-1, keepdim=True)` [S1, unofficial].
-9.  **Step Count Determination:**
-    *   If `fixed_num_samples > 0`, set `steps` to a constant tensor of value `self.args.fixed_num_samples` [S1, unofficial].
-    *   Otherwise, set `steps = dists.sum(-1) / self.encoder.step_size` [S1, unofficial].
+9.  **Step Count Determination:** If `fixed_num_samples > 0`, set `steps` to a constant tensor of value `self.args.fixed_num_samples`; otherwise, set `steps = dists.sum(-1) / self.encoder.step_size` [S1, unofficial].
 10. **Hierarchical Sampling (Optional):** In `prepare_hierarchical_sampling`, if `fine_num_sample_ratio > 0`, update `steps` to be the count of valid voxel indices multiplied by the ratio: `steps = samples['sampled_point_voxel_idx'].ne(-1).sum(-1).float() * self.args.fine_num_sample_ratio` [S1, unofficial].
-11. **Postprocessing Background Fill:**
-    *   Identify missed rays: `missed = fill_in((fullsize,), hits, all_results['missed'], 1.0)` [S1, unofficial].
-    *   Fill missed rays with background values:
-        *   `colors = fill_in((fullsize, 3), hits, all_results['colors'], 0.0)` [S1, unofficial].
-        *   `depths = fill_in((fullsize,), hits, all_results['depths'], 0.0)` [S1, unofficial].
-    *   Add background contribution:
-        *   `colors += missed.unsqueeze(-1) * bg_color` [S1, unofficial].
-        *   `depths += missed * BG_DEPTH`, where `bg_color` is derived from `all_results['colors']` and `BG_DEPTH` is `self.field.bg_color.depth` [S1, unofficial].
+11. **Postprocessing Background Fill:** Fill missed rays with background values: `missed = fill_in((fullsize,), hits, all_results['missed'], 1.0)`; `colors = fill_in((fullsize, 3), hits, all_results['colors'], 0.0)`; `depths = fill_in((fullsize,), hits, all_results['depths'], 0.0)` [S1, unofficial]. Add background contribution to colors and depths: `colors += missed.unsqueeze(-1) * bg_color`; `depths += missed * BG_DEPTH`, where `bg_color` is derived from `all_results['colors']` and `BG_DEPTH` is `self.field.bg_color.depth` [S1, unofficial].
 
 **Pseudocode:**
 
@@ -68,8 +45,8 @@ def voxel_aware_masked_ray_sampling(
     background_depth=5.0
 ):
     """
-    Simulates the NSVF voxel-aware masked ray sampling logic.
-    Assumes helper functions for intersection and compositing are provided.
+    Implements NSVF voxel-aware masked ray sampling logic.
+    Assumes intersection logic returns pre-computed tensors.
     """
     full_size = rays.shape[0]
     
@@ -78,20 +55,19 @@ def voxel_aware_masked_ray_sampling(
         chunks = torch.split(rays, chunk_size, dim=0)
         results = []
         for chunk in chunks:
-            # Process chunk (simplified call)
             chunk_res = _process_chunk(chunk, max_hits, raymarching_stepsize, 
                                        fine_num_sample_ratio, fixed_num_samples, 
                                        background_depth)
             results.append(chunk_res)
         
-        # Pad results
+        # Pad results to uniform shape
         max_len = max(r['sampled_dists'].shape[1] for r in results)
         padded_results = []
         for r in results:
             padded = _pad_to_length(r, max_len)
             padded_results.append(padded)
         
-        # Zip results (stack along batch dim)
+        # Combine chunks
         final_sampled_dists = torch.cat([r['sampled_dists'] for r in padded_results], dim=0)
         final_sampled_idx = torch.cat([r['sampled_idx'] for r in padded_results], dim=0)
         final_sampled_depth = torch.cat([r['sampled_depth'] for r in padded_results], dim=0)
@@ -112,58 +88,65 @@ def voxel_aware_masked_ray_sampling(
     }
 
 def _process_chunk(rays, max_hits, raymarching_stepsize, fine_num_sample_ratio, fixed_num_samples, background_depth):
+    # Sources do not provide voxel intersection logic; assume tensors are returned.
+    # sampled_depth: (batch, max_hits)
+    # sampled_dists: (batch, max_hits)
+    # sampled_idx: (batch, max_hits)
+    # min_depth: (batch, 1)
+    # max_depth: (batch, 1)
+    # ordered_index: (batch, max_hits)
+    sampled_depth = torch.full((rays.shape[0], max_hits), float('inf')) # Mock
+    sampled_dists = torch.zeros(rays.shape[0], max_hits) # Mock
+    sampled_idx = torch.full((rays.shape[0], max_hits), -1, dtype=torch.long) # Mock
+    min_depth = torch.zeros(rays.shape[0], 1) # Mock
+    max_depth = torch.ones(rays.shape[0], 1) # Mock
+    ordered_index = torch.arange(max_hits).unsqueeze(0).expand(rays.shape[0], -1) # Mock
+
     # Step 3: Mask Identification
-    # Assume intersection logic returns sampled_depth
-    sampled_depth = _get_sampled_depth(rays, max_hits) 
-    sampled_masks = (sampled_depth == float('inf')) # Assuming MAX_DEPTH is inf or large value
+    MAX_DEPTH = float('inf')
+    sampled_masks = sampled_depth.eq(MAX_DEPTH)
     
     # Step 4: Step Count Calculation
-    num_max_steps = (~sampled_masks).sum(dim=1).max().item()
+    num_max_steps = (~sampled_masks).sum(-1).max().item()
+    if num_max_steps == 0:
+        num_max_steps = 1 # Guard against empty chunks [G]
     
     # Step 5: Truncation
     sampled_depth = sampled_depth[:, :num_max_steps]
     
     # Step 6: Gathering and Masking
-    # Assume ordered_index is generated from intersection logic
-    ordered_index = _get_ordered_index(rays, max_hits)
-    
-    sampled_dists = _get_sampled_dists(rays, max_hits)
     sampled_dists = sampled_dists.gather(1, ordered_index).masked_fill_(sampled_masks, 0.0)[:, :num_max_steps]
-    
-    sampled_idx = _get_sampled_idx(rays, max_hits)
     sampled_idx = sampled_idx.gather(1, ordered_index).masked_fill_(sampled_masks, -1)[:, :num_max_steps]
     
     # Step 7: Distance Calculation
-    min_depth = _get_min_depth(rays)
-    max_depth = _get_max_depth(rays)
     pts_idx = sampled_idx
-    
-    dists = (max_depth - min_depth).masked_fill(pts_idx.eq(-1), 0)
+    dists = (max_depth[:, :num_max_steps] - min_depth[:, :num_max_steps]).masked_fill(pts_idx.eq(-1), 0)
     
     # Step 8: Probability Normalization
     probs = dists / dists.sum(dim=-1, keepdim=True)
     
     # Step 9: Step Count Determination
     if fixed_num_samples > 0:
-        steps = torch.full_like(dists[:, 0:1], fixed_num_samples)
+        steps = torch.full((rays.shape[0], 1), fixed_num_samples)
     else:
-        steps = dists.sum(-1) / raymarching_stepsize
+        steps = dists.sum(-1, keepdim=True) / raymarching_stepsize
     
     # Step 10: Hierarchical Sampling (Optional)
     if fine_num_sample_ratio > 0:
-        # Assume samples['sampled_point_voxel_idx'] is available
-        samples_voxel_idx = sampled_idx
-        steps = samples_voxel_idx.ne(-1).sum(-1).float() * fine_num_sample_ratio
+        steps = pts_idx.ne(-1).sum(-1, keepdim=True).float() * fine_num_sample_ratio
     
     # Step 11: Postprocessing Background Fill
-    # Assume compositing results in all_results
-    all_results = _composite(rays, sampled_dists, sampled_idx, dists, probs, steps)
+    # Mock compositing results
+    hits = torch.ones(rays.shape[0], dtype=torch.bool)
+    all_results_missed = torch.zeros(rays.shape[0])
+    all_results_colors = torch.zeros(rays.shape[0], 3)
+    all_results_depths = torch.zeros(rays.shape[0])
     
-    missed = _fill_in((rays.shape[0],), all_results['hits'], all_results['missed'], 1.0)
-    colors = _fill_in((rays.shape[0], 3), all_results['hits'], all_results['colors'], 0.0)
-    depths = _fill_in((rays.shape[0],), all_results['hits'], all_results['depths'], 0.0)
+    missed = _fill_in((rays.shape[0],), hits, all_results_missed, 1.0)
+    colors = _fill_in((rays.shape[0], 3), hits, all_results_colors, 0.0)
+    depths = _fill_in((rays.shape[0],), hits, all_results_depths, 0.0)
     
-    bg_color = all_results['colors'].mean(dim=0) # Placeholder for bg_color derivation
+    bg_color = torch.tensor([0.0, 0.0, 0.0]) # Placeholder for bg_color derivation
     bg_depth = background_depth
     
     colors = colors + missed.unsqueeze(-1) * bg_color
@@ -179,7 +162,6 @@ def _process_chunk(rays, max_hits, raymarching_stepsize, fine_num_sample_ratio, 
     }
 
 def _pad_to_length(result_dict, max_len):
-    # Pad tensors to max_len along dim 1
     for key in ['sampled_dists', 'sampled_idx', 'sampled_depth']:
         if key in result_dict:
             tensor = result_dict[key]
@@ -195,16 +177,9 @@ def _pad_to_length(result_dict, max_len):
     return result_dict
 
 def _fill_in(shape, hits, data, fill_value):
-    # Fill missed rays with fill_value
-    # hits is a boolean mask of hit rays
-    if data is None:
-        return torch.zeros(shape, dtype=torch.float32)
-    # Ensure shape matches
-    if data.shape != shape:
-        # Resize or broadcast as needed
-        pass
     filled = torch.full(shape, fill_value, dtype=torch.float32)
-    filled[hits] = data[hits]
+    if data is not None and data.numel() > 0:
+        filled[hits] = data[hits]
     return filled
 ```
 
@@ -222,14 +197,14 @@ def _fill_in(shape, hits, data, fill_value):
 *   Precision issues may arise when `sampled_depth` equals `MAX_DEPTH` if not handled with a robust equality check or tolerance [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of voxel intersections per ray. Padding and masking operations are $O(N \cdot K)$ where $N$ is the number of rays and $K$ is the maximum hits.
+*   **Time Complexity:** Not given in the sources.
 *   **Memory Complexity:** Requires storing tensors of size $(N, K)$ for depths, indices, and distances. Padding increases memory usage if rays have varying intersection counts [S1, unofficial].
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Scales with the number of rays via chunking. Performance degrades if `max_hits` is set too high for sparse scenes due to padding overhead [S1, unofficial].
-*   **Strengths:** Adaptive sampling based on voxel geometry; handles sparse fields efficiently by ignoring empty space.
+*   **Scaling:** Scales with the number of rays via chunking [S1, unofficial].
+*   **Strengths:** Adaptive sampling based on voxel geometry; handles sparse fields efficiently by ignoring empty space [S1, unofficial].
 *   **Limitations:** Requires voxel intersection logic; padding overhead for rays with varying intersection counts; complex masking logic [S1, unofficial].
-*   **When to use:** Sparse voxel fields where uniform sampling is inefficient.
-*   **When not to use:** Dense fields or when hardware does not support efficient tensor masking/padding.
+*   **When to use:** Sparse voxel fields where uniform sampling is inefficient [S1, unofficial].
+*   **When not to use:** Dense fields or when hardware does not support efficient tensor masking/padding [S1, unofficial].
 
 ## Background
 Voxel-Aware Masked Ray Sampling is part of the NSVF (Neural Sparse Voxel Fields) framework developed by Facebook Research [S1, unofficial]. It was introduced to optimize ray sampling for sparse neural fields, reducing computation by focusing on intersected voxels [S1, unofficial].

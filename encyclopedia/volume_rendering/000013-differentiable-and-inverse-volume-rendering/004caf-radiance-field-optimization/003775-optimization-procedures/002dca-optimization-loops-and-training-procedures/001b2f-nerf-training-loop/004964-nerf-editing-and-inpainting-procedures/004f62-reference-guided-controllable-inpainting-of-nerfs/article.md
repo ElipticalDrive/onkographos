@@ -3,157 +3,187 @@
 Also called: Reference-guided Inpainting
 
 ## Overview
-This method performs 3D inpainting on a Neural Radiance Field (NeRF) using a single inpainted reference view to guide geometry and appearance, avoiding view inconsistencies and generating view-dependent effects [S1]. It distinguishes itself from sibling methods by relying on only one user-provided inpainted image rather than multi-view consistency or complex diffusion pipelines, utilizing monocular depth estimation and bilateral solvers to propagate this single view into a coherent 3D structure [S1].
+Reference-guided Controllable Inpainting of NeRFs is a 3D inpainting algorithm that uses a single inpainted reference view to guide the geometry and appearance of a Neural Radiance Field (NeRF), avoiding view inconsistencies and generating view-dependent effects [S1]. It solves the problem of editing NeRFs with limited guidance by back-projecting a single 2D inpainted image into 3D space and propagating its appearance to other viewpoints via a bilateral solver, while handling disocclusions using image inpainters [S1]. Unlike methods requiring multi-view consistency checks or extensive user interaction, this approach allows a user to control the generated scene via a single inpainted image [S1].
 
 ## How it works
+
+### Inputs and Outputs
 **Inputs:**
 *   $n$ input images $\{I_i\}_{i=1}^n$.
 *   Camera transform matrices $\{\Pi_i\}_{i=1}^n$.
-*   Binary masks $\{M_i\}_{i=1}^n$ delineating unwanted regions in each view.
-*   A single inpainted reference view $I_r$, where $r \in \{1, \dots, N\}$ [S1].
+*   Masks $\{M_i\}_{i=1}^n$ delineating unwanted regions in each view.
+*   A single inpainted reference view $I_r$, where $r \in \{1, \dots, n\}$ [S1].
 
 **Outputs:**
-*   Updated NeRF parameters $\theta$ representing the inpainted scene [S1].
+*   A trained NeRF $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$ representing the inpainted scene [S1].
+*   Novel views synthesized from the edited NeRF [S1].
 
-**Data Structures:**
-*   The NeRF is represented by a function $f_\theta(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$, mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$ [S1].
-*   Rays $\mathbf{r}$ are parameterized by origin $\mathbf{o}$ and direction $\mathbf{d}$. Sampling points $t_i$ along a ray yield density $\sigma_i$ and color $c_i$ [S1].
-*   Transmittance is computed as $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, where $\delta_i = t_{i+1} - t_i$ [S1].
-*   Rendered color $\hat{C}(\mathbf{r})$ is computed via volume rendering: $\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) c_i$ [S1].
-*   Depth $\hat{\zeta}(\mathbf{r})$ is estimated by replacing $c_i$ with $t_i$ in the rendering equation, and disparity is $D(\mathbf{r}) = \hat{\zeta}^{-1}(\mathbf{r})$ [S1].
+### Data Structures
+The method operates on a standard NeRF representation $f_\theta$ mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$ [Parent]. Rays $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ are sampled at $N$ points with distances $\delta_i = t_{i+1} - t_i$ and accumulated transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [Parent].
 
-**Parameters:**
-*   $N_{depth}$: Number of iterations for Stage 1 (unmasked supervision).
-*   $\gamma_{depth}, \gamma_{rec}, \gamma_{do}$: Weighting coefficients for the respective loss terms [S1].
-*   $N_{bilateral}, N_{do}$: Iteration intervals for computing bilateral and disocclusion losses, respectively [S1].
+### Parameters
+*   $N_{depth}$: Number of iterations for Stage 1 supervision.
+*   $N_{bilateral}$: Iteration interval for bilateral solver updates.
+*   $N_{do}$: Iteration interval for disocclusion handling.
+*   $\gamma_{depth}, \gamma_{rec}, \gamma_{do}$: Loss weights (values not given in the sources) [S1].
 
-**Steps:**
+### Steps
 
-1.  **Stage 1: Unmasked Supervision.**
-    Optimize $f_\theta$ for $N_{depth}$ iterations using only the unmasked pixels from the input views. This ensures the existing geometry converges while leaving the masked region under-fit, facilitating later alterations [S1]. The loss is:
-    $$ L_{rec}^{unmasked} = \mathbb{E}_{\mathbf{r} \sim R_{unmasked}} \| \hat{C}(\mathbf{r}) - C_{GT}(\mathbf{r}) \|^2 $$
-    where $R_{unmasked}$ is the set of rays corresponding to pixels in $\{I_i (1 - M_i)\}_{i=1}^n$ and $C_{GT}(\mathbf{r})$ is the ground truth color [S1].
+1.  **Stage 1: Unmasked Supervision**
+    Supervise $f_\theta$ on unmasked pixels for $N_{depth}$ iterations using the standard NeRF reconstruction loss $L_{rec}^{unmasked}$ [S1]. The masked region remains under-fit to allow altering masked values in later stages [S1].
+    $$
+    L_{rec}^{unmasked} = \mathbb{E}_{r \sim R_{unmasked}} \| \hat{C}(r) - C_{GT}(r) \|^2
+    $$
+    where $R_{unmasked}$ is the set of rays corresponding to pixels in $\{I_i (1 - M_i)\}_{i=1}^n$ and $C_{GT}(r)$ is the ground truth color [S1].
 
-2.  **Stage 2: Geometry Supervision via Monocular Depth.**
-    Use a monocular depth estimator to predict depth for the inpainted reference view $I_r$. Back-project $I_r$ to 3D positions to compute a disparity map. Align this map with the current NeRF scene. Compute the masked depth loss $L_{depth}^{masked}$ to supervise the geometry of the inpainted region based on the reference view's depth [S1].
+2.  **Geometry Supervision via Depth Estimation**
+    Use a monocular depth estimator to compute a disparity map from the inpainted reference view $I_r$. Back-project $I_r$ to 3D positions using the camera parameters $\Pi_r$. Align this depth information with the current NeRF scene. Compute the masked depth loss $L_{depth}^{masked}$ to supervise the geometry of the inpainted region [S1].
 
-3.  **Stage 3: View-Dependent Effects (VDEs) via Bilateral Solver.**
-    To generate view-dependent effects for non-reference views, use a view-substitution technique followed by bilaterally guided inpainting. This constructs target colors $I_{br,t}$ for non-reference views from the single reference view. Compute the masked reconstruction loss $L_{rec}^{masked}$ using these target colors to ensure appearance consistency with VDEs [S1].
+3.  **View-Dependent Effects (VDEs) via Bilateral Solver**
+    For non-reference views, generate target colors $I_{br,t}$ using a view-substitution technique followed by bilaterally guided inpainting [S1]. This simulates VDEs of non-reference views from the reference viewpoint. Compute the masked reconstruction loss $L_{rec}^{masked}$ using these target colors [S1].
 
-4.  **Stage 4: Disocclusion Handling.**
-    For regions disoccluded in non-reference views that are not covered by the single reference view, use image inpainters to guide both geometry and appearance. Compute the disocclusion loss $L_{do}$ to handle these areas [S1].
+4.  **Disocclusion Handling**
+    For non-reference disoccluded regions not supervised by the single reference view, use image inpainters to guide both geometry and appearance. Compute the disocclusion loss $L_{do}$ [S1].
 
-5.  **Optimization Loop.**
-    Combine the losses for the total optimization. The total loss is:
-    $$ L = L_{rec}^{unmasked} + \gamma_{depth} L_{depth}^{masked} + \gamma_{rec} L_{rec}^{masked} + \gamma_{do} L_{do} $$
-    Compute $L_{depth}$, $L_{rec}$, and $L_{do}$ every $N_{depth}$, $N_{bilateral}$, and $N_{do}$ iterations, respectively. Use gradient descent (e.g., Adam) to update $\theta$ [S1].
+5.  **Total Loss and Optimization**
+    The total loss is computed as:
+    $$
+    L = L_{rec}^{unmasked} + \gamma_{depth} L_{depth}^{masked} + \gamma_{rec} L_{rec}^{masked} + \gamma_{do} L_{do}
+    $$
+    Losses $L_{depth}^{masked}$, $L_{rec}^{masked}$, and $L_{do}$ are computed every $N_{depth}$, $N_{bilateral}$, and $N_{do}$ iterations respectively [S1]. Optimize $\theta$ using gradient descent (e.g., Adam) [Parent].
 
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reference_guided_inpainting(input_images, camera_matrices, masks, reference_view, initial_neurf, n_depth, n_bilateral, n_do, gamma_depth, gamma_rec, gamma_do):
+def reference_guided_inpainting(images, cameras, masks, reference_view, 
+                                n_depth_iters, n_bilateral_iters, n_do_iters,
+                                gamma_depth, gamma_rec, gamma_do):
     """
-    Performs 3D inpainting on a NeRF using a single reference view.
+    Perform reference-guided inpainting on a NeRF.
     
     Args:
-        input_images: List of n input images {I_i}.
-        camera_matrices: List of n camera transform matrices {Pi}.
-        masks: List of n binary masks {Mi}.
+        images: List of n input images {I_i}.
+        cameras: List of n camera transform matrices {Pi}.
+        masks: List of n masks {Mi} delineating unwanted regions.
         reference_view: The single inpainted reference view Ir.
-        initial_neurf: The initial NeRF model f_theta.
-        n_depth: Iterations for unmasked supervision.
-        n_bilateral: Iteration interval for bilateral VDE loss.
-        n_do: Iteration interval for disocclusion loss.
+        n_depth_iters: Iterations for Stage 1.
+        n_bilateral_iters: Interval for bilateral solver updates.
+        n_do_iters: Interval for disocclusion handling.
         gamma_depth, gamma_rec, gamma_do: Loss weights.
         
     Returns:
-        Updated NeRF model.
+        Trained NeRF model f_theta.
     """
-    neurf = initial_neurf
-    total_iterations = n_depth + max(n_bilateral, n_do) * some_factor # Placeholder for total loop count logic
+    # Initialize NeRF f_theta
+    f_theta = initialize_nerf()
     
-    # Stage 1: Unmasked Supervision
-    for i in range(n_depth):
-        rays_unmasked = get_rays(input_images, masks, unmasked_only=True)
-        gt_colors = get_gt_colors(rays_unmasked, input_images)
-        rendered_colors = render_neurf(rays_unmasked, neurf)
-        loss_unmasked = mean_squared_error(rendered_colors, gt_colors)
-        loss_unmasked.backward()
-        update_neurf_weights(neurf)
+    # Stage 1: Supervise unmasked pixels
+    for step in range(n_depth_iters):
+        loss = 0.0
+        for i in range(len(images)):
+            # Get rays for unmasked pixels
+            rays = get_unmasked_rays(images[i], masks[i], cameras[i])
+            # Render colors
+            rendered_colors = render_nerf(f_theta, rays)
+            # Compute reconstruction loss
+            gt_colors = get_gt_colors(rays, images[i])
+            loss += mean_squared_error(rendered_colors, gt_colors)
         
-    # Stage 2, 3, 4: Joint Optimization
-    # Note: The source specifies losses are computed every N iterations.
-    # We assume a main loop continues until convergence or a fixed step count.
-    
-    for i in range(n_depth, total_iterations):
+        # Backpropagate and update
+        update_nerf(f_theta, loss)
+        
+    # Stage 2: Iterative refinement with geometry, VDEs, and disocclusions
+    for step in range(n_depth_iters, total_training_steps):
         total_loss = 0.0
         
-        # 1. Unmasked reconstruction loss (always active or periodic? Source implies L_rec^unmasked is part of L)
-        # Source says L = L_rec^unmasked + ...
-        rays_unmasked = get_rays(input_images, masks, unmasked_only=True)
-        gt_colors = get_gt_colors(rays_unmasked, input_images)
-        rendered_colors = render_neurf(rays_unmasked, neurf)
-        loss_unmasked = mean_squared_error(rendered_colors, gt_colors)
-        total_loss += loss_unmasked
-        
-        # 2. Depth Loss (every N_depth iterations? Source says computed every N_depth)
-        if i % n_depth == 0:
-            # Use monocular depth estimator on reference_view
-            depth_map_ref = monocular_depth_estimator(reference_view)
-            disparity_map_ref = 1.0 / depth_map_ref
+        # 1. Unmasked reconstruction (always active)
+        for i in range(len(images)):
+            rays = get_unmasked_rays(images[i], masks[i], cameras[i])
+            rendered_colors = render_nerf(f_theta, rays)
+            gt_colors = get_gt_colors(rays, images[i])
+            loss_unmasked = mean_squared_error(rendered_colors, gt_colors)
+            total_loss += loss_unmasked
             
-            # Back-project reference view to 3D and align with NeRF
-            # Compute masked depth loss
-            rays_masked = get_rays(input_images, masks, masked_only=True)
-            rendered_depths = render_depth(rays_masked, neurf)
-            # Align disparity map with rendered disparity
-            loss_depth = compute_depth_loss(rendered_depths, disparity_map_ref, masks)
+        # 2. Geometry supervision (every n_depth_iters)
+        if step % n_depth_iters == 0:
+            # Back-project reference view to 3D using monocular depth estimator
+            depth_map = monocular_depth_estimator(reference_view)
+            disparity_map = 1.0 / depth_map
+            # Align with NeRF geometry
+            # Compute masked depth loss L_depth_masked
+            # [G]: Implementation details of alignment and loss computation depend on specific depth estimator output format
+            loss_depth = compute_masked_depth_loss(f_theta, cameras, masks, disparity_map)
             total_loss += gamma_depth * loss_depth
             
-        # 3. Bilateral VDE Loss (every N_bilateral iterations)
-        if i % n_bilateral == 0:
-            # View-substitution and bilateral solver to get target colors for non-reference views
-            target_colors_non_ref = bilateral_guided_inpainting(reference_view, camera_matrices, masks)
-            
-            # Render non-reference views and compare with targets
-            rays_non_ref = get_rays(input_images, masks, non_reference_only=True)
-            rendered_colors_non_ref = render_neurf(rays_non_ref, neurf)
-            loss_rec_masked = compute_reconstruction_loss(rendered_colors_non_ref, target_colors_non_ref, masks)
+        # 3. View-Dependent Effects via Bilateral Solver (every n_bilateral_iters)
+        if step % n_bilateral_iters == 0:
+            # Generate target colors for non-reference views using bilateral solver
+            target_colors = bilateral_solver_inpainting(reference_view, cameras, masks)
+            # Compute masked reconstruction loss L_rec_masked
+            # [G]: Implementation details of bilateral solver and target color application
+            loss_rec_masked = compute_masked_reconstruction_loss(f_theta, cameras, masks, target_colors)
             total_loss += gamma_rec * loss_rec_masked
             
-        # 4. Disocclusion Loss (every N_do iterations)
-        if i % n_do == 0:
+        # 4. Disocclusion Handling (every n_do_iters)
+        if step % n_do_iters == 0:
             # Identify disoccluded regions in non-reference views
-            disoccluded_masks = compute_disocclusion_masks(input_images, camera_matrices, masks)
-            
+            disoccluded_regions = identify_disocclusions(f_theta, cameras, masks)
             # Use image inpainters to guide geometry and appearance
-            # This likely involves rendering disoccluded regions and comparing with inpainted targets
-            loss_do = compute_disocclusion_loss(neurf, input_images, camera_matrices, disoccluded_masks)
+            # Compute disocclusion loss L_do
+            # [G]: Implementation details of disocclusion identification and image inpainter integration
+            loss_do = compute_disocclusion_loss(f_theta, cameras, masks, disoccluded_regions)
             total_loss += gamma_do * loss_do
             
-        total_loss.backward()
-        update_neurf_weights(neurf)
+        # Backpropagate and update
+        update_nerf(f_theta, total_loss)
         
-    return neurf
+    return f_theta
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Monocular depth estimation errors can propagate into 3D geometry if not properly aligned [S1].
-*   **Boundaries:** The method assumes the reference view is correctly inpainted; errors in $I_r$ will propagate [S1].
-*   **Disocclusions:** Regions not visible in the reference view require specific handling via image inpainters to avoid artifacts [S1].
+### Edge Cases and Pitfalls
+*   **Precision:** Monocular depth estimation may introduce inaccuracies, affecting geometry supervision [S1].
+*   **Boundaries:** The method relies on a single reference view; if the reference view is poorly chosen or contains artifacts, these may propagate [S1].
+*   **Degenerate Input:** If the reference view is not representative of the scene, the inpainting may fail to generalize to other viewpoints [S1].
+
+## Subtopics
+
+### Bilateral Solver Inpainting
+*   **What it is:** A technique to generate target colors for non-reference views by substituting views and applying bilateral guidance [S1].
+*   **What sets it apart:** It simulates view-dependent effects without multiview appearance information [S1].
+*   **When to choose it:** When view-dependent effects are needed in non-reference views but only a single reference view is available [S1].
+*   **Link:** [Bilateral Solver Inpainting](link-to-bilateral-solver.md)
+
+### Monocular Depth Estimation for Geometry
+*   **What it is:** Using a monocular depth estimator to back-project a 2D reference view to 3D positions for geometry supervision [S1].
+*   **What sets it apart:** It provides geometric guidance from a single 2D image, avoiding the need for multi-view stereo depth [S1].
+*   **When to choose it:** When geometric consistency is required but multi-view depth is not available [S1].
+*   **Link:** [Monocular Depth Estimation](link-to-monocular-depth.md)
+
+### Disocclusion Handling via Image Inpainters
+*   **What it is:** Using image inpainters to guide geometry and appearance in disoccluded regions not supervised by the reference view [S1].
+*   **What sets it apart:** It handles regions that are not visible in the reference view, ensuring complete inpainting [S1].
+*   **When to choose it:** When disocclusions are present in non-reference views [S1].
+*   **Link:** [Disocclusion Handling](link-to-disocclusion-handling.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of optimization iterations and the cost of monocular depth estimation and bilateral solver operations per iteration.
-*   **Memory Complexity:** Requires storing the NeRF parameters, input images, masks, and intermediate renderings for loss computation.
-*   **Strengths:** Uses only a single reference view, avoiding view inconsistencies. Generates view-dependent effects.
-*   **Limitations:** Relies on the quality of the single reference view and monocular depth estimator. May struggle with complex disocclusions not covered by the reference view.
-*   **When to use:** When a user wants to inpaint a NeRF with a specific target appearance provided by a single image, and computational resources for multi-view inpainting are limited.
-*   **When not to use:** When high-fidelity view-dependent effects are required in regions far from the reference view and not covered by monocular depth priors.
+
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The approach shows superior performance to NeRF inpainting baselines [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Avoids view inconsistencies, generates view-dependent effects, allows user control via a single inpainted image [S1].
+*   **Limitations:** Relies on the quality of the single reference view and monocular depth estimation [S1].
+*   **When to use it:** When editing NeRFs with limited guidance (single reference view) and requiring view-consistent inpainting [S1].
+*   **When not to use it:** When high-quality multi-view depth is available and view-dependent effects are not critical [S1].
 
 ## Background
-The method was introduced in "Reference-guided Controllable Inpainting of Neural Radiance Fields" [S1]. It addresses the limitations of previous NeRF inpainting methods, such as lack of view-dependent effects and disocclusion handling, by leveraging a single inpainted reference view [S1].
+
+*   **Origin:** The method was introduced in "Reference-guided Controllable Inpainting of Neural Radiance Fields" [S1].
+*   **History and Development:** The work addresses the desire for NeRF editing tools, focusing on inpainting regions in a view-consistent and controllable manner [S1].
+*   **Where it is used:** NeRF editing and inpainting applications [S1].
 
 ## Sources
+
 [S1] Reference-guided Controllable Inpainting of Neural Radiance Fields, https://doi.org/10.1109/ICCV51070.2023.01633, fetched 2026-10-29

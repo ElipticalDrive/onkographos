@@ -3,69 +3,53 @@
 Also called: A-Buffer Ray Intersection List, ABuffer Voxel Output Representation & Traversal, Atomic Counter Voxelization, Linked List Voxel Output, Shader Storage Buffer Object Linked List Voxelization
 
 ## Overview
-Per-Pixel Linked List Voxelization is a GPU-based technique that constructs a linked list of fragment depths per pixel using atomic counters and shader storage buffers, allowing for subsequent sorting and processing of depth-sorted voxels [S1, unofficial]. It solves the problem of variable-depth fragment accumulation in rasterization by deferring the resolution of depth conflicts to a post-processing sort phase, enabling accurate solid voxelization without fixed-depth buffers. It differs from [MSAA Voxelization](7412-msaa-voxelization.md) by using explicit linked lists and atomic operations rather than multisample coverage masks, and from [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) by preserving individual fragment depths for sorting rather than averaging them immediately.
+Per-Pixel Linked List Voxelization is a GPU-based voxelization technique that constructs a linked list of fragment depths per pixel using atomic counters and shader storage buffers, allowing for subsequent sorting and processing of depth-sorted voxels [S1, unofficial]. It solves the problem of variable-depth fragment accumulation in rasterization by deferring the resolution of depth conflicts to a post-processing sort phase, enabling accurate solid voxelization without fixed-depth buffers [S1, unofficial]. It differs from [MSAA Voxelization](7412-msaa-voxelization.md) by using explicit linked lists and atomic operations rather than multisample coverage masks, and from [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) by preserving individual fragment depths for sorting rather than averaging them immediately [G].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input**: A mesh defined by vertex positions and a model transformation matrix. The spatial domain is defined by the framebuffer resolution $(W, H)$ and the depth range implied by the projection.
-*   **Output**: A `Voxelizer_ABufferLinkedList` structure containing arrays of head pointers, node pointers, and node data (depths), representing the voxelized volume as a set of depth-sorted intervals per pixel.
+*   **Input**: A mesh defined by vertex positions and a model transformation matrix [S1, unofficial]. The spatial domain is defined by the framebuffer resolution $(W, H)$ and the depth range implied by the projection [G].
+*   **Output**: A `Voxelizer_ABufferLinkedList` structure containing arrays of head pointers, node pointers, and node data (depths), representing the voxelized volume as a set of depth-sorted intervals per pixel [S1, unofficial].
 
 **Data Structures**
-The method relies on three Shader Storage Buffer Objects (SSBOs) bound to specific bindings and a host-side structure.
-
+The method relies on three Shader Storage Buffer Objects (SSBOs) bound to specific bindings and a host-side structure [S1, unofficial].
 1.  **HeadPointers** (Binding 1, `std430`):
     *   Layout: `int HeadPointers[]`
     *   Size: $W \times H$ integers.
-    *   Purpose: Stores the index of the first node in the linked list for each pixel $(x, y)$. Initialized to $-1$.
+    *   Purpose: Stores the index of the first node in the linked list for each pixel $(x, y)$. Initialized to $-1$ [S1, unofficial].
 2.  **NodePointers** (Binding 2, `std430`):
     *   Layout: `int NodePointers[]`
-    *   Size: $N$ integers, where $N$ is the maximum possible fragment count (or total triangles $\times$ 3).
-    *   Purpose: Stores the index of the next node in the linked list for each fragment.
+    *   Size: $N$ integers, where $N$ is the maximum possible fragment count [S1, unofficial].
+    *   Purpose: Stores the index of the next node in the linked list for each fragment [S1, unofficial].
 3.  **NodeData** (Binding 3, `std430`):
     *   Layout: `int NodeData[]`
     *   Size: $N$ integers.
-    *   Purpose: Stores the depth value for each fragment, scaled by the framebuffer width.
+    *   Purpose: Stores the depth value for each fragment, scaled by the framebuffer width [S1, unofficial].
 4.  **Host Structure** (`Voxelizer_ABufferLinkedList`):
-    *   Fields: `width` (int), `height` (int), `depth` (int), `fragmentCount` (int), `headPointers` (int*), `nodePointers` (int*), `nodeData` (int*).
+    *   Fields: `width` (int), `height` (int), `depth` (int), `fragmentCount` (int), `headPointers` (int*), `nodePointers` (int*), `nodeData` (int*) [S1, unofficial].
 
 **Parameters**
-*   `framebufferWidth`: Uniform integer representing $W$, used to calculate pixel indices from fragment coordinates.
-*   `counter`: Atomic unsigned integer used to generate unique indices for each fragment.
+*   `framebufferWidth`: Uniform integer representing $W$, used to calculate pixel indices from fragment coordinates [S1, unofficial].
+*   `counter`: Atomic unsigned integer used to generate unique indices for each fragment [S1, unofficial].
 
 **Algorithm Steps**
-
-1.  **Fragment Counting**:
-    *   Render the mesh with a fragment shader that increments a global atomic counter for each generated fragment.
-    *   Shader: `atomicCounterIncrement(counter)`.
-    *   This determines the required size for `NodePointers` and `NodeData` arrays.
-
-2.  **List Construction (MakeFragList)**:
-    *   For each fragment generated by rasterizing the mesh:
-        *   Increment the atomic counter to obtain a unique index `count`.
-        *   Calculate the pixel index: `headPointerIndex = int(gl_FragCoord.x) + int(gl_FragCoord.y) * framebufferWidth`.
-        *   Atomically exchange the current head pointer value with `count`: `prevPtr = atomicExchange(HeadPointers[headPointerIndex], count)`.
-        *   Link the new node to the previous head: `NodePointers[count] = prevPtr`.
-        *   Store the depth data, scaled by the framebuffer width: `NodeData[count] = int(gl_FragCoord.z * framebufferWidth)`.
-
-3.  **Sorting (SortFragList)**:
-    *   Render a full-screen quad to iterate over all pixels.
-    *   For each pixel $(x, y)$:
-        *   Calculate `headPointerIndex` and retrieve `headPtr = HeadPointers[headPointerIndex]`.
-        *   If `headPtr == -1`, discard (no fragments for this pixel).
-        *   Perform a selection sort on the linked list using nested loops with a safety limit of 1024 iterations to prevent infinite loops.
-        *   Outer loop iterates `outerPtr` from `headPtr`.
-        *   Inner loop finds the node with the smallest `NodeData` value (`smallestPtr`) among the remaining nodes.
-        *   If `smallestPtr != outerPtr`, swap `NodeData[smallestPtr]` and `NodeData[outerPtr]`.
-        *   Advance `outerPtr` to `NodePointers[outerPtr]`.
-
-4.  **Voxel Interval Extraction**:
-    *   Iterate over screen pixels $(i, j)$.
-    *   Read the starting node index: `curPtr = headPointers[i + j * width]`.
-    *   The contiguous filled voxels along the ray are represented by the interval $[startVoxel, endVoxel)$.
-    *   Advance the pointer by two hops to skip processed nodes or handle gaps: `curPtr = nodePointers[nodePointers[curPtr]]`.
+1.  **Fragment Counting**: Render the mesh with a fragment shader that increments a global atomic counter for each generated fragment [S1, unofficial]. This determines the required size for `NodePointers` and `NodeData` arrays [S1, unofficial].
+2.  **List Construction (MakeFragList)**: For each fragment generated by rasterizing the mesh:
+    *   Increment the atomic counter to obtain a unique index `count` [S1, unofficial].
+    *   Calculate the pixel index: `headPointerIndex = int(gl_FragCoord.x) + int(gl_FragCoord.y) * framebufferWidth` [S1, unofficial].
+    *   Atomically exchange the current head pointer value with `count`: `prevPtr = atomicExchange(HeadPointers[headPointerIndex], count)` [S1, unofficial].
+    *   Link the new node to the previous head: `NodePointers[count] = prevPtr` [S1, unofficial].
+    *   Store the depth data, scaled by the framebuffer width: `NodeData[count] = int(gl_FragCoord.z * framebufferWidth)` [S1, unofficial].
+3.  **Sorting (SortFragList)**: Render a full-screen quad to iterate over all pixels [S1, unofficial]. For each pixel $(x, y)$:
+    *   Calculate `headPointerIndex` and retrieve `headPtr = HeadPointers[headPointerIndex]` [S1, unofficial].
+    *   If `headPtr == -1`, discard (no fragments for this pixel) [S1, unofficial].
+    *   Perform a selection sort on the linked list using nested loops with a safety limit of 1024 iterations to prevent infinite loops [S1, unofficial].
+    *   Outer loop iterates `outerPtr` from `headPtr` [S1, unofficial].
+    *   Inner loop finds the node with the smallest `NodeData` value (`smallestPtr`) among the remaining nodes [S1, unofficial].
+    *   If `smallestPtr != outerPtr`, swap `NodeData[smallestPtr]` and `NodeData[outerPtr]` [S1, unofficial].
+    *   Advance `outerPtr` to `NodePointers[outerPtr]` [S1, unofficial].
+4.  **Voxel Interval Extraction**: Iterate over screen pixels $(i, j)$ where $i$ ranges from $0$ to width-1 and $j$ ranges from $0$ to height-1 [S1, unofficial]. Read the starting node index: `curPtr = headPointers[i + j * width]` [S1, unofficial]. The interval $[startVoxel, endVoxel)$ represents the contiguous filled voxels along the ray [S1, unofficial]. Advance the pointer by two hops: `curPtr = nodePointers[nodePointers[curPtr]]` [S1, unofficial].
 
 **Pseudocode**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -74,27 +58,39 @@ The method relies on three Shader Storage Buffer Objects (SSBOs) bound to specif
 # NodePointers and NodeData allocated for max fragment count
 # Atomic counter initialized to 0
 
+def rasterize(mesh):
+    # Standard graphics operation: returns list of generated fragments
+    return mesh.fragments
+
+def atomic_counter_increment(counter):
+    counter += 1
+    return counter
+
+def atomic_exchange(array, index, value):
+    old_value = array[index]
+    array[index] = value
+    return old_value
+
 # Step 1: Count Fragments
-def count_fragments(mesh):
+def count_fragments(mesh, counter):
     for fragment in rasterize(mesh):
-        atomic_counter += 1
-    return atomic_counter
+        counter = atomic_counter_increment(counter)
+    return counter
 
 # Step 2: Build Linked List
-def make_frag_list(mesh, framebuffer_width):
+def make_frag_list(mesh, framebuffer_width, counter, HeadPointers, NodePointers, NodeData):
     for fragment in rasterize(mesh):
-        count = atomic_counter_increment()
+        count = atomic_counter_increment(counter)
         head_pointer_index = fragment.x + fragment.y * framebuffer_width
         
-        # Atomic exchange to prepend node
-        prev_ptr = atomic_exchange(HeadPointers[head_pointer_index], count)
+        prev_ptr = atomic_exchange(HeadPointers, head_pointer_index, count)
         
         NodePointers[count] = prev_ptr
-        # Scale depth by framebuffer width for integer storage
         NodeData[count] = int(fragment.z * framebuffer_width)
+    return counter
 
 # Step 3: Sort Linked List
-def sort_frag_list(framebuffer_width):
+def sort_frag_list(framebuffer_width, HeadPointers, NodePointers, NodeData):
     for y in range(height):
         for x in range(width):
             head_pointer_index = x + y * framebuffer_width
@@ -104,7 +100,6 @@ def sort_frag_list(framebuffer_width):
                 continue
             
             outer_ptr = head_ptr
-            # Safety limit to prevent infinite loops
             for _ in range(1024):
                 if outer_ptr == -1:
                     break
@@ -114,7 +109,6 @@ def sort_frag_list(framebuffer_width):
                 
                 inner_ptr = NodePointers[outer_ptr]
                 
-                # Inner loop to find minimum
                 for _ in range(1024):
                     if inner_ptr == -1:
                         break
@@ -126,7 +120,6 @@ def sort_frag_list(framebuffer_width):
                     
                     inner_ptr = NodePointers[inner_ptr]
                 
-                # Swap data if a smaller node was found
                 if smallest_ptr != outer_ptr:
                     NodeData[smallest_ptr] = NodeData[outer_ptr]
                     NodeData[outer_ptr] = smallest_data
@@ -134,37 +127,26 @@ def sort_frag_list(framebuffer_width):
                 outer_ptr = NodePointers[outer_ptr]
 
 # Step 4: Extract Voxels
-def extract_voxels(width, height):
+def extract_voxels(width, height, HeadPointers, NodePointers):
     for i in range(width):
         for j in range(height):
             cur_ptr = HeadPointers[i + j * width]
-            # Process interval [startVoxel, endVoxel)
-            # Advance pointer by two hops as per implementation
             if cur_ptr != -1:
                 next_ptr = NodePointers[cur_ptr]
                 if next_ptr != -1:
                     cur_ptr = NodePointers[next_ptr]
 ```
 
-## Subtopics
-
-### A-Buffer Representation
-The use of linked lists to store multiple depth values per pixel, allowing for accurate coverage calculation. Chosen when precise depth resolution is required over performance. [Link to A-Buffer concepts if available, otherwise link to Parent](6878-gpu-and-parallel-acceleration-voxelization.md).
-
-### Atomic Counter Voxelization
-The reliance on GPU atomic operations for thread-safe list construction. Chosen for parallel fragment processing without complex synchronization barriers. [Link to Parent](6878-gpu-and-parallel-acceleration-voxelization.md).
-
 ## Operating characteristics
-*   **Time Complexity**: The sorting phase is $O(N^2)$ in the worst case per pixel due to the nested selection sort, where $N$ is the number of fragments per pixel. The safety limit of 1024 iterations caps this but may result in incomplete sorting for highly complex scenes.
-*   **Memory Complexity**: $O(W \times H + F)$, where $W, H$ are framebuffer dimensions and $F$ is the total fragment count. Requires storage for three integer arrays of size $F$ and one of size $W \times H$.
-*   **Measured Performance**: Performance is heavily dependent on the number of fragments per pixel. For simple meshes, it is efficient. For complex meshes with high overdraw, the sorting phase becomes a bottleneck.
-*   **Strengths**: Accurate depth sorting; handles arbitrary geometry; no fixed-depth buffer limitations.
-*   **Limitations**: Sorting is slow for high overdraw; memory usage scales with fragment count; requires multiple render passes.
-*   **When to use**: When accurate voxelization is critical and the scene complexity is moderate.
-*   **When not to use**: For real-time applications with high overdraw or very large meshes where sorting time is prohibitive.
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**: Not given in the sources.
+*   **Scaling**: Not given in the sources.
+*   **Strengths and Limitations**: Not given in the sources.
+*   **When to use and when not**: Not given in the sources.
 
 ## Background
-The method is implemented in the `Voxelizer` library by Kelsey Kurzeja [S1, unofficial]. It utilizes OpenGL 4.2 features, specifically Shader Storage Buffer Objects (SSBOs) and atomic counters, to implement the A-Buffer concept on the GPU. The technique is part of a broader family of GPU-accelerated voxelization methods that leverage parallel processing for geometric intersection and depth management.
+The method is implemented in the `Voxelizer` library by Kelsey Kurzeja [S1, unofficial]. It utilizes OpenGL 4.2 features, specifically Shader Storage Buffer Objects (SSBOs) and atomic counters, to implement the A-Buffer concept on the GPU [S1, unofficial]. The technique is part of a broader family of GPU-accelerated voxelization methods that leverage parallel processing for geometric intersection and depth management [G].
 
 ## Sources
 [S1] khkurzeja/Voxelizer, https://github.com/khkurzeja/Voxelizer, fetched 2026-10-26 (unofficial)

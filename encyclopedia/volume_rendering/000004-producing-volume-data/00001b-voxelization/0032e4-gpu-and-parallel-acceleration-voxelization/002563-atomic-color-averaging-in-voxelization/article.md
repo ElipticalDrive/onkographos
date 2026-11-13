@@ -7,57 +7,33 @@ Atomic Color Averaging is a GPU-based technique for compositing multiple fragmen
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Fragment color $C_{new} \in [0, 1]^3$, voxel coordinate $V \in \mathbb{Z}^3$.
-- Output: Updated voxel texture where each voxel stores the average color of all fragments that hit it.
+- Input: Fragment color $C_{new} \in [0, 1]^3$, voxel coordinate $V \in \mathbb{Z}^3$ [S1, unofficial].
+- Output: Updated voxel texture where each voxel stores the average color of all fragments that hit it [S1, unofficial].
 
 **Data Structures:**
 - Voxel Texture: A 3D texture with format `R32UI` (unsigned 32-bit integer) [S2, unofficial]. Each texel packs four 8-bit unsigned normalized values (RGBA8) into a single 32-bit integer [S1, unofficial].
-- Packing Layout: The 32-bit integer is composed of four 8-bit channels. The source code in [S2, unofficial] implies a specific byte order for `convVec4ToRGBA8`:
-  - Bits 0-7: Red component ($C_r$)
-  - Bits 8-15: Green component ($C_g$)
-  - Bits 16-23: Blue component ($C_b$)
-  - Bits 24-31: Counter/Alpha component ($N$), representing the number of samples accumulated [S1, unofficial].
+- Packing Layout: The 32-bit integer is composed of four 8-bit channels, with the counter stored in the most significant byte (Alpha) to allow it to participate in the atomic integer operation [S2, unofficial].
 
 **Packing/Unpacking Functions:**
 The conversion between `vec4` (normalized floats) and `uint` (packed integer) is defined as follows [S2, unofficial]:
-
-$$
-\text{pack}(C_r, C_g, C_b, N) = (N \ll 24) \mid (C_b \ll 16) \mid (C_g \ll 8) \mid C_r
-$$
-
-$$
-\text{unpack}(V) = \left( \frac{V \& 0xFF}{255.0}, \frac{(V \gg 8) \& 0xFF}{255.0}, \frac{(V \gg 16) \& 0xFF}{255.0}, \frac{V \gg 24}{255.0} \right)
-$$
-
-Note: [S1, unofficial] uses `packUnorm4x8` which typically maps RGB to the first three channels and the counter to Alpha. The specific bit-shifting in [S2, unofficial] confirms the counter resides in the most significant byte (Alpha) to allow it to be part of the atomic integer operation.
+$$ \text{pack}(C_r, C_g, C_b, N) = (N \ll 24) \mid (C_b \ll 16) \mid (C_g \ll 8) \mid C_r $$
+$$ \text{unpack}(V) = \left( \frac{V \& 0xFF}{255.0}, \frac{(V \gg 8) \& 0xFF}{255.0}, \frac{(V \gg 16) \& 0xFF}{255.0}, \frac{V \gg 24}{255.0} \right) $$
 
 **Algorithm Steps:**
-1. **Initialization:** For each fragment hitting voxel $V$, initialize `prevUint = 0` and `nextUint` with the new color and a count of 1. The count is stored as $1/255.0$ in the alpha channel, which corresponds to the integer value 1 in the 8-bit field [S1, unofficial].
-   $$
-   C_{scaled} = C_{new} \times 255.0
-   $$
-   $$
-   nextUint = \text{pack}(C_{scaled}.r, C_{scaled}.g, C_{scaled}.b, 1)
-   $$
-2. **Atomic Compare-and-Swap:** Perform `curUint = imageAtomicCompSwap(voxelTexture, V, prevUint, nextUint)` [S1, unofficial]. This atomically swaps the value at $V$ with `nextUint` if the current value is `prevUint`.
-3. **Conflict Check:** If `curUint != prevUint`, a race condition occurred (another thread modified the voxel).
+1. **Initialization:** For each fragment hitting voxel $V$, initialize `prevUint = 0` and `nextUint` with the new color scaled to [0, 255] and a count of 1 [S1, unofficial].
+   $$ C_{scaled} = C_{new} \times 255.0 $$
+   $$ nextUint = \text{pack}(C_{scaled}.r, C_{scaled}.g, C_{scaled}.b, 1) $$
+2. **Atomic Compare-and-Swap:** Perform `curUint = imageAtomicCompSwap(voxelTexture, V, prevUint, nextUint)` [S1, unofficial]. This atomically swaps the value at $V$ with `nextUint` if the current value matches `prevUint` [S1, unofficial].
+3. **Conflict Check:** If `curUint != prevUint`, a race condition occurred because another thread modified the voxel [S1, unofficial].
    - Set `prevUint = curUint`.
    - Unpack `curUint` to get the current average color $C_{avg}$ and count $N$ [S1, unofficial].
    - Calculate the new incremental average using the formula:
-     $$
-     C_{new\_avg} = \frac{C_{avg} \times N + C_{new}}{N + 1}
-     $$
-     $$
-     N_{new} = N + 1
-     $$
-     In integer/normalized terms:
-     $$
-     C_{scaled\_avg} = \frac{C_{avg\_scaled} \times N + C_{scaled}}{N + 1}
-     $$
-     $$
-     N_{new\_int} = N + 1
-     $$
-   - Pack the new state: `nextUint = pack(C_scaled_avg.r, C_scaled_avg.g, C_scaled_avg.b, N_new)` [S1, unofficial].
+     $$ C_{new\_avg} = \frac{C_{avg} \times N + C_{new}}{N + 1} $$
+     $$ N_{new} = N + 1 $$
+     In normalized terms:
+     $$ C_{scaled\_avg} = \frac{C_{avg\_scaled} \times N + C_{scaled}}{N + 1} $$
+     $$ N_{new\_int} = N + 1 $$
+   - Pack the new state: `nextUint = packUnorm4x8(vec4(C_scaled_avg.r, C_scaled_avg.g, C_scaled_avg.b, float(N_new) / 255.0f))` [S1, unofficial].
    - Retry the atomic swap: `curUint = imageAtomicCompSwap(voxelTexture, V, prevUint, nextUint)` [S1, unofficial].
 4. **Termination:** Loop until `curUint == prevUint`, indicating the write was successful without interference [S1, unofficial].
 
@@ -65,7 +41,6 @@ Note: [S1, unofficial] uses `packUnorm4x8` which typically maps RGB to the first
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Helper functions for packing/unpacking as defined in [S2, unofficial]
 def pack_rgba8(r, g, b, n):
     # r, g, b, n are integers in [0, 255]
     return (n << 24) | (b << 16) | (g << 8) | r
@@ -77,42 +52,36 @@ def unpack_rgba8(val):
     n = (val >> 24) & 0xFF
     return r, g, b, n
 
+def atomic_compare_and_swap(target_array, coord, expected, desired):
+    # Simulates hardware imageAtomicCompSwap: atomically swaps target_array[coord] with desired
+    # if target_array[coord] == expected, otherwise returns the current value.
+    current = target_array[coord]
+    if current == expected:
+        target_array[coord] = desired
+        return expected
+    return current
+
 def atomic_color_average(voxel_texture, coord, new_color_rgb):
-    # new_color_rgb is vec3 in [0, 1]
-    # Scale to 0-255
-    r = int(new_color_rgb.r * 255.0)
-    g = int(new_color_rgb.g * 255.0)
-    b = int(new_color_rgb.b * 255.0)
+    # new_color_rgb is a tuple/list of floats in [0, 1]
+    r = int(new_color_rgb[0] * 255.0)
+    g = int(new_color_rgb[1] * 255.0)
+    b = int(new_color_rgb[2] * 255.0)
     
-    # Initial state: new color, count = 1
     next_uint = pack_rgba8(r, g, b, 1)
     prev_uint = 0
-    cur_uint = image_atomic_comp_swap(voxel_texture, coord, prev_uint, next_uint)
+    cur_uint = atomic_compare_and_swap(voxel_texture, coord, prev_uint, next_uint)
     
     while cur_uint != prev_uint:
         prev_uint = cur_uint
-        
-        # Unpack current value
         cur_r, cur_g, cur_b, count = unpack_rgba8(cur_uint)
         
-        # Calculate new average: (current_sum + new_val) / (count + 1)
-        # current_sum = cur_rgb * count
-        # new_sum = cur_rgb * count + new_rgb
-        # new_avg = new_sum / (count + 1)
-        
         new_count = count + 1
+        avg_r = (cur_r * count + r) / new_count
+        avg_g = (cur_g * count + g) / new_count
+        avg_b = (cur_b * count + b) / new_count
         
-        # Integer arithmetic for average
-        # avg_r = (cur_r * count + r) / new_count
-        avg_r = (cur_r * count + r) // new_count
-        avg_g = (cur_g * count + g) // new_count
-        avg_b = (cur_b * count + b) // new_count
-        
-        # Pack new state
-        next_uint = pack_rgba8(avg_r, avg_g, avg_b, new_count)
-        
-        # Retry atomic swap
-        cur_uint = image_atomic_comp_swap(voxel_texture, coord, prev_uint, next_uint)
+        next_uint = pack_rgba8(int(avg_r), int(avg_g), int(avg_b), new_count)
+        cur_uint = atomic_compare_and_swap(voxel_texture, coord, prev_uint, next_uint)
 ```
 
 **Parameters:**
@@ -121,7 +90,7 @@ def atomic_color_average(voxel_texture, coord, new_color_rgb):
 - Combination Scheme: Simple arithmetic mean is the default [S2, unofficial]. Coverage-based combination is mentioned as a sophisticated alternative but not implemented in the basic method [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Overflow:** Using RGBA8 limits the counter to 255. If more than 255 fragments hit the same voxel, the count overflows [S2, unofficial]. The method assumes the count fits in 8 bits.
+- **Overflow:** The 8-bit counter limits the maximum representable count to 255, and direct summation would overflow; the incremental average avoids this [S2, unofficial].
 - **Precision:** Integer division truncates the average, introducing quantization error [S1, unofficial].
 - **Performance:** The retry loop can be slow if many collisions occur. Lower resolution voxelization may be slower than higher resolution due to increased collision rates per voxel [S2, unofficial].
 - **Atomic Restrictions:** OpenGL 4.2 restricts image atomics to 32-bit integers, preventing direct use of `imageAtomicAdd` on float textures [S2, unofficial].
@@ -132,16 +101,16 @@ def atomic_color_average(voxel_texture, coord, new_color_rgb):
 A hardware-specific variant used in volumetric displays where voxel coloring is synchronized with an LC color filter [S3]. Instead of software atomic averaging, it relies on temporal separation: the laser repetition frequency (1 kHz) is synchronized with the filter switching (60 Hz, 17 pulses per color) to assign different colors to voxels generated at different times [S3]. This avoids race conditions entirely by ensuring only one color is written to a spatial position at a time [S3].
 
 ### Sparse Voxel List and Indirect Commands
-An optimization layer often used in conjunction with atomic averaging [S1, unofficial]. A sparse voxel list tracks occupied voxels during the atomic compositing pass. This list is used to generate indirect command buffers for the compute shader, restricting subsequent reads/writes to only occupied voxels, thereby reducing thread usage and improving performance [S1, unofficial].
+An optimization layer often used in conjunction with atomic averaging [S1, unofficial]. A sparse voxel list tracks occupied voxels during the atomic compositing pass [S1, unofficial]. This list is used to generate indirect command buffers for the compute shader, restricting subsequent reads/writes to only occupied voxels, thereby reducing thread usage and improving performance [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of fragments and $C$ is the average number of retries due to collisions [S2, unofficial]. In the worst case (high collision rate), performance degrades significantly.
-- **Memory Complexity:** $O(V)$, where $V$ is the number of voxels, storing one 32-bit integer per voxel [S2, unofficial].
-- **Measured Performance:** On the Stanford Dragon mesh, RGBA8 atomic averaging was significantly slower than standard writes. At resolution 512, standard write took 1.47 ms, while atomic merge took 31.40 ms [S2, unofficial]. The FP32 atomicAdd emulation was up to 25 times slower than native operations when collisions were frequent [S2, unofficial].
+- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of fragments and $C$ is the average number of retries due to collisions [S2, unofficial]. In the worst case (high collision rate), performance degrades significantly [S2, unofficial].
+- **Memory Complexity:** $O(V)$, where $V$ is the number of voxels, storing one packed 32-bit integer per voxel [S2, unofficial].
+- **Measured Performance:** On the Stanford Dragon mesh, RGBA8 atomic averaging was significantly slower than standard writes [S2, unofficial]. At resolution 512, standard write took 1.47 ms, while atomic merge took 31.40 ms [S2, unofficial]. The FP32 atomicAdd emulation was up to 25 times slower than native operations when collisions were frequent [S2, unofficial].
 - **Strengths:** Correctly handles arbitrary write ordering; no floating-point atomics required; simple implementation [S1, unofficial].
 - **Limitations:** Slow under high collision rates; limited to 255 samples per voxel due to 8-bit counter; quantization error from integer division [S2, unofficial].
 - **When to Use:** Real-time voxelization where color averaging is required and collision rates are moderate [S1, unofficial].
-- **When Not to Use:** High-resolution voxelization with high triangle overlap, or when sub-8-bit color precision is needed [S2, unofficial].
+- **When Not to Use:** Scenarios with extremely high collision rates, as lower resolutions may become slower than higher resolutions due to increased contention per voxel [S2, unofficial].
 
 ## Background
 The method was described in the context of OpenGL-based sparse voxelization, specifically addressing the limitations of OpenGL 4.2 image atomics [S2, unofficial]. It builds on techniques from "Octree-Based Sparse Voxelization Using the GPU Hardware Rasterizer" by Cyril Crassin and Simon Green, who proposed packing colors into integer formats to use `imageAtomicCompSwap` [S1, unofficial]. The technique is cited in "OpenGL Insights" [S2, unofficial].
