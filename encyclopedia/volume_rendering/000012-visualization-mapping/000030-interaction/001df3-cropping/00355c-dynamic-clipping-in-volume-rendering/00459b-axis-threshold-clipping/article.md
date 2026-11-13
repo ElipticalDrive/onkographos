@@ -1,0 +1,117 @@
+# Axis Threshold Clipping
+
+Also called: Gaussian Axis Clipping
+
+## Overview
+Axis Threshold Clipping is a dynamic clipping method for 3D Gaussian Splatting that discards Gaussians whose projected screen-space bounding quad exceeds a maximum axis length threshold $\tau_\lambda$ [S1]. It solves the performance bottleneck of processing large, distant Gaussians that fall outside the view frustum but have significant screen-space extent, specifically targeting mobile hardware constraints [S1]. It differs from general volume clipping methods by operating on the projected 2D geometry of splats rather than 3D voxel data, and from sibling dynamic clipping techniques by using a simple axis-aligned bound check rather than complex frustum intersection tests [S1, Siblings].
+
+## How it works
+**Inputs:**
+- A set of 3D Gaussians, each defined by a mean position $\mu$, a covariance matrix $\Sigma$, and an opacity $\alpha$.
+- A camera projection matrix $P$ and view matrix $V$.
+- A clipping threshold $\tau_\lambda$ (scalar).
+
+**Outputs:**
+- A subset of Gaussians eligible for rasterization.
+
+**Data Structures:**
+- Gaussian attributes: $\mu \in \mathbb{R}^3$, $\Sigma \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), $\alpha \in [0, 1]$.
+- Clipping threshold: $\tau_\lambda \in \mathbb{R}^+$.
+
+**Steps:**
+1. For each Gaussian $i$ with mean $\mu_i$ and covariance $\Sigma_i$:
+   a. Compute the 3D-to-2D projection of the Gaussian mean: $p_i = P \cdot V \cdot \mu_i$.
+   b. If $p_i$ is outside the normalized device coordinates (NDC) view frustum (i.e., $|p_{i,x}| > 1$ or $|p_{i,y}| > 1$ or $p_{i,z} < 0$ or $p_{i,z} > 1$), proceed to step 2. Otherwise, the Gaussian is inside the frustum and must be processed [S1].
+   c. Compute the projected 2D covariance matrix $\Sigma'_i$ in screen space. This involves the Jacobian of the projection transformation $J$ applied to $\Sigma_i$: $\Sigma'_i = J \Sigma_i J^T$ [S1, G]. The Jacobian $J$ depends on the camera intrinsics and extrinsics and the depth of $\mu_i$.
+   d. Compute the axis-aligned bounding box (AABB) of the projected Gaussian in screen space. The extents along the x and y axes are determined by the eigenvalues of $\Sigma'_i$. Let $\sigma_{x,i}$ and $\sigma_{y,i}$ be the maximum extents (e.g., $3\sigma$ or similar confidence interval) along the screen x and y axes respectively [S1, G].
+   e. Determine the maximum axis length: $L_{max, i} = \max(\sigma_{x,i}, \sigma_{y,i})$.
+   f. If $L_{max, i} > \tau_\lambda$, discard Gaussian $i$ [S1].
+   g. Otherwise, keep Gaussian $i$ for rendering [S1].
+
+**Parameters:**
+- $\tau_\lambda$: The clipping threshold for the maximum axis of the screen-space quad. Typical value: 40 pixels [S1].
+
+**Edge Cases and Pitfalls:**
+- Gaussians with means outside the frustum but large splats inside the view frustum are correctly discarded if their projected quad exceeds $\tau_\lambda$ [S1].
+- Precision issues may arise when computing the Jacobian for Gaussians very close to the camera or at extreme depths [G].
+- The threshold $\tau_\lambda$ must be tuned to the target resolution and hardware capabilities [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def axis_threshold_clipping(gaussians, camera_matrix, tau_lambda):
+    """
+    gaussians: List of Gaussian objects with attributes .mu (3,), .Sigma (3,3)
+    camera_matrix: Projection matrix P and View matrix V combined or separate
+    tau_lambda: float, clipping threshold
+    Returns: List of kept Gaussians
+    """
+    kept_gaussians = []
+    
+    for g in gaussians:
+        # Project mean to screen space
+        # Assuming camera_matrix provides a function to project 3D point to NDC
+        p_ndc = project_to_ndc(g.mu, camera_matrix)
+        
+        # Check if mean is inside NDC frustum
+        if is_inside_ndc_frustum(p_ndc):
+            kept_gaussians.append(g)
+            continue
+            
+        # If mean is outside, check projected size
+        # Compute 2D covariance in screen space
+        # J is the Jacobian of the projection at g.mu
+        J = compute_projection_jacobian(g.mu, camera_matrix)
+        Sigma_2d = J @ g.Sigma @ J.T
+        
+        # Compute extents along x and y axes
+        # Extent is typically k * sqrt(eigenvalue) for some k (e.g., 3 for 3-sigma)
+        # For axis-aligned, we can use the diagonal elements if axes are aligned,
+        # or eigenvalues if rotated. The source mentions "maximum axis", implying
+        # the extent along the screen axes or the bounding box diagonal?
+        # Source says "maximum axis of the screenspace quad". This usually means
+        # the width or height of the AABB.
+        # Let's assume we compute the AABB of the 2D Gaussian.
+        # The extent along screen X is sqrt(Sigma_2d[0,0]) * k
+        # The extent along screen Y is sqrt(Sigma_2d[1,1]) * k
+        # Note: Sigma_2d is in homogeneous coordinates, need to normalize by w^2
+        w = p_ndc[2] # Depth in NDC? Or use original depth for Jacobian?
+        # Standard projection: x_ndc = x_cam / z_cam, y_ndc = y_cam / z_cam
+        # Jacobian involves 1/z.
+        
+        # Simplified: Get projected covariance in screen pixels
+        # This requires camera intrinsics (focal length, etc.)
+        # Assuming project_to_ndc handles the math, we need screen-space covariance
+        Sigma_screen = compute_screen_space_covariance(g.Sigma, g.mu, camera_matrix)
+        
+        # Extents
+        extent_x = 3.0 * sqrt(Sigma_screen[0, 0])
+        extent_y = 3.0 * sqrt(Sigma_screen[1, 1])
+        
+        max_axis = max(extent_x, extent_y)
+        
+        if max_axis <= tau_lambda:
+            kept_gaussians.append(g)
+            
+    return kept_gaussians
+```
+
+## Subtopics
+
+### Automatic Axis Aligned Cutting Tool
+A clipping tool for volume rendering that divides the volume into eight octants and hides those located between the viewpoint and the Region of Interest (ROI) [S2]. It also supports a sphere-based cutting method with 26 sectors (6 for half, 12 for quarter, 8 for eighth cuts) to discard octants occluding the origin based on the viewpoint's sector [S2]. It uses a mask volume with 1/10th resolution and 10x voxel size, where voxels with mask value 0 are discarded in a GLSL shader [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of Gaussians, as each Gaussian is checked once against the threshold [S1].
+- **Memory Complexity:** $O(1)$ additional memory per Gaussian for the check [S1].
+- **Performance:** On mobile VR (Quest3), using $\tau_\lambda = 40$ results in 19 FPS compared to 6 FPS without the threshold for the Bike scene with 790k splats [S1].
+- **Strengths:** Significantly improves rendering performance on mobile hardware by skipping expensive processing of large, distant Gaussians [S1].
+- **Limitations:** May discard Gaussians that are technically inside the view frustum but have large extents, potentially causing visual artifacts if $\tau_\lambda$ is too low [S1].
+
+## Background
+Axis Threshold Clipping was introduced in the context of real-time Gaussian Splatting in VR, specifically to address performance issues on mobile hardware [S1]. The Automatic Axis Aligned Cutting Tool, a related concept for traditional volume rendering, was introduced by Christian Rieder et al. in 2008 for medical visualization [S2].
+
+## Sources
+[S1] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01
+[S2] High-Quality Multimodal Volume Visualization of Intracerebral Pathological Tissue, https://doi.org/10.2312/vcbm/vcbm08/167-176, fetched 2026-10-26

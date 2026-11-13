@@ -1,48 +1,46 @@
 # Unified Points, Beams, and Paths (UPBP)
-
-
 ## Overview
 Unified Points, Beams, and Paths (UPBP) is a combined rendering algorithm that fuses volumetric density estimation estimators (Point-Point, Point-Beam, Beam-Beam) with unbiased Bidirectional Path Tracing (BPT) using Multiple Importance Sampling (MIS) [S2, S3]. It solves the problem of efficiently simulating light transport in diverse participating media by automatically selecting the most suitable representation—points for high-order scattering, beams for low-order scattering, and paths for specular surface interactions—thereby mitigating the weaknesses of individual estimators [S1, S3]. Unlike pure path tracing, which struggles with low-order scattering in dense media, or pure photon mapping, which suffers from bias and poor handling of specular connections, UPBP provides a unified framework that subsumes previous methods like Volumetric Connection Mapping (VCM) and Photon Beam Tracing [S2].
 
 ## How it works
-The algorithm operates in two distinct stages: a light subpath generation phase (Stage 1) and a camera subpath evaluation phase (Stage 2) [S2, S3]. It uses the extended balance heuristic for MIS weights to combine contributions from different estimators [S3].
+The algorithm operates in two distinct stages: a light subpath generation phase (Stage 1) and a camera subpath evaluation phase (Stage 2) [S2, S3]. It uses the balance heuristic for MIS weights to combine contributions from different estimators [S3].
 
 ### Inputs and Outputs
-*   **Inputs:** Scene geometry, participating media properties (extinction $\sigma_t$, scattering $\sigma_s$, emission $\sigma_e$, phase function $p$), light sources, camera parameters, and user-defined parameters: maximum path length $k$, number of light subpaths $n_v$ for each technique $v$, and the set of active estimators.
-*   **Outputs:** Radiance estimate for each pixel.
+*   **Inputs:** Scene geometry, participating media properties (extinction $\sigma_t$, scattering $\sigma_s$, emission $\sigma_e$, phase function $p$), light sources, camera parameters, and user-defined parameters: maximum path length $k$, number of light subpaths $n_v$ for each technique $v$, and the set of active estimators [S2, S3].
+*   **Outputs:** Radiance estimate for each pixel [S2, S3].
 
 ### Data Structures
 The implementation maintains specific data structures to accelerate density estimation queries [S2, S3]:
-1.  **Hashed Grids:** Separate grids for surface vertices and medium vertices. Used for Point-Point (P-P) estimators.
-2.  **Bounding Volume Hierarchy (BVH):** Built over medium vertices. Used for Point-Beam (P-B) estimators.
-3.  **Uniform Grid:** Organizes photon beams. Used for Beam-Beam (B-B) estimators. The uniform grid is chosen over BVH for beams because it is faster to build, though query performance is suboptimal [S2].
+1.  **Hashed Grids:** Separate grids for surface vertices and medium vertices, used for Point-Point (P-P) estimators [S2].
+2.  **Bounding Volume Hierarchy (BVH):** Built over medium vertices, used for Point-Beam (P-B) estimators [S2].
+3.  **Uniform Grid:** Organizes photon beams, used for Beam-Beam (B-B) estimators. The uniform grid is chosen over BVH for beams because it is faster to build, though query performance is suboptimal [S2].
 
 ### Active Estimators
 To reduce bias and computational cost, the standard implementation uses only the "minimum-blur" volumetric estimators and their short-beam variants [S2]:
-*   **P-P3D:** Point-Point 3D (medium).
-*   **P-Bl2D:** Point-Beam 2D (short photon beams, long query beams).
-*   **Bs-Bl1D:** Beam-Beam 1D (short beams).
-*   **P-P2D:** Point-Point 2D (surface).
-*   **BPT:** Bidirectional Path Tracing.
+*   **P-P3D:** Point-Point 3D (medium) [S2].
+*   **P-Bl2D:** Point-Beam 2D (short photon beams, long query beams) [S2].
+*   **Bs-Bl1D:** Beam-Beam 1D (short beams) [S2].
+*   **P-P2D:** Point-Point 2D (surface) [S2].
+*   **BPT:** Bidirectional Path Tracing [S2].
 
 Long photon beams are excluded due to high construction and query costs that are rarely compensated by variance reduction [S2].
 
 ### Numbering and Indices
-*   $k$: Maximum path length (number of bounces).
-*   $s$: Number of vertices on the light subpath.
-*   $t$: Number of vertices on the camera subpath.
-*   For BPT: $t = k + 1 - s$.
-*   For PDE (Point/Beam Density Estimation): $t = k + 2 - s$.
+*   $k$: Maximum path length (number of bounces) [S3].
+*   $s$: Number of vertices on the light subpath [S3].
+*   $t$: Number of vertices on the camera subpath [S3].
+*   For BPT: $t = k + 1 - s$ [S3].
+*   For PDE (Point/Beam Density Estimation): $t = k + 2 - s$ [S3].
 *   PDE techniques cannot be evaluated on a light source or camera lens, so valid indices are $2 \leq s \leq k$ [S3].
 
 ### Step-by-Step Algorithm
 
 **Stage 1: Light Subpath Generation and Storage**
-1.  Generate $n_{BPT}$ light subpaths $\bar{\bf y}$ using standard path tracing or light tracing techniques.
-2.  Store vertices on surfaces and vertices/beams in media.
-3.  Build the hashed grids for surface and medium vertices.
-4.  Build the BVH over medium vertices.
-5.  Organize photon beams into the uniform grid.
+1.  Generate $n_{BPT}$ light subpaths $\bar{\bf y}$ using standard path tracing or light tracing techniques [S2, S3].
+2.  Store vertices on surfaces and vertices/beams in media [S2, S3].
+3.  Build the hashed grids for surface and medium vertices [S2].
+4.  Build the BVH over medium vertices [S2].
+5.  Organize photon beams into the uniform grid [S2].
 6.  Store fewer photon beams than points due to higher memory and computational costs per beam [S2].
 
 **Stage 2: Camera Subpath Evaluation**
@@ -56,8 +54,8 @@ Long photon beams are excluded due to high construction and query costs that are
 4.  For each segment (beam) on the camera subpath passing through a medium:
     *   Evaluate the P-Bl2D estimator using the medium BVH and the uniform grid for beams [S2].
     *   Evaluate the Bs-Bl1D estimator using the uniform grid for beams [S2].
-5.  For each evaluated estimator $v$ at vertex/segment $s$, compute the MIS weight $w_{v,s,t}$ and the radiance contribution $\langle I \rangle_{v,s}$.
-6.  Sum the weighted contributions and add to the pixel value.
+5.  For each evaluated estimator $v$ at vertex/segment $s$, compute the MIS weight $w_{v,s,t}$ and the radiance contribution $\langle I \rangle_{v,s}$ [S3].
+6.  Sum the weighted contributions and add to the pixel value [S3].
 
 ### Formulas
 
@@ -69,7 +67,7 @@ $$
 
 Where $n_v$ is the number of light subpaths for technique $v$, and $w_{v,s,t}$ is the MIS weight [S3].
 
-The MIS weight is computed using the extended balance heuristic [S3]:
+The MIS weight is computed using the balance heuristic [S3]:
 
 $$
 w_{v,s,t}(\bar{\bf x}) = \frac{n_v p_{v,s}(\bar{\bf x})}{g_v(\bar{\bf x})}
@@ -90,7 +88,7 @@ def upbp_render(scene, camera, max_path_length_k, n_light_subpaths):
     """
     Main UPBP rendering loop.
     """
-    # Stage 1: Light Subpath Generation
+    # Stage 1: Light Subpath Generation and Storage
     light_subpaths = []
     surface_vertices = []
     medium_vertices = []
@@ -230,7 +228,7 @@ A full GPU implementation leveraging NVIDIA RTX hardware for light and camera pa
 ## Operating characteristics
 *   **Time Complexity:** The algorithm involves two stages. Stage 1 scales with the number of light subpaths and the cost of building data structures (hashing, BVH, uniform grid). Stage 2 scales with the number of pixels and the cost of querying data structures for each vertex and segment of the camera subpath. The uniform grid for beams is noted to have suboptimal query performance [S2].
 *   **Memory Complexity:** Memory usage is dominated by the storage of light subpaths, vertices, and beams. The implementation stores fewer photon beams than points due to higher memory costs per beam [S2].
-*   **Performance:** The use of short photon beams and long query beams provides the best performance for a given time budget [S2]. The GPU-accelerated variant achieves significant speedups over CPU baselines [S1].
+*   **Performance:** The use of short photon beams and long query beams provides the best performance for a given time budget [S2].
 *   **Strengths:** Automatically selects the best representation for different media types (points for high-order, beams for low-order, paths for specular) [S1]. Subsumes previous methods like VCM and Photon Beam Tracing [S2].
 *   **Limitations:** The uniform grid for beams has suboptimal query performance [S2]. The algorithm does not use joint path importance sampling techniques, which could further reduce variance in scenes with highly anisotropically scattering media [S2].
 

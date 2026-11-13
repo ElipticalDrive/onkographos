@@ -2,202 +2,175 @@
 Also called: Brute-force SDF generation
 
 ## Overview
-Naive SDF Generation (CPU) computes the Signed Distance Field (SDF) for a triangle mesh by explicitly evaluating the distance from every voxel sample point to every triangle in the mesh. It solves the problem of converting an explicit mesh representation into an implicit volume representation suitable for ray marching or voxel-based rendering. Unlike spatial acceleration methods, it performs a linear scan of all triangles for each sample, making it simple to implement but computationally prohibitive for high-resolution volumes or complex meshes.
+Naive SDF Generation (CPU) computes the Signed Distance Field (SDF) for a triangle mesh by explicitly evaluating the distance from every voxel sample point to every triangle in the mesh [S1, unofficial]. It converts an explicit mesh representation into an implicit volume representation suitable for ray marching or voxel-based rendering [G]. Unlike spatial acceleration methods, it performs a linear scan of all triangles for each sample, making it simple to implement but computationally prohibitive for high-resolution volumes or complex meshes [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A triangle mesh defined by a vertex buffer and an index buffer.
-- A world transformation matrix for the mesh.
-- A 3D volume grid defined by dimensions $(W, H, D)$ and spatial bounds (min/max coordinates).
-- Sampling resolution (distance between sample points).
+- A triangle mesh defined by a vertex buffer and an index buffer [S1, unofficial].
+- A world transformation matrix for the mesh [S1, unofficial].
+- A 3D volume grid defined by dimensions $(W, H, D)$ and spatial bounds (min/max coordinates) [G].
+- Sampling resolution (distance between sample points) [G].
 
 **Outputs:**
-- A 3D array (or flattened texture) of signed floating-point distances.
+- A 3D array (or flattened texture) of signed floating-point distances [S1, unofficial].
 
 **Data Structures:**
-- **Triangle List:** An array of triangles, where each triangle consists of three vertices $v_0, v_1, v_2$.
-- **Sample Grid:** A 3D array `dist[W][H][D]` storing the computed signed distance for each voxel.
+- **Triangle List:** An array of triangles, where each triangle consists of three vertices $v_0, v_1, v_2$ [S1, unofficial].
+- **Sample Grid:** A 3D array `dist[W][H][D]` storing the computed signed distance for each voxel [G].
 
 **Steps:**
 1. **Preprocessing:**
-   - Extract all vertices from the vertex buffer.
-   - Transform each vertex $v$ using the mesh's world matrix $M$: $v' = M \cdot v$.
-   - Generate a list of triangles from the index buffer, using the transformed vertices.
-   - Compute the normal $n$ for each triangle. The normal direction is determined by the clockwise (or counter-clockwise) winding order of the triangle's edges to define the inside/outside orientation. Let the triangle vertices be $A, B, C$. The normal is proportional to $(B-A) \times (C-A)$.
+   - Extract all vertices from the vertex buffer [S1, unofficial].
+   - Transform each vertex $v$ using the mesh's world matrix $M$: $v' = M \cdot v$ [S1, unofficial].
+   - Generate a list of triangles from the index buffer, using the transformed vertices [S1, unofficial].
+   - Compute the normal $n$ for each triangle. The normal direction is determined by the clockwise winding order of the triangle's edges to define the inside/outside orientation [S1, unofficial]. Let the triangle vertices be $A, B, C$. The normal is proportional to $(B-A) \times (C-A)$ [G].
 
 2. **Voxel Sampling Loop:**
-   - Iterate through each sample point $P$ in the 3D volume grid.
-   - Initialize `min_sq_dist` to infinity and `closest_normal` to zero.
+   - Iterate through each sample point $P$ in the 3D volume grid [S1, unofficial].
+   - Initialize `min_sq_dist` to infinity and `closest_normal` to zero [G].
 
 3. **Triangle Distance Evaluation:**
    - For each triangle $T$ in the mesh:
-     - Calculate the squared Euclidean distance $d^2$ from point $P$ to triangle $T$ using the "Triangle Unsigned" distance function [S1, unofficial]. This function returns the squared distance to the closest point on the triangle surface (vertex, edge, or interior).
+     - Calculate the squared Euclidean distance $d^2$ from point $P$ to triangle $T$ using the "Triangle Unsigned" distance function [S1, unofficial]. This function returns the squared distance to the closest point on the triangle surface (vertex, edge, or interior) [S1, unofficial].
      - If $d^2 < \text{min\_sq\_dist}$:
        - Update `min_sq_dist` = $d^2$.
        - Calculate the vector $V$ from $P$ to the closest point on the triangle.
-       - Compute the dot product $dot = V \cdot n$, where $n$ is the triangle's normal.
-       - Store the sign indicator based on the dot product.
+       - Compute the dot product $dot = V \cdot n$, where $n$ is the triangle's normal [S1, unofficial].
 
 4. **Sign Determination:**
-   - Determine if $P$ is inside or outside the mesh.
-   - If $dot < 0$, the point is outside (assuming normals point outward). If $dot > 0$, the point is inside.
-   - Set `sign` = $-1$ if inside, $+1$ if outside. (Note: The source states "negative means inside" and "if we look the opposite direction we are outside" [S1, unofficial]).
+   - Determine if $P$ is inside or outside the mesh by calculating the dot product of the distance vector to the triangle normal [S1, unofficial].
+   - If $dot < 0$, the point is outside (assuming normals point outward). If $dot > 0$, the point is inside [S1, unofficial].
+   - Set `sign` = $-1$ if inside, $+1$ if outside [S1, unofficial].
 
 5. **Final Distance Calculation:**
    - Compute the signed distance $SDF$ for the sample point:
      $$ SDF = \sqrt{|min\_sq\_dist|} \times \text{sign} $$
-   - Store $SDF$ in the volume grid at the corresponding voxel index.
+   - Store $SDF$ in the volume grid at the corresponding voxel index [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
-import numpy as np
+
+def dot(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def sub(v1, v2):
+    return (v1[0]-v2[0], v1[1]-v2[1], v1[2]-v2[2])
+
+def add(v1, v2):
+    return (v1[0]+v2[0], v1[1]+v2[1], v1[2]+v2[2])
+
+def scale(v, s):
+    return (v[0]*s, v[1]*s, v[2]*s)
+
+def cross(v1, v2):
+    return (v1[1]*v2[2] - v1[2]*v2[1],
+            v1[2]*v2[0] - v1[0]*v2[2],
+            v1[0]*v2[1] - v1[1]*v2[0])
+
+def len_sq(v):
+    return dot(v, v)
 
 def triangle_unsigned_dist_sq(p, a, b, c):
-    """
-    Computes the squared distance from point p to triangle abc.
-    Returns (dist_sq, closest_point_on_triangle).
-    Based on 'Triangle Unsigned' function from Mr. Quilez [S1, unofficial].
-    """
-    # Vector from a to b, a to c, a to p
-    ab = b - a
-    ac = c - a
-    ap = p - a
-
-    # Project ap onto ab and ac to find closest point
-    d1 = np.dot(ap, ab)
-    d2 = np.dot(ap, ac)
+    ab = sub(b, a)
+    ac = sub(c, a)
+    ap = sub(p, a)
+    
+    d1 = dot(ap, ab)
+    d2 = dot(ap, ac)
     
     if d1 <= 0.0 and d2 <= 0.0:
-        return np.dot(ap, ap), a
+        return len_sq(ap), a
     
-    # Check if closest point is on edge ab
-    bp = p - b
-    d3 = np.dot(bp, ab)
-    d4 = np.dot(bp, ac)
+    bp = sub(p, b)
+    d3 = dot(bp, ab)
     
     if d1 > 0.0 and d3 <= 0.0:
-        v = d1 / np.dot(ab, ab)
-        return np.dot(ap - v * ab, ap - v * ab), a + v * ab
-
-    # Check if closest point is on edge ac
-    cp = p - c
-    d5 = np.dot(cp, ab)
-    d6 = np.dot(cp, ac)
+        v = d1 / len_sq(ab)
+        return len_sq(sub(ap, scale(ab, v))), add(a, scale(ab, v))
+        
+    cp = sub(p, c)
+    d6 = dot(cp, ac)
     
     if d2 > 0.0 and d6 <= 0.0:
-        w = d2 / np.dot(ac, ac)
-        return np.dot(ap - w * ac, ap - w * ac), a + w * ac
-
-    # Check if closest point is inside the triangle
-    denom = np.dot(ab, ab) * np.dot(ac, ac) - np.dot(ab, ac) * np.dot(ab, ac)
-    v = (np.dot(ab, ac) * d2 - np.dot(ac, ac) * d1) / denom
-    w = (np.dot(ab, ac) * d1 - np.dot(ab, ab) * d2) / denom
+        w = d2 / len_sq(ac)
+        return len_sq(sub(ap, scale(ac, w))), add(a, scale(ac, w))
+        
+    denom = len_sq(ab) * len_sq(ac) - dot(ab, ac) * dot(ab, ac)
+    v = (dot(ab, ac) * d2 - len_sq(ac) * d1) / denom
+    w = (dot(ab, ac) * d1 - len_sq(ab) * d2) / denom
     
     if v >= 0.0 and w >= 0.0 and v + w <= 1.0:
-        q = ap + v * ab + w * ac
-        return np.dot(q, q), a + v * ab + w * ac
-
-    # Closest point is on edge bc
-    bc = c - b
-    bp = p - b
-    cp = p - c
+        q = add(ap, add(scale(ab, v), scale(ac, w)))
+        return len_sq(q), add(a, add(scale(ab, v), scale(ac, w)))
+        
+    bc = sub(c, b)
+    bp = sub(p, b)
+    cp = sub(p, c)
     
-    d7 = np.dot(bp, bc)
-    d8 = np.dot(cp, bc)
+    d7 = dot(bp, bc)
+    d8 = dot(cp, bc)
     
     if d7 <= 0.0 and d8 >= 0.0:
-        e = d7 / np.dot(bc, bc)
-        return np.dot(bp - e * bc, bp - e * bc), b + e * bc
+        e = d7 / len_sq(bc)
+        return len_sq(sub(bp, scale(bc, e))), add(b, scale(bc, e))
+        
+    return len_sq(cp), c
 
-    # Fallback to vertex c (should be covered by other checks, but for safety)
-    return np.dot(cp, cp), c
+def mat4_mul_vec(m, v):
+    x, y, z = v
+    return (
+        m[0]*x + m[4]*y + m[8]*z + m[12],
+        m[1]*x + m[5]*y + m[9]*z + m[13],
+        m[2]*x + m[6]*y + m[10]*z + m[14]
+    )
 
-def generate_naive_sdf(mesh_vertices, mesh_indices, world_matrix, volume_bounds, resolution):
-    """
-    Generates SDF for a mesh using naive CPU brute-force.
-    """
-    # 1. Transform vertices
-    # Assuming world_matrix is 4x4 and vertices are homogeneous (x,y,z,1)
-    transformed_verts = []
-    for v in mesh_vertices:
-        # Apply world matrix
-        v_hom = np.append(v, 1.0)
-        v_trans = np.dot(world_matrix, v_hom)[:3]
-        transformed_verts.append(v_trans)
+def generate_naive_sdf(vertices, indices, world_matrix, bounds, resolution):
+    transformed = [mat4_mul_vec(world_matrix, v) for v in vertices]
     
-    # 2. Generate triangles
     triangles = []
-    for i in range(0, len(mesh_indices), 3):
-        idx0, idx1, idx2 = mesh_indices[i], mesh_indices[i+1], mesh_indices[i+2]
-        a = transformed_verts[idx0]
-        b = transformed_verts[idx1]
-        c = transformed_verts[idx2]
+    for i in range(0, len(indices), 3):
+        a = transformed[indices[i]]
+        b = transformed[indices[i+1]]
+        c = transformed[indices[i+2]]
+        normal = cross(sub(b, a), sub(c, a))
+        n_len = math.sqrt(len_sq(normal))
+        if n_len > 0:
+            normal = scale(normal, 1.0 / n_len)
+        triangles.append((a, b, c, normal))
         
-        # Compute normal for orientation
-        ab = b - a
-        ac = c - a
-        normal = np.cross(ab, ac)
-        # Normalize is not strictly needed for dot product sign check if consistent,
-        # but good for clarity. The source implies using the normal vector directly.
-        norm_len = np.linalg.norm(normal)
-        if norm_len > 0:
-            normal = normal / norm_len
-            
-        triangles.append({'verts': (a, b, c), 'normal': normal})
-        
-    # 3. Define volume grid
-    # Calculate number of samples based on bounds and resolution
-    # resolution is the distance between points
-    min_x, min_y, min_z = volume_bounds['min']
-    max_x, max_y, max_z = volume_bounds['max']
-    
+    min_x, min_y, min_z = bounds['min']
+    max_x, max_y, max_z = bounds['max']
     width = int((max_x - min_x) / resolution) + 1
     height = int((max_y - min_y) / resolution) + 1
     depth = int((max_z - min_z) / resolution) + 1
     
-    sdf_grid = np.zeros((width, height, depth))
+    sdf_grid = [[0.0] * depth for _ in range(height)]
     
-    # 4. Iterate samples
     for x in range(width):
         for y in range(height):
             for z in range(depth):
-                # Convert grid index to world coordinate
-                px = min_x + x * resolution
-                py = min_y + y * resolution
-                pz = min_z + z * resolution
-                p = np.array([px, py, pz])
-                
+                p = (min_x + x * resolution, min_y + y * resolution, min_z + z * resolution)
                 min_sq_dist = float('inf')
                 sign = 1.0
                 
-                # Check all triangles
                 for tri in triangles:
-                    a, b, c = tri['verts']
-                    normal = tri['normal']
-                    
+                    a, b, c, normal = tri
                     dist_sq, closest_pt = triangle_unsigned_dist_sq(p, a, b, c)
                     
                     if dist_sq < min_sq_dist:
                         min_sq_dist = dist_sq
-                        # Vector from sample to closest point on triangle
-                        vec_to_tri = closest_pt - p
-                        # Dot product to determine inside/outside
-                        dot = np.dot(vec_to_tri, normal)
+                        vec_to_tri = sub(closest_pt, p)
+                        dot_val = dot(vec_to_tri, normal)
                         
-                        # If dot < 0, we are looking opposite to normal -> outside
-                        # If dot > 0, we are looking same direction as normal -> inside
-                        # Source: "negative means inside"
-                        if dot > 0:
+                        if dot_val > 0:
                             sign = -1.0
                         else:
                             sign = 1.0
                 
-                # Final signed distance
-                sdf_val = math.sqrt(abs(min_sq_dist)) * sign
-                sdf_grid[x, y, z] = sdf_val
+                sdf_grid[y][z] = math.sqrt(abs(min_sq_dist)) * sign
                 
     return sdf_grid
 ```
@@ -209,7 +182,7 @@ def generate_naive_sdf(mesh_vertices, mesh_indices, world_matrix, volume_bounds,
 **Edge Cases and Pitfalls:**
 - **Performance:** The algorithm checks every triangle for every sample point. For a mesh with 280,000 triangles, this results in $280,000 \times N$ distance calculations, where $N$ is the number of samples [S1, unofficial].
 - **Precision:** Using squared distances for comparison avoids expensive square roots during the inner loop, applying it only once per sample [S1, unofficial].
-- **Orientation:** The sign depends on the winding order of the triangles. Incorrect winding leads to inverted SDF signs [S1, unofficial].
+- **Orientation:** The sign depends on the winding order of the triangles. The source states that normals are created based on the clockwise arrangement of triangle edges to determine inside/outside orientation [S1, unofficial].
 - **Degenerate Triangles:** Triangles with zero area may cause division by zero in normal calculation or distance functions. Not explicitly handled in the source, but implied by the robustness of the "Triangle Unsigned" function [S1, unofficial].
 
 ## Subtopics
@@ -234,7 +207,7 @@ A technique to compute Signed Distance Fields (SDFs) for a mesh by uploading tri
 - **When not to use:** High-resolution SDFs, large meshes, or when performance is critical.
 
 ## Background
-The naive approach was demonstrated in a blog post by kosmonaut in 2017, detailing the journey of implementing SDF rendering for the Sponza Atrium mesh. The author noted that while the results were "okayish" for low-resolution textures, the generation time was prohibitive, leading to the exploration of GPU-based methods [S1, unofficial].
+The naive approach was demonstrated in a blog post by kosmonaut in 2017, detailing the implementation of SDF rendering for the Sponza Atrium mesh. The author noted that while the results were "okayish" for low-resolution textures, the generation time was prohibitive, and they had previously considered outsourcing the work to the GPU but forgot due to fatigue [S1, unofficial].
 
 ## Sources
 [S1] Signed Distance Field Rendering Journey pt.1 – kosmonaut's blog, https://kosmonautblog.wordpress.com/2017/05/01/signed-distance-field-rendering-journey-pt-1/, fetched 2026-10-29 (unofficial)

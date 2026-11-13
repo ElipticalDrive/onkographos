@@ -1,8 +1,7 @@
 # Fortune's Palette Compression
 
-
 ## Overview
-Fortune's Palette Compression is a lossless data compression method that maps unique values in a flat, cubic 3D vector to a compact palette, storing indices in a bit-packed integer array [S1, unofficial]. It is designed for fast, header-only implementation in C++ to compress block data where the number of unique values is small relative to the total volume [S1, unofficial]. It differs from general-purpose codecs by operating directly on the value space rather than spatial frequency, making it suitable for sparse or low-entropy volumetric data with discrete values.
+Fortune's Palette Compression is a lossless data compression method that maps unique values in a flat, cubic 3D vector to a compact palette, storing indices in a bit-packed integer array [S1, unofficial]. It is designed for fast, header-only implementation in C++ to compress block data where the number of unique values is small relative to the total volume [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -28,7 +27,7 @@ The compressed state is held in `PaletteCompressedBlocks`:
 2. **Unique Value Collection**: Iterate through the input vector and insert all values into a `std::set<RETURN_TYPE>` to find unique values [S1, unofficial].
 3. **Edge Case Handling**:
    - If the set is empty, print an error and return [S1, unofficial].
-   - If the set size is 1, set `SingleBlockTypeID` to the unique value and return [S1, unofficial].
+   - If the set size is 1, set `SingleBlockTypeID` to the unique value and skip compression [S1, unofficial].
 4. **Palette Construction**: Iterate through the sorted unique values. For each value, append it to `PaletteToBlockID` and store the mapping from value to index in `BlockToPalette` [S1, unofficial].
 5. **Bit Packing Calculation**:
    - Calculate `paletteSize` = size of unique values [S1, unofficial].
@@ -59,7 +58,7 @@ The compressed state is held in `PaletteCompressedBlocks`:
 4. If `intIndex` is out of bounds, do nothing [S1, unofficial].
 5. Retrieve `currentPackedBlock` = `compressedBlocks[intIndex]` [S1, unofficial].
 6. Clear the bits for the target block: `currentPackedBlock &= ~(mask << bitOffset)`, where `mask` = $(1ULL << \text{bitBlockSize}) - 1$ [S1, unofficial].
-7. Look up the palette index for `newNum` in `BlockToPalette`. If `newNum` is not in the palette, the operation fails or requires full recompression [S1, unofficial].
+7. Look up the palette index for `newNum` in `BlockToPalette` [S1, unofficial]. If `newNum` is not in the palette, the entire vector must be decompressed and recompressed [S1, unofficial].
 8. Set the new block data: `currentPackedBlock |= (palette_index << bitOffset)` [S1, unofficial].
 9. Store `currentPackedBlock` back to `compressedBlocks[intIndex]` [S1, unofficial].
 
@@ -69,9 +68,8 @@ The compressed state is held in `PaletteCompressedBlocks`:
 
 ```python
 import math
-from typing import List, Dict, Set, Tuple, Union
+from typing import List, Dict, Set
 
-# Types
 RETURN_TYPE = int  # Typically uint16_t
 
 class PaletteCompressedBlocks:
@@ -186,7 +184,7 @@ class PaletteCompression:
             return
 
         if newNum not in self.blocks.BlockToPalette:
-            raise ValueError("New value not in palette")
+            raise ValueError("New value not in palette; requires full decompression and recompression")
 
         mask = (1 << bitBlockSize) - 1
         currentPackedBlock = self.blocks.compressedBlocks[intIndex]
@@ -202,11 +200,11 @@ class PaletteCompression:
 ```
 
 ## Operating characteristics
-- **Time Complexity**: Compression is $O(V)$ where $V$ is the vector volume, due to single-pass iteration and set insertion. Decompression/Access is $O(1)$ per element.
-- **Memory Complexity**: The compressed size is $V \cdot \lceil \log_2(K) \rceil$ bits, where $K$ is the number of unique values. The overhead includes the palette ($K \cdot \text{sizeof(RETURN\_TYPE)}$) and the `BlockToPalette` map.
+- **Time Complexity**: Compression is $O(V)$ where $V$ is the vector volume, due to single-pass iteration and set insertion [S1, unofficial]. Decompression/Access is $O(1)$ per element [S1, unofficial].
+- **Memory Complexity**: The compressed size is $V \cdot \lceil \log_2(K) \rceil$ bits, where $K$ is the number of unique values [S1, unofficial]. The overhead includes the palette ($K \cdot \text{sizeof(RETURN\_TYPE)}$) and the `BlockToPalette` map [S1, unofficial].
 - **Performance**: Designed for speed with header-only C++ implementation. No external dependencies [S1, unofficial].
 - **Strengths**: Very fast for low-entropy data (few unique values). Simple API. Supports in-place modification of existing values [S1, unofficial].
-- **Limitations**: Only supports flat, cubic vectors ($N \times N \times N$) [S1, unofficial]. Cannot add new unique values without full recompression [S1, unofficial]. Not suitable for high-entropy data where $K$ is large, as bit overhead approaches original size.
+- **Limitations**: Only supports flat, cubic vectors ($N \times N \times N$) [S1, unofficial]. Cannot add new unique values without full recompression [S1, unofficial]. Not suitable for high-entropy data where $K$ is large, as bit overhead approaches original size [S1, unofficial].
 
 ## Background
 Fortune's Palette Compression is an unofficial implementation found in a GitHub repository [S1, unofficial]. It is designed as a fast, header-only C++ library for compressing block data, inspired by techniques used in voxel-based games like Minecraft [S1, unofficial]. It is not a peer-reviewed academic method but a practical engineering solution for specific use cases [S1, unofficial].

@@ -1,47 +1,46 @@
 # THREAD System
-
 Also called: Three dimensional Reconstruction And Display
 
 ## Overview
-The THREAD System is an early isosurface extraction method developed for medical imaging that reconstructs 3D surfaces from a sequence of 2D cross-sectional slices [S1, unofficial]. It solves the problem of visualizing internal anatomical structures by tessellating surfaces between outlines detected on consecutive slices [S1, unofficial]. It sets itself apart from grid-based methods like Marching Cubes by operating directly on discrete slice contours rather than a volumetric scalar field, relying on interpolation between adjacent 2D boundaries [S1, unofficial].
+The THREAD System is an early isosurface extraction method for medical imaging that reconstructs 3D surfaces from a sequence of 2D cross-sectional slices [S1, unofficial]. It solves the problem of visualizing internal anatomical structures by tessellating surfaces between outlines detected on consecutive slices [S1, unofficial]. It sets itself apart from grid-based methods like Marching Cubes by operating directly on slice contours rather than a volumetric grid, relying on interpolation between discrete image planes [S1, unofficial].
 
 ## How it works
-The method processes a stack of 2D images representing cross-sections of an object.
+The method processes a stack of 2D medical images to generate a tessellated 3D surface mesh.
 
-**Inputs and Outputs:**
-- **Input:** A sequence of $N$ 2D images (slices), typically $N=20$ as in the original implementation [S1, unofficial].
-- **Output:** A 3D polygonal mesh representing the surface of the object of interest, shaded with surface normals [S1, unofficial].
+**Inputs:** A sequence of $N$ 2D image slices (e.g., $N=20$) containing scalar intensity data representing a sectioned object [S1, unofficial].
+**Outputs:** A set of surface polygons (triangles or quadrilaterals) representing the reconstructed 3D surface, ready for rendering with hidden-line removal and shading [S1, unofficial].
 
 **Data Structures:**
-- **Slice Outlines:** For each slice $i$, a set of 2D coordinates $(x, y)$ defining the boundary of the object. These are derived via threshold segmentation and automatic boundary detection [S1, unofficial].
-- **Surface Patches:** Triangular or polygonal faces connecting vertices from slice $i$ to slice $i+1$.
+1.  **Slice Outlines:** For each slice $i$, a list of 2D coordinates $(x, y)$ defining the boundary of the object of interest.
+2.  **Surface Patches:** A collection of polygonal faces connecting vertices from slice $i$ to slice $i+1$.
 
 **Steps:**
-1. **Threshold Segmentation:** Apply threshold segmentation to each of the $N$ images to isolate the object from the background. Manual correction may be applied to refine the outlines [S1, unofficial].
-2. **Automatic Boundary Detection:** Use an automatic boundary detection scheme to extract the 2D outlines of the area of interest from the segmented images [S1, unofficial].
-3. **Tessellation:** Define the 3D surface by tessellating between the outlines on consecutive slices ($i$ and $i+1$). This involves connecting vertices from the outline of slice $i$ to vertices on the outline of slice $i+1$ to form surface patches [S1, unofficial].
-4. **Shading:** Apply a simple surface-normal based shading algorithm to the generated surface polygons to provide visual depth cues [S1, unofficial].
-5. **Rendering:** Display the resulting 3D model at different angles, supporting both hidden-line removal and wireframe views [S1, unofficial].
+1.  **Threshold Segmentation:** Apply a threshold value to each 2D slice to separate the object of interest from the background. Manual correction may be applied to refine the segmentation [S1, unofficial].
+2.  **Automatic Boundary Detection:** Identify the connected component outlines on the thresholded slices. This yields a set of 2D contours for each slice [S1, unofficial].
+3.  **Inter-slice Tessellation:** For each pair of consecutive slices $i$ and $i+1$, map the outline vertices from slice $i$ to the corresponding vertices on slice $i+1$. The surface is defined by tessellating the area between these two outlines [S1, unofficial].
+4.  **Shading:** Compute surface normals for the resulting polygons. Apply simple surface-normal based shading to provide depth cues [S1, unofficial].
+5.  **Rendering:** Display the resulting mesh at various angles, optionally applying hidden-line removal to occlude back-facing or internal surfaces [S1, unofficial].
 
 **Parameters:**
-- **Number of Slices:** The original system processed 20 slices to display 30 images [S1, unofficial].
-- **Isosurface Threshold:** Determined by the threshold segmentation step [S1, unofficial].
+*   **Threshold Value:** Determines the segmentation boundary. Not given in the sources.
+*   **Number of Slices:** The method was demonstrated with 20 slices [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Slice Spacing:** The quality of the tessellation depends on the distance between slices; large gaps may require more complex interpolation or result in jagged surfaces [G].
-- **Outline Correspondence:** Matching vertices between consecutive outlines requires a consistent ordering or correspondence algorithm to avoid twisted or self-intersecting patches [G].
+*   **Topology Changes:** If the object's topology changes between slices (e.g., splitting or merging), the correspondence between outlines on slice $i$ and $i+1$ becomes ambiguous. The sources do not specify how this is handled [S1, unofficial].
+*   **Missing Outlines:** If a slice contains no object (background only), the tessellation step must handle the absence of vertices. Not given in the sources.
+*   **Precision:** The method relies on the accuracy of the 2D boundary detection. Errors in slice segmentation propagate directly into the 3D geometry [S1, unofficial].
 
 ## Subtopics
-
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** The system was capable of displaying 30 images from 20 sections [S1, unofficial].
-- **Strengths:** Conceptually simple; naturally renders curved surfaces using surface patches; effective for medical data visualization [S1, unofficial].
-- **Limitations:** Relies on sequential slices; may struggle with complex topology changes between slices; limited to the specific medical imaging context described [S1, unofficial].
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Strengths:** Capable of displaying 3D structures from a limited number of 2D sections (e.g., 30 images from 20 sections) [S1, unofficial]. Simple implementation using standard polygonal tessellation and shading [S1, unofficial].
+**Limitations:** Limited to processing discrete slices; does not utilize volumetric data between slices for smoothing or interpolation beyond linear tessellation. Resolution is constrained by the slice spacing and 2D image resolution [S1, unofficial].
+**When to use:** Historical analysis of early medical imaging visualization techniques.
+**When not to use:** Modern applications requiring high-fidelity volumetric reconstruction or handling of complex topologies between slices.
 
 ## Background
-The THREAD System was developed in 1976 by Mazziotta et al. [S1, unofficial]. It was designed for applications in stereotactic neurosurgery planning, specifically for the volumetric rendering of medical data [S1, unofficial]. The system utilized threshold segmentation and automatic boundary detection to outline areas of interest on 20 images, which were then tessellated to define surfaces [S1, unofficial].
+The THREAD System was developed in 1976 by Mazziotta et al. [S1, unofficial]. It was designed for applications in stereotactic neurosurgery planning, allowing surgeons to view sectioned object outlines at different angles with or without hidden-line removal [S1, unofficial]. The system represents an early approach to 3D reconstruction from 2D medical images, predating widespread grid-based isosurface extraction methods.
 
 ## Sources
 [S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

@@ -3,123 +3,158 @@
 Also called: Histogram Smoothing via Super-sampling, K-neighborhood Histogram Smoothing, Noise Reduction in Histograms
 
 ## Overview
-Histogram Noise Reduction is a preprocessing step applied to the 3D histogram of data values, first derivatives, and second derivatives to handle underrepresented regions where voxel counts are too low for valid classification [S1]. It solves the problem of noisy histograms by artificially increasing sample density, thereby enabling opacity assignment in sparse regions [S1]. It sets itself apart from sibling methods like [Histogram Equalization](5642-histogram-equalization.md) by focusing on statistical smoothing of the histogram bin populations rather than redistributing intensity values, and from [Histogram and Thumbnail Integration](5951-histogram-and-thumbnail-integration.md) by operating directly on the histogram data structure to fix classification validity before transfer function generation [S1].
+Histogram Noise Reduction is a preprocessing step applied to the 3D histogram of a volume dataset to mitigate noise in underrepresented regions where voxel counts are too low for valid classification [S1]. It solves the problem of sparse data causing invalid opacity assignments by artificially increasing sample density through super-sampling and neighborhood expansion [S1]. It sets itself apart from sibling methods like [Histogram Equalization](5642-histogram-equalization.md) by focusing on statistical smoothing of the histogram bin counts rather than redistributing intensity values, and from [Boundary Emphasis](12217-boundary-emphasis.md) by prioritizing the removal of noise over the enhancement of specific features [S1].
 
 ## How it works
-**Inputs:** A 3D histogram $H$ of the volume data, where bins represent combinations of data value, 1st derivative, and 2nd derivative. A threshold $T$ for minimum valid voxel count per bin (typically 5–10) [S1].
+**Inputs:**
+- A 3D histogram $H$ of the volume data, where bins are indexed by data value, 1st derivative, and 2nd derivative.
+- A noise threshold $T_{noise}$, typically 5–10 voxels per bin [S1].
 
-**Outputs:** A smoothed histogram $H'$ with increased sample counts in underrepresented regions, allowing for valid opacity classification [S1].
+**Outputs:**
+- A smoothed histogram $H'$ with increased sample counts in previously empty or low-count bins.
 
 **Data Structures:**
-The histogram is stored as a 3D array or hash map mapping coordinate tuples $(v, d_1, d_2)$ to integer counts $c$.
+- The histogram is stored as a 3D array. Let $N_v, N_d, N_{dd}$ be the number of bins for value, 1st derivative, and 2nd derivative respectively.
+- Each bin $H[i, j, k]$ stores an integer count of voxels mapping to that coordinate.
 
 **Steps:**
-1.  **Identify Noisy Regions:** Iterate through all histogram bins. If the count $c < T$, mark the bin as noisy [S1].
-2.  **Super-sampling (Optional):** To increase sample density, perform trilinear interpolation of the volume data at sub-voxel positions.
-    *   A two-times super-sampling factor increases the number of samples by a factor of 8 [S1].
-    *   A four-times super-sampling factor increases samples by a factor of 256 (implied by $4^3$), but is computationally expensive [S1].
-3.  **K-neighborhood Smoothing (Alternative or Combined):** For each voxel in the volume, add its contribution not only to its primary histogram bin but also to its $k$-neighborhood in the histogram space.
-    *   A $k$-neighborhood includes all bins within Chebyshev distance $k$ in the 3D histogram space.
-    *   A $k=1$ neighborhood increases the number of samples per voxel by a factor of 9 (since $3^3 = 27$ total neighbors, but the method describes a factor of 9, implying a specific subset or 2D projection logic; however, the text explicitly states "factor of 9" for $k=1$) [S1].
-    *   *Note:* The source states $k=1$ increases samples by a factor of 9. In a 3D histogram, a full $k=1$ neighborhood has 27 bins. The factor of 9 suggests either a 2D histogram context or a specific weighting scheme not fully detailed, but the implementation must follow the stated factor [S1].
-4.  **Combined Approach:** Apply both two-times super-sampling and a $k=2$ neighborhood. This smooths noisy regions effectively while keeping the number of trilinear interpolations reasonable [S1].
-5.  **Classification:** Assign opacity to bins based on the smoothed counts. Bins with counts below $T$ in the original histogram may now have sufficient support in $H'$ to be classified, or are explicitly set to zero opacity if they remain sparse [S1].
+1. **Identify Noisy Regions:** Iterate through all bins in $H$. If $H[i, j, k] < T_{noise}$, mark the bin as noisy [S1].
+2. **Super-sampling:**
+   - Generate additional samples by interpolating the volume data.
+   - For a super-sampling factor of $S$, each voxel contributes $S^3$ samples to the histogram [S1].
+   - Perform trilinear interpolation to estimate values at the sub-voxel grid points defined by the super-sampling grid [S1].
+   - Increment the corresponding histogram bins for these new samples.
+3. **K-neighborhood Expansion (Alternative or Combined):**
+   - For each voxel in the volume, identify its spatial neighbors within a Chebyshev distance $k$.
+   - A $k$-neighborhood includes the voxel itself and all adjacent voxels in the 3D grid such that $\max(|dx|, |dy|, |dz|) \le k$ [S1].
+   - Add the voxel's value, 1st derivative, and 2nd derivative to the histogram bins corresponding to the voxel and all its neighbors [S1].
+   - This effectively spreads the count of a voxel to $3^{3k}$ bins in the histogram space [S1].
+4. **Combined Approach:**
+   - Apply super-sampling and k-neighborhood expansion sequentially or simultaneously to achieve sufficient smoothing [S1].
 
 **Parameters:**
-*   **Super-sampling factor:** 2 is recommended. 4 is too slow due to excessive trilinear interpolations [S1].
-*   **K-neighborhood radius ($k$):** 2 is recommended for the combined approach [S1].
-*   **Threshold ($T$):** 5–10 voxels [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** Trilinear interpolation introduces floating-point precision requirements. High super-sampling factors (e.g., 4x) dramatically increase preprocessing time [S1].
-*   **Boundaries:** The method assumes coherent regions in the volume translate to coherent regions in the transfer function [S1].
+- **Super-sampling factor ($S$):**
+  - $S=2$: Increases samples by a factor of $2^3 = 8$ [S1].
+  - $S=4$: Increases samples by a factor of $4^3 = 64$ [S1].
+- **K-neighborhood radius ($k$):**
+  - $k=1$: Increases samples by a factor of $3^3 = 9$ [S1].
+  - $k=2$: Increases samples by a factor of $5^3 = 125$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reduce_histogram_noise(histogram, volume, threshold=10, super_sample_factor=2, k_radius=2):
+def histogram_noise_reduction(volume, histogram_bins, threshold=5, super_sample_factor=2, k=2):
     """
-    Reduces noise in a 3D histogram by super-sampling and k-neighborhood smoothing.
+    Reduces noise in a 3D histogram by super-sampling and k-neighborhood expansion.
     
     Args:
-        histogram: 3D array or dict mapping (val, d1, d2) -> count
-        volume: 3D array of voxel values
-        threshold: Minimum count for valid classification
-        super_sample_factor: Integer, e.g., 2 for 2x super-sampling
-        k_radius: Integer, radius of neighborhood in histogram space
+        volume: 3D array of voxel values.
+        histogram_bins: Tuple (N_v, N_d, N_dd) defining the resolution of the 3D histogram.
+        threshold: Minimum voxel count to consider a bin non-noisy.
+        super_sample_factor: Factor S for super-sampling (S=2 means 2x2x2 grid per voxel).
+        k: Radius for k-neighborhood expansion.
         
     Returns:
-        smoothed_histogram: 3D array or dict with smoothed counts
+        smoothed_histogram: 3D array with smoothed counts.
     """
-    # Initialize smoothed histogram with zeros
-    smoothed_histogram = {}
+    # Initialize histogram
+    H = np.zeros(histogram_bins, dtype=np.int32)
     
-    # Determine grid resolution for super-sampling
-    # 2x super-sampling implies 2^3 = 8 samples per voxel
-    samples_per_voxel = super_sample_factor ** 3
+    # Step 1: Base histogram from original voxels
+    for x in range(volume.shape[0]):
+        for y in range(volume.shape[1]):
+            for z in range(volume.shape[2]):
+                val = volume[x, y, z]
+                # Calculate derivatives (1st and 2nd)
+                # Note: Derivative calculation details are not specified in sources [G]
+                d1 = calculate_1st_derivative(volume, x, y, z)
+                d2 = calculate_2nd_derivative(volume, x, y, z)
+                
+                # Map to histogram bins
+                bin_idx = map_to_bins(val, d1, d2, histogram_bins)
+                H[bin_idx] += 1
+                
+                # Step 2: K-neighborhood expansion
+                # Add this voxel's contribution to all neighbors in the k-neighborhood
+                for dx in range(-k, k + 1):
+                    for dy in range(-k, k + 1):
+                        for dz in range(-k, k + 1):
+                            nx, ny, nz = x + dx, y + dy, z + dz
+                            if 0 <= nx < volume.shape[0] and 0 <= ny < volume.shape[1] and 0 <= nz < volume.shape[2]:
+                                n_val = volume[nx, ny, nz]
+                                n_d1 = calculate_1st_derivative(volume, nx, ny, nz)
+                                n_d2 = calculate_2nd_derivative(volume, nx, ny, nz)
+                                n_bin_idx = map_to_bins(n_val, n_d1, n_d2, histogram_bins)
+                                H[n_bin_idx] += 1
+
+    # Step 3: Super-sampling
+    # Generate sub-voxel samples using trilinear interpolation
+    step = 1.0 / super_sample_factor
+    for x in range(volume.shape[0]):
+        for y in range(volume.shape[1]):
+            for z in range(volume.shape[2]):
+                # Define the 8 corners of the super-sampled grid relative to the voxel
+                # This is a simplified representation; actual implementation requires
+                # iterating through all sub-voxel positions within the voxel cell
+                for sx in range(super_sample_factor):
+                    for sy in range(super_sample_factor):
+                        for sz in range(super_sample_factor):
+                            # Interpolated position
+                            fx = x + sx * step
+                            fy = y + sy * step
+                            fz = z + sz * step
+                            
+                            # Trilinear interpolation to get value at sub-voxel
+                            # Note: Exact trilinear formula not provided in sources [G]
+                            sub_val = trilinear_interpolate(volume, fx, fy, fz)
+                            
+                            # Calculate derivatives at sub-voxel position
+                            # Note: Derivative calculation at interpolated positions is complex [G]
+                            sub_d1 = calculate_1st_derivative_at(sub_val, fx, fy, fz) # Placeholder for derivative logic
+                            sub_d2 = calculate_2nd_derivative_at(sub_val, fx, fy, fz) # Placeholder for derivative logic
+                            
+                            sub_bin_idx = map_to_bins(sub_val, sub_d1, sub_d2, histogram_bins)
+                            H[sub_bin_idx] += 1
+                            
+    # Step 4: Thresholding (Optional, based on description)
+    # If the goal is to set opacity to zero for noisy bins, this step might be applied
+    # after classification, not during histogram construction.
+    # The sources state: "If the number of voxels per histogram entry is very low... 
+    # opacity of these entries needs to be set to zero."
+    # This implies the smoothed histogram is used for classification, and bins 
+    # below threshold are handled during the transfer function application.
     
-    # Iterate over all voxels in the volume
-    for x, y, z in volume.indices():
-        voxel_val = volume[x, y, z]
-        
-        # Calculate primary histogram bin coordinates
-        # Assuming binning function bin_index(val, d1, d2) exists
-        primary_bin = bin_index(voxel_val, derivative_1(voxel_val), derivative_2(voxel_val))
-        
-        # Method 1: Super-sampling
-        # Perform trilinear interpolation at sub-voxel positions
-        for i in range(super_sample_factor):
-            for j in range(super_sample_factor):
-                for l in range(super_sample_factor):
-                    # Calculate sub-voxel position
-                    sub_x = x + i / super_sample_factor
-                    sub_y = y + j / super_sample_factor
-                    sub_z = z + l / super_sample_factor
-                    
-                    # Interpolate value
-                    interp_val = trilinear_interpolate(volume, sub_x, sub_y, sub_z)
-                    
-                    # Calculate bin for interpolated value
-                    interp_bin = bin_index(interp_val, derivative_1(interp_val), derivative_2(interp_val))
-                    
-                    # Increment count in smoothed histogram
-                    smoothed_histogram[interp_bin] = smoothed_histogram.get(interp_bin, 0) + 1
-        
-        # Method 2: K-neighborhood smoothing
-        # Add contribution to k-neighborhood in histogram space
-        # Note: Source states k=1 increases samples by factor of 9.
-        # We iterate over the neighborhood in histogram bin space.
-        for dx in range(-k_radius, k_radius + 1):
-            for dy in range(-k_radius, k_radius + 1):
-                for dz in range(-k_radius, k_radius + 1):
-                    neighbor_bin = (primary_bin[0] + dx, primary_bin[1] + dy, primary_bin[2] + dz)
-                    # Check if neighbor_bin is valid (within histogram bounds)
-                    if is_valid_bin(neighbor_bin):
-                        smoothed_histogram[neighbor_bin] = smoothed_histogram.get(neighbor_bin, 0) + 1
-                        
-    return smoothed_histogram
+    return H
 ```
+
+**Edge Cases and Pitfalls:**
+- **Preprocessing Time:** High super-sampling factors (e.g., $S=4$) dramatically increase preprocessing time due to the large number of trilinear interpolations required [S1].
+- **Derivative Calculation:** The sources do not specify how derivatives are calculated for super-sampled points or how they are integrated into the histogram bins. Implementers must define this [G].
+- **Boundary Conditions:** When expanding to k-neighborhoods, boundary checks are required to avoid out-of-bounds access [S1].
 
 ## Subtopics
 
 ### [Non-parametric Transfer Function Generation using Spatial Variance](6682-non-parametric-transfer-function-generation-using-spatial-va.md)
-Enhances 2D histograms by mapping entries to spatial variance rather than voxel count, solving background noise inclusion. Chosen when spatial coherence is more important than intensity density.
+Enhances 2D histograms by mapping entries to spatial variance rather than voxel count, solving background noise inclusion issues.
 
 ### [α-histogram Enhancement](11753-histogram-enhancement.md)
-Amplifies spatially coherent materials by summing local histograms raised to power $\alpha$. Chosen as the primary noise reduction technique within the pipeline for distinguishing tissue ranges obscured by background.
+Amplifies value ranges corresponding to spatially coherent materials by summing local histograms raised to the power of $\alpha$, distinguishing minor materials.
+
+### [Histogram-Based Automatic Transfer Function for Multi-Modal Blending](13857-histogram-based-automatic-transfer-function-for-multi-modal-.md)
+Automatically generates blending transfer functions for multi-modal MRI data using Fuzzy C-Means clustering.
 
 ## Operating characteristics
-*   **Time Complexity:** Super-sampling increases the number of voxels processed by a factor of $S^3$ (where $S$ is the super-sampling factor). Two-times super-sampling adds a factor of 8. Four-times adds a factor of 256, which dramatically increases preprocessing time [S1]. K-neighborhood smoothing adds a factor of $(2k+1)^3$ to the histogram updates per voxel.
-*   **Memory Complexity:** The histogram size remains unchanged, but the intermediate processing requires storing interpolated values.
-*   **Measured Performance:** Two-times super-sampling with $k=2$ provides a good balance, smoothing noisy regions while keeping trilinear interpolations reasonable [S1]. Four-times super-sampling is too slow [S1].
-*   **Strengths:** Enables valid classification in sparse regions; simple to implement.
-*   **Limitations:** Computationally expensive for high super-sampling factors; may blur sharp transitions in the transfer function if $k$ is too large.
-*   **When to use:** When the histogram has many bins with very low voxel counts (below 5-10) [S1].
-*   **When not to use:** When preprocessing time is critical and super-sampling factors >2 are considered.
+- **Time Complexity:** Dominated by the number of trilinear interpolations for super-sampling and the neighborhood expansion. Super-sampling by factor $S$ increases the number of samples by $S^3$ [S1]. K-neighborhood with radius $k$ increases the number of samples per voxel by $(2k+1)^3$ [S1].
+- **Memory Complexity:** Proportional to the size of the histogram and the volume data. No significant additional memory is required beyond the histogram array [S1].
+- **Measured Performance:** Two-times super-sampling ($S=2$) increases samples by a factor of 8, which was found insufficient alone [S1]. Four-times super-sampling ($S=4$) reduced noise sufficiently but increased preprocessing time dramatically [S1]. A combined approach using $k=2$ and $S=2$ provided good smoothing with reasonable preprocessing time [S1].
+- **Strengths:** Effectively smooths noisy regions in the histogram, enabling valid classification in underrepresented areas [S1].
+- **Limitations:** High computational cost for large super-sampling factors [S1]. Does not distinguish between noise and valid sparse data [G].
+- **When to Use:** When the histogram has sparse regions with low voxel counts that prevent valid classification [S1].
+- **When Not to Use:** When preprocessing time is a critical constraint and the histogram is already sufficiently smooth [S1].
 
 ## Background
-Originated in the context of spatialized transfer functions for volume visualization [S1]. The method addresses the limitation of standard histogram-based classification where underrepresented data ranges are ignored due to low voxel counts [S1]. It builds on the observation that coherent regions in the volume translate to coherent regions in the transfer function [S1].
+Histogram Noise Reduction was introduced in the context of spatialized transfer functions for volume visualization [S1]. It addresses the limitation of standard histogram-based transfer function generation where sparse data leads to unreliable classification [S1]. The method was developed to improve the quality of volume visualizations by ensuring that the transfer function is well-defined across the entire range of the histogram [S1].
 
 ## Sources
 [S1] Spatialized Transfer Functions, https://doi.org/10.2312/vissym/eurovis05/271-278, fetched 2026-10-26

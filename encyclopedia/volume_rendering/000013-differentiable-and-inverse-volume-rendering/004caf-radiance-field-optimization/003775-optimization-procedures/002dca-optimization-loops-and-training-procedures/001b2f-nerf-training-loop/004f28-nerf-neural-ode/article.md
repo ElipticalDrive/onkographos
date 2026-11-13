@@ -1,0 +1,274 @@
+# NeRF-Neural ODE
+
+Also called: NeRFNODE, Neural ODE for NeRF
+
+## Overview
+NeRF-Neural ODE replaces the discrete quadrature summation of standard NeRF with a continuous Neural Ordinary Differential Equation (Neural ODE) solver to integrate radiance and transmittance along rays [S1, unofficial]. It differs from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by treating the ray integration as a continuous dynamical system solved via adaptive ODE solvers rather than fixed-step numerical integration.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray features tensor of shape $11 \times N$ (or $14 \times N$ if view direction is augmented separately, though the standard implementation uses 11). The 11 rows correspond to: rays origin $o$ (3), rays direction $d$ (3), view directions $v$ (3), near plane $near$ (1), and far plane $far$ (1) [S1, unofficial].
+*   **Output:** A `RenderResult` structure containing `rgb` (shape $3 \times N$) and `disparity` [S1, unofficial].
+
+**Data Structures:**
+The ODE state vector $x$ has shape $15 \times N$. It is constructed by augmenting the input ray features with accumulated color $C$ (3 rows) and accumulated transmittance $T$ (1 row), initialized to zero [S1, unofficial].
+*   Rows 1-3: Position $p$ (derived from ray origin and parameter $t$).
+*   Rows 4-6: Direction $d$ (constant).
+*   Rows 7-9: View direction $v$ (constant).
+*   Row 10: Near plane $near$ (constant).
+*   Row 11: Far plane $far$ (constant).
+*   Rows 12-14: Accumulated Color $C$ (3 channels).
+*   Row 15: Accumulated Transmittance $T$ (scalar).
+
+**Neural Network Architecture:**
+The model consists of a `NeRFNet` wrapped in a `NeRFNODE` [S1, unofficial].
+1.  **Positional Encoding:** For input $x$ and levels $L$, compute $\sin(2^i \pi x)$ and $\cos(2^i \pi x)$ for $i \in 0 \dots L-1$, concatenated along the first dimension [S1, unofficial].
+    *   Positional encoding levels: $L_o = 10$ for position, $L_d = 4$ for direction [S1, unofficial].
+2.  **Trunk:**
+    *   Input: Concatenation of positional encoding of position (60 dims) and raw position.
+    *   Layer 1: `Parallel(vcat, γ_o, Chain(γ_o, Dense(60, 256, relu), [Dense(256, 256, relu) for i=1:4]))`. This effectively processes the positional encoding and raw input through a shared path and a separate MLP path, then concatenates them. The output dimension is $60 + 256 = 316$ [S1, unofficial].
+    *   Layer 2: `Dense(316, 256, relu)`.
+    *   Layer 3: `Dense(256, 256, relu)`.
+    *   Layer 4: `Dense(256, 256, relu)`.
+    *   Layer 5: `Dense(256, 256)` (no activation).
+    *   Split: The output is split into density $\sigma$ via `Dense(256, 1, sigmoid)` and features $h$ via identity [S1, unofficial].
+3.  **RGB Head:**
+    *   Input: Concatenation of positional encoding of view direction (280 dims) and features $h$ (256 dims). Total input dim: $280 + 256 = 536$? No, the source specifies `Dense(280, 128, relu)`. This implies the view direction encoding is 280 dims ($2 \times 4 \times 35$? No, $L_d=4$ for 3D vector is $2 \times 4 \times 3 = 24$ dims. The source says "Positional encoding of view direction (280 dims) concatenated with features". Let's look closer. `γ_d` is defined with $L_d=4$. For a 3D vector, $2 \times 4 \times 3 = 24$. The source code says `Dense(280, 128, relu)`. This suggests the input to the head is 280 dims. This might be a specific configuration or a typo in the source notes regarding the dimension calculation, but the architecture explicitly uses 280 as the input size to the first dense layer of the head [S1, unofficial].
+    *   Layer 1: `Dense(280, 128, relu)`.
+    *   Layer 2: `Dense(128, 3, sigmoid)`. Output is RGB [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Ray Generation:** Generate rays from camera parameters (height $H$, width $W$, focal length, camera-to-world matrix $c2w$). Direction is computed in NDC space if `ndc=true`. Near and far planes are set to 0.0 and 1.0 respectively [S1, unofficial].
+2.  **Feature Extraction:** Compute ray features. If `ndc=true`, transform rays to NDC space. Concatenate rays origin, rays direction, view directions, near, and far into an $11 \times N$ tensor [S1, unofficial].
+3.  **State Initialization:** Augment the $11 \times N$ ray features with 4 rows of zeros (for $C$ and $T$) to create the initial state $x_0$ of shape $15 \times N$ [S1, unofficial].
+4.  **ODE Definition:** Define the derivative function $f(t, x)$ where $t$ is the integration parameter from 0 to 1 [S1, unofficial].
+    *   Extract $p, d, v, near, far, C, T$ from $x$ [S1, unofficial].
+    *   Compute derivatives:
+        *   $dp/dt = (far - near) \cdot d$
+        *   $dd/dt = 0$
+        *   $dv/dt = 0$
+        *   $d(near)/dt = 0$
+        *   $d(far)/dt = 0$
+        *   Query `NeRFNet` with $p$ and $v$ to get $\sigma$ and $rgb$ [S1, unofficial].
+        *   $dC/dt = \exp(-T) \cdot \sigma \cdot rgb$
+        *   $dT/dt = \sigma$
+    *   Return concatenated derivatives [S1, unofficial].
+5.  **ODE Solving:** Solve the ODE from $t=0$ to $t=1$ using the `Tsit5()` solver with relative tolerance $10^{-3}$ and absolute tolerance $10^{-3}$ [S1, unofficial].
+6.  **Result Extraction:** Extract the final state $x_{end}$. The RGB values are located at rows 13-15 of the final state vector [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import torch
+import torch.nn as nn
+import torchdiffeq
+
+class PositionalEncoder(nn.Module):
+    def __init__(self, L):
+        super().__init__()
+        self.L = L
+
+    def forward(self, x):
+        # x shape: (..., D)
+        # i shape: (L,)
+        i = torch.arange(self.L, device=x.device, dtype=x.dtype)
+        # freq_bands shape: (L, 2) -> sin and cos
+        # We need to compute sin(2^i * pi * x) and cos(2^i * pi * x)
+        # x is (..., D). i is (L,).
+        # freq_bands: (L, 1)
+        freq_bands = (2.0 ** i).view(-1, 1)
+        # scaled_x: (..., D, L)
+        scaled_x = x.unsqueeze(-1) * freq_bands
+        # sin and cos: (..., D, L)
+        sin_vals = torch.sin(np.pi * scaled_x)
+        cos_vals = torch.cos(np.pi * scaled_x)
+        # Concatenate along last dim: (..., D, 2L)
+        out = torch.cat([sin_vals, cos_vals], dim=-1)
+        # Reshape to (..., 2*L*D)
+        return out.view(*x.shape[:-1], -1)
+
+class NeRFNet(nn.Module):
+    def __init__(self, L_o, L_d):
+        super().__init__()
+        self.pos_encoder = PositionalEncoder(L_o)
+        self.dir_encoder = PositionalEncoder(L_d)
+        
+        # Trunk
+        # Input: pos_enc (60) + raw_pos (3) -> 63? 
+        # Source says: "Positional encoding of position (60 dims) concatenated with a 5-layer MLP"
+        # And "Dense(316, 256)". 316 = 60 + 256.
+        # This implies the trunk input is pos_enc (60) + output of a small MLP on raw pos?
+        # Source code: Parallel(vcat, γ_o, Chain(γ_o, Dense(60, 256, relu), ...))
+        # γ_o is PositionalEncoder(10). 
+        # Path 1: γ_o(x) -> 60 dims.
+        # Path 2: γ_o(x) -> 60 dims -> Dense(60, 256, relu) -> 256 dims -> 4x Dense(256, 256, relu) -> 256 dims.
+        # Concat: 60 + 256 = 316.
+        
+        self.trunk_path1 = nn.Sequential(
+            PositionalEncoder(L_o),
+            nn.Identity() # Just the encoding
+        )
+        
+        self.trunk_path2 = nn.Sequential(
+            PositionalEncoder(L_o),
+            nn.Linear(2 * L_o * 3, 256), # 60 -> 256
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        
+        self.trunk_combined = nn.Linear(316, 256)
+        self.trunk_relu1 = nn.ReLU()
+        self.trunk_relu2 = nn.ReLU()
+        self.trunk_relu3 = nn.ReLU()
+        self.trunk_linear = nn.Linear(256, 256)
+        
+        self.sigma_head = nn.Linear(256, 1)
+        self.feature_head = nn.Identity()
+        
+        # RGB Head
+        # Input: dir_enc (280) + features (256) -> 536?
+        # Source says Dense(280, 128). This implies the input to the head is 280 dims.
+        # This is a discrepancy. The source notes say "Positional encoding of view direction (280 dims) concatenated with features".
+        # If L_d=4, 2*4*3 = 24. 
+        # However, the source code explicitly uses Dense(280, 128).
+        # We will follow the explicit layer definition from the source code [S1, unofficial].
+        
+        self.rgb_head_linear1 = nn.Linear(280, 128) # Note: Input dim mismatch with standard PE, using source value
+        self.rgb_head_relu = nn.ReLU()
+        self.rgb_head_linear2 = nn.Linear(128, 3)
+
+    def forward(self, pos, viewdir):
+        # pos: (..., 3)
+        # viewdir: (..., 3)
+        
+        # Trunk
+        p1 = self.trunk_path1(pos) # (..., 60)
+        p2 = self.trunk_path2(pos) # (..., 256)
+        trunk_in = torch.cat([p1, p2], dim=-1) # (..., 316)
+        
+        h = self.trunk_combined(trunk_in)
+        h = self.trunk_relu1(h)
+        h = self.trunk_relu2(h)
+        h = self.trunk_relu3(h)
+        h = self.trunk_linear(h)
+        
+        sigma = torch.sigmoid(self.sigma_head(h))
+        features = self.feature_head(h)
+        
+        # RGB Head
+        # d_enc = self.dir_encoder(viewdir) # This would be 24 dims.
+        # Source uses 280. We assume the input `d` to the head is pre-encoded to 280 dims or the source has a specific config.
+        # To be implementable from the source code provided:
+        # The source code `rgb_head = Chain(Parallel(vcat, γ_d, x -> x), ...)`
+        # γ_d is PositionalEncoder(4). 
+        # If the input to the head is `d` (viewdir) and `h` (features), 
+        # and the first layer is Dense(280, 128), then the concatenation must be 280.
+        # This implies γ_d output + h = 280.
+        # If h=256, then γ_d output = 24. 24+256 = 280.
+        # So the input to the head is the concatenation of dir_enc and features.
+        
+        d_enc = self.dir_encoder(viewdir) # (..., 24)
+        head_in = torch.cat([d_enc, features], dim=-1) # (..., 280)
+        
+        rgb = torch.sigmoid(self.rgb_head_linear2(self.rgb_head_relu(self.rgb_head_linear1(head_in))))
+        
+        return sigma, rgb
+
+class NeRFNODE(nn.Module):
+    def __init__(self, L_o, L_d):
+        super().__init__()
+        self.nn = NeRFNet(L_o, L_d)
+
+    def forward(self, t, x):
+        # x shape: (15, N)
+        # Unbatch for ODE solver which expects (N, 15) or similar depending on implementation
+        # torchdiffeq expects x to be (N, ...) or (..., N) depending on setup.
+        # The source uses Julia's DifferentialEquations.jl which handles batched ODEs.
+        # In PyTorch, we typically transpose.
+        
+        # Reshape x to (N, 15)
+        x_T = x.T 
+        
+        p = x_T[:, 0:3]
+        d = x_T[:, 3:6]
+        v = x_T[:, 6:9]
+        near = x_T[:, 9]
+        far = x_T[:, 10]
+        C = x_T[:, 11:14]
+        T = x_T[:, 14]
+        
+        # Derivatives
+        dpdt = (far.unsqueeze(1) - near.unsqueeze(1)) * d
+        dddt = torch.zeros_like(d)
+        dvdtdt = torch.zeros_like(v)
+        dneardt = torch.zeros_like(near).unsqueeze(1)
+        dfardt = torch.zeros_like(far).unsqueeze(1)
+        
+        sigma, rgb = self.nn(p, v)
+        
+        # sigma: (N, 1), rgb: (N, 3)
+        dCdt = torch.exp(-T.unsqueeze(1)) * sigma * rgb
+        dTdt = sigma.squeeze(1)
+        
+        # Concatenate back to (N, 15)
+        dxdt = torch.cat([dpdt, dddt, dvdtdt, dneardt, dfardt, dCdt, dTdt.unsqueeze(1)], dim=1)
+        
+        # Return in original shape (15, N)
+        return dxdt.T
+
+def raw_to_state_space(ray_features):
+    # ray_features: (11, N)
+    # Add 4 rows of zeros
+    zeros = torch.zeros(4, ray_features.shape[1], device=ray_features.device)
+    return torch.cat([ray_features, zeros], dim=0)
+
+def render_rays(ray_features, model):
+    # ray_features: (11, N)
+    state = raw_to_state_space(ray_features)
+    
+    # Solve ODE
+    # t_span = [0.0, 1.0]
+    # sol = torchdiffeq.odeint(model, state, t_span)
+    # sol shape: (2, 15, N)
+    # We only need the final state
+    final_state = sol[-1] # (15, N)
+    
+    # Extract RGB (rows 12-14, 0-indexed 12,13,14)
+    # Source says view(x, 13:15, :) which is 1-indexed 13,14,15 -> 0-indexed 12,13,14
+    rgb = final_state[12:15, :]
+    
+    return rgb
+```
+
+**Parameters:**
+*   **Positional Encoding Levels:** $L_o=10$, $L_d=4$ [S1, unofficial].
+*   **Solver:** `Tsit5()` with `reltol=1e-3`, `abstol=1e-3` [S1, unofficial].
+*   **Batch Size:** 4096 rays [S1, unofficial].
+*   **Optimizer:** ADAM with learning rate $5 \times 10^{-4}$, $\beta_1=0.9$, $\beta_2=0.999$, with exponential decay starting at iteration 250,000 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **NDC Space:** If `ndc=true`, rays must be transformed to NDC space before feature extraction. The near plane is set to 1.0 in NDC space [S1, unofficial].
+*   **Dimension Mismatch:** The RGB head input dimension is explicitly defined as 280 in the source, which requires careful construction of the view direction encoding and feature concatenation to match this size [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The ODE solver uses adaptive step sizes, which may result in more function evaluations than fixed-step quadrature, but potentially higher accuracy per step. The complexity depends on the number of steps taken by `Tsit5` [S1, unofficial].
+*   **Memory Complexity:** Requires storing the state vector for the ODE solver. The neural network parameters are similar to standard NeRF [S1, unofficial].
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Continuous integration may offer smoother gradients and potentially better handling of complex radiance fields [S1, unofficial].
+*   **Limitations:** ODE solvers can be slower than fixed-step marching if the scene is simple. The implementation relies on specific library features (e.g., `torchdiffeq` or `DifferentialEquations.jl`) [S1, unofficial].
+
+## Background
+NeRF-Neural ODE is an unofficial implementation attempting to use Neural ODEs instead of quadrature for NeRF [S1, unofficial]. It was developed by tqhdesilva [S1, unofficial].
+
+## Sources
+[S1] tqhdesilva/nerf-node, https://github.com/tqhdesilva/nerf-node, fetched 2026-10-26 (unofficial)

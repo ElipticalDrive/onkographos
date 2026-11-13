@@ -1,0 +1,156 @@
+# Adaptive IOR Optimization
+Also called: IOR Search Algorithm
+## Overview
+Adaptive IOR Optimization is a training procedure for neural radiance fields that iteratively searches for the optimal Index of Refraction (IOR) to minimize the reconstruction error of transparent foreground objects. It solves the problem of unknown or inaccurate IOR values in refractive scene reconstruction by decoupling background training from foreground IOR selection. It differs from sibling methods like [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md) by explicitly treating IOR as a discrete search parameter rather than a continuous gradient-based variable, and from [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md) by focusing on material properties rather than camera pose.
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   $F_\theta$: A multi-layer perceptron (MLP) mapping position $x$ and direction $d$ to density $\sigma$ and color $c$.
+*   $[IOR_{min}, IOR_{max}]$: The initial search interval for the Index of Refraction.
+*   $k$: The number of segments to divide the IOR interval into during each search step.
+*   $M$: A mesh representing the transparent object (used for ray tracing).
+*   $r = \{r_1, \dots, r_n\}$: Foreground camera rays.
+*   $c_{label} = \{c_1, \dots, c_n\}$: Ground truth pixel colors for the foreground.
+
+**Outputs:**
+*   $IOR_{best}$: The optimal Index of Refraction found.
+
+### Data Structures
+*   **IOR List**: An array of $k$ evenly spaced values within the current search interval.
+*   **PSNRmax**: A scalar initialized to $-\infty$ to track the best performance metric.
+*   **IORbest**: A scalar initialized to $IOR_{min}$ to store the current best IOR candidate.
+
+### Steps
+The method proceeds in four distinct phases:
+
+1.  **Background Training**: Train the background radiance field using only pixels with a mask value of 0. The background is assumed to be unaffected by refraction [S1]. This provides a stable reference for subsequent foreground rendering.
+2.  **Iterative IOR Search**:
+    *   Divide the current IOR range $[IOR_{min}, IOR_{max}]$ into $k$ equal parts [S1].
+    *   For each part, calculate the emergent light rays after refraction $r_{refr}$ using the transparent object mesh $M$ [S1].
+    *   Render the color $c_{IOR}$ for each pixel using the radiance field and the refracted rays [S1].
+    *   Calculate the Mean Squared Error (MSE) or PSNR between the rendered color $c_{IOR}$ and the ground truth $c_{label}$ [S1]. Note: The source text defines the selection criterion as maximizing PSNR, but the algorithm pseudocode calculates the sum of squared errors $\sum ||c_{label} - c_{IOR}||^2$ and compares it against a maximum threshold, implying a minimization of error or maximization of a related metric [S1]. The formula provided uses PSNR [S1].
+    *   Select the best IOR:
+        $$ IOR_{best} = \arg\max_{IOR} PSNR(c_{IOR}(r), c_{label}(r)) $$
+        [S1]
+    *   Narrow the search interval. The new range is set to $[IOR_{best} - \Delta, IOR_{best} + \Delta]$, where $\Delta = (IOR_{max} - IOR_{min}) \times 0.4 / 2$ [S1]. This reduces the search space by 60% (factor of 0.4) centered on the best candidate [S1].
+    *   Repeat the search with the new interval until convergence or a fixed number of iterations [S1].
+3.  **Joint Training**: Once the optimal IOR is determined, train both foreground and background rays simultaneously using $IOR_{best}$ [S1]. This step ensures that rays appearing only in the foreground are properly integrated into the radiance field [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_ior_optimization(F_theta, IOR_min, IOR_max, k, M, rays, c_label):
+    """
+    Iteratively searches for the optimal IOR.
+    
+    Args:
+        F_theta: MLP for radiance field.
+        IOR_min: Lower bound of IOR search.
+        IOR_max: Upper bound of IOR search.
+        k: Number of segments per search step.
+        M: Transparent object mesh.
+        rays: List of foreground camera rays.
+        c_label: Ground truth pixel colors.
+        
+    Returns:
+        IOR_best: Optimal IOR.
+    """
+    IOR_best = IOR_min
+    PSNR_max = -float('inf')
+    
+    # Initial range
+    current_IOR_min = IOR_min
+    current_IOR_max = IOR_max
+    
+    # Loop until convergence or max iterations (implementation detail not specified in source)
+    while True:
+        # Step 1: Divide range into k equal parts
+        IOR_list = [current_IOR_min + i * (current_IOR_max - current_IOR_min) / k for i in range(k + 1)]
+        
+        # Step 2: Search for best IOR in current interval
+        for IOR_now in IOR_list:
+            # Calculate emergent light rays after refraction
+            r_refr = ray_tracing(rays, M, IOR_now)
+            
+            # Render color for each pixel
+            c_IOR = render(F_theta, r_refr)
+            
+            # Calculate PSNR (or MSE as proxy for comparison)
+            # Note: Source pseudocode calculates sum of squared errors but compares against PSNR_max
+            # We follow the logic: find the IOR that yields the best metric
+            mse = sum((c_label[i] - c_IOR[i])**2 for i in range(len(c_label)))
+            psnr = calculate_psnr(c_label, c_IOR)
+            
+            if psnr > PSNR_max:
+                PSNR_max = psnr
+                IOR_best = IOR_now
+        
+        # Step 3: Narrow search interval
+        # Delta calculation based on source: (IOR_max - IOR_min) * 0.4 / 2
+        # Note: Source uses original IOR_max/min for delta calculation in step 13, 
+        # but logically it should use the current interval bounds. 
+        # We use current bounds for correctness.
+        delta = (current_IOR_max - current_IOR_min) * 0.4 / 2
+        
+        new_IOR_min = IOR_best - delta
+        new_IOR_max = IOR_best + delta
+        
+        # Boundary checks
+        new_IOR_min = max(new_IOR_min, IOR_min)
+        new_IOR_max = min(new_IOR_max, IOR_max)
+        
+        # Check for convergence (e.g., interval size is negligible)
+        if new_IOR_max - new_IOR_min < 1e-6:
+            break
+            
+        current_IOR_min = new_IOR_min
+        current_IOR_max = new_IOR_max
+        
+    return IOR_best
+
+def ray_tracing(rays, M, IOR):
+    """
+    Simulates refraction through mesh M with given IOR.
+    [G] Placeholder for specific ray-tracing implementation details not provided in source.
+    """
+    # Implementation depends on the specific ray tracer used
+    pass
+
+def render(F_theta, rays):
+    """
+    Renders colors using the radiance field.
+    [G] Placeholder for volume rendering integration.
+    """
+    pass
+
+def calculate_psnr(c_label, c_IOR):
+    """
+    Calculates Peak Signal-to-Noise Ratio.
+    [G] Standard PSNR calculation from MSE.
+    """
+    mse = sum((c_label[i] - c_IOR[i])**2 for i in range(len(c_label))) / len(c_label)
+    if mse == 0:
+        return float('inf')
+    return 10 * (1 / mse) # Simplified, assuming max pixel value is 1
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: The search relies on discrete sampling ($k$ segments). If $k$ is too small, the optimal IOR may be missed. If $k$ is too large, computational cost increases.
+*   **Boundaries**: The narrowing step must respect the global $[IOR_{min}, IOR_{max}]$ bounds to prevent invalid IOR values [S1].
+*   **Background Assumption**: The method assumes the background is unaffected by refraction. If the background contains refractive elements, this assumption fails, leading to incorrect IOR estimation [S1].
+*   **Metric Consistency**: The source text mentions minimizing MSE but provides a formula maximizing PSNR. The pseudocode calculates MSE but compares against PSNR_max. Implementers should ensure consistency between the metric calculated and the optimization goal [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The search step is $O(k \cdot N)$ per iteration, where $N$ is the number of rays. The number of iterations depends on the convergence criterion. The source claims a rendering time reduction of 70–80% depending on the proportion of the foreground [S1].
+*   **Memory Complexity**: Depends on the storage of the radiance field and the ray data. No additional significant memory overhead is described beyond the search variables [S1].
+*   **Strengths**: Decouples background and foreground training, simplifying the optimization landscape. Does not require gradient computation with respect to IOR, avoiding potential non-differentiability issues in refraction [S1].
+*   **Limitations**: Relies on a discrete search, which may be slower than gradient-based methods if high precision is required. Performance depends on the initial IOR range and the number of segments $k$ [S1].
+*   **When to use**: When the IOR of the transparent object is unknown and cannot be easily estimated. When the background is static and non-refractive [S1].
+*   **When not to use**: When the background contains refractive elements. When real-time optimization is required and the search iterations are too costly [S1].
+
+## Background
+The method was proposed in "An Index of Refraction Adaptive Neural Refractive Radiance Field for Transparent Scenes" published in *Electronics* in 2025 [S1]. It builds upon the work of Pan et al. [45] and Sun et al. [46], which established that background radiance fields are largely unaffected by refraction [S1]. The algorithm is designed to adaptively optimize the IOR during the training process, addressing the difficulty of obtaining accurate IOR values in practical applications [S1].
+
+## Sources
+[S1] An Index of Refraction Adaptive Neural Refractive Radiance Field for Transparent Scenes, https://doi.org/10.3390/electronics14061073, fetched 2026-10-29

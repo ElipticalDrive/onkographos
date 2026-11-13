@@ -1,0 +1,44 @@
+# Blur and Transient Modeling
+
+Also called: Transient Gaussian Splatting, Neural Transient Field
+
+## Overview
+This family addresses the degradation of reconstruction quality in dynamic scenes and real-world captures caused by temporal inconsistencies (transients) and optical blurs (motion/defocus). It distinguishes itself from static reconstruction methods by explicitly modeling non-static elements as separate entities or incorporating blur kernels into the rendering pipeline, rather than treating them as noise or artifacts.
+
+## Shared principles
+All methods in this family address the problem of representing a 4D spatiotemporal volume $D(x, y, z, t)$ using a set of input images captured at different times $t$. The core mechanism involves decomposing the scene into static and dynamic components or modeling the temporal evolution of attributes directly.
+
+1.  **Temporal Parameterization:** Attributes that vary with time (position $\mathbf{c}$, rotation $\mathbf{q}$, opacity $\alpha$, density $\sigma$) are expressed as functions of time $t$. Common functional forms include:
+    *   **Polynomial/Linear:** $\mathbf{q}(t) = \mathbf{q}_0 + \mathbf{m}t$ [S2].
+    *   **Fourier Series:** $\mathbf{c}(t) = \mathbf{c}_0 + \sum_{k=0}^{K} (\mathbf{a}_k \cos(k \omega t) + \mathbf{b}_k \sin(k \omega t))$ [S2].
+    *   **Neural Deformation:** A neural network $\Psi_t(x, t)$ predicts displacement $\Delta x$ to warp points to a canonical space [S1, S3].
+    *   **Implicit Fields:** Time-dependent NeRFs map $(x, d, t)$ to density and color, often using local neighborhoods of frames [S4].
+
+2.  **Canonical Space Mapping:** Many methods (e.g., D-NeRF, Nerfies) introduce a canonical configuration (usually at $t=0$) where the scene is static. A deformation network maps dynamic coordinates $x$ at time $t$ to canonical coordinates $x'$:
+    $$ x' = x + \Psi_t(x, t) $$
+    The radiance field is then queried in the canonical space: $[\sigma, c] = \Psi_x(x', d)$ [S1, S3].
+
+3.  **Rendering with Dynamics:** The rendering process integrates the time-dependent attributes. For Gaussians, the position and rotation are computed for the specific time $t$ of the camera ray before rasterization [S2]. For NeRFs, the density $\sigma$ and color $c$ are queried at the deformed or time-conditioned point [S1, S4].
+
+4.  **Loss Functions:** Optimization typically minimizes photometric loss (L1 or LPIPS) between rendered and ground truth images [S1, S2]. Additional constraints often include:
+    *   **Temporal Smoothness:** Penalizing abrupt changes in attributes between adjacent frames [S1].
+    *   **Rigid/Flow Constraints:** Using optical flow or KNN rigid loss to guide deformation [S1].
+    *   **Regularization:** Elastic or background regularization to prevent overfitting in deformation fields [S5].
+
+## Subtopics
+
+### [Neural Transient Field (NeTF)](4692-neural-transient-field-netf.md)
+NeTF is a neural modeling framework for Non-Line-of-Sight (NLOS) imaging that recovers the 5D transient function (spatial location and direction) implicitly represented by a Multi-Layer Perceptron (MLP). Unlike [NeRF](52-name.md), which parametrizes input training data along lines (rays), NeTF parametrizes input training data on spherical wavefronts, formulating the NLOS process under spherical coordinates analogous to volume rendering under Cartesian coordinates. It is distinguished from sibling methods by its specific application to time-of-flight transient data and its use of Markov chain Monte Carlo (MCMC) to handle sparse and unbalanced sampling. See [Neural Transient Field (NeTF)](4692-neural-transient-field-netf.md).
+
+### [SWAG](6875-swag.md)
+SWAG extends 3D Gaussian Splatting by conditioning Gaussians on learned appearance embeddings and training unsupervised transient Gaussians to ignore occluders, yielding state-of-the-art results on diverse photo scenes. It distinguishes itself from siblings like Wild-GS by explicitly modeling transient elements as separate Gaussian entities rather than relying solely on depth regularization or visibility maps to mitigate their effects. See [SWAG](6875-swag.md).
+
+### Blur Modeling in 3D GS
+**Definition:** Techniques to explicitly incorporate blur modeling during training to address real-world capture issues like motion blur and defocus blur [S1].
+**Steps:** Employ coarse-to-fine kernel optimization [S1] and photometric bundle adjustment [S1].
+
+## Background
+The challenge of reconstructing reflective and transparent objects, as well as handling blurs in real-world captures, remains a significant hurdle for 3D Gaussian Splatting. While 3D GS excels on curated datasets, real-world captures often suffer from blurs such as motion blur and defocus blur. Recent approaches explicitly incorporated blur modeling during training, employing techniques such as coarse-to-fine kernel optimization [193] and photometric bundle adjustment [325] to address this challenge [S1]. While the approximations made in GS contribute to its efficiency, they also underlie artifacts such as aliasing and blur, and limit the accuracy of illumination estimation and the modeling of challenging objects. Most existing efforts focus on specific failure modes (e.g., anti-aliasing, deblurring, or handling particular challenging objects) rather than providing a universal solution. In practice, one can first diagnose which issues are present in a scene (e.g., aliasing, blur, or reflective and transparent objects) and then apply targeted optimization strategies [S1].
+
+## Sources
+[S1] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27

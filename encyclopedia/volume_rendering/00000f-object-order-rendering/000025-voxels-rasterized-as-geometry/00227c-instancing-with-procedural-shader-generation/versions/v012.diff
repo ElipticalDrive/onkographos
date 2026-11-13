@@ -1,0 +1,203 @@
+--- v011.md
++++ v012.md
+@@ -4,80 +4,93 @@
+ 
+ ## Overview
+-This method renders a voxel model by instantiating a single unit cube mesh for each occupied voxel, positioning them via per-instance 3D offsets and coloring them via per-instance UV coordinates sampled from a 2D palette texture [S1, unofficial]. It solves the problem of efficiently rendering large voxel worlds by decoupling geometry generation from instance data, allowing the GPU to handle the repetition of the base mesh [S4, unofficial]. It differs from [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md) by avoiding the creation of individual vertex buffers for every voxel face, instead relying on hardware instancing to replicate a single proxy geometry [S1, unofficial]. It differs from [Instanced Rendering with Texture Arrays](12569-instanced-rendering-with-texture-arrays.md) by using a 2D palette texture for color lookup rather than a 3D texture array for direct voxel sampling [S1, unofficial].
++Instancing with Procedural/Shader Generation renders a voxel model by instantiating a single unit cube mesh for each occupied voxel, positioning them via per-instance 3D offsets and coloring them via per-instance UV coordinates sampled from a 2D palette texture [S1, unofficial]. It solves the problem of efficiently rendering large voxel worlds by decoupling geometry generation from instance placement, allowing the GPU to handle the repetition of identical primitives [S1, S4, unofficial]. It differs from [Binary Volume Rendering (Opacity Thresholding)](1015-binary-volume-rendering-opacity-thresholding.md) by explicitly rasterizing geometric proxies rather than ray-marching a scalar field, and from [Voxel Fragment Shader Rendering](5849-voxel-fragment-shader-rendering.md) by pushing the coordinate transformation and visibility logic to the vertex/geometry stage rather than evaluating voxel occupancy entirely within a fragment shader [S1, S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of occupied voxel coordinates (indices $i, j, k$) and a 2D palette texture containing base colors.
+-*   **Output:** A rasterized image of the voxel model with lighting.
++*   **Input:** A list of occupied voxel coordinates $(x, y, z)$ and a 2D palette texture containing base colors.
++*   **Output:** A rasterized image of the voxel scene with Phong lighting.
+ 
+ **Data Structures:**
+-1.  **Instance Buffer (VBO):** A contiguous array of floats. Each instance contains exactly 5 floats in the following order:
+-    *   `offsetX` (float): X-coordinate offset.
+-    *   `offsetY` (float): Y-coordinate offset.
+-    *   `offsetZ` (float): Z-coordinate offset.
++1.  **Instance Buffer (VBO):** A contiguous array of floats bound to `GL_ARRAY_BUFFER`. Each instance contains exactly 5 floats in the following order:
++    *   `offsetX` (float): X-coordinate of the voxel center.
++    *   `offsetY` (float): Y-coordinate of the voxel center.
++    *   `offsetZ` (float): Z-coordinate of the voxel center.
+     *   `u` (float): S-coordinate for palette texture sampling.
+     *   `v` (float): T-coordinate for palette texture sampling.
+-    *   Total size: $N_{instances} \times 5 \times 4$ bytes [S1, unofficial].
+-2.  **Palette Texture:** A 2D texture (e.g., RGBA8) where each texel represents a unique color. Wrap modes must be set to `GL_CLAMP_TO_EDGE` to prevent sampling artifacts at boundaries [S1, unofficial].
+-3.  **Base Geometry:** A single unit cube mesh (6 faces, 24 vertices for flat shading or 6 vertices for shared shading) [S1, unofficial].
++    *   Total size: $N_{voxels} \times 5 \times 4$ bytes [S1, unofficial].
++2.  **Palette Texture:** A 2D texture (e.g., `GL_RGBA8`) storing the color map. Wrap modes must be set to `GL_CLAMP_TO_EDGE` for both S and T axes to prevent sampling artifacts at boundaries [S1, unofficial].
++3.  **Cube Geometry:** A static mesh representing a unit cube (typically 6 faces, 24 vertices for flat shading or 6 vertices for shared shading, though the specific vertex count depends on the base mesh implementation) [S1, G, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Instance Data Generation:** For each occupied voxel at grid index $(i, j, k)$, calculate the world-space offset. If the voxel grid is unit-sized, the offset is $(i, j, k)$. Assign a unique UV coordinate $(u, v)$ to the voxel, typically derived from a color index or procedural mapping [S1, unofficial].
+-2.  **Buffer Upload:** Pack the per-instance data into a contiguous float array and upload it to a Vertex Buffer Object (VBO) bound to `GL_ARRAY_BUFFER` with usage hint `GL_STATIC_DRAW` [S1, unofficial].
+-3.  **Vertex Shader Execution:**
+-    *   Receive the local vertex position of the base cube.
+-    *   Retrieve the instance offset using the instance ID.
+-    *   Combine the local position with the instance offset: $P_{local\_combined} = P_{local} + P_{instance\_offset}$.
+-    *   Transform the combined position to clip space using the Model-View-Projection (MVP) matrix: $gl\_Position = MVP \times vec4(P_{local\_combined}, 1.0)$ [S1, unofficial].
+-    *   Pass the instance UV coordinates to the fragment shader [S1, unofficial].
+-4.  **Fragment Shader Execution:**
+-    *   Sample the base color from the palette texture using the interpolated UVs: $C_{base} = texture(uPaletteTexture, vUV).rgb$ [S1, unofficial].
++1.  **Data Preparation:** Iterate through the voxel grid. For each occupied voxel at grid index $(i, j, k)$, calculate its world position. If the voxel format uses Z-up and OpenGL uses Y-up, swap the Y and Z components during offset calculation: `localY = gridZ`, `localZ = gridY` [S1, unofficial].
++2.  **Buffer Upload:** Pack the offsets and palette UVs into the contiguous float array. Upload this array to the GPU using `glBufferData` with `GL_STATIC_DRAW` hint [S1, unofficial].
++3.  **Shader Setup:** Bind the vertex shader and fragment shader program. Retrieve uniform locations for the Model-View-Projection (MVP) matrix, light position, and palette texture [S1, unofficial].
++4.  **Vertex Processing:**
++    *   The vertex shader receives the base cube vertex position `aLocalPosition` and the instance offset `aInstanceOffset` (from the VBO).
++    *   Compute the combined world position: `localCombined = aLocalPosition + aInstanceOffset` [S1, unofficial].
++    *   Transform to clip space: `gl_Position = uMVPMatrix * vec4(localCombined, 1.0)` [S1, unofficial].
++    *   Pass the instance UVs (`vUV`) to the fragment shader [S1, unofficial].
++5.  **Fragment Processing:**
++    *   Sample the base color from the palette texture: `baseColor = texture(uPaletteTexture, vUV).rgb` [S1, unofficial].
+     *   Compute lighting using a Phong model:
+-        *   Ambient: $C_{ambient} = C_{base} \times I_{ambient}$
+-        *   Diffuse: $C_{diffuse} = C_{base} \times \max(N \cdot L, 0.0) \times I_{diffuse}$
+-        *   Specular: $C_{specular} = V_{specular} \times I_{specular}$
+-        *   Total: $C_{final} = C_{ambient} + C_{diffuse} + C_{specular}$ [S1, unofficial].
++        *   Ambient: `ambient = baseColor * uAmbientIntensity`
++        *   Diffuse: `diffuse = baseColor * max(dot(N, L), 0.0)`
++        *   Specular: `specular = vec3(1.0) * spec * uSpecularIntensity`
++        *   Final color: `baseColor + ambient + diffuse + specular` [S1, unofficial].
++6.  **Rendering:** Issue a single draw call (e.g., `glDrawElementsInstanced` or `glDrawArraysInstanced`) to render all instances [S1, S4, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Vertex Shader Logic (GLSL-like)
+-# Inputs: aLocalPosition (vec3), aInstanceOffset (vec3), aInstanceUV (vec2)
+-# Uniforms: uMVPMatrix (mat4)
++# Initialization
++def setup_instanced_voxel_renderer(voxel_data, palette_texture):
++    # 1. Create Instance Buffer
++    instance_data = []
++    for voxel in voxel_data:
++        # Handle coordinate system swap if necessary (Z-up to Y-up)
++        x, y, z = voxel.position
++        if coordinate_system_mismatch:
++            y, z = z, y
++        
++        # Pack 5 floats: x, y, z, u, v
++        instance_data.extend([x, y, z, voxel.u, voxel.v])
++    
++    # Upload to GPU
++    instance_vbo = create_vbo(instance_data, usage=GL_STATIC_DRAW)
++    
++    # 2. Setup Shaders
++    program = compile_shaders(vertex_shader_code, fragment_shader_code)
++    u_mvp = get_uniform_location(program, "uMVPMatrix")
++    u_palette = get_uniform_location(program, "uPaletteTexture")
++    
++    return {
++        "instance_vbo": instance_vbo,
++        "program": program,
++        "u_mvp": u_mvp,
++        "u_palette": u_palette,
++        "count": len(voxel_data)
++    }
+ 
+-void main() {
+-    // Combine local vertex position with instance offset
+-    vec3 localCombined = aLocalPosition + aInstanceOffset;
++# Rendering
++def render_instanced_voxels(renderer, mvp_matrix):
++    glUseProgram(renderer["program"])
+     
+-    // Transform to clip space
+-    gl_Position = uMVPMatrix * vec4(localCombined, 1.0);
+-}
+-
+-# Fragment Shader Logic (GLSL-like)
+-# Inputs: vUV (vec2)
+-# Uniforms: uPaletteTexture (sampler2D), uAmbientIntensity (float), 
+-#           uSpecularIntensity (float), uLightPosWorld (vec3), 
+-#           uCameraPosWorld (vec3), uShininess (float)
+-
+-void main() {
+-    // Sample base color from palette
+-    vec3 baseColor = texture(uPaletteTexture, vUV).rgb;
++    # Set Uniforms
++    glUniformMatrix4fv(renderer["u_mvp"], 1, False, mvp_matrix)
++    glActiveTexture(GL_TEXTURE0)
++    glBindTexture(GL_TEXTURE_2D, renderer["palette_texture"])
++    glUniform1i(renderer["u_palette"], 0)
+     
+-    // Phong Lighting Calculation
+-    vec3 N = normalize(gl_FrontFacing ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 0.0, -1.0)); 
+-    // Note: Normal calculation depends on face orientation; simplified here for unit cube faces
++    # Bind Instance Data
++    glBindBuffer(GL_ARRAY_BUFFER, renderer["instance_vbo"])
+     
+-    vec3 L = normalize(uLightPosWorld - gl_FragCoord.xyz);
+-    vec3 V = normalize(uCameraPosWorld - gl_FragCoord.xyz);
+-    vec3 H = normalize(L + V);
++    # Enable vertex attributes for instance offsets and UVs
++    # Assuming attribute locations are set up in shader/linking
++    # glVertexAttribPointer for offset (stride 5*4, offset 0)
++    # glVertexAttribPointer for uv (stride 5*4, offset 3*4)
++    # glEnableVertexAttribArray for both
++    # glVertexAttribDivisor for both to 1 (per-instance)
+     
+-    float diff = max(dot(N, L), 0.0);
+-    float spec = pow(max(dot(N, H), 0.0), uShininess);
+-    
+-    vec3 ambient = baseColor * uAmbientIntensity;
+-    vec3 diffuse = baseColor * diff;
+-    vec3 specular = vec3(1.0) * spec * uSpecularIntensity;
+-    
+-    gl_FragColor = vec4(ambient + diffuse + specular, 1.0);
+-}
++    # Draw
++    glDrawArraysInstanced(GL_TRIANGLES, 0, 36, renderer["count"])
+ ```
+ 
+@@ -86,9 +99,9 @@
+ *   `SPECULAR_INTENSITY`: 0.5 [S1, unofficial].
+ *   `SHININESS`: 32 [S1, unofficial].
+-*   `LIGHT_POS_WORLD`: (10, 15, 10) [S1, unofficial].
++*   `LIGHT_POS_WORLD`: $(10, 15, 10)$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Coordinate System Mismatch:** If the source model uses a Z-up coordinate system (common in some voxel formats) while OpenGL uses Y-up, the Y and Z offsets must be swapped during instance buffer generation to align the geometry correctly [S1, unofficial].
+-*   **Palette Texture Artifacts:** Sampling near the edges of the palette texture can cause bleeding from adjacent colors. This is mitigated by setting the texture wrap modes for both S and T axes to `GL_CLAMP_TO_EDGE` [S1, unofficial].
++*   **Coordinate System Mismatch:** Voxel formats may use Z-up while OpenGL uses Y-up. This must be handled by swapping Y and Z components during offset calculation [S1, unofficial].
++*   **Palette Artifacts:** Sampling at the edges of the palette texture can cause bleeding. Mitigate by setting texture wrap modes to `GL_CLAMP_TO_EDGE` [S1, unofficial].
+ 
+ ## Subtopics
+@@ -125,25 +138,24 @@
+ 
+ ### [Procedural and Rule-Based Spawning](13402-procedural-and-rule-based-spawning.md)
+-Procedural and Rule-Based Spawning is a family of techniques for automatically generating and placing large numbers of 3D instances (such as vegetation, rocks, or debris) onto a surface or volume based on algorithmic rules rather than manual placement. It solves the scalability problem of hand-placing assets in large environments by decoupling instance logic from the rendering pipeline, allowing for dynamic, data-driven distribution. It distinguishes itself from sibling methods like [Surface-based Instancing with Noise Modulation](1582-surface-based-instancing-with-noise-modulation.md) by relying on explicit procedural generators and LOD-aware grid constraints rather than purely continuous noise fields, and from [3D Gaussian Splatting via Instancing](1586-3d-gaussian-splatting-via-instancing.md) by using discrete geometric primitives instead of point-sprites.
++Procedural and Rule-Based Spawning is a family of techniques for populating voxel terrains with large numbers of objects (e.g., grass, rocks, trees) by evaluating spawn rules against terrain geometry rather than manual placement. It distinguishes itself from static instancing by integrating tightly with the voxel terrain's Level of Detail (LOD) system and Signed Distance Field (SDF) surface snapping, ensuring instances align with uneven terrain geometry automatically.
+ 
+ ### Splat quad vertex layout
+-Sets up a 4-vertex quad with specific coordinates for shader-based scaling of projected 2D Gaussian eigenvectors [S2, unofficial]. Vertex positions are defined as (-2,-2), (2,-2), (2,2), (-2,2) with indices 0,1,2,0,2,3. The vertex buffer uses `VET_FLOAT2` at `VES_POSITION`, and the index buffer uses `IT_16BIT`. The instance buffer contains 1 float per instance (`VET_FLOAT1`, `VES_TEXTURE_COORDINATES[0]`, location 8) [S2, unofficial].
++Splat quad vertex layout sets up a 4-vertex quad with specific coordinates for shader-based scaling of projected 2D Gaussian eigenvectors [S2, unofficial]. Vertex positions are defined as $(-2,-2), (2,-2), (2,2), (-2,2)$. Indices are $0,1,2,0,2,3$. The vertex buffer uses `VET_FLOAT2` at `VES_POSITION`. The index buffer uses `IT_16BIT`. The instance buffer contains 1 float per instance (`VET_FLOAT1`, `VES_TEXTURE_COORDINATES[0]`, location 8) [S2, unofficial].
+ 
+ ### Uniform Object Distribution via Modulo Instancing
+-A technique where a modulo function is applied to the scene distance function to repeat a single SDF component with a defined interval, generating a uniform grid of object copies [S3]. A pitfall is that cutting off the previous grid hit by a ray may result in 3D objects associated with the cell and potentially intersected by the ray being removed from the scene [S3]. The original single-pass approach causes visible artifacts from many vantage points despite using Existence operators to reduce visibility [S3].
++Uniform Object Distribution via Modulo Instancing is a technique where a modulo function is applied to the scene distance function to repeat a single SDF component with a defined interval, generating a uniform grid of object copies [S3]. A pitfall is that cutting off the previous grid hit by a ray may result in 3D objects associated with the cell and potentially intersected by the ray being removed from the scene [S3]. The original single-pass approach causes visible artifacts from many vantage points despite using Existence operators to reduce visibility [S3].
+ 
+ ### Instanced Rendering
+-A rendering technique where a single vertex object is uploaded once, and transformation matrices are uploaded in a buffer, allowing efficient drawing of many static objects with the same geometry [S4, unofficial]. Steps include assuming all voxels use the same geometry and are mostly static, uploading transformation matrices in a buffer, and uploading the vertex object once [S4, unofficial]. Compared to per-object rendering, instanced rendering avoids repeated matrix multiplications, inverses, uniform uploads, and texture state changes per frame, which are expensive operations [S4, unofficial].
++Instanced Rendering is a technique where a single vertex object is uploaded once, and transformation matrices are uploaded in a buffer, allowing efficient drawing of many static objects with the same geometry [S4, unofficial]. Steps include assuming all voxels use the same geometry and are mostly static, uploading transformation matrices in a buffer, and uploading the vertex object once [S4, unofficial]. Compared to per-object rendering, it avoids repeated matrix multiplications, inverses, uniform uploads, and texture state changes per frame, which are expensive operations [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Setup time is $O(V)$ to compute offsets and pack data, where $V$ is the number of voxels. Draw time is $O(1)$ draw call with instancing, but fragment shader cost is proportional to the number of visible voxels [S1, unofficial].
+-*   **Memory Complexity:** $O(V)$ for the instance buffer (5 floats per voxel) and $O(P)$ for the palette texture, where $P$ is the number of unique colors [S1, unofficial].
+-*   **Strengths:** Reduces CPU-GPU synchronization overhead by minimizing draw calls. Decouples geometry from instance data, allowing for dynamic updates of voxel positions or colors without regenerating mesh buffers [S4, unofficial].
+-*   **Limitations:** Requires a palette texture, which may limit color depth or require complex UV mapping for procedural colors. Back-face culling is still necessary to optimize performance [S1, unofficial].
+-*   **When to Use:** Ideal for rendering large, static or semi-static voxel worlds where memory bandwidth and draw call overhead are bottlenecks [S4, unofficial].
+-*   **When Not to Use:** When voxels require highly unique geometry per instance (not just color/position) or when dynamic per-voxel topology changes are frequent and complex [S2, unofficial].
++*   **Time Complexity:** Setup time is $O(V)$ to compute offsets and pack data, where $V$ is the number of voxels. Draw time is $O(1)$ draw call with instancing, but fragment shader cost is proportional to visible voxels [S1, unofficial].
++*   **Memory Complexity:** $O(V)$ for the instance buffer (5 floats per voxel) and $O(P)$ for the palette texture [S1, unofficial].
++*   **Performance:** Implemented in the VoxelRenderer Android application for rendering .vly voxel models using OpenGL ES 3.0 [S1, unofficial]. It significantly reduces CPU overhead compared to per-voxel draw calls [S4, unofficial].
++*   **Strengths:** Efficient rendering of large voxel counts; simple pipeline; easy color variation via palette textures [S1, S4, unofficial].
++*   **Limitations:** Limited to discrete voxel positions; requires palette texture management; potential coordinate system mismatches [S1, unofficial].
+ 
+ ## Background
+-This method was implemented in the VoxelRenderer Android application for rendering .vly voxel models using OpenGL ES 3.0 [S1, unofficial]. It builds on the general principles of instanced rendering, which avoids repeated matrix multiplications and uniform uploads per frame [S4, unofficial]. The use of palette textures for coloring is a common optimization in voxel rendering to reduce the size of instance data buffers [S1, unofficial].
++This method is commonly used in mobile and embedded graphics applications where hardware instancing support is available but advanced compute-based voxelization is not feasible. It was notably implemented in the VoxelRenderer Android application for rendering .vly voxel models [S1, unofficial]. The technique leverages standard OpenGL ES 3.0 features, making it widely compatible with mobile GPUs [S1, unofficial].
+ 
+ ## Sources

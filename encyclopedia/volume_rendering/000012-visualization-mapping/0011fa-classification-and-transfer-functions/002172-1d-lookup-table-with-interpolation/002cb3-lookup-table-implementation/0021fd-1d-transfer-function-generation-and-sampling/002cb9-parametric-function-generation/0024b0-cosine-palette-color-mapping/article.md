@@ -1,83 +1,83 @@
 # Cosine Palette Color Mapping
 Also called: Inigo Quilez Palette
 ## Overview
-Cosine Palette Color Mapping generates a smooth color gradient from a scalar input using a cosine function with specific parameters, as described by Inigo Quilez [S1, unofficial]. It differs from the [Gaussian Transfer Function](4408-gaussian-transfer-function.md) and [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md) by using trigonometric interference rather than additive basis functions or localized peaks [G].
+Cosine Palette Color Mapping generates smooth, perceptually uniform color gradients from a scalar input by evaluating a parametric cosine function with distinct phase offsets for each RGB channel [S1, unofficial]. It differs from sibling methods like the [Gaussian Transfer Function](4408-gaussian-transfer-function.md) or [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md) by relying on trigonometric interference rather than probability distributions or logistic curves, producing vibrant, continuous transitions without explicit piecewise definitions [S1, unofficial].
 ## How it works
-**Inputs and Outputs:**
-- Input: A normalized scalar value $t \in [0, 1]$ [G].
-- Output: An RGBA vector $\mathbf{C} = (R, G, B, A)$ [G].
+**Inputs and Outputs**
+- Input: A normalized scalar value $t \in [0, 1]$ representing the volume data intensity [G].
+- Output: An RGBA color vector $\mathbf{C} = (R, G, B, A)$. The alpha channel is typically constant or handled separately; this method defines the RGB components [G].
 
-**Data Structures:**
-The method uses four parameter vectors $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$, each of size 3 representing the Red, Green, and Blue channels [S1, unofficial].
-- $\mathbf{a} = (a_r, a_g, a_b)$: Offset vector.
-- $\mathbf{b} = (b_r, b_g, b_b)$: Amplitude vector.
-- $\mathbf{c} = (c_r, c_g, c_b)$: Frequency vector.
-- $\mathbf{d} = (d_r, d_g, d_b)$: Phase offset vector.
-
-**Formula:**
-The RGB color is computed component-wise as:
-$$ \mathbf{C}_{rgb} = \mathbf{a} + \mathbf{b} \odot \cos(2\pi (\mathbf{c} \cdot t + \mathbf{d})) $$
-where $\odot$ denotes element-wise multiplication and $\cdot$ denotes scalar-vector multiplication [S1, unofficial].
-
-**Parameters:**
-The canonical parameters are:
+**Data Structures**
+The method uses three constant vectors $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$ of size 3 (representing R, G, B channels).
 - $\mathbf{a} = (0.5, 0.5, 0.5)$
 - $\mathbf{b} = (0.5, 0.5, 0.5)$
 - $\mathbf{c} = (1.0, 1.0, 1.0)$
-- $\mathbf{d} = (0.00, 0.33, 0.67)$ [S1, unofficial].
+- $\mathbf{d} = (0.00, 0.33, 0.67)$
 
-**Steps:**
-1. Clamp the input scalar $t$ to the range $[0, 1]$ [G].
-2. For each channel $k \in \{r, g, b\}$:
-   a. Calculate the argument: $arg_k = 2\pi (c_k t + d_k)$ [S1, unofficial].
-   b. Evaluate the cosine: $val_k = \cos(arg_k)$ [S1, unofficial].
-   c. Scale and offset: $C_k = a_k + b_k val_k$ [S1, unofficial].
-3. Clamp each resulting channel $C_k$ to $[0, 1]$ to handle numerical precision or out-of-bounds results [G].
-4. Assign a constant alpha value $A = 1.0$ [G].
+**Formula**
+The RGB color is computed as:
+$$ \mathbf{C}_{rgb} = \mathbf{a} + \mathbf{b} \cdot \cos\left(2\pi \cdot (\mathbf{c} \cdot t + \mathbf{d})\right) $$
+where $\cdot$ denotes component-wise multiplication and addition. The $\cos$ function operates component-wise on the vector argument.
 
-**Pseudocode:**
+**Steps**
+1. Clamp input $t$ to $[0, 1]$ to ensure valid domain evaluation [G].
+2. Compute the phase vector $\mathbf{\phi} = \mathbf{c} \cdot t + \mathbf{d}$.
+3. Compute the cosine vector $\mathbf{v} = \cos(2\pi \cdot \mathbf{\phi})$.
+4. Scale by amplitude $\mathbf{b}$ and shift by offset $\mathbf{a}$: $\mathbf{C}_{rgb} = \mathbf{a} + \mathbf{b} \cdot \mathbf{v}$.
+5. Clamp each component of $\mathbf{C}_{rgb}$ to $[0, 1]$ to handle numerical precision [G].
+6. Set Alpha $A$ to a constant value (e.g., 1.0) or a separate transfer function [G].
+
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
-def cosine_palette(t: float) -> tuple[float, float, float, float]:
-    # Canonical parameters
+def cosine_palette(t: float) -> tuple:
+    # Constants as defined in [S1, unofficial]
     a = (0.5, 0.5, 0.5)
     b = (0.5, 0.5, 0.5)
     c = (1.0, 1.0, 1.0)
-    d = (0.0, 0.33, 0.67)
-
+    d = (0.00, 0.33, 0.67)
+    
     # Clamp input to [0, 1]
     t = max(0.0, min(1.0, t))
-
-    rgb = []
-    for k in range(3):
-        # Calculate argument: 2 * pi * (c[k] * t + d[k])
-        arg = 2.0 * math.pi * (c[k] * t + d[k])
-        # Evaluate cosine
-        cos_val = math.cos(arg)
-        # Scale and offset
-        val = a[k] + b[k] * cos_val
-        # Clamp to [0, 1]
-        val = max(0.0, min(1.0, val))
-        rgb.append(val)
-
-    # Alpha is not defined by the core cosine formula in the source
-    # [G] Default to opaque
-    return (rgb[0], rgb[1], rgb[2], 1.0)
+    
+    # Compute RGB channels
+    r = a[0] + b[0] * math.cos(2.0 * math.pi * (c[0] * t + d[0]))
+    g = a[1] + b[1] * math.cos(2.0 * math.pi * (c[1] * t + d[1]))
+    b_val = a[2] + b[2] * math.cos(2.0 * math.pi * (c[2] * t + d[2]))
+    
+    # Clamp output to [0, 1]
+    r = max(0.0, min(1.0, r))
+    g = max(0.0, min(1.0, g))
+    b_val = max(0.0, min(1.0, b_val))
+    
+    # Alpha is not defined by the palette formula itself; set to 1.0 as default [G]
+    return (r, g, b_val, 1.0)
 ```
+
+**Edge Cases**
+- If $t$ is outside $[0, 1]$, clamping is required to prevent unexpected color shifts due to the periodic nature of cosine [G].
+- The phase offsets $\mathbf{d}$ are chosen to create a specific visual progression; altering them changes the color sequence significantly.
+
 ## Subtopics
 
 ### [Blue-Red Colormap](3921-blue-red-colormap.md)
-A piecewise linear depth visualization map [G]. Unlike the smooth trigonometric gradients of Cosine Palette, it uses linear segments for high-contrast depth cues [G].
+Uses piecewise linear gradients for depth visualization, unlike the trigonometric smoothness of Cosine Palette.
 
 ### [Hue Transfer Function](4574-hue-transfer-function.md)
-Uses smoothstep functions to create distinct spectral bands [G]. Unlike Cosine Palette's continuous wave interference, it constructs sharp transitions between primary hues [G].
+Uses smoothstep-based hue cycling, distinct from the cosine interference pattern.
 
 ## Operating characteristics
-Not given in the sources.
+- **Time Complexity**: $O(1)$ per sample, involving a few trigonometric evaluations.
+- **Memory Complexity**: $O(1)$, requiring only constant storage for the palette vectors.
+- **Strengths**: Produces smooth, vibrant gradients without discontinuities; computationally cheap; easy to implement in shaders.
+- **Limitations**: The color progression is fixed by the constants; not easily adjustable for specific perceptual uniformity requirements without retuning parameters.
+- **When to use**: When a visually pleasing, continuous color ramp is needed for volume rendering or general visualization without complex parameter tuning.
+
 ## Background
-The method was popularized by Inigo Quilez in the context of GLSL shader programming for procedural color generation [S1, unofficial].
+The method was popularized by Inigo Quilez in the context of procedural shading and color palettes [S1, unofficial]. It leverages the mathematical property that summing cosines with different phases creates complex, smooth waveforms. It is used in real-time graphics and volume rendering to map scalar fields to colors efficiently.
+
 ## Sources
 [S1] Show HN: Volume rendering 3D data in Three.js and GLSL, https://github.com/SuboptimalEng/volume-rendering, fetched 2026-10-26 (unofficial)

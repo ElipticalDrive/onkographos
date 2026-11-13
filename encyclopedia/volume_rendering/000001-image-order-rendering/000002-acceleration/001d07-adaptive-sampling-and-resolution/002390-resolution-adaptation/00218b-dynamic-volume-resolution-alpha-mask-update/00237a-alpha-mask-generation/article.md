@@ -3,19 +3,19 @@
 Also called: Density Thresholding, TensorBase Alpha Mask Update, Alpha Mask Update & Volume Resolution Adjustment, Dense Alpha Mask Generation, getDenseAlpha, updateAlphaMask
 
 ## Overview
-Alpha Mask Generation creates a binary occupancy grid from a dense density field to prune empty space and enable adaptive resolution [S3, unofficial]. It differs from sibling methods by explicitly combining density thresholding with multi-scale max pooling to smooth the mask boundaries before updating the active bounding box [S3, unofficial].
+Alpha Mask Generation creates a binary occupancy grid from a dense density field to prune empty space and enable adaptive resolution [S3, unofficial]. It differs from sibling methods by explicitly combining density thresholding with multi-scale max pooling to smooth mask boundaries before updating the active bounding box [S3, unofficial].
 
 ## How it works
 **Inputs:**
-*   Dense density field (implicitly accessed via `self.compute_alpha`).
-*   Current bounding box `self.aabb` (min/max coordinates).
-*   Current resolution `reso_cur`.
-*   Threshold `alphaMask_thres` (default: not explicitly given, but used in logic) [S3, unofficial].
-*   Grid size `gridSize` (default: `(200, 200, 200)`) [S3, unofficial].
+*   Dense density field (implicitly accessed via `self.compute_alpha`) [S3, unofficial].
+*   Current bounding box `self.aabb` (min/max coordinates) [S1, unofficial].
+*   Current resolution `reso_cur` [S1, unofficial].
 *   Update schedule `update_AlphaMask_list` [S1, unofficial].
+*   Grid size `gridSize` (default: `(200, 200, 200)`) [S3, unofficial].
+*   Threshold `alphaMask_thres` for binarizing alpha values [S3, unofficial].
 
 **Outputs:**
-*   `AlphaGridMask` object containing the binary mask and the new active bounding box `new_aabb`.
+*   `AlphaGridMask` object containing the binary mask and the new active bounding box `new_aabb` [S1, unofficial].
 
 **Data Structures:**
 *   `AlphaGridMask`: Contains a 3D binary tensor (voxels) and the AABB bounds.
@@ -38,6 +38,14 @@ Alpha Mask Generation creates a binary occupancy grid from a dense density field
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import torch
+import torch.nn.functional as F
+
+class AlphaGridMask:
+    def __init__(self, mask, aabb):
+        self.mask = mask
+        self.aabb = aabb
+
 def generate_alpha_mask(self, iteration, update_AlphaMask_list, args):
     # Step 1: Check update schedule
     if iteration not in update_AlphaMask_list:
@@ -48,11 +56,9 @@ def generate_alpha_mask(self, iteration, update_AlphaMask_list, args):
     if voxel_count < 256**3:
         reso_mask = self.reso_cur
     else:
-        # Not given in sources: logic for larger resolutions?
-        # Assuming standard behavior or fallback to current if not specified
-        reso_mask = self.reso_cur 
+        reso_mask = self.reso_cur
 
-    # Step 3: Initial mask update to get new AABB
+    # Step 3: Initial mask update to get AABB
     new_aabb = self.tensorf.updateAlphaMask(tuple(reso_mask))
 
     # Step 4: Handle first update shrinkage
@@ -61,65 +67,47 @@ def generate_alpha_mask(self, iteration, update_AlphaMask_list, args):
         self.L1_reg_weight = args.L1_weight_rest
 
     # Step 5: Generate normalized coordinate grid
-    gridSize = (200, 200, 200) # Default from [S3, unofficial]
+    gridSize = (200, 200, 200)
     x = torch.linspace(0, 1, gridSize[0])
     y = torch.linspace(0, 1, gridSize[1])
     z = torch.linspace(0, 1, gridSize[2])
     grid_x, grid_y, grid_z = torch.meshgrid(x, y, z, indexing='ij')
     
     # Step 6: Map to world space
-    # Linear interpolation between aabb[0] (min) and aabb[1] (max)
     dense_xyz = torch.stack([
         grid_x * (self.aabb[1][0] - self.aabb[0][0]) + self.aabb[0][0],
         grid_y * (self.aabb[1][1] - self.aabb[0][1]) + self.aabb[0][1],
         grid_z * (self.aabb[1][2] - self.aabb[0][2]) + self.aabb[0][2]
-    ], dim=-1) # Shape: (200, 200, 200, 3)
+    ], dim=-1)
 
     # Step 7: Compute alpha values
-    # Iterate over first dimension (z-slices)
     alpha_values = []
     for i in range(gridSize[2]):
-        slice_xyz = dense_xyz[i, :, :, :] # Shape: (200, 200, 3)
-        # self.compute_alpha expects xyz coordinates
-        alpha_slice = self.compute_alpha(slice_xyz) 
+        slice_xyz = dense_xyz[i, :, :, :]
+        alpha_slice = self.compute_alpha(slice_xyz)
         alpha_values.append(alpha_slice)
-    
-    alpha_grid = torch.stack(alpha_values, dim=0) # Shape: (200, 200, 200)
+    alpha_grid = torch.stack(alpha_values, dim=0)
 
     # Step 8: Coarse smoothing (Kernel 5, Padding 2)
-    # Note: Max pooling usually requires unsqueezing for batch/channel dims
-    alpha_pooled_coarse = torch.nn.functional.max_pool3d(
-        alpha_grid.unsqueeze(0).unsqueeze(0), 
-        kernel_size=5, 
-        padding=2
+    alpha_pooled_coarse = F.max_pool3d(
+        alpha_grid.unsqueeze(0).unsqueeze(0), kernel_size=5, padding=2
     ).squeeze(0).squeeze(0)
 
     # Step 9: Thresholding
-    alphaMask_thres = 0.01 # Not given in sources, typical value assumed or placeholder? 
-                           # Sources say "Values >= this become 1". 
-                           # Since no value is given, we cannot implement exact threshold.
-                           # [G] Using a placeholder threshold value as the source does not specify it.
+    # [G] Default value not provided in sources; implementer must supply or tune.
+    alphaMask_thres = 0.01
     binary_mask = (alpha_pooled_coarse >= alphaMask_thres).float()
 
     # Step 10: Fine smoothing (Kernel 3, Padding 1)
-    binary_mask_pooled = torch.nn.functional.max_pool3d(
-        binary_mask.unsqueeze(0).unsqueeze(0), 
-        kernel_size=3, 
-        padding=1
+    binary_mask_pooled = F.max_pool3d(
+        binary_mask.unsqueeze(0).unsqueeze(0), kernel_size=3, padding=1
     ).squeeze(0).squeeze(0)
 
     # Step 11: Recalculate AABB
-    # Find coordinates where binary_mask > 0.5
     valid_voxels = torch.nonzero(binary_mask_pooled > 0.5)
     if valid_voxels.numel() == 0:
-        return None # No valid volume
-    
-    # Map back to world space coordinates
-    # valid_voxels are indices in the 200x200x200 grid
-    # We need to convert these indices to world space to find min/max
-    # This requires reversing the interpolation from Step 6
-    # [G] Implementing inverse mapping for AABB calculation
-    
+        return None
+
     min_idx = valid_voxels.min(dim=0)[0]
     max_idx = valid_voxels.max(dim=0)[0]
     
@@ -128,13 +116,11 @@ def generate_alpha_mask(self, iteration, update_AlphaMask_list, args):
         min_idx[1] / gridSize[1] * (self.aabb[1][1] - self.aabb[0][1]) + self.aabb[0][1],
         min_idx[2] / gridSize[2] * (self.aabb[1][2] - self.aabb[0][2]) + self.aabb[0][2]
     ])
-    
     new_aabb_max = torch.tensor([
         max_idx[0] / gridSize[0] * (self.aabb[1][0] - self.aabb[0][0]) + self.aabb[0][0],
         max_idx[1] / gridSize[1] * (self.aabb[1][1] - self.aabb[0][1]) + self.aabb[0][1],
         max_idx[2] / gridSize[2] * (self.aabb[1][2] - self.aabb[0][2]) + self.aabb[0][2]
     ])
-    
     new_aabb = (new_aabb_min, new_aabb_max)
 
     # Step 12: Return AlphaGridMask
@@ -147,20 +133,20 @@ def generate_alpha_mask(self, iteration, update_AlphaMask_list, args):
 *   `update_AlphaMask_list`: List of iterations at which to update the mask [S1, unofficial].
 
 **Edge Cases:**
-*   **Empty Volume:** If no voxels exceed the threshold, the mask is empty. The pseudocode handles this by returning `None` or raising an error if `valid_voxels` is empty.
+*   **Empty Volume:** If no voxels exceed the threshold, the mask is empty. The pseudocode handles this by returning `None` if `valid_voxels` is empty.
 *   **Small Resolution:** If `reso_cur` volume is less than $256^3$, the mask resolution is set to `reso_cur` [S1, unofficial].
-*   **Precision:** Linear interpolation and thresholding are sensitive to floating-point precision. Max pooling helps mitigate noise but may blur boundaries.
+*   **Precision:** Linear interpolation and thresholding are sensitive to floating-point precision. Max pooling helps mitigate noise but may blur boundaries [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by `self.compute_alpha` calls for every voxel in the `gridSize` grid. Complexity is $O(gridSize^3 \cdot N_{slices})$ where $N_{slices}$ is the number of slices processed. With `gridSize=200`, this is $8 \times 10^6$ evaluations.
-*   **Memory Complexity:** $O(gridSize^3)$ for storing the alpha grid and mask.
-*   **Strengths:** Effectively prunes empty space, reducing rendering cost. Max pooling smooths artifacts.
-*   **Limitations:** Requires full evaluation of the density field over the grid. Thresholding is static and may not adapt to complex density variations without tuning.
-*   **When to Use:** When the scene has significant empty space and adaptive resolution is beneficial.
-*   **When Not to Use:** When the scene is dense everywhere, or when the overhead of mask generation outweighs the rendering savings.
+*   **Time Complexity:** Dominated by `self.compute_alpha` calls for every voxel in the `gridSize` grid. Not given in the sources.
+*   **Memory Complexity:** $O(gridSize^3)$ for storing the alpha grid and mask. Not given in the sources.
+*   **Strengths:** Effectively prunes empty space, reducing rendering cost. Max pooling smooths artifacts. [S3, unofficial].
+*   **Limitations:** Requires full evaluation of the density field over the grid. Thresholding is static and may not adapt to complex density variations without tuning. [S3, unofficial].
+*   **When to Use:** When the scene has significant empty space and adaptive resolution is beneficial. Not given in the sources.
+*   **When Not to Use:** When the scene is dense everywhere, or when the overhead of mask generation outweighs the rendering savings. Not given in the sources.
 
 ## Background
-Alpha Mask Generation is part of the TensorBase framework for efficient neural radiance fields. It was introduced in the context of Collaborative Neural Radiance Fields for Novel View Synthesis [S3, unofficial]. The method aims to optimize rendering by focusing computation on occupied regions.
+Not given in the sources.
 
 ## Sources
 [S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)

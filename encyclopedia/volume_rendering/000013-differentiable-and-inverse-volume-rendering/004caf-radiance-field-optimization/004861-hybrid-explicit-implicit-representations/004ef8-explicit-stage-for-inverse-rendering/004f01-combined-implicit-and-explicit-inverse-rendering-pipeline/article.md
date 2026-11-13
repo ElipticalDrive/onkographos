@@ -1,0 +1,162 @@
+# Combined Implicit and Explicit Inverse Rendering Pipeline
+
+Also called: Two-stage Inverse Rendering Pipeline
+
+## Overview
+This method solves physics-based inverse rendering problems by combining implicit and explicit geometric representations to support topology changes and differentiable rendering of complex light-transport effects [S1]. It separates the reconstruction into a coarse implicit stage for robust topology handling and a fine explicit stage for high-fidelity appearance and shape refinement using mesh-based differentiable rendering [S1]. Unlike purely implicit methods (e.g., DVR, IDR) that struggle with complex light transport, or purely explicit methods that require good initialization, this pipeline leverages the topological flexibility of implicit fields and the rendering efficiency of explicit meshes [S1].
+
+## How it works
+The pipeline consists of two sequential stages: an implicit optimization stage followed by an explicit refinement stage.
+
+### Inputs and Outputs
+**Inputs:**
+- A collection of $N$ geometrically calibrated input images $I_1, \dots, I_N$ [S1].
+- Camera poses and intrinsics for each image [S1].
+- Initial geometric parameters $\theta_g$ for the implicit field [S1].
+- Initial optical parameters $\theta_a$ for the appearance field [S1].
+
+**Outputs:**
+- A reconstructed 3D mesh $M$ representing the object surface [S1].
+- SVBRDF maps (diffuse albedo $k_d$, specular albedo $k_s$, roughness $\alpha$) associated with the mesh [S1].
+
+### Data Structures
+1.  **Implicit Field ($\phi$):** A function $\phi: \mathbb{R}^3 \times \Theta_g \to \mathbb{R}$ defining the surface as the zero level set. In practice, this is often implemented as a Signed Distance Function (SDF) stored in a neural network or voxel grid, controlled by parameters $\theta_g$ [S1].
+2.  **Explicit Mesh ($M$):** A triangle mesh defined by vertex positions $V$ and connectivity $F$. Vertices are updated during the explicit stage [S1].
+3.  **Appearance Field ($B$):** A reflectance field mapping surface points to BRDF parameters. Implemented as SVBRDF maps (pixel-aligned textures) storing $k_d, k_s, \alpha$, controlled by parameters $\theta_a$ [S1].
+4.  **Lighting Model:** The incident radiance $L_i(x, \omega_i)$ is modeled to support environmental illumination, soft shadows, and interreflections [S1].
+
+### Numbered Steps
+
+**Stage 1: Implicit Optimization**
+1.  **Initialize:** Define the object surface $M(\theta_g)$ as the zero level set of $\phi(x; \theta_g) = 0$ [S1].
+2.  **Render:** For each input image, compute the rendered radiance $L_{rendered}$ using a differentiable renderer that supports implicit surfaces (e.g., via sphere tracing or volume rendering) [S1]. *Note: The source notes that Monte Carlo sampling over implicit surfaces is challenging, but this stage focuses on coarse shape recovery where topology changes are critical* [S1].
+3.  **Compute Loss:** Calculate the difference between $L_{rendered}$ and the input image $I_{target}$ [S1].
+4.  **Optimize:** Update geometric parameters $\theta_g$ to minimize the loss. This stage allows topology changes without remeshing [S1].
+5.  **Extract:** Once convergence is reached, obtain the coarse implicit geometry [S1].
+
+**Stage 2: Explicit Refinement**
+1.  **Iso-surface Extraction:** Apply a non-differentiable iso-surface extraction algorithm (specifically **MeshSDF**, a differentiable marching cubes variant) to convert the implicit surface $\phi(x; \theta_g) = 0$ into an explicit triangle mesh $M$ [S1].
+2.  **Initialize Appearance:** Initialize SVBRDF maps ($k_d, k_s, \alpha$) for the mesh [S1].
+3.  **Differentiable Rendering:** Render the mesh $M$ using physics-based differentiable rendering. This involves solving the rendering equation and its differential form [S1].
+    -   **Rendering Equation:**
+        $$ L(x, \omega_o) = \int_{S^2} L_i(x, \omega_i) f_r(x, \omega_i, \omega_o) d\sigma(\omega_i) $$
+        where $L_i$ is incident radiance, $f_r$ is the cosine-weighted BRDF, and $\sigma$ is the solid-angle measure [S1].
+    -   **Differential Rendering Equation:**
+        $$ \frac{d}{d\theta} L(x, \omega_o) = \int_{S^2} \frac{d}{d\theta} [L_i f_r] d\sigma(\omega_i) + \int_{\partial S^2} v_\perp(\omega_i) \Delta L_i f_r d\ell(\omega_i) $$
+        where $\partial S^2$ is the domain of jump discontinuity points of $L_i$, $v_\perp$ captures the change rate of the discontinuity boundary, and $\Delta L_i$ is the difference in $L_i$ across the boundary [S1].
+4.  **Optimize:** Jointly optimize:
+    -   **Shape:** Update mesh vertex positions [S1].
+    -   **Appearance:** Update pixel values in SVBRDF maps ($\theta_a$) [S1].
+5.  **Output:** Return the final mesh and SVBRDF maps [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def combined_inverse_rendering_pipeline(input_images, camera_poses, initial_theta_g, initial_theta_a):
+    """
+    Implements the two-stage inverse rendering pipeline.
+    
+    Args:
+        input_images: List of calibrated input images.
+        camera_poses: List of camera poses corresponding to input_images.
+        initial_theta_g: Initial parameters for the implicit field phi.
+        initial_theta_a: Initial parameters for the appearance field B.
+        
+    Returns:
+        final_mesh: Reconstructed triangle mesh.
+        final_svbrdf: SVBRDF maps (k_d, k_s, alpha).
+    """
+    
+    # --- Stage 1: Implicit Optimization ---
+    
+    # Initialize implicit field parameters
+    theta_g = initial_theta_g
+    
+    # Optimization loop for coarse shape and topology
+    for iteration in range(max_implicit_iterations):
+        loss = 0.0
+        for image, pose in zip(input_images, camera_poses):
+            # Render using implicit representation (e.g., sphere tracing or volume rendering)
+            # Note: The source implies this stage handles topology changes well
+            rendered_radiance = render_implicit(phi, theta_g, pose)
+            
+            # Compute loss against target image
+            # [G] Loss function is typically L2 or perceptual loss between rendered and target
+            image_loss = compute_loss(rendered_radiance, image)
+            loss += image_loss
+            
+        # Update implicit parameters
+        theta_g = optimize_gradient_descent(loss, theta_g)
+        
+    # Extract coarse mesh from implicit field
+    # Uses MeshSDF (differentiable marching cubes)
+    coarse_mesh = mesh_sdf_extraction(phi, theta_g)
+    
+    # --- Stage 2: Explicit Refinement ---
+    
+    # Initialize explicit mesh and appearance parameters
+    mesh = coarse_mesh
+    theta_a = initial_theta_a
+    
+    # Optimization loop for fine shape and appearance
+    for iteration in range(max_explicit_iterations):
+        loss = 0.0
+        for image, pose in zip(input_images, camera_poses):
+            # Render using explicit mesh with physics-based differentiable rendering
+            # This supports complex light transport: environmental illumination, soft shadows, interreflection
+            rendered_radiance = render_explicit(mesh, theta_a, pose)
+            
+            # Compute loss
+            image_loss = compute_loss(rendered_radiance, image)
+            loss += image_loss
+            
+        # Compute gradients for both shape and appearance
+        # Shape gradient: dL/d(vertex_positions)
+        # Appearance gradient: dL/d(SVBRDF_pixels)
+        # Uses the differential rendering equation:
+        # dL/dtheta = int(d(Li*fr)/dtheta) + int(v_perp * Delta_Li * fr)
+        
+        grad_mesh = compute_shape_gradient(loss, mesh)
+        grad_svbrdf = compute_appearance_gradient(loss, theta_a)
+        
+        # Update mesh vertices and SVBRDF maps
+        mesh = update_mesh_vertices(mesh, grad_mesh)
+        theta_a = optimize_gradient_descent(loss, theta_a)
+        
+    return mesh, theta_a
+```
+
+### Parameters and Typical Values
+-   **Max Implicit Iterations:** Not given in the sources.
+-   **Max Explicit Iterations:** Not given in the sources.
+-   **BRDF Model:** Microfacet BRDF model is used [S1].
+-   **Iso-surface Extraction:** MeshSDF is specified [S1].
+
+### Edge Cases and Pitfalls
+-   **Topology Changes:** Explicit mesh representations suffer from difficulty in handling topology changes during gradient-based optimization, requiring good initial geometry or frequent remeshing [S1]. The implicit stage mitigates this.
+-   **Implicit Rendering Difficulty:** Implicit representations are difficult to use for physics-based differentiable rendering because Monte Carlo sampling over implicitly expressed surfaces is challenging due to difficulty in parameterization [S1]. The pipeline avoids this by switching to explicit meshes for the final rendering stage.
+-   **Discontinuity Boundaries:** In differentiable rendering, the boundary integral term in the differential rendering equation is crucial when the parameter $\theta$ controls scene geometry (e.g., mesh vertex positions), as it can be the major contributor to the resulting gradient [S1].
+
+## Operating characteristics
+-   **Time Complexity:** Not given in the sources.
+-   **Memory Complexity:** Not given in the sources.
+-   **Measured Performance:** The pipeline is computationally more efficient than existing differentiable-sphere-tracing based methods (e.g., DVR, IDR) [S1].
+-   **Strengths:**
+    -   Supports topology changes during optimization [S1].
+    -   Supports complex light-transport effects such as environmental illumination, soft shadow, and interreflection [S1].
+    -   Enables high-fidelity 3D reconstruction of objects with complex topologies [S1].
+-   **Limitations:**
+    -   Requires two stages, potentially increasing implementation complexity.
+    -   Implicit stage may be less accurate for fine details compared to explicit methods.
+-   **When to Use:** When reconstructing objects with complex topologies that may change during optimization, or when high-fidelity appearance with complex lighting effects is required.
+-   **When Not to Use:** When computational resources are extremely limited and topology changes are not expected, or when simple lighting models suffice.
+
+## Background
+-   **Origin:** The method was introduced in the paper "Physics-Based Inverse Rendering using Combined Implicit and Explicit Geometries" [S1].
+-   **History:** Inverse rendering has been a long-standing problem in computer vision and graphics [S1]. Previous mesh-based techniques struggled with topology changes, while implicit methods struggled with differentiable rendering [S1]. This method bridges the gap by combining both [S1].
+-   **Usage:** Demonstrated on several synthetic and real examples [S1].
+
+## Sources
+[S1] Physics‐Based Inverse Rendering using Combined Implicit and Explicit Geometries, https://doi.org/10.1111/cgf.14592, fetched 2026-10-26

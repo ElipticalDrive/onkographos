@@ -2,54 +2,68 @@
 
 
 ## Overview
-Scene Representation Networks (SRN) represent a continuous scene as an opaque surface implicitly defined by a Multi-Layer Perceptron (MLP) that maps 3D coordinates to a feature vector [S1]. Unlike standard volumetric rendering which integrates density and color along a ray, SRN uses a Recurrent Neural Network (RNN) to adaptively march along the ray to find the surface intersection, outputting a single depth and color per ray [S1]. It is distinguished from its sibling [NeRF MLP Architecture](910-nerf-mlp-architecture.md) by its explicit surface assumption and adaptive step-size prediction, and from [SIREN Neural Field](1250-siren-neural-field.md) by its use of recurrence for ray marching rather than direct coordinate-to-color mapping [S1].
+Scene Representation Networks (SRN) represent a continuous scene as an opaque surface implicitly defined by a Multi-Layer Perceptron (MLP) that maps 3D coordinates to a feature vector [S1]. Unlike standard volume rendering methods that integrate density and color along a ray, SRN uses a Recurrent Neural Network (RNN) to march along the ray, predicting step sizes until the surface is found, then decoding the final feature vector into a single color [S1]. This approach is distinct from its siblings, such as [NeRF MLP Architecture](910-nerf-mlp-architecture.md), which models volumetric density and view-dependent color continuously, whereas SRN models a single opaque surface per ray [S1].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A camera ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
-*   **Output:** A single RGB color $\mathbf{c}$ and depth $z$ for the point where the ray intersects the implicit surface.
+*   **Output:** A single RGB color $\mathbf{c}$ for the point where the ray intersects the implicit surface.
 
 **Data Structures:**
-1.  **Scene MLP ($\Phi$):** A standard MLP that takes a 3D coordinate $\mathbf{x} \in \mathbb{R}^3$ as input and outputs a feature vector $\mathbf{f} \in \mathbb{R}^k$. The exact dimension $k$ and network depth are not specified in the sources [S1].
-2.  **Ray Marcher RNN ($R$):** A recurrent neural network that takes the feature vector $\mathbf{f}$ from the Scene MLP and the current ray state to predict the next step size.
+1.  **Scene MLP ($\Phi$):** Maps a 3D coordinate $\mathbf{x} \in \mathbb{R}^3$ to a feature vector $\mathbf{f} \in \mathbb{R}^k$. The exact dimension $k$ and network architecture are not specified in the primary source [S1], but it serves as the scene representation.
+2.  **Step Prediction Network ($\Psi$):** An RNN (or recurrent module) that takes the current feature vector $\mathbf{f}$ and predicts the next step size $\Delta t$ along the ray.
+3.  **Color Decoder ($\Omega$):** A network that maps the final feature vector $\mathbf{f}_{final}$ to the output color $\mathbf{c}$.
 
-**Algorithm Steps:**
-1.  **Initialization:** Start at the ray origin $\mathbf{x}_0 = \mathbf{o}$. Initialize the RNN hidden state $h_0$ (typically to zero or a learned bias) [G].
-2.  **Feature Extraction:** Query the Scene MLP to get the feature vector at the current position: $\mathbf{f}_t = \Phi(\mathbf{x}_t)$ [S1].
-3.  **Step Prediction:** Pass $\mathbf{f}_t$ and the previous hidden state $h_{t-1}$ into the RNN to predict the step size $\Delta z_t$ along the ray direction $\mathbf{d}$:
-    $$ \Delta z_t, h_t = R(\mathbf{f}_t, h_{t-1}) $$
-    The step size $\Delta z_t$ is typically constrained to be positive [G].
-4.  **Ray Update:** Advance the position along the ray:
-    $$ \mathbf{x}_{t+1} = \mathbf{x}_t + \Delta z_t \cdot \mathbf{d} $$
-5.  **Termination:** Repeat steps 2-4 for a fixed number of iterations or until a convergence criterion is met (e.g., $\Delta z_t$ becomes very small, indicating surface intersection) [G]. The sources do not specify the exact termination condition or maximum iteration count [S1].
-6.  **Color Decoding:** Take the feature vector $\mathbf{f}_{final}$ from the final step (or the step where termination occurred) and decode it into a single RGB color $\mathbf{c}$ using a small decoding network or linear layer [S1].
+**Algorithm:**
+The method synthesizes a view by marching along each camera ray. The process is iterative:
+
+1.  Initialize the current position $\mathbf{p}_0 = \mathbf{o}$ and the initial feature vector $\mathbf{f}_0$ (often derived from $\Phi(\mathbf{p}_0)$ or a learned initial state).
+2.  Iterate for $i = 0, 1, \dots, N-1$:
+    a. Compute the feature vector at the current position: $\mathbf{f}_i = \Phi(\mathbf{p}_i)$.
+    b. Use the recurrent step predictor to determine the step size: $\Delta t_i = \Psi(\mathbf{f}_i)$.
+    c. Update the position along the ray: $\mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t_i \cdot \mathbf{d}$.
+3.  After $N$ steps (or when a convergence criterion is met), the final position $\mathbf{p}_N$ is considered the surface intersection.
+4.  Decode the color from the final feature vector: $\mathbf{c} = \Omega(\mathbf{f}_N)$.
 
 **Parameters:**
-*   **Feature Dimension:** Not given in the sources.
-*   **RNN Type:** Not specified (e.g., LSTM, GRU) [S1].
-*   **MLP Architecture:** Not specified [S1].
+*   **Number of steps ($N$):** Not given in the sources.
+*   **Feature dimension ($k$):** Not given in the sources.
+*   **Network Architectures:** The specific layers, activation functions, and sizes for $\Phi$, $\Psi$, and $\Omega$ are not detailed in the provided text [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Single Depth Assumption:** SRN assumes the scene is an opaque surface, meaning it can only represent one depth and color per ray. It cannot handle transparent or multi-layered structures [S1].
-*   **Smoothing:** The method produces heavily smoothed geometry and texture, failing to reproduce fine details [S1].
-*   **Precision:** The adaptive step size relies on the RNN's ability to predict accurate distances; poor convergence can lead to incorrect surface locations [G].
+*   **Single Depth Assumption:** SRN assumes a single opaque surface per ray. It cannot handle transparent or multi-layered geometry [S1].
+*   **Smoothing:** The method produces heavily smoothed geometry and texture, limiting its ability to reproduce fine details [S1].
+*   **Step Prediction Stability:** The RNN must reliably predict step sizes that converge to the surface. If $\Delta t$ becomes too large, the ray may skip the surface; if too small, convergence is slow.
 
 ## Subtopics
 
 ### [Adaptively Placed Multi-Grid Scene Representation Network (APMGSRN)](11125-adaptively-placed-multi-grid-scene-representation-network-ap.md)
 APMGSRN is a variant of SRN that represents continuous volumetric data using multiple spatially adaptive feature grids, dynamically allocating neural network resources to regions of high reconstruction error. Unlike sibling methods that rely on expensive octree structures or hash collisions to handle sparsity, APMGSRN uses learnable transformation matrices to migrate grid positions and scales, avoiding tree traversal and pruning while maintaining high accuracy for somewhat sparse scientific data.
 
+### Signed Surface Approximation Network (SSAN)
+SSAN is a module that creates a truncated signed distance field (TSDF) from NeRFs to enable the extraction of a unique and accurate surface and appearance [S2]. It is optimized from pretrained NeRFs, harnessing the rough 3D approximation of scene geometry learnt by the NeRF and useful priors such as rendered depths via volumetric rendering [S2].
+
+**Layout and Formulas:**
+SSAN is a neural network $\phi: \mathbb{R}^3 \rightarrow (\mathbb{R}, \mathbb{S}^2, \mathbb{R}^8)$ that takes a 3D coordinate $\mathbf{x}$ as input and predicts:
+1.  Truncated signed distance approximation $\hat{t} \in [-0.1, 0.1]$.
+2.  Normal $\hat{\mathbf{n}} \in \mathbb{S}^2$.
+3.  8-dimensional appearance feature $\hat{\mathbf{f}} \in [0, 1]$.
+
+$$ [\hat{t}, \hat{\mathbf{n}}, \hat{\mathbf{f}}] = \phi(\mathbf{x}) $$
+
+The view-dependent RGB color $\hat{\mathbf{c}} \in [0, 1]$ is computed by an appearance network $\eta: (\mathbb{R}^8, \mathbb{S}^2, \mathbb{S}^2) \rightarrow \mathbb{R}^3$:
+
+$$ \hat{\mathbf{c}} = \eta(\hat{\mathbf{f}}, \hat{\mathbf{n}}, \mathbf{d}) $$
+
+where $\mathbf{d} \in \mathbb{S}^2$ is the viewing direction [S2].
+
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of RNN steps required to converge to the surface. Adaptive stepping can reduce steps compared to uniform sampling, but RNN inference is sequential [G].
-*   **Memory Complexity:** Dominated by the parameters of the Scene MLP and the RNN. No explicit voxel grid is stored, unlike [Neural Volumes](911-neural-volumes.md) which uses a $128^3$ voxel grid [S1].
-*   **Performance:** SRN produces heavily smoothed geometry and texture [S1]. It captures low-frequency geometry and color variation but is unable to reproduce fine detail [S1].
-*   **Strengths:** Implicit representation allows for infinite resolution in theory; adaptive marching can be efficient for smooth surfaces [G].
-*   **Limitations:** Cannot represent transparency or multiple surfaces per ray; limited representational power for high-frequency details [S1].
-*   **When to use:** Scenes with smooth, opaque surfaces where fine detail is not critical [S1].
-*   **When not to use:** Scenes with transparency, complex fine geometry, or high-frequency textures [S1].
+*   **Accuracy:** SRN captures low-frequency geometry and color variation but is unable to reproduce fine detail [S1]. It produces heavily smoothed geometry and texture [S1].
+*   **Limitations:** The representational power is limited by selecting only a single depth and color per camera ray, making it unsuitable for transparent or complex multi-surface scenes [S1].
+*   **Comparison:** It is a better-performing followup to DeepVoxels [S1]. It outperforms Neural Volumes (NV) and Local Light Field Fusion (LLFF) in some scenarios but lacks the fine detail reconstruction of later methods like NeRF [S1].
 
 ## Background
-SRN was introduced by Mildenhall et al. in "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" [S1]. It is described as a better-performing follow-up to DeepVoxels [41] by the same authors [S1]. The method was designed to represent continuous scenes as opaque surfaces, contrasting with volumetric approaches like Neural Volumes (NV) which optimize a discretized RGB$\alpha$ voxel grid [S1]. SRN was evaluated against baselines including NV and Local Light Field Fusion (LLFF) [S1].
+Scene Representation Networks (SRN) were introduced as a method to represent continuous scenes as opaque surfaces using an MLP [S1]. It is described as a better-performing followup to DeepVoxels by the same authors [S1]. The method was compared against Neural Volumes (NV) and Local Light Field Fusion (LLFF) in evaluations on real-world scenes, where it was noted for capturing low-frequency geometry but failing to reproduce fine details like fern leaves or rigging compared to other methods [S1].
 
 ## Sources
 [S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27
