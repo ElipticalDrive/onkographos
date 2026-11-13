@@ -1,77 +1,95 @@
 # Scaffold-GS
-
 Also called: Scaffold-Gaussian Splatting
-
 ## Overview
-Scaffold-GS replaces the explicit storage of Gaussian attributes (mean, covariance, opacity, color) with a neural representation driven by a voxel grid [S1]. It solves the problem of inefficient memory usage and poor initialization in sparse regions by predicting all primitive parameters from learnable features attached to voxel points, rather than storing them directly [S1]. It differs from standard 3D Gaussian Splatting by decoupling the geometric scaffold (voxels) from the rendered primitives (Gaussians), and from Diff-Gaussian by using neural prediction for attributes instead of negative coefficients [S1].
-
+Scaffold-GS addresses the limitations of standard 3D Gaussian Splatting (3DGS) regarding initialization sparsity and the capacity to model complex view-dependent effects without excessive Gaussian proliferation. It replaces the direct attribute storage of standard 3DGS with a structured voxel grid backbone, where Gaussian attributes are derived from interpolated voxel features and lightweight neural networks. This approach distinguishes itself from standard 3DGS by enforcing structural constraints on the representation, linking it to the [Representation and Kernel Modifications](10145-representation-and-kernel-modifications.md) family, while differing from [Negative Gaussian Splatting](9152-negative-gaussian-splatting.md) by focusing on geometric scaffolding rather than attribute sign extension.
 ## How it works
-**Inputs:** Sparse Structure-from-Motion (SfM) point cloud; camera poses and images.
-**Outputs:** Rendered images; optimized voxel features and network weights.
+**Inputs and Outputs:**
+*   **Input:** Sparse Structure-from-Motion (SfM) point cloud; multi-view images.
+*   **Output:** A set of 3D Gaussians defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$, rendered via differentiable rasterization.
 
 **Data Structures:**
-1.  **Voxel Grid:** A 3D grid covering the scene volume. Each voxel point $v$ stores learnable feature vectors $\mathbf{f}_v$.
-2.  **Lightweight Neural Networks:** Small MLPs or linear layers that map interpolated features to Gaussian attributes.
+1.  **Voxel Grid:** A 3D grid covering the scene extent. Each voxel point stores learnable features $\mathbf{f}_v$.
+2.  **Gaussian Attributes:** Not stored directly. Instead, $\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha, \mathbf{c}$ are computed on-the-fly or cached based on interpolated features.
 
-**Steps:**
-1.  **Initialization:** Initialize a voxel grid within the bounding volume of the SfM point cloud. Attach learnable feature vectors $\mathbf{f}_v$ to each voxel point [S1].
-2.  **Feature Interpolation:** For a target Gaussian center $\boldsymbol{\mu}$, identify the surrounding voxels. Interpolate the feature vectors $\mathbf{f}_v$ from these voxels to obtain a combined feature vector $\mathbf{F}$ at $\boldsymbol{\mu}$ [S1].
-3.  **Attribute Prediction:** Pass $\mathbf{F}$ through lightweight neural networks to predict all Gaussian attributes: mean $\boldsymbol{\mu}$ (refinement), covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and view-dependent color $\mathbf{c}$ [S1].
-4.  **Rendering:** Project the predicted Gaussians to 2D, sort by depth, and perform alpha compositing using the standard differentiable rasterization pipeline [S1].
-5.  **Optimization:** Minimize photometric loss (L1/SSIM) between rendered and ground-truth images. Gradients flow back to the voxel features $\mathbf{f}_v$ and network weights [S1].
+**Method Steps:**
+1.  **Voxel Grid Initialization:** Initialize a voxel grid covering the bounding box of the input SfM points. Attach learnable feature vectors $\mathbf{f}_v$ to each voxel center.
+2.  **Feature Interpolation:** For a target Gaussian location $\mathbf{x}$, trilinearly interpolate the features from the surrounding voxels to obtain $\mathbf{f}_{interp}(\mathbf{x})$.
+3.  **Attribute Prediction:** Use lightweight neural networks (MLPs) to map $\mathbf{f}_{interp}$ to the Gaussian attributes:
+    *   $\boldsymbol{\mu}, \boldsymbol{\Sigma}$: Derived from the spatial position and potentially interpolated orientation/scale features.
+    *   $\alpha, \mathbf{c}$: Predicted via MLPs taking $\mathbf{f}_{interp}$ and view direction $\mathbf{v}$ as input.
+4.  **Rendering:** Render the Gaussians using standard alpha blending.
+5.  **Optimization:** Backpropagate gradients through the interpolation and MLP layers to update voxel features $\mathbf{f}_v$.
+
+**Parameters:**
+*   Voxel resolution: Not given in the sources.
+*   MLP depth/width: Not given in the sources.
+
+**Edge Cases:**
+*   **Out-of-bounds:** If a Gaussian center falls outside the voxel grid, features must be clamped or zero-padded. [G]
+*   **Precision:** Trilinear interpolation requires careful handling of floating-point precision for gradient stability. [G]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for attribute prediction in Scaffold-GS
-def predict_gaussian_attributes(voxel_grid, gaussian_mean):
+def get_gaussian_attributes(voxel_grid, gaussian_centers, view_directions):
     """
-    Predicts Gaussian attributes from voxel features.
+    voxel_grid: Tensor of shape [V, V, V, C] containing learnable features.
+    gaussian_centers: Tensor of shape [N, 3] with Gaussian means.
+    view_directions: Tensor of shape [N, 3] with view vectors.
+    Returns:
+    means: Tensor [N, 3]
+    covariances: Tensor [N, 3, 3]
+    opacities: Tensor [N, 1]
+    colors: Tensor [N, 3]
     """
-    # 1. Identify surrounding voxels for the Gaussian mean
-    surrounding_voxels = get_surrounding_voxels(voxel_grid, gaussian_mean)
+    # Normalize centers to voxel grid coordinates [0, 1]
+    normalized_centers = normalize_to_voxel_space(gaussian_centers)
     
-    # 2. Interpolate features from surrounding voxels
-    # Let f_v be the feature vector of voxel v
-    # Interpolation weights w_v depend on distance from gaussian_mean to voxel centers
-    interpolated_feature = sum(w_v * f_v for v, w_v in surrounding_voxels)
+    # Trilinear interpolation of features
+    # grid_sample requires normalized coordinates in [-1, 1]
+    grid_coords = 2.0 * normalized_centers - 1.0
+    grid_coords = grid_coords.unsqueeze(0).unsqueeze(0).unsqueeze(0) # [1, 1, 1, 3]
     
-    # 3. Predict attributes using lightweight neural networks
-    # Network takes interpolated_feature as input
-    covariance = covariance_network(interpolated_feature)
-    opacity = opacity_network(interpolated_feature)
-    color = color_network(interpolated_feature)
+    # Interpolate features for all Gaussians
+    # Assuming voxel_grid is [1, V, V, V, C] for grid_sample
+    features = grid_sample(voxel_grid, grid_coords, mode='bilinear', padding_mode='border')
+    features = features.squeeze() # [N, C]
     
-    return {
-        'mean': gaussian_mean,
-        'covariance': covariance,
-        'opacity': opacity,
-        'color': color
-    }
+    # Predict attributes using lightweight MLPs
+    # Note: Standard 3DGS covariance is parameterized by rotation and scale.
+    # Scaffold-GS predicts these from features.
+    
+    # Example MLP for opacity and color
+    opacity_mlp = MLP_small()
+    color_mlp = MLP_small()
+    
+    opacities = opacity_mlp(features)
+    colors = color_mlp(features, view_directions)
+    
+    # Predict mean, rotation, scale from features
+    # This part is simplified; actual implementation may use separate heads
+    mean_offset = mean_mlp(features)
+    means = gaussian_centers + mean_offset
+    
+    rotation = rotation_mlp(features)
+    scale = scale_mlp(features)
+    
+    covariances = compute_covariance_from_rotation_scale(rotation, scale)
+    
+    return means, covariances, opacities, colors
 ```
-
-**Parameters:**
-- Voxel grid resolution: Not given in the sources.
-- Network size: Lightweight (specific dimensions not given) [S1].
-
-**Edge Cases:**
-- Sparse regions: The voxel grid initialization helps, but if no voxels surround a Gaussian, interpolation fails [S1].
-- Precision: Interpolation accuracy depends on voxel resolution [S1].
-
 ## Subtopics
 
 ### [Scaffold-GS Integration](12513-scaffold-gs-integration.md)
-Applies DART and AGE modules to the Scaffold-GS backbone to handle sparse initialization and densification gating.
+Applies DART and AGE modules to the Scaffold-GS backbone for improved initialization and densification control.
 
 ## Operating characteristics
-- **Memory:** Significantly reduced compared to storing explicit attributes for every Gaussian, as attributes are predicted from a shared voxel grid [S1].
-- **Speed:** Prediction overhead from neural networks adds computational cost per Gaussian, but initialization is faster due to voxel-based seeding [S1].
-- **Quality:** Improves reconstruction in sparse regions by providing a structured scaffold [S1].
-- **Limitations:** Requires careful tuning of voxel resolution and network capacity [S1].
-
+*   **Time Complexity:** Rendering is similar to 3DGS, but attribute prediction adds MLP inference cost per Gaussian. [S1]
+*   **Memory Complexity:** Stores voxel features instead of per-Gaussian attributes. Memory usage depends on voxel resolution and feature dimension. [S1]
+*   **Strengths:** Better handling of sparse regions; reduced popping artifacts; more compact representation for complex geometry. [S1]
+*   **Limitations:** Requires careful tuning of voxel resolution; MLP inference can be slower than direct attribute lookup. [S1]
 ## Background
-Scaffold-GS was proposed to address the limitations of standard 3D Gaussian Splatting in handling sparse initialization and view-dependent effects [S1]. It builds on the idea of using neural networks to predict attributes, similar to VDGS, but uses a voxel grid as a scaffold [S1]. It is a foundational method for later approaches like Octree-GS [S1].
-
+Scaffold-GS was proposed in [S1] as a method to improve 3DGS by initializing a voxel grid and attaching learnable features to each voxel point. All attributes of Gaussians are determined by interpolated features and lightweight neural networks. This approach was later extended by Octree-GS [S1] for level-of-detail strategies.
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

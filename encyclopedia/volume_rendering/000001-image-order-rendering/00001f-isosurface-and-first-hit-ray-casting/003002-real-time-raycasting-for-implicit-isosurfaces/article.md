@@ -3,267 +3,237 @@
 Also called: Implicit Isosurface Display, Implicit Isosurface Display via Single-Pass Raycasting, Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, Real-Time Ray-Tracing for Isosurfaces
 
 ## Overview
-This method renders implicit isosurfaces defined by a regular volumetric grid directly via ray-casting on graphics hardware, bypassing intermediate polygonal representations [S1][S3, book]. It employs a two-level hierarchical representation (blocks and bricks) for empty space skipping and memory management, adaptive sampling for intersection, and deferred image-space shading using tri-cubic filtering for smooth normals and curvatures [S1]. Unlike sibling methods that may rely on mesh extraction or single-level grids, this approach supports very large datasets by dynamically caching bricks and deferring all shading computations to image space, ensuring performance independent of input data size [S1][S3, book].
+This method is a real-time rendering pipeline for implicit surfaces defined by a regular volumetric grid of samples, using ray-casting on graphics hardware to directly render the isosurface without intermediate polygonal representation [S1][S3, book]. It employs a two-level hierarchical representation for empty space skipping and memory management, adaptive sampling for intersection, and deferred image-space shading using tri-cubic filtering for smooth normals and curvatures [S1]. It sets itself apart from sibling methods like [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) by explicitly separating the object-space ray-casting stage from the image-space derivative and shading stages, allowing advanced non-photorealistic effects (curvature-based transfer functions, ridge/valley lines) to be computed with image-space complexity [S1]. It differs from [Robust Iso-surface Rendering via Bisection and Newton Refinement](1309-robust-iso-surface-rendering-via-bisection-and-newton-refine.md) by using an analytic cubic root solver for trilinear interpolation rather than iterative numerical refinement [S3, book].
 
 ## How it works
-The pipeline consists of three stages: Ray-Casting, Image Space Derivatives, and Image Space Shading [S1].
+The pipeline consists of three main stages: Ray-Casting, Image Space Derivatives, and Image Space Shading [S1].
 
-### Inputs and Outputs
-*   **Input:** A regularly sampled scalar volume $\rho(x,y,z)$, an isovalue $\rho_{iso}$, and camera parameters [S1].
-*   **Output:** A color image of the isosurface, potentially augmented with curvature-based transfer functions, ridge/valley lines, or flow advection [S1].
+**Inputs and Outputs:**
+*   **Input:** A regularly sampled scalar volume $V$ defined on a 3D grid. An isovalue $\tau$. Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel).
+*   **Output:** A final color image. Intermediate floating-point images for intersection positions, gradient components, and Hessian matrix components [S1].
 
-### Data Structures
-1.  **Volume Data:** Regular 3D grid of scalar samples [S1].
-2.  **Two-Level Hierarchy:**
-    *   **Fine Level (Blocks):** Subdivisions of the volume used for empty space skipping. Each block stores min/max values of its constituent voxels [S1].
-    *   **Coarse Level (Bricks):** Subdivisions of the volume used to manage memory. Bricks are cached in a dynamic texture if the volume exceeds GPU memory [S1].
-3.  **Macrocells:** A trilevel spatial hierarchy (one top-level cell, two intermediate macrocell levels, and data cells) used to accelerate traversal of empty cells. Each macrocell stores the min/max data values of its child cells [S3, book].
-4.  **Dynamic Cache:** A texture storing active bricks. An additional low-resolution texture references the positions of bricks in the cache [S1].
-5.  **Render Targets:** Floating-point textures for intersection positions (volume coordinates), gradient components, Hessian matrix components, curvature measures, and the final color image [S1].
+**Data Structures:**
+1.  **Volume Data:** Stored in a two-level hierarchical representation [S1][S3, book]:
+    *   **Fine Level (Blocks):** The volume is subdivided into blocks. Each block stores the minimum and maximum scalar values of its constituent voxels. Used for empty space skipping during ray-casting [S1].
+    *   **Coarse Level (Bricks):** The volume is subdivided into bricks (analogous to image tiles). Bricks are used to circumvent graphics memory limitations via dynamic caching [S1][S3, book].
+    *   **Hierarchy:** A trilevel spatial hierarchy is used for acceleration: one top-level cell, two intermediate macrocell levels, and the data cells. Each macrocell stores the min/max data values of its child cells. Storage overhead is negligible (< 0.5% of data size) [S3, book].
+2.  **Dynamic Cache:** If the volume exceeds GPU texture memory, a dynamic cache texture stores active bricks. An additional low-resolution texture references the positions of bricks in the cache. The cache is updated on-the-fly according to the current isovalue [S1].
+3.  **Textures:** Volumetric textures for volume data, cache, and hierarchy. Render-to-texture support is required [S1].
 
-### Parameters
-*   **Hierarchy Depth:** A trilevel hierarchy is used (top-level, two macrocell levels, data cells). Storage overhead is < 0.5% of data size [S3, book].
-*   **Tile Size:** For dynamic load balancing, screen space is split into tiles, e.g., 32 pixels wide by 4 pixels high [S3, book].
-*   **Hardware Requirements:** Support for volumetric textures, render-to-texture, and looping in fragment programs (e.g., Shader Model 3.0) [S1].
+**Algorithm Steps:**
 
-### Steps
-
-#### Stage 1: Ray-Casting (Object Space)
-For each pixel (or tile of pixels):
-
-1.  **Ray Initialization:** Define the ray origin $P_a$ and direction $P_b$ in volume coordinates [G].
-2.  **Traversal:** Use the incremental traversal method by Amanatides and Woo to traverse cells [S3, book].
-    *   Check macrocells using min/max values. If the isovalue $\rho_{iso}$ is not within $[min, max]$, skip the macrocell [S3, book].
-    *   Recurse deeper or proceed to the next cell if the isovalue is within bounds [S3, book].
-    *   If the volume does not fit in memory, check the dynamic cache texture. If the brick is not in the cache, update it on-the-fly [S1].
-3.  **Intersection Search:** When a cell containing the isosurface is found:
-    *   The ray is parameterized as $R(t) = P_a + t P_b$ [G].
-    *   The scalar field is approximated using trilinear interpolation within the cell [S3, book].
-    *   Solve for $t$ where the interpolated field equals the isovalue:
-        $$ \rho(x_a + t x_b, y_a + t y_b, z_a + t z_b) - \rho_{iso} = 0 $$
-    *   This expands to a cubic polynomial in $t$ [S3, book].
-    *   Solve the cubic polynomial in closed form [S3, book].
-    *   Examine only roots contained in the cell $[0, 1]$ (relative to cell bounds) [S3, book].
+1.  **Ray Casting Initialization:** For each pixel, define a ray $r(t) = \mathbf{o} + t\mathbf{d}$ in world space. Rays are started on block bounding faces and cast into the volume [S1].
+2.  **Traversal with Empty Space Skipping:**
+    *   Use the incremental traversal method by Amanatides and Woo to traverse cells [S3, book].
+    *   Organize volume into bricks for cache locality [S3, book].
+    *   Use the trilevel hierarchy to accelerate traversal of empty cells. Examine min/max at each macrocell. If the isovalue $\tau$ is not within $[min, max]$, skip the cell or its children. If it is, recurse deeper or proceed to the next cell [S3, book].
+    *   Average complexity of search with a three-level hierarchy is $O(\sqrt{n})$, where $n$ is the volume dimension. Worst-case is $O(n)$ [S3, book].
+3.  **Intersection Detection:**
+    *   When a ray enters a voxel (cell) containing the isosurface, perform an analytic intersection computation [S3, book].
+    *   The scalar field $\rho$ is approximated using trilinear interpolation between discrete grid points. The intersection condition is:
+        $$ \rho(x_a + t x_b, y_a + t y_b, z_a + t z_b) - \tau = 0 $$
+        where $(x_a, y_a, z_a)$ is the ray origin within the cell and $(x_b, y_b, z_b)$ is the ray direction. This expands to a cubic polynomial in $t$ [S3, book].
+    *   Solve the cubic polynomial in closed form to find roots [S3, book].
+    *   Examine only roots contained in the cell (i.e., $0 \le t \le 1$ relative to the cell entry/exit).
     *   If multiple roots exist, select the smallest $t$ (closest to the eye). If no roots, the ray misses the isosurface in that cell [S3, book].
-4.  **Adaptive Sampling & Refinement:**
-    *   Use adaptive sampling during traversal to determine step sizes [S1].
-    *   Iteratively refine the hit-point with a constant number of steps to achieve high-quality intersection positions [S1]. This is the transition from object to image space [S1].
+4.  **Adaptive Sampling and Refinement:**
+    *   Use adaptive sampling during ray casting [S1].
+    *   Iteratively refine the isosurface hit-point with a constant number of steps of image space complexity. This is the last operation of the ray-casting stage, producing a high-quality intersection position image [S1].
+5.  **Image Space Derivatives:**
+    *   At the exact intersection position $\mathbf{p}$ obtained from Stage 1, compute differential surface properties [S1].
+    *   Use tri-cubic filtering for continuous third-order reconstruction. This allows on-the-fly evaluation of smooth normals and extrinsic curvatures without interpolating data computed at grid points [S1].
+    *   Compute first partial derivatives (gradient $\nabla f$) and second partial derivatives (Hessian matrix $H$) of the scalar volume at $\mathbf{p}$ [S1].
+    *   Store gradient components and Hessian components in floating-point images [S1].
+6.  **Image Space Shading:**
+    *   Generate the final output image using the shape descriptors (normals, curvatures) from Stage 2 [S1].
+    *   Apply shading models such as Blinn-Phong, tone shading, curvature-based transfer functions, ridge/valley lines, and flow advection [S1].
+    *   Curvature measures are mapped to colors via 1D or 2D transfer functions. Ridge/valley areas are identified per-pixel [S1].
 
-#### Stage 2: Image Space Derivatives
-Using the intersection positions from Stage 1:
-
-1.  **Tri-Cubic Filtering:** Evaluate the scalar volume and its derivatives using tri-cubic filtering at the exact intersection positions [S1]. This allows on-the-fly evaluation of smooth normals and curvatures without interpolating data computed at grid points [S1].
-2.  **Gradient Computation:** Compute first partial derivatives $\nabla \rho = (\frac{\partial \rho}{\partial x}, \frac{\partial \rho}{\partial y}, \frac{\partial \rho}{\partial z})$ to obtain surface normals [S1].
-3.  **Hessian Computation:** Compute second partial derivatives to form the Hessian matrix $H$ [S1].
-4.  **Curvature Computation:** Derive curvature measures from the gradient and Hessian [S1].
-5.  **Store Results:** Write gradient components, Hessian components, and curvatures to floating-point render targets [S1].
-
-#### Stage 3: Image Space Shading
-1.  **Shading Pass:** Generate the final output image using the shape descriptors (normals, curvatures) computed in Stage 2 [S1].
-2.  **Effects:** Apply standard Blinn-Phong lighting, tone shading, curvature-based transfer functions, ridge/valley lines, and flow advection [S1].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
+# Global constants
 ISOVALUE = 0.5
-REFINEMENT_STEPS = 3
-TILE_WIDTH = 32
-TILE_HEIGHT = 4
-SHININESS = 32.0
+NUM_REFINEMENT_STEPS = 3
+HIERARCHY_LEVELS = 3 # Top, 2 intermediate, data
 
-# Data Structures
-class Macrocell:
-    min_val: float
-    max_val: float
-    children: list  # List of Macrocells or Blocks
-
-class Block:
-    min_val: float
-    max_val: float
-    voxels: list  # Scalar values
-
-class Brick:
-    blocks: list  # List of Blocks
-
-class VolumeBounds:
-    min: list  # [x, y, z]
-    max: list  # [x, y, z]
-
-class Cell:
-    min_val: float
-    max_val: float
-    voxels: list
-    size: float  # Uniform cell size
-
-# Global State
-volume_hierarchy: Macrocell  # Root of hierarchy
-brick_cache: list  # Dynamic cache of active bricks
-brick_positions: list  # Low-res texture referencing brick positions
-volume_data: list  # Full volume data (if fits in memory)
-cell_size: float = 1.0
-
-def render_frame(camera):
-    # Stage 1: Ray Casting
-    intersection_image = allocate_texture()
+def render_volume(volume_data, camera, isovalue):
+    """
+    Main rendering pipeline.
+    volume_data: 3D array or texture of scalar values.
+    camera: Contains origin o and direction d per pixel.
+    isovalue: The threshold tau.
+    """
+    width, height = camera.resolution
+    # Intermediate images
+    intersection_image = create_float_image(width, height)
+    gradient_image = create_float_image(width, height, channels=3)
+    hessian_image = create_float_image(width, height, channels=9)
     
-    # Process tiles for dynamic load balancing
-    for tile_y in range(0, camera.height, TILE_HEIGHT):
-        for tile_x in range(0, camera.width, TILE_WIDTH):
-            for dy in range(TILE_HEIGHT):
-                for dx in range(TILE_WIDTH):
-                    pixel_x = tile_x + dx
-                    pixel_y = tile_y + dy
-                    ray_origin, ray_dir = camera.get_ray(pixel_x, pixel_y)
-                    hit_t = trace_ray(ray_origin, ray_dir)
-                    if hit_t is not None:
-                        intersection_image.set(pixel_x, pixel_y, ray_origin + hit_t * ray_dir)
-                    else:
-                        intersection_image.set(pixel_x, pixel_y, None)
-
-    # Stage 2: Image Space Derivatives
-    gradient_image = allocate_texture()
-    hessian_image = allocate_texture()
-    curvature_image = allocate_texture()
+    # Precompute hierarchy if not already done
+    hierarchy = build_trilevel_hierarchy(volume_data)
     
-    for pixel_y in range(camera.height):
-        for pixel_x in range(camera.width):
-            hit_pos = intersection_image.get(pixel_x, pixel_y)
-            if hit_pos is not None:
-                grad = compute_gradient_tricubic(hit_pos)
-                hess = compute_hessian_tricubic(hit_pos)
-                grad_image.set(pixel_x, pixel_y, grad)
-                hess_image.set(pixel_x, pixel_y, hess)
-                curvature_image.set(pixel_x, pixel_y, compute_curvature(grad, hess))
+    # Dynamic cache for bricks if volume > memory
+    cache = DynamicBrickCache(volume_data, hierarchy)
+    
+    for y in range(height):
+        for x in range(width):
+            ray_o = camera.origin(x, y)
+            ray_d = camera.direction(x, y)
+            
+            # Stage 1: Ray Casting
+            hit_point = cast_ray(ray_o, ray_d, isovalue, hierarchy, cache)
+            
+            if hit_point is not None:
+                # Stage 2: Image Space Derivatives
+                # Use tri-cubic filtering to evaluate derivatives at hit_point
+                grad = evaluate_gradient_tricubic(volume_data, hit_point)
+                hess = evaluate_hessian_tricubic(volume_data, hit_point)
+                
+                gradient_image.set(x, y, grad)
+                hessian_image.set(x, y, hess)
+                intersection_image.set(x, y, hit_point)
+            else:
+                intersection_image.set(x, y, None)
 
     # Stage 3: Image Space Shading
-    final_image = allocate_texture()
-    for pixel_y in range(camera.height):
-        for pixel_x in range(camera.width):
-            hit_pos = intersection_image.get(pixel_x, pixel_y)
-            if hit_pos is not None:
-                normal = gradient_image.get(pixel_x, pixel_y)
-                curvature = curvature_image.get(pixel_x, pixel_y)
-                color = shade(hit_pos, normal, curvature)
-                final_image.set(pixel_x, pixel_y, color)
+    final_image = create_color_image(width, height)
+    for y in range(height):
+        for x in range(width):
+            hit_point = intersection_image.get(x, y)
+            if hit_point is not None:
+                grad = gradient_image.get(x, y)
+                hess = hessian_image.get(x, y)
+                
+                normal = normalize(grad)
+                curvature = compute_curvature(grad, hess)
+                
+                # Apply shading model
+                color = apply_shading_model(hit_point, normal, curvature, camera)
+                final_image.set(x, y, color)
+            else:
+                final_image.set(x, y, background_color)
+                
     return final_image
 
-def trace_ray(origin, direction):
-    # Amanatides & Woo traversal initialization
-    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
-    start_cell = [int((volume_bounds.min[i] - origin[i]) * inv_dir[i]) for i in range(3)]
-    step = [1 if direction[i] > 0 else -1 for i in range(3)]
-    t_delta = [abs(inv_dir[i]) for i in range(3)]
-    t_max = [0.0, 0.0, 0.0]
-    for i in range(3):
-        if direction[i] > 0:
-            t_max[i] = (start_cell[i] + 1.0 - origin[i]) * inv_dir[i]
-        else:
-            t_max[i] = (start_cell[i] - origin[i]) * inv_dir[i]
-            
-    current_cell = start_cell
-    t = 0.0
+def cast_ray(ray_o, ray_d, isovalue, hierarchy, cache):
+    """
+    Traverses the volume using hierarchy and cache, finds intersection.
+    """
+    # Initialize traversal with Amanatides and Woo method
+    cell = find_initial_cell(ray_o, ray_d, hierarchy)
     
-    while not is_outside_volume(current_cell, volume_bounds):
-        cell = hierarchy.get_cell(current_cell)
-        if cell.min_val <= ISOVALUE <= cell.max_val:
+    while cell is not None:
+        # Check min/max in hierarchy to skip empty cells
+        if not isovalue_in_range(cell.min, cell.max):
+            cell = next_cell_in_traversal(ray_o, ray_d, cell, hierarchy)
+            continue
+            
+        # If cell is a leaf (data cell), check for intersection
+        if cell.is_leaf():
             # Analytic intersection with trilinear interpolation
-            local_t = solve_cubic_trilinear(cell, origin, direction, ISOVALUE)
-            if local_t is not None:
-                global_t = t + local_t * cell_size
-                # Iterative refinement
-                for _ in range(REFINEMENT_STEPS):
-                    global_t = newton_refine(global_t, origin, direction, ISOVALUE)
-                return global_t
+            roots = solve_cubic_trilinear_intersection(ray_o, ray_d, cell)
+            
+            # Filter roots within cell bounds
+            valid_roots = [t for t in roots if 0 <= t <= cell.max_t]
+            
+            if valid_roots:
+                t_hit = min(valid_roots) # Closest root
+                hit_point = ray_o + t_hit * ray_d
                 
-        # Advance to next cell
-        if t_max[0] < t_max[1]:
-            if t_max[0] < t_max[2]:
-                current_cell[0] += step[0]
-                t = t_max[0]
-                t_max[0] += t_delta[0]
-            else:
-                current_cell[2] += step[2]
-                t = t_max[2]
-                t_max[2] += t_delta[2]
-        else:
-            if t_max[1] < t_max[2]:
-                current_cell[1] += step[1]
-                t = t_max[1]
-                t_max[1] += t_delta[1]
-            else:
-                current_cell[2] += step[2]
-                t = t_max[2]
-                t_max[2] += t_delta[2]
-                
+                # Iterative refinement (constant steps)
+                for _ in range(NUM_REFINEMENT_STEPS):
+                    hit_point = refine_intersection(hit_point, ray_o, ray_d, isovalue)
+                    
+                return hit_point
+        
+        cell = next_cell_in_traversal(ray_o, ray_d, cell, hierarchy)
+        
     return None
 
-def solve_cubic_trilinear(cell, origin, direction, iso):
-    # Expand rho(xa + t xb, ya + t yb, za + t zb) - iso = 0
-    # into a cubic polynomial a*t^3 + b*t^2 + c*t + d = 0
-    # using trilinear interpolation coefficients derived from cell voxels
-    coeffs = compute_trilinear_coeffs(cell.voxels, origin, direction)
-    return solve_cubic(coeffs.a, coeffs.b, coeffs.c, coeffs.d)
+def solve_cubic_trilinear_intersection(ray_o, ray_d, cell):
+    """
+    Solves rho(xa + t xb, ya + t yb, za + t zb) - tau = 0
+    using trilinear interpolation within the cell.
+    Returns list of real roots t.
+    """
+    # Coefficients of cubic polynomial a*t^3 + b*t^2 + c*t + d = 0
+    # Derived from trilinear interpolation of cell corners
+    a, b, c, d = compute_cubic_coefficients_trilinear(ray_o, ray_d, cell)
+    d -= ISOVALUE
+    
+    roots = solve_cubic_equation(a, b, c, d)
+    return roots
 
-def newton_refine(t, origin, direction, iso):
-    # Constant number of steps to refine hit point to high precision
-    p = origin + t * direction
-    f = evaluate_trilinear(p, cell.voxels) - iso
-    df = dot(compute_gradient_trilinear(p, cell.voxels), direction)
-    if df != 0.0:
-        t -= f / df
-    return t
+def evaluate_gradient_tricubic(volume_data, point):
+    """
+    Evaluates gradient using tri-cubic filtering.
+    """
+    # Tri-cubic filter coefficients and derivatives
+    # Return vector (dx, dy, dz)
+    pass
 
-def is_outside_volume(cell, bounds):
-    return any(cell[i] < bounds.min[i] or cell[i] > bounds.max[i] for i in range(3))
-
-def compute_trilinear_coeffs(voxels, origin, direction):
-    # Standard trilinear interpolation coefficient extraction
-    # Returns polynomial coefficients for rho(t) - iso = 0
-    pass  # Standard algebraic expansion
-
-def solve_cubic(a, b, c, d):
-    # Closed-form cubic solver returning real roots in [0, 1]
-    pass  # Standard Cardano's method or numerical root finder
-
-def compute_gradient_tricubic(pos):
-    # Evaluate tri-cubic filter derivatives at pos
-    pass  # Standard tri-cubic derivative evaluation
-
-def compute_hessian_tricubic(pos):
-    # Evaluate tri-cubic filter second derivatives at pos
-    pass  # Standard tri-cubic Hessian evaluation
+def evaluate_hessian_tricubic(volume_data, point):
+    """
+    Evaluates Hessian matrix using tri-cubic filtering.
+    """
+    # Tri-cubic filter second derivatives
+    # Return 3x3 matrix
+    pass
 
 def compute_curvature(grad, hess):
-    # Derive curvature measures from gradient and Hessian
-    pass  # Standard shape descriptor computation
+    """
+    Computes extrinsic curvature from gradient and Hessian.
+    """
+    # K = (n^T H n) / |grad| where n = grad/|grad|
+    pass
 
-def shade(hit_pos, normal, curvature):
-    # Blinn-Phong lighting
-    diffuse = max(dot(normal, light_dir), 0)
-    specular = pow(max(dot(reflect(-view_dir, normal), light_dir), 0), SHININESS)
-    # Curvature-based transfer function
-    color_map = curvature_transfer_function(curvature)
-    return diffuse * color_map + specular
+def apply_shading_model(point, normal, curvature, camera):
+    """
+    Applies Blinn-Phong, tone shading, or curvature transfer functions.
+    """
+    # Standard lighting
+    light_dir = normalize(vec3(0.5, 1.0, 0.5))
+    view_dir = normalize(camera.origin - point)
+    half_dir = normalize(light_dir + view_dir)
+    
+    diffuse = max(dot(normal, light_dir), 0.0)
+    specular = pow(max(dot(normal, half_dir), 0.0), 32.0)
+    
+    # Curvature-based coloring
+    curvature_color = map_curvature_to_color(curvature)
+    
+    base_color = mix(vec3(0.8), curvature_color, 0.5)
+    return base_color * (0.2 + 0.8 * diffuse) + vec3(1.0) * specular
 ```
 
-### Edge Cases and Pitfalls
-*   **Multiple Roots:** Trilinear interpolation results in a cubic polynomial which may have multiple roots or no roots. The algorithm must handle these cases by selecting the closest valid root (smallest $t$) or skipping the cell if no roots exist [S3, book].
-*   **Memory Limits:** If the volume does not fit in graphics memory, rays must be cast through a dynamic cache texture storing active bricks. The cache must be updated on-the-fly according to the current isovalue [S1].
-*   **Precision:** Iterative refinement is necessary to achieve high-quality intersections, as the initial analytic solution may have limited precision due to interpolation [S1].
+**Parameters:**
+*   **Isovalue ($\tau$):** The threshold for the isosurface. Dynamic updates may require cache refresh [S1].
+*   **Hierarchy Levels:** Trilevel hierarchy (1 top, 2 intermediate, data) is empirically determined to be efficient [S3, book].
+*   **Refinement Steps:** Constant number of steps (e.g., 3) for iterative refinement [S1].
+*   **Tile Size:** For dynamic load balancing, screen space can be split into tiles (e.g., 32x4 pixels) [S3, book].
+*   **Hardware Requirements:** Support for volumetric textures, render-to-texture, and looping in fragment programs (e.g., Shader Model 3.0) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Multiple Roots:** Trilinear interpolation results in a cubic polynomial which may have multiple roots or no roots. The algorithm must handle these cases by selecting the closest valid root or skipping the cell [S3, book].
+*   **Memory Limitations:** If the volume does not fit in graphics memory, a dynamic cache texture is required. Cache updates must be efficient [S1].
+*   **Precision:** Floating-point images are used for intersection positions, gradients, and Hessians to maintain precision for shading [S1].
 
 ## Operating characteristics
-*   **Complexity:** The ray-casting stage has object space complexity. All other computations (derivatives, shading) have image space complexity [S1].
-*   **Search Complexity:** The average complexity of search with a three-level hierarchy is $O(\sqrt{n})$. The worst-case complexity is $O(n)$ [S3, book].
-*   **Runtime:** Ray-tracing runtime is expected to be $O(n/p)$ where $n$ is volume dimension and $p$ is number of processors, compared to $O(n^2)$ for z-buffer rendering of marching cubes polygons [S3, book].
-*   **Storage Overhead:** The trilevel hierarchy storage overhead is negligible (< 0.5% of the data size) [S3, book].
-*   **Strengths:** Supports very large datasets; advanced shading (curvature, ridges/valleys) in real-time; no intermediate polygonal representation; correct compositing order for transparent isosurfaces [S1][S3, book].
-*   **Limitations:** Requires hardware support for volumetric textures, render-to-texture, and looping in fragment programs (e.g., Shader Model 3.0) [S1]. Performance depends on the efficiency of the hierarchical traversal [S3, book].
+*   **Time Complexity:** The ray-casting stage has object space complexity. All other computations (derivatives, shading) have image space complexity [S1]. The average complexity of search with a three-level hierarchy is $O(\sqrt{n})$, where $n$ is the volume dimension. Worst-case complexity is $O(n)$ [S3, book].
+*   **Memory Complexity:** Storage overhead for the trilevel hierarchy is negligible (< 0.5% of the data size) [S3, book]. Dynamic caching allows handling volumes larger than GPU memory [S1].
+*   **Performance:** Ray-tracing runtime is expected to be $O(n/p)$ where $n$ is volume dimension and $p$ is number of processors, compared to $O(n^2)$ for z-buffer rendering of marching cubes polygons [S3, book]. For sufficiently large $n$ (e.g., 500 to 1000) and realistic $p$ (e.g., 8 to 128), ray-tracing is faster than z-buffer algorithms [S3, book].
+*   **Strengths:** Interactive rendering of very large datasets. Advanced shading (curvature, ridge/valley) in real-time. No intermediate polygonal representation. Parallelizable (each ray is independent) [S3, book].
+*   **Limitations:** Worst-case complexity is $O(n)$. Requires GPU support for volumetric textures and render-to-texture. Dynamic cache management adds complexity [S1][S3, book].
+*   **When to Use:** When rendering very large isosurfaces interactively, or when advanced shading effects (curvature-based transfer functions) are required without the overhead of polygon generation [S1][S3, book].
+*   **When Not to Use:** When the volume is small and polygonal rendering is sufficient. When hardware does not support required features (volumetric textures, render-to-texture) [S1].
 
 ## Background
-This method was presented by Siggraph and Eurographics researchers in 2005 [S1]. It addresses the limitations of existing GPU isosurface rendering approaches, particularly the lack of advanced shading and texture memory usage [S1]. It builds on earlier work in GPU ray-casting [KW03] and curvature-based transfer functions [HKG00, KWTM03]. The technique is suitable for interactive visualization of very large datasets where traditional polygonal extraction (e.g., Marching Cubes) becomes too slow [S3, book].
+*   **Origin:** The method was presented by [S1] in "Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces" (2005). It addresses shortcomings in existing GPU isosurface rendering approaches, particularly the lack of advanced shading and texture memory usage [S1].
+*   **History:** Ray-tracing for isosurfaces has been used in the past, but this work applies it to very large datasets in an interactive setting for the first time [S3, book]. It builds on earlier work in GPU ray-casting [KW03] and advanced shading techniques [HKG00, KWTM03] [S1].
+*   **Usage:** Used in visualization of levelset computations, surface interrogation, and non-photorealistic rendering (ridge/valley lines) [S1].
 
 ## Sources
 [S1] Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26

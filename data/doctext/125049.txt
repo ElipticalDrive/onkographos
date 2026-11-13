@@ -1,0 +1,953 @@
+arXiv:2403.10427v2 [cs.CV] 5 Apr 2024
+SWAG: Splatting in the Wild images with
+Appearance-conditioned Gaussians
+Hiba Dahmani, Moussab Bennehar, Nathan Piasco, and Luis Roldão and
+Dzmitry Tsishkou
+Noah’s Ark, Huawei Paris Research Center, France
+Fig. 1: Given in-the-wild captures (a), our model enables transient objects removal (b)
+and scene reconstruction with variable appearances (c).
+Abstract. Implicit neural representation methods have shown impressive advancements in learning 3D scenes from unstructured in-the-wild
+photo collections but are still limited by the large computational cost of
+volumetric rendering. More recently, 3D Gaussian Splatting emerged as
+a much faster alternative with superior rendering quality and training
+efficiency, especially for small-scale and object-centric scenarios. Nevertheless, this technique suffers from poor performance on unstructured
+in-the-wild data. To tackle this, we extend over 3D Gaussian Splatting
+to handle unstructured image collections. We achieve this by modeling
+appearance to seize photometric variations in the rendered images. Additionally, we introduce a new mechanism to train transient Gaussians to
+handle the presence of scene occluders in an unsupervised manner. Experiments on diverse photo collection scenes and multi-pass acquisition
+of outdoor landmarks show the effectiveness of our method over prior
+works achieving state-of-the-art results with improved efficiency.
+Keywords: 3D Gaussian Splatting · Unconstrained Photo Collection ·
+Novel View Synthesis · Appearance Modeling · Real-time Rendering ·
+Transient Object Removal
+2
+H. Dahmani et al.
+1
+Introduction
+Novel View Synthesis (NVS) and 3D scene reconstruction are long-standing challenging tasks in the realms of computer vision and computer graphics. Over
+the past few years, Neural radiance Fields (NeRF) [15] have shown groundbreaking results in rendering photorealistic views from novel viewpoints using
+an implicit neural representation of the radiance field and density in a scene.
+Although NeRFs are very effective in static scenes, their performance significantly degrades in dynamic scenarios (i.e. containing moving transient objects)
+or in the presence of changing conditions such as weather, exposure, and lighting
+(i.e. in-the-wild datasets). To tackle these challenges, NeRF-W [14] proposed an
+extension to NeRF enabling the reconstruction of outdoor landmarks from inthe-wild images. They achieve this by learning the changing appearance of the
+images through per-image embeddings. Furthermore, to handle the presence of
+occluders, the scenes are decomposed into “static” and “transient” elements being modeled by separate radiance fields. These modifications improved NeRF’s
+performance when confronted with appearance changes and transient occluders.
+More recent works [3, 22] improve transient object handling by leveraging 2D
+visibility maps. Nonetheless, these methods still suffer from the inherent cost of
+volumetric rendering.
+Recently, 3D Gaussian Splatting (3DGS) [8] attracted considerable interest
+thanks to its explicit representation resulting in faster training and rendering by
+leveraging GPU-based rasterization. 3DGS achieves fast training and matches
+visual quality obtained by the current SOTA NeRF methods [16]. This work
+represents the scene as a large number of anisotropic 3D Gaussians with color
+features and opacities. The Gaussians’ set is then used in a differentiable splatting process to project the 3D Gaussians into a 2D image plane and blend them
+to get the rendered image. Similar to the original NeRF [15], 3DGS suffers from
+the same limitations regarding varying lighting conditions and the presence of
+occluders on some of the training images.
+In this work, we present SWAG, the first in-the-wild extension for 3DGS.
+To achieve this, we propose to expand the capabilities of 3DGS and improve
+its robustness in these scenarios. To this aim, we capture the appearance of
+each image using a learned embedding space that modulates the color of the
+Gaussians with a multilayer perceptron (MLP). Second, we learn an imagedependent opacity variation to each Gaussian that enables a better handling of
+transient objects and a finer scene reconstruction as illustrated in Figure 1.
+We conduct a variety of experiments on the Phototourism dataset [6] and
+NeRF-OSR [18] benchmark and show that not only do we improve 3DGS performance in these scenarios, but we also achieve state-of-the-art rendering quality with significantly faster training and rendering speed compared to previous
+works [3, 7, 14, 22]. To summarize, our main contributions are as follows:
+– we introduce a new method for reconstructing scenes from unconstrained
+photo collections with varying appearances,
+– we design a specific training scheme that captures occluders and enables
+transient object removal from a trained scene,
+SWAG
+3
+– we show that our method achieves SoTA performance in NVS in-the-wild
+scenarios,
+– we demonstrate the ability of SWAG to generate new images with smooth visual transitions from learned appearances and to remove in an unsupervised
+manner transient objects from a captured scene.
+2
+Related Work
+2.1
+Neural Rendering in-the-wild
+The abundance of in-the-wild unconstrained image data has encouraged adapting neural radiance fields to such cases. Early works like NeRF-W [14] have
+proposed a disentanglement between static and transient occluders using two
+appearance and transient per-image embeddings in addition to two radiance
+fields for each component of the scene (i.e. static and transient). Ha-NeRF [3] on
+the other hand uses a 2D image-dependent visibility map to eliminate occluders
+instead of using a decoupled radiance field since transient phenomena are only
+observed in individual 2D images. This simplification reduces the blurry artifacts
+that NeRF-W [14] suffered from in the attempt to reconstruct transient phenomena with a 3D transient field. Building upon previous methods, CR-NeRF [22]
+enhances their performance by exploiting the interaction information from multiple rays and fusing it into global information. Using a light-weight segmentation
+network, this method learns a visibility map without the supervision of ground
+truth segmentation masks to eliminate transient parts in 2D images. Another
+recent work, RefinedFields [7], leverages K-Planes and generative priors for inthe-wild scenarios. The learning is done through the alternation of two stages: a
+scene fitting to optimize the K-Planes [4] representation and a scene enriching
+phase that finetunes a pre-trained generative prior and infers a new K-Planes
+representation. As presented, Implicit-field representations have found diverse
+adaptations for in-the-wild scenarios. However, their time-consuming training
+and inference pose a challenge to achieving real-time rendering. This constrains
+their application in practical scenarios where fast rendering speed is crucial,
+especially in diverse interactive 3D applications.
+2.2
+Point-Based Rendering
+Although NeRF demonstrated exceptional capabilities in generating photorealistic images, the demand for faster and more efficient rendering methods became increasingly evident. Point-based rendering has emerged as a prominent
+approach in computer graphics. It mainly revolves around the representation and
+rendering of the scene using discrete primitives. Starting from the most elementary form, Point Sample Rendering [5] authors proposed to sample a fixed-size
+formless set of points from a surface. Despite the developed strategies to adequately sample objects or surfaces, point sample rendering still suffers from
+holes and discontinuity. To overcome the issue of 3D points sparsity, the following works used different geometric primitives like discs [2] and surfels [24] that
+4
+H. Dahmani et al.
+have a larger extent compared to pixels. Differentiable point-based rendering
+is the groundwork of these methods since it enables end-to-end training of 3D
+primitives from images. Pulsar [10] introduced an efficient sphere-based differentiable renderer where the scene is represented by a set of spheres with learned
+positions, feature vectors, opacities, and radii. These parameters are optimized
+to minimize the photometric reconstruction loss using an efficient differentiable
+rendering. The rasterization is done using either a convolutional U-Net or a
+per-pixel one-by-one convolutional network applied to a 2D screen space feature
+map. The feature map is a blending function that combines each sphere channel information using weighting based on position, radius, and opacity. Recently
+3DGS [8] used 3D Gaussians as primitives and introduced a fully differentiable
+fast tile-based rasterizer for Gaussian splats allowing real-time rendering while
+outperforming state-of-the-art visual quality. Despite the demonstrated capability of 3DGS, there is still room for refining this method to enhance the quality of
+rendered images. One observed issue with 3DGS [8] is the appearance of strong
+artifacts when changing the sampling rate. Additionally, the rendering quality
+declines significantly in low resolutions or far away from camera positions due to
+the aliasing caused by the pixel size compared to the screen size and the Nyquist
+frequency.
+2.3
+3DGS Rendering Improvement
+To solve the aforementioned rendering issue, a multi-scale adaptation of 3DGS [21]
+has been introduced. This work explains the aliasing phenomena by the splitting
+of large amounts of Gaussians with a smaller extent than pixels in 3D regions
+featuring high-frequency details. To render at a certain scale, authors filter out
+too large or too small Gaussians. Additionally, small Gaussians are aggregated to
+form larger ones selected on bigger scales during training to prevent missing areas
+and low-frequency details. Motivated by Mip-NeRF’s [1] rendering quality, MipSplatting [23] replaces the 2D dilation filter introduced in Surface splatting [24]
+using 2D Mip filters that replicate box filters to solve the aliasing issue and uses
+3D smoothing filters with a maximal sampling rate obtained from training images. One other issue with 3DGS is its performance deterioration in scenes that
+may present variation in appearance. VastGaussian [12] introduced a decoupled
+appearance modeling using a pixel-wise appearance embedding and a CNN to
+predict a pixel-wise transformation for the rendered images. Hence these predicted transformations (multiplication, addition, and Gamma correction) work
+well for large scenes but they are insufficient to model more varying appearances
+that appear in-the-wild scenarios. Our work aims to extend in-the-wild 3DGS
+scene representation beyond closed-world setups.
+3
+Background
+The scene in 3DGS [8] is represented by a set of 3D anisotropic Gaussians. Each
+Gaussian is parameterized by its centroid x ∈ R3 , scale S ∈ R3 , rotation matrix
+SWAG
+5
+R ∈ R3×3 , opacity α ∈ R and color c ∈ R3 encoded in spherical harmonic (SH)
+coefficients. The 3D covariance matrix Σ of the 3D Gaussian is obtained using
+its rotation matrix R and scale S:
+\mathbf {\Sigma } = \mathbf {R}\mathbf {S}\mathbf {S}^T\mathbf {R}^T. \label {eq:covariance}
+(1)
+The 3D Gaussians are defined in world space following:
+\mathbf {G}(\mathbf {y}) = e^{-\frac {1}{2}(\mathbf {y-x})^T\mathbf {\Sigma }^{-1}(\mathbf {y-x})}. \label {eq:worldspaceG}
+(2)
+Given J, the Jacobian of the affine projective transformation and W, a viewing
+transformation, the covariance matrix Σ′ in camera coordinates is as follows:
+\mathbf {\Sigma '}= \mathbf {J}\mathbf {W}\mathbf {\Sigma } \mathbf {W}^T\mathbf {J}^T. \label {eq:cameraCov}
+(3)
+These 3D Gaussians are projected to 2D splats and blended during a fast differentiable α-blending process to get 2D rendered images. Each pixel y color value
+C is calculated using N-ordered 2D splats using the formula:
+\mathbf {C}=\sum _{i \in \mathbf {N}} \mathbf {\alpha }_i' \mathbf {c}_i \prod _{j=1}^{i-1}(1-\mathbf {\alpha }_j'), \; \; \; \; \label {eq:alphablend}
+(4)
+αi′ is the final opacity of the Gaussian obtained by:
+\mathbf {\alpha }_i'= \mathbf {\alpha }_i * e^{-\frac {1}{2}(\mathbf {y'}-\mathbf {x'})^T\mathbf {\Sigma '}^{-1}(\mathbf {y'}-\mathbf {x'})}. \; \; \label {eq:opa}
+′
+(5)
+′
+where x and y are coordinates in the projected space.
+Although 3D Gaussians can be arbitrarily initialized, a good prior is often
+required for optimal results. Typically, the 3D Gaussians centers are initialized
+using the sparse Structure from Motion (SfM) point cloud obtained from the set
+of images. To avoid leaving huge holes in the scene, their corresponding covariances are initialized to have isotropic Gaussians with initial radii equal to the
+mean distance to neighboring points. During training, the 3D Gaussian features
+are optimized such that the photometric difference between the rendered image
+Ir and the ground truth one Igt is minimized with intervening controlling steps.
+To control the Gaussians’ density and to address under- and over-distribution
+issues, authors use an adaptive densification step where Gaussians with large
+spatial gradients are split while transparent Gaussians that have very low opacity are pruned.
+Although 3DGS [8] works well on object-centric and small scenes, it struggles
+with scenes presenting varying appearances and transient objects.
+4
+Method
+In this section, we introduce SWAG, a novel 3DGS-based method for 3D scene
+reconstruction from in-the-wild photo collections. We propose to adapt the 3D
+6
+H. Dahmani et al.
+Fig. 2: SWAG model architecture – In addition to the typical Gaussians’ features,
+we also optimize a Hash Grid encoding their centers emb(x), a per-image embedding vector lI and an MLP. This MLP takes as inputs the Gaussians’ colors c, the
+associated image embedding lI , and their encoded centers emb(x) and outputs an
+image-dependent color cI as well as an image-dependent opacity variation parameter
+∆αI . This parameter is set as the location variable of a concrete distribution which
+we sample to get the opacity variation ∆α̃I . Leveraging this opacity variation across
+diverse training images enables identifying and excluding transient Gaussians within
+the scene, as demonstrated by the grey Gaussians.
+Gaussians parameters to handle variable visual appearances and the presence of
+occluders typically found in such unconstrained image collections.
+In Section 4.1, we explain how SWAG handles appearance variations using
+image-dependent embeddings injected into the Gaussian’s colors. In Section 4.2,
+we explain how our proposal handles transient occluders by learning imagedependent Gaussians’ opacities variations. Since our model’s knowledge about
+the presence of occluders is embedded in the Gaussians opacities variation, it
+easily enables a clear disentanglement between static and transient elements of
+the scene. The overall architecture of our method is illustrated in Figure 2.
+4.1
+Appearance Variation Modeling
+To adapt 3DGS to photometric variations, we associate, similarly to previous
+methods [14, 19], a trainable embedding vector lI for each image. To inject the
+appearance information, one naive solution would be to calculate a global transformation per image to the 3D Gaussian colors or SH features. This strategy,
+however, might be insufficient since it cannot model photometric features at the
+local level in an image. To model local appearance variances in an image, one
+possible way would be to predict a local transformation or directly a specific color
+for each Gaussian on a per-image basis. However, such solution is intractable as
+the number of training parameters will grow according to the number of Gaussians times the number of images.
+In SWAG, we propose a more effective solution where we use an MLP that
+takes as input a concatenation of the image embeddings and a positional encoding of the Gaussians’ centers. By using a positional encoding conditioned on the
+SWAG
+7
+center of the Gaussians, we are able to model local appearance variations that
+occur in the image while maintaining a tractable number of parameters to optimize. Initially, we considered estimating an affine color transformation similar to
+Urban Radiance Fields [17] to be applied to each Gaussian color. However, our
+initial results showed that affine color transformations cannot model all appearance changes. To solve this problem, we directly predict the Gaussian color from
+the MLP. We noticed that spatial embeddings coupled with an MLP produce a
+smoothing effect on the predicted colors. Hence, to render view-dependent specularities and high-frequency details and counterbalance this smoothing effect,
+we also add the Gaussian color obtained from the SH coefficients as input to
+the MLP.
+Our final solution employs an MLP Fθ that, for a given view, takes as input
+the color of the 3D Gaussian c, the embedding vector of its center emb(x) and
+the image embedding lI , and outputs the image-conditioned color cI . Accordingly, for a 3D Gaussian, the image-dependent color cI is computed as follows:
+\mathbf {c^{I}}=\mathcal {F}_{\mathbf {\theta }}(\mathbf {c},\mathbf {emb(x)}, l_I). \label {eq:colorMLP}
+4.2
+(6)
+Transient Gaussians Modeling
+To address the challenge of handling transient objects, we introduce a learnable image-dependent opacity variation term ∆α̃I to each Gaussian. On the one
+hand, this opacity variation parameter allows Gaussians to reconstruct occluders
+present in some images. On the other hand, it enables those same Gaussians to
+be transparent (i.e. not involved in the image rendering process in other images)
+where these occluders are absent. During training, we want to encourage this
+variation parameter to either fully mask (i.e. in the case of occluders) or fully
+maintain (i.e. in the case of the static background) the 3D Gaussians’ opacities.
+For this purpose, we sample ∆α̃I using a Binary Concrete random variable [13].
+This distribution is a continuous approximation of a Bernoulli distribution concentrating most of the mass on the boundaries of the interval [0, 1]. We return
+an additional output, ∆αI , of the previously introduced MLP Fθ as the location
+parameter to the concrete function:
+(\mathbf {c^{I}},\Delta \mathbf {{\alpha }^{I}})=\mathcal {F}_{\mathbf {\theta }}(\mathbf {c},\mathbf {emb(x)},l_I), \label {eq:fullMLPoutput}
+(7)
+\Delta \mathbf {\Tilde {\alpha }^{I}}=\text {sigmoid} \left [ \frac {1}{\mathbf {T}} \left ( log \left ( | \Delta \mathbf {{\alpha }^{I}}| \right ) +log(\mathbf {U})-log(1-\mathbf {U}) \right ) \right ], \label {eq:concreteFunction}
+(8)
+\mathbf {U} \sim \text {Uniform}(0,1), \label {eq:uniform}
+(9)
+where T is the temperature hyper-parameter. We do not use any annealing on the
+temperature parameter, rather we set T = 0.1 to force from the very beginning
+of the training the opacity variation to match a binary distribution. During the
+evaluation, we fix U at 0.5. The final image-dependent 3D Gaussian opacity is
+formulated as:
+\mathbf {{\alpha }^I} =\max \left ( \mathbf {{\alpha }} - \Delta \mathbf {\Tilde {\alpha }^{I}}, 0 \right ). \label {eq:finalOpacity}
+(10)
+H. Dahmani et al.
+0.0001
+1%
+10%
+100%
+8
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+Fig. 3: Variance histogram analysis of the Gaussians’ opacity variation ∆α̃I w.r.t
+training images for a dynamic (i.e. containing transient objects) scene (top, Trevi
+Fountain from Phototourism [6]); and a static scene (bottom, Locomotive from
+Tanks&Temples[9]). The left column views are rendered using only static Gaussians
+(i.e having Var ∆α̃I = 0) whereas right column views are rendered using all Gaussians.
+With our formulation of the opacity, we can naturally disentangle between
+the transient and the static parts of the scene by defining transient Gaussians
+I
+as the ones having non-zero
+ I  variance of their associated parameter ∆α̃
+ Iover
+
+training images: Var ∆α̃ ̸= 0. Figure 3 shows the histogram of Var ∆α̃ on
+two scenes: one without transient content (Locomotive) and one with occluders
+(Trevi ). We also show two rendered images of each scene: the right image using
+all the Gaussians and the left one using only Gaussians not detected as transient.
+The histogram shows that for a static scene, we detected less than 4% of
+ the
+Gaussians as transient and around 96% of the Gaussians having Var ∆α̃I = 0.
+Removing the 4% of transient Gaussians does not affect the rendered image
+quality. For the Trevi Fountain scene, our model was able to represent transient
+objects using less than 20% of the Gaussians and to maintain the majority of the
+Gaussians to reconstruct static parts of the scene. Comparing the two rendered
+images shows that the transient Gaussians correspond to the mass of tourists
+present near the fountain and removing the transient Gaussians guaranteed an
+occluders-free rendering.
+5
+Experiments
+5.1
+Implementation details
+Similarly to 3DGS, we minimize the L1 loss combined with D-SSIM term to
+optimize the 3D Gaussians parameters alongside with the MLP Fθ weights, the
+Hash Encoder parameters and the per-image embedding vectors. We fix the size
+of the latent embedding vectors to n = 24. For the Hash encoding parameters,
+we set the hash table size T = 219 , the finest resolution Nmax = 2048, the
+number of levels L = 12 and the coarsest resolution Nmin = 16. The MLP we
+SWAG
+9
+Table 1: Quantitative results – Results on three real-world scenes from Phototourism [6] and efficiency comparison among SoTA methods for NVS in-the-wild. Given
+the significant gap between previous baselines [3,7,14,22] and 3DGS [8], we marginalize
+on the different GPU configurations.
+Bradenburg Gate
+Sacre Coeur
+Trevi Fountain
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+NeRF [15]
+NeRF-W [14]
+Ha-NeRF [3]
+CR-NeRF [22]
+RefinedFields [7]
+3DGS [8]
+SWAG (ours)
+†
+Mean Efficiency
+Train time (h) FPS
+18.90
+24.17
+24.04
+26.53
+26.64
+19.99
+0.815
+0.890
+0.877
+0.900
+0.886
+0.889
+0.231
+0.167
+0.139
+0.106
+0.180
+15.60
+19.20
+20.02
+22.07
+22.26
+17.57
+0.715
+0.807
+0.801
+0.823
+0.817
+0.831
+0.291
+0.191
+0.171
+0.152
+0.219
+16.14
+18.97
+20.18
+21.48
+23.42
+18.47
+0.600
+0.698
+0.690
+0.711
+0.737
+0.761
+0.366
+0.265
+0.222
+0.206
+0.234
+400†
+452†
+420†
+150†
+0.50∗
+<1†
+0.20†
+0.25†
+<1†
+181∗
+26.33
+0.929
+0.139
+21.16
+0.860
+0.185
+23.10
+0.815
+0.208
+0.83∗
+15.29∗
+Results reported on [7]. ∗ Results computed using a high-tier GPU.
+Table 2: Quantitative results – Results on five sites from NeRF-OSR [18] outdoor
+scenes benchmark.
+stjohann
+lwp
+st
+europa
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+NeRF [15]
+NeRF-W [14]
+Ha-NeRF [3]
+NeRF-MS [11]
+3DGS [8]
+14.89
+21.23
+17.19
+22.84
+16.77
+0.432
+0.667
+0.686
+0.793
+0.741
+0.639
+0.426
+0.331
+0.235
+0.268
+11.51
+19.61
+20.03
+21.90
+11.76
+0.468
+0.616
+0.685
+0.719
+0.609
+0.574
+0.445
+0.365
+0.336
+0.414
+17.20
+20.31
+17.30
+20.68
+17.16
+0.514
+0.607
+0.538
+0.630
+0.629
+0.502
+0.438
+0.483
+0.402
+0.406
+17.49
+20.00
+17.79
+21.03
+20.18
+0.551
+0.699
+0.632
+0.721
+0.782
+0.503
+0.340
+0.421
+0.294
+0.252
+SWAG (ours)
+23.91
+0.864
+0.172
+22.07
+0.783
+0.303
+22.29
+0.713
+0.364
+23.74
+0.845
+0.242
+(a) Reported on NeRF-MS split [11]
+lk2
+st
+lwp
+PSNR ↑ SSIM ↑ PSNR ↑ SSIM ↑ PSNR ↑ SSIM ↑
+NeRF-OSR [18] 19.86
+15.91
+3DGS [8]
+0.626
+0.687
+15.83
+12.53
+0.556
+0.585
+17.38
+13.72
+0.576
+0.659
+SWAG (ours)
+0.756
+18.73
+0.721
+18.61
+0.753
+19.59
+(b) Reported on original benchmark split from NeRF-OSR [18]
+employ has 3 layers of 64 hidden units. See the supplement for additional details
+on hyperparameters.
+5.2
+Datasets
+Similar to SoTA in-the-wild reconstruction methods, we evaluate SWAG’s NVS
+capabilities using the Phototourism dataset [6] and report our results on three
+main touristic monuments: Brandenburg Gate, Sacre Coeur, and Trevi Fountain. We also evaluate our method on the benchmark introduced in NeRFOSR [18] for outdoor scene relighting tasks. We report our performance using NeRF-MS’s [11] data split on 4 sites: stjohann (St. Johann, Saarbrücken),
+lwp (Landwehrplatz, Saarbrücken), st (Staatstheater, Saarbrücken), and europa
+(Galerie Europa, Saarbrücken) and the original NeRF-OSR [18]’s data split on
+3 sites: stjohann, lwp and lk2 (Ludwigskirche, Saarbrücken). More details about
+the datasets can be found in supplementary materials.
+10
+5.3
+H. Dahmani et al.
+Evaluation
+We provide visual comparisons with rendered images and report quantitative
+results based on common rendering metrics from the literature: Peak Signal-toNoise Ratio (PSNR), Structural Similarity Index Measure (SSIM), and Learned
+Perceptual Image Patch Similarity (LPIPS). Since only the embeddings associated with the training images are optimized during training, we follow NeRFW’s [14] evaluation approach: we optimize an embedding on the left half of each
+test image and report metrics on the right half.
+5.4
+Results
+Table 1 shows quantitative results on three Phototourism scenes. Unsurprisingly,
+optimizing 3DGS on in-the-wild photo collections showed poor results due to the
+lack of image appearance dependency. The 3D Gaussians colors converge to a
+mean color which makes the method unable to model visual changes caused by
+weather, lightning conditions and different camera specifications. The presence
+of transient objects also resulted in the persistence of artifacts. SWAG improves
+3DGS performance and outperforms the baselines on SSIM across all datasets.
+In particular, our proposal improves 3DGS’s PSNR by an average margin of
+5.01 dB. SWAG outperforms NeRF-W across all datasets in terms of LPIPS,
+PSNR, and SSIM and shows competitive performance with CR-NeRF and RefinedFields despite the priors these two methods use and requiring significantly
+longer times to train.
+Table 2 shows quantitative results on NeRF-OSR [18] benchmark. SWAG improves 3DGS performance by an average PSNR margin of 5 dB and outperformed
+all the other baselines regardless of the train/test split choices.
+Figure 4 and Figure 5 show qualitative results of 3DGS and SWAG on Phototourism scenes and four of NeRF-OSR sites. In some parts of the scene, 3DGS
+presents artifacts and floaters either in under-observed part of the scene or in
+areas occluded by transient objects. Adding to that, the rendered color is shifted
+from the ground truth color as shown in Figure 4. SWAG produces visual appearances close to the ground truth thanks to our per-image conditioning. Compared
+to previous implicit methods [3,7,14,22], our proposal achieves one order of magnitude faster training and guarantees real-time rendering as shown in Table 1.
+5.5
+Controllable appearance
+Modeling the image appearance with an embedding vector enabled us to learn
+a latent space that we can utilize to change the lighting and appearance of any
+viewpoint at inference time. On top of the training image embeddings shown
+in Figure 6, we can sample vectors from the appearance space using interpolation
+between the learned embeddings. These interpolations are smooth and natural
+as shown in Figure 7. We encourage the readers to explore the supplementary
+videos and appreciate more the naturalness of these interpolations.
+11
+Trevi Fountain
+Sacre Coeur
+Brandenburg Gate
+SWAG
+Ground-truth
+3DGS [8]
+SWAG (ours)
+Fig. 4: Qualitative experimental results on three real-world scenes from Phototourism [6].
+5.6
+Transient Objects Removal
+As explained in Section 4.2, our method is able to localize 3D Gaussians that
+represent transient objects and, consequently, is able to manipulate the scenes
+omitting these objects. It should be noted that SWAG is thoughtfully designed
+to model transient objects without allowing the Gaussians to vary their opacity
+to compensate for appearance variation. Indeed, according to our experiments,
+it was observed that less than 20% (average on trained scenes) of the Gaussians
+capture transient objects. Consequently, SWAG achieves a better reconstruction
+of the static scene parts without having blurry elongated Gaussians that arise
+in view-dependent appearances with 3DGS. The capabilities of our model of
+disentangling static and dynamic Gaussians are clearly highlighted in Figure 5.
+H. Dahmani et al.
+NeRF-OSR Dataset [18]
+Phototourism Dataset [6]
+12
+Ground-truth
+SWAG
+SWAG Static
+SWAG Transient
+Fig. 5: Qualitative experimental results on three real-world scenes from Phototourism [6] and four NeRF-OSR [18] scenes. We demonstrate the capability of SWAG
+to disentangle between static and transient parts of the scene.
+5.7
+Ablations
+In this section, we compare two variants of our method to analyze the contribution of each component of SWAG:
+– SWAG-A, a variation wherein the transient detection part of our model is
+removed,
+– SWAG-T, a variation wherein the image appearance color dependency is
+omitted.
+SWAG
+13
+Fig. 6: Appearance transfer – SWAG is able to render a scene at any viewpoint
+with the visual appearance of any training image thanks to the learned appearance
+embeddings.
+Fig. 7: Appearance interpolation – Interpolations between the appearance embeddings of two training images (left, right).
+We compare the results of our model variation on Phototourism scenes and
+we report the results in Table 3. SWAG-A enabled appearance modeling and
+closer colors to ground truth compared to 3DGS where colors shift away and
+converge to an average color for all training images. Transient objects’ presence
+still causes floaters in the scene alike 3DGS as shown in Figure 8. In contrast,
+SWAG-T enables the elimination of these floaters and produces an occluders-free
+scene while suffering from color alterations compared to ground truth like 3DGS.
+Combining these two variations enables SWAG to model varying appearances
+with the ability to reduce scene floaters.
+Ground-truth
+3DGS
+SWAG-A
+SWAG-T
+SWAG
+Fig. 8: Ablation study – Visual comparison of 3DGS, SWAG, and the two variants
+used in our ablation study: SWAG-T (no appearance) and SWAG-A (no transient).
+14
+H. Dahmani et al.
+Table 3: Quantitative results – Results of two ablations of SWAG : SWAG-A and
+SWAG-T on three real-world scenes from Phototourism [6].
+Bradenburg Gate
+Sacre Coeur
+Trevi Fountain
+PSNR ↑ SSIM↑ LPIPS ↓ PSNR ↑ SSIM↑ LPIPS ↓ PSNR ↑ SSIM↑ LPIPS ↓
+SWAG
+26.33
+SWAG-A 26.44
+SWAG-T 24.46
+5.8
+0.929
+0.928
+0.914
+0.139
+0.141
+0.160
+21.16
+21.02
+19.06
+0.860
+0.855
+0.836
+0.185
+0.183
+0.205
+23.10
+22.35
+20.13
+0.815
+0.801
+0.769
+0.208
+0.223
+0.244
+Discussion
+SWAG leverages an MLP, a hash grid encoder, and image embedding to adapt
+3DGS to in-the-wild scenarios. While this empowered 3DGS’s reconstruction
+capabilities in these conditions as it was demonstrated in our experiments, it almost doubles the training time and has 10 times longer inference time per frame
+as shown Table 1 compared to 3DGS. Nonetheless, our method still requires significantly less training time than all previous in-the-wild baselines and achieves
+real-time rendering.
+Although SWAG succeeded in removing occluders using transient Gaussians,
+some parts of the scene where transient objects’ presence is more frequent (eg.
+clouds in the sky and tourists on the roads) can suffer from being detected as
+transient. Eliminating all the transient Gaussians can leave some holes in these
+parts of the scene as seen in Figure 5 for the Trevi Fountain scene where some
+parts of the fountain contain black spots. One way to solve this is to remove
+Gaussians based on an adaptive threshold
+
+λ rather than considering as static
+only Gaussian with zero variance: Var ∆α̃I < λ, but it requires manual tuning
+of this threshold λ.
+6
+Conclusion
+In this paper, we presented SWAG, a method designed for tailoring 3DGS representations to in-the-wild scenarios. SWAG incorporates appearance modeling in
+the Gaussians’ colors and employs an adaptive opacity modulation to handle the
+presence of transient objects. Extensive experiments demonstrate that SWAG
+achieves state-of-the-art results on two challenging benchmarks while exhibiting
+training times orders of magnitude faster than in-the-wild NVS baselines while
+enabling real-time rendering. As a first step in conditioning 3DGS for in-the-wild
+scene representations, this work suggests potential future research direction, such
+as extending SWAG to dynamic scenes.
+References
+1. Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., Srinivasan, P.P.: Mip-nerf: A multiscale representation for anti-aliasing neural radiance
+fields. ICCV (2021) 4
+SWAG
+15
+2. Botsch, M., Hornung, A., Zwicker, M., Kobbelt, L.: High-quality surface splatting
+on today’s gpus. In: Proceedings Eurographics/IEEE VGTC Symposium PointBased Graphics (2005) 3
+3. Chen, X., Zhang, Q., Li, X., Chen, Y., Feng, Y., Wang, X., Wang, J.: Hallucinated
+neural radiance fields in the wild. In: CVPR. pp. 12943–12952 (2022) 2, 3, 9, 10,
+18
+4. Fridovich-Keil, S., Meanti, G., Warburg, F.R., Recht, B., Kanazawa, A.: K-planes:
+Explicit radiance fields in space, time, and appearance. In: CVPR (2023) 3
+5. Grossman, J., Sc, H., Dally, W.: Point sample rendering (1999) 3
+6. Jin, Y., Mishkin, D., Mishchuk, A., Matas, J., Fua, P., Yi, K.M., Trulls, E.: Image
+matching across wide baselines: From paper to practice. International Journal of
+Computer Vision p. 517–547 (2020) 2, 8, 9, 11, 12, 14, 16
+7. Kassab, K., Schnepf, A., Franceschi, J.Y., Caraffa, L., Mary, J., Gouet-Brunet, V.:
+Refinedfields: Radiance fields refinement for unconstrained scenes (2024) 2, 3, 9,
+10
+8. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics (2023) 2, 4, 5,
+9, 11, 18, 19
+9. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples. ACM Transactions on Graphics pp. 1–13 (2017) 8
+10. Lassner, C.: Fast differentiable raycasting for neural rendering using sphere-based
+representations. CoRR (2020) 4
+11. Li, P., Wang, S., Yang, C., Liu, B., Qiu, W., Wang, H.: Nerf-ms: Neural radiance
+fields with multi-sequence. In: ICCV. pp. 18591–18600 (2023) 9, 17
+12. Lin, J., Li, Z., Tang, X., Liu, J., Liu, S., Liu, J., Lu, Y., Wu, X., Xu, S., Yan, Y.,
+Yang, W.: Vastgaussian: Vast 3d gaussians for large scene reconstruction (2024) 4
+13. Maddison, C.J., Mnih, A., Teh, Y.W.: The concrete distribution: A continuous
+relaxation of discrete random variables. In: International Conference on Learning
+Representations (2017) 7
+14. Martin-Brualla, R., Radwan, N., Sajjadi, M.S.M., Barron, J.T., Dosovitskiy, A.,
+Duckworth, D.: NeRF in the Wild: Neural Radiance Fields for Unconstrained
+Photo Collections. In: CVPR (2021) 2, 3, 6, 9, 10, 17
+15. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In: ECCV
+(2020) 2, 9, 17
+16. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. CoRR (2022) 2
+17. Rematas, K., Liu, A., Srinivasan, P.P., Barron, J.T., Tagliasacchi, A., Funkhouser,
+T., Ferrari, V.: Urban radiance fields. CVPR (2022) 7
+18. Rudnev, V., Elgharib, M., Smith, W., Liu, L., Golyanik, V., Theobalt, C.: Nerf for
+outdoor scene relighting. In: ECCV (2022) 2, 9, 10, 12, 17
+19. Turki, H., Ramanan, D., Satyanarayanan, M.: Mega-nerf: Scalable construction of
+large-scale nerfs for virtual fly-throughs. In: CVPR. pp. 12922–12931 (2022) 6
+20. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.N., Kaiser,
+L., Polosukhin, I.: Attention is all you need. CoRR 18
+21. Yan, Z., Low, W.F., Chen, Y., Lee, G.H.: Multi-scale 3d gaussian splatting for
+anti-aliased rendering (2023) 4
+22. Yang, Y., Zhang, S., Huang, Z., Zhang, Y., Tan, M.: Cross-ray neural radiance fields
+for novel-view synthesis from unconstrained image collections. In: ICCV (2023) 2,
+3, 9, 10
+16
+H. Dahmani et al.
+23. Yu, Z., Chen, A., Huang, B., Sattler, T., Geiger, A.: Mip-splatting: Alias-free 3d
+gaussian splatting (2023) 4
+24. Zwicker, M., Pfister, H., van Baar, J., Gross, M.: Surface splatting. In: Proceedings
+of the 28th Annual Conference on Computer Graphics and Interactive Techniques.
+p. 371–378 (2001) 3, 4
+In this supplementary material, we provide additional details about our hyperparameters in (Section 7), and the datasets we used to evaluate our model
+(Section 8). We also provide an ablation study of our appearance modeling (Section 9) and an analysis of the 3D Gaussians distribution (Section 10).
+7
+SWAG’s Training hyperparameters
+A summary of the hyperparameters used during the training of our model for
+both synthetic and in-the-wild scenes is provided in Table 4. We adjust these
+parameters across all scenes rather than on a per-scene basis. However, we believe
+that a per-scene tuning of these parameters can potentially improve the results
+of our model.
+Table 4: Hyperparameters – Detailed description of parameters used in SWAG.
+Hyperparameter
+Iterations
+3DGS Optimisation Densification interval
+Densification end
+Image embeddings
+latent vector dimension
+Learning rate
+Value
+60000
+2000
+30000
+24
+0.0025
+Hash table size T
+219
+Finest resolution Nmax
+2048
+HashGrid Encoding Coarsest resolution Nmin 16
+Number of levels L
+12
+Learning rate
+0.0025
+MLP Fθ
+Number of layer
+Input dimension
+Hidden layers size
+Output dimension
+Learning rate
+8
+Datasets
+8.1
+Phototourism Dataset [6]
+3
+51
+64
+4
+0.0025
+This dataset comprises numerous images of touristic landmarks obtained from
+the internet. These images have visual challenges for reconstruction algorithms
+SWAG
+17
+such as illumination variation and transient occluders. We initialize the 3D Gaussians using the initial set of sparse points from SfM. We evaluate SWAG on three
+specific scenes: Brandenburg Gate (950 images), Sacré Cœur (859 images), and
+Trevi Fountain (1407 images). These landmarks are chosen due to their popularity and availability of a large number of internet images. Testing is performed
+on a standard set that is free of transient occluders.
+8.2
+NeRF-OSR Dataset [18]
+Table 5: NeRF-OSR [18] Dataset train/test split.
+Site Train Test
+lk2 160
+st
+301
+lwp 258
+95
+96
+96
+This dataset contains eight sites, each captured from various viewpoints using
+a DSLR camera. In total, there are 3240 viewpoints captured across 110 different
+recording sessions. These sessions took place at different times of the day covering
+different weather conditions including sunny and cloudy days. Train/Test splits
+are detailed in Table 5.
+Table 6: NeRF-MS [11] Dataset train/test split.
+Site
+stjohann
+lwp
+st
+europa
+Train Test
+63
+58
+59
+51
+9
+9
+9
+8
+Following NeRF-MS [11], we also evaluate SWAG on three sequences chosen
+for each of the four scenes which are captured under different lighting conditions.
+From each selected sequence, the first frame of every 8th frame is selected as part
+of the testing set. Similarly, we use semantic segmentation to eliminate transient
+occlusions, which suggests a focus on evaluating the model’s ability to handle
+static components. The train/test splits used for the evaluation are reported in
+Table 6.
+8.3
+Lego Dataset
+Similarly to NeRF-W [14], we evaluate our model on two variants of the Lego
+dataset [15]: one with color perturbations and another one with artificial oc-
+18
+H. Dahmani et al.
+Table 7: Quantitative results – Synthetic Lego Dataset.
+Original
+Color Perturbation
+Occlusion
+Color & Occlusion
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+NeRF-W [8]
+32.89
+0.989
+0.019
+31.51
+0.987
+0.022
+25.03
+0.946
+0.063
+22.19
+0.927
+0.087
+Ha-NeRF [3]
+–
+–
+–
+29.60
+0.937
+0.294
+30.93
+0.949
+0.023
+28.41
+0.934
+0.036
+32.34
+0.972
+0.042
+16.47
+0.553
+0.267
+26.18
+0.943
+0.076
+15.18
+0.532
+0.359
+SWAG(ours) 31.34
+0.960
+0.058
+26.54
+0.951
+0.061
+30.02
+0.952
+0.065
+29.22
+0.945
+0.072
+3DGS [8]
+Table 8: Ablation on SWAG appearance modeling effectiveness
+Bradenburg Gate
+Trevi Fountain
+PSNR ↑ SSIM↑ LPIPS ↓ PSNR ↑ SSIM↑ LPIPS ↓
+Affine color transformation 18.34
+0.777
+0.313
+19.01
+0.761
+0.246
+Fourier series for pos. emb. 18.66
+0.763
+0.347
+19.91
+0.741
+0.305
+26.33 0.929
+0.139
+23.10 0.815
+0.208
+SWAG
+cluders added on images. Table 7 shows a quantitative comparison of various
+baselines. As shown with in-the-wild scenes, the presence of appearance variations and occluders in the training images affects 3DGS effectiveness. Using
+SWAG, we improved 3DGS performance for these introduced color and occluder
+perturbations. We also have competitive results with the previous baselines over
+the three perturbations and outperform these baselines when combining color
+perturbations and occlusions.
+9
+Ablation study on appearance modeling
+In this section, we study the effectiveness of our appearance modeling choices.
+We compare our proposal to these two variants:
+1. An image-dependent affine color transformation for the Gaussian
+colors: we first employed an MLP to predict an affine color transformation
+(shift + scale) to each Gaussian.
+2. 3D Gaussians centers encoding: fixed sine/cosine positional encoding [20].
+We present quantitative evaluation of these two approaches in Tab. 8. Although
+affine color transformations enabled injecting more appearance variance to 3DGS
+renderings (exposure,..), this transformation cannot model all possible appearances in in-the-wild scenarios. Using a learned hash encoding (SWAG) for the
+3D Gaussians centers enables a better appearance modeling compared to the
+fixed sine/cosine positional encodings as shown in (d) and (e) in Fig. 9.
+10
+3D Gaussians distribution analysis
+To model transient objects, we introduce an opacity variation that enables the
+separation of the final scene Gaussians into static and transient ones, and dis-
+SWAG
+(a)
+(b)
+(d)
+19
+(c)
+(e)
+Fig. 9: (a) Ground-Truth (b) 3DGS [8] (c) Affine color transformation prediction (d)
+Positional Encoding of 3D Gaussian centers (e) SWAG
+carding these Gaussians keeps the static part of the scene. Table 9 shows that
+even though SWAG uses less frequent densification steps than original 3DGS [8],
+injecting image-dependent information ensured a finer representation with more
+Gaussians than 3DGS. We also present the number of transient Gaussians that
+represent transient objects and do not over-construct static parts of the scene
+except for some failure cases that we previously discussed (black spots on roads,
+Gate scene, and fountain water, Trevi Fountain scene).
+Table 9: Transient/Static Gaussians distribution
+Scene
+SWAG transient 3DGS
+Brandenburg Gate 202082 25273 192748
+Sacre Coeur
+275315 66754 246131
+Trevi Fountain 573644 109672 517066

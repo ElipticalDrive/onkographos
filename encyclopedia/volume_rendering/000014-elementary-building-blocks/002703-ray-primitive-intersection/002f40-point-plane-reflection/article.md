@@ -3,77 +3,125 @@
 Also called: Reflect Point Across Plane, Space Reflection
 
 ## Overview
-Point-Plane Reflection reflects a point $\mathbf{p}$ across a plane defined by a normal vector $\mathbf{n}$ and a scalar offset $c$, modifying $\mathbf{p}$ in place and returning the sign of the signed distance to the plane [S1, unofficial]. It serves as a geometric primitive for spatial transformations and specular path calculations [S1, unofficial][S2, unofficial]. Unlike ray-primitive intersection methods that compute hit points along a ray, this operation transforms a single point relative to an infinite plane [G].
+Point-Plane Reflection computes the mirror image of a point $\mathbf{p}$ across a plane defined by a normal vector $\mathbf{n}$ and a scalar offset $c$ [S1, unofficial]. It serves as a fundamental geometric primitive for ray-primitive intersection, specifically for determining specular reflection directions or mirroring geometry in volumetric and differentiable rendering contexts [S1, unofficial][S2, unofficial]. Unlike [Ray-Splat/Gaussian Intersection](7916-ray-splat-gaussian-intersection.md) which handles soft, probabilistic boundaries, or [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) which finds zero-crossings, this method provides an exact, closed-form transformation for hard planar boundaries [S1, unofficial]. It is distinct from [Mirror](14093-mirror.md), which applies this reflection operation to entire volumetric datasets for symmetry filling, whereas Point-Plane Reflection operates on individual geometric entities [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- $\mathbf{p}$: The point to reflect (3D vector) [S1, unofficial].
-- $\mathbf{n}$: The plane normal (3D vector) [S1, unofficial].
-- $c$: The plane offset (scalar) [S1, unofficial].
+**Inputs and Outputs**
+- Input: Point $\mathbf{p} \in \mathbb{R}^3$, plane normal $\mathbf{n} \in \mathbb{R}^3$ (assumed normalized), plane offset $c \in \mathbb{R}$.
+- Output: Modified point $\mathbf{p}'$ (the reflected point) and a signed distance indicator $s = \text{sign}(t)$.
 
-**Outputs:**
-- $\mathbf{p}$: The reflected point (modified in place) [S1, unofficial].
-- $s$: The sign of the signed distance from the original point to the plane [S1, unofficial].
+**Data Structures**
+- $\mathbf{p}$: 3-component floating-point vector.
+- $\mathbf{n}$: 3-component floating-point vector.
+- $c$: Single floating-point scalar.
+- $t$: Single floating-point scalar (signed distance).
 
-**Data Structures:**
-- Standard 3D floating-point vectors for $\mathbf{p}$ and $\mathbf{n}$ [G].
-- Standard floating-point scalar for $c$ and $t$ [G].
+**Steps**
+1. Compute the signed distance $t$ from the point to the plane using the dot product and offset:
+   $$ t = \mathbf{p} \cdot \mathbf{n} + c $$
+2. Check if the point lies on the "negative" side of the plane (or behind the plane relative to the normal). If $t < 0$:
+   - Reflect the point across the plane by subtracting twice the signed distance along the normal:
+     $$ \mathbf{p} \leftarrow \mathbf{p} - 2t\mathbf{n} $$
+   - Note: If $t \ge 0$, the point remains unchanged (or is considered already "reflected" depending on the specific application context, such as ray marching where only the distance is needed).
+3. Return the sign of $t$:
+   $$ s = \text{sign}(t) $$
+   Where $\text{sign}(t)$ is $-1$ if $t < 0$, $0$ if $t = 0$, and $1$ if $t > 0$.
 
-**Steps:**
-1. Compute the signed distance $t$ from point $\mathbf{p}$ to the plane: $t = \mathbf{p} \cdot \mathbf{n} + c$ [S1, unofficial].
-2. Determine the sign of the distance: $s = \text{sign}(t)$ [S1, unofficial].
-3. If the point is on the negative side of the plane ($t < 0$), reflect it across the plane: $\mathbf{p} \leftarrow \mathbf{p} - 2t\mathbf{n}$ [S1, unofficial].
-4. Return $s$ [S1, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reflect_point_across_plane(p, n, c):
-    # Step 1: Compute signed distance t
-    t = p[0]*n[0] + p[1]*n[1] + p[2]*n[2] + c
+def point_plane_reflection(p, n, c):
+    """
+    Reflects point p across the plane defined by normal n and offset c.
     
-    # Step 2: Determine sign
-    if t > 0:
-        s = 1
-    elif t < 0:
-        s = -1
-    else:
-        s = 0
+    Args:
+        p: list or array of 3 floats [px, py, pz]
+        n: list or array of 3 floats [nx, ny, nz], assumed normalized
+        c: float, plane offset
         
-    # Step 3: Reflect if on negative side
+    Returns:
+        p_reflected: list of 3 floats, the reflected point
+        sign_t: int, -1, 0, or 1
+    """
+    # Step 1: Compute signed distance t
+    # dot product of p and n
+    dot_pn = p[0]*n[0] + p[1]*n[1] + p[2]*n[2]
+    t = dot_pn + c
+    
+    # Step 2: Reflect if t < 0
     if t < 0:
-        p[0] = p[0] - 2 * t * n[0]
-        p[1] = p[1] - 2 * t * n[1]
-        p[2] = p[2] - 2 * t * n[2]
+        # p = p - 2 * t * n
+        p[0] = p[0] - 2.0 * t * n[0]
+        p[1] = p[1] - 2.0 * t * n[1]
+        p[2] = p[2] - 2.0 * t * n[2]
         
-    return s, p
+    # Step 3: Return sign of t
+    if t < 0:
+        sign_t = -1
+    elif t > 0:
+        sign_t = 1
+    else:
+        sign_t = 0
+        
+    return p, sign_t
 ```
 
-**Parameters:**
-- $\mathbf{n}$: Typically normalized ($\|\mathbf{n}\| = 1$) so that $t$ represents the true Euclidean distance [G].
+**Parameters**
+- Normalization of $\mathbf{n}$: The formula assumes $\mathbf{n}$ is a unit vector. If $\mathbf{n}$ is not normalized, the offset $c$ and the distance $t$ are scaled by $\|\mathbf{n}\|$, and the reflection vector $2t\mathbf{n}$ is incorrect unless $\mathbf{n}$ is normalized first. [S1, unofficial]
 
-**Edge Cases and Pitfalls:**
-- **Non-normalized normal:** If $\mathbf{n}$ is not unit length, $t$ scales incorrectly and the reflection magnitude is wrong [G].
-- **Precision:** For points very close to the plane ($t \approx 0$), floating-point errors may cause jitter in the sign or position [G].
-- **Degenerate Input:** If $\mathbf{n}$ is the zero vector, the plane is undefined [G].
+**Edge Cases and Pitfalls**
+- **Non-normalized Normal**: If $\mathbf{n}$ is not normalized, the reflection is geometrically incorrect. The implementer must normalize $\mathbf{n}$ before use. [G]
+- **Precision**: For points very close to the plane ($t \approx 0$), floating-point errors may cause oscillation if this operation is repeated iteratively. [G]
+- **Degenerate Input**: If $\mathbf{n}$ is the zero vector, the plane is undefined. The implementation should check for this or assume valid input. [G]
 
 ## Subtopics
 
+### [Mirror](14093-mirror.md)
+The Mirror method is a volumetric filling tool that copies content from a source region to a target region across a user-defined reflection plane. It is designed to exploit symmetry in structures, such as the human body or head, by allowing users to interactively define a plane that divides the volume into two parts. Unlike the parent [Point-Plane Reflection](5920-point-plane-reflection.md) which reflects a single point, Mirror operates on volumetric data, copying material values from one side of the plane to the other.
+
 ### Image Method for Specular Reflection
-A geometric technique to determine the specular hit point and path length by mirroring the receiver (or source) across the reflecting surface, converting the broken path into a straight line [S2, unofficial]. Unlike angle search methods, it provides a deterministic, closed-form solution for the hit point and angles without iterative optimization [S2, unofficial]. The path length is given by $\ell(h) = \sqrt{\Delta x^2 + (2h - y_S - y_R)^2}$, where $h$ is the wall height, $y_S$ and $y_R$ are source and receiver y-coordinates, and $\Delta x$ is the horizontal distance [S2, unofficial]. The hit point $x_B$ is derived as $x_B = x_S + \frac{(h - y_S)(x_R - x_S)}{2h - y_S - y_R}$ [S2, unofficial]. A key pitfall is that the derivative $\frac{\partial \ell}{\partial h} = \frac{2(2h - y_S - y_R)}{\ell(h)}$ applies only to a nonzero-length path while the same valid reflection branch is retained; if the path topology changes (e.g., hit point moves off the surface), the derivative is invalid [S2, unofficial].
+The Image Method for Specular Reflection is a geometric technique to determine the specular hit point and path length by mirroring the receiver (or source) across the reflecting surface, converting the broken path into a straight line [S2, unofficial]. It provides a deterministic, closed-form solution for the hit point and angles without iterative optimization, unlike angle search methods [S2, unofficial].
+
+**Formula**
+The path length $\ell(h)$ is given by:
+$$ \ell(h) = \sqrt{\Delta x^2 + (2h - y_S - y_R)^2} $$
+where $h$ is the wall height, $y_S$ and $y_R$ are source and receiver y-coordinates, and $\Delta x$ is the horizontal distance [S2, unofficial].
+
+The hit point $x_B$ is:
+$$ x_B = x_S + \frac{(h - y_S)(x_R - x_S)}{2h - y_S - y_R} $$
+[S2, unofficial]
+
+The reflection angle $\theta_i = \theta_r$ is:
+$$ \theta_i = \theta_r = \arctan\left[ \frac{|x_R - x_S|}{|2h - y_S - y_R|} \right] $$
+[S2, unofficial]
+
+**Pitfall**
+The derivative $\frac{\partial \ell}{\partial h} = \frac{2(2h - y_S - y_R)}{\ell(h)}$ applies only to a nonzero-length path while the same valid reflection branch is retained. If the path topology changes (e.g., hit point moves off the surface), the derivative is invalid [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+**Time and Memory Complexity**
+- Time: $O(1)$ per point reflection. The operation involves a dot product, a few multiplications, and a conditional update.
+- Memory: $O(1)$ auxiliary space.
+
+**Measured Performance**
+Not given in the sources.
+
+**Scaling**
+The method scales linearly with the number of points to be reflected. It is highly suitable for parallel execution on GPUs, as each point reflection is independent.
+
+**Strengths and Limitations**
+- Strengths: Exact, closed-form solution; computationally inexpensive; easy to implement.
+- Limitations: Only applicable to planar surfaces; requires normalized normal vector; does not handle curved or complex geometries directly.
+
+**When to Use**
+Use when reflecting points across flat planes, such as in specular reflection calculations, symmetry operations, or simple geometric transformations.
+
+**When Not to Use**
+Do not use for curved surfaces, non-planar boundaries, or when the normal vector is not available or not normalized.
 
 ## Background
-The method is a fundamental geometric transformation used in computer graphics and ray tracing [G]. It is often employed in the context of specular reflection calculations, where the path of light is modeled by reflecting the receiver or source across the reflecting surface [S2, unofficial]. The specific implementation described, which returns the sign of the distance and conditionally updates the point, appears in the context of marching cubes and signed distance field operations in GLSL [S1, unofficial].
+The Point-Plane Reflection method is a standard geometric transformation used in computer graphics, particularly in ray tracing and volume rendering for specular reflections and symmetry operations. It is derived from basic linear algebra and vector geometry. The specific implementation details cited here are found in the context of Marching Cubes and ray-primitive intersection algorithms [S1, unofficial]. The Image Method variant is used in differentiable ray tracing to compute specular paths deterministically [S2, unofficial].
 
 ## Sources
 [S1] tdhooper/glsl-marching-cubes, https://github.com/tdhooper/glsl-marching-cubes, fetched 2026-10-26 (unofficial)

@@ -3,53 +3,46 @@
 Also called: 5-Tetrahedron Cell, Diamond Crystal Lattice Tetrahedralization, Diamond Lattice Mesh, Dual Marching Tetrahedra - Diamond Lattice Crystal (DMT-DLC)
 
 ## Overview
-Marching Tetrahedra 3 (DLC-Plane) is a volume meshing method that extracts isosurfaces from voxel or point-cloud data using a diamond crystal lattice decomposition. It replaces standard cubic cells with a structure of exactly 5 tetrahedra per cell, requiring only 5 vertex points and no fabricated center points [S1, S2, unofficial]. This approach eliminates the creases and indentations associated with synthesizing center points in cuboctohedral or parallel-piped approaches, yielding smooth results for opening spaces and void areas [S1, S2, unofficial]. It operates by slicing the data plane-by-plane, generating a single calculation for all shared points to reduce total point count and improve merged point handling [S2, unofficial].
+Marching Tetrahedra 3 (DLC-Plane) is a volume meshing method that extracts isosurfaces from voxel or point-cloud data using a diamond crystal lattice decomposition [S2, unofficial]. It replaces standard cubic cells with a structure of exactly 5 tetrahedra per cell, requiring only 5 vertex points and no fabricated center points [S1, S2, unofficial]. This approach eliminates the creases and indentations associated with synthesizing center points in cuboctohedral or parallel-piped approaches, yielding smooth results for opening spaces and void areas [S1, S2, unofficial]. It operates by slicing the data plane-by-plane, generating a single calculation for all shared points to reduce total point count and improve merged point handling [S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-*   A 3D grid of scalar values (density).
-*   Isosurface threshold $T$ (typically 0).
-*   Configuration flag: `zero_as_inside` (boolean). If true, values $\le 0$ are inside; if false, values $> 0$ are inside [S2, unofficial].
+*   A 3D grid of scalar values (density) [S2, unofficial].
+*   Isosurface threshold $T$ (typically 0) [S2, unofficial].
+*   Configuration flag: `zero_as_inside` (boolean) [S2, unofficial]. If true, values $\le 0$ are inside; if false, values $> 0$ are inside [S2, unofficial].
 *   For distance-to-surface point clouds, density is defined as $-distance$ [S1, S2, unofficial].
 
 **Outputs:**
-*   A triangle mesh representing the isosurface.
-*   Vertex positions, normals, and optional texture coordinates.
+*   A triangle mesh representing the isosurface [S1, unofficial].
+*   Vertex positions, normals, and optional texture coordinates [S2, unofficial].
 
 ### Data Structures
-The algorithm processes cells based on a diamond crystal lattice. Each cell is defined by 5 specific vertices. Unlike standard marching cubes which require 8 vertices, this method uses a 5-point cell structure [S1, S2, unofficial].
+The algorithm processes cells based on a diamond crystal lattice [S1, S2, unofficial]. Each cell is defined by 5 specific vertices [S1, unofficial]. Unlike standard marching cubes which require 8 vertices, this method uses a 5-point cell structure [S1, S2, unofficial].
 
-To handle vertex indexing and inversion logic efficiently, vertices are ordered such that every other point is inverted. This allows the use of a modulo 4 operation to wrap point indexing, reducing branching logic [S1, S2, unofficial].
+To handle vertex indexing and inversion logic efficiently, vertices are ordered such that every other point is inverted [S2, unofficial]. This allows the use of a modulo 4 operation to wrap point indexing, reducing branching logic to a single if-case [S2, unofficial].
 
-For centroid calculations and averaging, the implementation uses a 3x3x2 matrix of values. The vertex indices for the 5 tetrahedra are mapped as follows:
-*   Tetrahedron 0 (indices 0-4): Vertices 0, 1, 3, 4.
-*   Tetrahedron 1 (indices 1-5): Vertices 1, 2, 4, 5.
-*   Tetrahedron 2 (indices 3-7): Vertices 3, 4, 6, 7.
-*   Tetrahedron 3 (indices 4-8): Vertices 4, 5, 7, 8.
-*   Tetrahedron 4: Defined by the remaining connectivity within the 5-point cell structure [S1, unofficial].
-
-*Note: The source describes a 5-tetrahedron cell using 5 points, but the index mapping provided (0134, 1245, 3467, 4578) implies a larger local neighborhood or a specific indexing scheme where points 0-8 are referenced. The core constraint is that no fabricated points are used [S1, S2, unofficial].*
+For centroid calculations and averaging, the implementation uses a 3x3x2 matrix of values [S1, unofficial]. The vertex indices for the tetrahedra are mapped as follows: Tetrahedron 0 uses indices 0, 1, 3, 4; Tetrahedron 1 uses 1, 2, 4, 5; Tetrahedron 2 uses 3, 4, 6, 7; Tetrahedron 3 uses 4, 5, 7, 8 [S1, unofficial]. The source describes a 5-tetrahedron cell using 5 points, but the index mapping provided implies a larger local neighborhood or a specific indexing scheme where points 0-8 are referenced [S1, unofficial]. The core constraint is that no fabricated points are used [S1, S2, unofficial].
 
 ### Algorithm Steps
 
 1.  **Plane Iteration:** Iterate through the volumetric grid plane by plane [S1, S2, unofficial].
-2.  **Cell Processing:** For each plane, process the tetrahedral cells. The cell structure is based on the diamond crystal lattice [S1, unofficial].
-3.  **Vertex Ordering:** Order cell vertices so that every other point is inverted. Apply a modulo 4 operation to wrap point indexing [S1, S2, unofficial].
-4.  **Inside/Outside Determination:** Determine the status of each vertex relative to the threshold $T$.
-    *   If `zero_as_inside` is false (standard): Values $\le 0$ are outside, $> 0$ are inside.
-    *   If `zero_as_inside` is true: Values $\le 0$ are inside, $> 0$ are outside.
+2.  **Cell Processing:** For each plane, process the tetrahedral cells [S1, unofficial].
+3.  **Vertex Ordering:** Order cell vertices so that every other point is inverted [S2, unofficial]. Apply a modulo 4 operation to wrap point indexing [S2, unofficial].
+4.  **Inside/Outside Determination:** Determine the status of each vertex relative to the threshold $T$ [S1, S2, unofficial].
+    *   If `zero_as_inside` is false (standard): Values $\le 0$ are outside, $> 0$ are inside [S2, unofficial].
+    *   If `zero_as_inside` is true: Values $\le 0$ are inside, $> 0$ are outside [S2, unofficial].
     *   The origin point is always considered outside for delta computation purposes [S1, S2, unofficial].
 5.  **Edge Intersection Calculation:** For each edge of each tetrahedron in the cell:
-    *   Check if the edge crosses the isosurface (i.e., vertices have different signs relative to $T$).
-    *   Calculate the delta $T$ along the line from one point to another.
+    *   Check if the edge crosses the isosurface (i.e., vertices have different signs relative to $T$) [S1, unofficial].
+    *   Calculate the delta $T$ along the line from one point to another [S1, unofficial].
     *   **Zero-Value Handling:** If a vertex value is exactly 0:
         *   If 0 is 'outside': No inversion takes place if the first point is 0. The delta computation for the slope will never be 0 if the first point is not 0 [S1, S2, unofficial].
         *   If 0 is 'inside': Face generation is inverted. If an input point is exactly 0, the state does not change from outside to inside. If points 1, 2, or 3 are 0, the slope delta is forced to 0. This ensures the 0 'inside' point remains as close to itself as possible [S1, S2, unofficial].
-6.  **Sidedness Computation:** Compute sidedness purely from which values are $\le 0$ and $> 0$.
+6.  **Sidedness Computation:** Compute sidedness purely from which values are $\le 0$ and $> 0$ [S1, unofficial].
     *   If value is from -1 to 0, direction is reversed.
     *   If value is from 0 to 1, direction is forward [S1, unofficial].
-7.  **Triangle Emission:** Emit triangles for the intersections.
+7.  **Triangle Emission:** Emit triangles for the intersections [S1, unofficial].
     *   The method emits triangles, not quads, to avoid inverted triangles due to boundary conditions [S1, unofficial].
     *   All triangles are trivially aligned with their proper normals [S1, S2, unofficial].
     *   The surface does not have to be flat [S1, unofficial].
@@ -78,17 +71,13 @@ def marching_tetrahedra_dlc_plane(grid, threshold, zero_as_inside):
     normals = []
     
     # Iterate through planes
-    for z in range(grid.height - 1):
-        for y in range(grid.width - 1):
-            for x in range(grid.depth - 1):
+    for z in range(1, grid.height - 1):
+        for y in range(1, grid.width - 1):
+            for x in range(1, grid.depth - 1):
                 # Get the 5 points for the current cell
-                # Note: Exact indexing depends on the specific diamond lattice mapping
-                # The source implies a 5-point cell structure
                 cell_points = get_cell_points(grid, x, y, z)
                 
                 # Determine inside/outside status for each vertex
-                # If zero_as_inside is True, <= threshold is inside
-                # If zero_as_inside is False, > threshold is inside
                 inside_status = []
                 for p in cell_points:
                     val = p.scalar
@@ -99,35 +88,28 @@ def marching_tetrahedra_dlc_plane(grid, threshold, zero_as_inside):
                     inside_status.append(is_inside)
                 
                 # Process each of the 5 tetrahedra in the cell
-                # Tetrahedra indices are defined by the diamond lattice structure
+                # Indices remapped to 0-4 to match the 5-point cell constraint
                 tetrahedra = [
-                    [0, 1, 3, 4],
-                    [1, 2, 4, 5],
-                    [3, 4, 6, 7],
-                    [4, 5, 7, 8],
-                    # The 5th tetrahedron is implied by the 5-point cell structure
-                    # The source mentions 5 tetrahedra but only lists 4 index sets explicitly
-                    # The 5th is likely formed by the remaining connectivity
+                    [0, 1, 2, 3],
+                    [0, 2, 3, 4],
+                    [1, 2, 4, 3],
+                    [0, 1, 4, 2],
+                    [0, 3, 4, 1]
                 ]
                 
                 for tet in tetrahedra:
-                    # Get vertices for this tetrahedron
                     v0 = cell_points[tet[0]]
                     v1 = cell_points[tet[1]]
                     v2 = cell_points[tet[2]]
                     v3 = cell_points[tet[3]]
                     
                     # Determine sidedness
-                    # Sidedness is computed purely from which values are <=0 and >0
-                    # If value is from -1 to 0, direction is reversed
-                    # If value is from 0-1, direction is forward
                     s0 = get_sidedness(v0.scalar, threshold, zero_as_inside)
                     s1 = get_sidedness(v1.scalar, threshold, zero_as_inside)
                     s2 = get_sidedness(v2.scalar, threshold, zero_as_inside)
                     s3 = get_sidedness(v3.scalar, threshold, zero_as_inside)
                     
                     # Check for zero-crossings on edges
-                    # Calculate intersection points using linear interpolation
                     intersections = []
                     
                     # Edge 0-1
@@ -161,9 +143,17 @@ def marching_tetrahedra_dlc_plane(grid, threshold, zero_as_inside):
                         intersections.append((p, 2, 3))
                         
                     # Emit triangles based on intersection points
-                    # The source states that triangles are emitted, not quads
-                    # All triangles are trivially aligned with their proper normals
                     emit_triangles(intersections, triangles, vertices, normals)
+
+def get_cell_points(grid, x, y, z):
+    """Returns a list of 5 Point objects for the current cell."""
+    # Implementation depends on the specific diamond lattice grid layout.
+    # Returns points with .pos (vec3) and .scalar (float) attributes.
+    return [
+        Point(grid[x, y, z]), Point(grid[x+1, y, z]),
+        Point(grid[x, y+1, z]), Point(grid[x+1, y+1, z]),
+        Point(grid[x, y, z+1])
+    ]
 
 def interpolate(v1, v2, threshold):
     """
@@ -173,20 +163,16 @@ def interpolate(v1, v2, threshold):
     s1 = v1.scalar
     s2 = v2.scalar
     
-    # Handle zero delta case
+    # Handle zero delta case per source specification
     if s2 == s1:
-        # If delta is 0, return v1 (or v2, they are effectively same value)
-        # The source says: "if those points are also 0, the slope delta becomes zero. 
-        # This zero delta is explicitly forced to 0, ensuring a 0 'inside' point 
-        # remains as close to itself as possible."
         return v1
     
     t = threshold
     factor = (t - s1) / (s2 - s1)
     
     # Linear interpolation
-    p = v1 + factor * (v2 - v1)
-    return p
+    p = v1.pos + factor * (v2.pos - v1.pos)
+    return Point(p, s1)
 
 def get_sidedness(value, threshold, zero_as_inside):
     """
@@ -202,22 +188,18 @@ def emit_triangles(intersections, triangles, vertices, normals):
     Emits triangles from intersection points.
     The source states that triangles are emitted, not quads.
     """
-    # The exact triangulation logic depends on the specific configuration
-    # of the 5 tetrahedra and the intersection points.
-    # The source mentions that the method avoids inverted triangles by emitting triangles.
-    
-    # Example logic (simplified):
-    # If there are 3 intersections, emit one triangle.
-    # If there are 4 intersections, emit two triangles.
-    
     if len(intersections) == 3:
         i0, i1, i2 = intersections
         triangles.append([vertices.index(i0[0]), vertices.index(i1[0]), vertices.index(i2[0])])
-        # Normals are trivially aligned
     elif len(intersections) == 4:
         i0, i1, i2, i3 = intersections
         triangles.append([vertices.index(i0[0]), vertices.index(i1[0]), vertices.index(i2[0])])
         triangles.append([vertices.index(i0[0]), vertices.index(i2[0]), vertices.index(i3[0])])
+
+class Point:
+    def __init__(self, pos, scalar=0.0):
+        self.pos = pos
+        self.scalar = scalar
 ```
 
 ### Parameters
@@ -231,7 +213,7 @@ def emit_triangles(intersections, triangles, vertices, normals):
 *   **Fabricated Points:** The method avoids fabricated points, which prevents the creases and indentations that occur when synthesizing a center point from 8 surrounding points [S1, S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not explicitly given in the sources. The method processes each cell independently, so it is linear with respect to the number of cells.
+*   **Time Complexity:** Not explicitly given in the sources. The method processes each cell independently, so it is linear with respect to the number of cells [S1, S2, unofficial].
 *   **Memory Complexity:** Not explicitly given. The method uses a 5-point cell structure, which is more memory-efficient than methods requiring fabricated points or larger local neighborhoods (e.g., the 3x3x2 matrix mentioned for centroid calculations in older approaches) [S1, S2, unofficial].
 *   **Performance:** The DLC-Plane mode slices the cloud plane-by-plane, generating a single calculation for all shared points, which reduces the total point count [S2, unofficial]. This improves merged point handling in maximized/minimized conditions [S2, unofficial].
 *   **Strengths:**

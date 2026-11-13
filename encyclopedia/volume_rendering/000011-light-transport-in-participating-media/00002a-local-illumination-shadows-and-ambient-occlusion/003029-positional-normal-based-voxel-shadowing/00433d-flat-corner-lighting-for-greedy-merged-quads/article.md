@@ -3,27 +3,27 @@
 Also called: computeGreedyCornerLighting
 
 ## Overview
-Flat corner lighting calculates per-vertex lighting values for greedy merged quads to allow the GPU to interpolate a smooth light gradient across the face, avoiding the broken ambient occlusion (AO) artifacts that occur when lighting is computed per-face [S1, unofficial]. It builds on [Positional & Normal-Based Voxel Shadowing](6206-positional-normal-based-voxel-shadowing.md) by providing the specific corner samples required for that shading model.
+Flat corner lighting calculates per-vertex lighting values for greedy merged quads to allow the GPU to interpolate a smooth light gradient across the face, avoiding broken ambient occlusion (AO) artifacts that occur when lighting is computed per-face [S1, unofficial]. It builds on [Positional & Normal-Based Voxel Shadowing](6206-positional-normal-based-voxel-shadowing.md) by providing the specific corner samples required for that shading model [G].
 
 ## How it works
 **Inputs:**
-- `world`: The voxel world context providing block state and lighting queries.
-- `face`: The greedy merged quad geometry, containing `getStepX()`, `getStepY()`, `getStepZ()` (integer offsets from the block origin) and the face normal/orientation.
-- `worldX, worldY, worldZ`: The integer coordinates of the block origin for this face.
-- `cornerIndex`: The index of the specific corner being computed (0–3 for a quad).
-- `scratch`: A temporary storage structure with fields `brightness[4]` and `lightmap[4]`.
+- `world`: The voxel world context providing block state and lighting queries [S1, unofficial].
+- `face`: The greedy merged quad geometry, containing `getStepX()`, `getStepY()`, `getStepZ()` (integer offsets from the block origin) and the face normal/orientation [S1, unofficial].
+- `worldX, worldY, worldZ`: The integer coordinates of the block origin for this face [S1, unofficial].
+- `cornerIndex`: The index of the specific corner being computed (0–3 for a quad) [S1, unofficial].
+- `scratch`: A temporary storage structure with fields `brightness[4]` and `lightmap[4]` [S1, unofficial].
 
 **Outputs:**
-- Updates `scratch.brightness[cornerIndex]` and `scratch.lightmap[cornerIndex]` with the computed lighting values for the specified corner.
+- Updates `scratch.brightness[cornerIndex]` and `scratch.lightmap[cornerIndex]` with the computed lighting values for the specified corner [S1, unofficial].
 
 **Data Structures:**
-- `scratch`: An array-like structure of size 4 for `brightness` and `lightmap`.
-- `cornerState`: The `BlockState` retrieved from the world.
-- `packedLight`: An integer or packed float representing the combined light and AO value.
+- `scratch`: An array-like structure of size 4 for `brightness` and `lightmap` [S1, unofficial].
+- `cornerState`: The `BlockState` retrieved from the world [S1, unofficial].
+- `packedLight`: An integer or packed float representing the combined light and AO value [S1, unofficial].
 
 **Steps:**
 1. Calculate the sample position for the corner:
-   $$ \text{samplePos} = (\text{worldX} + \text{face.getStepX()}, \text{worldY} + \text{face.getStepY()}, \text{worldZ} + \text{face.getStepZ}) $$
+   $$ \text{samplePos} = (\text{worldX} + \text{face.getStepX()}, \text{worldY} + \text{face.getStepY()}, \text{worldZ} + \text{face.getStepZ()}) $$
    [S1, unofficial]
 2. Retrieve the block state at the sample position:
    $$ \text{cornerState} = \text{world.getBlockState}(\text{samplePos}) $$
@@ -54,36 +54,38 @@ def computeGreedyCornerLighting(world, face, worldX, worldY, worldZ, cornerIndex
     cornerState = world.getBlockState(samplePos)
 
     # Step 3: Compute packed light color for the corner
-    packedLight = greedyMeshing_getLightColor(world, cornerState, samplePos)
+    packedLight = getLightColor(world, cornerState, samplePos)
 
     # Step 4: Compute directional shade for the entire face
-    # Note: applyDirectionalShade is a helper or flag passed to getShade
     shade = world.getShade(face, scratch.applyDirectionalShade)
 
     # Step 5: Store results in scratch buffer
     scratch.brightness[cornerIndex] = shade
     scratch.lightmap[cornerIndex] = packedLight
+
+def getLightColor(world, state, pos):
+    # Standard lighting lookup for the block state at position [G]
+    return world.getLightColor(state, pos)
 ```
 
 **Edge Cases and Pitfalls:**
 - The sample position is derived from the face's step offsets, not the corner's local offset within the quad. This ensures consistent lighting across merged geometry [S1, unofficial].
-- Precision issues may arise if `worldX` etc. are very large, but standard integer arithmetic in Minecraft typically handles this within the world bounds.
 
 ## Subtopics
 
 ### Flat Face Lighting for Greedy Merged Quads
-Fills lighting for an entire merged face by sampling light at a specific position, handling emissive blocks correctly to avoid dark rendering through translucent blocks [S1, unofficial]. It differs from corner lighting by using a single sample position for the whole face rather than per-corner samples. Choose this when the face is uniform and emissive blocks are present. The logic is: if `state.getLightEmission() > 0`, set `samplePos` to `(worldX, worldY, worldZ)`; else, set `samplePos` to `(worldX + face.getStepX(), worldY + face.getStepY(), worldZ + face.getStepZ())`. Then get `faceState = world.getBlockState(samplePos)`, compute `packedLight = greedyMeshing$getLightColor(world, faceState, samplePos)`, compute `shade = world.getShade(face, scratch.applyDirectionalShade)`, and fill `scratch.brightness` and `scratch.lightmap` arrays with `shade` and `packedLight` respectively [S1, unofficial].
+Fills lighting for an entire merged face by sampling light at a specific position, handling emissive blocks correctly to avoid dark rendering through translucent blocks [S1, unofficial]. It differs from corner lighting by using a single sample position for the whole face rather than per-corner samples [G]. Choose this when the face is uniform and emissive blocks are present [G]. The logic is: if `state.getLightEmission() > 0`, set `samplePos` to `(worldX, worldY, worldZ)`; else, set `samplePos` to `(worldX + face.getStepX(), worldY + face.getStepY(), worldZ + face.getStepZ())` [S1, unofficial]. Then get `faceState = world.getBlockState(samplePos)`, compute `packedLight = greedyMeshing$getLightColor(world, faceState, samplePos)`, compute `shade = world.getShade(face, scratch.applyDirectionalShade)`, and fill `scratch.brightness` and `scratch.lightmap` arrays with `shade` and `packedLight` respectively [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** O(1) per corner or per face.
-- **Memory Complexity:** O(1) for scratch buffers.
-- **Strengths:** Provides smooth lighting gradients on large merged quads, reducing visual artifacts compared to flat face lighting alone.
-- **Limitations:** Requires access to the world's block state and lighting system. May not be suitable for non-voxel-based geometry.
-- **When to use:** When using greedy meshing for voxel-based geometry and smooth lighting is desired.
-- **When not to use:** When emissive blocks are present and flat face lighting is preferred to avoid dark rendering through translucent blocks, or when the geometry is not voxel-based.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Provides smooth lighting gradients on large merged quads, reducing visual artifacts compared to flat face lighting alone [S1, unofficial].
+- **Limitations:** Requires access to the world's block state and lighting system [S1, unofficial]. May not be suitable for non-voxel-based geometry [G].
+- **When to use:** When using greedy meshing for voxel-based geometry and smooth lighting is desired [G].
+- **When not to use:** When emissive blocks are present and flat face lighting is preferred to avoid dark rendering through translucent blocks, or when the geometry is not voxel-based [S1, unofficial].
 
 ## Background
-This method is part of the Greedy Meshing Mod for Minecraft, which optimizes rendering by merging adjacent faces of the same block type. The specific lighting techniques are designed to maintain visual fidelity while reducing draw calls. The mod addresses issues with fancy grass mods and translucent geometry sorting [S1, unofficial].
+This method is part of the Greedy Meshing Mod for Minecraft, which optimizes rendering by merging adjacent faces of the same block type [S1, unofficial]. The specific lighting techniques are designed to maintain visual fidelity while reducing draw calls [S1, unofficial]. The mod addresses issues with fancy grass mods and translucent geometry sorting [S1, unofficial].
 
 ## Sources
 [S1] Greedy Meshing - GitHub, https://github.com/programmer1o1/GreedyMeshingMod, fetched 2026-10-27 (unofficial)

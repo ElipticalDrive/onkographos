@@ -1,0 +1,295 @@
+--- v006.md
++++ v007.md
+@@ -4,192 +4,132 @@
+ 
+ ## Overview
+-Negative Gaussian Splatting (NegGS) is a variant of 3D Gaussian Splatting that extends the representation of 3D scenes by incorporating "negative Gaussians"—ellipsoids with negative color values—alongside standard positive Gaussians [S1, S2]. This method solves the limitation of standard Gaussian Splatting, which relies on simple ellipsoid shapes that struggle to model complex nonlinear structures and high-frequency color transitions without a prohibitive increase in the number of primitives [S2]. By allowing Gaussians with inverse colors to cancel each other out, NegGS provides greater flexibility in shape representation and color modulation, enabling the approximation of complex distributions (such as donut or moon-shaped datasets) and improving the rendering of shadows and high-frequency details [S1, S2]. It differs from its siblings by explicitly utilizing negative opacity contributions within the alpha-blending pipeline, whereas siblings like Scaffold-GS or GeoGaussian modify the geometry or kernel shape but maintain positive-only contributions [Parent].
++Negative Gaussian Splatting (NegGS) extends the standard 3D Gaussian Splatting representation by incorporating "negative Gaussians"—ellipsoids with negative color values—into the optimization process [S1, S2]. This allows the model to represent high-frequency elements, complex nonlinear structures, and rapid color transitions that are difficult to capture with standard positive-only Gaussians, while potentially reducing the total number of primitives required [S1, S2]. Unlike standard Gaussian Splatting, which relies on many components to approximate complex shapes, NegGS uses the cancellation effect between positive and negative Gaussians to achieve greater flexibility in shape and color modulation [S1, S2].
+ 
+ ## How it works
+-The method extends the standard Gaussian Splatting framework [Parent] by allowing the color attribute $c_i$ of a Gaussian primitive to take negative values. The rendering pipeline remains identical to the parent method, but the set of optimized primitives is a joint family of positive and negative components.
++NegGS modifies the primitive definition and optimization strategy of 3D Gaussian Splatting. It introduces a joint family of Gaussians that includes both positive and negative color components, effectively implementing a "Diff-Gaussian" distribution where the effective density is modeled by the ratio of two Gaussian probability density functions (PDFs) [S1, S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of camera poses and corresponding 2D images; initial 3D point cloud (typically from Structure-from-Motion); hyperparameters for initialization and optimization.
+-*   **Outputs:** A set of 3D Gaussian primitives $G_{NeGS}$, each defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ (where $\mathbf{c}$ can be negative); rendered images for any novel view.
++*   **Inputs:** A set of camera poses and images; initial 3D point cloud (typically derived from Structure-from-Motion); hyperparameters for initialization (specifically the ratio of negative Gaussians).
++*   **Outputs:** A set of Gaussian primitives $G_{NeGS}$, each defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ (where $\mathbf{c}$ can be negative), optimized to minimize rendering loss.
+ 
+ ### Data Structures
+-The scene is represented by a joint family of Gaussians:
+-$$ G_{NeGS} = G_{GS} \cup G_{-GS} $$
+-where:
+-*   $G_{GS}$ contains tuples with positive color values ($c_i > 0$).
+-*   $G_{-GS}$ contains tuples with negative color values ($c_i < 0$) [S1].
+-
+-Each Gaussian primitive $G_i$ retains the standard attributes from the parent method:
+-*   $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Mean position.
+-*   $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (parameterized via rotation $\mathbf{R}$ and scale $\mathbf{S}$).
+-*   $\alpha_i \in [0, 1]$: Opacity.
+-*   $\mathbf{c}_i \in \mathbb{R}^3$: Color (RGB). In NegGS, $\mathbf{c}_i$ can be negative.
+-
+-To preserve rendering speed and leverage the existing implementation, negative Gaussians are tracked via a binary mask within the standard Gaussian Splatting data structure [S1].
++The method leverages the original Gaussian Splatting framework implementation [S1]. To preserve rendering speed and compatibility with the differentiable rasterization pipeline, negative Gaussians are tracked via a **binary mask** [S1].
++*   **Primitive Tuple:** Each Gaussian $i$ retains the standard attributes: $\boldsymbol{\mu}_i \in \mathbb{R}^3$, $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (or its rotation/scale decomposition), $\alpha_i \in [0, 1]$, and $\mathbf{c}_i \in \mathbb{R}^3$.
++*   **Color Constraint:** In NegGS, $\mathbf{c}_i$ is allowed to take negative values [S1].
++*   **Mask:** A binary flag or mask distinguishes whether a Gaussian belongs to the positive set $G_{GS}$ or the negative set $G_{-GS}$ [S1].
+ 
+ ### The Diff-Gaussian Concept
+-The theoretical basis for NegGS is the "Diff-Gaussian" distribution, defined as the ratio of two Gaussian probability density functions (PDFs) [S2]:
+-$$ f_{Diff}(w) = \frac{f_{m_0, \Sigma_0}(w)}{f_{m_1, \Sigma_1}(w)} $$
+-where $f_{m_0, \Sigma_0}$ and $f_{m_1, \Sigma_1}$ are two standard Gaussian densities [S1]. This ratio can approximate complex nonlinear structures that single Gaussians cannot [S2].
++The theoretical basis for NegGS is the "Diff-Gaussian" distribution, defined as the ratio of two Gaussian PDFs [S2]. Let $f_{m_0, \Sigma_0}$ and $f_{m_1, \Sigma_1}$ be two Gaussian densities. The Diff-Gaussian density is proportional to:
++$$ f_{Diff}(w) \propto \frac{f_{m_0, \Sigma_0}(w)}{f_{m_1, \Sigma_1}(w)} $$
++This ratio allows for the approximation of complex structures (e.g., donut or moon-shaped datasets) that standard Gaussians cannot represent efficiently [S2].
+ 
+-The optimal coefficient $c_{opt}$ for a Diff-Gaussian distribution is the minimum value of this ratio:
++### Optimization Strategy
++The optimization operates on a joint family of Gaussians:
++$$ G_{NeGS} = G_{GS} \cup G_{-GS} $$
++where $G_{GS}$ contains tuples with positive color values $c_i$ and $G_{-GS}$ contains tuples with negative color values $c_i$ [S1].
++
++1.  **Initialization:** The initial number of negative Gaussians is a critical hyperparameter. Experiments indicate that setting the number of negative Gaussians to approximately **20%** of the total Gaussians yields optimal efficacy [S1]. The initial number of negative components is significantly less than that of positive components [S1].
++2.  **Rendering:** The rendering pipeline remains identical to standard 3D Gaussian Splatting, using alpha blending. The negative colors allow for destructive interference (cancellation) with positive Gaussians, effectively subtracting color/opacity in specific regions [S1, S2].
++3.  **Densification and Pruning:** The standard GS densification strategy is applied:
++    *   Gaussians with low opacity are pruned (reduced) [S1].
++    *   New Gaussians are introduced into empty 3D regions [S1].
++    *   The binary mask ensures that the distinction between positive and negative Gaussians is maintained during these operations [S1].
++
++### Mathematical Details: Optimal Coefficient and Null Density
++The method relies on the properties of the ratio of two Gaussians. The optimal coefficient $c_{opt}$ for a Diff-Gaussian distribution is defined as the minimum of the ratio of the two PDFs [S1]:
+ $$ c_{opt} := \min_{x} \frac{f_{m_0, \Sigma_0}(x)}{f_{m_1, \Sigma_1}(x)} = \frac{f_{m_0, \Sigma_0}(w)}{f_{m_1, \Sigma_1}(w)} $$
+-This minimum is achieved if and only if the vector $w$ satisfies:
+-$$ \Sigma_1^{-1}(w - m_1) = \Sigma_0^{-1}(w - m_0) \quad \text{(Equation 6 in [S1])} $$
++if and only if $w$ satisfies the condition [S1]:
++$$ \Sigma_1^{-1}(w - m_1) = \Sigma_0^{-1}(w - m_0) $$
++This condition arises from minimizing the quadratic function $q(x) = x^T A x + 2b^T x$, where $A = \Sigma_1^{-1} - \Sigma_0^{-1}$ and $b = \Sigma_0^{-1} m_0 - \Sigma_1^{-1} m_1$, assuming $A$ is positive semi-definite [S1].
+ 
+-To find $w$, we minimize the logarithmic difference, which reduces to minimizing a quadratic function $q(x)$:
+-$$ q(x) = x^T A x + 2b^T x $$
+-where:
+-*   $A = \Sigma_1^{-1} - \Sigma_0^{-1}$
+-*   $b = \Sigma_0^{-1} m_0 - \Sigma_1^{-1} m_1$
++For diagonal covariance matrices $\Sigma_0 = \text{diag}(\sigma_1^2, \dots, \sigma_n^2)$ and $\Sigma_1 = \text{diag}(h_1 \sigma_1^2, \dots, h_n \sigma_n^2)$ with $0 < h_i \le 1$, the coordinates $w_i$ of the null density vector (where the ratio is minimized) are given by [S1]:
++*   (i) $w_i = \frac{m_{1,i} - h_i m_{0,i}}{1 - h_i}$ if $h_i < 1$
++*   (ii) $w_i \in \mathbb{R}$ if $h_i = 1$ and $m_{1,i} = m_{0,i}$
+ 
+-Note: The source [S1] states $A = \Sigma_1^{-1} - \Sigma_0^{-1}$ in the proof derivation (Equation 7), but the summary notes list $A = \Sigma_1^{-1} - \Sigma_0$. The proof derivation in [S1] is mathematically consistent with $A = \Sigma_1^{-1} - \Sigma_0^{-1}$ derived from $\log f_0 - \log f_1$. We follow the proof derivation [S1]. The condition for the minimum to exist is that $A$ is positive semi-definite, which implies $\Sigma_0 - \Sigma_1$ is positive semi-definite (i.e., $\Sigma_0 \succeq \Sigma_1$) [S1].
+-
+-For diagonal covariance matrices $\Sigma_0 = \text{diag}(\sigma_1^2, \dots, \sigma_n^2)$ and $\Sigma_1 = \text{diag}(h_1 \sigma_1^2, \dots, h_n \sigma_n^2)$ with $0 < h_i \le 1$, the coordinates $w_i$ of the null density vector (where the ratio is minimized) are:
+-1.  $w_i = \frac{m_{1,i} - h_i m_{0,i}}{1 - h_i}$ if $h_i < 1$
+-2.  $w_i \in \mathbb{R}$ if $h_i = 1$ and $m_{1,i} = m_{0,i}$ [S1]
+-
+-### Optimization Steps
+-The optimization follows the standard 3D Gaussian Splatting training loop [Parent], with the following modifications:
+-
+-1.  **Initialization:**
+-    *   Initialize a set of Gaussians from the SfM point cloud.
+-    *   Assign a binary mask to each Gaussian indicating if it is positive ($G_{GS}$) or negative ($G_{-GS}$).
+-    *   **Hyperparameter:** The initial number of negative Gaussians is critical. It is typically set to approximately 20% of the total Gaussians [S1]. This is determined via grid search/cross-validation [S1].
+-
+-2.  **Rasterization:**
+-    *   Project all Gaussians ($G_{GS}$ and $G_{-GS}$) to 2D.
+-    *   Sort by depth.
+-    *   Composite using alpha blending. The color contribution of a negative Gaussian is subtracted from the accumulated color, effectively acting as a "negative opacity" or color cancellation [S1].
+-    *   *Note:* The standard alpha blending equation $\mathbf{C} = \sum c_i \alpha_i \prod_{j < i} (1 - \alpha_j)$ applies, where $c_i$ can be negative [Parent, S1].
+-
+-3.  **Loss Computation:**
+-    *   Compute photometric loss (e.g., L1 loss) between the rendered image and the ground truth image [S1].
+-
+-4.  **Backpropagation:**
+-    *   Backpropagate the loss to all parameters: $\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha, \mathbf{c}$ for both positive and negative Gaussians [S1].
+-
+-5.  **Adaptive Control (Pruning and Densification):**
+-    *   **Pruning:** Gaussians with low opacity are removed, regardless of whether they are positive or negative [S1].
+-    *   **Densification:** New Gaussians are introduced into empty 3D regions (areas with high gradient or low coverage) [S1].
+-    *   The optimization dynamically adapts the number of components. Experiments show that negative components allow the method to require fewer total Gaussians to achieve similar or better quality than standard GS [S1].
++This implies that a null density (zero effective contribution) can be imposed on a $k$-dimensional affine space by aligning means and variances, allowing for precise modeling of complex nonlinear structures [S1].
+ 
+ ### Pseudocode
++The following pseudocode outlines the initialization and the core distinction in the primitive update step. It assumes standard 3DGS rendering and loss computation are available.
++
+ ```python
+-# NegGS Training Step
+-# Assumes standard GS rasterization and backpropagation functions are available
+-# but extended to handle negative colors.
++def initialize_neggs(num_total_gaussians, negative_ratio=0.2):
++    """
++    Initialize the Gaussian primitives for NegGS.
++    """
++    num_negative = int(num_total_gaussians * negative_ratio)
++    num_positive = num_total_gaussians - num_negative
++    
++    # Initialize positions, scales, rotations, opacities as in standard GS
++    # Initialize colors c_i. 
++    # For positive Gaussians, c_i > 0.
++    # For negative Gaussians, c_i < 0.
++    
++    gaussians = []
++    for i in range(num_positive):
++        g = create_gaussian()
++        g.color = positive_random_color()
++        g.is_negative = False
++        gaussians.append(g)
++        
++    for i in range(num_negative):
++        g = create_gaussian()
++        g.color = negative_random_color() # Negative color values
++        g.is_negative = True
++        gaussians.append(g)
++        
++    return gaussians
+ 
+-def train_step_neggs(scene_gaussians, camera, gt_image, optimizer):
++def update_gaussians(gaussians, loss, grad):
+     """
+-    scene_gaussians: List of Gaussian objects.
+-                     Each has attributes: mu, cov, alpha, color (can be negative), is_negative (bool)
+-    camera: Camera pose and intrinsics
+-    gt_image: Ground truth RGB image
+-    optimizer: Optimizer for mu, cov, alpha, color
++    Standard GS densification/pruning, but respecting the negative mask.
+     """
++    # 1. Compute gradients for all attributes including color
++    # 2. Prune low opacity Gaussians
++    # 3. Clone/Densify high gradient Gaussians
+     
+-    # 1. Rasterization
+-    # Project all Gaussians to screen space
+-    screen_gaussians = []
+-    for g in scene_gaussians:
+-        # Project mean and covariance
+-        mu_2d, cov_2d = project_to_screen(g.mu, g.cov, camera)
+-        # Calculate screen-space opacity and color
+-        # Note: g.color can be negative
+-        screen_gaussians.append({
+-            'mu_2d': mu_2d,
+-            'cov_2d': cov_2d,
+-            'alpha': g.alpha,
+-            'color': g.color,
+-            'is_negative': g.is_negative,
+-            'depth': g.mu.z # For sorting
+-        })
+-    
+-    # Sort by depth (front to back)
+-    screen_gaussians.sort(key=lambda x: x['depth'])
+-    
+-    # Composite using alpha blending
+-    # The standard blending equation handles negative colors naturally
+-    # C = sum(c_i * alpha_i * product(1 - alpha_j))
+-    rendered_image = alpha_blend(screen_gaussians)
+-    
+-    # 2. Loss Computation
+-    loss = compute_l1_loss(rendered_image, gt_image)
+-    
+-    # 3. Backpropagation
+-    # Backpropagate to all parameters
+-    # The gradient of the color c_i will be negative if the rendered color is too high
+-    # and positive if too low, allowing negative Gaussians to "subtract" color
+-    loss.backward()
+-    
+-    # 4. Optimization Step
+-    optimizer.step()
+-    optimizer.zero_grad()
+-    
+-    # 5. Adaptive Control (Every N steps)
+-    if step % densification_interval == 0:
+-        prune_low_opacity_gaussians(scene_gaussians, threshold=0.005)
+-        densify_empty_regions(scene_gaussians, camera, gt_image, threshold=0.01)
+-        
+-        # Ensure initial ratio of negative Gaussians is maintained if needed,
+-        # or allow dynamic adaptation. Sources suggest initial ratio is key,
+-        # but final count adapts.
+-        
+-    return loss
+-
+-def project_to_screen(mu, cov, camera):
+-    """
+-    Standard 3DGS projection.
+-    mu: 3D mean
+-    cov: 3x3 covariance
+-    camera: Camera parameters
+-    Returns: 2D mean, 2x2 covariance
+-    """
+-    # Implementation details from Parent article
+-    # ...
+-    pass
+-
+-def alpha_blend(screen_gaussians):
+-    """
+-    Standard alpha blending loop.
+-    Handles negative colors in 'color' field.
+-    """
+-    H, W = image_height, image_width
+-    out_color = np.zeros((H, W, 3))
+-    out_alpha = np.zeros((H, W))
+-    
+-    for g in screen_gaussians:
+-        # Sample Gaussian at each pixel (or use tile-based rasterization)
+-        # For simplicity, assume we have pixel contributions
+-        # In practice, this is done via tile-based rasterization in GS
+-        pass
+-    return out_color
++    for g in gaussians:
++        if g.is_negative:
++            # Ensure color remains negative or handle sign flip if optimization drifts
++            # Note: Standard GS allows color to be anything, but NegGS relies on
++            # the initial negative sign for the "negative Gaussian" identity.
++            # The binary mask tracks this identity.
++            pass
++        else:
++            pass
++            
++    return gaussians
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The subtraction of colors can lead to cancellation artifacts if positive and negative Gaussians are not well-balanced. However, the alpha blending ensures that the final color is bounded if opacities are clamped [G].
+-*   **Boundary Conditions:** The condition $\Sigma_0 \succeq \Sigma_1$ (positive semi-definite difference) is required for the Diff-Gaussian minimum to be well-defined in the theoretical derivation. In practice, the optimization handles arbitrary covariances, but the theoretical justification relies on this [S1].
+-*   **Degenerate Input:** If two Gaussians have identical parameters and inverse colors, they cancel each other out completely. This is a feature, not a bug, as it allows for efficient representation of complex shapes [S1].
++*   **Initialization Sensitivity:** The initial number of negative Gaussians is critical. Deviating significantly from the ~20% ratio can reduce optimization efficacy [S1].
++*   **Color Sign Drift:** While the mask tracks the identity, optimization might theoretically drive a negative color towards positive. The binary mask ensures the rendering logic treats them as negative contributors regardless of the current color value's sign, but the semantic meaning relies on the initial assignment [S1].
++*   **Precision:** The calculation of the Diff-Gaussian ratio involves matrix inversions ($\Sigma^{-1}$). Ensure numerical stability when covariances are ill-conditioned [S1].
++
++## Subtopics
++
++### Diff-Gaussian Distribution
++A theoretical construct formed by dividing the PDFs of two Gaussians. It sets NegGS apart by enabling the approximation of non-convex, high-frequency structures (like donuts) that standard Gaussians cannot represent efficiently. Choose this when modeling complex nonlinear geometry is prioritized over simple smooth surfaces. [S2]
++
++### Negative Color Rendering
++The practical implementation detail where Gaussians have negative RGB values. This sets NegGS apart from standard GS by allowing destructive interference. Choose this when shadow modeling or high-frequency color transitions are present. [S1, S2]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** NegGS preserves the original Gaussian Splatting rendering speed because it leverages the same rasterization framework with only a binary mask overhead [S1]. Training time is comparable to standard GS, as the optimization loop is identical [S1].
+-*   **Memory Complexity:** Memory usage is slightly higher due to the storage of the binary mask and potentially more complex covariance interactions, but the total number of Gaussians required is often lower than standard GS for complex scenes, offsetting this [S1].
+-*   **Measured Performance:**
+-    *   On the Mip-NeRF360 dataset, NegGS-30K achieved an average PSNR of 27.39, SSIM of 0.812, and LPIPS of 0.219, compared to GS-30K's 27.21 PSNR, 0.815 SSIM, and 0.214 LPIPS [S1].
+-    *   On the NeRF Synthetic dataset, NegGS showed slight improvements in PSNR and SSIM over GS [S1].
+-    *   NegGS is particularly effective on datasets with high-frequency elements and rapid color transitions, such as Shiny Blender and Tanks and Temples [S1, S2].
++*   **Time Complexity:** NegGS preserves the original GS rendering speed by leveraging the existing framework and using a binary mask [S1]. However, it alleviates the time complexity increase associated with using many Gaussian components to model complex structures in standard GS [S2].
++*   **Memory Complexity:** Similar to standard GS, but potentially fewer total Gaussians are required to achieve comparable or better reconstruction quality for complex scenes, as negative Gaussians allow for more expressive primitives [S1, S2].
++*   **Performance:**
++    *   On the **Mip-NeRF360** dataset, NegGS-30K achieved an average PSNR of 27.39, SSIM of 0.812, and LPIPS of 0.219, compared to GS-30K's 27.21 PSNR, 0.815 SSIM, and 0.214 LPIPS [S1].
++    *   On the **NeRF Synthetic** dataset, NegGS showed slight improvements or parity with GS (e.g., Chair: 35.88 vs 35.82 PSNR) [S1].
+ *   **Strengths:**
+-    *   Models complex nonlinear structures (e.g., donut shapes) that standard Gaussians struggle with [S2].
+-    *   Improves representation of shadows and high-frequency details [S2].
+-    *   Requires fewer total Gaussians to achieve comparable or better quality [S1].
++    *   Better modeling of high-frequency elements with rapid color transitions [S1, S2].
++    *   Improved representation of shadows [S2].
++    *   Ability to model complex nonlinear structures with fewer primitives than standard GS [S1, S2].
+ *   **Limitations:**
+-    *   The initial number of negative Gaussians is a critical hyperparameter (typically ~20% of total) [S1].
+-    *   May introduce artifacts if the balance between positive and negative components is poor [G].
+-*   **When to use:** Use NegGS when standard Gaussian Splatting fails to capture high-frequency details, complex nonlinear geometries, or accurate shadowing, and when computational resources allow for the initial hyperparameter tuning.
+-*   **When not to use:** Use standard GS if simplicity and speed are paramount, or if the scene is relatively simple and does not require the additional flexibility of negative components.
++    *   Requires careful tuning of the initial ratio of negative Gaussians [S1].
++    *   Theoretical complexity of the Diff-Gaussian ratio may require careful numerical handling [S1].
++*   **When to Use:** Use NegGS when the scene contains complex nonlinear structures, high-frequency details, or intricate shadows that standard Gaussian Splatting struggles to represent efficiently without excessive memory usage.
++*   **When Not to Use:** For simple, smooth scenes where standard GS is sufficient, the added complexity of managing negative Gaussians may not provide significant benefits.
+ 
+ ## Background
+-Negative Gaussian Splatting (NegGS) was introduced as the first method to extend the simple ellipsoid shapes of Gaussian Splatting to more complex nonlinear structures [S2]. It is based on the theoretical concept of "Diff-Gaussians," which are formed by dividing the PDFs of two Gaussians [S2]. The method was evaluated on several standard datasets, including NeRF Synthetic, Mip-NeRF360, Tanks and Temples, Deep Blending, and Shiny Blender [S1]. It was developed to address the limitation that standard Gaussians, due to their linear nature, require a multitude of components to reflect complex nonlinear structures, leading to increased time complexity [S2].
++Negative Gaussian Splatting was introduced as the first method to extend the simple ellipsoid shapes of Gaussian Splatting to more complex nonlinear structures [S2]. It was developed by researchers publishing under the title "NegGS: Negative Gaussian Splatting" [S1, S2]. The method was evaluated on several benchmarks including NeRF Synthetic, Mip-NeRF360, Tanks and Temples, Deep Blending, and Shiny Blender datasets [S1]. It builds on the standard 3D Gaussian Splatting framework, modifying the representation to allow for negative colors and leveraging the mathematical properties of Gaussian ratios [S1].
+ 
+ ## Sources

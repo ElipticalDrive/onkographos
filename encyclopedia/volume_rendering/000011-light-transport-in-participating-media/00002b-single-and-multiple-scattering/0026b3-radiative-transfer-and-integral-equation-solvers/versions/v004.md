@@ -1,0 +1,84 @@
+# Radiative Transfer and Integral Equation Solvers
+
+
+## Overview
+This family encompasses methods for solving the Radiative Transfer Equation (RTE) and related transport problems in participating media. Approaches range from deterministic angular discretization (Discrete Ordinates Method, Principal-Ordinates Propagation) and iterative integral equation solvers (Multiple Scattering Model) to analytical gradient computation for differentiable rendering (Differential Radiative Transfer, Differential Form of RTE). Some variants employ approximation bases like Spherical Harmonics or Gaussians, while others adapt Monte Carlo techniques with signed distance functions (sMCRT) or ratio estimators for accurate shadowing. The family covers both steady-state flux propagation and wave propagation formulations.
+
+## Shared principles
+All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [G]. They share the following core definitions and mechanisms:
+
+**1. Fundamental Interactions**
+Any volumetric effect is composed of three fundamental characteristics [G]:
+*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [G].
+*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [G].
+*   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
+    *   *In-scattering:* Light from other directions reflected into the view ray [G].
+    *   *Out-scattering:* Light from the view ray reflected away [G].
+In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [G].
+
+**2. Notation**
+*   $\mathbf{p}$: Position of interaction.
+*   $\boldsymbol{\omega}$: Ray direction (unit vector).
+*   $L$: Radiance quantity.
+*   $L_i$: Incoming radiance.
+*   $L_o$: Outgoing radiance.
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [G].
+
+**3. Differential Forms**
+The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [G]:
+*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [G].
+*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [G].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
+
+**4. Transmittance**
+The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [G]:
+$$ T = e^{-\tau} $$
+where $\tau$ is the optical depth (integrated extinction) [G].
+
+## Subtopics
+
+### [Discrete Ordinates Method](1046-discrete-ordinates-method.md)
+The Discrete Ordinates Method (DOM) solves the Radiative Transfer Equation by approximating the continuous angular dependence of radiance with a finite set of $M$ discrete directions chosen to provide optimal Gaussian quadrature over the solid angle. It differs from the P-N method by working directly with directional intensities rather than spherical harmonic coefficients, and from ray-tracing methods by discretizing the angular domain into bins to mitigate ray effects. It is primarily used for computing multiple scattering in participating media, such as clouds, where it provides a global illumination solution via iterative flux propagation.
+
+### [Multiple Scattering Model (Integral Equation)](1177-multiple-scattering-model-integral-equation.md)
+The Multiple Scattering Model (Integral Equation) is a physically based illumination model that computes the radiance arriving at a pixel by integrating the contributions of light undergoing multiple scattering events along a ray through a participating medium. It solves for the directional intensity $I(\mathbf{X}, \boldsymbol{\omega})$ by accounting for emission, absorption, and the redirection of light from all possible incoming directions. Unlike single-scattering approximations, this model captures the complex interplay of light bounces, making it suitable for dense or high-albedo media where single-bounce assumptions fail. It is distinguished from its siblings by its formulation as a Fredholm integral equation of the second kind, where the unknown intensity appears on both sides of the equation, necessitating iterative solvers, spherical harmonic expansions, or stochastic sampling rather than direct evaluation.
+
+### [Principal-Ordinates Propagation](4121-principal-ordinates-propagation.md)
+Principal-Ordinates Propagation (POP) is a deterministic finite-element method for real-time simulation of anisotropic light transport in heterogeneous participating media. It solves the problem of false scattering and ray effects inherent in previous finite-element methods by dynamically decomposing illumination into directional and point sources and propagating them in independent discrete domains aligned with principal light directions. Unlike methods using general bases like spherical harmonics, POP uses a computationally efficient unimodal basis implicitly aligned with the respective principal ordinate, allowing for virtually arbitrary scattering anisotropy and albedo without precomputation.
+
+### [Jacobi Iterative Method for Diffusion](4382-jacobi-iterative-method-for-diffusion.md)
+This method solves the discrete diffusion equation and its differential counterpart to compute diffusion radiance ($L_d^0$), its derivative ($\partial_\pi L_d^0$), first-order radiance ($\vec{L}_1^d$), and its derivative ($\partial_\pi \vec{L}_1^d$). It is used to simulate fluid-like light diffusion in participating media, enabling the visualization of internal structures without global segmentation. It sets itself apart from sibling methods like [Discrete Ordinates Method](1046-discrete-ordinates-method.md) by operating on a grid-based iterative solver for the diffusion approximation rather than discrete angular directions, and from [Multiple Scattering Model (Integral Equation)](1177-multiple-scattering-model-integral-equation.md) by using a local Jacobi iteration on the differential form.
+
+### [Sparse Linear System Solver for Wave Propagation](4718-sparse-linear-system-solver-for-wave-propagation.md)
+This method solves for forward and backward acoustic wave amplitudes in a layered medium by formulating the coupled wave equations as a sparse linear system $A\mathbf{x} = \mathbf{b}$. It captures multiple internal reflections and transmissions at voxel boundaries defined by acoustic impedance contrasts. Unlike integral equation solvers that approximate scattering over volumes, this approach models wave propagation along straight-line ray paths through discrete interfaces.
+
+### [Differential Form of RTE](4803-differential-form-of-rte.md)
+The Differential Form of RTE provides an analytical method to compute the gradient of the Radiative Transfer Equation (RTE) with respect to medium density, enabling differentiable rendering for fluid modeling. It sets itself apart from numerical differentiation or automatic differentiation by deriving closed-form expressions for the derivatives of transmittance and single-scattering radiance directly from the continuous integral formulation.
+
+### [Spherical Harmonics and Spherical Gaussians for Radiance Transfer](5599-spherical-harmonics-and-spherical-gaussians-for-radiance-tra.md)
+Spherical Harmonics (SH) and Spherical Gaussians (SG) are approximation methods for radiance transfer used in real-time or long-rendering scenarios to avoid expensive on-the-fly calculations of the light transport equation. They approximate the incident radiance field using Spherical Radial Basis Functions (SRBFs), which are then convolved with the Bidirectional Reflectance Distribution Function (BRDF). SH is preferred for diffuse or rough surfaces, while SG is used for higher-frequency glossy terms or unified frameworks handling all-frequency shadows.
+
+### [Differential Radiative Transfer](7879-differential-radiative-transfer.md)
+Differential Radiative Transfer (DRTE) is a framework for computing the total derivative (gradient) of the interior radiance field $L$ with respect to arbitrary scene parameters $\pi$ by differentiating the integral operators in the combined Radiative Transfer Equation (RTE) and Radiance Equation (RE). It solves the problem of obtaining unbiased gradients for volumetric lighting effects, which standard path tracing cannot provide due to discontinuities in visibility and geometry. What sets it apart from its siblings is its rigorous handling of the RTE's transport and collision operators, including boundary integrals arising from geometric discontinuities, whereas methods like [Discrete Ordinates Method](1046-discrete-ordinates-method.md) solve for the radiance itself without differentiation, and [Li et al. 2018a] only considers the RE for reflected/refracted radiance, neglecting the volumetric phenomena governed by the RTE.
+
+### [Ratio Estimator for Volume Scattering](9012-ratio-estimator-for-volume-scattering.md)
+The Ratio Estimator is a Monte Carlo integration technique for volumetric light transport that separates the radiance integral into an analytically computed unoccluded term and a numerically estimated ratio of occluded to unoccluded radiance. It solves the problem of accurate shadowing in participating media by allowing existing sampling schemes (such as distance or equidistant sampling) to estimate visibility without bias, asymptotically converging to the correct solution even in multiple scattering scenarios. Unlike approximate moment-based estimators, this method provides an unbiased estimate by explicitly canceling the transmittance component through the ratio of two Monte Carlo estimates.
+
+### m > 1 Propagation
+- **Definition:** Handling of direction bins where $m > 1$ by maintaining work, edge, and corner arrays only for separations $s$ divisible by $m$, and spreading them for non-divisible $s$ [S1, book].
+- **Steps:**
+    - For $m=2$ in 2-D, compute weights for cells $a$, $b$, $c$ from integrals: $\int_{B_j} \int_{V_0} P(\omega, x) l_m(\omega, x) dx$ where $B_j$ is the shooting direction bin, $V_0$ is the shooting cell, $V_i$ is the receiving cell, $P$ is the extended top of $V_0$, and $l_m(\omega, x)$ is the length of the segment in which the ray through $x$ in direction $\omega$ intersects cell $V_m$ [S1, book]. Assign weight in cell $c$ to cell $b$ to reduce spread, normalize $a$ and $b$ to sum to 1 [S1, book].
+    - For 3-D $m>1$, use Monte Carlo integration to determine weights due to complex ray/cell intersection geometry [S1, book].
+    - On odd-numbered steps, use special weights to propagate flux [S1, book].
+
+### Meshless Monte Carlo Radiation Transfer (sMCRT)
+- **Definition:** A geometry-based Monte Carlo radiation transfer method that uses signed distance functions to represent model geometry, enabling accurate modeling of smooth curved surfaces without voxels or meshes [S2, abstract only, unofficial].
+- **Comparison:** Compared to voxel-based MCRT methods for curved surfaces, sMCRT is up to forty-five times more accurate [S2, abstract only, unofficial]. Compared to voxel models for equivalent scenarios, sMCRT is up to three times faster [S2, abstract only, unofficial].
+- **Usage:** Validated for modeling arbitrary complex geometries such as microvascular vessel networks using SDFs [S2, abstract only, unofficial].
+
+## Background
+The Discrete Ordinates Method originated from neutron transport theory and was adapted for computer graphics [S1, book]. Principal-Ordinates Propagation was introduced to enable real-time rendering of anisotropic scattering [S1, book]. Differential Radiative Transfer represents a recent advancement in differentiable rendering [S2, abstract only, unofficial]. Spherical Harmonics and Gaussians are long-standing techniques in global illumination [S1, book]. The application of Sparse Linear Systems for wave propagation is rooted in acoustic and seismic modeling [S1, book]. The Multiple Scattering Integral Equation formulation is a direct mathematical consequence of the RTE [S1, book].
+
+## Sources
+[S1] Efficient Light Propagation for Multiple Anisotropic Volume Scattering, https://doi.org/10.1007/978-3-642-87825-1_7, fetched 2026-10-26 (book)
+[S2] Enhanced Sphere Tracing | Request PDF - ResearchGate, https://www.researchgate.net/publication/265020476_Enhanced_Sphere_Tracing, fetched 2026-11-03 (abstract only, unofficial)

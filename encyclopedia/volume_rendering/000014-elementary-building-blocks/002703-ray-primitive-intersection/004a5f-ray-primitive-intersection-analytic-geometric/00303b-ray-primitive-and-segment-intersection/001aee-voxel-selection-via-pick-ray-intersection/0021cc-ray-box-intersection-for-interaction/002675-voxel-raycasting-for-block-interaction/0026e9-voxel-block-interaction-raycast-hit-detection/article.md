@@ -4,20 +4,20 @@ Also called: FindSolidBlock
 This method finds the solid voxel block closest to a raycast hit location by checking the hit block and its six immediate neighbors [S1, unofficial]. It differs from its parent, [Voxel Raycasting for Block Interaction](3780-voxel-raycasting-for-block-interaction.md), which steps along the ray to find the first solid voxel, by instead performing a localized search around a known hit location to determine the precise block for breaking or placing [S1, unofficial].
 ## How it works
 **Inputs:**
-- `HitLocation`: The world-space 3D vector where the interaction ray intersects the voxel geometry.
+- `HitLocation`: The world-space 3D vector where the interaction ray intersects the voxel geometry [S1, unofficial].
 - `S`: The side length of a single voxel block (BlockSize) [S1, unofficial].
 - `ChunkSizeZ`: The vertical dimension of a chunk in blocks [S1, unofficial].
-- `ChunkSizeX`, `ChunkSizeY`: The horizontal dimensions of a chunk in blocks [G].
-- `ChunkCache`: A dictionary mapping chunk indices to block data arrays.
+- `ChunkSizeX`, `ChunkSizeY`: Horizontal chunk dimensions in blocks [G].
+- `ChunkCache`: A dictionary mapping chunk indices to block data arrays [S1, unofficial].
 
 **Outputs:**
-- `OutChunkIndex`: The 2D integer index of the chunk containing the target block.
-- `OutLocalBlock`: The 3D integer coordinates of the block within that chunk.
-- `bFound`: A boolean indicating whether a solid block was successfully identified.
+- `OutChunkIndex`: The 2D integer index of the chunk containing the target block [S1, unofficial].
+- `OutLocalBlock`: The 3D integer coordinates of the block within that chunk [S1, unofficial].
+- `bFound`: A boolean indicating whether a solid block was successfully identified [S1, unofficial].
 
 **Data Structures:**
-- `FIntPoint`: A 2D integer tuple representing the chunk index $(CI_x, CI_y)$.
-- `FIntVector`: A 3D integer tuple representing local block coordinates $(LB_x, LB_y, LB_z)$.
+- `FIntPoint`: A 2D integer tuple representing the chunk index $(CI_x, CI_y)$ [S1, unofficial].
+- `FIntVector`: A 3D integer tuple representing local block coordinates $(LB_x, LB_y, LB_z)$ [S1, unofficial].
 - `ChunkCache`: A dictionary where keys are `FIntPoint` and values are block data arrays. A `None` value indicates an unloaded or empty chunk [S1, unofficial].
 
 **Parameters:**
@@ -70,7 +70,8 @@ This method finds the solid voxel block closest to a raycast hit location by che
 import math
 
 def GlobalToLocal(GX, GY, GZ, ChunkSizeX, ChunkSizeY, ChunkSizeZ):
-    """Converts global block coordinates to chunk index and local block coordinates [G]."""
+    """Converts global block coordinates to chunk index and local block coordinates [G].
+    Not given in the sources; standard chunk indexing assumed [G]."""
     CI = (GX // ChunkSizeX, GY // ChunkSizeY)
     LB = (GX % ChunkSizeX, GY % ChunkSizeY, GZ % ChunkSizeZ)
     return CI, LB
@@ -152,12 +153,12 @@ def FindSolidBlock(HitLocation, S, ChunkSizeZ, ChunkSizeX, ChunkSizeY, ChunkCach
 This method determines the global coordinates of an empty voxel position adjacent to a solid block that was hit by a raycast, enabling the placement of new blocks or mining operations. It solves the problem of translating a continuous raycast hit location into a discrete voxel grid coordinate while respecting the geometry of the hit face. It differs from its parent, [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md), which only identifies the hit block; this method extends that result to find the specific neighbor slot for interaction.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to Use:** Not given in the sources.
-- **When Not to Use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
+- **When to Use:** Not given in the sources. [S1, unofficial]
+- **When Not to Use:** Not given in the sources. [S1, unofficial]
 
 ## Background
 This method is derived from the implementation details of the `VoxelWorld` project by HawkDev15 [S1, unofficial]. It is used in the `GetBlockCoords` function to support block removal and placement operations [S1, unofficial]. The approach is common in voxel games where chunk-based storage is used, and interaction is resolved by checking the immediate vicinity of a raycast hit [S1, unofficial].

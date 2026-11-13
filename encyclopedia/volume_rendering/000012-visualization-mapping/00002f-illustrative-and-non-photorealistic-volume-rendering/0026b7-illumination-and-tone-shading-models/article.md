@@ -3,18 +3,18 @@
 Also called: Illustrative Lighting, NPR Illumination
 
 ## Overview
-Illumination and Tone Shading Models are non-photorealistic rendering techniques that enhance volume visualization by decoupling lighting from physical light transport, using mathematical functions of view direction, light direction, and scalar field properties to modulate color [S4, unofficial]. They solve the problem of missing depth cues and feature abstraction in translucent volume rendering by simulating artistic lighting styles, such as painterly effects, cel-shading, or warm-to-cool gradients, rather than calculating realistic radiance [S1, S2, unofficial]. Unlike photometric models, these methods map normal vectors or scalar values directly to pre-computed artistic colors or discrete tone bands, providing view-dependent or orientation-dependent shading that rotates with the camera or adapts to local data structure [S1, S2, unofficial].
+Illumination and Tone Shading Models are non-photorealistic rendering techniques that enhance volume visualization by decoupling lighting from physical light transport, using mathematical functions of view direction, light direction, and scalar field properties to modulate color [G]. They simulate artistic lighting styles, such as painterly effects, cel-shading, or warm-to-cool gradients, to solve the problem of missing depth cues and feature abstraction in translucent volume rendering [G]. Unlike photometric models, these methods map normal vectors or scalar values directly to pre-computed artistic colors or discrete tone bands, providing view-dependent or orientation-dependent shading that rotates with the camera or adapts to local data structure [G].
 
 ## Shared principles
-The family shares the goal of enhancing volume visualization through stylized lighting and feature abstraction [G]. All methods operate on fragment-level data, typically utilizing the volume sample gradient as a proxy for surface normal orientation [G]. They decouple illumination from the physical light transport equation, instead using mathematical functions of the view direction, light direction, and scalar field properties to modulate color [S4, unofficial]. Common inputs include the normalized gradient $\nabla f_n$, light vectors $L$, and base colors derived from transfer functions [G]. The output is a final color $c$ that combines ambient/gaseous components with directed illumination effects [G].
+The family shares the goal of enhancing volume visualization through stylized lighting and feature abstraction [G]. All methods operate on fragment-level data, typically utilizing the volume sample gradient as a proxy for surface normal orientation [G]. They decouple illumination from the physical light transport equation, instead using mathematical functions of the view direction, light direction, and scalar field properties to modulate color [G]. Common inputs include the normalized gradient $\nabla f_n$, light vectors $L$, and base colors derived from transfer functions [G]. The output is a final color $c$ that combines ambient/gaseous components with directed illumination effects [G].
 
 The framework utilizes four types of properties for enhancement:
-1. Volume sample location and value [S4, unofficial].
-2. Local volumetric properties, such as gradient and minimal change direction [S4, unofficial].
-3. View direction [S4, unofficial].
-4. Light information [S4, unofficial].
+1. Volume sample location and value [G].
+2. Local volumetric properties, such as gradient and minimal change direction [G].
+3. View direction [G].
+4. Light information [G].
 
-Volumetric illustration differs from surface-based NPR in several important ways [S2, S4, unofficial]. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2, S4, unofficial].
+Volumetric illustration differs from surface-based NPR in several important ways [G]. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [G].
 
 ## Subtopics
 
@@ -40,21 +40,18 @@ Applies cel-shading to volumetric data using a pre-computed 3D normal map and ha
 Enhances material boundaries by using two scalar samples along the gradient direction as inputs to a 2D lighting transfer function, dynamically adjusting lighting coefficients based on local data structure.
 
 ### Banks Illumination Model for Curves
-Uses the illumination model for curves of Banks to provide a better sense of curvature in line bundle rendering. Line bundles can be more opaque in this variant. [S1, unofficial]
+Uses the illumination model for curves of Banks to provide a better sense of curvature in line bundle rendering [S1, unofficial]. Line bundles can be more opaque in this variant [S1, unofficial].
 
 ### Tone Rendering
-A non-photorealistic rendering method used to visualize important information in an abstract but coherent way. [S2, unofficial]
+A non-photorealistic rendering method used to visualize important information in an abstract but coherent way [S2, unofficial].
 
-### Banks Illumination Model for Curves
-- **Step**: Use the illumination model for curves of Banks [12] in the rendering to provide a better sense of curvature [S1, unofficial].
-- **Parameter**: Line bundles can be more opaque in this variant [S1, unofficial].
-
-### Tone Rendering
-- **Definition**: A non-photorealistic rendering method used to visualize important information in an abstract but coherent way [S2, unofficial].
+### Cone Aperture Angle Shading
+The parameter $\theta$ determines the effect of surrounding features, with higher values causing more distant features to increase shading variation [S3]. Tested values include $50^\circ$ and $85^\circ$ [S3].
 
 ## Background
-The concept of Tone Rendering as a non-photorealistic method for abstract visualization was introduced in the context of volume visualization methods, contrasting with Phong Illumination which guarantees higher realistic images [S2, unofficial]. The Banks illumination model for curves was applied in flow visualization techniques to enhance the perception of curvature in vector fields [S1, unofficial]. These methods emerged as part of the broader field of Illustrative and Non-Photorealistic Volume Rendering, aiming to improve feature perception and artistic style over physical accuracy.
+The concept of Tone Rendering as a non-photorealistic method for abstract visualization was introduced in the context of volume visualization methods, contrasting with Phong Illumination which guarantees higher realistic images [S2, unofficial]. The Banks illumination model for curves was applied in flow visualization techniques to enhance the perception of curvature in vector fields [S1, unofficial].
 
 ## Sources
 [S1] Flow Visualization Techniques for CDF using Volume Rendering, https://www.osti.gov/servlets/purl/790542, fetched 2026-10-26 (unofficial)
 [S2] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S3] PDF A Directional Occlusion Shading Model for Interactive Direct Volume ..., https://cgl.ethz.ch/teaching/scivis_common/Literature/Schott2009.pdf, fetched 2026-10-29

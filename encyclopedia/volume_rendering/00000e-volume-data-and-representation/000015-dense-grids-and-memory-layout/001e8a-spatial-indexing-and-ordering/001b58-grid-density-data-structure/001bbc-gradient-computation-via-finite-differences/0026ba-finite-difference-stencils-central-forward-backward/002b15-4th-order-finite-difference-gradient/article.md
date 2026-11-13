@@ -15,7 +15,7 @@ This method computes the gradient (normal vector) of a Signed Distance Function 
 - A list of three 3D arrays `[gx, gy, gz]`, each of shape $(N_x, N_y, N_z)$, representing the partial derivatives $\frac{\partial V}{\partial x}$, $\frac{\partial V}{\partial y}$, and $\frac{\partial V}{\partial z}$ [S1, unofficial].
 
 **Data Structures:**
-- The grid is stored as a dense 3D array. No additional auxiliary structures are required beyond the input grid and temporary arrays for the shifted slices [S1, unofficial].
+- The grid is stored as a dense 3D array [S1, unofficial]. No additional auxiliary structures are required beyond the input grid and temporary arrays for the shifted slices [S1, unofficial].
 
 **Steps:**
 1. Define the largest valid index for each dimension: $n_x = N_x - 1$, $n_y = N_y - 1$, $n_z = N_z - 1$ [S1, unofficial].
@@ -31,11 +31,11 @@ $$ \frac{\partial V}{\partial x_i} \approx \frac{V_{i+1} - V_{i-1}}{2h} $$
 
 At the boundaries, 4th-order accuracy is maintained by extrapolating the ghost points using the 4th-order finite difference boundary condition [S1, unofficial]:
 $$ V_{n+1} = 3V_n - 3V_{n-1} + V_{n-2} $$
-$$ V_{-1} = -3V_0 + 3V_1 + V_2 $$
+$$ V_{-1} = 3V_0 - 3V_1 + V_2 $$
 
 For the x-axis:
 $$ X_1 = [V_{1}, V_{2}, \dots, V_{n_x}, \underbrace{3V_{n_x} - 3V_{n_x-1} + V_{n_x-2}}_{\text{extrapolated } V_{n_x+1}}] $$
-$$ X_2 = [\underbrace{-3V_0 + 3V_1 + V_2}_{\text{extrapolated } V_{-1}}, V_0, V_1, \dots, V_{n_x-1}] $$
+$$ X_2 = [\underbrace{3V_0 - 3V_1 + V_2}_{\text{extrapolated } V_{-1}}, V_0, V_1, \dots, V_{n_x-1}] $$
 $$ G_x = \frac{X_1 - X_2}{2h} $$
 
 **Parameters:**
@@ -44,12 +44,14 @@ $$ G_x = \frac{X_1 - X_2}{2h} $$
 **Edge Cases and Pitfalls:**
 - **Grid Resolution:** The stencil requires at least 3 voxels in each dimension to compute the boundary extrapolation ($V_{n-2}$ and $V_2$). If $N < 3$, the method fails or requires fallback to lower-order schemes [G].
 - **Precision:** The extrapolation coefficients ($3, -3, 1$) can amplify noise in the SDF grid at boundaries. Smoothing the input SDF before gradient computation is often recommended [G].
-- **Boundary Conditions:** This specific implementation uses one-sided extrapolation. Other methods might use zero-padding or clamping, which reduces accuracy at the boundary to 1st or 2nd order [G].
+- **Boundary Conditions:** This specific implementation uses one-sided extrapolation [S1, unofficial]. Other methods might use zero-padding or clamping, which reduces accuracy at the boundary to 1st or 2nd order [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import numpy as np
+
 def compute_4th_order_gradient(grid, voxel_size, nx, ny, nz):
     """
     Computes the gradient of a 3D SDF grid using 4th-order finite differences.
@@ -62,47 +64,40 @@ def compute_4th_order_gradient(grid, voxel_size, nx, ny, nz):
     Returns:
         gx, gy, gz: 3D arrays of shape (nx, ny, nz)
     """
-    # Initialize output arrays with zeros
-    gx = zeros_like(grid)
-    gy = zeros_like(grid)
-    gz = zeros_like(grid)
+    gx = np.zeros_like(grid)
+    gy = np.zeros_like(grid)
+    gz = np.zeros_like(grid)
     
     # --- X-axis ---
-    # Interior part of X1: grid[1:]
     x1_interior = grid[1:, :, :]
-    # Upper boundary extrapolation: V_{nx} = 3*V_{nx-1} - 3*V_{nx-2} + V_{nx-3}
     x1_boundary = 3 * grid[nx-1, :, :] - 3 * grid[nx-2, :, :] + grid[nx-3, :, :]
-    # Concatenate along axis 0
-    X1 = concatenate([x1_interior, x1_boundary[None, :, :]], axis=0)
+    X1 = np.concatenate([x1_interior, x1_boundary[None, :, :]], axis=0)
     
-    # Lower boundary extrapolation: V_{-1} = -3*V_0 + 3*V_1 + V_2
-    x2_boundary = -3 * grid[0, :, :] + 3 * grid[1, :, :] + grid[2, :, :]
-    # Interior part of X2: grid[:-1]
+    x2_boundary = -3 * grid[1, :, :] + 3 * grid[0, :, :] + grid[2, :, :]
     x2_interior = grid[:-1, :, :]
-    # Concatenate along axis 0
-    X2 = concatenate([x2_boundary[None, :, :], x2_interior], axis=0)
+    X2 = np.concatenate([x2_boundary[None, :, :], x2_interior], axis=0)
     
     gx = (X1 - X2) / (2 * voxel_size)
     
     # --- Y-axis ---
     y1_interior = grid[:, 1:, :]
     y1_boundary = 3 * grid[:, ny-1, :] - 3 * grid[:, ny-2, :] + grid[:, ny-3, :]
-    Y1 = concatenate([y1_interior, y1_boundary[:, None, :]], axis=1)
+    Y1 = np.concatenate([y1_interior, y1_boundary[:, None, :]], axis=1)
     
-    y2_boundary = -3 * grid[:, 0, :] + 3 * grid[:, 1, :] + grid[:, 2, :]
+    y2_boundary = -3 * grid[:, 1, :] + 3 * grid[:, 0, :] + grid[:, 2, :]
     y2_interior = grid[:, :-1, :]
-    Y2 = concatenate([y2_boundary[:, None, :], y2_interior], axis=1)
+    Y2 = np.concatenate([y2_boundary[:, None, :], y2_interior], axis=1)
     
     gy = (Y1 - Y2) / (2 * voxel_size)
     
     # --- Z-axis ---
     z1_interior = grid[:, :, 1:]
     z1_boundary = 3 * grid[:, :, nz-1] - 3 * grid[:, :, nz-2] + grid[:, :, nz-3]
-    Z1 = concatenate([z1_interior, z1_boundary[:, :, None]], axis=2)
+    Z1 = np.concatenate([z1_interior, z1_boundary[:, :, None]], axis=2)
     
-    z2_boundary = -3 * grid[:, :, 0] + 3 * grid[:, :, 1] + grid[:, :, 2]
+    z2_boundary = -3 * grid[:, :, 1] + 3 * grid[:, :, 0] + grid[:, :, 2]
     z2_interior = grid[:, :, :-1]
-    Z2 = concatenate([z2_boundary[:, :, None], z2_interior], axis=2)
+    Z2 = np.concatenate([z2_boundary[:, :, None], z2_interior], axis=2)
     
     gz = (Z1 - Z2) / (2 * voxel_size)
     
@@ -111,24 +106,22 @@ def compute_4th_order_gradient(grid, voxel_size, nx, ny, nz):
 
 ## Subtopics
 
-### Sobel Operator
-Uses fixed 3x3x3 convolution kernels. Faster but lower order accuracy. Choose for real-time performance where smoothness is less critical. [G]
+### [Sobel-based Gradient Estimation](9967-sobel-based-gradient-estimation.md)
+Uses fixed 3x3x3 convolution kernels. Faster but lower order accuracy. Choose for real-time performance where smoothness is less critical [G].
 
-### Jacobian Estimation via Central Differences
-Focuses on the full Jacobian matrix rather than just the gradient vector. Useful for deformation analysis. [G]
+### [Forward Difference Gradient](3362-forward-difference-gradient.md)
+Uses only forward neighbors. 1st-order accurate. Simpler to implement but less smooth [G].
 
-### Forward Difference Gradient
-Uses only forward neighbors. 1st-order accurate. Simpler to implement but less smooth. [G]
-
-### Gauss-Seidel with Successive Over-Relaxation (SOR)
-An iterative solver for linear systems, not a direct gradient estimator. Used for solving Poisson equations for SDF reconstruction. [G]
+### [Gauss-Seidel with Successive Over-Relaxation (SOR)](6904-gauss-seidel-with-successive-over-relaxation-sor.md)
+An iterative solver for linear systems, not a direct gradient estimator. Used for solving Poisson equations for SDF reconstruction [G].
+- [Jacobian Estimation via Central Differences]: Focuses on the full Jacobian matrix rather than just the gradient vector. Useful for deformation analysis [G].
 
 ## Operating characteristics
 - **Time Complexity**: $O(N)$ where $N = N_x N_y N_z$ is the number of voxels. Each voxel is accessed a constant number of times [G].
 - **Memory Complexity**: $O(N)$ for the input grid and $O(N)$ for the output gradients. Temporary arrays for concatenation add $O(N)$ overhead [G].
 - **Measured Performance**: Performance depends on the implementation and hardware acceleration [G].
 - **Strengths**: High-order accuracy (4th-order) provides very smooth normals, reducing artifacts in ray marching. Maintains accuracy at boundaries [S1, unofficial].
-- **Limitations**: Requires at least 3 voxels per dimension. Boundary extrapolation can be sensitive to noise. More complex to implement than simple central differences [G].
+- **Limitations**: Requires at least 3 voxels per dimension. Boundary extrapolation can be sensitive to noise [G]. More complex to implement than simple central differences [G].
 - **When to Use**: When high-quality normals are critical for rendering fidelity, such as in high-resolution SDF rendering or neural rendering pipelines [G].
 - **When Not to Use**: For very low-resolution grids (< 3 voxels) or when computational resources are extremely constrained and lower-order accuracy is acceptable [G].
 

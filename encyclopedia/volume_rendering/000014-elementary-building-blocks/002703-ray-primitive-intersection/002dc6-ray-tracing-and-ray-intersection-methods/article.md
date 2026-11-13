@@ -3,37 +3,27 @@
 Also called: Ray Intersection Methods
 
 ## Overview
-Ray tracing is a surface rendering technique that determines the first object intersected by a camera ray by analytically computing intersection distances for simple geometries [S1, unofficial]. It solves the problem of finding the exact point where a ray meets a surface in a single evaluation, providing mathematically correct intersections limited only by floating-point precision [S2, unofficial]. Unlike [Ray Marching](8334-ray-marching.md) which approximates intersections via stepping, or [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) which relies on field sampling, ray tracing requires explicit geometry definitions [S2, unofficial]. It differs from simple ray casting by explicitly supporting recursive light paths (shadows, reflections, refractions) in its classic form [S1, unofficial], though the core intersection method itself is the geometric primitive test.
+Ray tracing is a surface rendering technique that determines the first object intersected by a camera ray by analytically computing intersection distances for explicit geometry [S1, unofficial]. It solves the problem of finding the exact point where a ray meets a surface in a single evaluation, providing mathematically correct intersections limited only by floating-point precision [S3, unofficial]. Unlike [Ray Marching](8334-ray-marching.md) which advances a ray in repeated steps to approximate intersections, ray tracing solves specific mathematical equations (e.g., quadratics for spheres, barycentric tests for triangles) to find the hit point directly [S3, unofficial]. It differs from simple [Ray Casting](8334-ray-casting.md) by explicitly supporting recursive light paths for reflections, refractions, and shadows, generating more realistic images at higher computational cost [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- Input: Ray origin $\mathbf{o}$, normalized ray direction $\hat{\mathbf{d}}$, and a set of geometric primitives (e.g., triangles, spheres) organized in an acceleration structure.
-- Output: The smallest positive distance $t$ along the ray to the first intersected surface, and the intersection point $\mathbf{p} = \mathbf{o} + t\hat{\mathbf{d}}$.
+- **Input**: A ray defined by origin $\mathbf{o}$ and normalized direction $\hat{\mathbf{d}}$; a scene representation consisting of explicit geometry (e.g., triangle meshes) and an acceleration structure (e.g., BVH) [S3, unofficial].
+- **Output**: The smallest positive distance $t$ along the ray to the first intersected primitive, and the intersection point $\mathbf{p} = \mathbf{o} + t\hat{\mathbf{d}}$ [S3, unofficial].
 
 **Data Structures**
-- **Acceleration Structure**: Bounding Volume Hierarchies (BVHs) or kd-trees are required for large scenes to avoid testing every triangle [S2, unofficial]. A BVH wraps groups of triangles in bounding boxes [S2, unofficial].
-- **Primitive Storage**: Triangles are typically stored as vertex buffers. Spheres are stored as center $\mathbf{c}$ and radius $r$.
-
-**Formulas**
-1.  **Parametric Ray Equation**:
-    $$ \mathbf{p}(t) = \mathbf{o} + t\hat{\mathbf{d}} $$
-    where $\mathbf{o}$ is the ray origin, $\hat{\mathbf{d}}$ is the normalized ray direction, and $t$ is the distance along the ray [S2, unofficial]. The goal is to find the smallest positive $t$ where $\mathbf{p}(t)$ lies on a surface [S2, unofficial].
-
-2.  **Sphere Intersection**:
-    For a sphere at center $\mathbf{c}$ with radius $r$, the intersection satisfies $\|\mathbf{p} - \mathbf{c}\| = r$. Substituting the ray equation gives:
-    $$ \|\mathbf{o} + t\hat{\mathbf{d}} - \mathbf{c}\|^2 = r^2 $$
-    This is a quadratic equation in $t$, solvable in closed form. The smaller positive root is the intersection distance [S2, unofficial].
-
-3.  **Triangle Intersection**:
-    The ray is tested against the plane containing the triangle, and then barycentric coordinates determine whether the intersection point lies inside the triangle edges [S2, unofficial].
+- **Ray**: Defined by origin $\mathbf{o}$ and direction $\hat{\mathbf{d}}$ [G].
+- **Acceleration Structure**: Bounding Volume Hierarchy (BVH) or kd-tree. Nodes contain bounding boxes; leaf nodes contain lists of primitives (e.g., triangles) [S3, unofficial].
+- **Primitive**: For triangles, defined by vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ [S3, unofficial].
 
 **Steps**
-1.  **Acceleration Structure Traversal**: Traverse the BVH or kd-tree. If a ray misses a bounding box, skip every triangle inside that box [S2, unofficial].
-2.  **Primitive Intersection Test**: For each primitive in the leaf nodes of the traversal, compute the intersection distance $t$.
-    - For spheres, solve the quadratic equation [S2, unofficial].
-    - For triangles, compute the plane intersection and check barycentric coordinates [S2, unofficial].
-3.  **Closest Hit Selection**: Compare all valid intersection distances ($t > 0$) and select the smallest one [S1, unofficial].
-4.  **Output**: Return the intersection point and normal for shading [S1, unofficial].
+1. **Ray Definition**: Define the parametric ray equation:
+   $$ \mathbf{p}(t) = \mathbf{o} + t\hat{\mathbf{d}} $$
+   where $t > 0$ is the distance along the ray [S3, unofficial].
+2. **Acceleration Structure Traversal**: Traverse the BVH to identify candidate primitives. If a ray misses a bounding box, skip all primitives inside it [S3, unofficial].
+3. **Primitive Intersection**: For each candidate primitive, solve the intersection equation:
+   - **Sphere**: For a sphere at center $\mathbf{c}$ with radius $r$, solve $\|\mathbf{o} + t\hat{\mathbf{d}} - \mathbf{c}\|^2 = r^2$ for the smallest positive root [S3, unofficial].
+   - **Triangle**: Test the ray against the plane containing the triangle, then use barycentric coordinates to determine if the intersection point lies inside the triangle edges [S3, unofficial].
+4. **Closest Hit Selection**: Select the primitive with the smallest positive $t$ [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -41,7 +31,7 @@ Ray tracing is a surface rendering technique that determines the first object in
 ```python
 def ray_trace(ray_origin, ray_direction, scene):
     """
-    Finds the closest intersection between a ray and the scene geometry.
+    Trace a ray against a scene to find the closest intersection.
     
     Args:
         ray_origin: 3D vector, origin of the ray.
@@ -49,91 +39,39 @@ def ray_trace(ray_origin, ray_direction, scene):
         scene: Object containing acceleration structure and primitives.
         
     Returns:
-        float: Smallest positive t, or infinity if no intersection.
+        t_hit: Distance to closest intersection, or infinity if no hit.
+        hit_point: 3D vector, intersection point.
+        hit_primitive: Identifier of the hit primitive.
     """
-    min_t = infinity
+    t_hit = float('inf')
+    hit_point = None
+    hit_primitive = None
     
-    # Traverse acceleration structure (BVH)
-    # If ray misses a bounding box, skip its children
-    nodes_to_process = [scene.root_node]
+    # Step 1: Traverse acceleration structure to find candidate primitives
+    candidates = scene.bvh_traverse(ray_origin, ray_direction)
     
-    while nodes_to_process:
-        node = nodes_to_process.pop()
+    # Step 2: Test each candidate primitive
+    for primitive in candidates:
+        t = primitive.intersect(ray_origin, ray_direction)
         
-        # Check if ray intersects node's bounding box
-        if not ray_intersects_bbox(ray_origin, ray_direction, node.bbox):
-            continue
+        # Step 3: Update closest hit if this intersection is closer
+        if 0 < t < t_hit:
+            t_hit = t
+            hit_point = ray_origin + t * ray_direction
+            hit_primitive = primitive
             
-        if node.is_leaf:
-            # Test all primitives in this leaf
-            for primitive in node.primitives:
-                t = primitive.intersect(ray_origin, ray_direction)
-                if 0 < t < min_t:
-                    min_t = t
-        else:
-            # Add children to traversal stack
-            nodes_to_process.append(node.left_child)
-            nodes_to_process.append(node.right_child)
-            
-    return min_t
-
-def ray_intersects_bbox(ray_origin, ray_direction, bbox):
-    """
-    Checks if a ray intersects an axis-aligned bounding box.
-    Returns true if intersection exists.
-    """
-    # Standard slab method for AABB intersection
-    # Not given in the sources, implemented as standard geometric primitive [G]
-    t_min = -infinity
-    t_max = infinity
-    
-    for axis in range(3):
-        if abs(ray_direction[axis]) < 1e-8:
-            if ray_origin[axis] < bbox.min[axis] or ray_origin[axis] > bbox.max[axis]:
-                return False
-        else:
-            t1 = (bbox.min[axis] - ray_origin[axis]) / ray_direction[axis]
-            t2 = (bbox.max[axis] - ray_origin[axis]) / ray_direction[axis]
-            t_min = max(t_min, min(t1, t2))
-            t_max = min(t_max, max(t1, t2))
-            
-    return t_max >= t_min and t_max >= 0
-
-def sphere_intersect(ray_origin, ray_direction, sphere_center, sphere_radius):
-    """
-    Solves the quadratic equation for sphere intersection.
-    Returns smallest positive t, or infinity.
-    """
-    oc = ray_origin - sphere_center
-    a = dot(ray_direction, ray_direction)
-    b = 2.0 * dot(oc, ray_direction)
-    c = dot(oc, oc) - sphere_radius * sphere_radius
-    discriminant = b * b - 4 * a * c
-    
-    if discriminant < 0:
-        return infinity
-        
-    sqrt_disc = sqrt(discriminant)
-    t1 = (-b - sqrt_disc) / (2 * a)
-    t2 = (-b + sqrt_disc) / (2 * a)
-    
-    # Return smallest positive t
-    if t1 > 0:
-        return t1
-    elif t2 > 0:
-        return t2
-    else:
-        return infinity
+    return t_hit, hit_point, hit_primitive
 ```
 
 **Parameters**
-- **Acceleration Structure Type**: BVHs or kd-trees are required for large scenes [S2, unofficial].
-- **Precision**: Floating-point precision limits the exactness of the intersection [S2, unofficial].
+- **Acceleration Structure**: BVHs or kd-trees are required for large scenes to avoid testing every triangle [S3, unofficial].
+- **Epsilon**: Small values to handle precision issues (e.g., $10^{-5}$ for intersection, $10^{-3}$ for ray marching step size) [S5, unofficial].
 
 **Edge Cases and Pitfalls**
 - **Complex Geometry**: Fails when object geometry is too complex for analytical intersection solutions [S1, unofficial].
-- **Procedural Geometry**: Procedural geometry is awkward; ray tracing must either tessellate the function into triangles (losing precision and creating enormous meshes) or write custom intersection shaders for each procedural type [S2, unofficial].
-- **Deformation**: Moving, bending, or twisting geometry requires updating the mesh and rebuilding the acceleration structure [S2, unofficial].
+- **Procedural Geometry**: Awkward to handle; requires tessellation into triangles (losing precision) or custom intersection shaders [S3, unofficial].
+- **Deformation**: Moving or twisting geometry requires updating the mesh and rebuilding the acceleration structure, which is expensive [S3, unofficial].
+- **Memory**: Detailed triangle meshes and acceleration structures can consume gigabytes of memory [S3, unofficial].
 
 ## Subtopics
 
@@ -144,7 +82,7 @@ Binary Search IsoSurface Extraction approximates the position of an isosurface b
 Trilinear Isosurface Intersection computes the exact intersection point between a ray and an isosurface defined by a threshold value within a single hexahedral voxel of a scalar grid. It solves the problem of finding the precise surface location without the approximation errors of linear interpolation or the iterative convergence costs of ray marching. Unlike [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) which relies on iterative subdivision, or [Neubauer Iso-surface Ray Casting](7024-neubauer-iso-surface-ray-casting.md) which uses iterative root-finding, this method formulates the intersection as a cubic polynomial derived from trilinear interpolation and solves it analytically or via robust numerical methods. It builds on [Ray Tracing and Ray Intersection Methods](5617-ray-tracing-and-ray-intersection-methods.md) by providing the specific algebraic mechanism for hexahedral cells.
 
 ### [Neubauer Iso-surface Ray Casting](7024-neubauer-iso-surface-ray-casting.md)
-Neubauer Iso-surface Ray Casting is a single-kernel iso-surface ray casting method that uses a min/max octree built from macro-cells to accelerate ray traversal. It sets itself apart from its siblings by projecting macro-cell boundaries onto the image plane to create hexagonal footprints, allowing rays to skip entire subtrees of the octree based on 2D rasterization rather than 3D bounding box tests.
+Neubauer Iso-surface Ray Casting is a visibility testing method used to determine which parts of extracted line loops or sparse surface features are occluded by the isosurface, avoiding the computational cost of extracting and rendering the entire isosurface mesh. It sets itself apart from siblings like [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) and [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) by focusing on binary occlusion checks for specific vertices rather than precise surface point extraction, and differs from [Ray Tracing](8334-ray-tracing.md) by using a coarse macro-cell traversal structure optimized for sparse feature visibility.
 
 ### [Hybrid Packetization Strategy](7606-hybrid-packetization-strategy.md)
 The Hybrid Packetization Strategy is a ray-triangle intersection method designed to improve SIMD utilization on GPUs when standard packetization is inefficient due to sparse acceleration structures with high primitive density per leaf. It solves the problem of lost coherence in warp-level computations by dynamically switching between standard warp-level intersection and parallel processing of individual rays based on workload. It sets itself apart from standard packetization by distributing the work of a single ray across multiple threads when the number of intersection candidates is high, thereby maintaining throughput even when rays traverse cells with varying densities.
@@ -155,36 +93,30 @@ Classic ray tracing (Whitted-style) is a recursive rendering model that captures
 ### [Multi-Sphere Ray Tracing with Diffuse Lighting](11351-multi-sphere-ray-tracing-with-diffuse-lighting.md)
 This method casts a primary ray against a fixed set of spheres to find the closest intersection and computes unshadowed diffuse lighting from multiple point lights. It differs from [Ray Tracing](8334-ray-tracing.md) by omitting recursive shadow rays and reflections, and from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by using explicit geometric primitives rather than implicit field functions.
 
+### [Screen-Space Ray Tracing with Depth Buffer](13547-screen-space-ray-tracing-with-depth-buffer.md)
+Screen-Space Ray Tracing with Depth Buffer (SSRT) is a technique to trace rays in screen space against a depth buffer to find surface intersections, supporting up to four depth layers per pixel. It solves the problem of efficiently determining ray-surface intersections for effects like reflections, refractions, and ambient occlusion without traversing complex scene graphs or voxel structures. What sets it apart from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) and [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) is that it operates directly on the rendered depth buffer rather than a volumetric or implicit representation, allowing it to capture any geometry already present in the frame buffer. Unlike [Ray Tracing](8334-ray-tracing.md) which traverses acceleration structures, SSRT traverses the 2D screen grid, making it highly parallelizable on GPUs but limited to visible surfaces.
+
 ### Packet Ray List Merging
-Packet Ray List Merging is an optimization where lists of adjacent pixels (typically 2x2 groups) are combined into a single list. This exploits spatial coherence where adjacent pixels share common visible blocks, reducing the number of lists generated and processed [S3, unofficial].
-**Steps**:
-1.  Phase I: Traverse the BONO tree as in the basic scheme. Create lists for each packet of rays (2x2 adjacent pixels) instead of individual pixels. If a group of pixels overlaps with the projection of the current node, process the group's list [S3, unofficial].
-**Parameters**:
--   $k$ for packets: The upper bound on the list size for grouped pixels is increased compared to single pixels. Best performance is achieved when $k$ is around 20 for packets, compared to 12 for single pixels [S3, unofficial].
+Packet Ray List Merging is an optimization where lists of adjacent pixels (typically 2x2 groups) are combined into a single list. This exploits spatial coherence where adjacent pixels share common visible blocks, reducing the number of lists generated and processed [S4, unofficial]. In Phase I, the BONO tree is traversed, and lists are created for each packet of rays instead of individual pixels. If a group of pixels overlaps with the projection of the current node, the group's list is processed. The upper bound $k$ on the list size for grouped pixels is increased compared to single pixels; best performance is achieved when $k$ is around 20 for packets, compared to 12 for single pixels [S4, unofficial].
 
 ### Geometry Integrator
-The Geometry Integrator is a direct illumination integrator for scene geometry that uses a hardcoded two-sided diffuse BSDF with red reflectance $[0.8, 0.2, 0.2]$ [S4, unofficial].
-**Steps**:
-1.  Perform ray intersection against the scene: `itx : SurfaceInteraction3f = scene.ray_intersect(ray)` [S4, unofficial].
-2.  Adjust the normal direction to point against the ray direction: `itx.n = dr.select(dr.dot(itx.n, ray.d) < 0, itx.n, -itx.n)` [S4, unofficial].
-3.  Load a hardcoded two-sided diffuse BSDF: `bsdf : mi.BSDF = mi.load_dict({'type': 'twosided', 'bsdf': {'type': 'diffuse', 'reflectance': {'type': 'rgb', 'value': [0.8, 0.2, 0.2]}}})` [S4, unofficial].
-4.  Check visibility using a shadow ray intersected against the scene: `itx_shadow : mi.SurfaceInteraction3f = scene.ray_intersect(rayL)` [S4, unofficial].
-5.  Accumulate direct illumination if both primary and secondary rays are valid: `L += dr.select(valid_ray, Li, black)` [S4, unofficial].
+The Geometry Integrator is a direct illumination integrator for scene geometry that uses a hardcoded two-sided diffuse BSDF with red reflectance $[0.8, 0.2, 0.2]$ [S5, unofficial]. It performs ray intersection against the scene (`itx : SurfaceInteraction3f = scene.ray_intersect(ray)`), adjusts the normal direction to point against the ray direction (`itx.n = dr.select(dr.dot(itx.n, ray.d) < 0, itx.n, -itx.n)`), loads the BSDF, checks visibility using a shadow ray intersected against the scene (`itx_shadow : mi.SurfaceInteraction3f = scene.ray_intersect(rayL)`), and accumulates direct illumination if both primary and secondary rays are valid (`L += dr.select(valid_ray, Li, black)`) [S5, unofficial].
 
 ## Operating characteristics
--   **Time Complexity**: Depends on the acceleration structure. With a BVH, traversal is $O(\log n)$ on average, but worst-case is $O(n)$ [S2, unofficial].
--   **Memory Complexity**: Depends on the acceleration structure. BVHs can consume gigabytes of memory for detailed triangle meshes [S2, unofficial].
--   **Measured Performance**: Modern GPUs accelerate both tree traversal and triangle intersection with dedicated ray tracing hardware (RT cores), making real-time ray tracing feasible for games and interactive applications [S2, unofficial].
--   **Strengths**: Exact intersections, no stepping artifacts, no missed thin geometry, no threshold tuning [S2, unofficial]. Mesh compatibility with standard 3D content [S2, unofficial].
--   **Limitations**: Procedural geometry is awkward, deformation is expensive, memory for large scenes [S2, unofficial].
--   **When to Use**: When exact intersections are required, and geometry is static or changes infrequently [S2, unofficial].
--   **When Not to Use**: When geometry is highly dynamic or procedural, or when memory is constrained [S2, unofficial].
+- **Time Complexity**: $O(\log N)$ for BVH traversal per ray, where $N$ is the number of primitives, plus $O(1)$ for primitive intersection tests [S3, unofficial].
+- **Memory Complexity**: $O(N)$ for storing the acceleration structure and geometry [S3, unofficial].
+- **Measured Performance**: Modern GPUs accelerate ray-triangle intersection with dedicated hardware (RT cores), making real-time ray tracing feasible for games and interactive applications [S3, unofficial].
+- **Strengths**: Exact intersections; no stepping artifacts; hardware acceleration; mesh compatibility [S3, unofficial].
+- **Limitations**: Computationally more expensive than ray casting and ray marching [S2, unofficial]; procedural geometry is awkward; deformation is expensive; high memory usage for large scenes [S3, unofficial].
+- **When to Use**: When exact intersections are required, and the scene consists of explicit geometry (e.g., triangle meshes) [S3, unofficial].
+- **When Not to Use**: When the scene is defined by procedural functions or SDFs, or when performance is critical and approximate intersections are acceptable [S3, unofficial].
 
 ## Background
-Ray tracing was introduced as a surface rendering technique to determine the first object intersected by a camera ray [S1, unofficial]. It has evolved to leverage hardware acceleration for real-time applications [S2, unofficial].
+Ray tracing originated as a surface rendering technique to determine the first object intersected by a camera ray [S1, unofficial]. It was developed as a more sophisticated algorithm than ray casting, involving diffraction and reflection to generate more realistic images [S2, unofficial]. The method computes rays not only from the camera to the object, but also from the object to the light source to check for lighting, and implements reflection and diffraction [S2, unofficial]. It is computationally more expensive than ray casting and ray marching [S2, unofficial]. Modern implementations leverage acceleration structures like BVHs and kd-trees to handle large scenes efficiently [S3, unofficial].
 
 ## Sources
 [S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)
-[S2] ray marching vs ray tracing, https://tutorials.tektite.studio/ray-marching/ray-marching-vs-ray-tracing/, fetched 2026-10-27 (unofficial)
-[S3] PDF Interactive High Resolution Isosurface Ray Tracing on Multi-Core ... - UMD, https://www.umiacs.umd.edu/~joseph/isosurface-paper.pdf, fetched 2026-10-26 (unofficial)
-[S4] zichenwang01/relaxed-boundary, https://github.com/zichenwang01/relaxed-boundary, fetched 2026-10-27 (unofficial)
+[S2] http://www.hugi.scene.org/online/hugi37/hugi%2037%20-%20coding%20adok%20on%20ray%20casting,%20ray%20tracing,%20ray%20marching%20and%20the%20like.htm, http://www.hugi.scene.org/online/hugi37/hugi%2037%20-%20coding%20adok%20on%20ray%20casting,%20ray%20tracing,%20ray%20marching%20and%20the%20like.htm, fetched 2026-10-26 (unofficial)
+[S3] ray marching vs ray tracing, https://tutorials.tektite.studio/ray-marching/ray-marching-vs-ray-tracing/, fetched 2026-10-27 (unofficial)
+[S4] PDF Interactive High Resolution Isosurface Ray Tracing on Multi-Core ... - UMD, https://www.umiacs.umd.edu/~joseph/isosurface-paper.pdf, fetched 2026-10-26 (unofficial)
+[S5] zichenwang01/relaxed-boundary, https://github.com/zichenwang01/relaxed-boundary, fetched 2026-10-27 (unofficial)

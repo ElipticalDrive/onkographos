@@ -1,0 +1,238 @@
+# Golden-Section Search
+Also called: 2D Golden-Section Search, GSS for Bandwidth, GSS-based bandwidth searching scheme, Golden-Section Search (GSS) for Bandwidth, Golden-Section Search (GSS) for Bandwidth Selection, Linear GSS
+
+## Overview
+Golden-Section Search (GSS) is a gradient-free iterative optimization algorithm used to locate the minimum of a unimodal function by successively narrowing the range of values inside which the minimum is known to exist [S1]. In the context of volume rendering and neural implicit representations, it is specifically employed to efficiently search for optimal bandwidth parameters in Anisotropic Fourier Features Mapping (AFFM), replacing computationally prohibitive brute-force grid searches [S1]. Unlike its siblings, it reduces the number of expensive network training runs from polynomial time to logarithmic time by leveraging the golden ratio to shrink the search interval, requiring no gradient calculations with respect to the bandwidth [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An initial search interval $[a, b]$ for 1D, or an initial search box $[a_1, b_1] \times [a_2, b_2]$ for 2D, containing the optimal bandwidth(s). A cost function $J(\beta)$ that returns the training loss or validation error for a given bandwidth $\beta$, which requires a full network training run to evaluate [S1].
+*   **Output:** The estimated optimal bandwidth $\beta^*$ (or pair $\beta^*_1, \beta^*_2$) and the final search interval/box [S1].
+
+**Data Structures:**
+*   **1D Case:** Two scalar values $a, b$ representing the current search interval bounds. Two scalar values $x_1, x_2$ representing the candidate points within the interval.
+*   **2D Case:** Four scalar values $a_1, b_1, a_2, b_2$ representing the current search box bounds. Four candidate points $(x_{1,1}, x_{1,2}), (x_{1,2}, x_{2,2}), (x_{2,1}, x_{1,2}), (x_{2,2}, x_{2,2})$ forming a grid of 4 pairs [S1].
+
+**Constants:**
+*   Golden ratio conjugate $\phi = \frac{\sqrt{5}-1}{2} \approx 0.618$ [S1].
+*   Complementary ratio $1-\phi \approx 0.382$ [S1].
+
+**Numbered Steps (1D Linear GSS):**
+1.  Initialize the search interval $[a, b]$.
+2.  Calculate two candidate points:
+    $$x_1 = a + (1-\phi)(b-a)$$
+    $$x_2 = a + \phi(b-a)$$
+    Note: $x_1$ is at 0.382 and $x_2$ is at 0.618 of the interval [S1].
+3.  Evaluate the cost function $J(x_1)$ and $J(x_2)$ by training the network with these bandwidths [S1].
+4.  Compare $J(x_1)$ and $J(x_2)$:
+    *   If $J(x_1) < J(x_2)$, the minimum lies in $[a, x_2]$. Set $b = x_2$ and $x_2 = x_1$. Recalculate $x_2$ using the new interval. The old $x_1$ is reused, saving one evaluation [S1].
+    *   If $J(x_1) \ge J(x_2)$, the minimum lies in $[x_1, b]$. Set $a = x_1$ and $x_1 = x_2$. Recalculate $x_1$ using the new interval. The old $x_2$ is reused [S1].
+5.  Repeat steps 3-4 until convergence or a fixed number of iterations is reached [S1].
+
+**Numbered Steps (2D GSS):**
+1.  Initialize the search box $[a_1, b_1] \times [a_2, b_2]$.
+2.  Define the 1D split points for each dimension:
+    $$p_{low} = a + (1-\phi)(b-a)$$
+    $$p_{high} = a + \phi(b-a)$$
+3.  Generate 4 candidate pairs by combining the low/high points of dimension 1 with the low/high points of dimension 2:
+    $$C_1 = (p_{low,1}, p_{low,2})$$
+    $$C_2 = (p_{low,1}, p_{high,2})$$
+    $$C_3 = (p_{high,1}, p_{low,2})$$
+    $$C_4 = (p_{high,1}, p_{high,2})$$
+4.  Evaluate $J(C_i)$ for all 4 candidates [S1].
+5.  Identify the candidate $C_{best}$ with the lowest cost [S1].
+6.  Shrink the search box. The new bounds for each dimension are determined by the coordinates of $C_{best}$ and the previous bounds, effectively reducing the box area by a factor of $\phi^2$ (approx $0.618^2$) [S1].
+    *   Specifically, if $C_{best}$ is at $(x^*_1, x^*_2)$, the new interval for dimension 1 is determined by the subset of previous candidates that contained $x^*_1$, and similarly for dimension 2. The text states the box shrinks by a factor of $0.618^2$ [S1].
+7.  Repeat steps 2-6 until convergence [S1].
+
+**Formulas:**
+*   **1D Interval Width:** After $k$ iterations, the width of the search interval is $(0.618)^k$ [S1].
+*   **1D Evaluations:** The number of network trainings is $k + 1$ [S1].
+*   **2D Box Area:** After $k$ iterations, the parameter box area is $0.618^{2k}$ [S1].
+*   **2D Evaluations:** The number of network trainings is $3^k + 1$ [S1].
+
+**Parameters:**
+*   **Iterations:** Empirically, 5 iterations are sufficient to achieve good practice convergence [S1].
+*   **Shrinkage Factor:** 0.618 (golden ratio conjugate) for 1D; $0.618^2$ for 2D area reduction [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Non-Unimodal Functions:** GSS assumes the cost function is unimodal within the search interval. If the loss landscape has multiple local minima, GSS may converge to a suboptimal local minimum [G].
+*   **Evaluation Cost:** Each evaluation requires a full network training run, which is expensive. The algorithm's efficiency relies on minimizing these evaluations [S1].
+*   **Precision:** The reuse of candidates relies on precise interval updates. Floating-point errors in interval boundary calculations can accumulate, though the logarithmic convergence rate mitigates this over the typical 5 iterations [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def golden_section_search_1d(cost_func, a, b, max_iter=5):
+    """
+    Performs 1D Golden-Section Search.
+    cost_func: A function that takes a bandwidth beta and returns the training loss.
+    a, b: Initial search interval [a, b].
+    max_iter: Maximum number of iterations.
+    Returns: The estimated optimal bandwidth.
+    """
+    phi = (math.sqrt(5) - 1) / 2.0  # ~0.618
+    inv_phi = 1.0 - phi             # ~0.382
+    
+    # Initialize candidates
+    x1 = a + inv_phi * (b - a)
+    x2 = a + phi * (b - a)
+    
+    # Evaluate initial candidates
+    f1 = cost_func(x1)
+    f2 = cost_func(x2)
+    
+    for _ in range(max_iter):
+        if f1 < f2:
+            # Minimum is in [a, x2]
+            b = x2
+            x2 = x1
+            f2 = f1
+            x1 = a + inv_phi * (b - a)
+            f1 = cost_func(x1)
+        else:
+            # Minimum is in [x1, b]
+            a = x1
+            x1 = x2
+            f1 = f2
+            x2 = a + phi * (b - a)
+            f2 = cost_func(x2)
+            
+    # Return the better of the two
+    if f1 < f2:
+        return x1
+    else:
+        return x2
+
+def golden_section_search_2d(cost_func, a1, b1, a2, b2, max_iter=5):
+    """
+    Performs 2D Golden-Section Search.
+    cost_func: A function that takes a tuple (beta1, beta2) and returns the training loss.
+    a1, b1: Initial search interval for dimension 1.
+    a2, b2: Initial search interval for dimension 2.
+    max_iter: Maximum number of iterations.
+    Returns: The estimated optimal bandwidth tuple (beta1, beta2).
+    """
+    phi = (math.sqrt(5) - 1) / 2.0
+    inv_phi = 1.0 - phi
+    
+    # Initial candidates for dimension 1
+    x1_1 = a1 + inv_phi * (b1 - a1)
+    x2_1 = a1 + phi * (b1 - a1)
+    
+    # Initial candidates for dimension 2
+    x1_2 = a2 + inv_phi * (b2 - a2)
+    x2_2 = a2 + phi * (b2 - a2)
+    
+    # Generate 4 candidates
+    candidates = [
+        (x1_1, x1_2),
+        (x1_1, x2_2),
+        (x2_1, x1_2),
+        (x2_1, x2_2)
+    ]
+    
+    # Evaluate all 4
+    costs = [cost_func(c) for c in candidates]
+    
+    for _ in range(max_iter):
+        # Find best candidate
+        best_idx = costs.index(min(costs))
+        best_c = candidates[best_idx]
+        
+        # Determine new intervals based on the best candidate
+        # For each dimension, the new interval is defined by the best candidate
+        # and the adjacent previous candidate that was not the best.
+        # This effectively shrinks the box by phi^2.
+        
+        # Dimension 1 logic
+        if best_c[0] == x1_1:
+            b1 = x2_1
+            x2_1 = x1_1
+            x1_1 = a1 + inv_phi * (b1 - a1)
+        else:
+            a1 = x1_1
+            x1_1 = x2_1
+            x2_1 = a1 + phi * (b1 - a1)
+            
+        # Dimension 2 logic
+        if best_c[1] == x1_2:
+            b2 = x2_2
+            x2_2 = x1_2
+            x1_2 = a2 + inv_phi * (b2 - a2)
+        else:
+            a2 = x1_2
+            x1_2 = x2_2
+            x2_2 = a2 + phi * (b2 - a2)
+            
+        # Regenerate candidates
+        candidates = [
+            (x1_1, x1_2),
+            (x1_1, x2_2),
+            (x2_1, x1_2),
+            (x2_1, x2_2)
+        ]
+        
+        # Evaluate only the new candidates? 
+        # The source says "shrinks the search box... and repeats". 
+        # In 2D, unlike 1D, we cannot simply reuse one evaluation because the grid structure changes.
+        # However, the source states "number of network training is 3^k + 1".
+        # This implies that in each iteration, we evaluate 3 new candidates, reusing 1?
+        # Let's re-read: "producing 4 pairs... shrinks... repeats".
+        # If we reuse 1, we evaluate 3. 3^k + 1 fits this pattern (1 initial, then 3, 9, 27...).
+        # So we should identify which candidate is reused.
+        
+        # Reusing the best candidate from the previous iteration
+        # We need to find which of the new candidates corresponds to the best_c
+        # But best_c might not be exactly one of the new candidates due to floating point?
+        # Actually, the new candidates are derived from the old bounds.
+        # The best candidate is one of the 4. It will be one of the new 4?
+        # Not necessarily. The new candidates are at the phi/inv_phi positions of the NEW intervals.
+        # The best candidate was at a position in the OLD intervals.
+        # The source says "saves function evaluations per iteration".
+        # In 1D, we save 1. In 2D, if we save 1, we do 3 evaluations.
+        # Let's assume we evaluate the 4 candidates, but if one matches the previous best (within tolerance), reuse it.
+        
+        new_costs = []
+        reused_count = 0
+        for i, c in enumerate(candidates):
+            # Check if c is close to best_c
+            if abs(c[0] - best_c[0]) < 1e-6 and abs(c[1] - best_c[1]) < 1e-6:
+                new_costs.append(costs[best_idx])
+                reused_count += 1
+            else:
+                new_costs.append(cost_func(c))
+        
+        costs = new_costs
+        
+    # Return the best candidate from the last iteration
+    best_idx = costs.index(min(costs))
+    return candidates[best_idx]
+```
+
+## Subtopics
+
+### Linear GSS
+The 1D variant of the algorithm. It is chosen when a single bandwidth parameter needs to be optimized. It reduces the search space linearly by the golden ratio [S1].
+
+### 2D Golden-Section Search (2D GSS)
+The extension to two dimensions. It is chosen when two bandwidth parameters (e.g., spatial and angular) need to be optimized simultaneously. It reduces the search box area by the square of the golden ratio per iteration [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of searches from polynomial time (in grid search) to logarithmic time [S1]. Specifically, for 1D, the interval width decreases as $(0.618)^k$. For 2D, the area decreases as $0.618^{2k}$ [S1].
+*   **Memory Complexity:** Low. It only stores the current search interval/box and a few candidate points [G].
+*   **Measured Performance:** In a neural relighting task with the 'kneeling knight' imageset (253 reflectance images), 2D GSS provided a 7x speed-up over Grid search [S1].
+*   **Strengths:** Gradient-free (avoids expensive gradient calculations w.r.t bandwidth), no need for initial point selection, saves function evaluations per iteration [S1].
+*   **Limitations:** Assumes unimodality. Convergence is slower than Newton's method if gradients are available, but in this context, gradients are not available or too expensive [S1].
+*   **When to use:** When optimizing bandwidth parameters for Fourier feature mappings in neural rendering, where each evaluation is a full network training [S1].
+*   **When not to use:** When the cost function is not unimodal or when gradients are cheap and available [G].
+
+## Background
+Golden-Section Search was introduced in the context of Anisotropic Fourier Features for Neural Image-Based Rendering and Relighting by the authors of [S1]. It was developed to address the computational overload of brute-force grid search for bandwidth selection in AFFM. The method leverages the mathematical properties of the golden ratio to efficiently narrow down the search space for optimal bandwidths in both spatial and angular domains [S1].
+
+## Sources
+[S1] Anisotropic Fourier Features for Neural Image-Based Rendering and Relighting, https://ojs.aaai.org/index.php/AAAI/article/download/20223/19982, fetched 2026-10-29

@@ -3,112 +3,146 @@
 Also called: Adaptive Face Subsampling, Internal Face Subsampling
 
 ## Overview
-Face Subsampling is a Level of Detail (LOD) technique for tetrahedral volume rendering that reduces computational load by dynamically selecting a subset of internal mesh faces for rasterization, while keeping the boundary faces constant [S1, unofficial]. It solves the problem of maintaining interactive frame rates on complex volumetric datasets by adapting the number of rendered primitives to the available rendering time [S1, unofficial]. Unlike [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) which operates in the frequency domain, or [Mesh Simplification](1032-mesh-simplification.md) which modifies geometry topology, Face Subsampling preserves the original mesh structure and instead culls faces based on adaptive criteria such as topology, field values, or geometric area [S1, unofficial].
+Face Subsampling is a Level of Detail (LOD) technique for tetrahedral volume rendering that reduces computational load by dynamically selecting a subset of internal mesh faces for rasterization, while always retaining the boundary faces to maintain domain integrity [S1, unofficial]. It solves the problem of interactive frame rates on large tetrahedral meshes by adapting the number of rendered primitives to the available rendering time [S1, unofficial]. Unlike [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) which operates in the frequency domain, or [Multiresolution Volume Sampling: Intrablock](11149-multiresolution-volume-sampling-intrablock.md) which operates on voxel grids, Face Subsampling operates directly on the geometric topology of the tetrahedral mesh [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A tetrahedral mesh defined by a set of unique faces $F$, a target frame time $T_{target}$ (typically 0.01 seconds for interactive viewing), and the measured render time of the previous frame $T_{render}$ [S1, unofficial].
-*   **Output:** A subset of faces $F_{render} = B \cup I_{selected}$, where $B$ is the set of boundary faces and $I_{selected}$ is the selected subset of internal faces [S1, unofficial].
+*   **Output:** A subset of faces $B \cup I_{selected}$, where $B$ is the set of boundary faces and $I_{selected}$ is the selected subset of internal faces [S1, unofficial].
 
 **Data Structures:**
-The mesh faces are partitioned into two lists:
-1.  **Boundary Face List ($B$):** Faces on the exterior of the domain. These are never culled and remain constant across LOD levels [S1, unofficial].
-2.  **Internal Face List ($I$):** Faces shared between tetrahedra. This list is subdivided based on the chosen sampling strategy (e.g., layers for Topology Sampling, histogram bins for Field Sampling) [S1, unofficial].
+*   **Faces:** Each face is defined by its vertices and associated scalar values. Internal faces have a neighboring face with the same vertices and scalar values to avoid redundancy [S1, unofficial].
+*   **Boundary Faces ($B$):** Faces on the exterior of the mesh domain $D$. These are constant and always included [S1, unofficial].
+*   **Internal Faces ($I$):** Faces shared between tetrahedra inside the domain. These are subject to subsampling [S1, unofficial].
+*   **Layer Lists:** For Topology Sampling, faces are partitioned into a boundary face list (layer 0) and internal face lists (layers 1, 2, ...) [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Extract Boundary and Internal Faces:**
-    Identify all unique faces $F$ in the tetrahedral mesh. Partition $F$ into boundary faces $B$ and internal faces $I$ such that $B \cup I = F$ and $B \cap I = \emptyset$ [S1, unofficial].
+    Identify the set of unique faces $F$. Partition $F$ into boundary faces $B$ and internal faces $I$ such that $B \cup I = F$ and $B \cap I = \emptyset$ [S1, unofficial].
 
 2.  **Determine Target Internal Face Count:**
-    Calculate the number of internal faces $|I_{target}|$ to render in the current frame using the adaptive formula:
-    $$ |I_{target}| = |I| \times \frac{T_{target}}{T_{render}} $$
+    Calculate the number of internal faces $|I_{target}|$ to render in the current frame based on the previous frame's performance:
+    $$|I_{target}| = |I| \times \frac{T_{target}}{T_{render}}$$
     where $|I|$ is the total number of internal faces available [S1, unofficial].
     *   If $|I_{target}| > |I|$, set $|I_{target}| = |I|$.
     *   If $|I_{target}| < 0$, set $|I_{target}| = 0$ [S1, unofficial].
 
 3.  **Select Internal Faces:**
-    Select $|I_{target}|$ faces from $I$ based on one of the following strategies (see Subtopics):
-    *   **Topology Sampling:** Select faces from evenly distributed layers.
-    *   **Field Sampling:** Select faces via stratified random sampling based on scalar value histograms.
-    *   **Area Sampling:** Select faces based on geometric area weighted by a random number.
-    *   **View-Aligned Sampling:** Select faces based on alignment with the view vector (not detailed in notes, but mentioned as a sibling strategy) [S1, unofficial].
+    Select $|I_{target}|$ faces from $I$ using one of the sampling strategies (see Subtopics). The selected faces form $I_{selected}$ [S1, unofficial].
 
 4.  **Render:**
-    Rasterize the union of the constant boundary faces $B$ and the selected internal faces $I_{selected}$ [S1, unofficial].
+    Render the union $B \cup I_{selected}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Exceeding Limits:** If the total number of layer faces (in Topology Sampling) exceeds the allowed internal face limit, a subset of layers is rendered by picking an even distribution of layers throughout the mesh until the target internal face count is reached [S1, unofficial].
+*   **Clumping:** Uniform random sampling of faces can lead to clumping and holes, resulting in poor visual quality [S1, unofficial]. Stratified or priority-based sampling is preferred [S1, unofficial].
+*   **Discontinuities:** Sampling methods that ignore connectivity (e.g., Field Sampling) may produce obvious discontinuities in intensity [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def face_subsampling(mesh, target_time=0.01):
-    # 1. Preprocessing: Extract Boundary and Internal Faces
-    # This step is typically done once or when the mesh changes.
-    boundary_faces, internal_faces = extract_boundary_and_internal(mesh)
+def face_subsampling(mesh, target_time, prev_render_time):
+    """
+    Selects a subset of internal faces for rendering based on adaptive time budget.
     
-    # 2. Adaptive Selection
-    # Get render time from previous frame. If first frame, use a default or full count.
-    render_time = get_previous_frame_time()
-    if render_time is None:
-        render_time = target_time # Fallback to render all if no history
+    Args:
+        mesh: Tetrahedral mesh object with methods get_boundary_faces(), 
+              get_internal_faces(), and get_total_internal_faces().
+        target_time: Desired frame time in seconds (e.g., 0.01).
+        prev_render_time: Time taken to render the previous frame in seconds.
         
+    Returns:
+        list: A list of faces to render (Boundary + Selected Internal).
+    """
+    # 1. Extract Boundary and Internal Faces
+    boundary_faces = mesh.get_boundary_faces()
+    internal_faces = mesh.get_internal_faces()
     total_internal = len(internal_faces)
     
-    # Calculate target count using the adaptive formula
-    # |I| = |I| * (TargetTime / RenderTime)
-    target_count = int(total_internal * (target_time / render_time))
+    # 2. Determine Target Internal Face Count
+    # Avoid division by zero; assume 1.0 if prev_render_time is 0
+    if prev_render_time <= 0:
+        prev_render_time = 1.0
+        
+    target_internal_count = total_internal * (target_time / prev_render_time)
     
     # Clamp to valid range
-    target_count = max(0, min(target_count, total_internal))
+    target_internal_count = max(0, min(target_internal_count, total_internal))
     
-    # 3. Select Faces based on Strategy
-    # Note: The specific selection logic depends on the variant (Topology, Field, Area)
-    # For a generic implementation, we assume a 'select_faces' function exists
-    # which implements the specific variant's logic on the internal_faces list.
-    selected_internal = select_faces(internal_faces, target_count)
+    # 3. Select Internal Faces
+    # Default to Area Sampling if no specific strategy is provided
+    selected_internal = area_sampling(internal_faces, int(target_internal_count))
     
-    # 4. Form Render Set
-    render_set = boundary_faces + selected_internal
-    
-    return render_set
-```
+    # 4. Return Renderable Set
+    return boundary_faces + selected_internal
 
-**Edge Cases and Pitfalls:**
-*   **Exceeding Limit:** If the number of layer faces (in Topology Sampling) exceeds the target internal face count, a subset of layers is rendered by picking an even distribution of layers throughout the mesh until the target count is reached [S1, unofficial].
-*   **Discontinuities:** Field Sampling ignores connectivity, which can lead to obvious discontinuities in intensity [S1, unofficial].
-*   **Flickering:** View-Aligned Sampling can cause flickering artifacts between frames due to view-dependence, whereas Topology, Field, and Area sampling are view-independent and do not flicker [S1, unofficial].
+def area_sampling(internal_faces, count):
+    """
+    Selects faces based on area, prioritizing larger faces with randomization.
+    
+    Args:
+        internal_faces: List of internal face objects.
+        count: Number of faces to select.
+        
+    Returns:
+        list: Selected subset of faces.
+    """
+    if count == 0:
+        return []
+        
+    # Calculate priority for each face: Area * Random Number
+    # This favors larger triangles but preserves possibility of choosing small ones
+    priorities = []
+    for face in internal_faces:
+        area = face.get_area()
+        random_val = random.uniform(0, 1)
+        priority = area * random_val
+        priorities.append((priority, face))
+        
+    # Sort by priority descending
+    priorities.sort(key=lambda x: x[0], reverse=True)
+    
+    # Select top 'count' faces
+    selected = [face for _, face in priorities[:count]]
+    
+    return selected
+```
 
 ## Subtopics
 
 ### Topology Sampling
-A preprocessing strategy that assigns layers to faces by peeling the tetrahedral mesh from the outside in. It extracts the boundary, removes boundary tetrahedra, and repeats until all tetrahedra are peeled, assigning a layer value to faces at each step [S1, unofficial].
-*   **Step:** Initialize `CurrentLayer` to 0. Loop while unpeeled tetrahedra exist. For each face of unpeeled tetrahedra, if the face is external, assign it `CurrentLayer`. Mark shared tetrahedra as peeled. Increment `CurrentLayer` [S1, unofficial].
-*   **Characteristics:** Produces images without obvious holes and maintains connected regions, but may result in correlated regions in the image [S1, unofficial].
-*   **When to choose:** When visual continuity and lack of holes are prioritized over uniform distribution [S1, unofficial].
+Topology Sampling assigns layers to faces by peeling the mesh from the outside in. It extracts the boundary, removes boundary tetrahedra, and repeats until all tetrahedra are peeled. Faces on the boundary at each step are assigned a new layer value. Boundary faces form layer 0; internal faces form subsequent layers [S1, unofficial].
+*   **Step:** Initialize `CurrentLayer` to 0. Loop while there exists an unpeeled tetrahedron $t$. For each face $f$ in unpeeled tetrahedra, if $f$ is external, assign it `CurrentLayer`. Mark shared tetrahedra as peeled. Increment `CurrentLayer` [S1, unofficial].
+*   **Pitfall:** If all layer faces cannot be drawn because they exceed the internal face limit, a subset of layers is rendered by picking an even distribution of layers throughout the mesh until the target internal face count is reached [S1, unofficial].
+*   **Characteristics:** Produces images without obvious holes but may have correlated regions in the image [S1, unofficial].
 
 ### Field Sampling
-A strategy that assigns importance to faces based on the average scalar value at their vertices. It uses stratified sampling on a histogram of normalized scalar values [S1, unofficial].
-*   **Step:** Build a histogram of normalized scalar values at mesh vertices. Divide the histogram into evenly spaced intervals (typically 128). Randomly pick the same number of faces from each interval to fill the internal face list [S1, unofficial].
-*   **Characteristics:** Robust and view-independent. Ignores connectivity, leading to intensity discontinuities. Unlike Monte Carlo integration, it samples over the entire space of functions without extra computation per viewpoint [S1, unofficial].
-*   **When to choose:** When the scalar field distribution is important and uniform coverage of value ranges is desired [S1, unofficial].
+Field Sampling assigns importance to a mesh face based on the average scalar value at its vertices. It uses stratified sampling on a histogram of normalized scalar values [S1, unofficial].
+*   **Definition:** A preprocessing strategy that assigns importance to a mesh face based on the average scalar value at its vertices to select a subset of faces for rendering [S1, unofficial].
+*   **Step:** Build a histogram of normalized scalar values at the mesh vertices. Divide the histogram into evenly spaced intervals (typically 128). Randomly pick the same number of faces from each interval to fill the internal face list [S1, unofficial].
+*   **Parameter:** Histogram Intervals: 128 [S1, unofficial].
+*   **Comparison:** Ignores connectivity, leading to obvious discontinuities in intensity, but is a robust strategy [S1, unofficial]. Unlike Monte Carlo integration, it randomly samples over the entire space of functions without extra computation per viewpoint [S1, unofficial].
 
 ### Area Sampling
-A strategy that selects internal faces based on their geometric area in $\mathbb{R}^3$. It prioritizes larger triangles to minimize total error magnitude, which is proportional to triangle area [S1, unofficial].
-*   **Formula:** Priority is calculated as $A_i \times \xi_i$, where $A_i$ is the area of the $i$-th face and $\xi_i$ is a uniform random number [S1, unofficial].
-*   **Characteristics:** View-independent and avoids flickering. Randomizes selection to preserve the possibility of choosing small faces. Lowers visual error but may reduce the number of rasterized triangles due to larger fill requirements for large triangles [S1, unofficial].
-*   **When to choose:** When minimizing geometric error is the primary goal and fill rate is not the bottleneck [S1, unofficial].
+Area Sampling selects internal faces based on their geometric size (area) to minimize total error magnitude, which is proportional to the area of the triangle [S1, unofficial].
+*   **Definition:** A sampling strategy that selects internal faces based on their geometric size (area) [S1, unofficial].
+*   **Formula:** Priority is calculated as $A_i \times \xi_i$, where $A_i$ is the area in $\mathbb{R}^3$ of the $i$-th face and $\xi_i$ is a uniform random number [S1, unofficial].
+*   **Step:** Randomize the selection using the uniform random number to favor larger triangles while preserving the possibility of choosing small faces [S1, unofficial].
+*   **Comparison:** Unlike view-aligned sampling, it is independent of viewpoint and does not have flickering artifacts [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The adaptive selection step is $O(1)$ after preprocessing. Preprocessing (e.g., layer extraction for Topology Sampling) is $O(N)$ where $N$ is the number of tetrahedra [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the mesh, boundary faces, and internal faces partitioned by the chosen strategy (e.g., layers or histogram bins) [S1, unofficial].
-*   **Performance:** In tests with the Fighter dataset (1.4 million tetrahedra), full quality rendered at 1.3 fps. At 15% LOD, it achieved 4.5 fps, and at 5% LOD, 10.0 fps using Area Sampling [S1, unofficial].
-*   **Strengths:** Provides natural traversal of LODs; view-independent variants (Topology, Field, Area) avoid flickering; adaptive mechanism maintains target frame rates [S1, unofficial].
-*   **Limitations:** Field Sampling has intensity discontinuities; Topology Sampling has correlated regions; Area Sampling may suffer from fill-rate limitations due to large triangles; View-Aligned Sampling suffers from flickering [S1, unofficial].
-*   **When to use:** Interactive volume rendering of tetrahedral meshes where frame rate stability is critical [S1, unofficial].
-*   **When not to use:** When visual continuity is paramount and Topology Sampling's correlated regions are unacceptable, or when fill rate is the primary bottleneck and large triangles are prevalent [S1, unofficial].
+*   **Time Complexity:** The selection phase is $O(N)$ or $O(N \log N)$ depending on the sampling strategy (sorting for Area Sampling), where $N$ is the number of internal faces. The rendering time is proportional to the number of selected faces [S1, unofficial].
+*   **Memory Complexity:** Requires storing the mesh topology and precomputed sampling data (e.g., histograms for Field Sampling) [S1, unofficial].
+*   **Performance:** On the Fighter dataset (1.4 million tetrahedra), full quality rendered at 1.3 fps, 15% LOD at 4.5 fps, and 5% LOD at 10.0 fps using Area Sampling [S1, unofficial].
+*   **Strengths:** Adaptive to rendering time; view-independent methods (Topology, Field, Area) avoid flickering artifacts [S1, unofficial].
+*   **Limitations:** Field Sampling ignores connectivity, causing intensity discontinuities. Topology Sampling may produce correlated regions. Area Sampling reduces the number of rasterized triangles, which may lower visual fidelity despite error minimization [S1, unofficial].
+*   **When to Use:** Interactive volume rendering of large tetrahedral meshes where frame rate stability is critical [S1, unofficial].
 
 ## Background
-Face Subsampling was introduced by Steve Callahan in his 2006 Master's thesis, "The K-Buffer and Its Applications to Volume Rendering" [S1, unofficial]. The method builds on the Hardware-Assisted Visibility Sorting (HAVS) volume rendering system [S1, unofficial]. It is part of a family of multiresolution techniques that operate on tetrahedral meshes, offering an alternative to grid-based or wavelet-based LOD methods [S1, unofficial].
+Face Subsampling was introduced by Steve Callahan in his 2006 Master's thesis, "The K-Buffer and Its Applications to Volume Rendering" [S1, unofficial]. It builds on the Hardware-Assisted Visibility Sorting (HAVS) volume rendering system [S1, unofficial]. The method addresses the limitations of uniform sampling and the need for adaptive LOD in tetrahedral volume rendering [S1, unofficial].
 
 ## Sources
 [S1] THE K-BUFFER AND ITS APPLICATIONS TO VOLUME RENDERING, https://ctsilva.github.io/thesis/steve-callahan-ms-thesis.pdf, fetched 2026-10-27 (unofficial)

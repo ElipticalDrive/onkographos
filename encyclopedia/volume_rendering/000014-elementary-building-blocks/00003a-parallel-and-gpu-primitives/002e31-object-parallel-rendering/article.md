@@ -3,74 +3,74 @@
 Also called: Object-Space Parallel Rendering, Parallel Object-Order Rendering
 
 ## Overview
-Object Parallel Rendering is a parallelization scheme that exploits parallelism in object space by dividing the volume dataset into subvolumes and assigning each to a separate processor [S1, unofficial]. Unlike screen-space (image-space) parallelism, which distributes pixels across processors and requires complex synchronization for depth sorting, object parallelism distributes the data itself [S1, unofficial]. This makes it particularly suitable for large-scale datasets where memory constraints prevent a single node from holding the entire volume, as it allows the dataset to be distributed across the memory of multiple processors [S1, unofficial]. The method generates distributed subimages that must be merged via image compositing to form the final result [S1, unofficial].
+Object Parallel Rendering is a parallelization strategy for volume rendering that exploits parallelism in object space by dividing the volume dataset into subvolumes and assigning them to independent processors [S1, unofficial]. Unlike image-space methods that decompose the screen, this approach distributes the data itself, making it suitable for large-scale datasets where loading the entire volume into every processor's memory is infeasible [S1, unofficial]. It generates distributed subimages that must be merged via image compositing to form the final result [S1, unofficial].
 
 ## How it works
-**Inputs:** A volume dataset $V$, a viewpoint (camera), and a set of $p$ processors.
+**Inputs:** A 3D volume dataset $V$, a set of $p$ processors, and a camera viewpoint.
 **Outputs:** A final composite image.
 
 **Data Structures:**
-The volume $V$ is partitioned into $p$ disjoint subvolumes $V_1, V_2, \dots, V_p$. Each processor $i$ stores a local copy of $V_i$.
+The volume $V$ is partitioned into $p$ disjoint subvolumes $V_1, V_2, \dots, V_p$. Each processor $i$ stores $V_i$ in its local memory.
 
 **Steps:**
-1.  **Partitioning:** Divide the total volume $V$ into $p$ subvolumes. The partitioning strategy (e.g., grid-based) determines the spatial extent of each $V_i$ [S1, unofficial].
+1.  **Partitioning:** Divide the volume $V$ into $p$ subvolumes [S1, unofficial].
 2.  **Assignment:** Assign each subvolume $V_i$ to a distinct processor $P_i$ [S1, unofficial].
-3.  **Local Rendering:** Each processor $P_i$ independently renders its assigned subvolume $V_i$ from the global viewpoint. This involves casting rays from the eye through the pixels and accumulating opacity and color contributions from the voxels in $V_i$ that lie along the ray path [S1, unofficial].
-    *   *Note:* Because the viewpoint is global, every processor must load the entire volume into memory if the volume is small, but for large datasets, the partitioning ensures each processor only loads its assigned chunk [S1, unofficial].
-    *   *Limitation:* Global Early Ray Termination (ERT) is difficult to utilize because a ray's accumulation task may span multiple processors. Local ERT can be applied within each subvolume [S1, unofficial].
-4.  **Compositing:** The $p$ processors generate $p$ distributed subimages (or partial accumulation buffers). These subimages are merged into the final image using image compositing operations [S1, unofficial]. This step resolves the depth ordering between contributions from different subvolumes.
+3.  **Parallel Rendering:** Each processor $P_i$ independently renders its subvolume $V_i$ from the shared viewpoint to generate a local subimage $I_i$ [S1, unofficial].
+    *   *Note:* Because a single ray may traverse multiple subvolumes assigned to different processors, the accumulation of optical properties (color and opacity) is distributed. Global Early Ray Termination (ERT) is difficult to utilize in this scheme because a processor cannot know if a ray will terminate in a remote subvolume [S1, unofficial]. Local ERT may be applied within a subvolume [S1, unofficial].
+4.  **Compositing:** Merge the $p$ distributed subimages $\{I_1, \dots, I_p\}$ into the final image using image compositing [S1, unofficial]. This step resolves the depth ordering of fragments generated from different subvolumes.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Object Parallel Rendering
-# Assumes p processors, each with local memory for its subvolume
-
 def object_parallel_render(volume, viewpoint, num_processors):
     # Step 1: Partition volume
     subvolumes = partition_volume(volume, num_processors)
     
-    # Step 2 & 3: Parallel local rendering
-    # Each processor executes this block independently for its assigned subvolume
+    # Step 2 & 3: Parallel rendering of subvolumes
+    # In a real distributed system, this runs on separate nodes.
+    # Here we simulate the local computation for each processor.
     subimages = []
     for i in range(num_processors):
         local_volume = subvolumes[i]
-        # Render local subvolume from the global viewpoint
-        # This produces a partial image or accumulation buffer
-        # Local ERT may be applied here
-        subimage = render_subvolume(local_volume, viewpoint)
-        subimages.append(subimage)
+        # Render local subvolume. 
+        # Rays are cast from viewpoint. 
+        # If a ray exits local_volume, the contribution from remote subvolumes 
+        # is not available locally, so the subimage represents only the 
+        # visible portion from this subvolume's perspective.
+        local_image = render_subvolume(local_volume, viewpoint)
+        subimages.append(local_image)
         
     # Step 4: Merge subimages
-    # Compositing is required to merge subimages into the final image
-    final_image = composite_subimages(subimages)
-    
+    final_image = composite_images(subimages)
     return final_image
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Global ERT:** It is not easy to utilize global Early Ray Termination because the accumulation of a single ray may be split across multiple processors. If one processor terminates a ray early, other processors holding later parts of the ray must also be notified, which adds communication overhead [S1, unofficial].
-*   **Memory Load:** If the dataset is small, object parallelism may be inefficient because every processor might still need to load the entire volume into memory if partitioning is not strictly enforced or if the partitioning overhead outweighs the benefits [S1, unofficial].
-*   **Compositing Complexity:** The final compositing step requires careful handling of depth information to ensure correct blending of contributions from different subvolumes [S1, unofficial].
 
 ## Subtopics
 
 ### World-Space Parallel Ray Tracing
-A parallelization method for geometric ray tracing that divides 3D space (world space) into subregions and distributes objects within those subregions across independent computers [S2, unofficial]. Rays are initially cast from the computer containing the eye. Rays are processed (intersected with objects) in the subregions along their paths. Rays exiting one subregion are passed onto the neighboring subregion until they terminate. Equal workload is achieved through adaptive subdivision, with neighboring computers communicating via messages to balance loads [S2, unofficial]. This contrasts with the more popular method of dividing the screen into subscreens [S2, unofficial].
+A parallelization method for geometric ray tracing that divides 3D space (world space) into subregions and distributes objects within those subregions across independent computers [S2, unofficial]. Rays are cast from the computer containing the eye, processed in subregions along their paths, and passed to neighboring subregions until termination [S2, unofficial]. Workload is balanced via adaptive subdivision and message passing between neighbors [S2, unofficial]. This contrasts with the more popular method of dividing the screen into subscreens [S2, unofficial].
 
 ### Object-Space Parallel Volume Rendering
-A parallel rendering architecture where the total memory is the aggregation of physically separated but interconnected systems, seen as a logically contiguous big space [S3, unofficial]. It uses object space partitioning for data decomposition, which maps naturally to distributed memory systems to reduce synchronization needs [S3, unofficial]. This approach is particularly effective in distributed memory architectures where inter-node communication is expensive [S3, unofficial].
+A parallel rendering architecture for distributed memory systems where the total memory is an aggregation of physically separated but interconnected systems, viewed as a logically contiguous big space [S3, unofficial]. It uses object space partitioning for data decomposition to map naturally to the distribution scheme, reducing the amount of synchronization needed compared to image decomposition [S3, unofficial].
 
 ## Operating characteristics
-*   **Scalability:** Highly scalable for large-scale datasets because it distributes the data across processors, avoiding the memory bottleneck of a single node [S1, unofficial].
-*   **Communication Overhead:** Requires image compositing to merge subimages, which involves communication between processors. In distributed memory systems, this communication can be expensive [S3, unofficial].
-*   **Synchronization:** Object space partitioning reduces the need for synchronization during the rendering phase compared to image-space methods, as each processor works on independent data chunks [S3, unofficial]. However, synchronization is still required for the final compositing step.
-*   **Suitability:** Suitable for large-scale datasets where data decomposition is necessary [S1, unofficial]. Not suitable for small datasets where screen parallel rendering is more efficient [S1, unofficial].
-*   **Limitations:** Difficult to implement global Early Ray Termination (ERT) due to the distributed nature of ray accumulation [S1, unofficial].
+**Strengths:**
+*   **Scalability for Large Data:** Suitable for large-scale datasets that do not fit into the memory of a single processor or shared memory system [S1, unofficial].
+*   **Memory Efficiency:** Each processor only needs to load its assigned subvolume, avoiding the need for every processor to load the entire volume [S1, unofficial].
+
+**Limitations:**
+*   **Compositing Overhead:** Requires a final image compositing step to merge distributed subimages [S1, unofficial].
+*   **Communication Cost:** In distributed memory systems, inter-node communication is expensive, and the compositing step may require significant data transfer [S3, unofficial].
+*   **Algorithmic Complexity:** It is not easy to utilize global Early Ray Termination (ERT) because accumulation tasks for a single ray can be assigned to more than one processor, making it difficult to determine if a ray can be terminated early across subvolume boundaries [S1, unofficial].
+*   **Load Balancing:** Requires careful partitioning to ensure equal workload among processors, potentially requiring adaptive subdivision [S2, unofficial].
+
+**Complexity:**
+*   **Time:** $O(N/p)$ for rendering per processor, where $N$ is the total number of voxels/ray steps, plus $O(C)$ for compositing, where $C$ is the cost of communication/compositing.
+*   **Memory:** $O(V/p)$ per processor, where $V$ is the total volume size.
 
 ## Background
-Object Parallel Rendering was introduced as an alternative to screen-space parallel rendering to address the limitations of distributing pixels for large datasets [S1, unofficial]. The concept of dividing object space (volume) among processors for volume ray tracing optimization builds on earlier work in geometric ray tracing, such as the world-space parallelization by Dippe and Swensen (1984) [S2, unofficial]. In distributed memory architectures, object space partitioning is frequently used because it reduces synchronization needs and leverages the aggregation of physically separated memory [S3, unofficial].
+Object parallel rendering was developed as an alternative to screen parallel rendering (image-space) to address the memory limitations of parallel systems when handling large datasets [S1, unofficial]. While screen parallel rendering is effective for small datasets, it fails for large-scale data because every processor would need to load the entire volume [S1, unofficial]. The concept of dividing object space (volume) among processors for optimization was also applied to geometric ray tracing by Mark Dippe and John Swensen in 1984, who subdivided 3D space instead of the 2D image plane [S2, unofficial]. This approach is particularly relevant for distributed memory architectures, where object space partitioning is frequently used to reduce synchronization needs [S3, unofficial].
 
 ## Sources
 [S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

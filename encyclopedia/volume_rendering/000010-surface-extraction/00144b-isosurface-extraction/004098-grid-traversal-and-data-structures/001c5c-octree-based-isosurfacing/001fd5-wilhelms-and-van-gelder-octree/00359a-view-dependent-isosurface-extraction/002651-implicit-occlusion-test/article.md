@@ -16,50 +16,46 @@ The method operates directly on the scalar field values $f(\mathbf{x})$ at sampl
 **Algorithm Steps:**
 1.  For each viewing ray, sample the scalar field $f(\mathbf{x})$ along the ray path [S1, unofficial][S2, unofficial].
 2.  Compare sampled values against the isosurface threshold $T$ [S1, unofficial][S2, unofficial].
-3.  Identify segments where the scalar field crosses $T$. Due to the continuity of $f(\mathbf{x})$, if a ray travels from a region where $f(\mathbf{x}) > T$ to a region where $f(\mathbf{x}) < T$ (or vice versa), it must intersect the isosurface $f(\mathbf{x}) = T$ [S1, unofficial][S2, unofficial].
+3.  Identify segments where the scalar field crosses $T$ by detecting sign changes in $f(\mathbf{x}) - T$ [S1, unofficial][S2, unofficial]. Due to the continuity of $f(\mathbf{x})$, if a ray travels from a region where $f(\mathbf{x}) > T$ to a region where $f(\mathbf{x}) < T$ (or vice versa), it must intersect the isosurface $f(\mathbf{x}) = T$ [S1, unofficial][S2, unofficial].
 4.  Mark regions behind the first intersection as occluded, skipping further extraction [S1, unofficial][S2, unofficial].
 
 **Formulas:**
-Let $f(\mathbf{x})$ be the scalar field value at position $\mathbf{x}$, and $T$ be the isosurface threshold.
+Let $f(\mathbf{x})$ be the scalar field value at position $\mathbf{x}$, and $T$ be the isosurface threshold [S1, unofficial][S2, unofficial].
 A ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ intersects the isosurface if there exists $t \ge 0$ such that:
 $$ f(\mathbf{r}(t)) = T $$
 By the Intermediate Value Theorem, if $f(\mathbf{r}(t_1)) - T$ and $f(\mathbf{r}(t_2)) - T$ have opposite signs, an intersection exists in $[t_1, t_2]$ [G]. This intersection acts as an occluder for subsequent parts of the ray [S1, unofficial][S2, unofficial].
 
 **Parameters:**
-*   **Threshold $T$:** The specific scalar value defining the isosurface. Typical values depend on the dataset (e.g., density, temperature) [G].
-*   **Sampling Rate:** The distance between samples along the ray. Not given in the sources.
+*   **Threshold $T$:** The specific scalar value defining the isosurface [S1, unofficial][S2, unofficial].
+*   **Sampling Rate:** The distance between samples along the ray. Not given in the sources. [G]
 
 **Edge Cases and Pitfalls:**
 *   **Discontinuities:** The method relies on scalar field continuity. Discontinuous fields may break the intersection guarantee [G].
 *   **Precision:** Floating-point errors near $T$ can cause missed intersections or false occlusions [G].
-*   **Degenerate Input:** If $f(\mathbf{x}) = T$ over a region, the "above/below" distinction is ambiguous. Not given in the sources.
+*   **Degenerate Input:** If $f(\mathbf{x}) = T$ over a region, the "above/below" distinction is ambiguous. Not given in the sources. [G]
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
-def implicit_occlusion_test(ray_origin, ray_direction, scalar_field, threshold, max_distance):
+def implicit_occlusion_test(ray_origin, ray_direction, field_sample, threshold, max_distance, step_size):
     """
     Tests if a ray is occluded by the isosurface f(x) = threshold.
     Returns the distance to the first intersection, or infinity if none.
     """
-    # Evaluate field at ray origin
     t = 0.0
-    prev_val = scalar_field.evaluate(ray_origin) - threshold
+    prev_val = field_sample(ray_origin) - threshold
     
-    # Sources do not specify the sampling strategy or step size [G]
-    step_size = 0.1 
+    # Sources do not specify sampling step; implementer chooses based on resolution [G]
     while t < max_distance:
         t += step_size
         current_pos = ray_origin + ray_direction * t
-        curr_val = scalar_field.evaluate(current_pos) - threshold
+        curr_val = field_sample(current_pos) - threshold
         
         # Check for sign change (crossing)
         if prev_val * curr_val <= 0.0:
-            return t # Intersection found
+            return t
         prev_val = curr_val
         
-    return float('inf') # No intersection
+    return float('inf')
 ```
 
 ## Subtopics
@@ -83,6 +79,6 @@ A sibling method that uses shear-warp transformation and explicit visibility ext
 The technique was proposed by Pesco et al. as an occlusion test for the implicit itself, further reducing the cost of isosurface extraction at render-time [S3, unofficial]. It is described as a method to speed up computation and rendering of isosurfaces by performing visibility computations prior to the actual extraction [S1, unofficial][S2, unofficial]. The method is part of the broader field of view-dependent isosurface extraction, which aims to optimize the rendering of large volumetric datasets by only processing visible parts [S1, unofficial][S2, unofficial][S3, unofficial].
 
 ## Sources
-[S1] A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S1] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
 [S2] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
 [S3] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

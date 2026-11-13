@@ -6,8 +6,8 @@ Also called: Camera Projection Setup, Camera Uniform and Matrix Setup, View-Proj
 This method computes the view and projection matrices for camera rendering, specifically handling focal length calculation from field of view (FOV) for use in splat shaders [S3, unofficial]. It differs from fixed-function pipeline setups by explicitly managing tangent-based FOV parameters, coordinate system conversions (e.g., OpenGL to WGPU), and uniform buffer population [S1, S2, S3, unofficial].
 
 ## How it works
-**Inputs:** viewport width $W$, height $H$, FOV $\theta_{fov}$ (degrees), near plane $n$, far plane $f$, eye position $E$, target $T$, up vector $U$.
-**Outputs:** view matrix $V$, projection matrix $P$, view-projection matrix $VP$, inverse view-projection $VP^{-1}$, `CameraUniform` struct.
+**Inputs:** viewport width $W$, height $H$, FOV $\theta_{fov}$ (degrees), near plane $n$, far plane $f$, eye position $E$, target $T$, up vector $U$ [S1, S2, S3, unofficial].
+**Outputs:** view matrix $V$, projection matrix $P$, view-projection matrix $VP$, inverse view-projection $VP^{-1}$, `CameraUniform` struct [S1, S2, S3, unofficial].
 
 **Data Structures:**
 The `CameraUniform` struct is passed to the GPU [S2, unofficial]. Its layout is defined as `#[repr(C)]` and contains:
@@ -19,7 +19,7 @@ Total: 34 floats, padded to 36 or 40 bytes depending on alignment [S2, unofficia
 
 **Steps:**
 1. **Compute Aspect Ratio:** $a = W / H$ [S3, unofficial].
-2. **Compute FOV Tangents:** Convert FOV to radians $\theta_{rad} = \text{radians}(\theta_{fov})$. Compute horizontal tangent $t_{fov_x} = \tan(\theta_{rad} / 2)$ [S1, unofficial]. Compute vertical tangent $t_{fov_y} = t_{fov_x} \times (H / W)$ [S1, unofficial]. Alternatively, compute focal lengths for shader uniforms: $f_y = H / (2 \times \tan(\theta_{rad} / 2))$, $f_x = f_y$ [S3, unofficial].
+2. **Compute FOV Tangents:** Convert FOV to radians $\theta_{rad} = \text{radians}(\theta_{fov})$ [S1, S3, unofficial]. Compute horizontal tangent $t_{fov_x} = \tan(\theta_{rad} / 2)$ [S1, unofficial]. Compute vertical tangent $t_{fov_y} = t_{fov_x} \times (H / W)$ [S1, unofficial]. Alternatively, compute focal lengths for shader uniforms: $f_y = H / (2 \times \tan(\theta_{rad} / 2))$, $f_x = f_y$ [S3, unofficial].
 3. **Construct View Matrix:** $V = \text{lookAt}(E, T, U)$ [S3, unofficial]. Some implementations compute it as $V = \text{inverse}(\text{translation} \times \text{rotation})$ [S1, unofficial].
 4. **Construct Projection Matrix:** $P = \text{perspective}(\theta_{rad}, a, n, f)$ [S3, unofficial]. An alternative formulation uses the precomputed vertical tangent: $P = \text{perspective}(\arctan(t_{fov_y}) \times 2, W / H, n, f)$ [S1, unofficial].
 5. **Apply Coordinate System Conversion:** To convert from OpenGL to WGPU, multiply the projection matrix by $C = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 0.5 & 0.5 \\ 0 & 0 & 0 & 1 \end{bmatrix}$ [S2, unofficial]. Alternatively, flip the Y and Z axes of the view and projection matrices by multiplying columns 1 and 2 by $-1.0$ [S1, unofficial].
@@ -31,7 +31,6 @@ Total: 34 floats, padded to 36 or 40 bytes depending on alignment [S2, unofficia
 
 ```python
 import math
-import numpy as np
 
 def compute_view_projection(width, height, fov_deg, near, far, eye, target, up):
     # 1. Aspect ratio
@@ -49,15 +48,17 @@ def compute_view_projection(width, height, fov_deg, near, far, eye, target, up):
     proj = perspective(fov_rad, aspect, near, far)
 
     # 5. Coordinate conversion (OpenGL to WGPU)
-    ogl_to_wgpu = np.array([[1, 0, 0, 0],
-                            [0, 1, 0, 0],
-                            [0, 0, 0.5, 0.5],
-                            [0, 0, 0, 1]], dtype=np.float32)
-    proj = ogl_to_wgpu @ proj
+    ogl_to_wgpu = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.5, 0.5],
+        [0.0, 0.0, 0.0, 1.0]
+    ]
+    proj = mat_mul(ogl_to_wgpu, proj)
 
     # 6. Combined matrices
-    view_proj = proj @ view
-    inv_view_proj = np.linalg.inv(view_proj)
+    view_proj = mat_mul(proj, view)
+    inv_view_proj = mat_inv(view_proj)
 
     # 7. Camera uniform
     camera_uniform = {
@@ -68,21 +69,76 @@ def compute_view_projection(width, height, fov_deg, near, far, eye, target, up):
     }
     return view, proj, view_proj, inv_view_proj, camera_uniform
 
+def vec_sub(a, b):
+    return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+
+def vec_cross(a, b):
+    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+
+def vec_norm(v):
+    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    return [v[0]/l, v[1]/l, v[2]/l]
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
 def look_at(eye, target, up):
-    z = normalize(eye - target)
-    x = normalize(np.cross(up, z))
-    y = np.cross(z, x)
-    return np.array([[x[0], y[0], z[0], 0],
-                     [x[1], y[1], z[1], 0],
-                     [x[2], y[2], z[2], 0],
-                     [-np.dot(x, eye), -np.dot(y, eye), -np.dot(z, eye), 1]], dtype=np.float32).T
+    z = vec_norm(vec_sub(eye, target))
+    x = vec_norm(vec_cross(up, z))
+    y = vec_cross(z, x)
+    # Column-major layout matching GLM
+    return [
+        [x[0], y[0], z[0], 0.0],
+        [x[1], y[1], z[1], 0.0],
+        [x[2], y[2], z[2], 0.0],
+        [-dot(x, eye), -dot(y, eye), -dot(z, eye), 1.0]
+    ]
 
 def perspective(fov_rad, aspect, near, far):
     f = 1.0 / math.tan(fov_rad / 2.0)
-    return np.array([[f / aspect, 0, 0, 0],
-                     [0, f, 0, 0],
-                     [0, 0, -(far + near) / (far - near), -1],
-                     [0, 0, -(2 * far * near) / (far - near), 0]], dtype=np.float32)
+    # OpenGL clip space (Z in [-1, 1])
+    return [
+        [f / aspect, 0.0, 0.0, 0.0],
+        [0.0, f, 0.0, 0.0],
+        [0.0, 0.0, -(far + near) / (far - near), -1.0],
+        [0.0, 0.0, -(2 * far * near) / (far - near), 0.0]
+    ]
+
+def mat_mul(A, B):
+    C = [[0.0]*4 for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            for k in range(4):
+                C[i][j] += A[i][k] * B[k][j]
+    return C
+
+def mat_inv(M):
+    # Standard 4x4 inverse for affine transformation matrices
+    inv = [[0.0]*4 for _ in range(4)]
+    inv[0][0] = M[1][1]*M[2][2]*M[3][3] - M[1][1]*M[2][3]*M[3][2] - M[1][2]*M[2][1]*M[3][3] + M[1][2]*M[2][3]*M[3][1] + M[1][3]*M[2][1]*M[3][2] - M[1][3]*M[2][2]*M[3][1]
+    inv[0][1] = -M[0][1]*M[2][2]*M[3][3] + M[0][1]*M[2][3]*M[3][2] + M[0][2]*M[2][1]*M[3][3] - M[0][2]*M[2][3]*M[3][1] - M[0][3]*M[2][1]*M[3][2] + M[0][3]*M[2][2]*M[3][1]
+    inv[0][2] = M[0][1]*M[1][2]*M[3][3] - M[0][1]*M[1][3]*M[3][2] - M[0][2]*M[1][1]*M[3][3] + M[0][2]*M[1][3]*M[3][1] + M[0][3]*M[1][1]*M[3][2] - M[0][3]*M[1][2]*M[3][1]
+    inv[0][3] = -M[0][1]*M[1][2]*M[2][3] + M[0][1]*M[1][3]*M[2][2] + M[0][2]*M[1][1]*M[2][3] - M[0][2]*M[1][3]*M[2][1] - M[0][3]*M[1][1]*M[2][2] + M[0][3]*M[1][2]*M[2][1]
+    inv[1][0] = -M[1][0]*M[2][2]*M[3][3] + M[1][0]*M[2][3]*M[3][2] + M[1][2]*M[2][0]*M[3][3] - M[1][2]*M[2][3]*M[3][0] - M[1][3]*M[2][0]*M[3][2] + M[1][3]*M[2][2]*M[3][0]
+    inv[1][1] = M[0][0]*M[2][2]*M[3][3] - M[0][0]*M[2][3]*M[3][2] - M[0][2]*M[2][0]*M[3][3] + M[0][2]*M[2][3]*M[3][0] + M[0][3]*M[2][0]*M[3][2] - M[0][3]*M[2][2]*M[3][0]
+    inv[1][2] = -M[0][0]*M[1][2]*M[3][3] + M[0][0]*M[1][3]*M[3][2] + M[0][2]*M[1][0]*M[3][3] - M[0][2]*M[1][3]*M[3][0] - M[0][3]*M[1][0]*M[3][2] + M[0][3]*M[1][2]*M[3][0]
+    inv[1][3] = M[0][0]*M[1][2]*M[2][3] - M[0][0]*M[1][3]*M[2][2] - M[0][2]*M[1][0]*M[2][3] + M[0][2]*M[1][3]*M[2][0] + M[0][3]*M[1][0]*M[2][2] - M[0][3]*M[1][2]*M[2][0]
+    inv[2][0] = M[1][0]*M[2][2]*M[3][3] - M[1][0]*M[2][3]*M[3][2] - M[1][2]*M[2][0]*M[3][3] + M[1][2]*M[2][3]*M[3][0] + M[1][3]*M[2][0]*M[3][2] - M[1][3]*M[2][2]*M[3][0]
+    inv[2][1] = -M[0][0]*M[2][2]*M[3][3] + M[0][0]*M[2][3]*M[3][2] + M[0][2]*M[2][0]*M[3][3] - M[0][2]*M[2][3]*M[3][0] - M[0][3]*M[2][0]*M[3][2] + M[0][3]*M[2][2]*M[3][0]
+    inv[2][2] = M[0][0]*M[1][2]*M[3][3] - M[0][0]*M[1][3]*M[3][2] - M[0][2]*M[1][0]*M[3][3] + M[0][2]*M[1][3]*M[3][0] + M[0][3]*M[1][0]*M[3][2] - M[0][3]*M[1][2]*M[3][0]
+    inv[2][3] = -M[0][0]*M[1][2]*M[2][3] + M[0][0]*M[1][3]*M[2][2] + M[0][2]*M[1][0]*M[2][3] - M[0][2]*M[1][3]*M[2][0] - M[0][3]*M[1][0]*M[2][2] + M[0][3]*M[1][2]*M[2][0]
+    inv[3][0] = -M[1][0]*M[2][1]*M[3][3] + M[1][0]*M[2][3]*M[3][1] + M[1][1]*M[2][0]*M[3][3] - M[1][1]*M[2][3]*M[3][0] - M[1][3]*M[2][0]*M[3][1] + M[1][3]*M[2][1]*M[3][0]
+    inv[3][1] = M[0][0]*M[2][1]*M[3][3] - M[0][0]*M[2][3]*M[3][1] - M[0][1]*M[2][0]*M[3][3] + M[0][1]*M[2][3]*M[3][0] + M[0][3]*M[2][0]*M[3][1] - M[0][3]*M[2][1]*M[3][0]
+    inv[3][2] = -M[0][0]*M[1][1]*M[3][3] + M[0][0]*M[1][3]*M[3][1] + M[0][1]*M[1][0]*M[3][3] - M[0][1]*M[1][3]*M[3][0] - M[0][3]*M[1][0]*M[3][1] + M[0][3]*M[1][1]*M[3][0]
+    inv[3][3] = M[0][0]*M[1][1]*M[2][3] - M[0][0]*M[1][3]*M[2][1] - M[0][1]*M[1][0]*M[2][3] + M[0][1]*M[1][3]*M[2][0] + M[0][3]*M[1][0]*M[2][1] - M[0][3]*M[1][1]*M[2][0]
+    det = M[0][0]*inv[0][0] + M[0][1]*inv[1][0] + M[0][2]*inv[2][0] + M[0][3]*inv[3][0]
+    if abs(det) < 1e-8:
+        raise ValueError("Matrix is singular")
+    inv_det = 1.0 / det
+    for i in range(4):
+        for j in range(4):
+            inv[i][j] *= inv_det
+    return inv
 ```
 
 **Parameters and Typical Values:**
@@ -112,7 +168,7 @@ Prepares camera parameters for rendering and training, handling downscaling, vie
 - **When to use:** When implementing custom renderers, Gaussian Splatting, or when fine-grained control over camera matrices is needed beyond fixed-function pipeline defaults [S1, S2, S3, unofficial].
 
 ## Background
-This method is fundamental to computer graphics, originating from standard perspective projection and look-at camera models. The specific variations cited here are adapted for modern real-time Gaussian Splatting implementations using Vulkan [S1, unofficial], WGPU [S2, unofficial], and OpenGL [S3, unofficial]. The explicit computation of tangent FOV and focal lengths is particularly relevant for splat-based rendering where shader uniforms require these values for correct projection [S3, unofficial].
+This method is fundamental to computer graphics, originating from standard perspective projection and look-at camera models [S1, S2, S3, unofficial]. The specific variations cited here are adapted for modern real-time Gaussian Splatting implementations using Vulkan [S1, unofficial], WGPU [S2, unofficial], and OpenGL [S3, unofficial]. The explicit computation of tangent FOV and focal lengths is particularly relevant for splat-based rendering where shader uniforms require these values for correct projection [S3, unofficial].
 
 ## Sources
 [S1] Show HN: 3DGS.cpp – performant, cross platform Gaussian Splatting with Vulkan, https://github.com/shg8/3DGS.cpp, fetched 2026-10-26 (unofficial)

@@ -3,52 +3,54 @@
 Also called: Gsplat scaling, rotation, translation, recoloring, TransformGsplat
 
 ## Overview
-The Gsplat Transformation method applies affine and color modifications to a set of Gaussian splats, typically as part of a training or editing pipeline. It operates on a packed `Gsplat` structure, conditionally updating position, scale, orientation, and color attributes based on provided transformation vectors. Unlike general-purpose matrix multiplication which might require full serialization, this method provides semantic field access for specific attribute updates, building on [Splatting](23-splatting.md).
+The Gsplat Transformation method conditionally updates position, scale, orientation, and color attributes of a packed `Gsplat` structure based on provided transformation parameters [S1, unofficial]. It operates directly on semantic fields without requiring full serialization, building on [Splatting](23-splatting.md).
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A `Gsplat` structure containing position (`center`), scale (`scales`), rotation (`quaternion`), color (`rgba`), and an active flag (`flags`).
-- Input: Optional transformation parameters: `scale` (scalar or vector), `rotate` (quaternion), `translate` (vector), `recolor` (vector).
-- Output: A modified `Gsplat` structure.
+- Input: A `Gsplat` structure containing position (`center`), scale (`scales`), rotation (`quaternion`), color (`rgba`), and an active flag (`flags`) [S1, unofficial].
+- Input: Optional transformation parameters: `scale` (scalar or vector), `rotate` (quaternion), `translate` (vector), `recolor` (vector) [S1, unofficial].
+- Output: A modified `Gsplat` structure [S1, unofficial].
 
 **Data Structures:**
-The `Gsplat` structure is assumed to be packed for efficient memory access. Key fields include:
-- `flags`: Boolean or integer indicating if the splat is active.
-- `center`: 3D vector $(x, y, z)$ representing the Gaussian center.
-- `scales`: 3D vector $(s_x, s_y, s_z)$ representing the Gaussian extents.
-- `quaternion`: 4D vector $(w, x, y, z)$ representing orientation.
-- `rgba`: 4D vector $(r, g, b, a)$ representing color and opacity.
+The `Gsplat` structure is assumed to be packed for efficient memory access [S1, unofficial]. Key fields include:
+- `flags`: Boolean or integer indicating if the splat is active [S1, unofficial].
+- `center`: 3D vector $(x, y, z)$ representing the Gaussian center [S1, unofficial].
+- `scales`: 3D vector $(s_x, s_y, s_z)$ representing the Gaussian extents [S1, unofficial].
+- `quaternion`: 4D vector $(w, x, y, z)$ representing orientation [S1, unofficial].
+- `rgba`: 4D vector $(r, g, b, a)$ representing color and opacity [S1, unofficial].
 
 **Steps:**
-1. **Copy:** Create a copy of the input `Gsplat` to the output structure to preserve original data if needed or to ensure atomic updates.
-2. **Check Activity:** If `isGsplatActive(gsplat.flags)` is false, skip further transformations and return the copy.
-3. **Scale:** If a `scale` parameter is provided:
-   - Multiply `gsplat.center` by `scale`.
-   - Multiply `gsplat.scales` by `scale`.
-4. **Rotate:** If a `rotate` quaternion is provided:
-   - Rotate `gsplat.center` using the quaternion: `center = quatVec(rotate, center)`.
-   - Update `gsplat.quaternion` by composing the rotation: `quaternion = quatQuat(rotate, quaternion)`.
-5. **Translate:** If a `translate` vector is provided:
-   - Add `translate` to `gsplat.center`: `center = center + translate`.
-6. **Recolor:** If a `recolor` vector is provided:
-   - Multiply `gsplat.rgba` by `recolor`: `rgba = rgba * recolor`.
+1. **Copy:** Create a copy of the input `gsplat` to the output structure [S1, unofficial].
+2. **Check Activity:** If `isGsplatActive(gsplat.flags)` is false, skip further transformations and return the copy [S1, unofficial].
+3. **Scale:** If a `scale` parameter is provided, multiply `gsplat.center` and `gsplat.scales` by `scale` [S1, unofficial].
+4. **Rotate:** If a `rotate` quaternion is provided, rotate `gsplat.center` using `quatVec(rotate, gsplat.center)` and update `gsplat.quaternion` using `quatQuat(rotate, gsplat.quaternion)` [S1, unofficial].
+5. **Translate:** If a `translate` vector is provided, add `translate` to `gsplat.center` [S1, unofficial].
+6. **Recolor:** If a `recolor` vector is provided, multiply `gsplat.rgba` by `recolor` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class Gsplat:
+    def __init__(self, center, scales, quaternion, rgba, flags):
+        self.center = center
+        self.scales = scales
+        self.quaternion = quaternion
+        self.rgba = rgba
+        self.flags = flags
+
 def transform_gsplat(gsplat, scale=None, rotate=None, translate=None, recolor=None):
     # Step 1: Copy input to output
-    out = copy(gsplat)
+    out = Gsplat(gsplat.center.copy(), gsplat.scales.copy(), gsplat.quaternion.copy(), gsplat.rgba.copy(), gsplat.flags)
     
     # Step 2: Check if active
-    if not is_gsplat_active(out.flags):
+    if not (out.flags & 1):
         return out
     
     # Step 3: Scale
     if scale is not None:
-        out.center = out.center * scale
-        out.scales = out.scales * scale
+        out.center = [c * scale for c in out.center]
+        out.scales = [s * scale for s in out.scales]
         
     # Step 4: Rotate
     if rotate is not None:
@@ -57,40 +59,63 @@ def transform_gsplat(gsplat, scale=None, rotate=None, translate=None, recolor=No
         
     # Step 5: Translate
     if translate is not None:
-        out.center = out.center + translate
+        out.center = [c + t for c, t in zip(out.center, translate)]
         
     # Step 6: Recolor
     if recolor is not None:
-        out.rgba = out.rgba * recolor
+        out.rgba = [r * rc for r, rc in zip(out.rgba, recolor)]
         
     return out
+
+def quat_vec_mul(q, v):
+    # q = (w, x, y, z), v = (x, y, z)
+    w, x, y, z = q
+    vx, vy, vz = v
+    ix = 2.0 * (y * vz - z * vy)
+    iy = 2.0 * (z * vx - w * vz)
+    iz = 2.0 * (w * vy - y * vx)
+    return [vx + w * ix + (y * iz - z * iy),
+            vy + w * iy + (z * ix - x * iz),
+            vz + w * iz + (x * iy - y * ix)]
+
+def quat_quat_mul(q1, q2):
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return [w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2]
 ```
 
 **Parameters:**
-- `scale`: Scalar or 3D vector. Typical value: 1.0 (no change) or values derived from gradient descent.
-- `rotate`: 4D quaternion. Must be normalized.
-- `translate`: 3D vector. Typical values depend on scene scale.
-- `recolor`: 4D vector. Values typically in $[0, 1]$.
+- `scale`: Scalar or 3D vector [S1, unofficial].
+- `rotate`: 4D quaternion [S1, unofficial].
+- `translate`: 3D vector [S1, unofficial].
+- `recolor`: 4D vector [S1, unofficial].
 
 **Edge Cases:**
-- **Inactive Splats:** The method checks `flags` to avoid processing inactive splats, saving computation.
-- **Quaternion Normalization:** The `quatQuat` operation assumes normalized quaternions. If `rotate` is not normalized, the result may be invalid. [G] Ensure input quaternions are normalized before calling.
-- **Zero Scale:** Multiplying by zero scale collapses the Gaussian to a point. This may cause numerical instability in subsequent rendering steps.
+- **Inactive Splats:** The method checks `flags` to avoid processing inactive splats [S1, unofficial].
+- **Quaternion Normalization:** The `quatQuat` operation assumes normalized quaternions [G]. Ensure input quaternions are normalized before calling.
+- **Zero Scale:** Multiplying by zero scale collapses the Gaussian to a point [G]. This may cause numerical instability in subsequent rendering steps [G].
 
 ## Subtopics
 
 ### [Gsplat Split and Combine](8494-gsplat-split-and-combine.md)
 Decomposes or reconstructs `Gsplat` structures for fine-grained editing, building on [Gsplat Transformation](7308-gsplat-transformation.md).
 
+### Runtime Style/Shape Transformation via MLP Encoders
+Encodes multiple states of an object (e.g., burning, frozen, charcoal) in a single Gaussian Splatting model [S2]. MLP-based encoders are activated with a new value at collision time or interaction to instantly produce a new 3DGS state [S2]. The object is normalized back to its default state by applying a counter-effect (e.g., fire removes ice) [S2].
+
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per splat, as the number of operations is fixed and small.
-- **Memory Complexity:** $O(1)$ additional memory for the copy.
-- **Performance:** Highly efficient due to packed data structures and conditional execution. Suitable for real-time updates during training.
-- **Strengths:** Semantic field access, conditional processing, low overhead.
-- **Limitations:** Limited to specific transformation types; not a general-purpose matrix transform.
+- **Time Complexity:** $O(1)$ per splat, as the number of operations is fixed and small [S1, unofficial].
+- **Memory Complexity:** $O(1)$ additional memory for the copy [S1, unofficial].
+- **Performance:** Highly efficient due to packed data structures and conditional execution [S1, unofficial].
+- **Strengths:** Semantic field access, conditional processing, low overhead [S1, unofficial].
+- **Limitations:** Limited to specific transformation types; not a general-purpose matrix transform [S1, unofficial].
 
 ## Background
-The Gsplat Transformation method is part of the Gaussian Splatting ecosystem, specifically designed for efficient attribute updates. It originates from implementations that optimize the training loop by avoiding full serialization of Gaussian attributes. The method is commonly used in differentiable rendering pipelines where gradients are propagated to position, scale, rotation, and color.
+The Gsplat Transformation method originates from implementations that optimize the training loop by avoiding full serialization of Gaussian attributes [S1, unofficial]. It is commonly used in differentiable rendering pipelines where gradients are propagated to position, scale, rotation, and color [S1, unofficial]. Runtime style transformation variants use MLP encoders to instantly produce new 3DGS states upon interaction [S2].
 
 ## Sources
 [S1] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)
+[S2] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01

@@ -1,145 +1,153 @@
 # Incremental Blending for In-scattering
 
-Also called: Incremental In-scattering Blending
+Also called: Incremental In-scattering Blending, Multi-directional In-scattering Accumulation
 
 ## Overview
-Incremental Blending for In-scattering is a method for approximating volumetric light scattering (in-scattering) in direct volume rendering by accumulating scattered light contributions from multiple discrete directions [S1]. It solves the problem of computing global illumination effects in participating media without the prohibitive cost of full path tracing or expensive pre-computed light fields [S1]. It sets itself apart from standard compositing by treating the scattering integral as a sum of directional components that are blended incrementally, allowing for interactive updates as the number of scattering directions increases [S1]. Unlike [Intermixing](5139-intermixing.md), which focuses on spatial mixing of properties, this method focuses on the temporal accumulation of lighting estimates across rendering passes or directions [S1].
+Incremental Blending for In-scattering is a technique for approximating volumetric light scattering (in-scattering) in direct volume rendering by accumulating contributions from multiple discrete light directions [S1]. It solves the problem of computing realistic translucency and subsurface scattering effects in participating media without the prohibitive cost of full path tracing or expensive pre-integrated textures [S1]. It sets itself apart from standard compositing by replacing the sample's emitted color with a directionally averaged in-scattering term, and from [Intermixing](5139-intermixing.md) by explicitly managing the angular discretization of the scattering sphere through an iterative blending process rather than a single pass [S1].
 
 ## How it works
-The method discretizes the scattering sphere into $J$ directions. For each direction $j$ (from 1 to $J$), it computes the scattered intensity contribution and blends it with the previously accumulated intensity [S1].
+The method computes the eye-point intensity $I_{eye}$ by discretizing the scattering sphere into $J$ directions. For each direction $j$, a local in-scattering intensity $I_{final}$ is computed and incrementally blended into a stored accumulator $I_{stored}$ [S1].
 
 **Inputs and Outputs:**
-*   **Input:** Volume data (opacity $\alpha$, color $c$), transfer function parameters, light source direction, scattering sphere discretization (number of rays $J$), bias parameter $I_{bias}$.
-*   **Output:** Final in-scattered intensity image $I_{eye}$ or accumulated intensity buffer $I_{stored}$.
+*   **Input:** Volume density/opacity field $\alpha(s)$, transfer function color $c(s)$, light source direction, number of scattering directions $J$.
+*   **Output:** Final pixel intensity $I_{eye}$ (or accumulated color buffer).
 
 **Data Structures:**
-*   $I_{stored}$: A buffer (volume or image) storing the accumulated in-scattered intensity. Initialized to zero.
-*   $I_{final}$: A temporary buffer or variable storing the result of the current directional computation.
-*   $j$: Integer counter for the current scattering direction (1 to $J$).
-
-**Steps:**
-
-1.  **Initialization:** Initialize $I_{stored}$ to zero for all pixels/voxels. Set $j = 1$.
-2.  **Directional Computation:** For the current direction $j$:
-    a. Compute the scattered intensity $I_s(s_k)$ for each sample point $s_k$ along the ray. This typically involves evaluating the phase function and light transport from the source to the sample [S1].
-    b. Compute the emitted color contribution $g_k$ using the bias parameter:
-       $$g_k = (I_{bias} + (1 - I_{bias}) \cdot I_s(s_k)) \cdot c(s_k) \cdot \alpha(s_k)$$
-       where $I_{bias} \in [0, 1]$ adjusts the minimum light level (default white light assumption) [S1].
-    c. Compute the total in-scattered intensity $I_{final}$ for this direction by integrating along the ray using the standard volume rendering equation:
-       $$I_{final} = \sum_{k=0}^n g_k \prod_{p=0}^{k-1} (1 - \alpha(s_p))$$
-       where $n$ is the number of samples, $c(s_k)$ is the color from the transfer function, and $\alpha(s_p)$ is the opacity at sample $p$ [S1].
-3.  **Incremental Blending:** Blend the new result $I_{final}$ with the stored value $I_{stored}$ using the incremental blending formula:
-    $$I_{blended} = \frac{1}{j} \cdot I_{final} + \left(1 - \frac{1}{j}\right) \cdot I_{stored}$$
-    where $I_{blended}$ is the new value to store [S1].
-4.  **Update:** Store $I_{blended}$ as the new $I_{stored}$.
-5.  **Iteration:** Increment $j$. If $j \le J$, return to Step 2. Otherwise, the final in-scattered intensity is $I_{stored}$.
+*   $I_{stored}$: A buffer (volume or image) storing the accumulated in-scattering intensity. Initialized to 0.
+*   $I_{final}$: A temporary buffer or register holding the result of the current directional computation.
+*   $j$: Integer counter for the current direction, ranging from $1$ to $J$.
 
 **Parameters:**
-*   $J$: Number of scattering directions. Higher values yield better accuracy but increase computation time [S1].
-*   $I_{bias}$: Minimum light level bias, range $[0, 1]$. Default is often 0 or 1 depending on implementation, but the formula assumes a white light source if not extended [S1].
+*   $I_{bias}$: Minimum light level parameter in range $[0, 1]$. Default is typically $0$ or a small epsilon to prevent black holes in shadowed areas [S1].
+*   $J$: Number of directions used to approximate the scattering sphere. Typical values depend on desired quality vs. performance (e.g., 4, 8, 16) [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Accumulating many small values can lead to precision loss. Using floating-point buffers for $I_{stored}$ is recommended [S1].
-*   **Memory:** Storing intermediate results for each voxel for multiple passes can be memory-intensive. The source notes that for a $512^3$ volume, three additional volumes are needed for intermediate computations ($\alpha l_p$, $\alpha g$, $I_{final}$) [S1].
-*   **Light Color:** The base formula assumes a white light source. Extending to colored light requires per-channel computation or vector operations [S1].
+**Formulas:**
+The emitted color contribution $g_k$ at sample $k$ along a ray is defined as [S1]:
+$$
+g_k = I_{final} \cdot c(s_k) \cdot \alpha(s_k)
+$$
+where $I_{final}$ is the in-scattering intensity for the current direction:
+$$
+I_{final} = I_{bias} + (1 - I_{bias}) \cdot I_s(s_k)
+$$
+Here, $I_s(s_k)$ is the scattered intensity at sample $k$, and $c(s_k)$ is the color from the transfer function [S1].
+
+The total eye-point intensity is the Riemann sum discretization of the ray casting integral [S1]:
+$$
+I_{eye} = \sum_{k=0}^n g_k \prod_{p=0}^{k-1} (1 - \alpha(s_p))
+$$
+
+**Algorithm Steps:**
+1.  Initialize $I_{stored}$ to zero for all voxels/pixels.
+2.  Generate $J$ directions to discretize the scattering sphere (e.g., via subdivided icosahedron, tetrahedron, or octahedron) [S1].
+3.  For each direction $j$ from $1$ to $J$:
+    a. Compute the in-scattering intensity $I_s(s_k)$ for all samples along the view rays, considering the light direction $j$.
+    b. Compute $I_{final}$ using the bias formula above.
+    c. Compute the contribution $g_k$ for each sample.
+    d. Perform the ray marching integration to compute the accumulated intensity for this direction, resulting in a value $I_{dir}$ (or update the frame buffer directly if using hardware blending).
+    e. Blend the new result with the stored result using the incremental update rule [S1]:
+    $$
+    I_{blended} = \frac{1}{j} \cdot I_{final\_accumulated} + \left(1 - \frac{1}{j}\right) \cdot I_{stored}
+    $$
+    *Note: The source formula (13) uses $I_{final}$ and $I_{stored}$ as the accumulated intensities for the current step and previous steps respectively. In implementation, $I_{final}$ in the blend equation refers to the result of the current directional pass, not the local sample term.*
+    f. Update $I_{stored} \leftarrow I_{blended}$.
+4.  After $J$ directions, $I_{stored}$ contains the final in-scattering approximation.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def incremental_blending_in_scattering(volume, transfer_function, light_direction, J, I_bias):
+def incremental_blending_in_scattering(volume, transfer_function, light_directions, bias=0.0):
     """
-    Computes in-scattered light using incremental blending.
-    
-    Args:
-        volume: 3D array of opacity values alpha.
-        transfer_function: Function to map density to color c.
-        light_direction: Direction vector for light source.
-        J: Number of scattering directions.
-        I_bias: Bias parameter for minimum light level [0, 1].
-        
-    Returns:
-        I_stored: Final accumulated in-scattered intensity.
+    volume: 3D array of opacity values alpha(s)
+    transfer_function: function c(s) returning color for opacity s
+    light_directions: list of J unit vectors
+    bias: float in [0, 1]
     """
+    J = len(light_directions)
     # Initialize stored intensity buffer
-    I_stored = zeros_like(volume)
+    # Dimensions match the volume or the projected image plane
+    I_stored = zeros_like(volume) 
     
-    # Discretize scattering sphere into J directions
-    # For simplicity, assume directions are pre-computed or sampled uniformly
-    scattering_directions = sample_scattering_sphere(J)
-    
-    for j_idx, direction in enumerate(scattering_directions):
-        j = j_idx + 1  # Current direction index (1-based)
+    for j_idx, direction in enumerate(light_directions):
+        j = j_idx + 1  # 1-based index for blending formula
         
-        # Compute I_final for the current direction
-        I_final = compute_directional_in_scattering(
-            volume, transfer_function, direction, I_bias
+        # 1. Compute in-scattering intensity I_s for each voxel/sample
+        # This depends on the specific scattering model (e.g., phase function)
+        # and the light direction. For simplicity, assume I_s is precomputed or 
+        # derived from a single-scattering approximation.
+        I_s = compute_scattered_intensity(volume, direction)
+        
+        # 2. Compute I_final (local in-scattering term)
+        # I_final = I_bias + (1 - I_bias) * I_s
+        I_final_local = bias + (1.0 - bias) * I_s
+        
+        # 3. Compute contribution g_k and integrate along rays
+        # This step typically involves ray marching.
+        # For each view ray, accumulate: sum(g_k * product(1 - alpha))
+        # We assume a function ray_march_integrate that returns the 
+        # accumulated intensity for the current direction.
+        I_dir_accumulated = ray_march_integrate(
+            volume, 
+            I_final_local, 
+            transfer_function,
+            direction
         )
         
-        # Incremental blending
-        # I_blended = (1/j) * I_final + (1 - 1/j) * I_stored
+        # 4. Incremental Blending
+        # Blend the new directional result with the previously stored result
+        # Formula: I_blended = (1/j) * I_final + (1 - 1/j) * I_stored
+        # Note: In the source, I_final in Eq 13 refers to the result of the 
+        # current direction's computation.
         weight_new = 1.0 / j
         weight_old = 1.0 - weight_new
         
-        I_stored = weight_new * I_final + weight_old * I_stored
+        I_stored = weight_new * I_dir_accumulated + weight_old * I_stored
         
     return I_stored
 
-def compute_directional_in_scattering(volume, transfer_function, direction, I_bias):
+def ray_march_integrate(volume, I_final_local, tf, direction):
     """
-    Computes the in-scattered intensity for a single direction.
+    Performs ray marching for a single direction.
+    Returns the accumulated intensity for all view rays.
     """
-    # Ray march along the direction
-    # This is a simplified representation; actual implementation requires
-    # ray casting through the volume
-    I_final = 0.0
-    transmittance = 1.0
-    
-    for sample in ray_cast(volume, direction):
-        alpha = sample.opacity
-        c = transfer_function(sample.density)
-        
-        # Compute scattered intensity I_s
-        # This depends on the specific scattering model (e.g., Henyey-Greenstein)
-        # and light transport from source to sample
-        I_s = compute_scattered_intensity(sample.position, direction, volume)
-        
-        # Compute emitted color g_k
-        g_k = (I_bias + (1.0 - I_bias) * I_s) * c * alpha
-        
-        # Accumulate
-        I_final += g_k * transmittance
-        transmittance *= (1.0 - alpha)
-        
-    return I_final
+    # Implementation details of ray marching depend on the specific 
+    # volume traversal structure (e.g., ray casting, texture-based).
+    # This is a placeholder for the integration logic described in [S1].
+    # It computes: sum_{k=0}^n g_k * prod_{p=0}^{k-1} (1 - alpha(s_p))
+    # where g_k = I_final_local * tf(alpha) * alpha
+    pass
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Accumulating over many directions can lead to precision loss if not handled carefully. Using floating-point buffers for $I_{stored}$ is recommended [S1].
+*   **Bias:** Setting $I_{bias}$ too high can wash out contrast; too low can cause dark artifacts in shadowed regions [S1].
+*   **Discretization:** A small $J$ may result in visible artifacts (directional bias) in the in-scattering. The choice of directions (icosahedron vs. uniform grid) affects visual quality [S1].
 
 ## Subtopics
 
 ### [Incremental Lighting for In-Scattering](3401-incremental-lighting-for-in-scattering.md)
-Incremental Lighting for In-Scattering is a screen-space technique that approximates volumetric light scattering by propagating and blurring indirect lighting components across volume slices. It extends the base incremental blending method by introducing per-channel indirect attenuation parameters and a blur operation, allowing light to change color as it penetrates deeper into the volume. It is chosen when screen-space efficiency is prioritized over geometric accuracy. Link: [Incremental Lighting for In-Scattering](3401-incremental-lighting-for-in-scattering.md).
+Incremental Lighting for In-Scattering is a screen-space technique that approximates volumetric light scattering by propagating and blurring indirect lighting components across volume slices. It extends the base incremental blending method by introducing per-channel indirect attenuation parameters and a blur operation, allowing light to change color as it penetrates deeper into the volume. It is chosen when screen-space efficiency is prioritized over volumetric accuracy. See [Incremental Lighting for In-Scattering](3401-incremental-lighting-for-in-scattering.md).
 
 ### [Hardware Blending Recurrence Evaluation](5317-hardware-blending-recurrence-evaluation.md)
-Hardware Blending Recurrence Evaluation is a technique for evaluating the multiple forward scattering recurrence $I_k = g_{k-1} + T_{k-1} I_{k-1}$ by mapping the mathematical operation to GPU hardware blending and pixel read-back operations. It computes the incident light on each particle in a participating medium by using the frame buffer as an accumulator. It differs from [Incremental Lighting for In-Scattering](3401-incremental-lighting-for-in-scattering.md) by explicitly reading back pixel values to resolve the recurrence dependency. Link: [Hardware Blending Recurrence Evaluation](5317-hardware-blending-recurrence-evaluation.md).
+Hardware Blending Recurrence Evaluation is a technique for evaluating the multiple forward scattering recurrence $I_k = g_{k-1} + T_{k-1} I_{k-1}$ by mapping the mathematical operation to GPU hardware blending and pixel read-back operations. It computes the incident light on each particle in a participating medium by using the frame buffer as an accumulator. It differs from [Incremental Lighting for In-Scattering](3401-incremental-lighting-for-in-scattering.md) by explicitly reading back pixel values to resolve the recurrence dependency. See [Hardware Blending Recurrence Evaluation](5317-hardware-blending-recurrence-evaluation.md).
 
 ### Volume Ray Casting with In-scattering
-This variant uses the standard Riemann sum discretization for the eye ray integral, where the emitted color $g_k$ includes the in-scattering term $I_s(s_k)$ modulated by a bias $I_{bias}$ [S1]. The formula is $I_{eye} = \sum_{k=0}^n g_k \prod_{p=0}^{k-1} (1 - \alpha(s_p))$, with $g_k = (I_{bias} + (1 - I_{bias}) \cdot I_s(s_k)) \cdot c(s_k) \cdot \alpha(s_k)$ [S1]. It is used for single-pass volume rendering with approximate in-scattering. The bias parameter $I_{bias} \in [0, 1]$ adjusts the minimum light level, assuming a white light source by default [S1].
+This variant uses the standard Riemann sum discretization $I_{eye} = \sum_{k=0}^n g_k \prod_{p=0}^{k-1} (1 - \alpha(s_p))$ where $g_k = (I_{bias} + (1 - I_{bias}) \cdot I_s(s_k)) \cdot c(s_k) \cdot \alpha(s_k)$ [S1]. It is the foundational mathematical model for the incremental blending process. It is chosen when a direct volumetric integration approach is preferred over screen-space approximations.
 
 ### Incremental Integration for Epipolar Rendering
-This variant applies incremental integration to epipolar plane images (EPIs) for volumetric shadowing [S2]. It sweeps over view rays $\beta$ from the light away, maintaining an incremental function $b[\gamma]$ storing $\Gamma(\gamma)V(\gamma, \beta)$ [S2]. Initially $\beta=0$ and $b[\gamma]=\Gamma(\gamma)$. When stepping to a new $\beta$, $b[\gamma]$ is set to 0 for all light rays $\gamma$ where $S[\gamma]=\beta$ (light rays terminating at the current view ray) [S2]. The integral is $B(\beta) \sum_{\gamma<D[\beta]} b[\gamma]$ [S2]. The formula for intensity is $I[\beta] = \sum_{S[\gamma] > \beta} I(\gamma, \beta)$, where $D[\beta]$ is the view ray length, $S[\gamma]$ is the blocker distance, and $V(\gamma, \beta)$ is visibility [S2]. A pitfall is that naive incremental summation still requires iterating over all $\gamma$ for each $\beta$, resulting in $O(srd)$ complexity, same as brute force ray marching [S2].
+This variant sweeps over view rays $\beta$ from the light away, maintaining an incremental function $b[\gamma]$ storing $\Gamma(\gamma)V(\gamma, \beta)$ [S2]. It updates $b[\gamma]$ by zeroing entries where light rays terminate at the current view ray [S2]. It is chosen for epipolar rendering contexts where hierarchical integration is used to reduce complexity from $O(srd)$ to $O(\log n)$ per query [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The base method scales linearly with the number of scattering directions $J$ and the number of samples per ray. For $J$ directions, the complexity is $O(J \cdot N)$, where $N$ is the number of samples [S1]. The epipolar variant has $O(srd)$ complexity without hierarchical acceleration [S2].
-*   **Memory Complexity:** Requires storage for $I_{stored}$ and intermediate buffers. For a volume of size $V$, it requires $O(V)$ memory for the accumulated intensity and potentially additional volumes for intermediate computations ($\alpha l_p$, $\alpha g$, $I_{final}$) [S1].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Performance degrades linearly with $J$. Memory usage is constant with respect to $J$ if buffers are reused, but increases with volume resolution [S1].
-*   **Strengths:** Allows for interactive updates as more scattering directions are added. Simple to implement.
-*   **Limitations:** Approximate. Requires multiple passes or directions for accuracy. Memory intensive for large volumes [S1].
-*   **When to use:** When approximate in-scattering is needed for interactive volume rendering.
-*   **When not to use:** When high-fidelity global illumination is required, or when memory is severely constrained.
+*   **Time Complexity:** The base method requires $O(J \cdot N)$ operations, where $J$ is the number of scattering directions and $N$ is the number of samples per ray [S1]. The epipolar variant reduces complexity to $O(\log n)$ per query using partial sum trees, though naive incremental summation remains $O(srd)$ [S2].
+*   **Memory Complexity:** Requires storage for $I_{stored}$ and intermediate buffers ($I_{final}$, $I_s$). For a volume of size $512^3$, this can require significant memory (e.g., three additional $512^3$ volumes for $\alpha l_p$, $\alpha g$, and $I_{final}$) [S1]. Resolution reduction of the SVR (Sparse Voxel Tree) can mitigate this [S1].
+*   **Strengths:** Provides realistic in-scattering effects; relatively simple to implement as an extension to standard ray casting; allows for dynamic light directions [S1].
+*   **Limitations:** High memory usage for full-volume storage; $J$ must be large for high-quality results, increasing computation time; artifacts from directional discretization [S1].
+*   **When to use:** When realistic volumetric lighting is needed and hardware supports sufficient memory and compute for multiple passes.
+*   **When not to use:** When memory is constrained or real-time performance with many light directions is critical without hardware acceleration.
 
 ## Background
-The method originates from the work on Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration [S1]. It was developed to address the computational cost of computing in-scattering in direct volume rendering. The approach uses a Riemann sum to discretize the ray casting integral and blends results from multiple scattering directions incrementally [S1]. The epipolar variant was developed for hierarchical volumetric shadow algorithms [S2].
+The method originates from the work on Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration [S1]. It was developed to address the computational cost of global illumination in volume rendering by approximating in-scattering through incremental blending of multiple light directions. The epipolar variant stems from hierarchical volumetric shadow algorithms [S2].
 
 ## Sources
 [S1] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26

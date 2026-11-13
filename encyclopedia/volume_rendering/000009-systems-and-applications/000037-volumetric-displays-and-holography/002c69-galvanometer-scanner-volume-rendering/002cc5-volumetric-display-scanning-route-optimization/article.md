@@ -1,9 +1,9 @@
 # Volumetric Display Scanning Route Optimization
 
-Also called: Christofides Algorithm for Volumometric Display Scanning, TSP-based Scanning Order Optimization
+Also called: Christofides Algorithm for Volumetric Display Scanning, TSP-based Scanning Order Optimization
 
 ## Overview
-This method optimizes the traversal path of a beam scanner in a galvanometer-based volumetric display to minimize the total travel distance between voxels within each depth layer, thereby reducing rendering latency and mechanical wear [S1]. It solves the Traveling Salesman Problem (TSP) for the 2D coordinates of voxels in each quantized z-layer using the Christofides algorithm, which provides a guaranteed worst-case performance bound for the heuristic [S1]. Unlike simpler heuristics (e.g., nearest neighbor) that may produce suboptimal paths, or exact solvers that are computationally prohibitive for real-time systems, this approach balances optimality with deterministic execution time [S1].
+This method optimizes the traversal path of a beam scanner in a galvanometer-based volumetric display to minimize the total travel distance between voxels within each depth layer [S1]. It solves the Traveling Salesman Problem (TSP) for the 2D coordinates of voxels in each quantized z-layer using the Christofides algorithm, which provides a guaranteed worst-case performance bound for the heuristic [S1]. Unlike simpler heuristics (e.g., nearest neighbor) that may produce suboptimal paths, or exact solvers that are computationally prohibitive, this approach uses the Christofides algorithm which provides a worst-case analysis guarantee for the TSP heuristic [S1].
 
 ## How it works
 **Inputs:**
@@ -26,7 +26,7 @@ This method optimizes the traversal path of a beam scanner in a galvanometer-bas
   - `b`: float, blue color component [S1].
 
 **Algorithm Steps:**
-1. **Quantization:** Slice the 3D point cloud $\mathbf{V}$ into $K$ layers along the z-axis. Assign each voxel to the layer corresponding to its quantized z-coordinate [S1].
+1. **Quantization:** Slice the 3D point cloud $\mathbf{V}$ into $K$ layers along the z-axis [S1]. Assign each voxel to the layer corresponding to its quantized z-coordinate [S1].
 2. **Layer Processing:** For each layer $k$ from 1 to $K$:
    a. Extract the set of vertices $P_k = \{p_1, \ldots, p_N\}$ for the current layer [S1].
    b. If $N = 0$, skip to the next layer [G].
@@ -38,7 +38,7 @@ This method optimizes the traversal path of a beam scanner in a galvanometer-bas
    e. Store the resulting ordered list of vertices for layer $k$ [S1].
 3. **Command Generation:** For each layer $k$ in the computed order:
    a. Generate control signals for the varifocal lens to position at the layer's z-depth [S1].
-   b. Iterate through the optimized vertex sequence for layer $k$.
+   b. Iterate through the optimized vertex sequence for layer $k$ [S1].
    c. For each vertex $p_j$, send $(x_j, y_j)$ to the galvanometer scanners and $(r_j, g_j, b_j)$ to the LC color filter [S1].
 
 **Pseudocode:**
@@ -52,20 +52,88 @@ def euclidean_distance(p1, p2):
     return math.sqrt((p1['x'] - p2['x'])**2 + (p1['y'] - p2['y'])**2)
 
 def christofides(vertices):
-    """
-    Placeholder for the Christofides algorithm implementation.
-    Input: List of vertex dicts with 'x', 'y' keys.
-    Output: List of vertices in optimal TSP tour order.
-    Note: The source [S1] cites Christofides (1976) for the heuristic.
-    Standard implementation involves:
-    1. Minimum Spanning Tree (MST) construction.
-    2. Finding odd-degree vertices.
-    3. Minimum weight perfect matching on odd-degree vertices.
-    4. Eulerian tour formation and shortcutting.
-    """
-    # Implementation details of Christofides are standard TSP knowledge [G].
-    # For the purpose of this article, we assume a correct TSP solver is available.
-    pass
+    """Complete Christofides algorithm implementation [G]."""
+    n = len(vertices)
+    if n <= 1: return vertices[:]
+    
+    # 1. Minimum Spanning Tree (Prim's algorithm)
+    in_mst = [False] * n
+    key = [float('inf')] * n
+    parent = [-1] * n
+    key[0] = 0
+    mst_edges = []
+    for _ in range(n):
+        u = -1
+        min_val = float('inf')
+        for v in range(n):
+            if not in_mst[v] and key[v] < min_val:
+                min_val = key[v]
+                u = v
+        in_mst[u] = True
+        if parent[u] != -1:
+            mst_edges.append((parent[u], u))
+        for v in range(n):
+            if not in_mst[v]:
+                d = euclidean_distance(vertices[u], vertices[v])
+                if d < key[v]:
+                    key[v] = d
+                    parent[v] = u
+                    
+    # 2. Find odd-degree vertices
+    degree = [0] * n
+    for u, v in mst_edges:
+        degree[u] += 1
+        degree[v] += 1
+    odd_nodes = [i for i in range(n) if degree[i] % 2 == 1]
+    
+    # 3. Minimum weight perfect matching on odd nodes (recursive backtracking)
+    def find_matching(nodes):
+        if len(nodes) == 0: return []
+        if len(nodes) == 2: return [(nodes[0], nodes[1])]
+        best = None
+        best_cost = float('inf')
+        for i in range(1, len(nodes)):
+            u, v = nodes[0], nodes[i]
+            rest = nodes[1:i] + nodes[i+1:]
+            cost = euclidean_distance(vertices[u], vertices[v])
+            sub_match = find_matching(rest)
+            total_cost = cost + sum(euclidean_distance(vertices[a], vertices[b]) for a, b in sub_match)
+            if total_cost < best_cost:
+                best_cost = total_cost
+                best = [(u, v)] + sub_match
+        return best
+    matching_edges = find_matching(odd_nodes)
+    
+    # 4. Combine MST and matching, find Eulerian tour, shortcut
+    adj = {i: [] for i in range(n)}
+    for u, v in mst_edges:
+        adj[u].append(v)
+        adj[v].append(u)
+    for u, v in matching_edges:
+        adj[u].append(v)
+        adj[v].append(u)
+        
+    # Hierholzer's algorithm for Eulerian circuit
+    stack = [0]
+    circuit = []
+    while stack:
+        v = stack[-1]
+        if adj[v]:
+            u = adj[v].pop()
+            adj[u].remove(v)
+            stack.append(u)
+        else:
+            circuit.append(stack.pop())
+    circuit.reverse()
+    
+    # Shortcut to get Hamiltonian cycle
+    visited = set()
+    tour = []
+    for node in circuit:
+        if node not in visited:
+            visited.add(node)
+            tour.append(vertices[node])
+    return tour
 
 def optimize_scanning_route(point_cloud, num_layers):
     """
@@ -79,14 +147,13 @@ def optimize_scanning_route(point_cloud, num_layers):
         layers_commands: List of lists of vertex dicts, ordered for scanning.
     """
     # Step 1: Quantization
-    # Initialize buckets for each layer
     layer_vertices = [[] for _ in range(num_layers)]
+    z_min = min(v['z'] for v in point_cloud)
+    z_max = max(v['z'] for v in point_cloud)
+    z_range = z_max - z_min if z_max != z_min else 1.0
     
     for voxel in point_cloud:
-        # Quantize z to layer index
-        # Assuming z is normalized or scaled to [0, num_layers-1]
-        # Exact quantization formula depends on hardware range [G]
-        z_quantized = int(voxel['z'] * num_layers)
+        z_quantized = int((voxel['z'] - z_min) / z_range * num_layers)
         z_quantized = max(0, min(num_layers - 1, z_quantized))
         layer_vertices[z_quantized].append(voxel)
         
@@ -105,9 +172,7 @@ def optimize_scanning_route(point_cloud, num_layers):
             continue
             
         # Step 2d: Apply Christofides algorithm
-        # The algorithm minimizes sum of distances in 2D (x,y)
         optimal_order = christofides(current_layer_vertices)
-        
         layers_commands.append(optimal_order)
         
     return layers_commands
@@ -115,7 +180,7 @@ def optimize_scanning_route(point_cloud, num_layers):
 
 **Parameters:**
 - **Number of layers ($K$):** Determines the z-axis quantization resolution. Example value: 30 layers [S1].
-- **Vertex Count ($N$):** Varies per layer; the algorithm scales with $N$.
+- **Vertex Count ($N$):** Varies per layer; the algorithm scales with $N$ [S1].
 
 **Edge Cases and Pitfalls:**
 - **Empty Layers:** If a quantized layer contains no voxels, the scanner should skip the layer or hold position, depending on hardware constraints [G].
@@ -132,12 +197,12 @@ The parent method that uses this optimization to control x, y, z, and color hard
 The underlying combinatorial optimization problem solved by the Christofides algorithm [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The Christofides algorithm runs in $O(N^3)$ time for $N$ vertices per layer [S1]. For real-time volumetric displays, $N$ is typically small per layer, making this feasible.
+- **Time Complexity:** The Christofides algorithm runs in $O(N^3)$ time for $N$ vertices per layer [G].
 - **Memory Complexity:** $O(N)$ per layer to store vertex positions and the resulting path [G].
 - **Performance:** Minimizes total travel distance $L$, reducing the time required to scan each layer [S1].
 - **Strengths:** Provides a worst-case approximation guarantee (1.5x optimal) for metric TSP, ensuring predictable performance compared to greedy heuristics [S1].
 - **Limitations:** More complex to implement than nearest-neighbor heuristics; may be overkill for very small $N$ [S1].
-- **When to Use:** When minimizing scan time and mechanical wear is critical in galvanometer-based volumetric displays [S1].
+- **When to Use:** When minimizing scan time is critical in galvanometer-based volumetric displays [S1].
 - **When Not to Use:** If computational resources are extremely limited and $N$ is very small, simpler heuristics may suffice [G].
 
 ## Background

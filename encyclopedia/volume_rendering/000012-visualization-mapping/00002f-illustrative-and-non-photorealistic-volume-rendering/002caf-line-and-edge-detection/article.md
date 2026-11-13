@@ -1,17 +1,13 @@
 # Line and Edge Detection
 
-Also called: Volumetric Edge Detection, Silhouette Detection, Outline Generation
 
 ## Overview
-Line and Edge Detection is a family of non-photorealistic volume rendering techniques that enhance perceptual clarity by explicitly detecting and rendering edges, silhouettes, or structural boundaries within volumetric data [S2][S1, unofficial]. Unlike surface-based NPR, which relies on well-defined geometric surfaces, this family operates on continuous volumetric fields where feature areas must be determined through local property analysis because volumetric features vary continuously throughout three-dimensional space [S2][S4, unofficial]. It distinguishes itself from sibling methods like [Line Illustration Detection](772-line-illustration-detection.md) by focusing on boundary emphasis and structural outlines rather than flow-aligned strokes, and from [LOG-based Silhouette Detection](6322-log-based-silhouette-detection.md) by employing diverse detection mechanisms ranging from gradient-based particle tracing to user-defined interactive selection [S1, unofficial][S2].
+Line and Edge Detection is a family of non-photorealistic volume rendering techniques that enhance perceptual clarity by explicitly detecting and rendering edges, silhouettes, or structural boundaries within volumetric data. It distinguishes itself from sibling methods like [Line Illustration Detection](772-line-illustration-detection.md) by focusing on boundary emphasis and structural outlines rather than flow-aligned strokes, and from [LOG-based Silhouette Detection](6322-log-based-silhouette-detection.md) by employing diverse detection mechanisms ranging from gradient-based particle tracing to user-defined interactive selection.
 
 ## Shared principles
-The family shares the fundamental goal of enhancing perceptual clarity through non-photorealistic edge representation. Common mechanisms include:
-1.  **Edge Detection:** Identifying boundaries based on geometric properties (normals, curvature, topology) or image-space properties (depth, normal discontinuities) [S2][S3, S4, unofficial].
-2.  **Line Rendering:** Converting detected edges into line primitives (strips, segments) or stylized strokes [S2][S3, S4, unofficial].
-3.  **Compositing:** Integrating these lines with the underlying volume or surface rendering, often using depth buffering for hidden line removal [S2][S3, S4, unofficial].
-
-Volumetric illustration differs from surface-based NPR in several important ways [S2][S4, unofficial]. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2][S4, unofficial].
+The family shares the fundamental goal of enhancing perceptual clarity through non-photorealistic edge representation [G]. Common mechanisms include:
+1. **Edge Detection:** Identifying boundaries based on local volumetric properties (gradients, Laplacian of Gaussian) or image-space properties (depth, normal discontinuities) [S2][S3, S4, unofficial].
+2. **Line Rendering:** Converting detected edges into line primitives (strips, segments) or stylized strokes [S2][S3, S4, unofficial].
 
 ## Subtopics
 
@@ -28,7 +24,7 @@ Outline and Contour Generation is a family of non-photorealistic volume renderin
 LOG-based Silhouette Detection is a volumetric edge detection technique used to identify silhouette voxels for rendering sketch-like curves, replacing a more exhaustive 3x3x3 subspace search to improve performance. It identifies boundaries based on local volumetric properties (gradient magnitude and Laplacian of Gaussian values) to highlight structures such as bones or internal features. It sets itself apart from sibling methods like Line Illustration Detection by operating directly on volumetric scalar fields using a precomputed Laplacian of Gaussian operator rather than image-space depth discontinuities or surface normals.
 
 #### Voxel Highlight Edge Detection
-- **Step**: [S1, unofficial] Calculate entry point $hp = org + dir \times t_{cur}$. Calculate local cell coordinates $local = (hp - bmin) / cell$. Extract 2D face coordinates $f$ based on entry axis: if $axis=0$, $f=fract(local.yz)$; if $axis=1$, $f=fract(local.xz)$; if $axis=2$, $f=fract(local.xy)$. Calculate edge distance $edge = \min(\min(f.x, 1.0-f.x), \min(f.y, 1.0-f.y))$. If $edge < 0.06$, highlight color is yellow $(1.0, 0.85, 0.1)$; otherwise mix lit color with yellow at 0.35 weight.
+- **Step**: [S1, unofficial] Calculate entry point $hp = org + dir \times t_{cur}$. [S1, unofficial] Calculate local cell coordinates $local = (hp - bmin) / cell$. [S1, unofficial] Extract 2D face coordinates $f$ based on entry axis: if $axis=0$, $f=fract(local.yz)$; if $axis=1$, $f=fract(local.xz)$; if $axis=2$, $f=fract(local.xy)$. [S1, unofficial] Calculate edge distance $edge = \min(\min(f.x, 1.0-f.x), \min(f.y, 1.0-f.y))$. [S1, unofficial] If $edge < 0.06$, highlight color is yellow $(1.0, 0.85, 0.1)$; otherwise mix lit color with yellow at 0.35 weight.
 
 #### Hough Space Silhouette Detection
 - **Definition**: [S2] An approach by Li et al. to detect silhouettes in Hough space for edge sampling.
@@ -47,7 +43,7 @@ LOG-based Silhouette Detection is a volumetric edge detection technique used to 
 - **Step**: [S4, unofficial] Apply Sobel filter to the volume: `edges = ndimage.sobel(self.volume_data)`. [S4, unofficial] Compute threshold as twice the mean edge magnitude: $T = \text{mean}(E) \times 2$. [S4, unofficial] Create binary feature mask: $M = E > T$. [S4, unofficial] Label connected components in the mask: `labeled, num_features = ndimage.label(feature_mask)`. [S4, unofficial] Find bounding box of the largest feature: `largest_feature = ndimage.find_objects(labeled)[0]`. [S4, unofficial] Compute center coordinates: $C_y = (s_{start} + s_{stop}) / 2$, $C_x = (s_{start} + s_{stop}) / 2$. [S4, unofficial] Normalize center to [0,1] range and update lens position: `self.lens['position'] = glm.vec2(center[1] / H, center[0] / W)`.
 
 ## Background
-Line and edge detection in volume rendering emerged as a response to the limitations of photorealistic rendering in conveying structural information, particularly in medical and scientific visualization where internal boundaries are critical [S2][S1, unofficial]. Early approaches relied on surface extraction (isosurfacing) followed by traditional NPR techniques, but this introduced artifacts and lost volumetric context [S2]. Direct volumetric edge detection methods were developed to operate on the scalar field itself, utilizing gradient information and local neighborhood analysis to identify features without explicit surface reconstruction [S1, unofficial][S3, unofficial]. The field has evolved to include both analytical methods for resolution-independent line drawing and pixel-based methods for efficient real-time rendering [S1, unofficial]. Techniques such as LOG-based detection and object-space enhancement cues have been introduced to improve the robustness of edge detection in noisy or low-contrast data [S1, unofficial][S3, unofficial].
+Line and edge detection techniques in volume rendering utilize various strategies to highlight structural boundaries. Analytical and object-space approaches, such as Li et al.'s Hough space silhouette detection [S2], operate on geometric properties, while image-space methods like Sobel filtering [S4, unofficial] and LOG-based voxel detection [S1, unofficial] identify edges through gradient analysis. Pre-computed cues, such as the 3x3x3 sharpened filter for object-space enhancement, are used to improve edge visibility without impacting real-time rendering performance [S3, unofficial].
 
 ## Sources
 [S1] wlim33/vox-ocean, https://github.com/wlim33/vox-ocean, fetched 2026-10-27 (unofficial)

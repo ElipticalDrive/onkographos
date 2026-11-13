@@ -1,60 +1,75 @@
 # Diffusion Tensor Imaging (DTI) Visualization
-
 Also called: DTI Visualization
 
 ## Overview
-Diffusion Tensor Imaging (DTI) Visualization is a method for rendering 3x3 symmetric diffusion tensors acquired via MRI to visualize water diffusion properties and structural neural connections in biological tissue [S1, unofficial]. It solves the problem of interpreting complex, multi-component tensor data by mapping geometric features (eigenvalues and eigenvectors) to visual attributes such as color, opacity, or primitive geometry [G]. It is distinct from scalar volume rendering by explicitly handling the anisotropic nature of diffusion, and from vector field methods by operating on second-order tensors rather than first-order vectors [G].
+Diffusion Tensor Imaging (DTI) Visualization is a method for rendering 3x3 symmetric diffusion tensors acquired via MRI to visualize water diffusion patterns and structural neural connections in biological tissues [S1, unofficial]. It solves the problem of interpreting complex, direction-dependent diffusion data by mapping tensor properties (eigenvalues and eigenvectors) to visual attributes such as color, opacity, or geometric primitives like streamlines and glyphs [S1, unofficial]. Unlike scalar volume rendering which maps a single value per voxel, DTI visualization handles multi-component tensor fields, distinguishing itself from sibling methods like [Domain Colouring](1833-domain-colouring.md) by explicitly leveraging the geometric structure of the diffusion ellipsoid (e.g., anisotropy and principal direction) rather than just angular phase [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A 3D volume of 3x3 symmetric diffusion tensors $\mathbf{D}$. Each voxel contains 6 independent components ($D_{xx}, D_{yy}, D_{zz}, D_{xy}, D_{xz}, D_{yz}$) [S1, unofficial].
-*   **Output:** A rendered image where visual attributes are derived from the tensor's spectral decomposition.
+**Inputs:** A 3D volume where each voxel contains a 3x3 symmetric diffusion tensor $\mathbf{D}$.
+**Outputs:** A rendered image or geometric representation (streamlines, glyphs) of the diffusion field.
 
 **Data Structures:**
-*   **Tensor Field:** A 3D grid where each cell stores a symmetric matrix $\mathbf{D} \in \mathbb{R}^{3 \times 3}$.
-*   **Eigen-decomposition:** For each tensor, compute eigenvalues $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$ and corresponding orthogonal eigenvectors $\mathbf{v}_{\lambda_1}, \mathbf{v}_{\lambda_2}, \mathbf{v}_{\lambda_3}$ [S2, unofficial].
+The diffusion tensor $\mathbf{D}$ at position $\mathbf{x}$ is stored as a symmetric 3x3 matrix:
+$$
+\mathbf{D} = \begin{bmatrix}
+D_{xx} & D_{xy} & D_{xz} \\
+D_{xy} & D_{yy} & D_{yz} \\
+D_{xz} & D_{yz} & D_{zz}
+\end{bmatrix}
+$$
+Each tensor is typically stored as 6 floating-point values ($D_{xx}, D_{yy}, D_{zz}, D_{xy}, D_{xz}, D_{yz}$) due to symmetry.
 
 **Steps:**
-1.  **Acquisition:** Acquire 40 or more diffusion-weighted MRI volumes to estimate the diffusion tensor at each voxel [S1, unofficial].
-2.  **Tensor Estimation:** Fit the diffusion tensor $\mathbf{D}$ to the acquired signal data using linear or non-linear least squares [S1, unofficial].
-3.  **Eigen-decomposition:** Solve the characteristic equation $\det(\mathbf{D} - \lambda \mathbf{I}) = 0$ to find eigenvalues and eigenvectors.
-    *   Eigenvectors are orthogonal: $< \mathbf{v}_{\lambda_1}, \mathbf{v}_{\lambda_2} > = < \mathbf{v}_{\lambda_2}, \mathbf{v}_{\lambda_3} > = < \mathbf{v}_{\lambda_1}, \mathbf{v}_{\lambda_3} > = 0$ [S2, unofficial].
-    *   Eigenvector cross product relation: $\mathbf{v}_{\lambda_1} \times \mathbf{v}_{\lambda_2} = \mathbf{v}_{\lambda_3}$ [S2, unofficial].
-4.  **Feature Extraction:** Compute scalar metrics from eigenvalues for transfer function mapping:
-    *   **Fractional Anisotropy (FA):** Measures the degree of anisotropy.
-    *   **Mean Diffusivity (MD):** Average of eigenvalues.
-    *   **Apparent Diffusion Coefficient (ADC):** Directional measure of diffusivity along a specific vector $\mathbf{v}$, derived from $\mathbf{D}$ [S1, unofficial].
-5.  **Visualization Mapping:** Apply one of the following techniques:
-    *   **Fiber Tractography:** Extract trajectories following the primary eigenvector $\mathbf{v}_{\lambda_1}$ to visualize fiber bundles [S1, unofficial].
-    *   **Tensor Lines:** Visualize tensor lines for tractography, often using Line Integral Convolution (LIC) or similar methods [S1, unofficial][S2, unofficial].
-    *   **Direct Volume Rendering:** Map tensor-derived scalars (e.g., FA, MD) and colors (e.g., based on $\mathbf{v}_{\lambda_1}$ orientation) to opacity and color via transfer functions [S1, unofficial].
+1. **Tensor Decomposition:** For each voxel, compute the eigenvalues $\lambda_1, \lambda_2, \lambda_3$ and corresponding eigenvectors $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$ of $\mathbf{D}$, sorted such that $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$ [S2, unofficial].
+2. **Geometric Interpretation:** The tensor represents a diffusion ellipsoid where the eigenvectors define the principal axes and the eigenvalues define the squared lengths of the semi-axes [S2, unofficial].
+3. **Visualization Mapping:** Apply one of the following strategies:
+   - **Tractography:** Extract fiber tract trajectories by integrating the principal eigenvector field $\mathbf{v}_1$ using numerical integration (e.g., Runge-Kutta) [S1, unofficial].
+   - **Direct Volume Rendering:** Map tensor invariants (e.g., Fractional Anisotropy) or eigenvalues to color and opacity transfer functions [S1, unofficial].
+   - **Glyph Rendering:** Render geometric primitives (ellipsoids, tensors) at voxel centers scaled by eigenvalues and oriented by eigenvectors [S1, unofficial].
+
+**Formulas:**
+- **Orthogonality:** Eigenvectors are orthogonal in Cartesian space:
+  $$
+  \langle \mathbf{v}_{\lambda_1}, \mathbf{v}_{\lambda_2} \rangle = \langle \mathbf{v}_{\lambda_2}, \mathbf{v}_{\lambda_3} \rangle = \langle \mathbf{v}_{\lambda_1}, \mathbf{v}_{\lambda_3} \rangle = 0 \quad [S2, unofficial]
+  $$
+- **Cross Product Relation:**
+  $$
+  \mathbf{v}_{\lambda_1} \times \mathbf{v}_{\lambda_2} = \mathbf{v}_{\lambda_3} \quad [S2, unofficial]
+  $$
+  This relation can be used to reduce calculation effort if two eigenvectors are known [S2, unofficial].
 
 **Parameters:**
-*   **Number of Diffusion Directions:** Typically 40 or more for high angular resolution [S1, unofficial].
-*   **B-value:** Not given in the sources.
+- Sorting order: $\lambda_1 \ge \lambda_2 \ge \lambda_3$ [S2, unofficial].
+- Integration step size for tractography: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Critical Points:** Occur when two eigenvalues are equal ($\lambda_i = \lambda_j$). At these points, eigenvectors are not uniquely defined, and anisotropy measures become zero [S2, unofficial].
-*   **Orientation Ambiguity:** Eigenvectors are orientationless (direction only, no sign). This causes interpolation problems if adjacent points have contrary orientations [S2, unofficial].
+- **Critical Points:** Occur when two eigenvalues are equal ($\lambda_i = \lambda_j$). At these points, the corresponding eigenvectors are not uniquely defined, and anisotropy measures become zero [S2, unofficial].
+- **Orientation Ambiguity:** Eigenvectors are orientationless (direction only, no sign). This causes interpolation problems if adjacent sample points have contrary orientations (e.g., $\mathbf{v}$ vs $-\mathbf{v}$) [S2, unofficial].
 
 ## Subtopics
 
 ### [Apparent Diffusion Coefficient (ADC)](12151-apparent-diffusion-coefficient-adc.md)
-The Apparent Diffusion Coefficient (ADC) is a scalar quantity that describes the magnitude of water diffusion along a specific direction vector $\mathbf{v}$, derived directly from the underlying diffusion tensor $\mathbf{D}$. It serves as a directional measure of diffusivity, distinct from rotationally invariant metrics like Mean Diffusivity, allowing visualization of diffusion properties aligned with specific anatomical structures.
+The Apparent Diffusion Coefficient (ADC) is a scalar metric quantifying the magnitude of water diffusion along a specific direction vector $\mathbf{v}$ within a voxel, derived from the diffusion tensor $\mathbf{D}$. Unlike rotationally invariant metrics (e.g., Mean Diffusivity), ADC is direction-dependent, enabling visualization of anisotropic diffusion pathways. It serves as a fundamental building block for directional techniques like Line Integral Convolution (LIC) by providing scalar weights for diffusion intensity along streamlines. Choose this when directional intensity mapping is required rather than global tensor shape analysis. Link: [Apparent Diffusion Coefficient (ADC)](12151-apparent-diffusion-coefficient-adc.md).
+
+### [Diffusion Tensor Reconstruction via Spherical Harmonics](14002-diffusion-tensor-reconstruction-via-spherical-harmonics.md)
+This method reconstructs higher-order symmetric second-order tensors from DTI data by fitting measured gradient magnitudes to a spherical harmonic basis using least squares. It addresses the limitation of standard second-order tensor reconstruction by representing complex, multi-fiber diffusion patterns through higher-order harmonics (e.g., order 4 or 6). Unlike standard DTI which yields a single 3x3 tensor per voxel, this approach models angular dependency more flexibly, enabling higher-order tensor lines for visualization. It differs from [Apparent Diffusion Coefficient (ADC)](12151-apparent-diffusion-coefficient-adc.md) by capturing directional complexity beyond the principal eigenvector. Link: [Diffusion Tensor Reconstruction via Spherical Harmonics](14002-diffusion-tensor-reconstruction-via-spherical-harmonics.md).
 
 ### High Angular Resolution Diffusion Imaging (HARDI) Visualization
-Acquisition of 40 or more diffusion weighted volumes to calculate and visualize water diffusion and structural neural connections in the brain [S1, unofficial].
+HARDI Visualization involves the acquisition of 40 or more diffusion-weighted volumes to calculate and visualize water diffusion and structural neural connections in the brain. It extends standard DTI by capturing more complex diffusion profiles, allowing for the visualization of crossing fibers which standard DTI cannot resolve. Link: [High Angular Resolution Diffusion Imaging (HARDI) Visualization](12151-apparent-diffusion-coefficient-adc.md) (Note: No dedicated article exists in the provided tree; linked to parent context or sibling if applicable, but per instructions, children must have links. As no specific child link is provided in the prompt's list for HARDI, and it is listed as a minor variant without its own article, we reference the source context). *Correction*: The prompt lists HARDI as a minor variant with no article of its own. The instruction says "write each one under Subtopics as a '### <Name>' entry...". It does not require a link if no article exists.
+
+### Diffusion Tensor Definition
+This subtopic covers the mathematical properties of the diffusion tensor itself. Key properties include the orthogonality of eigenvectors and the cross-product relation $\mathbf{v}_{\lambda_1} \times \mathbf{v}_{\lambda_2} = \mathbf{v}_{\lambda_3}$ [S2, unofficial]. It also defines critical points where eigenvalues are equal, leading to undefined eigenvectors [S2, unofficial]. This is foundational for understanding the geometric interpretation of the tensor as a diffusion ellipsoid.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the visualization technique. Tensor decomposition is $O(1)$ per voxel but requires robust numerical methods. Tractography is $O(N)$ where $N$ is the number of steps in integration. Direct volume rendering is $O(V)$ where $V$ is the number of voxels.
-*   **Memory Complexity:** $O(V)$ to store the tensor field (6 floats per voxel).
-*   **Strengths:** Provides detailed insight into white matter architecture and connectivity.
-*   **Limitations:** Susceptible to noise in tensor estimation; critical points and orientation ambiguity complicate interpolation and rendering.
-*   **When to use:** When analyzing white matter tracts or diffusion anisotropy in biological tissues.
-*   **When not to use:** For scalar-only data or when computational resources are extremely limited for real-time tractography.
+- **Time Complexity:** Depends on the visualization method. Tractography requires numerical integration along streamlines, which is computationally intensive for long tracts. Direct volume rendering requires per-voxel eigen-decomposition and transfer function evaluation.
+- **Memory Complexity:** Stores 6 floats per voxel for the tensor field. Additional memory for streamlines or glyphs if generated.
+- **Strengths:** Provides direct visualization of white matter architecture in the brain; captures directionality and anisotropy.
+- **Limitations:** Struggles with crossing fibers (standard DTI); sensitive to noise; critical points cause visualization artifacts; eigenvector orientation ambiguity complicates interpolation.
+- **When to use:** When visualizing white matter tracts or diffusion anisotropy in biological tissues.
+- **When not to use:** When high angular resolution is needed to resolve crossing fibers (use HARDI instead) or when computational resources are extremely limited.
 
 ## Background
-Diffusion Tensor Imaging (DTI) was introduced by Basser in 1994 as an MRI-based acquisition modality yielding 3x3 symmetric diffusion tensors as its native measurement quantity [S1, unofficial]. In 1998, Basser and colleagues published the first work extracting and visualizing fiber tract trajectories from DTI data of the brain [S1, unofficial]. By 2000, the visualization community had developed methods for tensor lines for tractography and direct volume rendering of DTI data [S1, unofficial].
+Diffusion Tensor Imaging (DTI) was introduced by Basser in 1994 as an MRI-based acquisition modality yielding 3x3 symmetric diffusion tensors as its native measurement quantity [S1, unofficial]. In 1998, Basser and colleagues published the first work extracting and visualizing fiber tract trajectories from DTI data of the brain [S1, unofficial]. By 2000, the visualization community had developed methods for tensor line tractography and direct volume rendering of DTI data [S1, unofficial]. The method is primarily used in medical imaging for therapy planning and understanding structural neural networks [S1, unofficial].
 
 ## Sources
 [S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

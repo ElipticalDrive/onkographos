@@ -6,7 +6,7 @@ Also called: BCC MT with Reference Tetrahedron, GPU BCC Isosurface Extraction
 This method extracts explicit, connected triangle mesh isosurfaces from Body-Centered Cubic (BCC) volume datasets on a GPU [S1]. It solves the problem of large lookup tables required for tetrahedral decomposition by storing connectivity only for a single "Reference Tetrahedron" and applying 3D permutation transformations to handle all six cell types [S1]. Unlike naive approaches that require massive lookup tables for every cell variant, this method leverages the regular pattern of BCC lattice cells to reduce memory overhead for table storage, while producing a connected mesh structure that supports efficient post-processing like curvature rendering [S1].
 
 ## How it works
-The method processes a BCC volume dataset to generate a triangle mesh. It relies on the fact that a BCC cell can be decomposed into tetrahedra, and while there are six distinct cell types based on vertex configurations, they share a topological structure related by permutation [S1].
+The method processes a BCC volume dataset to generate a triangle mesh [S1]. It relies on the fact that a BCC cell can be decomposed into tetrahedra, and while there are six distinct cell types based on vertex configurations, they share a topological structure related by permutation [S1].
 
 ### Inputs and Outputs
 *   **Input:** A BCC volume dataset (scalar field values at lattice points), an isosurface threshold $T$, and a pre-allocated fixed-size GPU memory buffer for the output mesh [S1].
@@ -16,7 +16,7 @@ The method processes a BCC volume dataset to generate a triangle mesh. It relies
 1.  **Reference Tetrahedron Lookup Tables:**
     *   **Edge Table (Table 2a in [S1]):** Maps a 5-bit key (representing the intersection pattern on an edge) to an edge direction index [S1].
     *   **Connectivity Table (Table 3 in [S1]):** Defines which edges form triangles for the Reference Tetrahedron based on the intersection pattern [S1].
-    *   **Reference Edge Definition (Table 4 in [S1]):** Defines the 6 edges of the reference tetrahedron using lattice offsets and directions.
+    *   **Reference Edge Definition (Table 4 in [S1]):** Defines the 6 edges of the reference tetrahedron using lattice offsets and directions [S1].
 2.  **Buffers:**
     *   **Intersection Buffer:** Stores intermediate intersection data (5-bit key) generated during the marking phase [S1].
     *   **Vertex Buffer:** Stores the 3D coordinates of intersection points [S1].
@@ -35,22 +35,22 @@ The reference tetrahedron has 6 edges defined by lattice offsets and directions 
 | e4 | $(0,0,0)$ | $(0, 0, 2)$ |
 | e6 | $(-1,1,1)$ | $(2, 0, 0)$ |
 
-*Note: The source lists 'e6' but implies 6 edges total (e0-e5, with e5 possibly omitted or e6 being a typo for e5 in the source text, but we follow the source's explicit list) [S1].*
+*Note: The source lists 'e6' but implies 6 edges total (e0-e5, with e5 possibly omitted or e6 being a typo in the source text, but we follow the source's explicit list) [S1].*
 
 ### Algorithm Steps
 
 1.  **Marking Phase (Intersection Detection):**
-    *   For each lattice point in the BCC grid, determine the cell type and identify edges intersecting the isosurface.
+    *   For each lattice point in the BCC grid, determine the cell type and identify edges intersecting the isosurface [S1].
     *   Store the intersection information (5-bit key) in the Intersection Buffer [S1].
     *   *Note: The specific marking algorithm details are not fully provided in the source, but it precedes the vertex generation [S1].*
 
 2.  **Vertex Buffer Generation:**
     *   Create one thread per intersection point (corresponding to an entry in the Intersection Buffer) [S1].
-    *   Each thread reads the 5-bit key from the Intersection Buffer.
+    *   Each thread reads the 5-bit key from the Intersection Buffer [S1].
     *   Use the key to look up the edge direction from the Edge Table (Table 2a) [S1].
     *   Determine the current lattice point coordinates $V_{curr}$ and the edge direction $D$ [S1].
     *   Calculate the opposite lattice point coordinates: $V_{opp} = V_{curr} + D$ [S1].
-    *   Read the scalar volume data values $S_1$ at $V_{curr}$ and $S_2$ at $V_{opp}$ [S1].
+    *   Read the scalar volume data values at both ends of the edge [S1].
     *   Calculate the intersection position $P$ using linear interpolation:
         $$ P = V_{curr} + \frac{T - S_1}{S_2 - S_1} (V_{opp} - V_{curr}) $$
         where $T$ is the isosurface threshold [S1].
@@ -66,7 +66,7 @@ The reference tetrahedron has 6 edges defined by lattice offsets and directions 
         *   In the GPU implementation, this permutation is performed using the OpenCL `shuffle` function on the data stored in Constant Memory [S1].
     *   **Triangle Assembly:**
         *   Use the permuted connectivity information to determine which edges form triangles [S1].
-        *   Retrieve the indices of the vertices (from the Vertex Buffer) corresponding to the intersection points on these edges.
+        *   Retrieve the indices of the vertices (from the Vertex Buffer) corresponding to the intersection points on these edges [S1].
         *   Write the triangle indices to the Index Buffer [S1].
 
 ### Pseudocode
@@ -83,33 +83,57 @@ REF_EDGES = [
     {"offset": (0,0,2), "dir": (1, 1,-1)}, # e2
     {"offset": (0,0,0), "dir": (1, 1, 1)}, # e3
     {"offset": (0,0,0), "dir": (0, 0, 2)}, # e4
-    {"offset": (-1,1,1), "dir": (2, 0, 0)}  # e6 (Source lists e6, assuming 6 edges)
+    {"offset": (-1,1,1), "dir": (2, 0, 0)}  # e6 (Source lists e6)
 ]
 
 # Lookup Tables (Stored in Constant Memory)
 # Table 2a: Maps 5-bit key to edge direction index
-EDGE_LOOKUP = [...] 
+# Source does not provide exact mapping [S1]
+EDGE_LOOKUP = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5} 
 # Table 3: Connectivity for Reference Tetrahedron
 # Maps intersection pattern to list of edge indices forming triangles
-CONNECTIVITY_LOOKUP = [...]
+# Source does not provide exact mapping [S1]
+CONNECTIVITY_LOOKUP = {0: [[0, 1, 2]]}
+
+def sample_volume(volume_data, x, y, z):
+    """Safely sample a 3D volume array."""
+    return volume_data[x][y][z]
+
+def permute_coord(coord, perm):
+    """Apply a 3D permutation tuple to a coordinate."""
+    return (coord[perm[0]], coord[perm[1]], coord[perm[2]])
+
+def permute_vec(vec, perm):
+    """Apply a 3D permutation tuple to a direction vector."""
+    return (vec[perm[0]], vec[perm[1]], vec[perm[2]])
 
 def get_permutation(cell_type):
     """
     Returns the permutation transformation for the given BCC cell type.
     The 6 cell types are related by 3D permutations.
-    Implementation detail: Uses OpenCL shuffle function in GPU.
-    Here we simulate the permutation logic.
+    Source does not specify the exact permutation mapping per cell type [S1].
     """
-    # Placeholder for specific permutation logic derived from BCC symmetry
-    # The source states permutations are applied to lattice offsets and edge directions
-    pass
+    # Placeholder permutation logic for execution; actual mapping depends on BCC symmetry [G]
+    permutations = [
+        (0, 1, 2), (1, 0, 2), (0, 2, 1),
+        (2, 1, 0), (1, 2, 0), (2, 0, 1)
+    ]
+    return permutations[cell_type % 6]
+
+def find_vertex_index(lattice_point, edge_dir, vertex_buffer):
+    """
+    Finds the index of a vertex in the vertex buffer for a given edge.
+    Source does not specify the exact vertex indexing scheme [S1].
+    """
+    # Deterministic stub for execution; maps edge to a sequential index [G]
+    return hash((lattice_point, edge_dir)) % len(vertex_buffer)
 
 def vertex_generation_thread(intersection_entry, volume_data, threshold):
     """
     Thread function for generating vertex positions.
     """
-    key = intersection_entry.key
-    lattice_point = intersection_entry.lattice_point
+    key = intersection_entry["key"]
+    lattice_point = intersection_entry["lattice_point"]
     
     # 1. Get edge direction from lookup table
     edge_dir_index = EDGE_LOOKUP[key]
@@ -118,22 +142,19 @@ def vertex_generation_thread(intersection_entry, volume_data, threshold):
     ref_edge = REF_EDGES[edge_dir_index]
     
     # 3. Calculate opposite lattice point
-    # Note: The source says "Add the edge direction to the current lattice point coordinates"
-    # However, the edge direction in Table 4 is relative. 
-    # We assume the intersection entry provides the base lattice point for the edge.
-    opp_lattice_point = lattice_point + ref_edge["dir"]
+    opp_lattice_point = tuple(lattice_point[i] + ref_edge["dir"][i] for i in range(3))
     
-    # 4. Read volume data
-    s1 = volume_data[lattice_point]
-    s2 = volume_data[opp_lattice_point]
+    # 4. Read volume data at both ends of the edge [S1]
+    s1 = sample_volume(volume_data, *lattice_point)
+    s2 = sample_volume(volume_data, *opp_lattice_point)
     
     # 5. Linear Interpolation
-    # Guard against division by zero
+    # Guard against division by zero [G]
     if s2 == s1:
-        return None # Degenerate case
+        return None
     
     t = threshold
-    p = lattice_point + ((t - s1) / (s2 - s1)) * (opp_lattice_point - lattice_point)
+    p = tuple(lattice_point[i] + ((t - s1) / (s2 - s1)) * (opp_lattice_point[i] - lattice_point[i]) for i in range(3))
     
     return p
 
@@ -141,42 +162,30 @@ def triangle_generation_thread(cell_info, volume_data, threshold, vertex_buffer)
     """
     Thread function for generating triangle indices.
     """
-    cell_type = cell_info.type
-    lattice_point = cell_info.lattice_point
+    cell_type = cell_info["type"]
+    lattice_point = cell_info["lattice_point"]
     
     # 1. Get permutation for this cell type
     permutation = get_permutation(cell_type)
     
     # 2. Apply permutation to Reference Connectivity
-    # The connectivity table gives edge indices for the reference tetrahedron.
-    # We need to map these to the actual edges of the current cell.
-    # This involves permuting the lattice offsets and edge directions.
-    
     permuted_connectivity = []
-    for edge_indices in CONNECTIVITY_LOOKUP[cell_info.intersection_pattern]:
+    for edge_indices in CONNECTIVITY_LOOKUP[cell_info["intersection_pattern"]]:
         permuted_edges = []
         for edge_idx in edge_indices:
             ref_edge = REF_EDGES[edge_idx]
-            # Apply permutation to offset and direction
-            # Note: The exact permutation application logic is complex and depends on BCC symmetry
-            # The source mentions using OpenCL shuffle for this
-            permuted_offset = apply_permutation(ref_edge["offset"], permutation)
-            permuted_dir = apply_permutation(ref_edge["dir"], permutation)
+            
+            # Apply permutation to offset and direction [S1]
+            permuted_offset = permute_coord(ref_edge["offset"], permutation)
+            permuted_dir = permute_vec(ref_edge["dir"], permutation)
             
             # Calculate the actual edge in the current cell
-            # The edge connects two lattice points
-            start_point = lattice_point + permuted_offset
-            end_point = start_point + permuted_dir
+            start_point = tuple(lattice_point[i] + permuted_offset[i] for i in range(3))
+            end_point = tuple(start_point[i] + permuted_dir[i] for i in range(3))
             
             # Find the intersection points on this edge
-            # This requires re-running the interpolation logic or looking up pre-computed vertex indices
-            # The source implies the vertex buffer is already populated by the vertex generation phase
-            # We need to find the index of the vertex corresponding to the intersection on this edge
-            
-            # Simplified: Assume we can find the vertex index based on the edge and lattice point
-            # In practice, this requires a mapping from (lattice_point, edge) to vertex index
-            v_idx_start = find_vertex_index(start_point, end_point, volume_data, threshold)
-            v_idx_end = find_vertex_index(end_point, start_point, volume_data, threshold) # Direction might be reversed
+            v_idx_start = find_vertex_index(start_point, permuted_dir, vertex_buffer)
+            v_idx_end = find_vertex_index(end_point, tuple(-d for d in permuted_dir), vertex_buffer)
             
             if v_idx_start is not None and v_idx_end is not None:
                 permuted_edges.append((v_idx_start, v_idx_end))
@@ -184,54 +193,19 @@ def triangle_generation_thread(cell_info, volume_data, threshold, vertex_buffer)
         permuted_connectivity.append(permuted_edges)
     
     # 3. Write indices to Index Buffer
-    for triangle_edges in permuted_connectivity:
-        # A triangle is formed by 3 edges? Or the connectivity table gives vertices directly?
-        # The source says "Connectivity Table... defines which edges form triangles"
-        # Typically, MT outputs triangles defined by 3 vertices.
-        # If the table gives edges, we need to connect them.
-        # Assuming the connectivity table provides the vertices directly for the reference tetrahedron
-        # and the permutation maps these vertices to the current cell's vertices.
-        
-        # Re-reading source: "Connectivity structure for the Reference Tetrahedron... apply permutation... to lattice offsets and edge directions"
-        # This suggests the connectivity is defined by edges, and we must resolve vertices.
-        
-        # For the purpose of this pseudocode, we assume the connectivity table provides
-        # a list of vertex indices for the reference tetrahedron, and we permute the lattice points
-        # to find the corresponding vertices in the current cell.
-        
-        # This part is ambiguous in the source. We will assume a standard MT output:
-        # The connectivity table provides a list of edge indices that form a triangle.
-        # We need to resolve these edges to vertices.
-        
-        # Let's assume the connectivity table gives the vertices directly for simplicity,
-        # as is common in MT implementations, and the "permutation" applies to the lattice points
-        # to find the correct vertices in the vertex buffer.
-        
-        # However, the source explicitly mentions permuting "lattice offsets and edge directions".
-        # This implies the connectivity is edge-based.
-        
-        # Given the ambiguity, we will state that the triangle indices are generated by
-        # resolving the permuted edges to vertex indices in the Vertex Buffer.
-        pass
-
-def apply_permutation(vector, permutation):
-    """
-    Applies a 3D permutation to a vector.
-    """
-    # Example: permutation = (1, 0, 2) means x' = y, y' = x, z' = z
-    # This is a placeholder for the actual BCC symmetry permutation logic
-    return vector
+    # Source implies connectivity table provides edges that form triangles [S1]
+    return permuted_connectivity
 ```
 
 ### Parameters
-*   **Isosurface Threshold ($T$):** The scalar value at which the isosurface is extracted.
+*   **Isosurface Threshold ($T$):** The scalar value at which the isosurface is extracted [S1].
 *   **Reference Tetrahedron:** The base tetrahedron used for lookup. All other cell types are derived from it via permutation [S1].
 
 ### Edge Cases and Pitfalls
-*   **Dynamic Mesh Size:** The size of the extracted triangle mesh is dynamic and depends on the isosurface shape. Pre-calculating the exact size is difficult. For iterative processes, pre-allocating a sufficiently large fixed memory space is more efficient than reallocating every frame [S1].
-*   **Space Skipping Ineffectiveness:** The method relies on space skipping (culling empty cells). This is ineffective for datasets with high noise or complex isosurfaces with few empty spaces [S1].
+*   **Dynamic Mesh Size:** The size of the extracted triangle mesh is dynamic and depends on the isosurface shape [S1]. Pre-calculating the exact size is difficult [S1]. For iterative processes, pre-allocating a sufficiently large fixed memory space is more efficient than reallocating every frame [S1].
+*   **Space Skipping Ineffectiveness:** The method relies on space skipping (culling empty cells) [S1]. This is ineffective for datasets with high noise or complex isosurfaces with few empty spaces [S1].
 *   **Memory Usage:** The method is more complex and requires more GPU memory than existing methods due to the need for vertex and index buffers and the lookup tables [S1].
-*   **Degenerate Edges:** Linear interpolation requires $S_1 \neq S_2$. If $S_1 = S_2$, the edge does not cross the isosurface (or is tangent), and no intersection point should be generated.
+*   **Degenerate Edges:** Linear interpolation requires $S_1 \neq S_2$ [G]. If $S_1 = S_2$, the edge does not cross the isosurface (or is tangent), and no intersection point should be generated [G].
 
 ## Subtopics
 
@@ -242,7 +216,7 @@ Optimized FCC Data Fetching is a branchless, lookup-table-free algorithm for det
 This method extracts explicit, connected triangle mesh isosurfaces from Body-Centered Cubic (BCC) volume datasets on a GPU. It improves upon classical Marching Tetrahedra (MT) by using min/max blocks for empty space skipping, avoiding the "triangle soup" format and expensive post-processing. It builds on [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md) by adding a hierarchical culling stage to boost performance on high-resolution data.
 
 ## Operating characteristics
-*   **Time Complexity:** The method's performance scales well with resolution. At low resolutions, it is >2x slower than classic Marching Tetrahedra (MT) due to overhead from creating the triangle mesh structure and low space skipping rates [S1]. At high resolutions, it is significantly faster (up to ~5x) due to high space skipping rates [S1]. The time increase with resolution is small [S1].
+*   **Time Complexity:** The method's performance scales well with resolution [S1]. At low resolutions, it is >2x slower than classic Marching Tetrahedra (MT) due to overhead from creating the triangle mesh structure and low space skipping rates [S1]. At high resolutions, it is significantly faster (up to ~5x) due to high space skipping rates [S1]. The time increase with resolution is small [S1].
 *   **Memory Complexity:** The method requires more GPU memory than existing methods due to the need for vertex and index buffers and the lookup tables [S1]. The dynamic mesh size makes pre-allocation necessary, which can lead to over-allocation if the isosurface is simple [S1].
 *   **Measured Performance:**
     *   **Hardware:** Intel Core i5 2500 CPU @ 3.30GHz and NVIDIA GeForce RTX 2080 Ti GPU [S1].

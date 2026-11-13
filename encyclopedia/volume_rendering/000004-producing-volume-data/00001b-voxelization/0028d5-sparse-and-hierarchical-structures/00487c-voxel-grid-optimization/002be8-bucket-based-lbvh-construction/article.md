@@ -1,0 +1,94 @@
+# Bucket-based LBVH construction
+
+Also called: BVH Building, Bvh constructor, Fernandes and Walter LBVH construction
+
+## Overview
+Bucket-based LBVH construction initializes a Bounding Volume Hierarchy (BVH) from a voxel model by grouping voxels into buckets rather than using a uniform grid with a fixed brick size [S2, unofficial]. This approach, attributed to Fernandes and Walter, serves as a GPU-accelerated alternative to fixed-grid methods like those by Zellmann et al., aiming to improve performance for sparse volumes [S2, unofficial]. It sets itself apart from its siblings by replacing static spatial partitioning with dynamic bucketing to handle varying voxel densities more efficiently.
+
+## How it works
+The method relies on compute shaders to handle neighbor finding, cluster merging, and prefix scans [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A set of active voxels representing the model.
+*   **Output:** A BVH structure ready for traversal.
+
+**Data Structures:**
+*   **Volatile GPU Data:** Temporary storage for intermediate cluster states and neighbor relationships.
+*   **BVH Nodes:** Hierarchical nodes containing bounding volumes and child pointers.
+
+**Parameters:**
+*   `BVH_BUILDING_RADIUS`: A static constant used in neighbor finding, typically set to 100 [S1, unofficial].
+
+**Steps:**
+1.  **Aggregate Data:** Call `aggregateSSBOData(volatileGPUData)` to prepare the voxel data for processing [S1, unofficial].
+2.  **Bucket Grouping:** Group voxels into buckets. Unlike uniform grids, bucket sizes may vary or be determined dynamically to accommodate voxel distribution [S2, unofficial].
+3.  **Find Best Neighbor:** Execute the `FIND_BEST_NEIGHBOR` compute shader. This step identifies adjacent voxels or clusters within the `BVH_BUILDING_RADIUS` to establish connectivity [S1, unofficial].
+4.  **Cluster Merging:** Execute the `CLUSTER_MERGING` compute shader. Voxels or small clusters are merged based on proximity and spatial coherence [S1, unofficial].
+5.  **Reallocate Clusters:** Execute the `REALLOCATE_CLUSTERS` compute shader to adjust cluster boundaries and ensure balanced partitioning [S1, unofficial].
+6.  **Prefix Scan (Up-Sweep):** Execute the `REDUCE_PREFIX_SCAN` compute shader to compute aggregate values (e.g., cluster counts or offsets) [S1, unofficial].
+7.  **Prefix Scan (Down-Sweep):** Execute the `DOWN_SWEEP_PREFIX_SCAN` compute shader to finalize the prefix sums, determining final bucket boundaries or offsets [S1, unofficial].
+8.  **Reset Position:** Execute the `RESET_LAST_POSITION_PREFIX_SCAN` compute shader to reset tracking indices for the next iteration or finalization [S1, unofficial].
+9.  **End Loop:** Execute the `END_LOOP_COMPUTATIONS` compute shader to finalize the BVH structure and release temporary resources [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_bucket_lbvhi(voxels):
+    # 1. Aggregate data into GPU buffers
+    volatile_data = aggregateSSBOData(voxels)
+    
+    # 2. Group voxels into buckets
+    # Implementation detail: Bucket boundaries are determined dynamically
+    buckets = group_into_buckets(volatile_data)
+    
+    # 3. Find neighbors within radius
+    # Uses BVH_BUILDING_RADIUS = 100
+    neighbors = find_best_neighbor(buckets, radius=100)
+    
+    # 4. Merge clusters based on neighbor data
+    clusters = cluster_merging(buckets, neighbors)
+    
+    # 5. Reallocate clusters for balance
+    clusters = reallocate_clusters(clusters)
+    
+    # 6. Compute prefix sums for bucket offsets
+    # Up-sweep phase
+    prefix_up = reduce_prefix_scan(clusters)
+    # Down-sweep phase
+    prefix_down = down_sweep_prefix_scan(prefix_up)
+    
+    # 7. Reset tracking positions
+    reset_last_position(prefix_down)
+    
+    # 8. Finalize BVH structure
+    bvh = end_loop_computations(clusters, prefix_down)
+    
+    return bvh
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision in neighbor finding may affect cluster connectivity if the radius is small relative to voxel size.
+*   **Empty Buckets:** Buckets with no voxels must be handled to avoid invalid memory accesses during merging.
+*   **Boundary Conditions:** The `BVH_BUILDING_RADIUS` must be large enough to capture relevant neighbors but small enough to maintain performance.
+
+## Subtopics
+
+### [Bucket Size Computation](8964-bucket-size-computation.md)
+Computes the Bucket Texture storing the index of the last voxel of each bucket. It solves the problem of efficiently identifying boundaries on the GPU by splitting computation into fragment and vertex shader steps, avoiding inefficient vertex shader texture fetches.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of voxels and the depth of the BVH. The use of compute shaders allows for parallel processing, but the iterative nature of merging and prefix scans adds overhead.
+*   **Memory Complexity:** Requires storage for the BVH structure and temporary buffers for compute shaders.
+*   **Performance:** Allows for two to three times higher frame rates than using no empty-space skipping during ray marching [S2, unofficial].
+*   **Strengths:** Adapts to sparse volumes better than fixed-grid methods; leverages GPU parallelism.
+*   **Limitations:** Complexity of implementation due to multiple compute shader stages; potential for load imbalance if bucket distribution is uneven.
+*   **When to Use:** Sparse voxel volumes where fixed-grid methods are inefficient.
+*   **When Not to Use:** Dense volumes where fixed-grid methods may be simpler and faster.
+
+## Background
+The method is attributed to Fernandes and Walter [FW20] and is contrasted with Zellmann et al.'s fixed-brick approach [ZHL19] [S2, unofficial]. It is implemented in projects like VoxelFragmentML [S1, unofficial].
+
+## Sources
+[S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)
+[S2] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

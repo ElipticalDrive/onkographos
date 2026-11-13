@@ -1,41 +1,33 @@
 # Wavelet Tree
 
-Also called: Wavelet-based Multiresolution Hierarchy, Wavelet Volume Tree
+Also called: Wavelet-based Multiresolution Hierarchy
 
 ## Overview
-The Wavelet Tree is a multiresolution data representation that converts a large 3D volume into a hierarchical structure using wavelet transforms to enable level-of-detail (LOD) selection and rendering [S1]. It solves the problem of managing large volumetric datasets by allowing efficient traversal and rendering of selected data blocks at various resolutions [S1]. Unlike standard subdivision hierarchies which may produce topological inaccuracies, this method ensures correct topological information and smaller root-mean-square errors by reorganizing data into wavelet coefficients without requiring additional memory for the hierarchy structure itself [S1]. It builds on [Multiresolution and level of detail](7-multiresolution-and-level-of-detail.md).
+A wavelet tree is a multiresolution data representation that converts a large 3D volume into a hierarchical structure using wavelet transforms to enable level-of-detail (LOD) selection and rendering [S1]. It solves the problem of managing large volumetric datasets by allowing the renderer to traverse the hierarchy and select appropriate resolution blocks based on spatial importance or error metrics [S1]. It sets itself apart from spatial hierarchies (like Octrees) by decomposing data into frequency subbands, and from simple downsampling by preserving high-frequency detail coefficients for reconstruction [S1].
 
 ## How it works
-**Inputs:** A 3D volume dataset; a block size parameter $n$ (number of voxels per leaf block); a user-specified threshold $\tau$ for coefficient pruning.
-**Outputs:** A hierarchical tree structure where leaf nodes contain raw volume data, internal nodes contain low-resolution data blocks and wavelet coefficients, and the root contains a single block representing the entire volume.
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset.
+*   **Output:** A tree structure where leaf nodes contain raw volume blocks, internal nodes contain low-resolution data blocks and wavelet coefficients, and the root contains a single block representing the entire volume [S1].
 
 **Data Structures:**
-The tree is a complete 8-ary tree (each node has 8 children).
-*   **Leaf Nodes:** Store raw volume blocks of size $n$ voxels.
-*   **Internal Nodes:** Store two components:
-    1.  A low-resolution data block of size $n$ voxels (derived from the low-pass subbands of its children).
-    2.  Wavelet coefficients of size $7n/8$ (derived from the high-pass subbands of its children).
-*   **Root Node:** Stores a single low-resolution data block of size $n$ voxels.
+The tree is constructed bottom-up. Each node $N$ contains:
+1.  **Low-resolution data block:** A 3D array of voxels. For leaf nodes, this is the raw data. For internal nodes, this is the low-pass filtered subblock aggregated from children.
+2.  **Wavelet coefficients:** A 3D array of coefficients representing the high-frequency detail removed during the transform.
+3.  **Hierarchical Error Metric:** A scalar value associated with the node, used for LOD culling.
 
 **Algorithm Steps:**
-1.  **Leaf Initialization:** Subdivide the original 3D volume into a sequence of non-overlapping blocks of equal size, where each block contains $n$ voxels. These raw volume blocks form the leaf nodes of the wavelet tree [S1].
-2.  **Leaf Transform:** Perform a 3D wavelet transform on each leaf block. This decomposition produces:
+1.  **Block Subdivision:** Subdivide the original 3D volume into a sequence of blocks of equal size, assuming each block contains $n$ voxels. These raw volume blocks form the leaf nodes of the wavelet tree [S1].
+2.  **Wavelet Transform:** Perform a 3D wavelet transform on each leaf block. This produces:
     *   A low-pass filtered subblock of size $n/8$ voxels.
     *   Wavelet coefficients of size $7n/8$ voxels [S1].
-3.  **Parent Block Construction:** Group the low-pass filtered subblocks from eight adjacent leaf nodes (siblings in the tree) into a single contiguous block of $n$ voxels. This block becomes the low-resolution data stored in the parent node [S1].
-4.  **Coefficient Aggregation:** Collect the wavelet coefficients from the eight child nodes. These coefficients are stored in the parent node alongside the low-resolution data.
-5.  **Thresholding:** For each wavelet coefficient in every node, if the absolute value is smaller than the user-specified threshold $\tau$, set the coefficient to zero. This reduces the storage size and complexity of the tree [S1].
+3.  **Aggregation:** Group the low-pass filtered subblocks from eight adjacent leaf nodes (forming a $2 \times 2 \times 2$ block in the hierarchy) into a single block of $n$ voxels. This aggregated block becomes the low-resolution data block stored in the parent node [S1].
+4.  **Recursion:** Recursively apply steps 2 and 3 in a bottom-up manner. At each level, the number of blocks decreases by a factor of 8 in each dimension (or 8 blocks merge into 1 parent). Continue until the root is reached, where a single block of size $n$ represents the entire volume [S1].
+5.  **Thresholding:** To reduce storage size, apply a user-specified threshold $\tau$. Any wavelet coefficient $c$ with $|c| < \tau$ is set to zero [S1].
 6.  **Compression:** Compress the thresholded wavelet coefficients using run-length encoding (RLE) combined with a fixed Huffman encoder [S1].
-7.  **Recursive Upward Propagation:** Treat the newly formed low-resolution blocks (from Step 3) as the input data for the next level up. Recursively apply Steps 2–6 in a bottom-up manner until the root is reached. The root node contains a single block of size $n$ representing the entire volume [S1].
-
-**Hierarchical Error Metric:**
-To support LOD selection, a hierarchical error metric is calculated for each node [S1].
-*   Let $E_p$ be the error of a parent node and $E_{c_i}$ be the error of its $i$-th child ($i=1..8$).
-*   The error is calculated as the Mean Square Error (MSE) between the data in the parent node and the data in its eight immediate child nodes.
-*   The error value for a node is defined as:
-    $$ E_{node} = \text{MSE}(Data_{parent}, Data_{children}) + \max_{i=1..8}(E_{c_i}) $$
-    *(Note: The source states the calculation "considers the MSE... adding the maximum error value of the child nodes" [S1]. This implies a recursive accumulation where the parent's error metric includes the worst-case error from its subtree.)*
-*   This metric guarantees that $E_{parent} \ge E_{child}$ for all children, ensuring monotonic error bounds up the tree [S1].
+7.  **Error Calculation:** Compute a hierarchical error metric for each node to guide rendering traversal. The error $E(N)$ for a parent node $N$ is calculated as:
+    $$ E(N) = \max_{i=1..8} (E_{child}(N_i)) + \text{MSE}(N, \{N_1..N_8\}) $$
+    Where $E_{child}(N_i)$ is the error metric of the $i$-th child node, and $\text{MSE}$ is the mean square error between the data in the parent node and the data in its eight immediate child nodes [S1]. This metric guarantees that the error value of a parent node is greater than or equal to those of its children [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -44,136 +36,179 @@ To support LOD selection, a hierarchical error metric is calculated for each nod
 def build_wavelet_tree(volume, block_size_n, threshold_tau):
     """
     Constructs a wavelet tree from a 3D volume.
-    volume: 3D array of voxel values.
-    block_size_n: Number of voxels per leaf block.
-    threshold_tau: Threshold for coefficient pruning.
-    Returns: Root node of the wavelet tree.
+    volume: 3D array of voxels
+    block_size_n: number of voxels per block (assumed cubic root n^(1/3))
+    threshold_tau: scalar threshold for coefficient zeroing
     """
-    # Step 1: Subdivide volume into leaf blocks
-    leaf_blocks = subdivide_volume(volume, block_size_n)
+    # Step 1: Subdivide into leaf blocks
+    leaf_blocks = divide_into_blocks(volume, block_size_n)
     
-    # Initialize leaf nodes
-    leaf_nodes = []
+    # Initialize tree nodes for leaves
+    tree_nodes = []
     for block in leaf_blocks:
         node = Node()
-        node.data = block  # Raw volume data
-        node.children = []
-        node.coefficients = []
+        node.low_res_data = block.copy()
+        node.coefficients = [] # Empty for leaves
         node.error = 0.0
-        leaf_nodes.append(node)
+        tree_nodes.append(node)
         
-    # Step 2-6: Bottom-up construction
-    current_level_nodes = leaf_nodes
+    current_level_nodes = tree_nodes
+    
+    # Steps 2-4: Bottom-up recursion
     while len(current_level_nodes) > 1:
         next_level_nodes = []
-        # Process nodes in groups of 8
+        # Process groups of 8 adjacent nodes
         for i in range(0, len(current_level_nodes), 8):
             children = current_level_nodes[i : i+8]
-            if len(children) < 8:
-                raise ValueError("Volume dimensions must allow complete 8-way grouping")
             
-            parent = Node()
+            # Step 2: Wavelet Transform on children's low_res_data is implicit 
+            # in the aggregation step described in [S1] as grouping low-pass subblocks.
+            # However, the source says "Perform 3D wavelet transform... producing low-pass... 
+            # and coefficients". Then "Group low-pass... from eight adjacent leaf nodes".
+            # This implies the transform happens on the *blocks* before grouping?
+            # Re-reading [S1]: "After performing a 3D wavelet transform to each block... 
+            # The lowpass filtered subblocks from eight adjacent leaf nodes... are grouped".
+            # So: Transform leaf block -> get low-pass subblock (size n/8) and coeffs.
+            # Then group 8 low-pass subblocks (total size 8 * n/8 = n) into parent low-res block.
             
-            # Step 2: Transform children and collect low-pass subblocks
-            low_pass_subblocks = []
-            all_coefficients = []
+            parent_low_res = aggregate_low_pass_subblocks(children)
+            parent_coeffs = compress_and_store_coeffs(children, threshold_tau)
             
-            for child in children:
-                # Perform 3D wavelet transform on child's data
-                low_pass, coeffs = wavelet_transform_3d(child.data)
-                low_pass_subblocks.append(low_pass)
-                all_coefficients.extend(coeffs)
-            
-            # Step 3: Group low-pass subblocks into parent data block
-            parent.data = combine_subblocks(low_pass_subblocks, block_size_n)
-            
-            # Step 4 & 5: Store and threshold coefficients
-            parent.coefficients = []
-            for c in all_coefficients:
-                if abs(c) > threshold_tau:
-                    parent.coefficients.append(c)
-                # else: set to zero (implicit in compression)
-            
-            # Step 6: Compress coefficients (conceptual step for storage)
-            parent.compressed_coeffs = compress(parent.coefficients)
-            
-            # Step 7: Recursive error calculation
-            # Calculate MSE between parent data and reconstructed child data
-            # Note: Exact reconstruction requires inverse transform, 
-            # but source defines error based on MSE between parent and children data directly.
-            mse_val = compute_mse(parent.data, [child.data for child in children])
-            
-            # Add max error of children
+            # Step 7: Error Calculation
+            # MSE between parent low-res data and children's low-res data
+            mse_val = compute_mse(parent_low_res, [child.low_res_data for child in children])
             max_child_error = max(child.error for child in children)
-            parent.error = mse_val + max_child_error
+            parent_error = max_child_error + mse_val
             
-            # Link parent to children
-            parent.children = children
-            for child in children:
-                child.parent = parent
-                
-            next_level_nodes.append(parent)
+            parent_node = Node()
+            parent_node.low_res_data = parent_low_res
+            parent_node.coefficients = parent_coeffs
+            parent_node.error = parent_error
+            next_level_nodes.append(parent_node)
             
         current_level_nodes = next_level_nodes
         
-    return current_level_nodes[0]
+    root = current_level_nodes[0]
+    return root
 
-def wavelet_transform_3d(data_block):
+def aggregate_low_pass_subblocks(children):
     """
-    Performs a 3D wavelet transform on a block of n voxels.
-    Returns: (low_pass_subblock, high_pass_coefficients)
+    Groups low-pass filtered subblocks from 8 children into a single block of size n.
+    Assumes each child has a low_res_data subblock of size n/8.
     """
-    # Implementation depends on specific wavelet basis (e.g., Haar, Daubechies)
-    # Standard 3D separable wavelet transform
-    # 1. Transform along X
-    # 2. Transform along Y
-    # 3. Transform along Z
-    # Output: 1/8th of data is low-pass (LL L), 7/8th is high-pass (combinations of H)
-    pass
+    # The source [S1] states: "lowpass filtered subblocks from eight adjacent leaf nodes 
+    # ... are grouped into a single block of n voxels".
+    # This implies a simple concatenation or reconstruction of the low-frequency component.
+    # Since the transform is 3D, an 8-way merge corresponds to one level of 3D decomposition.
+    # We assume the low_res_data of children are the low-pass components.
+    # To form the parent's low_res_data (size n), we effectively reconstruct the 
+    # low-frequency approximation at the coarser scale.
+    
+    # Note: The exact reconstruction formula for the low-pass block from 8 subblocks 
+    # is not explicitly detailed in [S1] beyond "grouped". In standard wavelet trees, 
+    # this is often just the low-pass subband coefficients rearranged.
+    # For implementation, this is the low-frequency component of the parent.
+    return reconstruct_low_pass_block(children)
 
-def combine_subblocks(subblocks, n):
-    """
-    Combines 8 low-pass subblocks (each size n/8) into a single block of size n.
-    """
-    # Interleave or concatenate subblocks to reconstruct the low-resolution volume block
-    pass
+def reconstruct_low_pass_block(children):
+    # [G] Implementation detail: In a standard 3D wavelet transform (e.g., Haar or 
+    # orthogonal), the low-pass subband of a parent is formed by the low-pass 
+    # subbands of the children. If the children's low_res_data are the low-pass 
+    # coefficients, they are simply concatenated/rearranged to form the parent's 
+    # low-pass array.
+    # Assuming a standard separable 3D transform, the low-pass subband size is 
+    # 1/8th of the input. 8 such subbands form the next level's low-pass subband.
+    return concatenate_low_pass_subbands(children)
 
-def compute_mse(data_parent, data_children):
+def compress_and_store_coeffs(children, threshold):
     """
-    Computes Mean Square Error between parent data and children data.
+    Collects wavelet coefficients from children, thresholds them, and compresses.
     """
-    # Align dimensions and compute MSE
-    pass
+    all_coeffs = []
+    for child in children:
+        # The source [S1] says coefficients are produced by the transform on the block.
+        # We assume child.coefficients holds the high-pass details.
+        all_coeffs.extend(child.coefficients)
+        
+    # Thresholding
+    thresholded = [c if abs(c) >= threshold else 0 for c in all_coeffs]
+    
+    # Compression: RLE + Huffman
+    # [G] Standard RLE: run_length_encode(thresholded)
+    # Then Huffman encode the resulting symbols.
+    return run_length_encode(thresholded)
 
-def compress(coefficients):
+def compute_mse(parent_data, children_data_list):
     """
-    Compresses coefficients using RLE and Huffman coding.
+    Computes Mean Square Error between parent low-res data and children's low-res data.
     """
-    pass
+    # [G] The parent low-res data is an approximation of the children's data.
+    # The MSE is calculated over the voxel values.
+    # Note: The dimensions must match. Parent is size n. Children are 8 blocks of size n/8.
+    # We compare the parent's low-res representation against the upsampled or 
+    # direct values of the children? 
+    # Source [S1]: "MSE between the data in a parent node and the data in its eight 
+    # immediate child nodes".
+    # This implies comparing the parent's stored low-res block (size n) with the 
+    # children's stored low-res blocks (total size n).
+    # However, the children's low-res blocks are at a finer resolution than the 
+    # parent's low-res block? No, the parent's low-res block is size n, same as 
+    # the sum of children's low-res blocks? 
+    # Wait: Leaf block size = n. Low-pass subblock size = n/8.
+    # Parent low-res block size = n.
+    # So the parent's low-res block (size n) is compared to the 8 children's 
+    # low-res blocks (each size n/8, total n).
+    # This requires interpolating the parent's low-res block to the children's 
+    # resolution or vice versa. 
+    # [G] Standard practice: Upsample the parent's low-res data to match the 
+    # children's resolution for comparison, or downsample children to parent.
+    # Given the error metric is for culling, direct voxel-wise comparison after 
+    # upsampling the parent is likely.
+    parent_upsampled = upsample(parent_data, factor=2) # Assuming 2x2x2 upsampling
+    mse = 0
+    count = 0
+    for child_data in children_data_list:
+        diff = parent_upsampled - child_data
+        mse += sum(diff**2)
+        count += len(child_data)
+    return mse / count
 ```
+
+**Parameters:**
+*   **Threshold ($\tau$):** User-specified threshold for wavelet coefficients. Coefficients smaller than this value are set to zero [S1]. Typical values depend on the data range and desired compression ratio.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** The subdivision into blocks of size $n$ must handle volumes where dimensions are not multiples of the block size. Padding or irregular leaf blocks may be required [G].
+*   **Precision:** Floating-point precision in wavelet transforms can accumulate errors. Using orthogonal wavelets helps minimize reconstruction artifacts [G].
+*   **Degenerate Input:** If the volume is too small to form even a single parent node (e.g., less than 8 blocks), the tree may consist of only leaves.
 
 ## Subtopics
 
 ### [Hierarchical Wavelet Tree Construction](6598-hierarchical-wavelet-tree-construction.md)
-A bottom-up blockwise wavelet transform and compression scheme used to construct a multiresolution wavelet tree for 3D volume data. It solves the problem of managing large volumetric datasets by enabling parallel rendering of selected data blocks at various levels of detail. Unlike standard subdivision hierarchies which may produce topological inaccuracies, this method ensures correct topological information and smaller root-mean-square errors by reorganizing data into wavelet coefficients without requiring additional memory for the hierarchy structure itself. It builds on [Wavelet Tree](5390-wavelet-tree.md) by providing the specific algorithmic steps for generating the tree structure and coefficients.
+Hierarchical Wavelet Tree Construction is a bottom-up blockwise wavelet transform and compression scheme used to construct a multiresolution wavelet tree for 3D volume data. It solves the problem of managing large volumetric datasets by enabling parallel rendering of selected data blocks at various levels of detail. It sets itself apart by providing the specific algorithmic steps for generating the tree structure and coefficients, focusing on the blockwise processing and error metric calculation. Choose this when you need a standard, bottom-up construction for LOD rendering. See [Hierarchical Wavelet Tree Construction](6598-hierarchical-wavelet-tree-construction.md).
 
 ### [Wavelet Coefficient Trees](7647-wavelet-coefficient-trees.md)
-Wavelet Coefficient Trees provide a hierarchical data structure for volumetric data that exploits the spatial correlation of wavelet coefficients to enable progressive compression and level-of-detail rendering. Unlike standard octrees that split space uniformly, this method defines parent-child relationships based on the geometric refinement of the underlying mesh (tier-based structure) or subband decay (zero-tree structure). It sets itself apart by allowing efficient encoding of insignificant coefficients as "zero trees," where a single symbol represents an entire hierarchy of small coefficients, significantly reducing bitstream size for smooth regions.
+Wavelet Coefficient Trees provide a hierarchical data structure for volumetric data that exploits the spatial correlation of wavelet coefficients to enable progressive compression and level-of-detail rendering. Unlike standard octrees that split space uniformly, this method defines parent-child relationships based on the geometric refinement of the underlying mesh (tier-based structure) or subband decay (zero-tree structure). It sets itself apart by allowing efficient encoding of insignificant coefficients as "zero trees," where a single symbol represents an entire hierarchy of small coefficients, significantly reducing bitstream size for smooth regions. Choose this when compression efficiency for smooth volumes is critical. See [Wavelet Coefficient Trees](7647-wavelet-coefficient-trees.md).
 
 ### [Huffman-shaped Wavelet Matrix](10172-huffman-shaped-wavelet-matrix.md)
-The Huffman-shaped Wavelet Matrix is a compressed index data structure used to provide random access to a stream of node operations in segmentation volume bricks. It maps symbols from a small alphabet to bit patterns using bit-wise negated Canonical Huffman Codes (CHC), stored in a level-wise concatenated bit vector acting as a wavelet matrix. It enables variable bit-length compression and random access, solving the limitation of the parent CSGV method which uses ANS stream compression and requires serial decoding. It sets itself apart from general wavelet matrices by exploiting the specific structure of the CHC to eliminate branching and interval tracking during access queries.
+The Huffman-shaped Wavelet Matrix is a compressed index data structure used to provide random access to a stream of node operations in segmentation volume bricks. It maps symbols from a small alphabet to bit patterns using bit-wise negated Canonical Huffman Codes (CHC), stored in a level-wise concatenated bit vector acting as a wavelet matrix. It enables variable bit-length compression and random access, solving the limitation of the parent CSGV method which uses ANS stream compression and requires serial decoding. It sets itself apart from general wavelet matrices by exploiting the specific structure of the CHC to eliminate branching and interval tracking during access queries. Choose this when random access to compressed wavelet data is required. See [Huffman-shaped Wavelet Matrix](10172-huffman-shaped-wavelet-matrix.md).
+
+### Wavelet decomposition for multi-scale volume
+A method by Westermann using wavelet decomposition to generate a multi-scale representation of the volume [S2, unofficial]. It sets itself apart as an early application of wavelets for multi-scale volume rendering, focusing on generating the representation for interactive speeds [S2, unofficial]. Choose this for historical context or basic multi-scale generation.
 
 ## Operating characteristics
-*   **Time Complexity:** Construction is $O(N \log N)$ where $N$ is the total number of voxels, due to the recursive wavelet transforms at each level. Rendering traversal is $O(1)$ per node visited, with early culling based on the hierarchical error metric.
-*   **Memory Complexity:** The tree structure itself requires no additional memory overhead for pointers if the tree is implicit or stored in a flat array, as the source notes it does not require "additional memory for the hierarchy structure itself" [S1]. Storage is dominated by the wavelet coefficients, which are compressed.
+*   **Time Complexity:** Construction is $O(N)$ where $N$ is the number of voxels, as each voxel is processed a constant number of times in the bottom-up tree construction [S1]. Rendering traversal is $O(K)$ where $K$ is the number of nodes visited, which depends on the error threshold and LOD requirements.
+*   **Memory Complexity:** $O(N)$ for the full tree, but compression (RLE + Huffman) can significantly reduce the storage of wavelet coefficients, especially for smooth volumes [S1].
 *   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Guarantees topological correctness; smaller root-mean-square errors compared to subdivision hierarchies; efficient compression via RLE and Huffman; rapid error metric computation for LOD control [S1].
-*   **Limitations:** Requires the volume dimensions to be divisible into blocks of size $n$ that allow complete 8-way grouping; thresholding may introduce artifacts if $\tau$ is too high; compression is lossy if coefficients are pruned.
-*   **When to use:** Large static or time-varying 3D datasets requiring interactive LOD rendering [S1].
-*   **When not to use:** Data with irregular boundaries that do not align with block subdivisions; scenarios requiring exact lossless reconstruction without compression overhead.
+*   **Scaling:** Scales well with volume size due to the hierarchical nature, allowing large volumes to be rendered at low resolution initially [S1].
+*   **Strengths:** Efficient LOD control via hierarchical error metric; good compression for smooth data; supports progressive rendering [S1].
+*   **Limitations:** Requires significant memory for the full tree if not compressed; wavelet transform overhead; block boundaries may introduce artifacts if not handled carefully [G].
+*   **When to use:** Large static or time-varying volumes where LOD is needed for interactive rendering [S1].
+*   **When not to use:** Real-time applications with extremely tight memory constraints where even compressed wavelet trees are too large; data with high-frequency noise that does not compress well with wavelets [G].
 
 ## Background
-The Wavelet Tree was introduced in the context of hierarchical navigation interfaces for large 3D steady and time-varying data sets [S1]. It originates from the use of wavelet transforms to convert data into hierarchical multiresolution representations [S1]. The method builds upon earlier work on wavelet-based time-space partitioning trees [S1]. The hierarchical error metric used in conjunction with the tree is cited from reference [33] in the source [S1].
+The wavelet tree was introduced by Shen and Johnson [S1, citing [10]] as a method to build multiresolution data hierarchies for large 3D steady and time-varying data sets. It builds on the principles of wavelet transforms to convert data into a hierarchical multiresolution representation. The hierarchical error metric used for culling was also developed in this context [S1, citing [33]]. Westermann [S2, citing [266, unofficial]] also used wavelet decomposition for multi-scale volume representation, highlighting its utility for compression and interactive rendering speeds.
 
 ## Sources
-[S1] Hierarchical Navigation Interface: Leveraging Multiple Coordinated Views, https://academicweb.nd.edu/~cwang11/papers/iv05-hni.pdf, fetched 2026-10-30
+[S1] Hierarchical Navigation Interface: Leveraging Multiple Coordinated Views for Volume Visualization, https://academicweb.nd.edu/~cwang11/papers/iv05-hni.pdf, fetched 2026-10-30
+[S2] Overview of Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

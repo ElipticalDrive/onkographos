@@ -3,37 +3,35 @@
 Also called: Line Search
 
 ## Overview
-Inexact Line Search Optimization is an iterative method that adapts the step size in gradient descent to achieve a reduction in the objective function while ensuring sufficiently fast progress [S1]. It solves the problem of slow convergence in standard gradient descent by dynamically selecting a step size that guarantees descent without the computational cost of finding the exact minimum along the search direction [S1]. Unlike exact line search, which may suffer from convergence deterioration, this inexact strategy yields reasonable results and descends much faster [S1]. It builds on [Gradient Descent Solver](3280-gradient-descent-solver.md).
+Inexact Line Search Optimization is an iterative method that adapts the step size in gradient descent to achieve a reduction in the objective function while ensuring sufficiently fast progress [S1]. It solves the problem of slow convergence in standard gradient descent by dynamically selecting a step size that guarantees improvement without requiring the computational expense of finding the exact minimum along the search direction [S1]. Unlike exact line search methods, which may suffer from convergence deterioration, this inexact strategy yields reasonable results and descends much faster [S1].
 
 ## How it works
 **Inputs:**
 - $x_k$: Current point (e.g., feature opacity values) at iteration $k$.
-- $d_k$: Descent direction (e.g., negative gradient).
-- $f$: Objective function to minimize (e.g., visibility-weighted saliency error).
+- $d_k$: Descent direction at iteration $k$.
+- $f(\cdot)$: Objective function to minimize (e.g., visibility-weighted saliency error).
 - $M$: Maximum iteration count for the line search.
 
 **Outputs:**
 - $\gamma_m$: The chosen step size.
-- $x_{k+1}$: The updated point, computed as $x_k + \gamma_m d_k$.
+- $x_{k+1}$: The updated point $x_k + \gamma_m d_k$.
 
 **Data Structures:**
-- Integer $m$: Current line search iteration counter, initialized to 0.
-- Integer $M$: Maximum allowed line search iterations.
-- Scalar $\gamma_m$: Current step size candidate, defined as $\gamma_m = 2^m$.
+- Integer counter $m$: Tracks the current power of 2 for the step size.
+- Integer $M$: Upper bound for $m$.
 
 **Algorithm Steps:**
 1. Initialize $m = 0$.
-2. Set $M$ to the maximum iteration count.
-3. Check if the objective function value decreases with the next candidate step size:
+2. Set $M$ to the maximum allowed iteration count for the line search.
+3. Check the condition:
    $$ f(x_k + \gamma_{m+1} d_k) < f(x_k + \gamma_m d_k) $$
-   where $\gamma_{m+1} = 2^{m+1}$ and $\gamma_m = 2^m$.
+   where $\gamma_m = 2^m$.
 4. If the condition is met AND $m < M - 1$:
-   - Increment $m$ by 1.
-   - Repeat Step 3.
+   - Increment $m \leftarrow m + 1$.
+   - Repeat step 3.
 5. Otherwise (condition fails OR $m = M - 1$):
    - Terminate the line search.
-   - Set $\gamma_m$ as the chosen step size.
-6. Update the solution: $x_{k+1} = x_k + \gamma_m d_k$.
+   - Set the chosen step size to $\gamma_m$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -50,56 +48,64 @@ def inexact_line_search(x_k, d_k, f, M):
         M: Maximum iteration count.
         
     Returns:
-        gamma: Chosen step size.
+        gamma: The chosen step size.
     """
     m = 0
     # Precompute current step size gamma_m = 2^m
-    gamma_m = 1.0  # 2^0
+    gamma_m = 1  # 2^0
     
     while m < M - 1:
         # Calculate next step size gamma_{m+1} = 2^(m+1)
-        gamma_next = gamma_m * 2.0
+        gamma_next = gamma_m * 2
         
         # Evaluate objective function at current and next candidate points
         f_current = f(x_k + gamma_m * d_k)
         f_next = f(x_k + gamma_next * d_k)
         
-        # Check descent condition
+        # Check if the next point yields a lower objective value
         if f_next < f_current:
             m = m + 1
             gamma_m = gamma_next
         else:
-            # Condition failed or max iterations reached (handled by loop exit)
+            # Condition not met, terminate and use current gamma_m
             break
             
     return gamma_m
 ```
 
 **Parameters:**
-- $M$: Maximum iteration count. Typical values are not specified in the sources. [G] A small integer (e.g., 10-20) is typical for exponential search to prevent overflow, but the source does not specify.
+- $M$: Maximum iteration count. Not given in the sources.
+- $\gamma_m$: Step size defined as $2^m$.
 
 **Edge Cases and Pitfalls:**
-- **Convergence Deterioration:** Exact line search may suffer from convergence deterioration; this inexact strategy avoids this [S1].
-- **Convexity:** The parallel variant has the same behavior as the sequential version if the objective function is convex [S1].
-- **Objective Function Cost:** The objective function evaluation can be expensive (e.g., requiring visibility field recomputation), which justifies the use of line search [S1].
+- If the objective function evaluation is expensive, the overhead of multiple evaluations may outweigh the benefits of faster convergence [S1].
+- The method assumes the objective function allows for meaningful comparison between $f(x_k + \gamma_{m+1} d_k)$ and $f(x_k + \gamma_m d_k)$ [S1].
 
 ## Subtopics
 
 ### Parallel Inexact Line Search
-A parallel strategy that evaluates the objective function at different candidate points in parallel along the line search direction to accelerate optimization on multi-core processors [S1]. It generates a list of $M$ step sizes $S = \{\gamma_0, \gamma_1, ..., \gamma_{M-1}\}$ where $\gamma_m = 2^m$ [S1]. It evaluates $f(x_k + \gamma_m d_k)$ in parallel for each $\gamma_m$ in $S$ using multiple threads [S1]. It finds the index $m$ of the minimum $f(x_k + \gamma_m d_k)$, and $\gamma_m$ is the chosen step size [S1]. Unlike the sequential version which terminates early if the condition is not met, the parallel version always evaluates all candidate points and picks the one with the least objective function value [S1]. The number of threads should not exceed the number of processor cores to avoid performance impact from sharing cores; parallel search is only beneficial when objective function evaluation is more expensive than thread overhead [S1].
+Parallel Inexact Line Search is a variant that evaluates the objective function at different candidate points in parallel along the line search direction to accelerate optimization on multi-core processors [S1]. It differs from the sequential version by always evaluating all candidate points and picking the one with the least objective function value, whereas the sequential version terminates early if the condition is not met [S1]. It is beneficial when the objective function evaluation is more expensive than the overhead of parallel processing, such as when computing visibility fields requires a pass of slice-based volume rendering [S1].
+
+**Algorithm Steps:**
+1. Generate a list of $M$ step sizes $S = \{\gamma_0, \gamma_1, ..., \gamma_{M-1}\}$ where $\gamma_m = 2^m$.
+2. Evaluate $f(x_k + \gamma_m d_k)$ in parallel for each $\gamma_m$ in $S$ using multiple threads.
+3. Find the index $m$ of the minimum $f(x_k + \gamma_m d_k)$, and $\gamma_m$ is the chosen step size.
+
+**Pitfalls:**
+- The number of threads should not exceed the number of processor cores to avoid performance impact from sharing cores [S1].
+- Parallel search is only beneficial when objective function evaluation is more expensive than thread overhead [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The sequential version performs up to $M$ evaluations of the objective function $f$. The parallel version performs exactly $M$ evaluations in parallel.
+- **Time Complexity:** The sequential version performs up to $M$ evaluations of the objective function. The parallel version performs $M$ evaluations simultaneously, reducing wall-clock time for the line search phase but increasing total computational work if thread overhead is significant.
 - **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Compared to standard gradient descent, line search takes many fewer iterations to converge to a desired target [S1]. The parallel version accelerates optimization by exploiting multi-core processors [S1].
-- **Scaling:** Parallel line search is beneficial only when the evaluation of the objective function is more expensive than the overhead of parallel processing [S1]. In the cited application, the objective function is particularly expensive as it requires computing visibility fields, which in turn requires a pass of slice-based volume rendering [S1].
-- **Strengths:** Descends much faster than standard gradient descent; avoids convergence deterioration of exact methods; exploits multi-core processors [S1].
-- **Limitations:** Parallel version has overhead from thread management; sequential version may still require multiple function evaluations per iteration [S1].
-- **When to use:** When objective function evaluation is expensive (e.g., involves volume rendering passes) and convergence speed is critical [S1].
-- **When not to use:** When objective function evaluation is cheap, as the overhead of line search (especially parallel) may not be justified [S1].
+- **Performance:** Compared to standard gradient descent, line search takes many fewer iterations to converge to a desired target [S1]. It descends much faster than gradient descent [S1].
+- **Strengths:** Adapts step size to achieve reduction in objective function while making sufficiently fast progress [S1]. Avoids convergence deterioration associated with exact line search methods [S1].
+- **Limitations:** Requires multiple evaluations of the objective function per iteration. Parallel version has overhead from thread management.
+- **When to use:** When objective function evaluation is expensive (e.g., involves volume rendering passes) and parallel hardware is available. When faster convergence than standard gradient descent is needed.
+- **When not to use:** When objective function evaluation is cheap, making parallel overhead unjustified. When exact minimum is required (though inexact is preferred for stability).
 
 ## Background
-Originated in the context of transfer function optimization for volume rendering, specifically for optimizing visibility-weighted saliency [S1]. The method was proposed by Luo and Dingliana in 2017 [S1]. It builds on earlier work on line search methods [Vrahatis et al. 2000] and addresses issues with exact line search convergence [Zhou et al. 2006] [S1].
+The method was introduced in the context of transfer function optimization for volume rendering, specifically for optimizing feature opacities based on a combined model of visibility and saliency [S1]. It was proposed to reduce the number of iterations required in optimization compared to standard gradient descent [S1]. The approach is based on the work of Vrahatis et al. [2000] and Zhou et al. [2006], citing advantages of inexact strategies over exact methods [S1].
 
 ## Sources
 [S1] Transfer function optimization based on a combined model of visibility and saliency, https://doi.org/10.1145/3154353.3154357, fetched 2026-11-01

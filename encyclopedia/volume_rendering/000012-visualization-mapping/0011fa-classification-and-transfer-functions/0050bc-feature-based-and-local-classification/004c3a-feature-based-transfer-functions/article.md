@@ -3,26 +3,42 @@
 Also called: Feature-Based Classification, Local Classification
 
 ## Overview
-Feature-Based Transfer Functions map volume data to color and opacity using local or spatial features (such as texture, distance to a structure, or local scale) rather than just scalar intensity [S1]. This family solves the ambiguity where different structures share similar scalar values but differ in their physical or geometric properties. It sets itself apart from scalar-based methods by incorporating neighborhood statistics or global spatial relationships, distinguishing it from siblings like [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) which focuses on gradients, and [Data Feature-Based Classification](5934-data-feature-based-classification.md) which may use broader feature sets.
+Feature-Based Transfer Functions extend the classification domain from simple scalar intensity to derived feature vectors (e.g., gradient, texture, distance, or scale) to distinguish volumetric structures that share similar intensity values but differ in local geometric or statistical properties [S1][S2][S3][S4]. Unlike basic intensity-based methods, this family leverages local context to enable segmentation of complex structures, such as separating tissues with identical density but different textures or sizes.
 
 ## Shared principles
-All methods in this family extend the standard 1D transfer function $T(v) \rightarrow (c, \alpha)$ to a multi-dimensional domain $T(v, f_1, \dots, f_n) \rightarrow (c, \alpha)$, where $v$ is the scalar data value and $f_i$ are computed feature metrics [S1].
+All methods in this family evaluate a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
 
-1.  **Preprocessing:** Most methods require computing auxiliary 3D volumes (feature maps) before rendering. This includes texture metrics, distance fields, or scale fields [S1, S2, S3].
-2.  **Lookup:** During raycasting, sample points retrieve both the scalar value $v$ and the feature value $f$ at position $\mathbf{x}$ [S1, S2, S3].
-3.  **Mapping:** The optical properties are determined by querying a 2D (or higher-dimensional) Lookup Table (LUT) or shader function using the pair $(v, f)$ [S1, S2, S3].
-4.  **Compositing:** The resulting color and opacity are used in the standard front-to-back volume rendering integral [S1, S2, S3].
+**Input Domain:**
+The input to the classification function is a feature vector $\mathbf{f}(\mathbf{x})$ associated with position $\mathbf{x}$. While basic methods use scalar intensity $v = f(\mathbf{x})$, this family extends the domain to include derived features such as gradient magnitude $\|\nabla f(\mathbf{x})\|$, curvature, shape descriptors, color components, or topological graph attributes [S1][S2][S3][S4].
+
+**Output Range:**
+The output is a set of optical properties, most commonly:
+*   **Opacity ($\alpha$):** A value in $[0, 1]$ representing the probability of absorption or the inverse of transparency. $\alpha=0$ is fully transparent; $\alpha=1$ is fully opaque [S5, unofficial].
+*   **Color ($C$):** A vector $(r, g, b)$ representing the emitted or reflected light color [S2][S4].
+*   **Weight:** In some emission-only models, a weight $w$ is assigned to modulate the contribution of samples during accumulation [S6, unofficial].
+
+**Classification Types:**
+1.  **Binary Classification:** Uses hard thresholds to include or exclude data [6229-binary-and-soft-classification.md]. Values below a threshold are assigned $\alpha=0$, and values above are assigned $\alpha=1$ (or a constant high value) [G].
+2.  **Soft Classification:** Uses smooth transitions (e.g., piecewise linear ramps, Gaussian bumps, or power functions) to assign intermediate opacity values [S3][S8, unofficial].
+
+**Evaluation Order:**
+The timing of classification relative to sampling interpolation defines two main approaches [S2][S5, unofficial]:
+*   **Pre-classification:** The transfer function is applied to scalar values at the grid points (voxels) before sampling. Colors and opacities are interpolated during ray casting. Pre-classification produces blurred images when the image resolution is higher than the volume resolution, but prevents color bleeding if color interpolation is done with opacity-weighted colors [S2].
+*   **Post-classification:** Scalar values are interpolated from the volume texture during ray casting, and the transfer function is applied to these continuous sample values. Post-classification produces images with defined edges but is prone to aliasing because high-frequency details may be missed [S2].
+
+**Implementation Structures:**
+Transfer functions are commonly implemented as piecewise linear functions defined by user-specified keypoints [S3], lookup tables (LUTs) stored as 1D, 2D, or 3D textures for fast GPU sampling [S3][S6, unofficial], or shader functions evaluated dynamically during ray casting [S5, unofficial].
 
 ## Subtopics
 
 ### [Texture-based Transfer Function](5450-texture-based-transfer-function.md)
-Maps volume data using scalar values and 20 computed texture metrics (6 first-order, 7 GLCM-based, 7 Run-Length based). It distinguishes structures with similar intensities but different textures. Choose it when intensity alone is insufficient to separate materials. It is computationally expensive due to preprocessing and sensitive to noise.
+Maps optical properties using local texture statistics (20 metrics including GLCM and run-length) rather than scalar intensity, suitable for segmenting structures with similar intensities but different internal textures. Requires significant preprocessing and high memory, resulting in non-real-time performance during setup.
 
 ### [Distance-based Transfer Function](5451-distance-based-transfer-function.md)
-Maps volume data using scalar values and the spatial distance to a segmented reference structure. It highlights neighborhoods around known objects (e.g., tumors). Choose it when spatial context relative to a specific structure is critical. It requires prior segmentation, making it unsuitable for unsegmented or time-dependent data without significant overhead.
+Enhances rendering by incorporating spatial distance to a segmented reference structure as a second dimension alongside scalar intensity, using a 2D domain $(v, d)$ to differentiate features based on proximity. Distinguished by its reliance on explicit segmentation and geometric distance rather than local statistical properties.
 
 ### [Size-Based Transfer Functions](5845-size-based-transfer-functions.md)
-Maps volume data using scalar values and the local scale (size) of features derived from continuous scale-space analysis. It distinguishes features by spatial extent (e.g., veins vs. skin) rather than intensity. Choose it when feature size is the distinguishing characteristic. It uses GPU-accelerated scale-space computation and includes a visibility test controlled by threshold $\tau$.
+Maps the local scale (relative size) of volumetric features to color and opacity, allowing classification based on spatial extent rather than scalar intensity alone. Uses continuous scale-space analysis to derive scale maps, enabling the highlighting of specific structures (e.g., veins) while hiding others (e.g., skin).
 
 ### Feature Finding via Transfer Function Specification
 #### step
@@ -31,7 +47,7 @@ Use a 1D histogram of the scalar values if the goal is to find one or more homog
 In Computed Tomography (CT) medical scans, prior knowledge of tissue densities allows highlighting scalar ranges corresponding to specific regions [S1].
 
 ## Background
-The concept of feature-based classification emerged as a response to the limitations of manual, scalar-only transfer function specification, which is often time-consuming and ambiguous [S1]. The family builds on the idea that local differential properties and spatial relationships provide richer cues for classification than global intensity histograms alone [S1].
+The concept of using transfer functions for volume rendering was established in the early 1990s, with foundational work by Levoy [S1]. The field has evolved from simple 1D intensity mappings to complex multi-dimensional feature spaces to address the manual effort and ambiguity inherent in exploratory visualization [S1].
 
 ## Sources
 [S1] Direct Volume Rendering: A 3D Plotting Technique for ..., https://www.sci.utah.edu/~cscheid/pubs/dvr.pdf, fetched 2026-10-27
