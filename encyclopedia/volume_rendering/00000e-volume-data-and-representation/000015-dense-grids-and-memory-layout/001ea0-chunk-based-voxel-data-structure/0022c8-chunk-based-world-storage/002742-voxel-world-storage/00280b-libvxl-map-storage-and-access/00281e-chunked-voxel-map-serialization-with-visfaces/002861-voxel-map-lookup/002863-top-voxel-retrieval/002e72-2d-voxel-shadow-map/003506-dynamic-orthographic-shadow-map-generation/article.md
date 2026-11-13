@@ -76,9 +76,9 @@ def generate_shadow_map(entities, light_direction, viewport_bounds):
     max_bound[2] = max(0.0, min(255.0, max_bound[2]))
 
     # 7-9. Compute Matrices
-    identity = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
     centroid = [(min_bound[i] + max_bound[i]) / 2.0 for i in range(3)]
-    view_matrix = look_at(centroid, [centroid[0], centroid[1], centroid[2] + light_direction[2]], [0, 1, 0])
+    target = [centroid[0] + light_direction[0], centroid[1] + light_direction[1], centroid[2] + light_direction[2]]
+    view_matrix = look_at(centroid, target, [0, 1, 0])
 
     right, left, top, bottom, near, far = 210, -210, 210, -210, 210, -210
     proj_matrix = [
@@ -107,41 +107,53 @@ def generate_shadow_map(entities, light_direction, viewport_bounds):
 
 # Helper definitions
 def get_model_bounds(entity, viewport):
-    # Not given in the sources.
-    pass
+    # Projects entity's world-space AABB to screen space [G]
+    corners = []
+    for x in [entity.min[0], entity.max[0]]:
+        for y in [entity.min[1], entity.max[1]]:
+            for z in [entity.min[2], entity.max[2]]:
+                corners.append([x, y, z])
+    screen_corners = [project_to_screen(c, viewport) for c in corners]
+    return [min(c[i] for c in screen_corners) for i in range(2)], [max(c[i] for c in screen_corners) for i in range(2)]
+
 def intersects_viewport(screen_min, screen_max, viewport):
-    # Not given in the sources.
-    pass
+    # Checks if screen-space AABB overlaps viewport [G]
+    return screen_min[0] < viewport.max_x and screen_max[0] > viewport.min_x and \
+           screen_min[1] < viewport.max_y and screen_max[1] > viewport.min_y
+
 def look_at(eye, target, up):
-    # Not given in the sources.
-    pass
+    # Standard view matrix construction [G]
+    z_axis = normalize(subtract(eye, target))
+    x_axis = normalize(cross(up, z_axis))
+    y_axis = cross(z_axis, x_axis)
+    return [
+        [x_axis[0], y_axis[0], z_axis[0], 0],
+        [x_axis[1], y_axis[1], z_axis[1], 0],
+        [x_axis[2], y_axis[2], z_axis[2], 0],
+        [-dot(x_axis, eye), -dot(y_axis, eye), -dot(z_axis, eye), 1]
+    ]
+
 def multiply_matrices(a, b):
-    # Not given in the sources.
-    pass
-def bind_framebuffer(target, id):
-    # Not given in the sources.
-    pass
-def set_viewport(x, y, w, h):
-    # Not given in the sources.
-    pass
-def enable_depth_test():
-    # Not given in the sources.
-    pass
-def clear_depth_buffer():
-    # Not given in the sources.
-    pass
-def use_shader(index):
-    # Not given in the sources.
-    pass
-def set_uniform_matrix4(name, mat):
-    # Not given in the sources.
-    pass
-def set_uniform3(name, vec):
-    # Not given in the sources.
-    pass
-def render_entity(entity):
-    # Not given in the sources.
-    pass
+    # Standard 4x4 matrix multiplication [G]
+    res = [[0]*4 for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            for k in range(4):
+                res[i][j] += a[i][k] * b[k][j]
+    return res
+
+def project_to_screen(point, viewport):
+    # Simplified projection to screen coordinates [G]
+    return [point[0] * 100, point[1] * 100] # Placeholder logic for demo, actual depends on camera
+
+def bind_framebuffer(target, id): pass
+def set_viewport(x, y, w, h): pass
+def enable_depth_test(): pass
+def clear_depth_buffer(): pass
+def use_shader(index): pass
+def set_uniform_matrix4(name, mat): pass
+def set_uniform3(name, vec): pass
+def render_entity(entity): pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -155,10 +167,10 @@ The base concept storing the highest occupied voxel Y-coordinate per (X, Z) colu
 
 ## Operating characteristics
 *   **Measured Performance:** Executed in the `ShadowsUpdate` system every game loop iteration [S1, unofficial].
-*   **Strengths:** Fast per-frame update for dynamic scenes; simple depth comparison during lighting.
-*   **Limitations:** Resolution-dependent (1024x1024); requires rebinding and clearing FBO every frame; directional light only.
-*   **When to use:** Dynamic voxel worlds with moving objects.
-*   **When not to use:** Static scenes where a pre-computed shadow map suffices; perspective lighting.
+*   **Strengths:** Fast per-frame update for dynamic scenes; simple depth comparison during lighting. [G]
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
 
 ## Background
 Executed in the ShadowsUpdate system every game loop iteration [S1, unofficial].

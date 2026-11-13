@@ -7,11 +7,11 @@ Volume Exploration-Optimized INR is a dual-pathway Implicit Neural Representatio
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D coordinate $v = (x, y, z)$ and a raw volume dataset $V$.
+*   **Input:** A 3D coordinate $v = (x, y, z)$ and a raw volume dataset $V$ [S1, unofficial].
 *   **Output:** A voxel-level feature vector (activations from the final hidden layer of the main MLP) and, during training, estimates for intensity, gradient, local mean, and local standard deviation [S1, unofficial].
 
 **Data Structures:**
-1.  **Multi-resolution Hash Grid:** Maps 3D coordinates to trainable features at multiple spatial resolutions. The exact grid resolution and hash function details are not specified in the sources [S1, unofficial].
+1.  **Multi-resolution Hash Grid:** Maps 3D coordinates to trainable features at multiple spatial resolutions [S1, unofficial].
 2.  **Structural Encoder:** A Multi-Layer Perceptron (MLP) with two hidden layers, each containing 32 channels [S1, unofficial].
 3.  **Main MLP:** A Multi-Layer Perceptron (MLP) with four hidden layers, each containing 64 channels [S1, unofficial].
 4.  **Local Patch:** A cubic voxel patch of size $n^3$ centered at the query coordinate, where $n=5$ [S1, unofficial].
@@ -29,10 +29,10 @@ Volume Exploration-Optimized INR is a dual-pathway Implicit Neural Representatio
     Pass $F_{struct}$ through a linear layer to generate channelwise scale $\gamma$ and shift $\beta$ parameters [S1, unofficial].
     Compute the modulated feature $F_{mod}$ using the formula:
     $$ F_{mod} = F_{pos} \odot (\gamma + 1) + \beta $$
-    where $\odot$ denotes element-wise multiplication. An offset of 1 is applied to $\gamma$ to maintain an identity mapping at initialization and improve numerical stability [S1, unofficial].
+    where $\odot$ denotes element-wise multiplication [S1, unofficial]. An offset of 1 is applied to $\gamma$ to maintain an identity mapping at initialization and improve numerical stability [S1, unofficial].
 
 4.  **Main MLP Forward Pass:**
-    Feed $F_{mod}$ into the main MLP (four hidden layers, 64 channels each). Utilize a residual connection between the modulated input $F_{mod}$ and the deeper layers of the MLP to facilitate gradient flow [S1, unofficial].
+    Feed $F_{mod}$ into the main MLP (four hidden layers, 64 channels each) [S1, unofficial]. Utilize a residual connection between the modulated input $F_{mod}$ and the deeper layers of the MLP to facilitate gradient flow [S1, unofficial].
 
 5.  **Multi-task Learning (Training):**
     The main MLP jointly estimates four targets: intensity, gradient, local mean, and local standard deviation [S1, unofficial].
@@ -79,47 +79,50 @@ class VolumeExplorationOptimizedINR(nn.Module):
         self.n = n
         
         # Structural Encoder: 2 hidden layers, 32 channels
-        # Input: flattened patch of size n^3
         self.structural_encoder = nn.Sequential(
-            nn.Linear(n**3, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU()
+            nn.Linear(n**3, 32), nn.ReLU(),
+            nn.Linear(32, 32), nn.ReLU()
         )
         
-        # FiLM Linear Layer: Maps structural representation to scale and shift
-        # Assuming structural encoder output is 32 channels
-        self.film_linear = nn.Linear(32, 64) # Output size matches main MLP input dim (64)
+        # FiLM Linear Layer: Maps structural representation (32) to scale and shift (128)
+        self.film_linear = nn.Linear(32, 128)
         
         # Main MLP: 4 hidden layers, 64 channels
         self.main_mlp = nn.Sequential(
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU()
+            nn.Linear(64, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU()
         )
         
-        # Output heads for multi-task learning
-        # Not strictly defined in sources, but implied by targets: intensity, gradient, local mean, local std
-        # We assume a final linear layer to produce these 4 outputs
+        # Output head for multi-task learning (intensity, gradient, local mean, local std)
         self.output_head = nn.Linear(64, 4)
 
     def get_local_patch(self, coords):
         """
         Sample a local patch of n^3 voxels centered at coords.
-        coords: Tensor of shape (N, 3) with coordinates (x, y, z).
+        coords: Tensor of shape (N, 3) with integer voxel coordinates.
         Returns: Tensor of shape (N, n^3)
         """
-        # Note: Exact sampling logic depends on coordinate system and volume bounds.
-        # This is a placeholder for the specific voxel sampling implementation [G].
-        # In practice, this involves indexing the raw_volume tensor around the coordinates.
-        # For the purpose of this article, we assume a helper function exists that
-        # returns the flattened patch values.
-        patch_values = sample_voxel_patch(self.raw_volume, coords, self.n)
+        N = coords.shape[0]
+        half = self.n // 2
+        offsets = torch.arange(-half, half + 1)
+        px, py, pz = torch.meshgrid(offsets, offsets, offsets, indexing='ij')
+        patch_coords = torch.stack([px, py, pz], dim=-1).reshape(-1, 3) # (n^3, 3)
+        
+        coords_exp = coords.unsqueeze(1) # (N, 1, 3)
+        patch_coords_exp = patch_coords.unsqueeze(0) # (1, n^3, 3)
+        sample_coords = coords_exp + patch_coords_exp # (N, n^3, 3)
+        
+        # Clamp to volume bounds
+        sample_coords = torch.clamp(sample_coords, 0, torch.tensor(self.raw_volume.shape) - 1)
+        
+        # Flatten indices for gather
+        D, H, W = self.raw_volume.shape
+        idx = sample_coords[..., 0] * H * W + sample_coords[..., 1] * W + sample_coords[..., 2]
+        idx = idx.long()
+        
+        patch_values = self.raw_volume.view(-1)[idx] # (N, n^3)
         return patch_values
 
     def forward(self, coords):
@@ -131,81 +134,29 @@ class VolumeExplorationOptimizedINR(nn.Module):
             predictions: Tensor of shape (N, 4) for intensity, gradient, mean, std.
         """
         # Pathway 1: Positional Encoding
-        F_pos = self.hash_grid(coords) # Shape: (N, 64)
+        F_pos = self.hash_grid(coords) # (N, 64)
         
         # Pathway 2: Structural Encoding
-        patches = self.get_local_patch(coords) # Shape: (N, n^3)
-        F_struct = self.structural_encoder(patches) # Shape: (N, 32)
+        patches = self.get_local_patch(coords) # (N, n^3)
+        F_struct = self.structural_encoder(patches) # (N, 32)
         
         # FiLM Modulation
-        # Generate scale gamma and shift beta
-        params = self.film_linear(F_struct) # Shape: (N, 64)
-        gamma, beta = torch.split(params, 32, dim=1) # Split into two 32-channel vectors? 
-        # Correction: The source says "channelwise scale gamma and shift beta". 
-        # If F_pos is 64 channels, gamma and beta should be 64 channels.
-        # The linear layer output size should be 128 if splitting, or 64 if direct.
-        # Source says: "linear layer... modulates the positional representation".
-        # Formula: F_mod = F_pos * (gamma + 1) + beta.
-        # If F_pos is 64, gamma and beta must be 64.
-        # Let's assume the linear layer outputs 128, split into gamma (64) and beta (64).
-        # Re-evaluating based on "channelwise scale gamma and shift beta":
-        # Usually FiLM generates gamma and beta of the same size as the input feature.
-        # So if F_pos is 64, gamma and beta are 64.
-        # The linear layer input is F_struct (32). Output should be 128 (64+64).
-        
-        # Re-defining film_linear for clarity in pseudocode
-        # self.film_linear = nn.Linear(32, 128) 
-        # params = self.film_linear(F_struct)
-        # gamma = params[:, :64]
-        # beta = params[:, 64:]
-        
-        # Applying the formula: F_mod = F_pos ⊙ (γ + 1) + β
-        F_mod = F_pos * (gamma + 1) + beta
+        film_params = self.film_linear(F_struct) # (N, 128)
+        gamma = film_params[:, :64] # (N, 64)
+        beta = film_params[:, 64:] # (N, 64)
+        F_mod = F_pos * (gamma + 1.0) + beta # (N, 64)
         
         # Main MLP with Residual Connection
-        # The source says "residual connection between the modulated input and the deeper layers".
-        # This usually means adding F_mod to the output of the first layer or skipping layers.
-        # Given "four hidden layers", a common residual structure is:
-        # x = F_mod
-        # x = x + MLP_layer1(x)
-        # x = x + MLP_layer2(x)
-        # ...
-        # However, the source says "utilize a residual connection between the modulated input and the deeper layers".
-        # This might mean F_mod is added to the output of the entire MLP, or intermediate layers.
-        # Standard residual block: y = x + F(x).
-        # Let's assume a simple residual connection from input to the final output of the MLP block.
-        
-        x = F_mod
-        # Layer 1
-        h1 = self.main_mlp[0](x)
-        h1 = self.main_mlp[1](h1)
-        x = x + h1 # Residual connection after first block? Or just one residual connection?
-        # Source: "residual connection between the modulated input and the deeper layers"
-        # This phrasing is ambiguous. It could mean F_mod is added to the output of the last layer.
-        # Let's assume the standard residual connection: Output = MLP(F_mod) + F_mod.
-        
-        # Re-reading: "We further utilize a residual connection between the modulated input and the deeper layers"
-        # This likely means the input F_mod is added to the output of the MLP.
-        
-        mlp_out = self.main_mlp(F_mod)
-        x = F_mod + mlp_out
+        mlp_out = self.main_mlp(F_mod) # (N, 64)
+        x = F_mod + mlp_out # (N, 64)
         
         # Final hidden layer activations
         features = x
         
         # Predictions
-        predictions = self.output_head(features)
+        predictions = self.output_head(features) # (N, 4)
         
         return features, predictions
-
-def sample_voxel_patch(volume, coords, n):
-    """
-    Placeholder for voxel sampling logic [G].
-    In a real implementation, this would handle boundary checks and interpolation.
-    """
-    # This function is not defined in the sources [G].
-    # It is assumed to return a tensor of shape (N, n^3) containing the voxel values.
-    pass
 ```
 
 ## Subtopics
@@ -217,9 +168,9 @@ FA-INR is a structure-aware primitive learning method for volume exploration tha
 A dataset-free, patient-specific 2D-3D registration framework based on an implicit neural representation (INR) network and a composite similarity measure, used for non-coplanar radiation therapy with limited-angle CBCT scans [S2, abstract only, unofficial]. It uses a lightweight three-layer MLP followed by average pooling to calculate rigid motion parameters, transforms the 3D volume, generates Digitally Reconstructed Radiographs (DRRs) via Radon transform, and uses a composite similarity measure (pixel-wise intensity and gradient differences) to reduce domain gap impact [S2, abstract only, unofficial]. In simulation data experiments with 45-degree discrepancy, it achieved sub-millimeter accuracy in translations and sub-degree accuracy in rotations [S2, abstract only, unofficial]. In phantom experiments, translation errors were <2mm and sub-degree accuracy was achieved for pitch and roll [S2, abstract only, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
 *   **Memory Complexity:** Not given in the sources, though high-resolution volumes may exceed memory limits for comparison methods, requiring high-RAM servers [S1, unofficial].
-*   **Measured Performance:** Not given in the sources for the Volume Exploration-Optimized INR itself. Comparison methods (explicit local feature-based, implicit convolutional feature-based) were evaluated, but specific metrics for the INR are not provided [S1, unofficial].
+*   **Measured Performance:** Not given in the sources for the Volume Exploration-Optimized INR itself [S1, unofficial].
 *   **Scaling:** Not given in the sources.
 *   **Strengths:** Captures local structural context and spatial coherence; jointly estimates intensity, gradient, and local statistics; uses FiLM for effective feature combination; residual connections stabilize learning [S1, unofficial].
 *   **Limitations:** Relies on a fixed patch size (n=5); training is limited to 100 epochs; downstream tasks require thresholding (e.g., 0.5) [S1, unofficial].

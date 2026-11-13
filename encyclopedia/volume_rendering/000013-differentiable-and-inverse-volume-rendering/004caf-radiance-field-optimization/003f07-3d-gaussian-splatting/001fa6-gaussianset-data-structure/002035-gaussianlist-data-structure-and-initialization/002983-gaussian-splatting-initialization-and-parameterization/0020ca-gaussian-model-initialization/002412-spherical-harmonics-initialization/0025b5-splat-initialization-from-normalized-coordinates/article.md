@@ -1,94 +1,83 @@
 # Splat Initialization from Normalized Coordinates
 
-Also called: UnitShSplats.add, JSplat splat creation
+Also called: UnitShSplats.add
 
 ## Overview
-This method initializes a single 3D Gaussian splat (spherical harmonic degree 3) from normalized input coordinates, mapping the unit cube $[-0.5, 0.5]^3$ to a scene of a specific physical size. It sets uniform scale, identity rotation, and full opacity, while deriving the zeroth-order spherical harmonic (DC) color from the normalized position itself, with a special case for the corner point $(-0.5, -0.5, -0.5)$. It differs from [Spherical Harmonics Initialization](3163-spherical-harmonics-initialization.md) by tying the initial color to the spatial coordinate rather than an external RGB value, and from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by being an initialization routine rather than a rendering step.
+This method initializes a single 3D Gaussian splat with spherical harmonic degree 3 from normalized input coordinates in $[-0.5, 0.5]^3$, scaling them to a physical scene size [S1, unofficial]. It assigns uniform scale, identity rotation, and full opacity, while deriving the zeroth-order spherical harmonic (DC) color directly from the normalized position, with a special case for the corner point $(-0.5, -0.5, -0.5)$ [S1, unofficial]. It differs from [Spherical Harmonics Initialization](3163-spherical-harmonics-initialization.md) by deriving color from spatial coordinates rather than external RGB values, and from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by being an initialization routine rather than a rendering step [G].
 
 ## How it works
 **Inputs:**
-- `npx`, `npy`, `npz`: Normalized coordinates in $[-0.5, 0.5]$.
-- `size`: A scalar constant defining the physical extent of the scene (e.g., bounding box diagonal or max dimension).
-- `baseScale`: A scalar constant for the initial uniform scale of the Gaussian.
-- `alpha`: Fixed opacity value (typically 1.0).
+- `npx`, `npy`, `npz`: Normalized coordinates in $[-0.5, 0.5]$ [S1, unofficial].
+- `size`: A scalar constant defining the physical extent of the scene [S1, unofficial].
+- `baseScale`: A scalar constant for the initial uniform scale of the Gaussian [S1, unofficial].
+- `alpha`: Fixed opacity value (1.0) [S1, unofficial].
 
 **Outputs:**
-- A configured `MutableSplat` object appended to a `GaussianList`.
+- A configured splat object appended to a target list [S1, unofficial].
 
 **Data Structures:**
-- `MutableSplat`: An object with fields for position (vec3), scale (vec3), rotation (quat4), opacity (float), and spherical harmonic coefficients (array of floats).
-- `GaussianList`: A dynamic array of `MutableSplat` objects.
+- `MutableSplat`: An object with fields for position (vec3), scale (vec3), rotation (quat4), opacity (float), and spherical harmonic coefficients (array of floats) [S1, unofficial].
+- `GaussianList`: A dynamic array of `MutableSplat` objects [G].
 
 **Steps:**
-1. Create a new splat object with spherical harmonic degree 3.
-2. Set position by scaling normalized coordinates:
-   $$ p_x = npx \times size $$
-   $$ p_y = npy \times size $$
-   $$ p_z = npz \times size $$
-3. Set uniform scale:
-   $$ s_x = s_y = s_z = baseScale $$
-4. Set identity rotation quaternion:
-   $$ q_x = 0.0, q_y = 0.0, q_z = 0.0, q_w = 1.0 $$
-5. Set opacity by converting the fixed alpha value (1.0) using the function `alphaToOpacity`.
-6. Set degree-0 spherical harmonic coefficients (DC term) based on normalized coordinates:
-   - If `npx == -0.5` AND `npy == -0.5` AND `npz == -0.5`:
-     - $SH_{x,0} = colorToDirectCurrent(0.1)$
-     - $SH_{y,0} = colorToDirectCurrent(0.1)$
-     - $SH_{z,0} = colorToDirectCurrent(0.1)$
-   - Else:
-     - $SH_{x,0} = colorToDirectCurrent(npx + 0.5)$
-     - $SH_{y,0} = colorToDirectCurrent(npy + 0.5)$
-     - $SH_{z,0} = colorToDirectCurrent(npz + 0.5)$
-   - Note: `colorToDirectCurrent` maps a normalized value $v \in [0, 1]$ to the appropriate SH coefficient representation (typically linear RGB or sRGB depending on the renderer's internal format).
-7. Append the splat to the target list.
+1. Create a splat object with spherical harmonic degree 3 using `Splats.create(3)` [S1, unofficial].
+2. Set position coordinates by scaling normalized inputs with `size`: $p_x = \text{npx} \times \text{size}$, $p_y = \text{npy} \times \text{size}$, $p_z = \text{npz} \times \text{size}$ [S1, unofficial].
+3. Set uniform scale across all axes to `baseScale`: $s_x = s_y = s_z = \text{baseScale}$ [S1, unofficial].
+4. Set identity rotation quaternion: $q_x = 0.0$, $q_y = 0.0$, $q_z = 0.0$, $q_w = 1.0$ [S1, unofficial].
+5. Set opacity by converting a fixed alpha value of 1.0 using `alphaToOpacity` [S1, unofficial].
+6. Set degree-0 spherical harmonic coefficients based on normalized coordinates, applying a special case for the exact point $(-0.5, -0.5, -0.5)$ which uses 0.1 instead of the coordinate offset [S1, unofficial].
+7. Append the configured splat to the target list [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def initialize_splat(npx: float, npy: float, npz: float, size: float, base_scale: float) -> MutableSplat:
+def initialize_splat(npx: float, npy: float, npz: float, size: float, base_scale: float) -> dict:
     # 1. Create splat object with SH degree 3
-    splat = MutableSplat(sh_degree=3)
-    
+    splat = {
+        'position': [0.0, 0.0, 0.0],
+        'scale': [0.0, 0.0, 0.0],
+        'rotation': [0.0, 0.0, 0.0, 1.0],
+        'opacity': 0.0,
+        'sh': [[0.0, 0.0, 0.0]]  # Degree 3 -> 1 coefficient per RGB channel
+    }
+
     # 2. Set position
-    splat.position_x = npx * size
-    splat.position_y = npy * size
-    splat.position_z = npz * size
-    
+    splat['position'][0] = npx * size
+    splat['position'][1] = npy * size
+    splat['position'][2] = npz * size
+
     # 3. Set uniform scale
-    splat.scale_x = base_scale
-    splat.scale_y = base_scale
-    splat.scale_z = base_scale
-    
+    splat['scale'][0] = base_scale
+    splat['scale'][1] = base_scale
+    splat['scale'][2] = base_scale
+
     # 4. Set identity rotation
-    splat.rotation_x = 0.0
-    splat.rotation_y = 0.0
-    splat.rotation_z = 0.0
-    splat.rotation_w = 1.0
-    
-    # 5. Set opacity (alpha=1.0)
-    splat.opacity = alpha_to_opacity(1.0)
-    
-    # 6. Set SH coefficients (DC term only)
-    # Special case for the corner (-0.5, -0.5, -0.5)
-    if npx == -0.5 and npy == -0.5 and npz == -0.5:
-        val = 0.1
-    else:
-        val_x = npx + 0.5
-        val_y = npy + 0.5
-        val_z = npz + 0.5
-        
-        splat.sh_x[0] = color_to_direct_current(val_x)
-        splat.sh_y[0] = color_to_direct_current(val_y)
-        splat.sh_z[0] = color_to_direct_current(val_z)
-        return splat # Return early if only Z is set in special case, but logic implies all three are set in else block
-    
-    # If we are in the special case, set all three components to 0.1
-    splat.sh_x[0] = color_to_direct_current(val)
-    splat.sh_y[0] = color_to_direct_current(val)
-    splat.sh_z[0] = color_to_direct_current(val)
-    
+    splat['rotation'] = [0.0, 0.0, 0.0, 1.0]
+
+    # 5. Set opacity
+    splat['opacity'] = alpha_to_opacity(1.0)
+
+    # 6. Set SH coefficients (DC term)
+    # Special case for the exact corner point (-0.5, -0.5, -0.5)
+    is_corner = (npx == -0.5 and npy == -0.5 and npz == -0.5)
+    val_x = 0.1 if is_corner else npx + 0.5
+    val_y = 0.1 if is_corner else npy + 0.5
+    val_z = 0.1 if is_corner else npz + 0.5
+
+    splat['sh'][0][0] = color_to_direct_current(val_x)
+    splat['sh'][0][1] = color_to_direct_current(val_y)
+    splat['sh'][0][2] = color_to_direct_current(val_z)
+
     return splat
+
+def alpha_to_opacity(alpha: float) -> float:
+    # Standard conversion from alpha to opacity for Gaussian Splatting [G]
+    return alpha
+
+def color_to_direct_current(v: float) -> float:
+    # Maps normalized value v in [0, 1] to SH DC coefficient representation [G]
+    return v
 ```
 
 **Parameters:**
@@ -97,19 +86,19 @@ def initialize_splat(npx: float, npy: float, npz: float, size: float, base_scale
 - `alpha`: 1.0 [S1, unofficial].
 
 **Edge Cases:**
-- The exact point $(-0.5, -0.5, -0.5)$ is handled specially to avoid mapping to 0.0 color, using 0.1 instead [S1, unofficial].
-- Floating point equality checks for `npx == -0.5` may be sensitive to precision; however, the source uses direct equality [S1, unofficial].
+- The exact point $(-0.5, -0.5, -0.5)$ is handled specially to avoid mapping to a 0.0 color, using 0.1 instead [S1, unofficial].
+- Floating point equality checks for `npx == -0.5` may be sensitive to precision, but the source uses direct equality [S1, unofficial].
 
 ## Subtopics
 
 ### Gsplat Normal Calculation
-Calculates the normal vector of a Gsplat given its `scales` (vec3) and `quaternion` (vec4). 1. Find `minScale = min(scales.x, min(scales.y, scales.z))`. 2. Determine the base normal vector in local space: if `scales.z == minScale`, normal is `vec3(0,0,1)`; else if `scales.y == minScale`, normal is `vec3(0,1,0)`; else normal is `vec3(1,0,0)`. 3. Transform the normal to world space using `quatVec(quaternion, normal)` [S2, unofficial].
+Calculates the normal vector of a Gsplat given its `scales` (vec3) and `quaternion` (vec4) [S2, unofficial]. 1. Find `minScale = min(scales.x, min(scales.y, scales.z))` [S2, unofficial]. 2. Determine the base normal vector in local space: if `scales.z == minScale`, normal is `vec3(0,0,1)`; else if `scales.y == minScale`, normal is `vec3(0,1,0)`; else normal is `vec3(1,0,0)` [S2, unofficial]. 3. Transform the normal to world space using `quatVec(quaternion, normal)` [S2, unofficial].
 
 ## Operating characteristics
 Not given in the sources.
 
 ## Background
-This initialization method is part of the JSplat library, an unofficial Java implementation for handling 3D Gaussian Splatting data structures and operations [S1, unofficial]. It is designed to create initial splats from normalized coordinate spaces, likely for scene reconstruction or initialization from point clouds or other normalized inputs.
+This initialization method is part of the JSplat library, an unofficial Java implementation for handling 3D Gaussian Splatting data structures and operations [S1, unofficial]. It is designed to create initial splats from normalized coordinate spaces, likely for scene reconstruction or initialization from point clouds or other normalized inputs [G].
 
 ## Sources
 [S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)

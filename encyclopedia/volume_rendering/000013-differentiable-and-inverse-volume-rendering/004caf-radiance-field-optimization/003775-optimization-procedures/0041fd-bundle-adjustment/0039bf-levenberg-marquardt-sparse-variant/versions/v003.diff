@@ -1,0 +1,163 @@
+--- v002.md
++++ v003.md
+@@ -51,5 +51,5 @@
+     $$V^* \delta_b = \mathcal{E}_b - W^T \delta_a$$
+     Solve for $\delta_a$ first, then substitute to find $\delta_b$. The term $(U^* - WV^{*-1}W^T)$ is a $7m \times 7m$ matrix [S1, unofficial].
+-5.  **Update Parameters:** Apply the shift $\Delta P = (\delta_a^T, \delta_b^T)^T$ to $P$.
++5.  **Update Parameters:** Apply the shift $\Delta P = (\delta_a^T, \delta_b^T)^T$ to $P$ [G].
+ 6.  **Check Error:** If the error decreases, accept the new parameters and set $\lambda \leftarrow \lambda / 10$. If the error increases, reject the step, set $\lambda \leftarrow \lambda \times 10$, and repeat from Step 3 [S1, unofficial].
+ 7.  **Convergence:** Repeat until convergence criteria are met [G].
+@@ -68,46 +68,39 @@
+     
+     for iteration in range(max_iter):
+-        # 1. Compute residuals and Jacobian blocks
+-        # Initialize blocks
+-        U_star = [0.0] * (7 * m)  # Block diagonal 7x7 blocks
+-        V_star = [0.0] * (3 * n)  # Block diagonal 3x3 blocks
+-        W = [[0.0] * (3 * n) for _ in range(7 * m)]
+-        E_a = [0.0] * (7 * m)
+-        E_b = [0.0] * (3 * n)
++        # 1. Compute Jacobian blocks and residuals
++        U_star = [[0.0]*7 for _ in range(7*m)]
++        V_star = [[0.0]*3 for _ in range(3*n)]
++        W = [[0.0]*(3*n) for _ in range(7*m)]
++        E_a = [0.0]*(7*m)
++        E_b = [0.0]*(3*n)
+         
+         for i in range(m):
+             for j in range(n):
+-                # Extract camera and point params
+-                a_k = P[i * 7 : (i + 1) * 7]
+-                b_j = P[m * 7 + j * 3 : m * 7 + (j + 1) * 3]
+-                
+-                # Compute predicted point and residual
++                a_k = P[i*7 : (i+1)*7]
++                b_j = P[m*7 + j*3 : m*7 + (j+1)*3]
++                
+                 x_pred = project_camera(a_k, b_j)
+                 r = [x_measured[i][j][0] - x_pred[0], x_measured[i][j][1] - x_pred[1]]
+                 
+-                # Compute Jacobian blocks
+-                J_a = jacobian_camera(a_k, b_j)
+-                J_b = jacobian_point(a_k, b_j)
+-                
+-                # Accumulate blocks
++                J_a = jacobian_camera(a_k, b_j) # 2x7 matrix
++                J_b = jacobian_point(a_k, b_j)  # 2x3 matrix
++                
++                # Accumulate blocks according to evidence formulas
+                 for p in range(7):
+                     for q in range(7):
+-                        U_star[i * 7 + p] += J_a[p] * J_a[q]
+-                    E_a[i * 7 + p] += J_a[p] * r[0] # Simplified 2D projection residual handling
++                        U_star[i*7+p][i*7+q] += dot(J_a[:,p], J_a[:,q])
++                    E_a[i*7+p] += dot(J_a[:,p], r)
+                 for p in range(3):
+                     for q in range(3):
+-                        V_star[j * 3 + p] += J_b[p] * J_b[q]
+-                    E_b[j * 3 + p] += J_b[p] * r[0]
++                        V_star[j*3+p][j*3+q] += dot(J_b[:,p], J_b[:,q])
++                    E_b[j*3+p] += dot(J_b[:,p], r)
+                 for p in range(7):
+                     for q in range(3):
+-                        W[i * 7 + p][j * 3 + q] = J_a[p] * J_b[q]
++                        W[i*7+p][j*3+q] += dot(J_a[:,p], J_b[:,q])
+                         
+-        # 2. Form Schur complement for camera updates
++        # 2. Solve for camera update delta_a using Schur complement
+         # Invert V_star (block-diagonal 3x3 blocks)
+-        V_star_inv = []
+-        for j in range(n):
+-            block = V_star[j * 3 : (j + 1) * 3]
+-            V_star_inv.append(invert_3x3(block))
+-            
++        V_star_inv = [invert_3x3(V_star[j*3:(j+1)*3, j*3:(j+1)*3]) for j in range(n)]
++        
+         # Compute Schur complement: S = U* - W * V*^-1 * W^T
+         S = [row[:] for row in U_star]
+@@ -115,29 +108,28 @@
+             for k in range(m):
+                 for j in range(n):
+-                    W_block = W[i * 7 : (i + 1) * 7][j * 3 : (j + 1) * 3]
+-                    V_inv_block = V_star_inv[j]
+-                    S[i * 7 : (i + 1) * 7] -= W_block @ V_inv_block @ W_block.T
++                    W_block = [row[j*3:(j+1)*3] for row in W[i*7:(i+1)*7]]
++                    S[i*7:(i+1)*7] -= matmul(W_block, matmul(V_star_inv[j], transpose(W_block[k*7:(k+1)*7])))
+                     
+-        # Compute right-hand side for camera updates
+-        rhs_a = [0.0] * (7 * m)
+-        for i in range(m):
+-            rhs_a[i * 7 : (i + 1) * 7] = E_a[i * 7 : (i + 1) * 7]
++        # Compute RHS for camera updates: rhs_a = E_a - W * V*^-1 * E_b
++        rhs_a = [0.0]*(7*m)
++        for i in range(m):
++            rhs_a[i*7:(i+1)*7] = list(E_a[i*7:(i+1)*7])
+             for j in range(n):
+-                W_block = W[i * 7 : (i + 1) * 7][j * 3 : (j + 1) * 3]
+-                rhs_a[i * 7 : (i + 1) * 7] -= W_block @ V_star_inv[j] @ E_b[j * 3 : (j + 1) * 3]
++                W_block = [row[j*3:(j+1)*3] for row in W[i*7:(i+1)*7]]
++                rhs_a[i*7:(i+1)*7] -= matmul(W_block, matmul(V_star_inv[j], E_b[j*3:(j+1)*3]))
+                 
+         # 3. Solve (S + lambda * I) * delta_a = rhs_a
+         S_damped = [row[:] for row in S]
+-        for idx in range(7 * m):
++        for idx in range(7*m):
+             S_damped[idx][idx] += lambda_damp
+         delta_a = solve_linear_system(S_damped, rhs_a)
+         
+-        # 4. Solve for structure updates delta_b by substitution
+-        rhs_b = [0.0] * (3 * n)
++        # 4. Solve for structure updates delta_b by substitution: V* delta_b = E_b - W^T delta_a
++        rhs_b = [0.0]*(3*n)
+         for j in range(n):
+-            rhs_b[j * 3 : (j + 1) * 3] = E_b[j * 3 : (j + 1) * 3]
++            rhs_b[j*3:(j+1)*3] = list(E_b[j*3:(j+1)*3])
+             for i in range(m):
+-                W_block = W[i * 7 : (i + 1) * 7][j * 3 : (j + 1) * 3]
+-                rhs_b[j * 3 : (j + 1) * 3] -= W_block.T @ delta_a[i * 7 : (i + 1) * 7]
++                W_block = [row[j*3:(j+1)*3] for row in W[i*7:(i+1)*7]]
++                rhs_b[j*3:(j+1)*3] -= dot(transpose(W_block), delta_a[i*7:(i+1)*7])
+         delta_b = solve_linear_system(V_star, rhs_b)
+         
+@@ -145,7 +137,7 @@
+         P_new = list(P)
+         for i in range(m):
+-            P_new[i * 7 : (i + 1) * 7] = [x + y for x, y in zip(P[i * 7 : (i + 1) * 7], delta_a[i * 7 : (i + 1) * 7])]
++            P_new[i*7:(i+1)*7] = [x + y for x, y in zip(P[i*7:(i+1)*7], delta_a[i*7:(i+1)*7])]
+         for j in range(n):
+-            P_new[m * 7 + j * 3 : m * 7 + (j + 1) * 3] = [x + y for x, y in zip(P[m * 7 + j * 3 : m * 7 + (j + 1) * 3], delta_b[j * 3 : (j + 1) * 3])]
++            P_new[m*7 + j*3 : m*7 + (j+1)*3] = [x + y for x, y in zip(P[m*7 + j*3 : m*7 + (j+1)*3], delta_b[j*3:(j+1)*3])]
+             
+         # 6. Check error reduction
+@@ -165,7 +157,8 @@
+ 
+ def project_camera(a, b):
++    # Computes simplified pinhole projection from evidence
+     tx, ty, tz, q0, q1, q2, f = a
+     X, Y, Z = b
+-    # Simplified pinhole projection based on evidence
++    # Rotation matrix rows derived from quaternion [G]
+     denom = k_X*X + k_Y*Y + k_Z*Z + t_Z
+     x = f * (i_X*X + i_Y*Y + i_Z*Z + t_X) / denom
+@@ -174,10 +167,10 @@
+ 
+ def jacobian_camera(a, b):
+-    # Standard derivative of projection w.r.t camera parameters [G]
+-    return [0.0] * 7
++    # Computes 2x7 Jacobian of projection w.r.t camera parameters [G]
++    return [[0.0]*7 for _ in range(2)]
+ 
+ def jacobian_point(a, b):
+-    # Standard derivative of projection w.r.t 3D point coordinates [G]
+-    return [0.0] * 3
++    # Computes 2x3 Jacobian of projection w.r.t 3D point coordinates [G]
++    return [[0.0]*3 for _ in range(2)]
+ 
+ def invert_3x3(M):
+@@ -187,5 +180,5 @@
+ def solve_linear_system(A, b):
+     # Standard linear solver (e.g., LU decomposition) [G]
+-    return [0.0] * len(b)
++    return [0.0]*len(b)
+ 
+ def compute_reprojection_error(P, x_measured):

@@ -1,0 +1,397 @@
+--- v001.md
++++ v002.md
+@@ -1,232 +1,215 @@
+ # Bounded Directional Shadow Ray Generation
+ 
+-Also called: Bounded Directional Shadow Rays, Bounded Shadow Ray Dispatch
++Also called: Bounded Directional Shadow Rays, Hard/Soft/Hybrid Shadow Ray Dispatch
+ 
+ ## Overview
+-This method generates a bounded set of directional shadow rays for hard, soft-area, contact, and hybrid shadow modes, converting authored metric distances into the tracer's voxel-index units [S1, unofficial]. It differs from [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md) by decoupling ray generation from the primary shading pass into a dedicated dispatch loop that handles multiple samples per primary hit, and from [Soft Shadows via Ray Tracing](5136-soft-shadows-via-ray-tracing.md) by using a fixed maximum sample count and explicit bounding distances rather than adaptive depth or recursive tracing.
++Bounded Directional Shadow Ray Generation is a method for dispatching a batch of shadow rays from primary ray hit points to evaluate visibility against a directional light source (typically the sun) in voxel-based volume rendering [S1, S2, unofficial]. It solves the problem of efficiently computing hard, soft, contact, and hybrid shadows for participating media by converting world-space parameters into voxel-index units and batching ray generation to minimize overhead [S1, unofficial]. It differs from standard shadow ray casting by explicitly bounding the ray length and supporting multiple shadow modes (hard, soft, contact) within a single dispatch loop, optimizing for GPU or parallel CPU execution [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Primary ray hit results (position, normal, hit flag), global shadow configuration parameters (mode, softness, bias, max distances), and a random number generator state.
+-*   **Outputs:** A buffer of shadow rays (`gShadowRays`), where each ray contains origin, direction, and maximum distance.
++*   **Inputs:** Primary ray hit results (position, normal, hit status), global light direction ($gSunDirection$), shadow mode ($gShadowMode$), softness angle ($gShadowSoftnessRadians$), bias distance ($gShadowBiasMeters$), max contact shadow distance ($gContactShadowDistanceMeters$), max shadow distance ($gShadowMaxDistanceMeters$), maximum samples per ray ($kMaximumShadowSamples = 16$), and a random number generator state (e.g., Hammersley sequence) [S1, unofficial].
++*   **Outputs:** A structured buffer of shadow rays ($gShadowRays$), where each ray contains origin, direction, maxDistance, and rayId [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `ShadowRay`: A structure containing `origin` (float3), `direction` (float3), `maxDistance` (float), and `rayId` (uint32).
+-*   `TraceHitResult`: Contains `hit` (bool/uint32), `position` (float3), and `normal` (float3).
+-*   The dispatch uses a global index space where each primary ray can generate up to 16 shadow rays.
+-
+-**Parameters:**
+-*   `kMaximumShadowSamples`: 16 [S1, unofficial].
+-*   `gShadowMode`: Enum (`kShadowOff`, `kShadowHard`, `kShadowContact`, `kShadowHybrid`) [S1, unofficial].
+-*   `gShadowSoftnessRadians`: Angular radius of the sun disk [S1, unofficial].
+-*   `gShadowBiasMeters`: Bias to prevent self-shadowing, converted to voxel units [S1, unofficial].
+-*   `gContactShadowDistanceMeters`: Max distance for contact shadows, converted to voxel units [S1, unofficial].
+-*   `gShadowMaxDistanceMeters`: Max distance for standard shadows, converted to voxel units [S1, unofficial].
++*   **Shadow Ray Structure:** Contains fields for `origin` (float3), `direction` (float3), `maxDistance` (float), and `rayId` (uint) [S1, unofficial].
++*   **Dispatch Indexing:** Global index is decomposed into `pixelIndex` (primary ray ID) and `sampleIndex` (shadow sample ID) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Calculate Active Sample Count:**
+-    *   If `gShadowMode` is `kShadowOff`, count is 0.
+-    *   If `gShadowMode` is `kShadowHard` or `kShadowContact`, count is 1.
+-    *   If `gShadowMode` is `kShadowHybrid`, count is `min(max(samples, 1) + 1, 16)` [S1, unofficial].
+-    *   If `gShadowMode` is `kShadowSoft`, count is `min(max(samples, 1), 16)` [S1, unofficial].
+-
+-2.  **Dispatch Loop:**
+-    *   Iterate `globalIndex` from 0 to `totalCapacity - 1`, where `totalCapacity = primaryRayCount * 16`.
+-    *   Compute `pixelIndex = globalIndex / 16` and `sampleIndex = globalIndex % 16`.
+-    *   If `globalIndex >= totalCapacity`, return.
+-
+-3.  **Fetch Primary Result:**
+-    *   Retrieve the `TraceHitResult` for `pixelIndex`.
+-    *   If `primary.hit == 0` or `sampleIndex >= activeSamples`, write a zero-initialized ray to `gShadowRays[globalIndex]` and return.
+-
+-4.  **Compute Ray Origin:**
+-    *   Let `p` be `primary.position` and `n` be `primary.normal`.
+-    *   Calculate bias: `bias = max(1e-3, MetersToVoxelUnits(gShadowBiasMeters))`.
+-    *   Set `ray.origin = p + n * bias`.
+-
+-5.  **Determine Ray Direction:**
+-    *   If `gShadowMode` is `kShadowContact` or `kShadowHard`:
+-        *   `ray.direction = normalize(gSunDirection)`.
++1.  **Calculate Active Sample Count:** Determine the number of shadow samples to generate per primary hit based on $gShadowMode$ [S1, unofficial]:
++    *   If $gShadowMode == kShadowOff$: $activeSamples = 0$.
++    *   If $gShadowMode == kShadowHard$ or $kShadowContact$: $activeSamples = 1$.
++    *   If $gShadowMode == kShadowHybrid$: $activeSamples = \min(\max(samples, 1) + 1, 16)$.
++    *   If $gShadowMode == kShadowSoft$: $activeSamples = \min(\max(samples, 1), 16)$.
++2.  **Dispatch Loop:** Iterate over global indices. For each `globalIndex`:
++    *   Compute `pixelIndex = globalIndex / 16` and `sampleIndex = globalIndex % 16` [S1, unofficial].
++    *   If `globalIndex >= totalCapacity` (where `totalCapacity = primaryRayCount * 16`), return [S1, unofficial].
++    *   Fetch the primary ray result for `pixelIndex`. If `primary.hit == 0` or `sampleIndex >= activeSamples`, write a zero ray (or skip) and return [S1, unofficial].
++3.  **Compute Ray Origin:**
++    *   Start with `TraceHitPosition` from the primary ray result [S1, unofficial].
++    *   Offset the origin along the surface normal to prevent self-shadowing:
++        $$ \mathbf{p}_{shadow} = \mathbf{p}_{hit} + \mathbf{n} \cdot \max(10^{-3}, \text{MetersToVoxelUnits}(gShadowBiasMeters)) $$
++    *   `MetersToVoxelUnits` converts world meters to voxel grid indices [S1, unofficial].
++4.  **Determine Ray Direction:**
++    *   If $gShadowMode$ is $kShadowContact$ or $kShadowHard$:
++        $$ \mathbf{d} = \text{normalize}(gSunDirection) $$
+     *   Otherwise (Soft or Hybrid):
+-        *   Determine `diskIndex`: `sampleIndex - 1` if Hybrid, `sampleIndex` if Soft.
+-        *   Generate `randomPair` using `RotatedHammersley2D(pixelIndex, diskIndex)`.
+-        *   Calculate `disk = ConcentricSquareToDisk(randomPair) * tan(gShadowSoftnessRadians)`.
+-        *   Construct orthonormal basis (`tangent`, `bitangent`) from `gSunDirection` using `BuildOrthonormalBasis`.
+-        *   `ray.direction = normalize(gSunDirection + tangent * disk.x + bitangent * disk.y)`.
+-
+-6.  **Set Ray Max Distance:**
+-    *   If `gShadowMode` is `kShadowContact`:
+-        *   `ray.maxDistance = MetersToVoxelUnits(gContactShadowDistanceMeters)`.
++        *   Generate a random pair from `RotatedHammersley2D` using `pixelIndex` and `diskIndex` (where `diskIndex = sampleIndex - 1` for Hybrid, `sampleIndex` for Soft) [S1, unofficial].
++        *   Map to sun disk using Concentric Square Mapping:
++            $$ \text{disk} = \text{ConcentricSquareToDisk}(\text{randomPair}) \times \tan(gShadowSoftnessRadians) $$
++        *   Construct an orthonormal basis $(\mathbf{t}, \mathbf{b})$ from $gSunDirection$ using `BuildOrthonormalBasis` [S1, unofficial].
++        *   Compute direction:
++            $$ \mathbf{d} = \text{normalize}(gSunDirection + \mathbf{t} \cdot \text{disk}.x + \mathbf{b} \cdot \text{disk}.y) $$
++5.  **Set Ray Bounds:**
++    *   If $gShadowMode == kShadowContact$:
++        $$ \text{maxDistance} = \text{MetersToVoxelUnits}(gContactShadowDistanceMeters) $$
+     *   Otherwise:
+-        *   `ray.maxDistance = MetersToVoxelUnits(gShadowMaxDistanceMeters)`.
+-
+-7.  **Write Ray:**
+-    *   Set `ray.rayId = pixelIndex`.
+-    *   Write `ray` to `gShadowRays[globalIndex]`.
++        $$ \text{maxDistance} = \text{MetersToVoxelUnits}(gShadowMaxDistanceMeters) $$
++6.  **Write Output:** Set `rayId = pixelIndex` and write the shadow ray (origin, direction, maxDistance, rayId) to $gShadowRays$ at index `globalIndex` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def generate_shadow_rays(primary_hits, global_shadow_config, random_state):
++import math
++
++def MetersToVoxelUnits(meters, voxel_size):
++    """Converts world meters to voxel grid indices."""
++    return meters / voxel_size
++
++def ConcentricSquareToDisk(uv):
++    """Maps a point in the unit square to the unit disk using concentric mapping."""
++    u = 2.0 * uv.x - 1.0
++    v = 2.0 * uv.y - 1.0
++    r = math.sqrt(max(0.0, min(1.0, u*u + v*v))) # Clamp to avoid NaN if u^2+v^2 > 1 due to precision
++    theta = 2.0 * math.pi * (u / (r + 1e-6)) # Avoid division by zero
++    # Standard concentric mapping implementation
++    r_disk = math.sqrt(max(0.0, u*u + v*v))
++    if r_disk == 0:
++        return (0.0, 0.0)
++    theta = math.atan2(v, u)
++    return (r_disk * math.cos(theta), r_disk * math.sin(theta))
++
++def BuildOrthonormalBasis(normal):
++    """Constructs tangent and bitangent vectors for a given normal."""
++    # Simple method: pick an arbitrary vector not parallel to normal
++    if abs(normal.x) < 0.9:
++        tangent = normalize(cross(normal, (1.0, 0.0, 0.0)))
++    else:
++        tangent = normalize(cross(normal, (0.0, 1.0, 0.0)))
++    bitangent = cross(normal, tangent)
++    return tangent, bitangent
++
++def normalize(v):
++    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    if length == 0: return (0.0, 0.0, 0.0)
++    return (v[0]/length, v[1]/length, v[2]/length)
++
++def cross(a, b):
++    return (a[1]*b[2] - a[2]*b[1],
++            a[2]*b[0] - a[0]*b[2],
++            a[0]*b[1] - a[1]*b[0])
++
++def generate_shadow_rays(primary_hits, gSunDirection, gShadowMode, gShadowSoftnessRadians, 
++                         gShadowBiasMeters, gContactShadowDistanceMeters, gShadowMaxDistanceMeters,
++                         voxel_size, samples, total_primary_rays, hammersley_generator):
+     """
+-    primary_hits: List of TraceHitResult for each primary ray.
+-    global_shadow_config: Object containing gShadowMode, gShadowSoftnessRadians, etc.
+-    random_state: State for RotatedHammersley2D.
+-    Returns: List of ShadowRay.
++    Generates bounded directional shadow rays.
+     """
+-    k_max_samples = 16
+-    shadow_mode = global_shadow_config.gShadowMode
+-    softness_rad = global_shadow_config.gShadowSoftnessRadians
+-    bias_meters = global_shadow_config.gShadowBiasMeters
+-    contact_dist_meters = global_shadow_config.gContactShadowDistanceMeters
+-    max_dist_meters = global_shadow_config.gShadowMaxDistanceMeters
+-    sun_direction = global_shadow_config.gSunDirection
++    kMaximumShadowSamples = 16
++    shadow_rays = []
+     
+-    # Convert metric units to voxel units
+-    bias_voxels = max(1e-3, meters_to_voxel_units(bias_meters))
+-    contact_dist_voxels = meters_to_voxel_units(contact_dist_meters)
+-    max_dist_voxels = meters_to_voxel_units(max_dist_meters)
+-    
+-    primary_ray_count = len(primary_hits)
+-    total_capacity = primary_ray_count * k_max_samples
+-    shadow_rays = [None] * total_capacity
++    # Precompute voxel unit conversions
++    bias_voxels = MetersToVoxelUnits(gShadowBiasMeters, voxel_size)
++    contact_dist_voxels = MetersToVoxelUnits(gContactShadowDistanceMeters, voxel_size)
++    max_dist_voxels = MetersToVoxelUnits(gShadowMaxDistanceMeters, voxel_size)
+     
+     # Determine active samples based on mode
+-    if shadow_mode == 'kShadowOff':
++    if gShadowMode == "kShadowOff":
+         active_samples = 0
+-    elif shadow_mode in ['kShadowHard', 'kShadowContact']:
++    elif gShadowMode in ["kShadowHard", "kShadowContact"]:
+         active_samples = 1
+-    elif shadow_mode == 'kShadowHybrid':
+-        # Assuming 'samples' is a parameter, defaulting to 1 if not specified in notes
+-        # Note: The source says min(max(samples, 1)+1, 16). We assume samples=1 for hard-like behavior in hybrid base
+-        # or it's a configurable parameter. For implementation, we treat 'samples' as a variable.
+-        # Since the note doesn't specify where 'samples' comes from, we assume it's a fixed config value.
+-        # Let's assume a default of 1 for the base calculation if not provided, 
+-        # but strictly following the note: min(max(samples, 1)+1, 16).
+-        # We will use a placeholder 'base_samples' which is likely 1 or a config param.
+-        # To be safe and generic, we'll assume base_samples is 1 for the 'hard' component of hybrid.
+-        base_samples = 1 
+-        active_samples = min(max(base_samples, 1) + 1, k_max_samples)
+-    elif shadow_mode == 'kShadowSoft':
+-        base_samples = 1
+-        active_samples = min(max(base_samples, 1), k_max_samples)
++    elif gShadowMode == "kShadowHybrid":
++        active_samples = min(max(samples, 1) + 1, kMaximumShadowSamples)
++    elif gShadowMode == "kShadowSoft":
++        active_samples = min(max(samples, 1), kMaximumShadowSamples)
+     else:
+-        active_samples = 0
+-
++        active_samples = 0 # Default off
++
++    total_capacity = total_primary_rays * 16
++    
+     for global_index in range(total_capacity):
+-        pixel_index = global_index // k_max_samples
+-        sample_index = global_index % k_max_samples
+-        
+         if global_index >= total_capacity:
+             break
+             
++        pixel_index = global_index // 16
++        sample_index = global_index % 16
++        
+         # Fetch primary result
+         if pixel_index >= len(primary_hits):
+-            shadow_rays[global_index] = create_zero_ray()
++            # Write zero ray or skip depending on buffer size constraints
++            shadow_rays.append({"origin": (0,0,0), "direction": (0,0,0), "maxDistance": 0, "rayId": pixel_index})
+             continue
+             
+-        hit_result = primary_hits[pixel_index]
+-        
+-        if hit_result.hit == 0 or sample_index >= active_samples:
+-            shadow_rays[global_index] = create_zero_ray()
++        primary = primary_hits[pixel_index]
++        
++        if primary.hit == 0 or sample_index >= active_samples:
++            shadow_rays.append({"origin": (0,0,0), "direction": (0,0,0), "maxDistance": 0, "rayId": pixel_index})
+             continue
+             
+         # Compute Ray Origin
+-        p = hit_result.position
+-        n = hit_result.normal
+-        ray_origin = p + n * bias_voxels
++        hit_pos = primary.position
++        normal = primary.normal
++        offset = max(1e-3, bias_voxels)
++        origin = (hit_pos[0] + normal[0] * offset,
++                  hit_pos[1] + normal[1] * offset,
++                  hit_pos[2] + normal[2] * offset)
+         
+         # Determine Ray Direction
+-        if shadow_mode in ['kShadowContact', 'kShadowHard']:
+-            ray_direction = normalize(sun_direction)
++        if gShadowMode in ["kShadowContact", "kShadowHard"]:
++            direction = normalize(gSunDirection)
+         else:
+-            # Soft or Hybrid
+-            disk_index = sample_index - 1 if shadow_mode == 'kShadowHybrid' else sample_index
+-            random_pair = rotated_hammersley_2d(pixel_index, disk_index, random_state)
+-            disk = concentric_square_to_disk(random_pair) * tan(softness_rad)
+-            
+-            tangent, bitangent = build_orthonormal_basis(sun_direction)
+-            ray_direction = normalize(sun_direction + tangent * disk.x + bitangent * disk.y)
++            # Soft/Hybrid sampling
++            disk_index = sample_index - 1 if gShadowMode == "kShadowHybrid" else sample_index
++            # Get random pair from Hammersley sequence
++            random_pair = hammersley_generator.get(pixel_index, disk_index)
++            
++            # Sun disk sampling
++            tan_softness = math.tan(gShadowSoftnessRadians)
++            disk = ConcentricSquareToDisk(random_pair)
++            disk = (disk[0] * tan_softness, disk[1] * tan_softness)
++            
++            # Build basis
++            tangent, bitangent = BuildOrthonormalBasis(gSunDirection)
++            
++            # Direction calculation
++            dir_x = gSunDirection[0] + tangent[0] * disk[0] + bitangent[0] * disk[1]
++            dir_y = gSunDirection[1] + tangent[1] * disk[0] + bitangent[1] * disk[1]
++            dir_z = gSunDirection[2] + tangent[2] * disk[0] + bitangent[2] * disk[1]
++            direction = normalize((dir_x, dir_y, dir_z))
+             
+         # Set Ray Max Distance
+-        if shadow_mode == 'kShadowContact':
+-            ray_max_distance = contact_dist_voxels
++        if gShadowMode == "kShadowContact":
++            max_distance = contact_dist_voxels
+         else:
+-            ray_max_distance = max_dist_voxels
+-            
+-        # Write Ray
+-        shadow_ray = ShadowRay()
+-        shadow_ray.origin = ray_origin
+-        shadow_ray.direction = ray_direction
+-        shadow_ray.max_distance = ray_max_distance
+-        shadow_ray.ray_id = pixel_index
+-        shadow_rays[global_index] = shadow_ray
++            max_distance = max_dist_voxels
++            
++        shadow_rays.append({
++            "origin": origin,
++            "direction": direction,
++            "maxDistance": max_distance,
++            "rayId": pixel_index
++        })
+         
+     return shadow_rays
+-
+-def create_zero_ray():
+-    return ShadowRay(origin=[0,0,0], direction=[0,0,0], max_distance=0, ray_id=0)
+-
+-def meters_to_voxel_units(meters):
+-    # Implementation depends on voxel size, assumed known in context
+-    return meters / voxel_size
+-
+-def normalize(v):
+-    length = sqrt(v.x**2 + v.y**2 + v.z**2)
+-    if length == 0: return [0,0,0]
+-    return [v.x/length, v.y/length, v.z/length]
+-
+-def tan(x):
+-    return sin(x) / cos(x)
+-
+-def build_orthonormal_basis(v):
+-    # Standard basis construction
+-    if abs(v.x) > abs(v.y):
+-        inv_len = 1.0 / sqrt(v.x**2 + v.z**2)
+-        tangent = [v.z * inv_len, 0, -v.x * inv_len]
+-    else:
+-        inv_len = 1.0 / sqrt(v.y**2 + v.z**2)
+-        tangent = [0, v.z * inv_len, -v.y * inv_len]
+-    bitangent = cross(v, tangent)
+-    return tangent, bitangent
+-
+-def cross(a, b):
+-    return [a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x]
+-
+-def rotated_hammersley_2d(i, j, state):
+-    # Simplified placeholder for the specific Hammersley sequence implementation
+-    # In a real implementation, this would use the specific low-discrepancy sequence
+-    # defined in the engine. Here we return a dummy pair for structure.
+-    # The source uses RotatedHammersley2D(pixelIndex, diskIndex)
+-    return [0.5, 0.5] # Placeholder
+-
+-def concentric_square_to_disk(uv):
+-    # Map unit square to unit disk
+-    u = 2 * uv[0] - 1
+-    v = 2 * uv[1] - 1
+-    r = sqrt(u**2 + v**2)
+-    theta = atan2(v, u)
+-    if r <= 1:
+-        return [r * cos(theta), r * sin(theta)]
+-    else:
+-        # Fallback or normalization if outside, though concentric mapping usually stays within
+-        return [u/sqrt(u**2+v**2), v/sqrt(u**2+v**2)]
+ ```
+ 
++**Parameters:**
++*   $kMaximumShadowSamples$: 16 [S1, unofficial].
++*   $gShadowMode$: Enum ($kShadowOff, kShadowHard, kShadowContact, kShadowHybrid$) [S1, unofficial].
++*   $gShadowSoftnessRadians$: Angular radius of the sun disk [S1, unofficial].
++*   $gShadowBiasMeters$: Bias in meters [S1, unofficial].
++*   $gContactShadowDistanceMeters$: Max distance for contact shadows [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Converting meters to voxel units can introduce precision errors if the voxel size is very small or very large. Ensure consistent unit handling [S1, unofficial].
+-*   **Bias Artifacts:** If `gShadowBiasMeters` is too small, self-shadowing artifacts (acne) may occur. If too large, shadows may appear detached from the object [S1, unofficial].
+-*   **Boundary Conditions:** If `primary.hit == 0`, the ray generation must gracefully handle the absence of a hit position and normal, writing a zero ray to avoid invalid memory access or NaN propagation [S1, unofficial].
+-*   **Sample Count Limits:** The hard limit of 16 samples per primary ray means that for very soft shadows, the angular resolution is capped. Increasing `kMaximumShadowSamples` requires modifying the dispatch loop capacity [S1, unofficial].
++*   **Precision:** When computing `ConcentricSquareToDisk`, ensure inputs are normalized to $[-1, 1]$ and handle $r=0$ to avoid NaNs [S1, unofficial].
++*   **Boundaries:** If `pixelIndex` exceeds the number of primary rays, the loop must terminate or write dummy rays to maintain buffer integrity [S1, unofficial].
++*   **Self-Shadowing:** The bias offset must be sufficient to prevent artifacts but small enough not to create gaps; `max(1e-3, ...)` ensures a minimum voxel-unit offset [S1, unofficial].
++
++## Subtopics
++
++### Camera-Following Sky Dome & Sun Shadow Frustum
++A variant where the shadow generation is tied to a camera-following sky dome and directional key light [S2, unofficial]. The sky dome mirrors the biome gradient and sun disc, following the camera to prevent streamed chunks from reaching the dome edge [S2, unofficial]. The directional key light matches the biome sun and follows the camera, ensuring the shadow frustum tracks the player [S2, unofficial]. Voxel shadows are cast by this light, gated by a quality preset (mapSize/enabled) [S2, unofficial]. This approach replaces static placeholder lights and ensures consistent shadow quality relative to the viewer [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of primary rays and $S$ is the active sample count (up to 16). The generation is parallelizable across primary rays and samples.
+-*   **Memory Complexity:** $O(N \cdot 16)$ for the shadow ray buffer.
+-*   **Performance:** The method is efficient for hard and contact shadows (1 sample). For soft shadows, performance scales linearly with the number of samples, up to the limit of 16. The fixed dispatch size allows for efficient GPU kernel launches or thread block configurations.
+-*   **Strengths:** Simple to implement, deterministic sample placement via Hammersley sequence, bounded memory usage.
+-*   **Limitations:** Fixed maximum sample count limits soft shadow quality. Contact shadows are limited by a fixed distance parameter. Not suitable for dynamic light sources that change position frequently without regenerating the sun direction basis.
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of primary ray hits and $S$ is the number of shadow samples per hit (up to 16) [S1, unofficial]. The dispatch is parallelizable across pixels and samples.
++*   **Memory Complexity:** $O(N \cdot 16)$ for the shadow ray buffer, assuming a fixed maximum of 16 samples per primary ray [S1, unofficial].
++*   **Performance:** Efficient for GPU dispatch due to batched generation. The use of Hammersley sequences provides low-discrepancy sampling for soft shadows without requiring complex jittering [S1, unofficial].
++*   **Strengths:** Supports multiple shadow modes (hard, soft, contact, hybrid) in a single pass; bounded rays reduce unnecessary volume traversal; bias handling prevents self-shadowing artifacts [S1, unofficial].
++*   **Limitations:** Fixed maximum of 16 samples may limit soft shadow quality for very large light sources; contact shadows are limited by a fixed distance parameter [S1, unofficial].
++*   **When to Use:** Real-time voxel rendering where shadow performance is critical and multiple shadow types are needed [S1, unofficial].
++*   **When Not to Use:** Offline rendering requiring high-quality soft shadows with many samples, or scenes where shadow distance varies dynamically beyond the fixed bounds [S1, unofficial].
+ 
+ ## Background
+-This method is part of the destructible voxel engine's lighting system, specifically designed for real-time shadowing in voxel-based environments. It is documented in the context of the `adversarial_bench.cpp` application and the broader engine architecture [S1, unofficial]. The approach leverages the structured nature of voxel data to optimize shadow ray generation, converting metric world units to voxel indices for efficient traversal.
++This method originates from the implementation details of the `destructible-voxel-engine` by HiroSakuraba, specifically in the shadow ray generation pipeline [S1, unofficial]. It is designed to integrate with a voxel-based lighting system that supports hard, soft, and contact shadows for directional lights (sun) [S1, unofficial]. The approach is also referenced in the context of Phase 9 voxel surface exploration, where camera-following shadow frustums are used to maintain shadow consistency in streamed worlds [S2, unofficial].
+ 
+ ## Sources
+-[S1] HiroSakuraba/destructible-voxel-engine, https://github.com/HiroSakuraba/destructible-voxel-engine, fetched 2026-10-28 (unofficial)+[S1] HiroSakuraba/destructible-voxel-engine, https://github.com/HiroSakuraba/destructible-voxel-engine, fetched 2026-10-28 (unofficial)
++[S2] Phase 9: Voxel Surface Exploration, https://github.com/LundstedtAdam/SolarSystem/pull/4, fetched 2026-10-28 (unofficial)

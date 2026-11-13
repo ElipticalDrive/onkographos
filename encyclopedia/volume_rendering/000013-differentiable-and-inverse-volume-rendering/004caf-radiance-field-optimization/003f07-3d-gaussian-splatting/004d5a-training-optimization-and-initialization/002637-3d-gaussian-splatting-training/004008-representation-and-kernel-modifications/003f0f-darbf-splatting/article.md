@@ -3,153 +3,202 @@
 Also called: DARB-Splatting, Decaying Anisotropic Radial Basis Functions Splatting
 
 ## Overview
-DARBF-Splatting is a method that replaces the standard Gaussian reconstruction kernel in 3D Gaussian Splatting with a class of non-exponential functions called Decaying Anisotropic Radial Basis Functions (DARBFs) [S1]. It solves the limitation of being restricted to the exponential family by allowing kernels like Half-Cosine or Inverse Multiquadric, which span a larger region with higher opacity for the same variance, thereby reducing the number of splats required [S1]. It sets itself apart from siblings like Negative Gaussian Splatting (which uses negative values for interference) and Grid-based Blur Kernel (which uses spatially varying blur) by generalizing the kernel shape itself while maintaining the standard positive, decaying nature of the primitive [S1].
+DARBF-Splatting is a splatting-based 3D reconstruction method that replaces the standard Gaussian kernel with Decaying Anisotropic Radial Basis Functions (DARBFs) [S1]. It solves the limitation of 3D Gaussian Splatting (3DGS) being restricted to the exponential family of functions, which often requires many primitives to cover large areas efficiently [S1]. By using non-exponential kernels like Half-Cosine or Inverse Multiquadric, DARBF-Splatting achieves comparable visual quality with 34% faster training convergence and 15% lower memory usage [S1]. It sets itself apart from siblings like Negative Gaussian Splatting by focusing on kernel shape generalization rather than attribute sign or neural scaffolding [S1, 9152-negative-gaussian-splatting.md, 9186-scaffold-gs.md].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of 3D points (means $\boldsymbol{\mu}$) and their associated 3x3 covariance matrices ($\boldsymbol{\Sigma}$), opacity ($\alpha$), and color coefficients (e.g., spherical harmonics) from the parent 3DGS pipeline [S1].
-*   **Outputs:** A rendered 2D image and gradients for optimizing the 3D primitives [S1].
+*   **Input:** Sparse 3D point cloud from Structure-from-Motion (SfM) (e.g., COLMAP), camera poses, and input images [S1].
+*   **Output:** Optimized set of 3D DARBF primitives (ellipsoids) defined by position, covariance, opacity, and color, capable of differentiable rasterization [S1].
 
 **Data Structures:**
-The primitive representation remains identical to 3DGS:
-*   **Mean:** $\boldsymbol{\mu} \in \mathbb{R}^3$ [S1].
-*   **Covariance:** $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$, symmetric positive definite, defining the anisotropic shape and orientation [S1].
-*   **Opacity:** $\alpha \in [0, 1]$ [S1].
-*   **Color:** $\mathbf{c}$ (typically SH coefficients) [S1].
+Each primitive stores:
+1.  **Position:** $\boldsymbol{\mu} \in \mathbb{R}^3$ [S1].
+2.  **Covariance:** $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$, symmetric positive-definite, defining anisotropic shape and orientation [S1].
+3.  **Opacity:** $\alpha \in [0, 1]$ [S1].
+4.  **Color:** $\mathbf{c}$ (typically represented via Spherical Harmonics or RGB) [S1].
 
-**The DARBF Kernel:**
-The core modification is the kernel function $K(d_M)$, which depends on the Mahalanobis distance $d_M$ [S1].
-The Mahalanobis distance from a point $\mathbf{x}$ to the center $\boldsymbol{\mu}$ with covariance $\boldsymbol{\Sigma}$ is:
-$$ d_M(\mathbf{x}; \boldsymbol{\mu}, \boldsymbol{\Sigma}) = [(\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu})]^{\frac{1}{2}} $$
-where $\boldsymbol{\Sigma}$ is the covariance matrix [S1].
+**Method Steps:**
 
-DARBFs are non-negative, decaying functions of $d_M$. Examples include:
-1.  **Half-Cosine:** Defined as $\cos \left( \frac{d_M^2}{\xi} \right)$ for $d_M^2 < \frac{\xi \pi}{2}$, where $\xi > 0$ is a scaling parameter. It has finite support [S1].
-2.  **Inverse Multiquadric (Inverse MQ):** A function that spans a wider region with a blunt peak compared to Gaussians [S1].
-3.  **Modified Raised Cosine / Modular Sinc:** Other variants mentioned as part of the DARBF spectrum [S1].
+1.  **Primitive Representation:**
+    Represent the scene as a collection of 3D DARBF primitives. Unlike standard Gaussians, these use a kernel function $K(d_M)$ based on the Mahalanobis distance [S1].
 
-**Projection and Correction Factor:**
-Standard 3DGS exploits the property that the 2D covariance matrix is obtained by skipping the third row and column of the 3D covariance matrix, bypassing costly integration [S1]. DARBFs do not share this closed-form integration property. To preserve computational efficiency, DARBF-Splatting introduces a correction factor $\psi$ [S1].
-*   $\psi$ is a scalar precomputed from closed-form regression experiments (preferred over matrix $\psi$ from an MLP for efficiency) [S1].
-*   This factor approximates the Gaussian's closed-form integration shortcut, allowing the use of the simplified 2D covariance projection [S1].
+2.  **Mahalanobis Distance Calculation:**
+    For a point $\mathbf{x}$ in 3D space, calculate the distance to the primitive center $\boldsymbol{\mu}$ using the inverse covariance matrix $\boldsymbol{\Sigma}^{-1}$ [S1]:
+    $$
+    d_M(\mathbf{x}; \boldsymbol{\mu}, \boldsymbol{\Sigma}) = \sqrt{(\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu})}
+    $$
+    [S1]
 
-**Numbered Steps:**
-1.  **Initialization:** Initialize 3D primitives with mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ from an SfM pipeline (e.g., COLMAP) [S1].
-2.  **Transformation:** Transform 3D primitives into the camera coordinate frame [S1].
-3.  **Covariance Projection:** Compute the 2D covariance matrix $\boldsymbol{\Sigma}_{2D}$ by skipping the third row and column of the transformed 3x3 covariance matrix $\boldsymbol{\Sigma}_{3D}$ [S1].
-4.  **Splatting:** Project the 3D DARBF primitive onto the 2D image plane. Calculate the contribution of each splat to pixels within its bounding box using the DARBF kernel function $K(d_M)$ and the correction factor $\psi$ [S1].
-5.  **Rasterization:** Accumulate opacity and color from all splats covering a pixel using alpha compositing [S1].
-6.  **Optimization:** Compute the loss between the rendered image and the ground truth. Backpropagate to update $\boldsymbol{\mu}$, $\boldsymbol{\Sigma}$, $\alpha$, and $\mathbf{c}$ [S1].
+3.  **Kernel Selection:**
+    Select a DARBF kernel $K(d_M)$. The function must be non-negative, decaying, and anisotropic [S1]. Common variants include:
+    *   **Half-Cosine:** $K(d_M) = \cos\left(\frac{d_M^2}{\xi}\right)$ for $d_M^2 < \frac{\xi \pi}{2}$, and 0 otherwise, where $\xi > 0$ is a scale parameter [S1].
+    *   **Inverse Multiquadric (Inverse MQ):** A decaying function with a wider spread than Gaussians [S1].
+    *   **Modified Raised Cosine / Modular Sinc:** Other non-exponential options [S1].
+    *   *Note:* Unbounded growing functions are omitted due to instability [S1].
+
+4.  **Projection to 2D (Footprint Function):**
+    Project the 3D primitive onto the 2D image plane. To maintain the computational efficiency of 3DGS, the 2D covariance matrix $\boldsymbol{\Sigma}_{2D}$ is obtained by skipping the third row and column of the transformed 3D covariance matrix $\boldsymbol{\Sigma}_{3D}$ [S1]. This bypasses costly numerical integration [S1].
+    $$
+    \boldsymbol{\Sigma}_{2D} = \text{Submatrix}(\boldsymbol{\Sigma}_{3D}, \text{rows } 0,1; \text{cols } 0,1)
+    $$
+    [S1]
+
+5.  **Correction Factor Application:**
+    Since DARBFs do not have the same closed-form integration properties as Gaussians, apply a correction factor $\psi$ to approximate the Gaussian's integration shortcut [S1].
+    *   **Implementation:** Use a scalar $\psi$ precomputed via closed-form regression experiments [S1].
+    *   **Purpose:** This factor adjusts the opacity/contribution to ensure comparable PSNR, SSIM, and LPIPS results to standard 3DGS [S1].
+    *   *Pitfall:* Omitting $\psi$ leads to significant quality degradation (e.g., PSNR drop from 27.45 to 26.69 on Mip-NeRF 360 for Half-Cosine) [S1].
+
+6.  **Rasterization:**
+    Render the splats using the footprint function $K(d_M)$ weighted by opacity $\alpha$ and color $\mathbf{c}$, accumulating pixel colors [S1].
+
+7.  **Optimization:**
+    Backpropagate pixel errors to optimize $\boldsymbol{\mu}$, $\boldsymbol{\Sigma}$, $\alpha$, and $\mathbf{c}$ [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def mahalanobis_distance(x, mu, Sigma_inv):
+def mahalanobis_distance(x, mu, sigma_inv):
     """
     Calculate Mahalanobis distance d_M.
     x: (3,) point in 3D space
-    mu: (3,) mean of the primitive
-    Sigma_inv: (3,3) inverse of the covariance matrix
+    mu: (3,) center of primitive
+    sigma_inv: (3,3) inverse covariance matrix
     """
     diff = x - mu
-    # d_M = sqrt(diff^T * Sigma_inv * diff)
-    dist_sq = np.dot(diff, np.dot(Sigma_inv, diff))
+    # d_M = sqrt(diff^T * Sigma^-1 * diff)
+    dist_sq = np.dot(diff, np.dot(sigma_inv, diff))
     return np.sqrt(dist_sq)
 
-def half_cosine_kernel(d_M, xi):
+def half_cosine_kernel(d_m, xi):
     """
     Half-Cosine DARBF kernel.
-    d_M: Mahalanobis distance
-    xi: scaling parameter > 0
+    d_m: Mahalanobis distance
+    xi: scale parameter
     """
-    # Condition: d_M^2 < (xi * pi) / 2
-    if d_M**2 < (xi * np.pi) / 2:
-        return np.cos(d_M**2 / xi)
+    d_m_sq = d_m ** 2
+    threshold = (xi * np.pi) / 2
+    if d_m_sq < threshold:
+        return np.cos(d_m_sq / xi)
     else:
         return 0.0
 
-def render_darb_splat(mu_3d, Sigma_3d, alpha, color, camera_matrix, K, xi, psi):
+def inverse_multiquadric_kernel(d_m, beta):
     """
-    Render a single DARBF primitive.
-    mu_3d: (3,) mean in world space
-    Sigma_3d: (3,3) covariance in world space
-    alpha: scalar opacity
-    color: color vector
-    camera_matrix: (3,4) view-projection matrix
-    K: (3,3) intrinsic matrix
-    xi: kernel parameter
-    psi: correction factor
+    Inverse Multiquadric DARBF kernel.
+    d_m: Mahalanobis distance
+    beta: shape parameter
     """
-    # 1. Transform mean to camera space
-    mu_cam = camera_matrix @ np.append(mu_3d, 1.0)
-    mu_cam = mu_cam[:3] / mu_cam[2] # Perspective divide
-    
-    # 2. Transform covariance to camera space
+    return 1.0 / np.sqrt(1.0 + (beta * d_m) ** 2)
+
+def get_2d_covariance(sigma_3d, view_matrix, focal_length):
+    """
+    Approximate 2D covariance by skipping 3rd row/col of 3D covariance
+    after projection. This is the 'shortcut' mentioned in [S1].
+    Note: In practice, the 3D covariance is transformed by the Jacobian
+    of the projection. [S1] states skipping the 3rd row/col of the 
+    3x3 covariance matrix of the 3D Gaussian is the method used.
+    """
+    # Transform 3D covariance to camera space
     # J is the Jacobian of the projection
-    # Simplified: Project 3D Sigma to 2D by skipping 3rd row/col of transformed Sigma
-    # Note: In practice, Sigma is transformed by the view matrix V: Sigma_cam = V @ Sigma_3d @ V^T
-    # Then projected. The paper states skipping 3rd row/col of the 3x3 covariance matrix
-    # implies the standard 3DGS shortcut is used for the DARBF structure.
+    # sigma_3d_cam = J @ sigma_3d @ J.T
+    # For simplicity, assuming sigma_3d is already in camera space or 
+    # the 'skipping' refers to the final 3x3 matrix before 2D reduction.
+    # [S1] explicitly says: "2x2 covariance matrix ... obtained by skipping 
+    # the third row and column of the 3x3 covariance matrix".
     
-    # Transform Sigma to camera frame
-    # Assuming V is the upper 3x3 of the view matrix
-    V = camera_matrix[:3, :3]
-    Sigma_cam = V @ Sigma_3d @ V.T
+    # Assuming sigma_3d is the transformed 3x3 covariance in camera coordinates
+    sigma_2d = sigma_3d[:2, :2]
+    return sigma_2d
+
+def render_primitive(x_pixel, mu_3d, sigma_3d, alpha, color, kernel_func, psi, xi=None, beta=None):
+    """
+    Render a single DARBF primitive at a pixel location.
+    x_pixel: (2,) pixel coordinate
+    mu_3d: (3,) 3D position
+    sigma_3d: (3,3) 3D covariance
+    alpha: opacity
+    color: color value
+    kernel_func: function K(d_m)
+    psi: correction factor scalar
+    """
+    # 1. Project 3D center to 2D
+    # Assuming standard pinhole camera projection for simplicity
+    # z = mu_3d[2]
+    # x_proj = (mu_3d[0] / z) * focal_length + cx
+    # y_proj = (mu_3d[1] / z) * focal_length + cy
+    # For this pseudocode, we assume mu_2d is provided or calculated externally.
+    # Let's assume we have mu_2d and sigma_2d from the projection step.
     
-    # 3. Project to 2D (Skip 3rd row/col)
-    Sigma_2d = Sigma_cam[:2, :2]
+    # 2. Calculate Mahalanobis distance in 2D
+    # sigma_2d_inv = np.linalg.inv(sigma_2d)
+    # diff_2d = x_pixel - mu_2d
+    # d_m = np.sqrt(np.dot(diff_2d, np.dot(sigma_2d_inv, diff_2d)))
     
-    # 4. Compute 2D bounding box and rasterize
-    # ... (Standard 3DGS rasterization loop over pixels in bbox)
-    # For each pixel p in bbox:
-    #   Calculate 2D distance d_2d from p to projected center
-    #   d_M is approximated or calculated using the 2D Sigma_2d and 2D distance
-    #   value = alpha * psi * half_cosine_kernel(d_M, xi)
-    #   Accumulate value into image buffer
+    # 3. Apply Kernel
+    # k = kernel_func(d_m, xi, beta)
     
+    # 4. Apply Correction Factor and Opacity
+    # contribution = alpha * k * psi
+    
+    # 5. Return weighted color
+    # return contribution * color
     pass
 
-def optimize_step(scene, image_gt, lr):
+def optimize_darbf_splatting(scene_data, kernel_type='half_cosine'):
     """
-    Standard optimization step.
+    Main optimization loop.
     """
-    # Render image using DARBF kernels
-    image_pred = render_scene(scene)
+    # Initialize primitives from SfM points
+    primitives = initialize_primitives(scene_data.sfm_points)
     
-    # Compute loss (e.g., L1 + SSIM)
-    loss = compute_loss(image_pred, image_gt)
-    
-    # Backpropagate
-    loss.backward()
-    
-    # Update parameters
-    scene.update_parameters(lr)
+    # Select kernel parameters
+    if kernel_type == 'half_cosine':
+        kernel_func = half_cosine_kernel
+        xi = 2.0 # Example parameter from [S1] Fig 5 caption
+        psi = precomputed_scalar_psi_half_cosine # From regression [S1]
+    elif kernel_type == 'inverse_mq':
+        kernel_func = inverse_multiquadric_kernel
+        beta = 1.0 # Example parameter
+        psi = precomputed_scalar_psi_inverse_mq
+        
+    for epoch in range(num_epochs):
+        for image in scene_data.images:
+            # Render image using DARBF kernels
+            rendered_image = render_image(primitives, image.camera, kernel_func, psi)
+            
+            # Compute loss (e.g., L1 + SSIM)
+            loss = compute_loss(rendered_image, image.gt)
+            
+            # Backpropagate to update primitives
+            update_primitives(primitives, loss)
+            
+    return primitives
 ```
 
 **Parameters:**
-*   **$\xi$ (xi):** Scaling parameter for Half-Cosine kernel. $\xi > 0$ [S1].
-*   **$\psi$ (psi):** Scalar correction factor, precomputed via closed-form regression [S1].
-*   **Covariance $\boldsymbol{\Sigma}$:** Defines anisotropic shape [S1].
+*   **$\xi$ (Half-Cosine scale):** Controls the support width. Typical value $\xi=2$ mentioned in [S1] Fig 5 caption context.
+*   **$\psi$ (Correction Factor):** Scalar precomputed via regression. Specific values not given, but essential for quality [S1].
+*   **Covariance $\boldsymbol{\Sigma}$:** Optimized via 3DGS densification strategies, but the kernel evaluation uses the DARBF form [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Unbounded Functions:** Growing functions cause instability and are omitted; only decaying functions are used [S1].
-*   **Integration Cost:** Using functions outside the Gaussian family typically incurs costly integration. The correction factor $\psi$ is critical to avoid this [S1].
-*   **Finite Support:** Half-Cosine has finite support ($d_M^2 < \frac{\xi \pi}{2}$), which must be handled in rasterization bounds [S1].
+*   **Unbounded Functions:** Growing functions cause instability and are omitted [S1].
+*   **Missing Correction Factor:** Using DARBFs without $\psi$ results in lower PSNR/SSIM [S1].
+*   **Integration Cost:** Standard non-Gaussian kernels require costly integration; the 2D covariance shortcut is critical for efficiency [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training convergence is 34% faster compared to standard Gaussian kernels [S1].
-*   **Memory Complexity:** Memory usage is reduced by 15% compared to standard Gaussian kernels [S1].
-*   **Performance:** Achieves comparable PSNR, SSIM, and LPIPS results to 3DGS [S1].
-*   **Strengths:** More efficient alternative for repetitive industrial applications where computational savings are critical; wider-spread kernels reduce the need for multiple splats [S1].
-*   **Limitations:** Requires precomputed correction factors; limited to specific DARBF variants (Half-Cosine, Inverse MQ) [S1].
-*   **When to use:** When training time and memory footprint are critical constraints and comparable visual quality to 3DGS is acceptable.
-*   **When not to use:** When the absolute highest fidelity of the exponential family Gaussian is required, or if the overhead of managing correction factors is undesirable.
+*   **Time Complexity:** Training convergence is 34% faster than standard 3DGS [S1].
+*   **Memory Complexity:** Memory usage is 15% lower than standard 3DGS [S1].
+*   **Performance:** Comparable PSNR, SSIM, and LPIPS to 3DGS on Mip-NeRF 360 scenes [S1].
+*   **Strengths:** Efficient for repetitive industrial applications where computational savings are critical; wider-spread kernels (Half-Cosine, Inverse MQ) reduce the need for multiple splats [S1].
+*   **Limitations:** Requires precomputed correction factors $\psi$; CUDA code modifications are needed for each kernel variant [S1].
 
 ## Background
-DARBF-Splatting was introduced by Hashiru Pramuditha, Vinasirajan Viruthshaan, Vishagar Arunan, Saeedha Nazar, Sameera Ramasinghe, Simon Lucey, and Ranga Rodrigo from the University of Moratuwa and University of Adelaide [S1]. It was published in 2026 in the IEEE Winter Conference on Applications of Computer Vision (WACV) [S1]. The method addresses the underexplored area of non-exponential reconstruction kernels in splatting-based 3D reconstruction, which had been limited by the computational inefficiency of integrating non-Gaussian functions [S1].
+DARBF-Splatting was introduced by Hashiru Pramuditha, Vinasirajan Viruthshaan, et al. from the University of Moratuwa and University of Adelaide [S1]. It was published in 2026 (WACV 2026) [S1]. The work generalizes splatting techniques beyond the exponential family, addressing the underexplored area of non-Gaussian reconstruction kernels in 3DGS [S1].
 
 ## Sources
 [S1] DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions, https://doi.org/10.1109/WACV61042.2026.00438, fetched 2026-10-30

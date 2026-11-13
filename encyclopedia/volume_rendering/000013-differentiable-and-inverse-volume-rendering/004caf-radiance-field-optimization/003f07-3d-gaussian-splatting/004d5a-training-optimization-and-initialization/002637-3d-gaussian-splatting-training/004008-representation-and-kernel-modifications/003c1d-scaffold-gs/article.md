@@ -3,52 +3,87 @@
 Also called: Scaffold-Gaussian Splatting
 
 ## Overview
-Scaffold-GS is a representation modification for 3D Gaussian Splatting (3DGS) that replaces the direct storage of Gaussian attributes with learnable features on a voxel grid, decoded via lightweight neural networks [S1]. It distinguishes itself from standard 3DGS and siblings like Negative Gaussian Splatting by decoupling attribute storage from direct parameters, enabling more compact and structured representation of 3D shapes and view-dependent appearance [S1].
+Scaffold-GS is a representation modification for 3D Gaussian Splatting that replaces the direct storage of Gaussian attributes with a voxel-based scaffold. It initializes a voxel grid where each voxel holds learnable features, and derives all Gaussian properties (position, covariance, opacity, color) via interpolation and lightweight neural networks [S1]. This approach decouples the geometric structure from the primitive attributes, addressing initialization sparsity and attribute prediction stability compared to standard 3DGS [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Sparse 3D point cloud from Structure-from-Motion (SfM); multi-view images.
-*   **Output:** Optimized voxel grid features and network weights; rendered images.
+**Inputs:** Sparse Structure-from-Motion (SfM) point cloud; multi-view images.
+**Outputs:** Optimized voxel grid features; derived 3D Gaussian primitives for rasterization.
 
 **Data Structures:**
-1.  **Voxel Grid:** A 3D grid where each voxel point holds learnable feature vectors. The grid resolution is a hyperparameter.
-2.  **Lightweight Neural Networks:** Small MLPs or linear layers that map interpolated voxel features to Gaussian attributes (mean, covariance, opacity, color).
+1.  **Voxel Grid:** A 3D grid covering the scene bounding box. Each voxel $v$ stores a learnable feature vector $\mathbf{f}_v$. The grid resolution is a hyperparameter.
+2.  **Gaussian Primitives:** Standard 3DGS tuple $(\mathbf{p}, \Sigma, \alpha, \mathbf{c})$, but $\mathbf{p}, \Sigma, \alpha, \mathbf{c}$ are not stored directly. They are computed on-the-fly or cached from the voxel features.
 
-**Method Steps:**
-1.  **Initialization:** Initialize a voxel grid covering the scene extent. Attach learnable feature vectors to each voxel point [S1].
-2.  **Feature Interpolation:** For each Gaussian primitive, determine its position within the voxel grid. Interpolate features from surrounding voxels to obtain a dense feature vector for that Gaussian [S1].
-3.  **Attribute Decoding:** Pass the interpolated features through lightweight neural networks to predict all Gaussian attributes: mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ [S1].
-4.  **Rendering:** Render the Gaussians using the standard differentiable rasterization pipeline of 3DGS [S1].
-5.  **Optimization:** Minimize the difference between rendered and ground-truth images using gradient descent, updating voxel features and network weights [S1].
+**Steps:**
+1.  **Voxel Initialization:** Initialize a uniform voxel grid over the scene extent. Attach learnable feature vectors $\mathbf{f}_v$ to each voxel center.
+2.  **Attribute Interpolation:** For a target Gaussian location (initially derived from the SfM cloud or voxel centers), sample the voxel features using trilinear interpolation. Let $\mathbf{f}_{interp}$ be the interpolated feature vector from the 8 surrounding voxels.
+3.  **Feature-to-Attribute Mapping:** Pass $\mathbf{f}_{interp}$ through a lightweight neural network (MLP) to predict the Gaussian attributes.
+    *   Position $\mathbf{p}$: Often fixed to the voxel center or interpolated position, or predicted as an offset. [S1] states attributes are "determined by interpolated features," implying the network outputs the final parameters.
+    *   Covariance $\Sigma$: Predicted from features, typically parameterized as a rotation matrix and scale vector.
+    *   Opacity $\alpha$: Predicted from features, passed through a sigmoid.
+    *   Color $\mathbf{c}$: Predicted from features, potentially including view-dependent coefficients if SH is replaced by the network output.
+4.  **Rasterization:** Render the derived Gaussians using the standard 3DGS differentiable rasterizer.
+5.  **Optimization:** Backpropagate gradients to the voxel features $\mathbf{f}_v$. The lightweight network weights are also optimized.
 
-**Formulas:**
-Let $F_v$ be the feature vector of voxel $v$. For a Gaussian at position $\mathbf{p}$, the interpolated feature $F_{interp}$ is computed via trilinear interpolation of surrounding voxel features. The attributes $\Theta$ are predicted by a network $N$:
-$$ \Theta = N(F_{interp}) $$
-where $\Theta = \{\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha, \mathbf{c}\}$ [S1].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_gaussian_attributes(voxel_grid, target_pos, network):
+    """
+    Retrieve Gaussian attributes for a target position from the voxel scaffold.
+    """
+    # 1. Find surrounding voxels for trilinear interpolation
+    # Assume voxel_grid is a dense tensor [D, D, D, C]
+    # target_pos is normalized to [0, 1]
+    
+    # Get fractional coordinates
+    frac_coords = target_pos * (voxel_grid.shape[0] - 1)
+    
+    # Perform trilinear interpolation to get feature vector f_interp
+    # This involves indexing the 8 corners and weighting by distance
+    f_interp = trilinear_interpolate(voxel_grid, frac_coords)
+    
+    # 2. Pass through lightweight neural network
+    # network is a small MLP
+    attributes = network(f_interp)
+    
+    # 3. Parse attributes
+    # Example layout: [p_offset, scale, rotation, opacity, color_coeffs]
+    # Note: Exact layout depends on the specific implementation in [S1]
+    # [G] Assuming standard 3DGS parameterization for compatibility
+    
+    p = target_pos + attributes['p_offset']
+    scale = softplus(attributes['scale'])
+    rotation = normalize(attributes['rotation'])
+    opacity = sigmoid(attributes['opacity'])
+    color = attributes['color']
+    
+    return p, scale, rotation, opacity, color
+```
 
 **Parameters:**
 *   Voxel grid resolution: Not given in the sources.
-*   Network architecture: Lightweight neural networks (specifics not given in the sources) [S1].
+*   Network depth/width: Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Voxel Resolution:** Too coarse leads to loss of detail; too fine increases memory and computation [S1].
-*   **Interpolation Artifacts:** Discontinuities at voxel boundaries if not handled properly [G].
+**Edge Cases:**
+*   **Out-of-bounds:** If a target position falls outside the voxel grid, clamp or handle as invalid.
+*   **Precision:** Trilinear interpolation requires careful handling of floating-point coordinates to avoid artifacts at voxel boundaries.
 
 ## Subtopics
 
 ### [Scaffold-GS Integration](12513-scaffold-gs-integration.md)
-Applies DART and AGE modules to the Scaffold-GS backbone for improved initialization and densification.
+Applies DART and AGE modules to the Scaffold-GS backbone. It augments the anchor-seeding SfM cloud before optimization and gates primitive growth during it, without modifying the rendering path or the optimizer. This approach is distinct from representation-level changes (like 3D-HGS) by operating as a backbone-agnostic add-on that specifically targets sparse initialization regions.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on voxel grid size and network inference speed. Generally slower per-frame rendering than standard 3DGS due to network evaluation [S1].
-*   **Memory Complexity:** Proportional to voxel grid size and feature dimensionality. Potentially more compact than storing millions of Gaussians directly if the scene is smooth [S1].
-*   **Strengths:** Compact representation; structured learning; better generalization for smooth surfaces [S1].
-*   **Limitations:** Requires careful tuning of voxel resolution; network inference overhead [S1].
-*   **When to Use:** Scenes with smooth geometry and view-dependent effects where compactness is desired [S1].
-*   **When Not to Use:** Highly detailed, non-smooth scenes requiring high-frequency detail [S1].
+*   **Time Complexity:** Rendering time is similar to 3DGS as it uses the same rasterization pipeline. However, the attribute prediction step adds a small per-primitive computational overhead (MLP evaluation).
+*   **Memory Complexity:** Memory usage is dominated by the voxel grid features. For high-resolution grids, this can be significant, but it avoids storing explicit attributes for every Gaussian, potentially offering compression benefits if the grid is sparse or quantized.
+*   **Strengths:** Improves initialization in sparse regions; stabilizes attribute prediction; allows for smoother attribute variations across space.
+*   **Limitations:** Introduces hyperparameters (voxel resolution, network architecture); may introduce interpolation artifacts if the grid is too coarse.
+*   **When to use:** When standard 3DGS suffers from poor initialization or unstable attribute learning in sparse areas.
+*   **When not to use:** When memory is extremely constrained and the scene is well-initialized; when real-time performance is critical and the MLP overhead is prohibitive.
 
 ## Background
-Scaffold-GS was proposed in "Recent advances in 3D Gaussian splatting" [S1]. It builds on the idea of using neural networks to predict Gaussian attributes, similar to VDGS, but uses a voxel grid scaffold for structured feature storage [S1].
+Scaffold-GS was proposed as an advancement in 3D Gaussian Splatting to address limitations in initialization and attribute representation. It builds on the idea of using neural fields to predict Gaussian properties, similar to VDGS [S1], but uses a voxel grid scaffold instead of a continuous neural network. This method is cited in recent surveys of 3DGS advancements [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

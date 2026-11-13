@@ -3,134 +3,123 @@
 Also called: 3D-Filter / Nishita, Nishita et al. 3D-Filter, 3D-Filter / N Directions, Concrete Directions Method
 
 ## Overview
-The 3D-Filter method is a deterministic approximation for rendering multiple scattering in participating media, specifically designed for clouds and snow [S1][S2, book]. It solves the problem of underestimating radiance in optically thick media by precomputing a "contribution-ratio pattern" (the 3D-filter) that encodes the directional distribution of scattered light [S1][S2, book]. Unlike stochastic methods that trace random walks, this approach uses extended form factors in a voxel grid to accumulate second- and third-order scattering contributions efficiently [S1][S2, book]. It sets itself apart from siblings like Most Probable Paths by restricting the scattering order to a small fixed number (typically three) and exploiting the forward-scattering nature of media like clouds to reduce the computational complexity of form factor calculation [S1][S2, book].
+The 3D-Filter method is a deterministic approximation for rendering multiple scattering in participating media, specifically designed for clouds and snow [S1][S2, book]. It solves the problem of computationally expensive multiple scattering integrals by precomputing a "contribution-ratio pattern" (the 3D-filter) that encodes the directional distribution of radiance for second and third-order scattering events [S1][S2, book]. Unlike stochastic methods that trace random walks, this approach uses a grid-based implicit representation of directional distribution, allowing for efficient accumulation of scattered light by multiplying precomputed form factors with local energy values [S1]. It is distinct from sibling methods like Most Probable Paths by focusing on a fixed set of scattering orders and directional contributions rather than path probability densities [S1][S2, book].
 
 ## How it works
-**Inputs:**
-*   A 3D voxel grid representing the participating medium (e.g., cloud or snow).
-*   The viewing direction $\omega_v$ (assumed constant or principal axis for the filter generation).
-*   The light source direction $\omega_l$ (e.g., sunlight).
-*   Optical properties: scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, and phase function $p$.
-*   Single scattering radiance $L_{ss}$ (computed separately).
+The method approximates the Radiative Transfer Equation (RTE) by separating single scattering (computed separately) from multiple scattering, considering only the first three orders of multiple scattering to balance accuracy and performance [S1][S2, book].
 
-**Outputs:**
-*   Final radiance $L(\mathbf{x})$ for each voxel $\mathbf{x}$ in the viewing direction.
+### Inputs and Outputs
+*   **Inputs:**
+    *   Medium density field $\rho(x)$, typically defined on a voxel grid [S1][S2, book].
+    *   Optical properties: extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s$, and single scattering albedo $\omega_0 = \sigma_s / \sigma_t$ [S1][S2, book].
+    *   Phase function $p(\omega_i, \omega_o)$, assumed to be strongly forward-scattering (e.g., Henyey-Greenstein) [S1][S2, book].
+    *   Illumination sources: Sunlight direction $\omega_s$ and sky light distribution [S1][S2, book].
+    *   Camera viewing direction $\omega_v$ [S1][S2, book].
+*   **Outputs:**
+    *   Radiance $L(x)$ for each voxel $x$ in the viewing direction, including contributions from single scattering and up to third-order multiple scattering [S1][S2, book].
 
-**Data Structures:**
-*   **Voxel Grid:** The space is subdivided into voxels. The grid resolution is determined by the medium's extent.
-*   **3D-Filter (Contribution-Ratio Pattern):** A precomputed data structure storing contribution ratios. For a center voxel, this pattern represents the fraction of energy arriving from other voxels that contributes to the radiance in the viewing direction, considering paths with 1 or 2 scatterings (for 2nd and 3rd order total scattering).
-*   **Energy Field:** The density or optical thickness distribution of the medium.
+### Data Structures
+1.  **Voxel Grid:** The space containing the medium (e.g., cloud volume) is subdivided into a 3D grid of voxels. The viewing direction $\omega_v$ is aligned with one of the principal axes of this grid to simplify the calculation of contribution ratios [S1][S2, book].
+2.  **3D-Filter (Contribution-Ratio Pattern):** A precomputed data structure representing the form factors. It stores the ratio of radiance contribution from neighboring voxels to a center voxel, accounting for 1 and 2 scattering events within the filter's scope [S1][S2, book].
+    *   **Layout:** For each voxel, the filter contains weights corresponding to specific relative positions in the grid. These weights are derived from the mean density of the cloud [S1][S2, book].
+    *   **Size:** The filter size is determined by the spatial extent of significant scattering contributions, which is small due to the forward-scattering nature of clouds [S1][S2, book].
 
-**Steps:**
+### Steps
 
-1.  **Voxelization:** Subdivide the space containing the medium into a grid of voxels. Align the grid such that the viewing direction $\omega_v$ serves as a principal axis [S1][S2, book].
+1.  **Grid Subdivision:** Subdivide the medium space into voxels, aligning the viewing direction $\omega_v$ with a principal axis of the grid [S1][S2, book].
+2.  **Mean Density Space:** Define a smaller reference space using the mean density of the cloud. This space is used to compute the generic contribution ratios, making the filter applicable to varying densities [S1][S2, book].
+3.  **Compute 3D-Filter (Precomputation):**
+    *   Calculate the contribution ratios to the radiance of a center voxel (in the viewing direction) from other voxels in the mean density space [S1][S2, book].
+    *   These ratios account for the sunlight direction $\omega_s$ and represent the light scattered due to second and third-order scattering events [S1][S2, book].
+    *   **Optimization:** Since scattering is mainly forward, concentrate computational effort on voxels that effectively contribute to the center voxel for paths with one or two scatterings. Use a stochastic method to select these contributing voxels efficiently [S1][S2, book].
+    *   Store these ratios as the 3D-filter [S1][S2, book].
+4.  **Apply Filter (Rendering):**
+    *   For each voxel $x$ in the actual medium grid:
+        *   Retrieve the local energy (radiance) from neighboring voxels based on the 3D-filter weights [S1][S2, book].
+        *   Multiply the filter weights by the energy at the related points [S1][S2, book].
+        *   Accumulate these products to obtain the multiple scattering contribution $L_{ms}(x)$ for the second and third orders [S1][S2, book].
+5.  **Single Scattering:** Compute single scattering contribution $L_{ss}(x)$ separately using standard ray-marching techniques [S1][S2, book].
+6.  **Final Radiance:** Combine single and multiple scattering contributions:
+    $$ L(x) = L_{ss}(x) + L_{ms}(x) $$
+    [S1][S2, book]
 
-2.  **Single Scattering Computation:** Compute the single scattering radiance $L_{ss}(\mathbf{x})$ for all voxels $\mathbf{x}$ separately. This accounts for direct illumination from the light source [S1][S2, book].
-
-3.  **Filter Generation (Precomputation):**
-    *   Define a smaller reference space using the mean density of the cloud/medium to simplify calculations [S1][S2, book].
-    *   Identify the center voxel $\mathbf{x}_c$ in the viewing direction.
-    *   Compute the contribution ratios from other voxels $\mathbf{x}_i$ to $\mathbf{x}_c$. These ratios represent the extended form factors for paths involving one or two scatterings (which contribute to the 2nd and 3rd order scattering terms) [S1][S2, book].
-    *   **Optimization:** Since scattering in clouds is predominantly forward, concentrate computational effort on voxels $\mathbf{x}_i$ that effectively contribute to $\mathbf{x}_c$. Use a stochastic method to select these contributing voxels rather than computing form factors for all pairs [S1][S2, book].
-    *   Store these ratios in the 3D-filter structure [S1][S2, book].
-
-4.  **Filter Application (Rendering):**
-    *   For each voxel $\mathbf{x}$ in the full space, apply the 3D-filter.
-    *   Multiply the precomputed form factors (from the filter) by the energy (radiance/density) at the related voxels [S1][S2, book].
-    *   Accumulate these products to obtain the multiple scattering contribution $L_{ms}(\mathbf{x})$ for the second and third orders [S1][S2, book].
-    *   Note: Only the first three orders of scattering are considered for sunlight multiple scattering to save computation time [S1][S2, book].
-
-5.  **Final Radiance:**
-    *   Combine single and multiple scattering contributions:
-        $$ L(\mathbf{x}) = L_{ss}(\mathbf{x}) + L_{ms}(\mathbf{x}) $$
-    *   Add sky light contributions if applicable (sky light is typically treated as single scattering) [S2, book].
-
-**Parameters:**
-*   **Maximum Scattering Order:** Typically 3 (1st, 2nd, 3rd orders). Higher orders are neglected [S1][S2, book].
-*   **Voxel Resolution:** Determines the granularity of the filter and the medium representation.
-
-**Edge Cases and Pitfalls:**
-*   **Heterogeneity:** The method uses a mean density for filter generation, which may introduce inaccuracies in highly heterogeneous media [S1][S2, book].
-*   **Viewing Direction:** The filter is generated for a specific viewing direction (principal axis). Changing the view significantly may require regeneration or interpolation of filters [S1][S2, book].
-*   **Backward Scattering:** The method exploits forward scattering. Media with strong backward scattering components may not be rendered accurately [S1][S2, book].
-
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_3d_filter(cloud_voxels, mean_density, viewing_direction, light_direction):
+def compute_3d_filter(mean_density, phase_function, sun_direction, num_scatterings=2):
     """
-    Precomputes the 3D-filter (contribution-ratio pattern) for a center voxel.
+    Precomputes the 3D-filter (contribution-ratio pattern) for a given mean density.
+    This represents the form factors for 2nd and 3rd order scattering.
     """
-    # Define a smaller reference space with mean density
-    reference_space = create_reference_space(mean_density)
+    # Define a small grid around the center voxel for the filter
+    filter_grid_size = 5 # Example size, determined by scattering extent
+    filter_weights = zeros(filter_grid_size, filter_grid_size, filter_grid_size)
     
-    # Identify center voxel in viewing direction
-    center_voxel = reference_space.get_voxel_in_direction(viewing_direction)
-    
-    filter_data = {}
-    
-    # Stochastic selection of contributing voxels for paths with 1 or 2 scatterings
+    # Stochastic selection of contributing voxels to speed up computation
     # due to forward scattering nature
-    contributing_voxels = stochastic_select_contributors(
-        reference_space, 
-        center_voxel, 
-        max_scatterings=2,
-        light_direction=light_direction
-    )
+    contributing_voxels = stochastic_select_contributors(filter_grid_size, phase_function, sun_direction)
     
-    for voxel_i in contributing_voxels:
-        # Compute extended form factor / contribution ratio
-        # This accounts for light traveling from voxel_i to center_voxel
-        # with 1 or 2 scatterings
+    for voxel in contributing_voxels:
+        # Calculate contribution ratio from this voxel to the center
+        # considering the path having 1 or 2 scatterings within the filter scope
         ratio = compute_contribution_ratio(
-            voxel_i, 
-            center_voxel, 
-            viewing_direction, 
-            light_direction,
-            reference_space.optical_properties
+            voxel.position, 
+            mean_density, 
+            phase_function, 
+            sun_direction
         )
-        filter_data[voxel_i.id] = ratio
+        filter_weights[voxel.index] = ratio
         
-    return filter_data
+    return filter_weights
 
-def render_with_3d_filter(cloud_voxels, single_scattering_radiance, filter_data, viewing_direction):
+def render_cloud(voxel_grid, filter_weights, single_scattering_radiance):
     """
-    Applies the precomputed 3D-filter to compute multiple scattering.
+    Renders the cloud by applying the precomputed 3D-filter to the voxel grid.
     """
-    final_radiance = {}
+    output_radiance = zeros_like(voxel_grid)
     
-    for voxel in cloud_voxels:
-        # Start with single scattering
-        ms_contribution = 0.0
+    # Apply filter to each voxel
+    for x in voxel_grid:
+        multiple_scattering_contribution = 0.0
         
-        # Apply filter: multiply form factors by energy at related points
-        for related_voxel_id, form_factor in filter_data.items():
-            # Retrieve energy/radiance at the related voxel
-            # Note: In practice, this might involve interpolation or direct lookup
-            energy = get_energy_at_voxel(related_voxel_id, cloud_voxels)
-            
-            # Accumulate contribution
-            ms_contribution += form_factor * energy
-            
-        # Combine single and multiple scattering (2nd and 3rd orders)
-        final_radiance[voxel.id] = single_scattering_radiance[voxel.id] + ms_contribution
+        # Iterate over the filter kernel
+        for offset in filter_weights.indices():
+            neighbor = x + offset
+            if neighbor is within bounds:
+                # Multiply form factors by energy at related points
+                energy = voxel_grid[neighbor].radiance
+                weight = filter_weights[offset]
+                multiple_scattering_contribution += weight * energy
+                
+        # Accumulate results
+        output_radiance[x] = single_scattering_radiance[x] + multiple_scattering_contribution
         
-    return final_radiance
+    return output_radiance
 ```
 
+### Parameters
+*   **Scattering Orders:** Only the first three orders of multiple scattering are considered (i.e., up to third-order) to save computation time [S1][S2, book].
+*   **Voxel Size:** Determined by the resolution of the medium and the extent of the 3D-filter [S1][S2, book].
+*   **Mean Density:** Used to normalize the filter, allowing it to be applied to media with varying local densities [S1][S2, book].
+
+### Edge Cases and Pitfalls
+*   **Forward Scattering Assumption:** The method relies on the fact that scattering in clouds is mainly forward. If the phase function is highly isotropic or backward-scattering, the filter may not capture significant contributions, leading to inaccuracies [S1][S2, book].
+*   **Boundary Conditions:** The method assumes an infinite or periodic medium for the filter computation. Edge effects in the actual medium may require special handling or larger filters [S1][S2, book].
+*   **Single Scattering Separation:** Single scattering must be computed separately. If not handled correctly, double-counting or missing contributions can occur [S1][S2, book].
+*   **Stochastic Selection:** The stochastic method for selecting contributing voxels introduces variance. A sufficient number of samples is needed to reduce noise in the precomputed filter [S1][S2, book].
+
 ## Operating characteristics
-*   **Time Complexity:** The precomputation of the 3D-filter is expensive but done once. Rendering is fast as it involves a lookup and multiplication per voxel. The stochastic selection of voxels reduces the number of form factor calculations from $O(N^2)$ to a smaller subset [S1][S2, book].
-*   **Memory Complexity:** Requires storing the 3D-filter for each relevant viewing direction and the voxel grid. The filter size depends on the number of contributing voxels selected stochastically [S1][S2, book].
-*   **Performance:** Significantly faster than stochastic multiple scattering methods for clouds and snow [S1][S2, book].
-*   **Strengths:** Efficient handling of multiple scattering in homogeneous or moderately heterogeneous media; exploits forward scattering [S1][S2, book].
-*   **Limitations:** Limited to a small number of scattering orders (typically 3); less accurate for highly heterogeneous media or strong backward scattering; view-dependent [S1][S2, book].
-*   **When to use:** Rendering clouds and snow where multiple scattering is important and performance is a concern [S1][S2, book].
-*   **When not to use:** Highly heterogeneous media, media with strong backward scattering, or when high accuracy for higher-order scattering is required [S1][S2, book].
+*   **Time Complexity:** The precomputation of the 3D-filter is done once per mean density configuration. Rendering time is linear with respect to the number of voxels, as it involves a simple convolution-like operation with the filter [S1][S2, book].
+*   **Memory Complexity:** Requires storing the voxel grid and the 3D-filter. The filter size is small due to the forward-scattering assumption, making memory usage manageable [S1][S2, book].
+*   **Strengths:** Efficient for media with high albedo and strong forward scattering, such as clouds and snow. Provides visually plausible results for multiple scattering without the high cost of full path tracing [S1][S2, book].
+*   **Limitations:** Limited to specific scattering orders (up to third). Less accurate for media with isotropic or backward scattering. Requires precomputation, which may not be suitable for dynamic media with rapidly changing densities [S1][S2, book].
+*   **When to Use:** Ideal for static or slowly varying cloud and snow rendering where multiple scattering is visually significant and computational resources are limited [S1][S2, book].
+*   **When Not to Use:** Not suitable for highly dynamic media, media with complex phase functions, or when higher-order multiple scattering effects are critical [S1][S2, book].
 
 ## Background
-The 3D-Filter method was proposed by Nishita et al. [S1][S2, book]. It was initially developed for rendering clouds, taking into account multiple scattering of sunlight and single scattering of sky light [S2, book]. The method was later applied to render snow, which has a high albedo and appears white due to multiple scattering [S1][S2, book]. The approach is part of a broader class of methods that use implicit representations of directional radiance, such as scattering patterns and diffusion equations [S1][S2, book].
+The 3D-Filter method was proposed by Nishita et al. for rendering clouds with multiple scattering and sky light [S1][S2, book]. It was later applied to render snow, which has a high albedo and appears white due to multiple scattering [S1]. The shape and density distribution of snow in these applications are often modeled using metaballs [S1]. The method is part of a broader family of techniques that use implicit representations of directional distribution, such as scattering patterns and diffusion equations [S1][S2, book].
 
 ## Sources
 [S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26

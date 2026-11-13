@@ -7,11 +7,11 @@ Pure Random-Access Decompression is a compression-domain rendering strategy wher
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Compressed volume data (transmitted from CPU to GPU).
-*   **Output:** Uncompressed scalar values for individual voxels as needed by the ray-caster or fragment shader.
+*   **Input:** Compressed volume data (transmitted from CPU to GPU) [S1].
+*   **Output:** Uncompressed scalar values for individual voxels as needed by the ray-caster or fragment shader [S1].
 
 **Data Structures:**
-The specific compressed data layout depends on the underlying codec (e.g., VQ, Huffman). The sources do not specify a universal bit-packing layout, only that data is transmitted in compressed form [S1][S2, unofficial].
+The specific compressed data layout depends on the underlying codec (e.g., VQ, Huffman) [S1][S2, unofficial]. The sources do not specify a universal bit-packing layout, only that data is transmitted in compressed form [S1][S2, unofficial].
 
 **Steps:**
 1.  **Transmission:** Transmit the compressed volume data from the CPU to the GPU memory [S1].
@@ -23,27 +23,23 @@ The specific compressed data layout depends on the underlying codec (e.g., VQ, H
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Conceptual implementation of pure random-access decompression
-# Assumes a generic decompressor function exists for the specific codec
-
-def render_volume(compressed_data, camera, transfer_function):
-    # 1. Transmit compressed data to GPU (handled by driver/API)
-    gpu_compressed_data = upload_to_gpu(compressed_data)
-    
-    # 2. For each fragment/voxel access during ray marching
-    for each ray in camera:
-        while ray is inside volume:
-            # 3. On-demand decompression for single voxel
-            # This is spatially independent; no neighbor data is fetched
-            voxel_value = decompress_single_voxel(gpu_compressed_data, ray.position)
-            
-            # 4. Use value for shading
-            color = apply_transfer_function(voxel_value, transfer_function)
-            ray.step()
-            
-            if ray.is_outside_or_saturated():
-                break
+def raycast(compressed_volume, origin, direction, step_size, bounds_min, bounds_max):
+    t = 0.0
+    samples = []
+    while step_size > 0:
+        pos = [origin[i] + direction[i] * t for i in range(3)]
+        if not (bounds_min[0] <= pos[0] <= bounds_max[0] and
+                bounds_min[1] <= pos[1] <= bounds_max[1] and
+                bounds_min[2] <= pos[2] <= bounds_max[2]):
+            break
+        value = decompress_voxel(compressed_volume, pos)
+        samples.append(value)
+        t += step_size
+        if value >= 1.0:
+            break
+    return samples
 ```
+*Note: The sources do not specify the codec internals; `decompress_voxel` is a black-box call that returns the scalar value for the given coordinate [S1].*
 
 **Edge Cases and Pitfalls:**
 *   **Performance Cost:** GPU implementations of random-access decompression (e.g., for VQ or HVQ) are costly in performance [S1].
@@ -53,7 +49,7 @@ def render_volume(compressed_data, camera, transfer_function):
 ## Subtopics
 
 ### GPU On-Demand Decompression
-This variant is used by Vector Quantization (VQ) methods [36-37] and by Wang et al. [48, 67]. It decompresses multiple related blocks or slices on-demand rather than just a single voxel, and employs delayed filtering to exploit data space correlations [S2, unofficial]. This approach improves GPU memory utilization compared to pure single-voxel access but still avoids full pre-decompression [S2, unofficial].
+This variant is used by Vector Quantization (VQ) methods [36-37] and by Wang et al. [48, 67] [S2, unofficial]. It decompresses multiple related blocks or slices on-demand rather than just a single voxel, and employs delayed filtering to exploit data space correlations [S2, unofficial]. This approach improves GPU memory utilization compared to pure single-voxel access but still avoids full pre-decompression [S2, unofficial].
 
 ## Operating characteristics
 *   **Memory Usage:** Low GPU memory footprint for the volume data itself, as the full dataset is never stored in uncompressed form [S1][S2, unofficial].
@@ -68,4 +64,4 @@ The concept emerged as an alternative to architectures that require prior decomp
 
 ## Sources
 [S1] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S2] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)
+[S2] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

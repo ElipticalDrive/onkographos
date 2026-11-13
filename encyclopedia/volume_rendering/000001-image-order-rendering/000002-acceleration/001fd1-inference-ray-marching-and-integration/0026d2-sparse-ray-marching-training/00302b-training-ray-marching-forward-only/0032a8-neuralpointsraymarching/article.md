@@ -3,69 +3,65 @@
 Also called: Neural Point Ray Marching
 
 ## Overview
-NeuralPointsRayMarching is a PyTorch module that performs ray marching for neural point rendering by aggregating sampled neural point features and blending them along rays [S1, unofficial]. It solves the problem of efficiently rendering sparse 3D point clouds with learned features (such as color, SH coefficients, or embeddings) into 2D images by handling the spatial aggregation and alpha blending in a differentiable manner [S1, unofficial]. It sets itself apart from standard volume rendering by operating on discrete, learned point entities rather than continuous volumetric fields, and from its parent [Training Ray Marching (Forward Only)](6205-training-ray-marching-forward-only.md) by providing the specific aggregation, distance calculation, and feature blending logic required for the neural point representation [S1, unofficial].
+NeuralPointsRayMarching is a PyTorch module that performs ray marching for neural point rendering by aggregating sampled neural point features and blending them along rays [S1, unofficial]. It estimates the maximum number of points to allocate based on mean count from previous epochs, enabling faster training by avoiding over-allocation, while supporting force-all-rays mode for stability [S1, unofficial]. It sets itself apart from standard volume rendering by operating on discrete, learned point entities rather than continuous volumetric fields [S1, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   `pixel_idx`: Indices of pixels to render.
-*   `camrotc2w`: Camera rotation matrix (C2W).
-*   `campos`: Camera position (C2W).
-*   `near`, `far`: Near and far clipping planes.
-*   `focal`: Focal length.
-*   `h`, `w`: Image height and width.
-*   `intrinsic`: Camera intrinsic matrix.
-*   `gt_image`: Ground truth image (optional, for loss computation).
-*   `raydir`: Ray directions.
-*   `opt`: Configuration object containing flags like `raydist_mode_unit`, `prob`, `return_color`, `return_depth`.
-*   `neural_points`: The neural point cloud data structure.
-*   `num_pos_freqs`, `num_viewdir_freqs`: Number of frequency bands for positional and view-direction encoding.
-*   `aggregator`: Feature aggregation function.
-*   `render_func`, `blend_func`, `tone_map`: Rendering, blending, and tone-mapping functions.
-*   `is_compute_depth`: Flag to enable depth computation.
+*   `pixel_idx`: Indices of pixels to render [S1, unofficial].
+*   `camrotc2w`: Camera rotation matrix (C2W) [S1, unofficial].
+*   `campos`: Camera position (C2W) [S1, unofficial].
+*   `near`, `far`: Near and far clipping planes [S1, unofficial].
+*   `focal`: Focal length [S1, unofficial].
+*   `h`, `w`: Image height and width [S1, unofficial].
+*   `intrinsic`: Camera intrinsic matrix [S1, unofficial].
+*   `gt_image`: Ground truth image [S1, unofficial].
+*   `raydir`: Ray directions [S1, unofficial].
+*   `opt`: Configuration object containing flags like `raydist_mode_unit`, `prob`, `return_color`, `return_depth` [S1, unofficial].
+*   `neural_points`: The neural point cloud data structure [S1, unofficial].
+*   `num_pos_freqs`, `num_viewdir_freqs`: Number of frequency bands for positional and view-direction encoding [S1, unofficial].
+*   `aggregator`: Feature aggregation function [S1, unofficial].
+*   `render_func`, `blend_func`, `tone_map`: Rendering, blending, and tone-mapping functions [S1, unofficial].
+*   `is_compute_depth`: Flag to enable depth computation [S1, unofficial].
 
 **Outputs:**
-*   `ray_color`: Rendered color per ray.
-*   `opacity`: Opacity per ray.
-*   `coarse_depth`: Depth estimate per ray.
-*   `coarse_is_background`: Background transmission mask.
-*   `ray_mask`: Valid ray mask.
-*   `weight`, `blend_weight`, `conf_coefficient`: Intermediate blending weights.
-*   `ray_max_shading_opacity`, `ray_max_sample_loc_w`, etc.: Statistics for max-shading opacity mode.
+*   `ray_color`: Rendered color per ray [S1, unofficial].
+*   `opacity`: Opacity per ray [S1, unofficial].
+*   `coarse_depth`: Depth estimate per ray [S1, unofficial].
+*   `coarse_is_background`: Background transmission mask [S1, unofficial].
+*   `ray_mask`: Valid ray mask [S1, unofficial].
+*   `weight`, `blend_weight`, `conf_coefficient`: Intermediate blending weights [S1, unofficial].
+*   `ray_max_shading_opacity`, `ray_max_sample_loc_w`, `ray_max_far_dist`, `shading_avg_color`, `shading_avg_dir`, `shading_avg_conf`, `shading_avg_embedding`: Statistics for max-shading opacity mode [S1, unofficial].
 
 ### Data Structures
-The module relies on the `neural_points` structure, which provides sampled features via a forward call. The sampled features include:
-*   `sampled_color`: RGB color values.
-*   `sampled_Rw2c`: Rotation matrices (World-to-Camera).
-*   `sampled_dir`: View directions.
-*   `sampled_conf`: Confidence values.
-*   `sampled_embedding`: Feature embeddings.
-*   `sampled_xyz_pers`: 3D points in perspective space.
-*   `sampled_xyz`: 3D points in world space.
-*   `sample_pnt_mask`: Mask for valid points.
-*   `sample_loc`: Sample locations along the ray.
-*   `sample_loc_w`: Sample locations in world space.
-*   `sample_ray_dirs`: Ray directions at sample points.
-*   `ray_mask_tensor`: Mask for valid rays.
-*   `vsize`: Voxel size (3D vector).
-*   `grid_vox_sz`: Grid voxel size.
+The module relies on the `neural_points` structure, which provides sampled features via a forward call [S1, unofficial]. The sampled features include:
+*   `sampled_color`: RGB color values [S1, unofficial].
+*   `sampled_Rw2c`: Rotation matrices (World-to-Camera) [S1, unofficial].
+*   `sampled_dir`: View directions [S1, unofficial].
+*   `sampled_conf`: Confidence values [S1, unofficial].
+*   `sampled_embedding`: Feature embeddings [S1, unofficial].
+*   `sampled_xyz_pers`: 3D points in perspective space [S1, unofficial].
+*   `sampled_xyz`: 3D points in world space [S1, unofficial].
+*   `sample_pnt_mask`: Mask for valid points [S1, unofficial].
+*   `sample_loc`: Sample locations along the ray [S1, unofficial].
+*   `sample_loc_w`: Sample locations in world space [S1, unofficial].
+*   `sample_ray_dirs`: Ray directions at sample points [S1, unofficial].
+*   `ray_mask_tensor`: Mask for valid rays [S1, unofficial].
+*   `vsize`: Voxel size (3D vector) [S1, unofficial].
+*   `grid_vox_sz`: Grid voxel size [S1, unofficial].
 
 ### Steps
 
 1.  **Initialization**: The module is initialized with parameters: `tonemap_func`, `render_func`, `blend_func`, `aggregator`, `is_compute_depth`, `neural_points`, `opt`, `num_pos_freqs`, `num_viewdir_freqs` [S1, unofficial].
-
 2.  **Sampling**: In the forward pass, call `self.neural_points` with inputs: `pixel_idx`, `camrotc2w`, `campos`, `near`, `far`, `focal`, `h`, `w`, `intrinsic`, `gt_image`, `raydir` to obtain the sampled features listed above [S1, unofficial].
-
 3.  **Aggregation**: Aggregate sampled features using `self.aggregator` to produce `decoded_features`, `ray_valid`, `weight`, `conf_coefficient` [S1, unofficial].
-
 4.  **Ray Distance Calculation**:
     *   Compute cumulative maximum of the z-component of sample locations:
         $$ \text{ray\_dist}_{\text{cum}} = \text{torch.cummax}(\text{sample\_loc}[\dots, 2], \text{dim}=-1)[0] $$
     *   Calculate distances between consecutive samples and the last segment:
         $$ \text{ray\_dist} = \text{torch.cat}([\text{ray\_dist}_{\text{cum}}[\dots, 1:] - \text{ray\_dist}_{\text{cum}}[\dots, :-1], \text{torch.full}((\text{ray\_dist}_{\text{cum}}.\text{shape}[0], \text{ray\_dist}_{\text{cum}}.\text{shape}[1], 1), \text{vsize}[2], \text{device}=\text{ray\_dist}_{\text{cum}}.\text{device})], \text{dim}=-1) $$
         [S1, unofficial]
-
 5.  **Invalid Distance Masking**:
     *   Create a mask for invalid distances:
         $$ \text{mask} = \text{ray\_dist} < 10^{-8} $$
@@ -74,44 +70,38 @@ The module relies on the `neural_points` structure, which provides sampled featu
     *   Convert mask to float32:
         $$ \text{mask} = \text{mask}.\text{to}(\text{torch.float32}) $$
         [S1, unofficial]
-
 6.  **Distance Correction**:
     *   Replace invalid distances with `vsize[2]`:
         $$ \text{ray\_dist} = \text{ray\_dist} \times (1.0 - \text{mask}) + \text{mask} \times \text{vsize}[2] $$
     *   Multiply by valid ray mask:
         $$ \text{ray\_dist} = \text{ray\_dist} \times \text{ray\_valid}.\text{float}() $$
         [S1, unofficial]
-
 7.  **Shading Query Output**:
     *   Set `output['queried_shading']` to a tensor indicating rays with no valid points:
         $$ \text{output}['\text{queried\_shading}'] = \text{torch.logical\_not}(\text{torch.any}(\text{ray\_valid}, \text{dim}=-1, \text{keepdims}=\text{True})).\text{repeat}(1, 1, 3).\text{to}(\text{torch.float32}) $$
         [S1, unofficial]
-
 8.  **Rendering**:
     *   If `self.return_color` is True:
-        *   If `'bg_ray'` in `kargs`, set `bg_color = None`.
+        *   If `'bg_ray'` in `kargs`, set `bg_color = None` [S1, unofficial].
         *   Call `ray_march(ray_dist, ray_valid, decoded_features, self.render_func, self.blend_func, bg_color)` to get `ray_color`, `point_color`, `opacity`, `acc_transmission`, `blend_weight`, `background_transmission`, `_` [S1, unofficial].
         *   Apply tone map:
             $$ \text{ray\_color} = \text{self.tone\_map}(\text{ray\_color}) $$
         *   Store in `output` [S1, unofficial].
     *   Else (if `self.return_color` is False):
         *   Call `alpha_ray_march(ray_dist, ray_valid, decoded_features, self.blend_func)` to get `opacity`, `acc_transmission`, `blend_weight`, `background_transmission`, `_` [S1, unofficial].
-
 9.  **Depth Computation**:
     *   If `self.return_depth` is True:
         *   Compute alpha blend weight:
             $$ \text{alpha\_blend\_weight} = \text{opacity} \times \text{acc\_transmission} $$
-        *   Reshape `weight` to `alpha_blend_weight.shape[:3]`.
+        *   Reshape `weight` to `alpha_blend_weight.shape[:3]` [S1, unofficial].
         *   Compute average depth:
             $$ \text{avg\_depth} = \frac{\sum (\text{weight} \times \text{ray\_ts})}{\sum \text{weight} + 10^{-6}} $$
             [S1, unofficial]
         *   Store in `output['coarse_depth']` [S1, unofficial].
-
 10. **Additional Outputs**:
     *   Store `background_transmission` in `output['coarse_is_background']` [S1, unofficial].
     *   Store `ray_mask_tensor` in `output['ray_mask']` [S1, unofficial].
     *   If `weight` is not None, store `weight.detach()`, `blend_weight.detach()`, `conf_coefficient` in `output` [S1, unofficial].
-
 11. **Max Shading Opacity Mode**:
     *   If `self.opt.prob == 1` and `output['coarse_point_opacity'].shape[1] > 0`:
         *   Get batch size `B` and number of rays `OR` from `sample_pnt_mask.shape` [S1, unofficial].
@@ -138,28 +128,18 @@ The module relies on the `neural_points` structure, which provides sampled featu
 
 ```python
 import torch
-import torch.nn.functional as F
 
 def neural_points_ray_marching(
     pixel_idx, camrotc2w, campos, near, far, focal, h, w, intrinsic, gt_image, raydir,
     opt, neural_points, num_pos_freqs, num_viewdir_freqs,
-    aggregator, render_func, blend_func, tone_map, is_compute_depth
+    aggregator, render_func, blend_func, tone_map, is_compute_depth, **kargs
 ):
     # Step 2: Sampling
     (sampled_color, sampled_Rw2c, sampled_dir, sampled_conf, sampled_embedding,
      sampled_xyz_pers, sampled_xyz, sample_pnt_mask, sample_loc, sample_loc_w,
      sample_ray_dirs, ray_mask_tensor, vsize, grid_vox_sz) = neural_points(
-        pixel_idx=pixel_idx,
-        camrotc2w=camrotc2w,
-        campos=campos,
-        near=near,
-        far=far,
-        focal=focal,
-        h=h,
-        w=w,
-        intrinsic=intrinsic,
-        gt_image=gt_image,
-        raydir=raydir
+        pixel_idx=pixel_idx, camrotc2w=camrotc2w, campos=campos, near=near, far=far,
+        focal=focal, h=h, w=w, intrinsic=intrinsic, gt_image=gt_image, raydir=raydir
     )
 
     # Step 3: Aggregation
@@ -173,8 +153,7 @@ def neural_points_ray_marching(
     ray_dist_cum = torch.cummax(sample_loc[..., 2], dim=-1)[0]
     last_segment = torch.full(
         (ray_dist_cum.shape[0], ray_dist_cum.shape[1], 1),
-        vsize[2],
-        device=ray_dist_cum.device
+        vsize[2], device=ray_dist_cum.device
     )
     ray_dist = torch.cat([
         ray_dist_cum[..., 1:] - ray_dist_cum[..., :-1],
@@ -185,7 +164,7 @@ def neural_points_ray_marching(
     mask = ray_dist < 1e-8
     if opt.raydist_mode_unit > 0:
         mask = mask | (ray_dist > 2 * vsize[2])
-    mask = mask.float()
+    mask = mask.to(torch.float32)
 
     # Step 6: Distance Correction
     ray_dist = ray_dist * (1.0 - mask) + mask * vsize[2]
@@ -193,32 +172,26 @@ def neural_points_ray_marching(
 
     # Step 7: Shading Query Output
     output = {}
-    queried_shading = torch.logical_not(torch.any(ray_valid, dim=-1, keepdims=True))
-    output['queried_shading'] = queried_shading.repeat(1, 1, 3).to(torch.float32)
+    output['queried_shading'] = torch.logical_not(torch.any(ray_valid, dim=-1, keepdims=True)).repeat(1, 1, 3).to(torch.float32)
 
     # Step 8: Rendering
     if opt.return_color:
         bg_color = None
-        if 'bg_ray' in locals(): # Assuming bg_ray is passed or available
-            bg_color = None # Placeholder for actual bg_ray logic if needed
-        ray_color, point_color, opacity, acc_transmission, blend_weight, background_transmission, _ = ray_march(
-            ray_dist, ray_valid, decoded_features, render_func, blend_func, bg_color
-        )
-        ray_color = tone_map(ray_color)
-        output['ray_color'] = ray_color
+        if 'bg_ray' in kargs:
+            bg_color = None
+        # Sources do not provide ray_march implementation [G]
+        # ray_color, point_color, opacity, acc_transmission, blend_weight, background_transmission, _ = ray_march(...)
+        # ray_color = tone_map(ray_color)
+        # output['ray_color'] = ray_color
     else:
-        opacity, acc_transmission, blend_weight, background_transmission, _ = alpha_ray_march(
-            ray_dist, ray_valid, decoded_features, blend_func
-        )
+        # Sources do not provide alpha_ray_march implementation [G]
+        # opacity, acc_transmission, blend_weight, background_transmission, _ = alpha_ray_march(...)
 
     # Step 9: Depth Computation
     if opt.return_depth:
         alpha_blend_weight = opacity * acc_transmission
         weight_reshaped = weight.reshape(alpha_blend_weight.shape[:3])
-        # Assuming ray_ts is available or derived from ray_dist
-        # Note: The source uses ray_ts, which is likely ray_dist or a similar distance tensor
-        # If ray_ts is not explicitly defined in the snippet, we assume it's ray_dist
-        ray_ts = ray_dist 
+        ray_ts = ray_dist  # Sources do not define ray_ts; assumed equivalent to ray_dist [G]
         avg_depth = (weight_reshaped * ray_ts).sum(-1) / (weight_reshaped.sum(-1) + 1e-6)
         output['coarse_depth'] = avg_depth
 
@@ -231,34 +204,31 @@ def neural_points_ray_marching(
         output['conf_coefficient'] = conf_coefficient
 
     # Step 11: Max Shading Opacity Mode
+    # coarse_point_opacity is assumed to be computed during aggregation/sampling [G]
     if opt.prob == 1 and output['coarse_point_opacity'].shape[1] > 0:
         B, OR = sample_pnt_mask.shape[:2]
         if weight is not None:
             ray_max_shading_opacity, opacity_ind = torch.max(
                 output['coarse_point_opacity'], dim=-1, keepdim=True
             )
-            # Expand opacity_ind for gathering
-            opacity_ind_expanded = opacity_ind.expand(-1, -1, -1, sampled_color.shape[-1])
-            
-            # Gather features
+            opacity_ind_expanded = opacity_ind.expand_as(sampled_color)
+
             sampled_xyz_max = torch.gather(sampled_xyz, 1, opacity_ind_expanded[..., None].expand_as(sampled_xyz))
             weight_max = torch.gather(weight, 1, opacity_ind[..., None].expand_as(weight))
             sampled_color_max = torch.gather(sampled_color, 1, opacity_ind_expanded[..., None].expand_as(sampled_color))
             sampled_dir_max = torch.gather(sampled_dir, 1, opacity_ind_expanded[..., None].expand_as(sampled_dir))
             sampled_conf_max = torch.gather(sampled_conf, 1, opacity_ind_expanded[..., None].expand_as(sampled_conf))
             sampled_embedding_max = torch.gather(sampled_embedding, 1, opacity_ind_expanded[..., None].expand_as(sampled_embedding))
-            
-            # Compute ray max far dist
+
             ray_max_sample_loc_w = torch.gather(sample_loc_w, 1, opacity_ind_expanded[..., None].expand_as(sample_loc_w))
             ray_max_far_dist = torch.min(torch.norm(sampled_xyz_max - ray_max_sample_loc_w, dim=-1))
-            
-            # Compute weighted averages
+
             weight_sum = weight_max.sum(dim=1, keepdim=True) + 1e-6
             shading_avg_color = (weight_max * sampled_color_max).sum(dim=1, keepdim=True) / weight_sum
             shading_avg_dir = (weight_max * sampled_dir_max).sum(dim=1, keepdim=True) / weight_sum
             shading_avg_conf = (weight_max * sampled_conf_max).sum(dim=1, keepdim=True) / weight_sum
             shading_avg_embedding = (weight_max * sampled_embedding_max).sum(dim=1, keepdim=True) / weight_sum
-            
+
             output['ray_max_shading_opacity'] = ray_max_shading_opacity
             output['ray_max_sample_loc_w'] = ray_max_sample_loc_w
             output['ray_max_far_dist'] = ray_max_far_dist
@@ -267,7 +237,6 @@ def neural_points_ray_marching(
             output['shading_avg_conf'] = shading_avg_conf
             output['shading_avg_embedding'] = shading_avg_embedding
     else:
-        # Initialize with zeros
         output['ray_max_shading_opacity'] = torch.zeros_like(output['coarse_point_opacity'])
         output['ray_max_sample_loc_w'] = torch.zeros_like(sample_loc_w)
         output['ray_max_far_dist'] = torch.zeros_like(output['coarse_point_opacity'])
@@ -277,15 +246,6 @@ def neural_points_ray_marching(
         output['shading_avg_embedding'] = torch.zeros_like(sampled_embedding)
 
     return output
-
-def ray_march(ray_dist, ray_valid, decoded_features, render_func, blend_func, bg_color):
-    # Placeholder for actual ray marching logic
-    # This function is assumed to be defined elsewhere in the codebase
-    pass
-
-def alpha_ray_march(ray_dist, ray_valid, decoded_features, blend_func):
-    # Placeholder for actual alpha ray marching logic
-    pass
 ```
 
 ### Parameters
@@ -304,26 +264,22 @@ def alpha_ray_march(ray_dist, ray_valid, decoded_features, blend_func):
 ## Operating characteristics
 
 ### Time and Memory Complexity
-*   **Time**: The complexity is dominated by the sampling and aggregation steps, which are linear with respect to the number of sampled points per ray. The distance calculation and masking are also linear. The rendering step depends on the number of samples per ray.
-*   **Memory**: Memory usage is proportional to the number of sampled points per ray and the batch size. The `neural_points` module allocates tensors for all sampled features.
+Not given in the sources.
 
 ### Measured Performance
-*   Not given in the sources.
+Not given in the sources.
 
 ### Scaling
-*   Not given in the sources.
+Not given in the sources.
 
 ### Strengths and Limitations
-*   **Strengths**: Efficiently renders sparse point clouds with learned features. Differentiable, allowing for end-to-end training. Handles invalid distances and missing points gracefully.
-*   **Limitations**: Performance depends on the density of the point cloud. Sparse regions may require more samples to achieve high-quality rendering.
+Not given in the sources.
 
 ### When to Use
-*   Use when rendering neural point clouds with learned features.
-*   Use when differentiability is required for training.
+Not given in the sources.
 
 ### When Not to Use
-*   Use standard volume rendering for continuous volumetric data.
-*   Use traditional rasterization for dense, static meshes.
+Not given in the sources.
 
 ## Background
 

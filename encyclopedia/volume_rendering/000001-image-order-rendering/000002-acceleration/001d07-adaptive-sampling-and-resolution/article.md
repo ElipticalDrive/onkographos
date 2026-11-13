@@ -1,84 +1,74 @@
 # Adaptive Sampling and Resolution
 
-Also called: Adaptive Sampling, Adaptive Resolution, Adaptive Ray Marching
 
 ## Overview
-Adaptive Sampling and Resolution is a family of volume rendering acceleration techniques that dynamically vary the computational effort—either by adjusting the number of samples per ray, the spatial resolution of the rendering grid, or the density of ray casting—based on local scene complexity, visual error, or performance budgets [S1][S2, unofficial]. It solves the problem of uniform computational waste in homogeneous regions or the excessive cost of high-fidelity rendering in complex areas by concentrating resources where they are most needed [S1][S2, unofficial]. It sets itself apart from static acceleration methods like [Early Z-Test Acceleration](8226-early-z-test-acceleration.md) or [Space Skipping and Empty Volume Culling](10063-space-skipping-and-empty-volume-culling.md) by actively modifying the sampling density or resolution parameters during the rendering or training process rather than merely skipping pre-defined empty regions [S1][S2, unofficial].
+Adaptive Sampling and Resolution is a family of volume rendering acceleration techniques that dynamically vary the computational effort—either by adjusting the number of samples per ray, the spatial resolution of the rendering grid, or the density of ray casting—based on local scene complexity, visual error, or performance budgets [S1, unofficial][S2, unofficial]. It solves the problem of uniform computational waste in homogeneous regions or the excessive cost of high-fidelity rendering in complex areas by concentrating resources where they are most needed [S1, unofficial]. It sets itself apart from static acceleration methods like [Early Z-Test Acceleration](8226-early-z-test-acceleration.md) or [Space Skipping and Empty Volume Culling](10063-space-skipping-and-empty-volume-culling.md) by actively modifying the sampling density or resolution parameters during the rendering or training process rather than merely skipping pre-defined empty regions [G].
 
 ## Shared principles
-The core mechanism shared by all children is the deviation from a fixed, uniform sampling strategy. Instead of casting a constant number of rays or samples per pixel/ray, the method computes a metric (such as gradient magnitude, rendering error, or temporal difference) and uses it to modulate the sampling rate or resolution.
+The core mechanism shared by all children is the deviation from a fixed, uniform sampling strategy [G]. Instead of casting a constant number of rays or samples per pixel/ray, the method computes a metric (such as gradient magnitude, rendering error, or temporal difference) and uses it to modulate the sampling rate or resolution [G].
 
 Mathematically, this often involves a control loop:
-1.  **Metric Evaluation:** Compute a scalar value $M$ representing local complexity or error.
-2.  **Adaptation:** Adjust a parameter $P$ (step size $\Delta t$, resolution $R$, or sampling probability $w$) based on $M$.
-3.  **Rendering/Training:** Execute the volume integral or loss computation with the adjusted parameter.
+1. **Metric Evaluation:** Compute a scalar value $M$ representing local complexity or error [G].
+2. **Adaptation:** Adjust a parameter $P$ (step size $\Delta t$, resolution $R$, or sampling probability $w$) based on $M$ [G].
+3. **Rendering/Training:** Execute the volume integral or loss computation with the adjusted parameter [G].
 
 Common adaptation laws include:
-*   **Step Size Adaptation:** $\Delta t \propto \frac{1}{M}$ or $\Delta t = \min(\Delta t_{max}, \max(\Delta t_{min}, \frac{k}{M}))$ [S6, S8, S9, unofficial].
-*   **Resolution Control:** $R_{new} = R_{old} + \alpha \cdot (t_{target} - t_{actual})$ or threshold-based switching [S3063, unofficial].
-*   **Probability Weighting:** $w_i \propto M_i$ for importance sampling [S4696, unofficial].
+* **Step Size Adaptation:** $\Delta t \propto \frac{1}{M}$ or $\Delta t = \min(\Delta t_{max}, \max(\Delta t_{min}, \frac{k}{M}))$ [G].
+* **Resolution Control:** $R_{new} = R_{old} + \alpha \cdot (t_{target} - t_{actual})$ or threshold-based switching [G].
+* **Probability Weighting:** $w_i \propto M_i$ for importance sampling [G].
 
-All methods in this family aim to maintain visual fidelity while reducing the total number of volume queries or network evaluations [S1][S2, unofficial].
+All methods in this family aim to maintain visual fidelity while reducing the total number of volume queries [S1, unofficial][S2, unofficial].
 
 ## Subtopics
 
 ### [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md)
-Decouples density estimation from color evaluation. A coarse network proposes samples in high-density regions, which are then importance-sampled by a fine network. It sets itself apart by explicitly separating the rough density estimation pass from the detailed evaluation pass. Choose when rendering neural radiance fields with significant empty space to avoid wasting fine-network queries on background.
+Decouples the volume rendering integral into a coarse density estimation pass and a fine detail reconstruction pass. It sets itself apart by explicitly structuring the sampling process into two distinct neural network evaluations rather than just adjusting resolution or step size dynamically. Choose when rendering neural radiance fields with significant empty space to avoid wasting fine-network queries on background.
 
 ### [Random Pixel Subsampling](1668-random-pixel-subsampling.md)
-Selects a random subset of pixel coordinates for rendering or training. It solves high memory/compute costs by processing a sparse set of pixels. Unlike siblings, it relies on uniform random selection without spatial coherence, serving as a baseline for efficiency rather than quality. Choose for rapid prototyping or when spatial coherence is not required.
-
-### [Temporal Upsampling and Dithering](2872-temporal-upsampling-and-dithering.md)
-Applies blue noise dithering to low-resolution renders to break aliasing, then uses temporal accumulation to reconstruct high-resolution details. It distinguishes itself by leveraging temporal blending to mitigate noise, unlike static low-resolution rendering. Choose for interactive applications where frame-to-frame coherence can be exploited.
+Selects a random subset of pixel coordinates from a full image grid to reduce the computational cost of training volume rendering models. It differs from siblings by using uniform random selection without spatial coherence constraints, relying instead on statistical averaging over iterations to maintain global fidelity. Choose for rapid prototyping or when spatial coherence is not required.
 
 ### [Resolution Adaptation](3063-resolution-adaptation.md)
-Dynamically adjusts spatial discretization (voxel grid, viewport, or octree depth) based on performance or error metrics. It sets itself apart by focusing on the *structural* granularity of the representation rather than just per-ray sample counts. Choose when hardware constraints require dynamic resolution scaling or when rendering hierarchical data structures.
-
-### [Adaptive Sampling Step with Early Ray Termination](4573-adaptive-sampling-step-with-early-ray-termination.md)
-Decreases sampling frequency based on distance from the viewpoint and uses early ray termination. It requires a pre-integrated transfer function to maintain brightness consistency across varying step sizes. Choose for distant volumetric data where spatial coherence allows larger steps.
+Modulates the spatial sampling density or grid resolution during volume rendering to balance visual fidelity against computational cost. It sets itself apart by adapting the "anchor points" or sampling rates continuously or periodically, distinguishing it from siblings that alter ray count or use coarse-to-fine refinement. Choose when hardware constraints require dynamic resolution scaling or when rendering hierarchical data structures.
 
 ### [Spatiotemporal Importance Sampling](4696-spatiotemporal-importance-sampling.md)
-Assigns higher sampling probabilities to pixels occluded by tools or exhibiting motion, and lower probabilities to stationary tissues. It solves inefficient training in surgical scenes by addressing varying learning difficulty across pixels. Choose for training neural fields on dynamic scenes with occlusions.
-
-### [Checkerboard Progressive Rendering](4836-checkerboard-progressive-rendering.md)
-Traces only half the pixels each frame using a deterministic checkerboard pattern, blending results over time. It sets itself apart from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by using temporal blending of partial frames rather than spatial resolution stages. Choose for interactive applications requiring immediate feedback with progressive refinement.
+Assigns higher sampling probabilities to tissue pixels occluded by tools or exhibiting extensive motion ranges, and lower probabilities to stationary tissues. It addresses the challenge of tool occlusion and stationary tissue redundancy, which exacerbate learning complexity. Choose for training neural fields on dynamic scenes with occlusions.
 
 ### [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md)
-Dynamically adjusts sampling density along a ray based on local scene properties (e.g., gradient, opacity). It distinguishes itself by focusing on spatial adaptation along the ray trajectory rather than temporal frame budgeting. Choose for general volume rendering where local density varies significantly.
-
-### [Multi-Resolution Rendering for Clouds](7260-multi-resolution-rendering-for-clouds.md)
-Limits samples by rendering clouds at low resolution first to identify areas needing fewer samples, then accumulating with higher resolution passes. Choose for atmospheric rendering where large-scale structures dominate.
+Dynamically adjusts the sampling step size $\Delta t$ and ray termination conditions based on local data metrics or geometric properties, rather than using a fixed uniform grid. It sets itself apart by modulating the ray's internal progression directly, often building on this family by implementing specific adaptation laws for step size and opacity thresholds. Choose for general volume rendering where local density varies significantly.
 
 ### [Adaptive Image Sampling with Pixel Sharing](8159-adaptive-image-sampling-with-pixel-sharing.md)
-Casts rays only from the corners of square image regions and interpolates the interior, handling parallel synchronization by sharing corner pixels. It is suitable for MIMD shared-memory architectures. Choose for parallel volume rendering on shared-memory systems.
+Reduces computational cost by casting rays only from the corners of square image regions and interpolating the interior pixels. It solves the problem of redundant ray casting in smooth areas while managing synchronization dependencies inherent in parallel implementations. Choose for parallel volume rendering on shared-memory systems.
 
 ### [Context-Based Adaptive Ray Sampling with Quadtree Subdivision](8164-context-based-adaptive-ray-sampling-with-quadtree-subdivisio.md)
-Partitions image space using a quadtree to allocate more rays to nontrivial areas (high error) and fewer to trivial areas. It operates continuously throughout training epochs, defining prior and posterior probability distributions to guide subdivision. Choose for training neural fields where error-driven refinement is beneficial.
-
-### [Adaptive Sampling Rate Control](8896-adaptive-sampling-rate-control.md)
-Not given in the sources.
+Partitions the image space into a quadtree hierarchy to allocate ray sampling density based on local rendering error. It sets itself apart by explicitly maintaining two probability distributions: a prior distribution to guide initial ray placement within leaf nodes and a posterior distribution to determine which leaf nodes are redundant and should be discarded. Choose for training neural fields where error-driven refinement is beneficial.
 
 ### [Spatial Subdivision and Hierarchical Sampling](10997-spatial-subdivision-and-hierarchical-sampling.md)
-Varies ray casting density across the image plane based on local visual complexity or error estimates using hierarchical structures (quadtrees). It solves uniform computational waste by concentrating effort on high-gradient regions. Choose for high-quality offline rendering where error bounds are critical.
+Accelerates volume rendering and neural radiance field training by dynamically adjusting sampling density based on local visual complexity or error metrics. It sets itself apart by explicitly using hierarchical data structures (quadtrees) or iterative error bounds to define the sampling regions. Choose for high-quality offline rendering where error bounds are critical.
 
-#### Adaptive Feature Level Selection
-- **Definition:** An anti-aliasing strategy that dampens high-resolution grid features based on the pixel footprint to prevent aliasing artifacts when rendering with adaptive sampling [S1].
-- **Step:** Derive pixel radius $p(\mathbf{x})$ in contracted space for a given sample $\mathbf{x}$. Calculate optimal feature level $L(\mathbf{x})$ using the formula $L(\mathbf{x}) := -\log_2(2s \cdot p(\mathbf{x}))$. Multiply grid features at resolution level $L$ by the per-level weight $w_L$ calculated from the piecewise function [S1].
-- **Formula:**
-  $$ L(\mathbf{x}) := -\log_2(2s \cdot p(\mathbf{x})) $$
-  where $s$ is the base grid resolution (128) [S1].
-  $$ w_L = \begin{cases} 1 & \text{if } L < \lceil L(\mathbf{x}) \rceil \\ L(\mathbf{x}) - \lceil L(\mathbf{x}) \rceil & \text{if } \lceil L(\mathbf{x}) \rceil < L \leq \lceil L(\mathbf{x}) \rceil \\ 0 & \text{if } \lceil L(\mathbf{x}) \rceil < L \end{cases} $$
-  These are per-level weights applied to grid features at resolution level $L$ [S1].
-- **Parameter:** $s$: Base grid resolution, typically 128 [S1].
+### [Temporal and Progressive Rendering](11267-temporal-and-progressive-rendering.md)
+Reduces per-frame computational cost by distributing the sampling budget across multiple frames or by adaptively refining resolution based on prior results. It distinguishes itself by leveraging temporal coherence or iterative spatial refinement rather than static importance metrics or neural network inference. Choose for interactive applications requiring immediate feedback with progressive refinement.
+
+### [Adaptive Volume Renderer (AVR)](11608-adaptive-volume-renderer-avr.md)
+A hybrid rendering method that combines adaptive ray marching with standard volume rendering to reduce computational cost while maintaining visual fidelity. It addresses high latency in neural radiance fields by using a recurrent neural network to predict a surface intersection point, then performing localized volume rendering around that point. Choose when latency reduction is critical and surface prediction is reliable.
 
 #### Adaptive Sparse Ray Sampling
-- **Definition:** An optimization that casts a sparse grid of rays (less than one per pixel) and adaptively increases ray density in regions of high image complexity, exploiting coherence in projections [S2, unofficial].
-- **Step:** Cast a sparse grid of rays, with density less than one ray per pixel. Measure local image complexity using color differences. Perform recursive subdivision of image space to increase sampling density in complex regions. Form images from the resulting nonuniform array of sample colors by interpolation and resampling at the display resolution [S2, unofficial].
-- **Number:** Performance: Savings of more than two orders of magnitude over brute-force rendering methods were obtained for many datasets. Performance: Crude images obtained in a few seconds, with gradually better images at intervals of a few seconds each, culminating in high-quality images in less than a minute [S2, unofficial].
+- **Definition:** An optimization that casts a sparse grid of rays (less than one per pixel) and adaptively increases ray density in regions of high image complexity, exploiting coherence in projections [S1, unofficial].
+- **Step:** Cast a sparse grid of rays, with density less than one ray per pixel. Measure local image complexity using color differences. Perform recursive subdivision of image space to increase sampling density in complex regions. Form images from the resulting nonuniform array of sample colors by interpolation and resampling at the display resolution [S1, unofficial].
+- **Number:** Performance: Savings of more than two orders of magnitude over brute-force rendering methods were obtained for many datasets. Performance: Crude images obtained in a few seconds, with gradually better images at intervals of a few seconds each, culminating in high-quality images in less than a minute [S1, unofficial].
+
+#### Adaptive Volume Sampling
+- **Number:** On 1024x1024 resolution, ATI X1800 XT achieves 2.6 FPS (full) vs 7.1 FPS (adaptive); NV GF7800 GTX achieves 1.2 FPS (full) vs 3.0 FPS (adaptive). Speed-up: 2.6-2.8 [S2, unofficial].
+
+#### Adaptive Depth Sampling with Voxel Layer Alignment
+- **Definition:** An acceleration technique for ray traversal that reduces trilinear interpolation cost by aligning sample points with voxel layers to use bilinear interpolation, and skipping intermediate samples via adaptive depth sampling [S3, unofficial].
+- **Step:** Step 1: Determine the reference axis perpendicular to the parallel voxel layers traversed fastest by the current ray. Step 2: Decide the first sampling position when the ray reaches the volume. Step 3: Calculate sampling interval $l$ such that every alternate sampling point lies exactly on a voxel layer. Step 4: Use bilinear interpolation for sample points lying on voxel layers. Use simplified trilinear interpolation for points between layers. Apply adaptive depth sampling to skip time-consuming points between layers [S3, unofficial].
+- **Number:** Saved about 70% of ray traversal time by skipping every other sample point along each ray [S3, unofficial].
+- **Comparison:** Differs from standard trilinear interpolation by exploiting ray direction to align samples with voxel layers, allowing bilinear interpolation (lower cost) for half the points, and skipping intermediate points via adaptive depth sampling [S3, unofficial].
 
 ## Background
-The concept of adaptive sampling in volume rendering originated from the need to handle the high computational cost of ray marching through dense volumetric data. Early work by [S2, unofficial] (DTIC ADA208091) described adaptive sparse ray sampling and recursive subdivision to exploit coherence in projections, achieving significant performance savings. More recently, with the rise of Neural Radiance Fields (NeRF), adaptive sampling has evolved to include importance sampling based on neural network outputs, such as the two-stage sampling in [925-two-stage-nerf-rendering.md] [S1]. The family also includes techniques for temporal coherence [2872-temporal-upsampling-and-dithering.md] and parallel execution [8159-adaptive-image-sampling-with-pixel-sharing.md].
+The concept of adaptive sampling in volume rendering originated from the need to handle the high computational cost of ray marching through dense volumetric data [G]. Early work by [S1, unofficial] described adaptive sparse ray sampling and recursive subdivision to exploit coherence in projections, achieving significant performance savings. Later research introduced adaptive volume sampling for GPU-based raycasting [S2, unofficial] and adaptive depth sampling with voxel layer alignment to reduce interpolation costs [S3, unofficial]. Modern implementations also incorporate temporal coherence [G] and parallel execution strategies [G].
 
 ## Sources
-[S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
-[S2] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)
+[S1] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)
+[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
+[S3] NASA Technical Reports Server (NTRS) 19990040407: Time-Critical Volume Rendering, https://archive.org/details/NASA_NTRS_Archive_19990040407, fetched 2026-10-26 (unofficial)

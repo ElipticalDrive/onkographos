@@ -3,38 +3,38 @@
 Also called: SDF Transforms, Transformed SDF, Transforming SDFs, SDF Affine Transformation, SDF Model Transformations, SDF Inverse Transformation, SDF Spatial Transformations, Rigid Body Transformation of SDFs, Inverse Transformation for Rotation/Translation
 
 ## Overview
-SDF Transformation is a technique for applying geometric transformations (rotation, translation, scaling, and deformation) to Signed Distance Field primitives by manipulating the query point coordinates before evaluating the base distance function [S1, S2, S5, unofficial]. It solves the problem of positioning and animating implicit surfaces in world space without modifying the underlying primitive definition, preserving the mathematical integrity of the distance field for ray marching [S2, S9, unofficial]. Unlike [Uniform Scaling of SDFs](2394-uniform-scaling-of-sdfs.md), which handles exact distance compensation for uniform factors, or [Lipschitz Transformation Bounds](1557-lipschitz-transformation-bounds.md), which derives safety bounds for non-linear deformations, standard SDF Transformation relies on the inverse mapping of isometries (which preserve distance) or explicit scaling factors [S1, S3, S10, unofficial].
+SDF Transformation is a technique for applying geometric transformations (rotation, translation, scaling, and deformation) to Signed Distance Field primitives by manipulating the query point coordinates before evaluating the base distance function [S1, unofficial][S2, unofficial][S5, unofficial]. It solves the problem of positioning and animating implicit surfaces in world space without modifying the underlying primitive definition, preserving the mathematical integrity of the distance field for ray marching [S2, unofficial][S9, unofficial]. Unlike [Uniform Scaling of SDFs](2394-uniform-scaling-of-sdfs.md), which handles exact distance compensation for uniform factors, or [Lipschitz Transformation Bounds](1557-lipschitz-transformation-bounds.md), which derives safety bounds for non-linear deformations, standard SDF Transformation relies on the inverse mapping of isometries (which preserve distance) or explicit scaling factors [S1, unofficial][S3, unofficial][S10, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A query point $\mathbf{x}$ in world space, a transformation $T$ (defined by parameters such as rotation matrix $R$, translation vector $\mathbf{t}$, or scale factor $s$), and a base SDF function $f(\mathbf{p})$.
-- Output: The signed distance $d$ from $\mathbf{x}$ to the transformed surface, and optionally the surface normal.
+- Input: A query point $\mathbf{x}$ in world space, a transformation $T$ (defined by parameters such as rotation matrix $R$, translation vector $\mathbf{t}$, or scale factor $s$), and a base SDF function $f(\mathbf{p})$ [S10, unofficial][S12, unofficial].
+- Output: The signed distance $d$ from $\mathbf{x}$ to the transformed surface, and optionally the surface normal [S9, unofficial].
 
 **Data Structures:**
-- Transformation Matrix: A $4 \times 4$ homogeneous matrix $M$ representing the local-to-world transform. For rigid bodies, this is composed of rotation $R$ and translation $\mathbf{t}$. For scaling, it may be diagonal.
-- Point: A 3D vector $\mathbf{x}$ or homogeneous 4D vector $\mathbf{x}_h = (\mathbf{x}, 1)$.
+- Transformation Matrix: A $4 \times 4$ homogeneous matrix $M$ representing the local-to-world transform [S11, unofficial]. For rigid bodies, this is composed of rotation $R$ and translation $\mathbf{t}$ [S3, unofficial][S6, unofficial]. For scaling, it may be diagonal [S10, unofficial].
+- Point: A 3D vector $\mathbf{x}$ or homogeneous 4D vector $\mathbf{x}_h = (\mathbf{x}, 1)$ [S3, unofficial][S6, unofficial].
 
 **Steps:**
-1. **Compute Inverse Transform:** Determine the inverse of the transformation $T^{-1}$ (or $M^{-1}$) that maps world coordinates back to the primitive's local space [S3, S5, S10, unofficial].
+1. **Compute Inverse Transform:** Determine the inverse of the transformation $T^{-1}$ (or $M^{-1}$) that maps world coordinates back to the primitive's local space [S3, unofficial][S5, unofficial][S10, unofficial].
    - For translation by $\mathbf{t}$: $\mathbf{x}' = \mathbf{x} - \mathbf{t}$ [S8, unofficial].
-   - For rotation by angle $\theta$ around an axis: Use the transpose of the rotation matrix, which corresponds to rotation by $-\theta$ [S3, S6, unofficial]. Note: GLSL/WebGL lacks built-in matrix inversion; use the property $R^{-1} = R^T$ [S3, S6, unofficial].
-   - For uniform scale $s$: $\mathbf{x}' = \mathbf{x} / s$ [S10, S12, unofficial].
+   - For rotation by angle $\theta$ around an axis: Use the transpose of the rotation matrix, which corresponds to rotation by $-\theta$ [S3, unofficial][S6, unofficial]. Note: GLSL/WebGL lacks built-in matrix inversion; use the property $R^{-1} = R^T$ [S3, unofficial][S6, unofficial].
+   - For uniform scale $s$: $\mathbf{x}' = \mathbf{x} / s$ [S10, unofficial][S12, unofficial].
    - For combined affine transform $M = T \cdot R \cdot S$: Compute $M^{-1}$ [S11, unofficial].
-2. **Transform Query Point:** Apply $T^{-1}$ to the world query point $\mathbf{x}$ to obtain the local point $\mathbf{p}_{local}$ [S2, S10, unofficial].
+2. **Transform Query Point:** Apply $T^{-1}$ to the world query point $\mathbf{x}$ to obtain the local point $\mathbf{p}_{local}$ [S2, unofficial][S10, unofficial].
    $$ \mathbf{p}_{local} = T^{-1}(\mathbf{x}) $$
-3. **Evaluate Base SDF:** Query the base distance function with the transformed point [S3, S11, unofficial].
+3. **Evaluate Base SDF:** Query the base distance function with the transformed point [S3, unofficial][S11, unofficial].
    $$ d_{local} = f(\mathbf{p}_{local}) $$
-4. **Adjust Distance (Non-Isometries Only):** If the transformation is not an isometry (e.g., scaling or non-uniform deformation), scale the returned distance to preserve metric correctness [S10, S12, unofficial].
-   - For uniform scale $s$: $d = s \cdot d_{local}$ [S10, S12, unofficial].
+4. **Adjust Distance (Non-Isometries Only):** If the transformation is not an isometry (e.g., scaling or non-uniform deformation), scale the returned distance to preserve metric correctness [S10, unofficial][S12, unofficial].
+   - For uniform scale $s$: $d = s \cdot d_{local}$ [S10, unofficial][S12, unofficial].
    - For isometries (rotation, translation): $d = d_{local}$ [S10, unofficial][S13].
 5. **Compute Normal (Optional):** If normals are required, evaluate the gradient in local space and transform it back to world space using the inverse transpose of the linear part of the transformation [S9, unofficial].
    $$ \mathbf{n}_{world} = (M^{-1})^T \cdot \mathbf{n}_{local} $$
    (Note: For pure rotation, the inverse transpose is the rotation matrix itself. For scaling, normals must be renormalized if anisotropic scaling is used, though standard SDF ray marching often assumes isotropic or rigid transforms for normal accuracy [S11, unofficial]).
 
 **Formulas:**
-- General Transformed Surface: $f(T^{-1}(\mathbf{x})) = 0$ [S10, S12, unofficial].
-- Isometry Distance Preservation: $d(\mathbf{x}, I \circ f^{-1}(0)) = d(I^{-1}(\mathbf{x}), f^{-1}(0))$ [S10, S12, unofficial].
-- Uniform Scale Distance: $d(\mathbf{x}, S(f^{-1}(0))) = s \cdot d(S^{-1}(\mathbf{x}), f^{-1}(0))$ where $S^{-1}(\mathbf{x}) = \mathbf{x}/s$ [S10, S12, unofficial].
+- General Transformed Surface: $f(T^{-1}(\mathbf{x})) = 0$ [S10, unofficial][S12, unofficial].
+- Isometry Distance Preservation: $d(\mathbf{x}, I \circ f^{-1}(0)) = d(I^{-1}(\mathbf{x}), f^{-1}(0))$ [S10, unofficial][S12, unofficial].
+- Uniform Scale Distance: $d(\mathbf{x}, S(f^{-1}(0))) = s \cdot d(S^{-1}(\mathbf{x}), f^{-1}(0))$ where $S^{-1}(\mathbf{x}) = \mathbf{x}/s$ [S10, unofficial][S12, unofficial].
 
 **Parameters:**
 - `orientation`: Quaternion or rotation matrix specifying rotation [S5, unofficial].
@@ -46,14 +46,16 @@ SDF Transformation is a technique for applying geometric transformations (rotati
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import numpy as np
+
 def transform_sdf(query_point, transform_matrix, base_sdf, scale_factor=None):
     """
     Evaluates an SDF with a geometric transformation applied.
     
     Args:
-        query_point: vec3, the point in world space to query.
-        transform_matrix: mat4, the local-to-world transformation matrix.
-        base_sdf: function, the untransformed signed distance function.
+        query_point: np.ndarray (3,), the point in world space to query.
+        transform_matrix: np.ndarray (4, 4), the local-to-world transformation matrix.
+        base_sdf: callable, the untransformed signed distance function.
         scale_factor: float, optional. Required if transform_matrix includes 
                       non-uniform or uniform scaling to correct distance magnitude.
                       If None, assumes isometry (rotation/translation).
@@ -64,15 +66,15 @@ def transform_sdf(query_point, transform_matrix, base_sdf, scale_factor=None):
     # 1. Compute inverse transformation
     # Inverse of a 4x4 matrix. For pure rotation, use transpose.
     # For affine M = T * R * S, M_inv = S_inv * R_inv * T_inv
-    inv_transform = inverse(transform_matrix)
+    inv_transform = np.linalg.inv(transform_matrix)
     
     # 2. Transform query point to local space
     # Treat point as homogeneous coordinate (x, y, z, 1)
-    local_point_homogeneous = vec4(query_point, 1.0)
-    local_point_homogeneous = inv_transform * local_point_homogeneous
+    local_point_homogeneous = np.append(query_point, 1.0)
+    local_point_homogeneous = inv_transform @ local_point_homogeneous
     
     # Extract xyz
-    local_point = local_point_homogeneous.xyz
+    local_point = local_point_homogeneous[:3]
     
     # 3. Evaluate base SDF
     distance_local = base_sdf(local_point)
@@ -94,20 +96,20 @@ def rotate_y_inverse(point, angle):
     Applies the inverse of a Y-axis rotation.
     Inverse of rotation by theta is rotation by -theta.
     """
-    c = cos(-angle)
-    s = sin(-angle)
+    c = np.cos(-angle)
+    s = np.sin(-angle)
     # Rotation matrix around Y:
     # [ c  0  s ]
     # [ 0  1  0 ]
     # [-s  0  c ]
-    x = point.x * c + point.z * s
-    y = point.y
-    z = -point.x * s + point.z * c
-    return vec3(x, y, z)
+    x = point[0] * c + point[2] * s
+    y = point[1]
+    z = -point[0] * s + point[2] * c
+    return np.array([x, y, z])
 ```
 
 **Edge Cases and Pitfalls:**
-- **Matrix Inversion:** In GLSL/WebGL, `inverse()` may not be available or efficient. For rotation matrices, use the transpose (negative angle) [S3, S6, unofficial].
+- **Matrix Inversion:** In GLSL/WebGL, `inverse()` may not be available or efficient. For rotation matrices, use the transpose (negative angle) [S3, unofficial][S6, unofficial].
 - **Non-Uniform Scaling:** Simple scalar multiplication of the distance is incorrect for non-uniform scaling. It requires conservative bounds or Lipschitz constants to avoid overestimation [S1, unofficial][S13].
 - **Deformation:** Non-linear deformations (twist, bend) break local linearity, potentially affecting normal estimation and step size accuracy in ray marching [S11, unofficial].
 - **Tiling:** Infinite tiling requires the position to be in the positive quadrant or handled via modulo arithmetic carefully to avoid discontinuities [S8, unofficial].
@@ -131,15 +133,15 @@ A technique to create a 'blob effect' by perturbing the position $\mathbf{p}$ wi
 - **Step:** Perturb coordinates using sine/cosine functions. Example: `p[0] += 0.02 * cos(8 * p[1] + 3 * p[2])`, `p[1] += 0.02 * sin(6 * p[2] + 7 * p[0])`, `p[2] += 0.02 * cos(8 * p[0] + 9 * p[0])` [S14, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per query, assuming the transformation matrix inversion is precomputed or cached. The cost is dominated by the base SDF evaluation.
-- **Memory Complexity:** $O(1)$ for storing transformation parameters (matrix, vector).
-- **Performance:** Extremely fast for rigid body transformations (rotation/translation) as they involve only matrix-vector multiplication. Scaling adds a single multiplication. Non-linear deformations (twist/bend) may involve more complex trigonometric calculations per point [S8, unofficial].
-- **Strengths:** Enables complex scene composition, animation, and hierarchical modeling without modifying primitive code. Preserves SDF properties for isometries.
-- **Limitations:** Non-isometric transformations (scaling, deformation) require careful distance correction to avoid ray marching artifacts (e.g., missing surfaces or incorrect normals). Non-linear deformations can break the Lipschitz condition, leading to inaccurate step sizes in sphere tracing [S11, unofficial][S13].
-- **When to Use:** Ideal for rigid body animation, camera-relative effects, and simple scaling. Use [Lipschitz Transformation Bounds](1557-lipschitz-transformation-bounds.md) for complex non-linear deformations where distance accuracy is critical.
+- **Time Complexity:** $O(1)$ per query, assuming the transformation matrix inversion is precomputed or cached [G]. The cost is dominated by the base SDF evaluation [G].
+- **Memory Complexity:** $O(1)$ for storing transformation parameters (matrix, vector) [G].
+- **Performance:** Extremely fast for rigid body transformations (rotation/translation) as they involve only matrix-vector multiplication [S3, unofficial][S6, unofficial]. Scaling adds a single multiplication [S10, unofficial].
+- **Strengths:** Enables complex scene composition, animation, and hierarchical modeling without modifying primitive code [S2, unofficial][S9, unofficial]. Preserves SDF properties for isometries [S10, unofficial].
+- **Limitations:** Non-isometric transformations (scaling, deformation) require careful distance correction to avoid ray marching artifacts (e.g., missing surfaces or incorrect normals) [S11, unofficial][S13]. Non-linear deformations can break the Lipschitz condition, leading to inaccurate step sizes in sphere tracing [S11, unofficial][S13].
+- **When to Use:** Ideal for rigid body animation, camera-relative effects, and simple scaling [S3, unofficial][S10, unofficial]. Use [Lipschitz Transformation Bounds](1557-lipschitz-transformation-bounds.md) for complex non-linear deformations where distance accuracy is critical [S13].
 
 ## Background
-The technique of transforming SDFs by applying the inverse transformation to the query point was popularized by Inigo Quilez in his articles on raymarching [S1, S8, unofficial]. It is based on the mathematical property that implicit surfaces can be transformed by modifying their domain [S10, S12, unofficial]. Hart's work on GPU Ray Marching further formalized the distinction between isometries (which preserve distance) and non-isometries (which require scaling compensation) [S10, S12, unofficial]. The method is a cornerstone of GLSL raymarching and is widely used in demoscene productions and real-time graphics [S3, S6, unofficial].
+The technique of transforming SDFs by applying the inverse transformation to the query point was popularized by Inigo Quilez in his articles on raymarching [S1, unofficial][S8, unofficial]. It is based on the mathematical property that implicit surfaces can be transformed by modifying their domain [S10, unofficial][S12, unofficial]. Hart's work on GPU Ray Marching further formalized the distinction between isometries (which preserve distance) and non-isometries (which require scaling compensation) [S10, unofficial][S12, unofficial].
 
 ## Sources
 [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)

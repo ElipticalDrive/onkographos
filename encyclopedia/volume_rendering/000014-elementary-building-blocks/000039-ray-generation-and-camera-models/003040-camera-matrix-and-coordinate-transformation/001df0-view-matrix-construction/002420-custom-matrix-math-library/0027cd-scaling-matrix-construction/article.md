@@ -3,37 +3,34 @@
 Also called: Mat.scale, Scaling Matrix
 
 ## Overview
-Constructs a 4x4 homogeneous transformation matrix that scales coordinates along the principal axes. It serves as the fundamental building block for non-uniform scaling in 3D graphics, distinct from translation or rotation. It differs from sibling utilities like [Matrix Norms & Utilities](3938-matrix-norms-utilities.md) by performing geometric transformation rather than mathematical analysis.
+Constructs a 4x4 diagonal matrix that scales coordinates along the X, Y, and Z axes. It solves the problem of applying non-uniform or uniform scaling transformations to 3D geometry within a homogeneous coordinate system. It is distinguished from [Scaling and Rotation Matrix Construction](7986-scaling-and-rotation-matrix-construction.md) by excluding rotational degrees of freedom, and from [Transformation Matrix Construction](12879-transformation-matrix-construction.md) by excluding translation.
 
 ## How it works
 **Inputs:**
-- `s`: A scalar number or a 4D vector (or 3D vector treated as xyz components).
+- `s`: A scalar number or a 4D vector (or 3D vector treated as the first three components).
+- `mat`: A 4x4 matrix structure (array of arrays or flat array of 16 elements).
 
 **Outputs:**
-- `mat`: A 4x4 matrix (represented as a 2D array or flat list of 16 floats).
+- The modified `mat` representing the scaling transformation.
 
-**Data Structure:**
-The matrix is stored in row-major order (or column-major depending on convention, but indices are explicit below). The structure is:
-$$
-\begin{bmatrix}
-s_x & 0 & 0 & 0 \\
-0 & s_y & 0 & 0 \\
-0 & 0 & s_z & 0 \\
-0 & 0 & 0 & 1
-\end{bmatrix}
-$$
+**Data Structures:**
+- `mat`: 4x4 matrix. Indices `mat[i][j]` or `mat[i*4+j]` correspond to row `i`, column `j`.
+- `s`: If scalar, `s_x = s_y = s_z = s`. If vector `v`, `s_x = v[0]`, `s_y = v[1]`, `s_z = v[2]`.
 
 **Steps:**
-1. Initialize a 4x4 matrix `mat` with zeros.
-2. If `s` is a scalar:
-   - Set `mat[0][0] = s`
-   - Set `mat[1][1] = s`
-   - Set `mat[2][2] = s`
-3. If `s` is a vector (length 3 or 4):
-   - Set `mat[0][0] = s[0]`
-   - Set `mat[1][1] = s[1]`
-   - Set `mat[2][2] = s[2]`
-4. Set `mat[3][3] = 1.0` to preserve homogeneous coordinates.
+1. Initialize `mat` as a 4x4 identity matrix or zero matrix, depending on implementation context. The source implies setting specific diagonal elements.
+2. Determine scale factors $s_x, s_y, s_z$ from input `s`.
+3. Set the diagonal elements:
+   $$
+   mat[0][0] = s_x
+   $$
+   $$
+   mat[1][1] = s_y
+   $$
+   $$
+   mat[2][2] = s_z
+   $$
+4. The fourth row and column (homogeneous components) remain unchanged (typically identity values: `mat[3][3]=1`, others 0) unless explicitly modified by the caller.
 5. Return `mat`.
 
 **Pseudocode:**
@@ -41,50 +38,55 @@ $$
 
 ```python
 def construct_scaling_matrix(s):
-    # Initialize 4x4 zero matrix
+    # Initialize 4x4 matrix with zeros
     mat = [[0.0 for _ in range(4)] for _ in range(4)]
     
-    # Handle scalar input
+    # Determine scale factors
     if isinstance(s, (int, float)):
-        mat[0][0] = s
-        mat[1][1] = s
-        mat[2][2] = s
-    # Handle vector input (list or array)
-    elif hasattr(s, '__len__') and len(s) >= 3:
-        mat[0][0] = s[0]
-        mat[1][1] = s[1]
-        mat[2][2] = s[2]
+        sx = s
+        sy = s
+        sz = s
+    elif len(s) >= 3:
+        sx = s[0]
+        sy = s[1]
+        sz = s[2]
     else:
-        raise ValueError("s must be a scalar or a vector with at least 3 components")
+        raise ValueError("s must be a number or a vector with at least 3 components")
         
-    # Homogeneous coordinate
+    # Set diagonal elements
+    mat[0][0] = sx
+    mat[1][1] = sy
+    mat[2][2] = sz
+    
+    # Note: The source does not explicitly set the homogeneous row/col.
+    # Standard practice is identity for these, but the source only specifies
+    # the scaling diagonal. We assume the rest is handled by initialization
+    # or caller. For a pure scaling matrix, mat[3][3] should be 1.
     mat[3][3] = 1.0
     
     return mat
 ```
 
-**Parameters:**
-- `s`: Scaling factors. Typical values are positive floats. Negative values flip the axis.
-
 **Edge Cases:**
-- If `s` is zero, the object collapses to a line or point.
-- Precision issues may arise if scaling factors are extremely large or small; standard float32 is typically sufficient for general graphics [S1, unofficial].
+- If `s` is not a number or vector, an error is thrown [S1, unofficial].
+- Precision issues may arise if scale factors are extremely large or small.
 
 ## Subtopics
 
-### Scaling and Rotation Matrix Construction
-Combines scaling and rotation into a single 3x3 matrix. It constructs a diagonal scaling matrix $L$ and multiplies it by a rotation matrix $R$ ($M = L \times R$). This is implemented on CUDA for batched operations, where $L$ is initialized to zeros and diagonal elements are set from a scale vector $s$, while $R$ is generated via `build_rotation(r)` [S2, unofficial]. This variant is chosen when affine transformations require both orientation and size adjustment in a single step, avoiding separate matrix multiplications in the shader or CPU.
+### [Scaling and Rotation Matrix Construction](7986-scaling-and-rotation-matrix-construction.md)
+Combines scaling and rotation. Chose when orientation changes are needed alongside size changes.
+
+### [Transformation Matrix Construction](12879-transformation-matrix-construction.md)
+Includes translation. Chose when position changes are also required.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for scalar/vector input.
-- **Memory Complexity:** $O(1)$ (fixed 16 floats).
-- **Strengths:** Simple, fast, numerically stable.
-- **Limitations:** Does not handle rotation or translation; requires composition for full affine transforms.
-- **Use Case:** Essential for resizing objects, normalizing coordinate spaces, or adjusting voxel grid dimensions in volume rendering.
+- **Time Complexity:** $O(1)$, constant number of assignments.
+- **Memory Complexity:** $O(1)$, fixed 4x4 matrix.
+- **Strengths:** Simple, fast, standard for uniform/non-uniform scaling.
+- **Limitations:** Does not handle rotation or translation.
 
 ## Background
-Originated from standard linear algebra applied to computer graphics. The specific implementation details for scalar/vector handling are documented in the [chloearluck/volume_rendering](https://github.com/chloearluck/volume_rendering) repository [S1, unofficial]. The batched CUDA variant for combined scaling/rotation is found in [NVlabs/InstantSplat](https://github.com/NVlabs/InstantSplat) [S2, unofficial].
+Originated in standard computer graphics literature for 3D transformations. Implemented in the `chloearluck/volume_rendering` repository [S1, unofficial].
 
 ## Sources
 [S1] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
-[S2] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)

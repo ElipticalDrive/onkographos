@@ -1,141 +1,164 @@
 # GPU-accelerated ray casting with volumetric lenses
 
-Also called: Magic Lens Implementation, Ray casting with lens distortion, Volumetric lens ray casting
+Also called: Magic Lens Implementation, Obstruction-free lens, Ray casting with lens distortion, Volumetric lens ray casting, obstruction-free fish-eye lens
 
 ## Overview
-This method implements interactive focus+context volume rendering by applying geometric distortions to ray trajectories within a specific region of interest (the "lens") [S1]. It solves the problem of standard ray casting, which cannot easily support non-linear view transformations like magnification or angular distortion, by replacing fixed orthogonal/perspective ray generation with custom, lens-aware ray direction calculations [S1]. Unlike standard direct volume ray casting, it requires a multi-pass fragment program structure to handle variable ray origins and directions that are not orthogonal to the view plane [S1].
+A volumetric visualization technique that modifies ray paths to push away occluding geometry, creating a magnified, unobstructed view of a target region while preserving the surrounding context [S1]. It solves the problem of inspecting dense volumes where targets and occluders share similar density values, a scenario where standard density filtering fails because it removes both the target and the occluder [S1]. Unlike standard Direct Volume Ray Casting (DVR), which uses straight rays, this method distorts ray trajectories based on lens parameters to "open a hole" in the volume [S1].
 
 ## How it works
-The method replaces the standard two-pass front/back face drawing technique with a custom multi-pass pipeline that computes ray parameters per fragment [S1]. It relies on modern GPU features including loops, early termination, and branching [S1].
+The method modifies a standard DVR ray caster to incorporate a new ray definition, the lens effect, and local per-voxel Phong lighting parameters [S1]. It is implemented as a multi-pass fragment program pipeline on the GPU [S2].
 
 ### Inputs and Outputs
-*   **Inputs**: 3D texture containing volume data (density, gradient, color); lens parameters (position, size, magnification, type); viewport dimensions.
-*   **Outputs**: Final color buffer with volumetric rendering effects applied within the lens region.
+*   **Inputs**: 3D texture containing volume data (density, gradient, color); camera parameters (view matrix, projection matrix); lens parameters (position, size, magnification, active state); bounding box of the volumetric object.
+*   **Outputs**: 2D image buffer with the lens-distorted volume rendering.
 
-### Data Structures and Shader Uniforms
-The shader requires the following uniforms [S2, unofficial]:
-*   `u_lens_active` (int/boolean): Controls if the lens effect is applied.
-*   `u_lens_position` (vec2): Normalized screen coordinates (0.0 to 1.0) for the lens center.
-*   `u_lens_size` (vec2): Normalized size of the lens area.
-*   `u_lens_magnification` (float): Magnification factor for the lens view.
+### Data Structures
+The implementation relies on standard GPU fragment program structures. Specific internal data structures beyond standard uniforms and texture samplers are not detailed in the sources [S2][S3, unofficial].
 
-### Rendering Pipeline (Multi-Pass)
-The implementation uses a sequence of fragment programs [S1]. The structure varies by lens type:
+### Parameters
+*   `lens_active` (boolean/int): Controls if the lens is active [S1][S3, unofficial].
+*   `lens_position` (vec2): Normalized screen coordinates (0.0 to 1.0) for the lens center [S3, unofficial].
+*   `lens_size` (vec2): Normalized size of the lens area [S3, unofficial].
+*   `lens_magnification` (float): Magnification factor for the lens view [S3, unofficial].
+*   Animation parameters $\alpha$ and $\beta$: Used to interpolate between straight-line classical DVR ($\alpha=1, \beta=0$) and the actual user-set lens values [S1].
+
+### Steps
+The rendering pipeline consists of four passes for magnifier and angular lenses, with variations for feature-based and sampling-rate-based lenses [S2].
 
 1.  **Pass 1: RayDirection**
-    *   Calculates the ray direction for each fragment based on the viewport and lens parameters [S1].
-    *   Determines if the ray passes through the lens, hits a feature of interest, or calculates the distance to the lens center [S1].
-    *   *Variation*: For sampling-rate-based lenses, this pass is replaced by **Pass 1\* (RayStartPoints)** [S1].
-    *   *Variation*: For feature-based lenses, an additional **Pass 1+ (RayLensBorder)** is inserted before Pass 2 [S1].
+    Calculate the ray direction for each fragment based on the viewport and lens parameters. This step determines whether a ray goes through the lens, hits a feature of interest, or calculates the distance to the lens center to achieve specific rendering effects [S2].
+    *   *Feature-based lens*: Adds a preliminary pass `RayLensBorder` before Pass 2 [S2].
+    *   *Sampling-rate-based lens*: Replaces Pass 1 with `RayStartPoints` [S2].
 
 2.  **Pass 2: RayTfrontback**
-    *   Computes the intersection points of each ray with the bounding box of the volumetric object [S1].
-    *   Stores the distances from the ray start point to the front and back intersection points, denoted as $t_{front}$ and $t_{back}$ [S1].
-    *   These values, combined with the ray direction and viewport parameters, define the intersection segment [S1].
+    Compute the intersections of each ray with the bounding box of the volumetric object. Store the distances from the ray start point to the front and back intersection points, denoted as $t_{front}$ and $t_{back}$ [S2].
+    *   *Note*: Standard OpenGL front/back face drawing cannot be used because ray directions are not always orthogonal or perspective; custom intersection calculation is required [S2].
 
 3.  **Pass 3: RayCasting**
-    *   Implements the ray traversal algorithm for a given step size [S1].
-    *   Accesses volume data (density, gradient, or color) stored in 3D textures [S1].
-    *   Uses early termination and loops to optimize performance [S1].
+    Implement a ray traversal algorithm for a given step size. Access volume data (density, gradient, or color) stored in 3D textures. The ray direction from Pass 1 and the interval $[t_{front}, t_{back}]$ from Pass 2 define the intersection segment [S2].
 
 4.  **Pass 4: Rendering**
-    *   Composites the final image based on the accumulated ray casting results [S1].
+    Composite the accumulated color and opacity to produce the final image [S2].
 
 ### Pseudocode
-The following pseudocode illustrates the core logic for a standard magnifier lens, adapted from the Cg fragment program structure [S1].
+The following pseudocode outlines the core logic for a standard magnifier lens implementation, adapted from the described four-pass structure [S1, S2].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Fragment Shader Logic for Volumetric Lens Ray Casting
-
-# Uniforms
-uniform int u_lens_active;
-uniform vec2 u_lens_position;
-uniform vec2 u_lens_size;
-uniform float u_lens_magnification;
-uniform sampler3D u_volume_texture;
-
-# Helper: Check if pixel is inside lens
-def is_inside_lens(pixel_coord):
-    dx = abs(pixel_coord.x - u_lens_position.x)
-    dy = abs(pixel_coord.y - u_lens_position.y)
-    return (dx < u_lens_size.x) and (dy < u_lens_size.y)
+# Uniforms passed to shaders
+uniform int u_lens_active
+uniform vec2 u_lens_position
+uniform vec2 u_lens_size
+uniform float u_lens_magnification
+uniform mat4 u_view_matrix
+uniform mat4 u_proj_matrix
+uniform vec3 u_bbox_min
+uniform vec3 u_bbox_max
+uniform float u_step_size
 
 # Pass 1: RayDirection
-def compute_ray_direction(pixel_coord, view_matrix, proj_matrix):
-    if u_lens_active == 1 and is_inside_lens(pixel_coord):
-        # Calculate distorted direction based on lens type (e.g., magnification)
-        # This replaces standard orthogonal/perspective projection
-        # Specific formula depends on lens type (magnifier, angular, feature-based)
-        # [S1] states: "Calculate the ray direction for each fragment based on the view port and lens parameters"
-        distorted_coord = apply_lens_distortion(pixel_coord, u_lens_position, u_lens_size, u_lens_magnification)
-        ray_dir = unproject(distorted_coord, view_matrix, proj_matrix)
-    else:
-        # Standard ray direction for context
-        ray_dir = unproject(pixel_coord, view_matrix, proj_matrix)
-    return normalize(ray_dir)
+function compute_ray_direction(fragment_coord, view_matrix, proj_matrix, lens_params):
+    # Convert screen coordinates to normalized device coordinates
+    ndc_x = (fragment_coord.x / screen_width) * 2.0 - 1.0
+    ndc_y = -((fragment_coord.y / screen_height) * 2.0 - 1.0)
+    
+    # Calculate unprojected ray direction in world space
+    # This is a simplified representation; actual implementation requires inverse projection/view matrices
+    ray_dir = unproject_ray(ndc_x, ndc_y, view_matrix, proj_matrix)
+    
+    # If lens is active, distort the ray direction
+    if u_lens_active:
+        dist_to_center = length(fragment_coord.xy - u_lens_position * screen_size)
+        if dist_to_center < u_lens_size * screen_size:
+            # Apply magnification/distortion logic
+            # Specific formula for distortion is not provided in sources, 
+            # but it pushes rays away from occluders [S1]
+            ray_dir = apply_lens_distortion(ray_dir, fragment_coord, u_lens_position, u_lens_size, u_lens_magnification)
+            
+    return ray_dir
 
 # Pass 2: RayTfrontback
-def compute_ray_intersections(ray_origin, ray_dir, volume_bbox):
-    # Compute intersection of ray with volume bounding box
-    # Returns t_front and t_back distances from ray origin
-    # [S1] states: "Compute the intersections of each ray with the volume bounding box"
-    t_front, t_back = intersect_box(ray_origin, ray_dir, volume_bbox)
+function compute_ray_intersections(ray_origin, ray_dir, bbox_min, bbox_max):
+    # Compute intersection of ray with axis-aligned bounding box
+    # Returns t_front and t_back
+    t_min = max((bbox_min.x - ray_origin.x) / ray_dir.x, 
+                (bbox_min.y - ray_origin.y) / ray_dir.y, 
+                (bbox_min.z - ray_origin.z) / ray_dir.z)
+    t_max = min((bbox_max.x - ray_origin.x) / ray_dir.x, 
+                (bbox_max.y - ray_origin.y) / ray_dir.y, 
+                (bbox_max.z - ray_origin.z) / ray_dir.z)
+                
+    # Handle cases where ray is parallel to faces or outside
+    if t_max < 0 or t_min > t_max:
+        return -1.0, -1.0 # No intersection
+        
+    t_front = t_min
+    t_back = t_max
+    
     return t_front, t_back
 
 # Pass 3: RayCasting
-def ray_cast(ray_origin, ray_dir, t_front, t_back, step_size):
+function ray_cast(ray_origin, ray_dir, t_front, t_back, volume_texture, step_size):
     color = vec4(0.0)
     alpha = 0.0
-    t = t_front
     
-    # Loop with early termination
-    while t < t_back and alpha < 1.0:
-        sample_point = ray_origin + ray_dir * t
-        density = texture(u_volume_texture, sample_point).r
+    t = t_front
+    while t < t_back:
+        sample_point = ray_origin + t * ray_dir
         
-        # Standard volume rendering integration
-        # [S1] states: "accessing volume data (density, gradient, or color) stored in 3D textures"
-        contribution = compute_contribution(density, sample_point)
-        color += contribution * (1.0 - alpha)
-        alpha += contribution
+        # Sample volume data
+        density = sample_volume(volume_texture, sample_point)
+        
+        # Standard DVR compositing (front-to-back)
+        # Note: Phong lighting parameters are also calculated here [S1]
+        light_color = compute_phong_lighting(sample_point, density)
+        
+        contribution = light_color * (1.0 - alpha)
+        color += contribution * density
+        alpha += density * (1.0 - alpha)
+        
+        if alpha >= 1.0:
+            break
+            
         t += step_size
         
-    return color
+    return color, alpha
 
-# Main Execution
-def main():
-    pixel_coord = gl_FragCoord.xy / resolution
-    ray_dir = compute_ray_direction(pixel_coord, view_matrix, proj_matrix)
-    
-    # Ray origin is typically the camera position
-    ray_origin = camera_position
-    
-    t_front, t_back = compute_ray_intersections(ray_origin, ray_dir, volume_bbox)
-    
-    if t_front < t_back:
-        final_color = ray_cast(ray_origin, ray_dir, t_front, t_back, step_size)
-    else:
-        final_color = background_color
+# Main Render Loop
+function render():
+    for each fragment:
+        ray_dir = compute_ray_direction(fragment_coord, view_matrix, proj_matrix, lens_params)
+        ray_origin = camera_position # Or computed via back-face intersection if needed
         
-    gl_FragColor = final_color
+        t_front, t_back = compute_ray_intersections(ray_origin, ray_dir, u_bbox_min, u_bbox_max)
+        
+        if t_front > 0:
+            final_color, final_alpha = ray_cast(ray_origin, ray_dir, t_front, t_back, volume_texture, u_step_size)
+            write_to_framebuffer(final_color)
 ```
 
 ### Edge Cases and Pitfalls
-*   **Non-Orthogonal Rays**: Standard OpenGL front/back face drawing cannot be used because ray directions are not always orthogonal or perspective [S1]. Custom intersection calculation is required [S1].
-*   **GPU Features**: The implementation requires GPUs that support loops, early termination, and branches [S1].
-*   **Performance**: Large volume datasets may require significant memory; downsampling is recommended for less powerful systems [S2, unofficial]. Adjust `max_steps` for quality/performance balance [S2, unofficial].
+*   **Ray Intersection**: Standard OpenGL front/back face drawing cannot be used because ray directions are not always orthogonal or perspective; custom intersection calculation is required [S2].
+*   **Animation**: When activating the lens, an animation plays forward to gradually open the lens, with decreasing speed at the end to show where occluders go. When deactivating, the animation plays in reverse [S1].
+*   **Performance**: Requires GPU features such as loop, early termination, and branches [S2].
 
 ## Operating characteristics
-*   **Complexity**: Time complexity is proportional to the number of samples per ray within the volume, which varies dynamically based on lens distortion and volume density. Memory complexity is dominated by the 3D texture storage [S1].
-*   **Performance**: Heavily dependent on GPU capabilities [S2, unofficial]. The multi-pass approach adds overhead compared to single-pass ray casting but enables interactive focus+context [S1].
-*   **Strengths**: Enables interactive magnification and angular distortion of volumetric data [S1].
-*   **Limitations**: Requires custom intersection logic; performance degrades with large datasets or high magnification factors requiring more samples [S1][S2, unofficial].
+*   **Performance**: Achieves 15 frames per second on a PC with 16 GB RAM and a GeForce GTX TITAN X card for volumes up to $512^3$ voxels at a $1900 \times 1200$ pixels screen resolution [S1].
+*   **Hardware Requirements**: Requires modern GPUs with support for loops, early termination, and branches (e.g., NVIDIA GeForce 6800 or later) [S2].
+*   **Strengths**: Outperforms standard DVR and transfer function manipulation when occluders and targets share similar density values [S1]. User study with 8 airport security specialists showed predominantly positive Likert scale ratings for ease of use and effectiveness in both untargeted and targeted exploration [S1].
+*   **Limitations**: Not suitable for carry-on baggage inspection due to strict time limits of 15 to 20 seconds; better suited for checked baggage where inspection windows extend up to 3 minutes [S1].
+*   **Scaling**: Performance is dependent on GPU capabilities and volume size. Large datasets may require downsampling for smoother performance [S3, unofficial].
 
 ## Background
-The method originates from the "Magic Volume Lens" technique, an interactive focus+context technique for volume rendering [S1]. It was developed to address the limitations of standard ray casting when applying non-linear view transformations [S1]. The approach was implemented using Cg fragment programs on hardware such as the NVIDIA GeForce 6800, leveraging emerging GPU features like loops and branching [S1].
+The technique was implemented by modifying a standard DVR ray caster publicly available in the NVIDIA CUDA SDK [S1]. It was developed to address challenges in volumetric data exploration, particularly in scenarios where automatic segmentation is not optimal or where density filtering is ineffective [S1].
+
+### Usage Scenarios
+*   **Baggage Inspection**: Evaluated on a $283 \times 189 \times 344$ voxel airport CT scan dataset to reveal objects hidden among materials of similar density [S1].
+*   **Fluid Flow Visualization**: Applied to a $500^3$ voxel scalar volume converted from 4595 streamlines (183K sample points) using GPU-accelerated kernel density estimation [S1].
+*   **Medical Imaging**: Applied to a $512 \times 512 \times 110$ voxel contrast chest CT scan to examine a tumor obscured by tissue of similar density [S1].
 
 ## Sources
-[S1] The Magic Volume Lens: An Interactive Focus+Context Technique for ..., https://www3.cs.stonybrook.edu/~mueller/papers/lens_highres.pdf, fetched 2026-10-27
-[S2] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
+[S1] Interactive obstruction-free lensing for volumetric data visualization, https://doi.org/10.1109/TVCG.2018.286469, fetched 2026-10-26
+[S2] PDF The Magic Volume Lens: An Interactive Focus+Context Technique for ..., https://www3.cs.stonybrook.edu/~mueller/papers/lens_highres.pdf, fetched 2026-10-27
+[S3] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)

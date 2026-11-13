@@ -1,252 +1,191 @@
 # Multiple Scattering Approximation via Light Volume Lookup
 
-Also called: Light Volume Lookup, Precomputed Light Volume, Light Volume Pyramid
+Also called: Light Volume Lookup, Light Volume Pyramid, Precomputed Light Volume
 
 ## Overview
-This method approximates the radiative transfer equation for multiple scattering in participating media by precomputing the spatial spreading and attenuation of light into a hierarchical texture structure (the light volume) [S1]. It solves the high computational cost of iterative multiple scattering integration by reducing the problem to a lookup operation during ray marching, allowing for real-time or near-real-time rendering of complex volumetric effects like smoke and clouds [S1]. It distinguishes itself from sibling methods like [Voxel Cone Tracing](1454-voxel-cone-tracing.md) and [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md) by explicitly modeling the statistical blurring of light beams via a derived point spread function (PSF) and storing the attenuated radiance in a mip-map pyramid, rather than relying on geometric cone intersections or sparse voxel grids [S1].
+This method approximates the contribution of multiple scattering in participating media by precomputing the spatial spreading and attenuation of light into a hierarchical texture structure (the "light volume") [S1]. It solves the computational bottleneck of integrating the radiative transfer equation for high-order scattering by replacing expensive path integration with a simple lookup operation indexed by a calculated "blur width" [S1]. Unlike [Voxel Cone Tracing](1454-voxel-cone-tracing.md) which traces rays through a voxel grid, or [Precomputed Radiance Transfer](13182-precomputed-radiance-transfer.md) which relies on linear transfer matrices, this approach explicitly models the statistical spreading of light beams through the medium using a derived point spread function [S1].
 
 ## How it works
-The method relies on the observation that multiple scattering causes light to spread spatially, an effect that can be modeled as a convolution with a Point Spread Function (PSF) whose width increases with distance [S1]. This spreading is precomputed into a "Light Volume" (LV), which stores the attenuated radiance at various blurring levels. During rendering, the multiple scattering contribution is retrieved from this volume using the accumulated optical thickness as an index for the blurring level [S1].
+**Inputs:**
+*   Density volume grid $\rho(x)$ (e.g., $128^3$ voxels) [S1].
+*   Absorption cross-section $C_{abs}$ and scattering cross-section $C_{sca}$ [S1].
+*   Light source position and intensity.
+*   Camera ray origin and direction.
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   Medium density field $\rho(x)$ stored in a 3D grid [S1].
-    *   Absorption cross-section $C_{abs}$ and scattering cross-section $C_{sca}$ [S1].
-    *   Light source position and intensity [S1].
-    *   Camera position and viewing rays [S1].
-*   **Outputs:**
-    *   Final radiance $L_{total}$ for each pixel [S1].
+**Outputs:**
+*   Final radiance $L_{total}$ for each pixel.
 
-### Data Structures
-1.  **Density Volume:** A 3D grid storing $\rho(x)$.
-    *   *Layout:* 128^3 voxels (example size) [S1].
-    *   *Size:* 8 Mb [S1].
-2.  **Light Volume (LV):** A 3D mip-map pyramid storing precomputed attenuated radiance.
-    *   *Layout:* Each level $w$ of the pyramid corresponds to a specific blurring width. The value at voxel $x$ in level $w$ represents the radiance attenuated by multiple scattering effects corresponding to that spread [S1].
-    *   *Size:* 32 Mb (for the pyramid) [S1].
-3.  **Optical Thickness Squared Storage (Optional for Inhomogeneous Media):**
-    *   *Layout:* 3D grid storing $\ell^2$ (light part of the path) [S1].
-    *   *Size:* 8 Mb [S1].
+**Data Structures:**
+1.  **Density Volume:** A 3D texture storing $\rho(x)$. Size: $128^3$ voxels (8 MB) [S1].
+2.  **Light Volume Pyramid:** A mip-map hierarchy storing precomputed attenuated radiance. The base level stores the initial light distribution; higher levels store spatially blurred versions. Size: 32 MB [S1].
+3.  **Optical Thickness Squared Volume:** For inhomogeneous media, a 3D texture storing $\ell^2$ (the square of the optical thickness along the light path) to avoid runtime integration. Size: 8 MB [S1].
 
-### Parameters
-*   $w$: The blurring level, used as an index into the Light Volume mip-map pyramid [S1].
-*   $C_{abs}$: Absorption cross-section [S1].
-*   $C_{sca}$: Scattering cross-section [S1].
-*   $\rho(x)$: Density of the medium at point $x$ [S1].
+**Parameters:**
+*   $w$: The blurring level, used as an index into the light volume pyramid.
+*   $C_{abs}$: Absorption cross-section.
+*   $C_{sca}$: Scattering cross-section.
+*   $\rho(x)$: Density at point $x$.
 
-### Formulas
-1.  **Scattering Coefficients:**
-    $$ a(x) = C_{abs} \cdot \rho(x) $$
-    $$ b(x) = C_{sca} \cdot \rho(x) $$
-    Where $a(x)$ is the absorption coefficient and $b(x)$ is the scattering coefficient [S1].
+**Formulas:**
+*   Scattering coefficient: $a(x) = C_{abs} \cdot \rho(x)$ [S1].
+*   Scattering coefficient: $b(x) = C_{sca} \cdot \rho(x)$ [S1].
+*   Optical thickness (homogeneous): $\ell = b \cdot d$ [S1].
+*   Optical thickness (inhomogeneous): $\ell = \int_{0}^{d} b(x) ds$ [S1].
+*   Blurring width $w$: Derived from the path integral analysis of light transport, approximating the spatial spread of the beam. The specific closed-form expression is not provided in the notes, but $w$ is used to index the light volume [S1].
+*   Attenuation factor: $atten = \exp(-(a/b) \cdot \ell)$ [S2]. Note: The notes use $c$ in one formula and $a$ in another for absorption; $a(x)$ is defined as $C_{abs} \rho(x)$ [S1]. The attenuation formula in [S2] uses $c/b$, where $c$ likely corresponds to absorption. We assume $a$ is absorption and $b$ is scattering.
+*   Phase function: $P = P_{MS}(\theta, \ell)$, where $\theta$ is the scattering angle [S1].
+*   Path curvature: $C = \alpha \cdot \theta^2 / \ell$ [S1].
+*   Weight: $weight = \exp(-(a/b) \cdot \ell) \cdot \exp(-C) \cdot P$ [S1].
 
-2.  **Optical Thickness ($\ell$):**
-    For homogeneous media, $\ell$ is computed along the path. For inhomogeneous media, it is integrated:
-    $$ \ell = \int_{0}^{s} b(x_{start} + s'\hat{\omega}) ds' $$
-    Due to the expense of computing $\ell$ during rendering for inhomogeneous media, $\ell^2$ (light part) is precomputed and stored [S1].
+**Steps:**
 
-3.  **Multiple Scattering Phase Function ($P_{MS}$):**
-    The method uses a simplified phase function based on the scattering angle $\theta$ and optical thickness $\ell$ [S1].
-    $$ P = P_{MS}(\theta, \ell) $$
-    The exact form of $P_{MS}$ is derived from the path integral analysis, approximating the angular distribution of multiply scattered light [S1].
+1.  **Preprocessing (Offline):**
+    1.  Compute scattering coefficients $a(x)$ and $b(x)$ from $\rho(x)$, $C_{abs}$, and $C_{sca}$ [S1].
+    2.  For each light source, compute the optical thickness $\ell$ along rays from the light into the medium.
+    3.  For inhomogeneous media, compute and store $\ell^2$ in a separate 3D texture to avoid runtime integration [S1].
+    4.  Construct the Light Volume Pyramid. For each level $i$, store the attenuated radiance $L$ at point $x_i$ and blurring level $w$ [S1]. This involves convolving the light distribution with the derived point spread function (PSF) to simulate spatial spreading [S1].
 
-4.  **Weighting Function:**
-    The contribution of the looked-up radiance is weighted by attenuation and phase function:
-    $$ \text{weight} = \exp\left(-\frac{c}{b} \cdot \ell\right) \cdot \exp(-C) \cdot P $$
-    Where $C$ is the path curvature term:
-    $$ C = \alpha \cdot \frac{\theta^2}{\ell} $$
-    And $c$ is a constant related to the medium properties [S1].
+2.  **Rendering (Per Frame):**
+    1.  For each pixel, cast a ray from the camera.
+    2.  March along the ray. For inhomogeneous media, track $\ell_{eye}$ (camera part of the path) and $\ell_{light}$ (light part of the path) [S1].
+        *   $\ell_{eye} = \ell_{eye} + b(x) \cdot \Delta x$ [S2].
+        *   $\ell_{light}$ is retrieved from the precomputed $\ell^2$ volume or integrated if not precomputed [S1].
+    3.  Calculate the total optical thickness $\ell = \ell_{eye} + \ell_{light}$ [S2].
+    4.  Calculate the blurring width $w$ based on the distance and medium properties [S1].
+    5.  **Multiple Scattering Lookup:**
+        *   $L_{ms} = \text{Lookup}(x_i, LV, w)$ [S1].
+        *   This returns the precomputed attenuated radiance from the light volume pyramid at the current position and blurring level [S1].
+    6.  **Weighting:**
+        *   Calculate scattering angle $\theta = \arccos(\hat{\omega}_i \cdot \hat{\omega}_o)$ [S1].
+        *   Calculate path curvature $C = \alpha \cdot \theta^2 / \ell$ [S1].
+        *   Calculate weight: $weight = \exp(-(a/b) \cdot \ell) \cdot \exp(-C) \cdot P_{MS}(\theta, \ell)$ [S1].
+    7.  **Accumulation:**
+        *   $L_{total} = L_{total} + L_{ms} \cdot weight$ [S1].
+    8.  **Step Size Adaptation:**
+        *   March along the ray using progressively larger step sizes for the multiple scattering component, as the blur width $w$ is monotonically increasing with distance [S1].
+        *   Single scattering requires smaller step sizes to resolve fine features [S1].
 
-### Steps
-
-#### Preprocessing (Offline)
-1.  **Compute Density:** Sample the medium density $\rho(x)$ into the Density Volume grid [S1].
-2.  **Construct Light Volume:**
-    *   For each light source, compute the light transport through the medium.
-    *   Apply the spatial spreading model (PSF) to simulate multiple scattering.
-    *   Store the attenuated radiance in the Light Volume pyramid at appropriate blurring levels $w$ [S1].
-    *   For inhomogeneous media, also compute and store $\ell^2$ (light part) in a separate data structure [S1].
-
-#### Rendering (Per Frame)
-For each pixel, cast a ray and march through the volume:
-
-1.  **Initialize:**
-    *   Set $L_{total} = 0$.
-    *   Set accumulated optical thickness for camera path $\ell_{eye} = 0$ [S1].
-    *   Set accumulated distance $s_{eye} = 0$ [S1].
-
-2.  **Ray Marching Loop:**
-    *   Determine step size $\Delta x$. Note: Single scattering requires small steps to resolve fine features; multiple scattering can use progressively larger steps as blur width increases [S1].
-    *   Update camera path optical thickness:
-        $$ \Delta \ell = \rho(x) \cdot b \cdot \Delta x $$
-        $$ \ell_{eye} = \ell_{eye} + \Delta \ell $$
-        $$ s_{eye} = s_{eye} + \Delta x $$
-    *   **Single Scattering Pass:**
-        *   Compute single scattering contribution using standard ray marching with shadow maps if applicable [S2].
-        *   $L_{direct} = L \cdot s_m \cdot P \cdot \text{atten} \cdot \Delta \ell$ [S2].
-        *   Add to $L_{total}$.
-    *   **Multiple Scattering Pass:**
-        *   Determine current blurring level $w$ based on accumulated optical thickness $\ell$ [S1].
-        *   **Lookup:** Retrieve precomputed radiance $L$ from the Light Volume:
-            $$ L = \text{Lookup}(x_i, LV, w) $$
-            Where `Lookup` returns the precomputed attenuated radiance from the mip-map at point $x_i$ and blurring level $w$ [S1].
-        *   **Compute Scattering Angle:**
-            $$ \theta = \arccos(\hat{\omega}_{in} \cdot \hat{\omega}_{out}) $$
-            Where $\hat{\omega}_{in}$ is the light direction and $\hat{\omega}_{out}$ is the view direction [S1].
-        *   **Compute Phase Function:**
-            $$ P = P_{MS}(\theta, \ell) $$
-        *   **Compute Path Curvature:**
-            $$ C = \alpha \cdot \frac{\theta^2}{\ell} $$
-        *   **Compute Weight:**
-            $$ \text{weight} = \exp\left(-\frac{c}{b} \cdot \ell\right) \cdot \exp(-C) \cdot P $$
-        *   **Accumulate:**
-            $$ L_{total} = L_{total} + L \cdot \text{weight} $$
-    *   **Step Size Adjustment:**
-        *   Increase step size $\Delta x$ for subsequent samples as the ray progresses, since the blur width is monotonically increasing with distance [S1].
-
-3.  **Return:** $L_{total}$ [S1].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_multiple_scattering(camera_ray, density_volume, light_volume, 
-                               c_abs, c_sca, alpha, c_constant):
+def render_multiple_scattering(ray_origin, ray_direction, density_volume, light_volume_pyramid, optical_thickness_sq_volume, C_abs, C_sca, alpha):
     """
-    Renders a single ray using the Light Volume Lookup method.
-    
-    Args:
-        camera_ray: Ray origin and direction.
-        density_volume: 3D grid of density rho(x).
-        light_volume: 3D mip-map pyramid of precomputed radiance.
-        c_abs: Absorption cross-section.
-        c_sca: Scattering cross-section.
-        alpha: Curvature constant.
-        c_constant: Attenuation constant.
-        
-    Returns:
-        L_total: Final radiance.
+    Renders multiple scattering contribution using light volume lookup.
     """
     L_total = 0.0
-    l_eye = 0.0  # Optical thickness for camera path
-    s_eye = 0.0  # Distance for camera path
+    current_pos = ray_origin
+    t = 0.0
     
-    # Initial step size
-    dx = get_initial_step_size()
+    # Initial step size for multiple scattering (larger than single scattering)
+    step_size = initial_step_size_ms 
     
-    # March along the ray
-    while not ray_exits_volume(camera_ray, s_eye):
-        x = camera_ray.origin + camera_ray.direction * s_eye
+    while t < ray_length:
+        # Sample density
+        rho = density_volume.sample(current_pos)
         
-        # Get density at current position
-        rho = density_volume.sample(x)
+        # Compute coefficients
+        a = C_abs * rho
+        b = C_sca * rho
         
-        # Compute scattering coefficients
-        a = c_abs * rho
-        b = c_sca * rho
+        # Compute optical thickness increment for camera path
+        delta_l_eye = b * step_size
+        l_eye += delta_l_eye
         
-        # Update camera path optical thickness
-        delta_l = rho * b * dx
-        l_eye += delta_l
-        s_eye += dx
+        # Retrieve light path optical thickness squared from precomputed volume
+        # l_light_sq = optical_thickness_sq_volume.sample(current_pos)
+        # l_light = sqrt(l_light_sq) # Approximation or interpolation
+        # Note: The notes state l_light is tracked. For simplicity, assume l_light is retrieved or integrated.
+        # In the notes, l_light is part of the total l.
         
-        # --- Single Scattering Pass ---
-        # (Simplified: assumes shadow map lookup sm is available)
-        # L_direct = L_source * sm * P_single * exp(-a * l_eye) * dx
-        # L_total += L_direct
-        pass # Single scattering handled separately or integrated here
+        # Total optical thickness
+        # l = l_eye + l_light
+        # For inhomogeneous media, l_light is expensive to compute at runtime, so l^2 is precomputed.
+        # We assume l_light is available via lookup or simple integration.
         
-        # --- Multiple Scattering Pass ---
-        # Determine blurring level w based on optical thickness
-        # Note: w is an index into the light_volume mip-map pyramid
-        w = get_blurring_level(l_eye)
+        # Calculate blurring width w
+        # w is a function of distance and medium properties.
+        # The exact formula for w is not given, but it indexes the light volume.
+        w = compute_blurring_width(current_pos, l_eye, l_light, b)
         
-        # Lookup precomputed radiance from Light Volume
-        L = light_volume.lookup(x, w)
+        # Lookup multiple scattering radiance
+        L_ms = light_volume_pyramid.lookup(current_pos, w)
         
-        # Compute scattering angle theta
-        # omega_in is light direction, omega_out is view direction
-        theta = acos(dot(light_direction, camera_ray.direction))
+        # Calculate scattering angle
+        # theta = arccos(dot(ray_direction, light_direction))
+        # Note: The notes use theta for scattering angle.
+        theta = compute_scattering_angle(ray_direction, light_direction)
         
-        # Compute Multiple Scattering Phase Function P_MS
-        P = compute_phase_function_ms(theta, l_eye)
-        
-        # Compute path curvature C
-        # Avoid division by zero if l_eye is very small
-        if l_eye < 1e-6:
+        # Calculate path curvature
+        if l > 0:
+            C = alpha * (theta ** 2) / l
+        else:
             C = 0.0
-        else:
-            C = alpha * (theta ** 2) / l_eye
             
-        # Compute weight
-        # Note: c/b is the ratio of absorption to scattering
-        # If b is 0, weight is 0 (no scattering)
-        if b > 1e-6:
-            weight = exp(-(c_constant / b) * l_eye) * exp(-C) * P
-        else:
-            weight = 0.0
-            
-        # Add multiple scattering contribution
-        L_total += L * weight
+        # Calculate phase function P_MS
+        P_ms = phase_function_multiple_scattering(theta, l)
+        
+        # Calculate attenuation weight
+        # Using a for absorption as per S1 definition a(x) = C_abs * rho(x)
+        # S2 uses c/b, assuming c=a.
+        attenuation = exp(-(a / b) * l)
+        
+        weight = attenuation * exp(-C) * P_ms
+        
+        # Accumulate
+        L_total += L_ms * weight
+        
+        # Advance ray
+        t += step_size
+        current_pos = ray_origin + ray_direction * t
         
         # Increase step size for multiple scattering as blur width increases
-        dx = get_next_step_size(s_eye)
+        step_size *= step_growth_factor
         
     return L_total
-
-def compute_phase_function_ms(theta, l):
-    """
-    Computes the multiple scattering phase function P_MS.
-    This is a placeholder for the specific formula derived in [S1].
-    The exact formula depends on the PSF derivation.
-    """
-    # Example placeholder: Gaussian-like distribution
-    # P_MS(theta, l) = exp(-theta^2 / (2 * sigma^2))
-    # where sigma is related to l
-    sigma = sqrt(l) # Simplified assumption
-    return exp(-(theta ** 2) / (2 * sigma ** 2))
-
-def get_blurring_level(l):
-    """
-    Maps optical thickness l to a mip-map level w.
-    """
-    # Linear or logarithmic mapping depending on implementation
-    return int(l * scaling_factor)
-
-def get_next_step_size(s):
-    """
-    Returns a progressively larger step size as s increases.
-    """
-    # Example: linear increase
-    return initial_step_size * (1 + s * rate)
 ```
-
-### Edge Cases and Pitfalls
-*   **Inhomogeneous Media:** Computing optical thickness $\ell$ along the path during rendering is expensive. The method mitigates this by precomputing $\ell^2$ (light part) during preprocessing [S1].
-*   **Large Number of Lights:** Precomputing the light attenuation volume for each light source becomes expensive in terms of memory and preprocessing time [S1].
-*   **Phase Function Approximation:** The method considers only the overall statistics of the phase function, not its particular shape. This leads to quantitative differences with Monte Carlo simulations, particularly in angular distribution [S1].
-*   **Multiply Scattered Light Attenuation:** The computation of multiply scattered light attenuation is not straightforward and relies on the precomputed Light Volume, which may not capture all complex attenuation scenarios accurately [S1].
-*   **Single Scattering Dominance:** For inhomogeneous media, single scattering computation dominates rendering time because it must resolve very fine features, requiring much smaller step sizes than multiple scattering [S1].
 
 ## Subtopics
 
+### [Beam Spreading Width Model](1193-beam-spreading-width-model.md)
+The Beam Spreading Width Model provides a closed-form expression for the spatial width $w$ of a collimated light beam as it propagates through a participating medium, approximating the spatial blurring effects caused by multiple scattering. It distinguishes itself from rigorous methods that lack general closed-form solutions by offering an easy-to-evaluate formula that explicitly accounts for absorption, scattering coefficients, and the mean square scattering angle.
+
+### [PSF-based Multiple Scattering Rendering](1297-psf-based-multiple-scattering-rendering.md)
+PSF-based Multiple Scattering Rendering approximates volumetric light transport by convolving a vacuum-rendered image with a spatially varying Gaussian Point Spread Function (PSF) derived from the medium's optical properties. It solves the problem of computationally expensive multiple scattering simulation by treating the medium as a blur filter, allowing for real-time performance on homogeneous media while handling directional lighting and visibility effects that simpler diffusion models miss. Unlike diffusion approximations which assume optically dense, homogeneous media with uniform angular distribution, this method uses a path integration framework to describe spatial spreading while avoiding direct numerical simulation, supporting spatially varying materials and anisotropic sources.
+
+### [In-Scattering Approximation](2215-in-scattering-approximation.md)
+In-Scattering Approximation is a real-time technique for estimating the contribution of multiple scattering in participating media, specifically treating the scattered portion of direct global light as an emittance source to capture short-range scattering effects. It solves the computational cost of integrating the full radiative transfer equation by approximating the in-scattering integral using either a discretized directional sum or a cheap analytical decay function. Unlike its sibling [Beam Spreading Width Model](1193-beam-spreading-width-model.md) which focuses on geometric spread, or [Precomputed Multiple Scattering Table](3324-precomputed-multiple-scattering-table.md) which relies on heavy precomputation, this method provides an immediate, low-cost approximation that brightens the inner parts of volumes (like clouds) while maintaining performance suitable for interactive frame rates.
+
+### [Precomputed Multiple Scattering Table](3324-precomputed-multiple-scattering-table.md)
+Precomputed Multiple Scattering Table (PMS) accelerates light simulation in participating media by precomputing the radiance contribution of multiple scattering events (more than two scattering events) in an infinite homogeneous medium, storing the results in compact 4D lookup tables. It solves the slow convergence of high-order scattering rendering by allowing existing global illumination algorithms (such as VRL, UPBP, and MEMLT) to handle single and double scattering explicitly, while querying the precomputed tables for the remaining multiple scattering contribution. Unlike [Beam Spreading Width Model](1193-beam-spreading-width-model.md) which approximates scattering via geometric width, or [PSF-based Multiple Scattering Rendering](1297-psf-based-multiple-scattering-rendering.md) which uses spatial filters, PMS relies on Monte-Carlo precomputation of directional lobes.
+
+### [One-pass Spectral Rendering Integral](5265-one-pass-spectral-rendering-integral.md)
+The One-pass Spectral Rendering Integral is a real-time approximation for light transport in participating media that simplifies the multiple scattering model by removing global illumination elements to facilitate ray casting with local illumination. It enables interactive data integration using different light sources during post-illumination by factoring the light source out of the volume rendering integral computation. It is distinguished from its siblings by its specific simplification of assigning a volumetric shadow ratio of 1 and considering only irradiance/radiance aligned with the viewing ray, computed via a local Phong-based model.
+
+### [Variation Along and Across Light Rays (SVD Approximation)](6391-variation-along-and-across-light-rays-svd-approximation.md)
+This method approximates the view-independent part of the multiple scattering integrand, $I(\gamma, \beta)$, as a low-rank sum of outer products using Singular Value Decomposition (SVD). It enables efficient integration by decomposing the 2D integrand into functions constant along the light ray direction ($\gamma$) and the view ray direction ($\beta$). This allows the use of a partial sum tree to accumulate terms along $\gamma$ independently, reducing the computational complexity from per-pixel to per-slice processing. It builds on [Multiple Scattering Approximation via Light Volume Lookup](1188-multiple-scattering-approximation-via-light-volume-lookup.md) [G].
+
+### [Asymmetric Lobe Approximation](8359-asymmetric-lobe-approximation.md)
+Asymmetric Lobe Approximation is a method for accelerating multiple scattering calculations in participating media by replacing full 4D spherical phase function lobes with asymmetric 1D functions. It solves the high computational cost of evaluating full angular scattering distributions by focusing on the dominant multiple scattering component, which is less sensitive to angular precision than double scattering. It differs from sibling methods like [Beam Spreading Width Model](1193-beam-spreading-width-model.md) and [PSF-based Multiple Scattering Rendering](1297-psf-based-multiple-scattering-rendering.md) by explicitly simplifying the angular representation of the scattering lobe itself rather than just the spatial spread or point spread function.
+
+### [MIP map filtering for multiple scattering](9075-mip-map-filtering-for-multiple-scattering.md)
+This method efficiently approximates multiple-scattering light transport in non-homogeneous, analytically integrable participating media by applying Gaussian blurring via MIP maps. It solves the high computational cost of neighborhood filtering in screen-space rendering, enabling real-time performance on GPUs by reducing time complexity from $O(n^4)$ to $O(n^2 \log_2 n)$. Unlike naive gathering which iterates over a fixed neighborhood for every pixel, this approach leverages hierarchical image representations to accumulate contributions across scales.
+
 ### Hybrid Shadowing
-Hybrid Shadowing is a variant technique for handling shadows cast by objects through a medium. It combines a 2D shadow map for single scattering with the Light Volume/Light Image for multiple scattering [S2].
-*   **Mechanism:** Objects are ignored during the generation of the Light Volume to avoid low-resolution shadow artifacts. Instead, a traditional 2D shadow map is built. During the single scattering pass, radiance is scaled by the shadow map lookup result. For multiple scattering, objects inside the medium are ignored, relying on the Light Volume which does not account for internal occlusion [S2].
-*   **Pitfall:** For large objects embedded in the medium (e.g., a wall), the media should be split into several separate volumes so the object is outside each volume, ensuring proper shadow handling [S2].
-*   **Comparison:** Unlike setting light values very large for occluded voxels (which causes low-resolution artifacts), this method uses a 2D shadow map for high-quality single scattering shadows at a nominal performance cost [S2].
+A method to handle shadows cast by objects through a medium using a 2D shadow map for single scattering and ignoring objects in multiple scattering (relying on LightImage/LightVolume) [S2]. Objects are ignored during the generation of the light volume. In the single scattering pass, radiance is scaled by the result of a shadow map lookup. For multiple scattering, objects inside the medium are ignored, relying on LightImage and light volume which do not account for internal occlusion [S2]. This strategy is adequate for reasonable size objects (such as game characters) since multiple scattering lets light bend around objects. For large objects embedded in the medium (e.g., a wall), split the media into several separate volumes so the object is outside each volume [S2]. Unlike setting light values very large for occluded voxels (which causes low-resolution artifacts), this method uses a 2D shadow map for high-quality single scattering shadows [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The method significantly reduces rendering time compared to Monte Carlo methods. For a rising smoke image, it took approximately 10 minutes compared to 3 hours for a traditional Monte Carlo ray marching solution [S1]. For inhomogeneous media (800x800, 9 samples/pixel), it took about 30 minutes on a 1 GHz Powerbook G4 [S1].
-*   **Memory Complexity:** The method requires substantial memory for precomputed volumes. The density volume (128^3) requires 8 Mb, the light volume pyramid requires 32 Mb, and the $\ell^2$ storage requires an additional 8 Mb, totaling 48 Mb [S1]. This is higher than Monte Carlo methods which required only 8 Mb [S1].
-*   **Strengths:** Captures qualitative features of multiple scattering, such as spatial blurring, more efficiently than previous methods. The use of progressively larger step sizes for multiple scattering further reduces computational cost [S1].
-*   **Limitations:** The approximation of the phase function leads to quantitative inaccuracies. Precomputation is expensive for scenes with many light sources. Single scattering still dominates rendering time for inhomogeneous media due to the need for small step sizes [S1].
-*   **When to Use:** Suitable for real-time or near-real-time rendering of volumetric effects like smoke and clouds where qualitative appearance is more important than strict physical accuracy.
-*   **When Not to Use:** Not suitable for scenes requiring high quantitative accuracy in angular distribution or scenes with a very large number of light sources due to precomputation costs.
+*   **Time Complexity:** The lookup operation is $O(1)$ per sample. The overall rendering time is dominated by the ray marching steps. For inhomogeneous media, single scattering computation dominates rendering time because it must resolve very fine features, requiring a much smaller step size than multiple scattering [S1]. The multiple scattering component uses progressively larger step sizes [S1].
+*   **Memory Complexity:** Storage for density volume ($128^3$ voxels) is 8 MB. Storage for the light volume pyramid is 32 MB. Additional 8 MB for precomputed $\ell^2$ [S1]. Total ~48 MB. This is higher than standard Monte Carlo methods which required less memory (8 MB) [S1].
+*   **Performance:** Rendering time for inhomogeneous media (800x800 resolution, 9 samples per pixel) was about 30 minutes on a 1 GHz Powerbook G4 with 512 MB RAM [S1]. For a rising smoke image, the algorithm took approximately 10 minutes, compared to 3 hours for a traditional Monte Carlo ray marching solution [S1].
+*   **Strengths:** Captures qualitative features of multiple scattering, such as spatial blurring, more efficiently than previous methods [S1]. Simple implementation [S1].
+*   **Limitations:** The method considers only the overall statistics of the phase function, not its particular shape, leading to quantitative differences with Monte Carlo simulations [S1]. Precomputing the light attenuation volume for each light source becomes expensive for a large number of light sources [S1]. The computation of multiply scattered light attenuation is not straightforward [S1].
+*   **When to use:** Suitable for real-time or near-real-time rendering of volumetric media where qualitative multiple scattering effects (glow, blurring) are desired, and computational resources for full Monte Carlo integration are unavailable [S1].
+*   **When not to use:** When high quantitative accuracy is required, or when the number of light sources is very large, making precomputation prohibitive [S1].
 
 ## Background
-The method was introduced in the paper "Practical Rendering of Multiple Scattering Effects in Participating Media" [S1]. It builds on the observation that multiple scattering can be modeled as a spatial spreading of light, which can be precomputed and stored in a hierarchical texture structure. The technique was demonstrated on rising smoke and inhomogeneous participating media in a Cornell box [S1]. It represents a practical approach to approximating multiple scattering effects without the high computational cost of iterative Monte Carlo methods [S1].
+The method was presented in "Practical Rendering of Multiple Scattering Effects in Participating Media" [S1]. It was used in the rendering of rising smoke (Figure 12) and inhomogeneous participating media in a Cornell box (Figure 13) [S1]. The approach avoids direct numerical simulation of multiple scattering by taking advantage of spatial spreading, using a derived point spread function (PSF) from a path integral analysis of light transport [S1]. While the PSF is derived under simple assumptions, it can be applied to inhomogeneous media as well [S1].
 
 ## Sources
 [S1] Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28

@@ -3,14 +3,14 @@
 Also called: Chunked Rendering, Memory-Efficient Rendering, NeRF Ray Rendering Pipeline
 
 ## Overview
-Batched Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU [S1, S2, S3, S4, unofficial]. It is primarily used during validation and inference phases where full-resolution images must be generated without training-time optimizations like CUDA-accelerated raymarching [S3, S4, unofficial]. It builds on [Ray-Centric and Hardware-Accelerated Rendering](8936-ray-centric-and-hardware-accelerated-rendering.md) by explicitly managing the batch size relative to available VRAM, and differs from [Chunked Trilinear Volume Rendering](2557-chunked-trilinear-volume-rendering.md) by chunking the *rays* (the query set) rather than the *volume data* (the lookup grid) [S2, S5, unofficial].
+Batched Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU [S1, S3, unofficial]. It builds on [Ray-Centric and Hardware-Accelerated Rendering](8936-ray-centric-and-hardware-accelerated-rendering.md) by explicitly managing the batch size relative to available VRAM.
 
 ## How it works
-The method decomposes a full image ray batch into smaller sub-batches, renders each sub-batch through the volume representation (typically a neural field), and concatenates the results.
+The method decomposes a full image ray batch into smaller sub-batches, renders each sub-batch through the volume representation (typically a neural field), and concatenates the results [S3, unofficial].
 
 **Inputs and Outputs:**
 *   **Input:** A tensor of rays with shape $(B, 11)$, where $B$ is the total number of rays. The 11 components are: `rays_o` (origin, 3 floats), `rays_d` (direction, 3 floats), `near` (near plane distance, 1 float), `far` (far plane distance, 1 float), and `viewdirs` (view direction, 3 floats) [S3, unofficial].
-*   **Output:** A dictionary of tensors (e.g., `rgb_map`, `disp_map`, `acc_map`) with spatial shape $(B, H, W)$ or flattened to $(B, \dots)$ depending on the post-processing step, where $H \times W = B$ [S3, unofficial].
+*   **Output:** A dictionary of tensors (e.g., `rgb_map`, `disp_map`, `acc_map`) reshaped to match the original batch dimensions, excluding the last dimension which corresponds to the sample dimension [S3, unofficial].
 
 **Data Structures:**
 *   `rays_flat`: Tensor of shape $(B, 11)$ containing all ray parameters [S3, unofficial].
@@ -209,7 +209,7 @@ def render_rays(ray_batch,
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0.0, white_bkgd=False, pytest=False):
     """
     Converts raw network output (rgb, sigma) to final image components.
-    Implements volume rendering equation.
+    Implements volume rendering equation. [G]
     """
     # raw shape: (N_rays, N_samples, 4) -> (rgb, sigma)
     rgb = raw[..., :3]
@@ -219,58 +219,19 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0.0, white_bkgd=False, pytest
     noise = 0.
     if sigma.shape[-1] > 0:
         noise = torch.randn(sigma.shape, device=raw.device) * raw_noise_std
-        
-    # Apply noise and activation (exp) to sigma
-    # Note: In standard NeRF, sigma is clamped or exp'd. 
-    # Assuming standard NeRF implementation where raw sigma is exponentiated.
-    # However, raw2outputs usually takes raw sigma directly or applies exp.
-    # Based on S3, raw is (B, 4). We assume sigma is the 4th component.
-    # Standard NeRF: sigma = exp(sigma) or similar. 
-    # Let's assume the standard formula:
-    # alpha = 1 - exp(-sigma * delta)
+    sigma = sigma + noise
     
     # Compute delta (distance between samples)
-    # delta = z_vals[:, 1:] - z_vals[:, :-1]
-    # For the last sample, delta is often approximated or handled.
-    # Here we compute deltas for the intervals.
-    
-    # To handle the last sample, we might need to extend z_vals or handle boundary.
-    # Standard implementation:
     deltas = z_vals[..., 1:] - z_vals[..., :-1]
-    # If the last delta is 0 (or undefined), replace with a small value or the previous delta
-    # This is a common pitfall/implementation detail [G]
-    deltas = torch.cat([deltas, deltas[..., -1:]], dim=-1)
+    # Approximate last delta to avoid boundary issues
+    deltas = torch.cat([deltas, torch.ones_like(deltas[..., :1]) * 1e10], dim=-1)
     
     # Compute alpha
-    # sigma might need to be exponentiated if the network outputs log(sigma)
-    # Assuming raw sigma is linear density for this implementation based on S3 structure
-    # But NeRF typically uses exp. Let's assume standard NeRF:
-    # alpha = 1 - torch.exp(-torch.relu(sigma) * deltas)
-    # However, S3 notes say "raw output... raw2outputs". 
-    # We will use the standard volume rendering formula.
-    
-    # Note: The exact activation of sigma depends on the specific network implementation.
-    # In the original NeRF code, sigma is clamped to be positive and often exp'd.
-    # We assume sigma here is the raw output and needs to be processed.
-    # Let's assume sigma is already positive or handled by relu.
-    
     alpha = 1.0 - torch.exp(-torch.relu(sigma) * deltas)
     
     # Transmittance
-    # T[i] = product(alpha[j] for j < i)
-    # T = exp(-sum(sigma * delta))
-    # We can compute T iteratively or via cumsum.
-    # T[..., 0] = 1.0
-    # T[..., i] = T[..., i-1] * (1.0 - alpha[..., i-1])
-    
-    # Using cumsum for efficiency
-    # log_alpha = log(1 - alpha)
-    # log_T = cumsum(log_alpha)
-    # T = exp(log_T)
-    
-    # Handle edge case where alpha is 1 (log(0) = -inf)
-    # Standard trick:
-    T = torch.cumsum(torch.cat([torch.ones_like(alpha[..., :1]), 1. - alpha], dim=-1), dim=-1)[..., :-1]
+    T = torch.cumsum(1. - alpha, dim=-1)
+    T = torch.cat([torch.ones_like(T[..., :1]), T[..., :-1]], dim=-1)
     
     # Weights
     weights = alpha * T
@@ -285,31 +246,17 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0.0, white_bkgd=False, pytest
 
 def sample_pdf(z_vals_mid, weights, N_importance, det=False, pytest=False):
     """
-    Hierarchical sampling: sample N_importance points from the distribution defined by weights.
+    Hierarchical sampling: sample N_importance points from the distribution defined by weights. [G]
     """
     # weights shape: (N_rays, N_samples-1)
     # z_vals_mid shape: (N_rays, N_samples-1)
     
     # Get pdf
-    # pdf = weights / (weights.sum(dim=-1, keepdim=True) + 1e-10)
-    # cdf = torch.cumsum(pdf, dim=-1)
-    # cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
-    
-    # Uniform samples
-    # u = torch.rand(...)
-    # Interpolate to find z_samples
-    
-    # Simplified implementation for the article
-    # Note: This is a helper function. The exact implementation varies.
-    # We assume a standard inverse CDF sampling.
-    
-    # Reshape weights to (N_rays, N_samples-1)
-    # Compute CDF
     pdf = weights / (weights.sum(dim=-1, keepdim=True) + 1e-10)
     cdf = torch.cumsum(pdf, dim=-1)
     cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
     
-    # Generate uniform samples
+    # Uniform samples
     if det:
         u = torch.linspace(0., 1., N_importance, device=weights.device)
         u = u.expand([weights.shape[0], N_importance])
@@ -317,10 +264,6 @@ def sample_pdf(z_vals_mid, weights, N_importance, det=False, pytest=False):
         u = torch.rand([weights.shape[0], N_importance], device=weights.device)
         
     # Inverse CDF
-    # Find indices where u falls in cdf
-    # This is typically done with torch.searchsorted or similar
-    # For simplicity, we assume a helper exists or implement a basic version
-    # [G] Using searchsorted for inverse CDF sampling
     indices = torch.searchsorted(cdf, u, right=True)
     indices = torch.clamp(indices, 0, cdf.shape[-1] - 2)
     
@@ -354,16 +297,16 @@ Chunked Trilinear Volume Rendering is a batched ray rendering technique that pro
 Chunked Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU. It is primarily used during validation and inference phases where full-resolution images must be generated without training-time optimizations like CUDA-accelerated raymarching. It builds on [Batched Ray Rendering](1547-batched-ray-rendering.md) by explicitly managing the batch size relative to available VRAM, and differs from [Chunked Trilinear Volume Rendering](2557-chunked-trilinear-volume-rendering.md) by chunking the *rays* (the query set) rather than the *volume data* (the lookup grid).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(B \cdot N_{samples} \cdot C)$, where $B$ is the number of rays, $N_{samples}$ is the number of samples per ray, and $C$ is the cost of the network query. The chunking does not change the asymptotic time complexity but adds overhead from loop iteration and concatenation.
-*   **Memory Complexity:** $O(chunk \cdot N_{samples} \cdot D)$, where $D$ is the dimensionality of the intermediate tensors (e.g., `pts`, `raw`). By reducing `chunk`, memory usage is reduced linearly, allowing rendering of larger images on GPUs with limited VRAM.
-*   **Measured Performance:** The default chunk size is $1024 \times 32 = 32768$ rays [S3, unofficial]. This value balances memory usage and GPU utilization. Smaller chunks may lead to underutilization of the GPU due to kernel launch overhead, while larger chunks risk OOM errors.
-*   **Strengths:** Enables rendering of high-resolution images and large neural fields on consumer-grade GPUs by preventing OOM errors. Simple to implement as a wrapper around the core rendering function.
-*   **Limitations:** Adds overhead from Python loop iteration and tensor concatenation. Does not optimize the computational cost of the ray marching itself.
-*   **When to Use:** Use during validation, inference, or training when the full image batch exceeds available VRAM. Use when the bottleneck is memory rather than compute.
-*   **When Not to Use:** Use when VRAM is sufficient, as the overhead of chunking is unnecessary. Use when real-time performance is critical and the overhead of chunking is unacceptable.
+*   **Time Complexity:** Not given in the sources. The chunking does not change the asymptotic time complexity but adds overhead from loop iteration and concatenation [G].
+*   **Memory Complexity:** Not given in the sources. By reducing `chunk`, memory usage is reduced linearly, allowing rendering of larger images on GPUs with limited VRAM [G].
+*   **Measured Performance:** The default chunk size is $1024 \times 32 = 32768$ rays [S3, unofficial]. This value balances memory usage and GPU utilization. Smaller chunks may lead to underutilization of the GPU due to kernel launch overhead, while larger chunks risk OOM errors [G].
+*   **Strengths:** Enables rendering of high-resolution images and large neural fields on consumer-grade GPUs by preventing OOM errors. Simple to implement as a wrapper around the core rendering function [G].
+*   **Limitations:** Adds overhead from Python loop iteration and tensor concatenation. Does not optimize the computational cost of the ray marching itself [G].
+*   **When to Use:** Use during validation, inference, or training when the full image batch exceeds available VRAM. Use when the bottleneck is memory rather than compute [G].
+*   **When Not to Use:** Use when VRAM is sufficient, as the overhead of chunking is unnecessary. Use when real-time performance is critical and the overhead of chunking is unacceptable [G].
 
 ## Background
-Batched Ray Rendering is a technique popularized by the NeRF (Neural Radiance Fields) paper and its associated codebase [S3, unofficial]. It is a standard practice in neural rendering pipelines to handle the memory requirements of evaluating large neural networks for every sample point along every ray in an image. The method is widely used in implementations such as `nerf-pytorch` and `HashNeRF-pytorch` [S1, S2, unofficial].
+Batched Ray Rendering is a standard practice in neural rendering pipelines to handle the memory requirements of evaluating large neural networks for every sample point along every ray in an image [S3, unofficial].
 
 ## Sources
 [S1] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)

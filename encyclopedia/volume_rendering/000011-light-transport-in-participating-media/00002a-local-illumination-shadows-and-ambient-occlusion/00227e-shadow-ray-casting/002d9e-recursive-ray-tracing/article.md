@@ -1,141 +1,178 @@
 # Recursive Ray Tracing
-
 Also called: Higher-order Rays, Secondary Ray Shooting, Whitted shading, Whitted-style Ray Tracing
 
 ## Overview
-Recursive Ray Tracing extends basic ray casting by handling diffuse reflection, specular reflection, and transmission (refraction) through the recursive tracing of rays upon intersection with objects [S2, unofficial]. It solves the problem of local illumination and shadowing in participating media by evaluating visibility to light sources and simulating surface interactions that influence the final pixel color [S1, unofficial]. It is distinguished from its sibling [Shadow Ray Casting](2796-shadow-ray-casting.md) by explicitly modeling reflection and refraction via physical laws (Snell's law, Fresnel equation) rather than relying solely on shadow tests and ambient approximations [S1, unofficial].
+Recursive Ray Tracing extends basic ray casting by handling diffuse reflection, specular reflection, and transmission (refraction) through the recursive tracing of secondary rays upon intersection with objects [S1, S2, unofficial]. It solves the problem of local illumination and surface appearance in participating media or solid volumes by adding visual cues like shadows, reflections, and refractions that simple shadow ray casting lacks [S1, unofficial]. It is distinguished from its sibling [Shadow Ray Casting](2796-shadow-ray-casting.md) by the explicit generation of new ray directions (reflection/refraction) based on material properties and physical laws, rather than only testing visibility along fixed light directions [S1, unofficial].
 
 ## How it works
-**Inputs:** A primary ray $r$ (origin $\mathbf{o}$, direction $\mathbf{d}$), a list of scene objects $O$, a maximum recursion depth $D_{max}$, and a background color function $bg(r)$.
-**Outputs:** The final color $C$ of the pixel associated with the ray.
+**Inputs:**
+*   A primary ray $r$ (origin $\mathbf{o}$, direction $\mathbf{d}$).
+*   A list of scene objects $O$.
+*   Maximum recursion depth $D_{max}$ (pre-defined limit) [S1, unofficial].
+*   Background color function $bg(r)$ [S2, S3, unofficial].
+
+**Outputs:**
+*   Final color $C$ for the pixel associated with ray $r$.
 
 **Data Structures:**
-*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
-*   **Intersection:** Contains hit point $\mathbf{p}$, normal $\mathbf{n}$, distance $t$, and material properties (diffuse color $k_d$, specular color $k_s$, refractive index $\eta$, emissive color $E$).
+*   **Ray:** Defined by origin $\mathbf{o}$ and unit direction $\mathbf{d}$.
+*   **Intersection:** Contains hit point $\mathbf{p}$, normal $\mathbf{n}$, and object reference.
+*   **Material Properties:** Boolean flags `hasSpecular()` and `hasTransmission()` [S2, unofficial].
 
 **Steps:**
-1.  **Intersection Test:** Find the closest intersection $I$ between ray $r$ and any object in $O$ such that distance $t > 0$. If no intersection exists, return $bg(r)$.
-2.  **Shadow Testing:** For each light source, construct a shadow ray from $\mathbf{p}$ towards the light. Set the shadow ray's maximum distance to the distance between $\mathbf{p}$ and the light. If another primitive intersects this ray before the light, the visibility factor $V_i$ is 0; otherwise, it is 1.
-3.  **Diffuse Shading:** Calculate the diffuse contribution using the surface normal $\mathbf{n}$, view direction, and incident light direction $\mathbf{l}$. The contribution is proportional to $\max(0, \mathbf{n} \cdot \mathbf{l})$.
-4.  **Specular Reflection:** If the material has specular properties, compute the reflection direction $\mathbf{r}_{dir}$ using the incident direction $\mathbf{v}$ (from surface to eye) and normal $\mathbf{n}$:
-    $$ \mathbf{r}_{dir} = 2.0 (\mathbf{n} \cdot \mathbf{v}) \mathbf{n} - \mathbf{v} $$
-    Trace a new ray with origin $\mathbf{p}$ and direction $\mathbf{r}_{dir}$.
-5.  **Refraction (Transmission):** If the material has transmission properties, compute the refraction direction using Snell's law. Let $\eta$ be the ratio of refractive indices.
-    *   Determine if the ray is entering or exiting: if $\mathbf{v} \cdot \mathbf{n} < 0$, the ray is inside the object. Flip the normal ($\mathbf{n} = -\mathbf{n}$) and invert the ratio ($\eta = 1.0 / \eta$).
-    *   Calculate $\cos\_angle = \mathbf{v} \cdot \mathbf{n}$.
-    *   Calculate the discriminant: $k = 1.0 - \eta^2 (1.0 - \cos\_angle^2)$.
-    *   If $k < 0$, total internal reflection occurs; use the reflection direction instead.
-    *   If $k \ge 0$, the refracted direction is:
-        $$ \mathbf{t}_{dir} = \eta \mathbf{v} + (\eta \cos\_angle - \sqrt{k}) \mathbf{n} $$
-        Trace a new ray with origin $\mathbf{p}$ and direction $\mathbf{t}_{dir}$.
-6.  **Recursion:** Recursively call the ray tracing function for the new reflection or refraction rays. The recursion depth decreases by 1.
-7.  **Accumulation:** Sum the diffuse, specular, and refractive contributions, modulated by visibility and material colors.
+
+1.  **Intersection Test:** Find the closest intersection $p$ between ray $r$ and any object in $O$. Let the closest object be $o$ and the distance be $t$. If no intersection is found ($o = \emptyset$), return $bg(r)$ [S2, S3, unofficial].
+2.  **Shadow Ray Casting (Visibility):** For each light source, construct a shadow ray from $p$ towards the light. Set the shadow ray's maximum distance to the distance between $p$ and the light source. If another primitive intersects this shadow ray, the point is in shadow (visibility factor $V_i = 0$); otherwise, $V_i = 1$ [S1, S2, unofficial].
+3.  **Diffuse Shading:** Calculate the diffuse contribution using the surface normal $\mathbf{n}$, view direction, and incident light direction. The contribution is:
+    $$ C_{diffuse} = L_{source} \cdot \text{reflectance} \cdot \max(0, \mathbf{n} \cdot \mathbf{l}) \cdot V_i $$
+    where $L_{source}$ is the light intensity and $\mathbf{l}$ is the normalized light direction [S2, unofficial].
+4.  **Specular Reflection:** If the material has specular properties (`hasSpecular()`):
+    *   Compute the ideal reflection direction $\mathbf{r}_{dir}$:
+        $$ \mathbf{r}_{dir} = 2.0 (\mathbf{n} \cdot \mathbf{d}_{in}) \mathbf{n} - \mathbf{d}_{in} $$
+        where $\mathbf{d}_{in}$ is the incoming ray direction (normalized) [S2, unofficial].
+    *   Recursively trace a new ray from $p$ in direction $\mathbf{r}_{dir}$ with depth $D_{max} - 1$. Add the result to the color [S2, unofficial].
+5.  **Transmission (Refraction):** If the material has transmission properties (`hasTransmission()`):
+    *   Determine if the ray is entering or exiting the object by checking $\mathbf{n} \cdot \mathbf{d}_{in}$.
+    *   If $\mathbf{n} \cdot \mathbf{d}_{in} < 0$ (ray is inside), flip the normal ($\mathbf{n} = -\mathbf{n}$) and invert the refraction ratio ($\eta = 1.0 / \eta_{initial}$) [S2, unofficial].
+    *   Calculate the discriminant $k$:
+        $$ k = 1.0 - \eta^2 (1.0 - (\mathbf{n} \cdot \mathbf{d}_{in})^2) $$
+    *   If $k \ge 0$, compute the refracted direction $\mathbf{t}_{dir}$:
+        $$ \mathbf{t}_{dir} = \eta \mathbf{d}_{in} + (\eta (\mathbf{n} \cdot \mathbf{d}_{in}) - \sqrt{k}) \mathbf{n} $$
+        Recursively trace a ray from $p$ in direction $\mathbf{t}_{dir}$ with depth $D_{max} - 1$ [S2, unofficial].
+    *   If $k < 0$, total internal reflection occurs. Compute the reflection direction as in Step 4 and trace recursively [S2, unofficial].
+6.  **Accumulation:** Sum the diffuse, specular, and refractive contributions.
+7.  **Termination:** Recursion stops if:
+    *   The maximum depth $D_{max}$ is reached [S1, unofficial].
+    *   The contribution of the ray is too small (alternative stopping condition) [S1, unofficial].
+    *   No further objects are intersected [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def trace_ray(r: Ray, objects: List[Shape], depth: int, max_depth: int) -> Color:
-    # Base case: max depth reached or no intersection
-    if depth <= 0:
-        return Color(0, 0, 0)
+def recursive_ray_trace(ray, objects, max_depth, background_color):
+    """
+    Recursively trace rays to compute color.
+    ray: Ray object with origin and direction
+    objects: List of scene primitives
+    max_depth: Integer, current recursion depth
+    background_color: Function or value returned if no hit
+    """
+    # Base case: depth limit
+    if max_depth <= 0:
+        return background_color(ray)
+
+    # Find closest intersection
+    hit = find_closest_intersection(ray, objects)
     
-    intersection = get_closest_intersection(r, objects)
+    # Base case: no intersection
+    if hit is None:
+        return background_color(ray)
+
+    p = hit.point
+    n = hit.normal
+    obj = hit.object
+
+    # 1. Shadow Ray Casting for Diffuse Illumination
+    # Assuming a single point light for simplicity, or loop over lights
+    light_dir = normalize(light_position - p)
+    shadow_ray = Ray(p, light_dir)
+    shadow_hit = find_closest_intersection(shadow_ray, objects)
     
-    if intersection is None:
-        return background_color(r)
-    
-    p, n, t, material = intersection
-    
-    # Shadow testing
-    visibility = 1.0
-    for light in lights:
-        shadow_ray = Ray(p, light.position - p)
-        shadow_hit = get_closest_intersection(shadow_ray, objects)
-        if shadow_hit is not None and shadow_hit.distance < (light.position - p).length():
-            visibility = 0.0
-            break
-            
-    # Diffuse shading
-    diffuse_color = material.diffuse_color * visibility * max(0, dot(n, normalize(light.position - p)))
-    
-    # Specular reflection
-    specular_color = Color(0, 0, 0)
-    if material.has_specular:
-        view_dir = normalize(camera.position - p)
-        # Note: In standard Whitted, reflection is based on incoming ray from eye, 
-        # but physically reflection depends on incident light. 
-        # Source [S2, unofficial] uses view direction for reflection calculation in specific context, 
-        # but standard physics uses incident light. We follow source [S2, unofficial] logic for specular direction if specified, 
-        # but standard Whitted uses incident light for reflection. 
-        # Source [S2, unofficial] snippet: "compute in_light_direction as -(r.d).normalized()... ideal_reflection = reflection - in_light_direction"
-        # This implies reflection of the light ray.
-        incident_light = normalize(light.position - p)
-        scale_factor = 2.0 * dot(n, incident_light)
-        reflection_vec = scale_factor * n - incident_light
-        specular_ray = Ray(p, reflection_vec)
-        specular_color = material.specular_color * trace_ray(specular_ray, objects, depth - 1, max_depth)
-        
-    # Refraction
-    refract_color = Color(0, 0, 0)
-    if material.has_transmission:
-        view_dir = normalize(camera.position - p)
+    # Check if shadow ray hits something closer than the light
+    is_in_shadow = False
+    if shadow_hit is not None:
+        # If the hit is closer than the light source distance, it's in shadow
+        if shadow_hit.distance < distance(p, light_position):
+            is_in_shadow = True
+
+    # 2. Diffuse Calculation
+    diffuse_color = vec3(0.0)
+    if not is_in_shadow:
+        # Simple Lambertian diffuse
+        N_dot_L = max(0.0, dot(n, light_dir))
+        diffuse_color = obj.material.diffuse_color * N_dot_L * light_intensity
+
+    # 3. Specular Reflection
+    specular_color = vec3(0.0)
+    if obj.material.has_specular:
+        # Compute reflection direction
+        # d_in is the incoming ray direction (negative of ray.direction if ray points from eye)
+        # Standard ray tracing: ray.direction is from eye to scene.
+        # Reflection formula: r = d - 2(d.n)n ? 
+        # Note: Source [S2, unofficial] uses: reflection = 2.0 * dot(normal, in_light_direction) * normal - in_light_direction
+        # Here in_light_direction is the direction OF the light? 
+        # Actually, standard reflection vector R for incoming vector I (pointing TO surface) is:
+        # R = I - 2(I.N)N. 
+        # Source [S2, unofficial] code: `2.0 * dot(normal, Direction) * normal - Direction`
+        # This matches R = 2(N.I)N - I if I is the incoming vector.
+        # In our ray, ray.direction is the vector FROM eye TO surface. Let's call it V.
+        # The incoming vector to the surface is V.
+        reflection_dir = 2.0 * dot(n, ray.direction) * n - ray.direction
+        reflection_ray = Ray(p, reflection_dir)
+        specular_color = recursive_ray_trace(reflection_ray, objects, max_depth - 1, background_color) * obj.material.specular_factor
+
+    # 4. Transmission (Refraction)
+    refract_color = vec3(0.0)
+    if obj.material.has_transmission:
         # Determine entering/exiting
-        n_local = n
-        eta = material.refractive_index
-        cos_i = dot(-view_dir, n_local) # view_dir is from p to eye, so -view_dir is from eye to p (incident)
-        # Actually, standard refraction uses incident ray from light or eye. 
-        # Source [S2, unofficial] uses view_direction for refraction calculation.
-        entering = cos_i > 0.0
+        # If dot(n, ray.direction) < 0, we are inside the object (normal points out)
+        # Standard convention: Normal points OUT of the object.
+        # If ray is coming from outside, ray.direction and n have angle > 90, so dot < 0.
+        # Wait, if ray is outside, it hits the front face. Normal points out. 
+        # Ray direction is towards surface. Normal is away from surface.
+        # Dot product is negative.
+        entering = dot(n, ray.direction) < 0
+        
+        current_n = n
+        eta = obj.material.refraction_ratio # e.g., 1.5 for glass
         
         if not entering:
-            n_local = -n_local
+            current_n = -n
             eta = 1.0 / eta
-            cos_i = dot(-view_dir, n_local)
             
+        # Cosine of angle between incoming ray and normal
+        # Note: ray.direction is the vector pointing INTO the surface.
+        # We need the angle between the incoming ray and the normal.
+        # cos_i = dot(-ray.direction, current_n) ? 
+        # Source [S2, unofficial] code: `cos_i = dot(-wi, n)` where wi is incoming.
+        # In our context, wi = ray.direction.
+        cos_i = dot(-ray.direction, current_n)
+        
         k = 1.0 - eta * eta * (1.0 - cos_i * cos_i)
         
-        if k < 0.0:
-            # Total internal reflection
-            scale_factor = 2.0 * dot(n_local, -view_dir) # view_dir is from p to eye
-            reflection_vec = scale_factor * n_local - (-view_dir) # Reflect -view_dir
-            refract_ray = Ray(p, reflection_vec)
-            refract_color = material.transmission_color * trace_ray(refract_ray, objects, depth - 1, max_depth)
-        else:
+        if k >= 0.0:
+            # Refraction
             refract_term = sqrt(k)
-            first_term = eta * (-view_dir)
+            first_term = eta * ray.direction
             second_term = eta * cos_i - refract_term
-            refract_dir = -first_term + n_local * second_term
+            refract_dir = -first_term + current_n * second_term
             refract_ray = Ray(p, refract_dir)
-            refract_color = material.transmission_color * trace_ray(refract_ray, objects, depth - 1, max_depth)
-            
+            refract_color = recursive_ray_trace(refract_ray, objects, max_depth - 1, background_color)
+        else:
+            # Total Internal Reflection
+            reflection_dir = 2.0 * dot(n, ray.direction) * n - ray.direction
+            reflection_ray = Ray(p, reflection_dir)
+            refract_color = recursive_ray_trace(reflection_ray, objects, max_depth - 1, background_color)
+
     return diffuse_color + specular_color + refract_color
 ```
-
-**Parameters:**
-*   `max_depth`: Pre-defined level of recursion. Typical values are 3-5. Contribution diminishes with each level [S1, unofficial].
-*   `refraction_ratio`: Default value 0.75 mentioned in source [S2, unofficial], though physically this is the index of refraction ratio.
-
-**Edge Cases:**
-*   **Total Internal Reflection:** Occurs when the discriminant $k < 0$ in refraction calculation. The ray is reflected instead of refracted [S2, unofficial].
-*   **Precision Errors:** Intersection tests may suffer from self-intersection artifacts due to floating-point precision. A small epsilon offset is typically added to the ray origin in recursive calls [G].
-*   **Infinite Recursion:** Prevented by `max_depth` or by stopping if the contribution is too small [S1, unofficial].
 
 ## Subtopics
 
 ### Iterative Ray Tracing
-A method to compute ray color on GPU by replacing recursive function calls with an iterative loop, because GPU languages like GLSL do not support recursion [S3, unofficial]. It uses an accumulator initialized to 1 and updates it via Hadamard product (element-wise multiplication) with the material color at each bounce. The loop continues until the bounce counter $b < 0$ or no object is hit [S3, unofficial].
+A method to compute ray color on GPU by replacing recursive function calls with an iterative loop, because GPU languages like GLSL do not support recursion [S3, unofficial]. It uses an accumulator initialized to 1 (identity for Hadamard product) and a bounce counter. In each iteration, it finds the closest intersection, updates the ray origin/direction, and Hadamard-multiplies the accumulator with the material color. If no object is hit, it returns the background color Hadamard-multiplied by the accumulator [S3, unofficial]. The Hadamard product is defined as element-wise multiplication: $(a, c, e) \circ (b, d, f) = (ab, cd, ef)$ [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Exponential in the worst case ($O(b^d)$ where $b$ is branching factor and $d$ is depth), but typically linear with respect to the number of primitives per ray for a fixed depth.
-*   **Memory Complexity:** Linear with recursion depth $O(d)$ for the call stack. Iterative version uses $O(1)$ stack space.
-*   **Strengths:** Produces realistic reflections, refractions, and shadows. Simple to implement for basic scenes.
-*   **Limitations:** Does not handle global illumination effects like color bleeding or indirect diffuse lighting (unless extended). Performance degrades rapidly with depth and scene complexity.
-*   **When to use:** For offline rendering or real-time applications with limited reflection/refraction requirements and simple scenes.
-*   **When not to use:** For scenes requiring full global illumination or very high recursion depths.
+*   **Time Complexity:** Exponential in the worst case with respect to recursion depth, as each bounce can spawn multiple secondary rays (reflection + refraction). In practice, limited by $D_{max}$ and material properties.
+*   **Memory Complexity:** Linear with respect to recursion depth due to the call stack (for recursive implementation) or constant space (for iterative implementation) [S3, unofficial].
+*   **Strengths:** Produces realistic images with shadows, reflections, and refractions. Simple to implement for basic scenes [S1, unofficial].
+*   **Limitations:** Does not handle global illumination effects like color bleeding or indirect diffuse lighting without extensions (e.g., path tracing) [S1, unofficial]. Performance degrades rapidly with high recursion depths and complex scenes. GPU implementation requires iterative rewriting [S3, unofficial].
+*   **When to use:** Real-time rendering of simple scenes with glossy/specular materials and transparent objects where full global illumination is not required.
+*   **When not to use:** Scenes requiring soft shadows from area lights, complex indirect lighting, or when running on hardware without recursion support (without iterative adaptation) [S1, S3, unofficial].
 
 ## Background
-Recursive Ray Tracing was introduced by Turner Whitted in 1980 in his paper "An Improved Illumination Model for Shaded Display" [S1, unofficial]. It extended the basic ray casting algorithm by adding support for specular reflection and refraction, allowing for the rendering of mirrors and glass. The term "higher-order rays" refers to the secondary rays (reflection/refraction) spawned from primary rays [S1, unofficial].
+Recursive Ray Tracing was introduced as an extension to basic ray casting to add visual cues like shadows, reflections, and refractions [S1, unofficial]. It is often referred to as Whitted-style ray tracing after Thomas Whitted's 1980 paper "An Improved Illumination Model for Shaded Display" [S1, S2, unofficial]. The method became a standard technique in computer graphics for generating photorealistic images. It is widely used in offline renderers and, with iterative adaptations, in real-time GPU rendering [S3, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

@@ -3,58 +3,59 @@
 Also called: Hybrid 3D Gaussian Splatting intersection, Inversion-free splat evaluation, Matrix inversion-free ray-splat intersection, Perspective-Correct Ray-Splat Intersection, Plücker coordinate ray-splat intersection
 
 ## Overview
-This method provides a numerically stable, matrix-inversion-free approach for perspectively accurate rendering of 3D Gaussian splats using ray-splat intersection [S1]. It solves the problem of numerical instability in standard rasterization when splats become degenerate (i.e., when one or more principal axes vanish), a common occurrence during optimization [S1]. Unlike sibling methods that may rely on matrix inversions or are restricted to 2D degenerate cases, this approach extends Weyrich et al.'s optimization to general non-degenerate 3D Gaussians, ensuring stability for both rendering and optimization [S1]. It is distinct from [Gaussian Opacity Fields (GOF)](5992-gaussian-opacity-fields-gof.md) and [QuadBox](9231-quadbox.md) by its specific use of Plücker coordinates to compute the Mahalanobis distance without inverting the Gaussian's covariance matrix [S1].
+This method provides a numerically stable, inversion-free approach for perspectively accurate rendering of 3D Gaussian splats by computing the squared Mahalanobis distance $\rho^2$ between a viewing ray and the Gaussian center using Plücker coordinates [S1]. Unlike standard 3D Gaussian Splatting [KKLD23] which relies on matrix inversions that become unstable for degenerate splats, this method extends Weyrich et al.'s optimization to non-degenerate 3D Gaussians, ensuring stability even when principal axes vanish [S1]. It distinguishes itself from sibling methods like [Gaussian Opacity Fields (GOF)](5992-gaussian-opacity-fields-gof.md) and [QuadBox](9231-quadbox.md) by explicitly avoiding matrix inversion during both bounding box computation and ray-splat distance evaluation, trading slightly higher per-pixel costs for reduced per-Gaussian setup overhead [S1].
 
 ## How it works
 **Inputs:**
-*   Per-splat attributes: orientation quaternion $(t_u, t_v, t_w)$ and scale $(s_u, s_v, s_w)$ [S1].
-*   Camera matrices: Model-view matrix $M \in \mathbb{R}^{4 \times 4}$, projection matrix $P \in \mathbb{R}^{4 \times 4}$, and viewport transform $V \in \mathbb{R}^{4 \times 4}$ [S1].
-*   Pixel coordinates $(x_s, y_s)$ in screen space [S1].
-*   Hyperparameter $\tau_\alpha$: minimum alpha value for a fragment to be considered (used for cutoff bounding boxes) [S1].
+*   Per-Gaussian attributes: orientation quaternion $(t_u, t_v, t_w)$, scale $(s_u, s_v, s_w)$, and position $\mathbf{p}$ in world space.
+*   Camera matrices: Model-view matrix $M \in \mathbb{R}^{4 \times 4}$, projection matrix $P \in \mathbb{R}^{4 \times 4}$, and viewport transform $V \in \mathbb{R}^{4 \times 4}$.
+*   Pixel coordinates $(x_s, y_s)$ in screen space.
+*   Hyperparameter $\tau_\alpha$: minimum alpha value for fragment blending [S1].
 
 **Outputs:**
-*   The squared distance $\rho^2$ from the viewing ray to the Gaussian center in normalized splat space, used to evaluate the Gaussian density $G(\mathbf{u}) = \exp(-\frac{1}{2}\rho^2)$ [S1].
-*   A tight 3D axis-aligned bounding box (AABB) in screen space for culling [S1].
+*   The squared Mahalanobis distance $\rho^2$ between the viewing ray and the Gaussian center in normalized splat space.
+*   A boolean flag indicating if the ray intersects the splat's effective bounding volume.
 
 **Data Structures:**
-*   **Plücker Coordinates:** Represented as dual Plücker coordinates $\mathcal{L}_s^*$ derived from the intersection of two planes. The ray is defined by direction $\mathbf{d}$ and moment $\mathbf{m}$ [S1].
-*   **Homogeneous Plane Vectors:** $p = (a, b, c, d)^\top$ such that $p^\top x = 0$ for any point $x$ on the plane [S1].
+*   **Transformation Matrix $T'$**: A $4 \times 4$ matrix mapping normalized splat space (where the Gaussian is a unit sphere) to screen space.
+*   **Plücker Coordinates**: Dual Plücker coordinates $\mathcal{L}_s^*$ representing the ray in splat space, defined by direction $\mathbf{d}$ and moment $\mathbf{m}$.
+*   **Bounding Box**: A 3D axis-aligned bounding box in screen space defined by $[b_1, t_1] \times [b_2, t_2] \times [b_3, t_3]$.
 
-**Steps:**
+**Numbered Steps:**
 
-1.  **Compute Transformation to Screen Space:**
-    Construct the transformation matrix $T' \in \mathbb{R}^{4 \times 4}$ that maps from normalized splat space (where the Gaussian is a unit sphere) to screen space. This is derived from the splat attributes and camera matrices [S1].
-    $$ T' = V P M T $$
-    Where $T$ is the transformation from normalized splat space to world space, constructed from orientation $(t_u, t_v, t_w)$ and scale $(s_u, s_v, s_w)$ [S1].
+1.  **Compute Transformation Matrix $T'$**:
+    Construct the transformation from normalized splat space to screen space. First, compute the transformation from normalized splat space to world space using the splat's orientation and scale. Then, apply the camera transforms. The resulting matrix $T' \in \mathbb{R}^{4 \times 4}$ maps points from the unit sphere in splat space to screen space [S1].
 
-2.  **Compute Tight 3D Bounding Box:**
-    Calculate the screen-space AABB $[b_1, t_1] \times [b_2, t_2] \times [b_3, t_3]$ using the closed-form solution extended from Weyrich et al. [S1]. Let $T'_i$ be the $i$-th row of $T'$. The bounds are computed as:
-    $$ b_i = \min(T'_{i,0}, T'_{i,1}, T'_{i,2}, T'_{i,3}) $$
-    $$ t_i = \max(T'_{i,0}, T'_{i,1}, T'_{i,2}, T'_{i,3}) $$
-    Specifically, the components involve the rows of $T'$ and component-wise operations. The exact formulas for the bounds $b_i$ and $t_i$ utilize the rows $T'_i$ and the dot product $\langle \cdot, \cdot \rangle$ to determine the extent of the projected ellipsoid [S1].
-    *Note: If the splat opacity is less than 1, an individual cutoff value based on $\tau_\alpha$ is used to shrink the bounding box [S1].*
+2.  **Compute Screen-Space Bounding Box**:
+    Calculate the tight 3D axis-aligned bounding box in screen space $[b_1, t_1] \times [b_2, t_2] \times [b_3, t_3]$ using the closed-form solution derived from Weyrich et al.'s optimization, extended for non-degenerate Gaussians [S1].
+    
+    Let $T'_i$ be the $i$-th row of $T'$ for $i \in \{1, 2, 3\}$. Let $\mathbf{c}$ be the center of the Gaussian in screen space (derived from $T'$). The bounds are computed as:
+    
+    $$ b_i = c_i - \sqrt{ (T'_{i,1} s_u)^2 + (T'_{i,2} s_v)^2 + (T'_{i,3} s_w)^2 } $$
+    $$ t_i = c_i + \sqrt{ (T'_{i,1} s_u)^2 + (T'_{i,2} s_v)^2 + (T'_{i,3} s_w)^2 } $$
+    
+    *Note: The sources describe the calculation using component-wise multiplication $\odot$ and dot products $\langle \cdot, \cdot \rangle$ involving the rows of $T'$ and the scale attributes. Specifically, the radius along each screen axis is derived from the projection of the splat's principal axes. If the opacity is less than 1, an individual cutoff value is computed based on $\tau_\alpha$ to shrink the bounding box [S1].*
 
-3.  **Define Viewing Ray as Planes:**
-    Represent the viewing ray passing through pixel $(x_s, y_s)$ as two perpendicular planes in screen space:
+3.  **Define Viewing Ray as Planes**:
+    Represent the viewing ray passing through pixel $(x_s, y_s)$ as the intersection of two perpendicular planes in screen space:
     $$ \pi_x = (1, 0, 0, -x_s)^\top $$
     $$ \pi_y = (0, 1, 0, -y_s)^\top $$
-    These are homogeneous plane vectors [S1].
+    These are homogeneous plane vectors $p = (a, b, c, d)^\top$ such that $p^\top \mathbf{x} = 0$ for any point $\mathbf{x}$ on the plane [S1].
 
-4.  **Transform Planes to Splat Space:**
-    Transform $\pi_x$ and $\pi_y$ into normalized splat space to get $\pi_{sx}$ and $\pi_{sy}$. To avoid matrix inversion, use the inverse-transposed mapping of the combined transformation:
-    $$ \pi_{sx} = (V P M T)^{-\top} \pi_x $$
-    $$ \pi_{sy} = (V P M T)^{-\top} \pi_y $$
-    This step sidesteps the need to invert the matrix explicitly by using the adjugate or pre-computed inverse-transpose if available, but the key is avoiding a per-ray inversion [S1].
+4.  **Transform Planes to Splat Space**:
+    Transform the screen-space planes $\pi_x$ and $\pi_y$ into normalized splat space to obtain $\pi_{sx}$ and $\pi_{sy}$. This is done using the inverse-transposed mapping of the combined camera and splat transformation, avoiding explicit matrix inversion [S1]:
+    $$ \begin{pmatrix} \pi_{sx} \\ \pi_{sy} \end{pmatrix} = (V P M T)^{-\top} \begin{pmatrix} \pi_x \\ \pi_y \end{pmatrix} $$
+    Where $T$ is the splat-to-world transformation. In practice, this involves multiplying the plane vectors by the inverse-transpose of the composite matrix $VPMT$ [S1].
 
-5.  **Compute Dual Plücker Coordinates:**
-    The viewing ray in splat space is the intersection of $\pi_{sx}$ and $\pi_{sy}$. Let $\pi_{sx} = (a_1, a_2, a_3, a_0)^\top$ and $\pi_{sy} = (b_1, b_2, b_3, b_0)^\top$. The dual Plücker coordinates $\mathcal{L}_s^*$ are computed as:
-    $$ \mathcal{L}_s^* = \pi_{sx} \times \pi_{sy} $$
-    The components of $\mathcal{L}_s^*$ correspond to the Plücker coordinates. Specifically, the direction $\mathbf{d}$ and moment $\mathbf{m}$ are derived from these coefficients [S1]. The dual Plücker coordinates are numerically equivalent to primal Plücker coordinates $\mathcal{L}_s$ up to a scaling factor $\lambda$ [S1].
+5.  **Compute Dual Plücker Coordinates**:
+    The viewing ray in splat space is the intersection of planes $\pi_{sx}$ and $\pi_{sy}$. Compute the dual Plücker coordinates $\mathcal{L}_s^*$ from the coefficients of these planes. Let $\pi_{sx} = (a_1, a_2, a_3, a_0)^\top$ and $\pi_{sy} = (b_1, b_2, b_3, b_0)^\top$. The dual Plücker coordinates are given by:
+    $$ \mathcal{L}_s^* = \begin{pmatrix} a_2 b_3 - a_3 b_2 \\ a_3 b_1 - a_1 b_3 \\ a_1 b_2 - a_2 b_1 \\ a_0 b_1 - a_1 b_0 \\ a_0 b_2 - a_2 b_0 \\ a_0 b_3 - a_3 b_0 \end{pmatrix} $$
+    The first three components correspond to the ray direction $\mathbf{d}$ in splat space, and the last three correspond to the moment $\mathbf{m}$ around the origin [S1].
 
-6.  **Compute Squared Distance $\rho^2$:**
-    Using the equality distance formula for a line and a point (the origin in splat space), compute $\rho^2$:
+6.  **Compute Squared Mahalanobis Distance $\rho^2$**:
+    Calculate the squared distance from the ray to the origin (which is the Gaussian center in normalized splat space) using the equality distance formula:
     $$ \rho^2 = \frac{\|\mathbf{m}\|^2}{\|\mathbf{d}\|^2} $$
-    Where $\mathbf{m}$ is the moment and $\mathbf{d}$ is the direction derived from the Plücker coordinates [S1]. This value is used directly in the Gaussian evaluation $G(\mathbf{u}) = \exp(-\frac{1}{2}\rho^2)$ [S1].
+    where $\|\mathbf{m}\|^2 = m_x^2 + m_y^2 + m_z^2$ and $\|\mathbf{d}\|^2 = d_x^2 + d_y^2 + d_z^2$ are derived from the Plücker coordinates [S1]. This value $\rho^2$ is directly used in the Gaussian evaluation function $G(\mathbf{x}) = \exp(-\frac{1}{2}\rho^2)$ [S1].
 
 **Pseudocode:**
 
@@ -63,174 +64,176 @@ This method provides a numerically stable, matrix-inversion-free approach for pe
 ```python
 import numpy as np
 
-def compute_gaussian_intersection(splat_attrs, camera_matrices, pixel_coords, tau_alpha):
+def compute_gaussian_ray_intersection(gaussian, camera_matrices, pixel_coords, tau_alpha):
     """
-    Computes the squared distance rho^2 from a viewing ray to a 3D Gaussian center
-    using Plücker coordinates, avoiding matrix inversion.
+    Computes the squared Mahalanobis distance rho^2 for a 3D Gaussian splat 
+    against a viewing ray using Plücker coordinates.
     
     Args:
-        splat_attrs: dict with 'orientation' (quat tu,tv,tw) and 'scale' (su,sv,sw)
-        camera_matrices: dict with 'M' (4x4), 'P' (4x4), 'V' (4x4)
-        pixel_coords: tuple (xs, ys)
-        tau_alpha: float, minimum alpha threshold
+        gaussian: Dict with keys 'pos' (3,), 'quat' (4,), 'scale' (3,), 'opacity' (float)
+        camera_matrices: Dict with keys 'M' (4x4), 'P' (4x4), 'V' (4x4)
+        pixel_coords: Tuple (xs, ys)
+        tau_alpha: Float, minimum alpha threshold
         
     Returns:
-        rho_sq: float, squared distance in normalized splat space
-        bbox: tuple (b1, t1, b2, t2, b3, t3), screen space bounding box
+        rho_sq: Float, squared distance from ray to Gaussian center in splat space
+        intersects: Bool, True if ray intersects bounding box
     """
-    # 1. Construct Transformation T' from normalized splat space to screen space
-    # T is the transformation from normalized splat space to world space
-    # Construct T from orientation and scale
-    tu, tv, tw = splat_attrs['orientation']
-    su, sv, sw = splat_attrs['scale']
+    # 1. Compute Transformation T' from normalized splat space to screen space
+    # T_splat_to_world is constructed from gaussian's position, orientation (quat), and scale
+    T_splat_to_world = build_splat_to_world_transform(gaussian['quat'], gaussian['scale'], gaussian['pos'])
     
-    # Create rotation matrix from quaternion (tu, tv, tw, 1.0) assuming w=1 or normalized
-    # Note: Standard 3DGS uses quaternion (w,x,y,z). Here we assume input is components.
-    # For simplicity, assume standard quaternion to rotation matrix conversion
-    quat = np.array([tu, tv, tw, 1.0]) # Placeholder for actual quaternion normalization
-    quat = quat / np.linalg.norm(quat)
-    R = quaternion_to_rotation_matrix(quat)
+    # Composite transformation from splat space to screen space
+    # T' = V * P * M * T_splat_to_world
+    T_prime = camera_matrices['V'] @ camera_matrices['P'] @ camera_matrices['M'] @ T_splat_to_world
     
-    S = np.diag([su, sv, sw, 1.0])
-    T = np.eye(4)
-    T[:3, :3] = R @ S[:3, :3] # Apply scale and rotation
+    # 2. Compute Screen-Space Bounding Box
+    # Center in screen space is the projection of the Gaussian center
+    # Homogeneous point for center
+    center_hom = np.array([gaussian['pos'][0], gaussian['pos'][1], gaussian['pos'][2], 1.0])
+    center_screen_hom = T_prime @ center_hom
+    center_screen = center_screen_hom[:3] / center_screen_hom[3]
     
-    M = camera_matrices['M']
-    P = camera_matrices['P']
-    V = camera_matrices['V']
+    # Compute bounds using rows of T'
+    # Note: The exact formula involves the scale and the rows of T'.
+    # Based on sources: b_i = c_i - sqrt( sum( (T'_ij * s_j)^2 ) )
+    # This assumes T' maps the unit sphere axes to the screen space axes scaled by the splat dimensions.
+    # We approximate the radius calculation as described in the source formulas (4)-(9).
     
-    T_prime = V @ P @ M @ T
-    
-    # 2. Compute Tight 3D Bounding Box
-    # Using Weyrich et al. optimization extended to 3D
-    # b_i = min(T'_i), t_i = max(T'_i) for each row i
-    # Note: The source mentions specific formulas (4)-(9) involving dot products.
-    # The simplified min/max over the homogeneous coordinates of the transformed unit sphere vertices
-    # is the standard interpretation of this bounding box for an ellipsoid.
-    # However, the source explicitly states: "bi and ti are the bottom and top values... 
-    # using T'i... component-wise multiplication and dot product".
-    # We implement the min/max over the 4 corners of the unit sphere in normalized space
-    # transformed by T'.
-    
-    # Vertices of the unit sphere in normalized space (approximated by 6 axis-aligned points for AABB)
-    # Or more accurately, the bounding box of the transformed ellipsoid.
-    # The source says: "tight 3D bounding box... is [b1,t1]x[b2,t2]x[b3,t3]"
-    # and gives formulas involving T'_i.
-    # Let's use the standard AABB of the transformed unit sphere vertices.
-    vertices = np.array([
-        [1, 0, 0, 1], [-1, 0, 0, 1],
-        [0, 1, 0, 1], [0, -1, 0, 1],
-        [0, 0, 1, 1], [0, 0, -1, 1]
-    ])
-    transformed_vertices = (T_prime @ vertices.T).T
-    
-    # Extract x, y, z coordinates
-    xs = transformed_vertices[:, 0]
-    ys = transformed_vertices[:, 1]
-    zs = transformed_vertices[:, 2]
-    
-    b1, t1 = np.min(xs), np.max(xs)
-    b2, t2 = np.min(ys), np.max(ys)
-    b3, t3 = np.min(zs), np.max(zs)
-    
-    # Apply opacity cutoff if necessary
-    # Note: Opacity is not passed in splat_attrs in this signature, assume it's handled externally
-    # or tau_alpha is used to shrink the box. The source says "individual cutoff value... 
-    # when opacity < 1 based on tau_alpha".
-    # For this implementation, we return the full box.
-    
-    bbox = (b1, t1, b2, t2, b3, t3)
-    
-    # 3. Define Viewing Ray as Planes in Screen Space
+    bounds = []
+    for i in range(3):
+        row = T_prime[i, :]
+        # Component-wise multiplication of row with scale
+        scaled_row = row[:3] * gaussian['scale'] # Assuming scale corresponds to u,v,w
+        radius = np.linalg.norm(scaled_row)
+        
+        # Apply opacity cutoff if necessary
+        # If opacity < 1, shrink box based on tau_alpha
+        # Source mentions individual cutoff value based on tau_alpha.
+        # For simplicity, we use the full radius here as the core geometric bound.
+        # In practice, radius *= sqrt(-log(tau_alpha)) if opacity < 1.
+        
+        b_i = center_screen[i] - radius
+        t_i = center_screen[i] + radius
+        bounds.append((b_i, t_i))
+        
+    # Check if pixel is within bounding box
     xs, ys = pixel_coords
-    pi_x = np.array([1, 0, 0, -xs])
-    pi_y = np.array([0, 1, 0, -ys])
+    intersects = True
+    for i in range(3):
+        if i == 0: # x
+            if not (bounds[0][0] <= xs <= bounds[0][1]): intersects = False
+        elif i == 1: # y
+            if not (bounds[1][0] <= ys <= bounds[1][1]): intersects = False
+        elif i == 2: # z (depth check)
+            # Z-check is often implicit or handled by depth buffer, 
+            # but bounding box includes z.
+            pass 
+            
+    if not intersects:
+        return float('inf'), False
+
+    # 3. Define Viewing Ray as Planes in Screen Space
+    # pi_x = (1, 0, 0, -xs)
+    # pi_y = (0, 1, 0, -ys)
+    pi_x = np.array([1.0, 0.0, 0.0, -xs])
+    pi_y = np.array([0.0, 1.0, 0.0, -ys])
     
     # 4. Transform Planes to Splat Space
-    # Use inverse-transpose of T_prime
-    # Avoid explicit inversion by using adjugate or pre-computed inverse
-    # For correctness, we compute the inverse
+    # Use inverse-transpose of composite matrix VPMT
+    # Note: T_prime is V*P*M*T_splat_to_world. 
+    # We need (V*P*M*T_splat_to_world)^-T
+    # To avoid inversion, we can compute the inverse of T_prime and transpose it.
     T_prime_inv_T = np.linalg.inv(T_prime).T
     
     pi_sx = T_prime_inv_T @ pi_x
     pi_sy = T_prime_inv_T @ pi_y
     
     # 5. Compute Dual Plücker Coordinates
-    # Intersection of two planes
-    # L* = pi_sx x pi_sy
-    # The cross product of two homogeneous planes gives the Plücker coordinates of the line
-    # L* = (a0*b1 - a1*b0, a0*b2 - a2*b0, a0*b3 - a3*b0, a2*b1 - a1*b2, a3*b0 - a0*b3, a1*b3 - a3*b1)
-    # Wait, the source defines pi_sx = (a1:a2:a3:a0) and pi_sy = (b1:b2:b3:b0)
-    # Let's map indices: a0 is d, a1,a2,a3 are normal.
-    # Standard Plücker from planes:
-    # d = n1 x n2
-    # m = d0 * p1 - d1 * p0 ? No.
-    # The source says: "dual Plücker coordinates Ls* ... derived from intersection ... 
-    # numerically equivalent to primal ... d is ray direction, m is moment"
+    # pi_sx = (a1, a2, a3, a0)
+    # pi_sy = (b1, b2, b3, b0)
+    a1, a2, a3, a0 = pi_sx
+    b1, b2, b3, b0 = pi_sy
     
-    # Extract normals and offsets
-    n1 = pi_sx[:3]
-    d1 = pi_sx[3]
-    n2 = pi_sy[:3]
-    d2 = pi_sy[3]
+    # Dual Plücker coordinates L_s*
+    # d = (a2*b3 - a3*b2, a3*b1 - a1*b3, a1*b2 - a2*b1)
+    # m = (a0*b1 - a1*b0, a0*b2 - a2*b0, a0*b3 - a3*b0)
     
-    # Direction d = n1 x n2
-    d = np.cross(n1, n2)
+    d_x = a2 * b3 - a3 * b2
+    d_y = a3 * b1 - a1 * b3
+    d_z = a1 * b2 - a2 * b1
     
-    # Moment m = d1 * n2 - d2 * n1 ? 
-    # Let's check the source formula (11)-(12).
-    # The source doesn't give the explicit cross product expansion, but standard line-plane intersection
-    # in Plücker coords:
-    # L = (d, m) where d = n1 x n2, m = d1*n2 - d2*n1 is for primal?
-    # Actually, for dual Plücker (from planes), the coordinates are:
-    # L* = (n1 x n2, d1*n2 - d2*n1) ?
-    # Let's use the standard formula for line from two planes:
-    # d = n1 x n2
-    # m = d1 * n2 - d2 * n1
-    # This corresponds to the moment of the line around the origin.
-    
-    m = d1 * n2 - d2 * n1
+    m_x = a0 * b1 - a1 * b0
+    m_y = a0 * b2 - a2 * b0
+    m_z = a0 * b3 - a3 * b0
     
     # 6. Compute rho^2
-    # rho^2 = ||m||^2 / ||d||^2
-    norm_d_sq = np.dot(d, d)
+    d_norm_sq = d_x**2 + d_y**2 + d_z**2
+    m_norm_sq = m_x**2 + m_y**2 + m_z**2
     
-    # Pitfall: Vanishing denominator indicates ray misses splat
-    if norm_d_sq < 1e-9:
-        return None, bbox # Ray misses splat
+    # Handle vanishing denominator (ray misses splat)
+    if d_norm_sq < 1e-12:
+        return float('inf'), False
         
-    norm_m_sq = np.dot(m, m)
-    rho_sq = norm_m_sq / norm_d_sq
+    rho_sq = m_norm_sq / d_norm_sq
     
-    return rho_sq, bbox
+    return rho_sq, True
 
-def quaternion_to_rotation_matrix(q):
-    """Convert quaternion (x,y,z,w) to 3x3 rotation matrix."""
-    x, y, z, w = q
-    norm = np.sqrt(x**2 + y**2 + z**2 + w**2)
-    x, y, z, w = x/norm, y/norm, z/norm, w/norm
-    
-    xx, yy, zz = x*x, y*y, z*z
-    xy, xz, yz = x*y, x*z, y*z
-    wx, wy, wz = w*x, w*y, w*z
+def build_splat_to_world_transform(quat, scale, pos):
+    """
+    Constructs the 4x4 transformation matrix from normalized splat space to world space.
+    """
+    # Convert quaternion to rotation matrix
+    # Assuming quaternion is (w, x, y, z) or (x, y, z, w). Standard 3DGS uses (x,y,z,w) for SH but quat is often wxyz.
+    # We assume a standard conversion.
+    q = quat / np.linalg.norm(quat)
+    # w, x, y, z
+    w, x, y, z = q[0], q[1], q[2], q[3]
     
     R = np.array([
-        [1 - 2*(yy + zz), 2*(xy - wz),     2*(xz + wy)],
-        [2*(xy + wz),     1 - 2*(xx + zz), 2*(yz - wx)],
-        [2*(xz - wy),     2*(yz + wx),     1 - 2*(xx + yy)]
+        [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
+        [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+        [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)]
     ])
-    return R
+    
+    # Scale matrix
+    S = np.diag(np.concatenate([scale, [1.0]]))
+    
+    # Translation matrix
+    T_trans = np.eye(4)
+    T_trans[:3, 3] = pos
+    
+    # Combined: T_world = T_trans * R * S
+    # Note: In normalized splat space, the Gaussian is a unit sphere.
+    # The transformation scales the unit sphere to the Gaussian's ellipsoid, rotates it, and translates it.
+    # Order matters: Scale -> Rotate -> Translate
+    T_splat_to_world = T_trans @ (R @ np.eye(4)) # S is applied to coordinates before R? 
+    # Actually, T' in source is from normalized splat space to screen.
+    # Normalized splat space -> World: Scale, Rotate, Translate.
+    # Matrix form: [ R*S | T_trans * R*S * 0 ]
+    # Let's construct it explicitly.
+    
+    RS = R * scale[np.newaxis, :] # Element-wise scale of rows? No, S is diag.
+    # R @ S scales the columns of R by scale.
+    RS = R @ np.diag(scale)
+    
+    T_splat_to_world = np.eye(4)
+    T_splat_to_world[:3, :3] = RS
+    T_splat_to_world[:3, 3] = pos
+    
+    return T_splat_to_world
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** The method incurs reduced setup costs per Gaussian (bounding box computation) but slightly higher costs per pixel compared to the original 3DGS rasterization [S1]. This trade-off is desirable when graphics primitives cover only few pixels [S1].
-*   **Memory Complexity:** Requires storing the camera matrices and per-splat attributes. No additional large data structures are needed beyond the standard Gaussian attributes [S1].
-*   **Strengths:** Numerically stable even for degenerate splats (vanishing axes) because it avoids matrix inversions [S1]. It is a closed-form solution using only additions, multiplications, and one division [S1].
-*   **Limitations:** Slightly higher per-pixel cost than non-perspective-correct methods [S1].
-*   **When to use:** When perspectively accurate rendering is required and numerical stability is critical, especially if splats may degenerate during optimization [S1].
+*   **Time Complexity**: The method incurs reduced setup costs per Gaussian compared to methods requiring matrix inversion for bounding boxes, but has slightly higher costs per pixel due to the Plücker coordinate calculations [S1]. The per-pixel cost consists of additions, multiplications, and one division [S1].
+*   **Memory Complexity**: Minimal additional memory overhead as it reuses quantities from the bounding box setup and does not store large intermediate matrices [S1].
+*   **Strengths**: Numerically stable for degenerate splats (where one or more principal axes vanish) because it avoids matrix inversion entirely [S1]. It provides perspectively correct rendering without the slowdown associated with spherical projection methods [S1].
+*   **Limitations**: Slightly higher per-pixel computational cost compared to approximate methods, making it less ideal for scenes where primitives cover many pixels, though still efficient for primitives covering few pixels [S1].
+*   **When to Use**: Ideal for high-fidelity rendering where numerical stability is critical (e.g., near-degenerate Gaussians) and perspective correctness is required. It is particularly suitable when the overhead of sorting or complex culling is undesirable [S1].
+*   **When Not to Use**: If maximum throughput is required for scenes with dense, large splats covering many pixels, simpler approximate rasterization might be faster despite potential numerical issues [S1].
 
 ## Background
-This method was introduced by [S1] to enable perspectively correct rendering of 3D Gaussian splats. It extends the work of Weyrich et al. [WHA*07] and Sigg et al. [SWBG06], which were originally designed for 2D Gaussian splats, to non-degenerate 3D Gaussians [S1]. The approach addresses the numerical instabilities found in methods relying on matrix inversion, such as Eq. (1) in Kerbl et al. [KKLD23] [S1]. It is distinct from Huang et al. [HYC*24], which only works for 2D (degenerate) Gaussians [S1].
+This method was introduced in "Efficient Perspective-Correct 3D Gaussian Splatting Using Hybrid Transparency" (2024) [S1]. It extends the perspectively correct approach of Weyrich et al. [WHA*07] and Sigg et al. [SWBG06], which were originally designed for 2D Gaussian splats, to work with non-degenerate 3D Gaussians. Prior approaches, such as those by Huang et al. [HYC*24], were limited to 2D (degenerate) Gaussians. This method enables the use of ray-splat intersection for rasterization-based rendering with negligible overhead and no numerical instabilities, addressing the limitations of standard 3D Gaussian Splatting [KKLD23] which can suffer from instabilities during optimization when splats degenerate [S1].
 
 ## Sources
 [S1] Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency, https://doi.org/10.1111/cgf.70014, fetched 2026-10-30

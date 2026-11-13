@@ -3,67 +3,104 @@
 Also called: Free-Form NeRF Inpainting with RGB-D Priors, NeRF object removal, NeRF-In
 
 ## Overview
-NeRF-In is a framework for removing unwanted objects from a pre-trained Neural Radiance Field (NeRF) by optimizing the model parameters $\Theta$ using color and depth guidance derived from 2D images, without requiring category-specific training data [S1, unofficial]. Unlike methods that require additional training or segmentation networks, NeRF-In updates the existing NeRF to inpaint masked regions across multiple views by jointly minimizing color and depth losses against generated guidance maps [S1, unofficial]. It sets itself apart from siblings like [Blended-NeRF](12273-blended-nerf.md) by relying on explicit RGB-D priors generated via external inpainting/completion tools rather than diffusion models or feature fields, and from [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md) by operating directly on the NeRF representation without converting to 3D Gaussians.
+NeRF-In is a framework for removing unwanted objects from a pre-trained Neural Radiance Field (NeRF) by optimizing the model parameters $\Theta$ using user-provided masks and RGB-D priors, without requiring category-specific training data [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. Unlike methods that require additional training or category-specific data, NeRF-In updates the existing NeRF to inpaint the masked region across all views by jointly minimizing color and depth guiding losses [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. It sets itself apart from siblings like [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md) by using explicit 2D guidance images and depth maps generated via external inpainting/completion tools, rather than relying solely on the NeRF's internal consistency or iterative erasing.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A pre-trained NeRF model $F_\Theta$ mapping 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$; a user-chosen camera position $o_u$; a user-drawn mask $M_u$ on the rendered view $I_u = F_{\Theta_{image}}(o_u)$, where $M_u=1$ indicates pixels outside the masked region (background/valid) and $M_u=0$ inside the object to remove [S1, unofficial].
-*   **Output:** Updated NeRF parameters $\tilde{\Theta}$ [S1, unofficial].
 
-**Data Structures:**
-*   **NeRF Model $F_\Theta$:** A multi-layer perceptron (MLP) or similar architecture. The specific network architecture is not detailed in the source, but it outputs $\sigma$ and $\mathbf{c}$ [S1, unofficial].
-*   **Camera Trajectory:** A set of $K$ sampled camera positions $O = \{o_s \mid s = 1 \dots K\}$ along a pre-set trajectory (e.g., LLFF test-set trajectory) [S1, unofficial].
-*   **Masks:** Transferred masks $M = \{M_s \mid s = 1 \dots K\}$ for each sampled view [S1, unofficial].
-*   **Guidance Images:** Guiding color images $I^G = \{I_s^G \mid s = 1 \dots K\}$ and guiding depth images $D^G = \{D_s^G \mid s = 1 \dots K\}$ [S1, unofficial].
-*   **Rendered Data:** Rendered RGB images $I_s$ and depth images $D_s$ (fine $D_f$ and coarse $D_c$) from the current NeRF parameters [S1, unofficial].
+### Inputs and Outputs
+**Inputs:**
+*   A pre-trained NeRF model $F_\Theta$ mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$.
+*   A user-chosen camera position $\mathbf{o}_u$.
+*   A user-drawn free-form mask $M_u$ on the rendered view $I_u = F_{\Theta_{image}}(\mathbf{o}_u)$, where $M_u(\mathbf{p}) = 1$ for pixels outside the masked region (background/valid) and $M_u(\mathbf{p}) = 0$ inside the region to be removed [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
-**Parameters:**
-*   $K$: Number of sampled camera positions. In experiments, views are sampled from a pre-set trajectory [S1, unofficial].
-*   Batch size: 4,096 rays [S1, unofficial].
-*   Sample points (Coarse): 64 [S1, unofficial].
-*   Sample points (Fine): 128 [S1, unofficial].
-*   Optimizer: Adam [S1, unofficial].
-*   Training steps for inpainting: 50,000 [S1, unofficial].
+**Outputs:**
+*   Updated NeRF parameters $\tilde{\Theta}$ that remove the unwanted object in the masked region across all rendered views [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
-**Numbered Steps:**
+### Data Structures
+*   **NeRF Model $F_\Theta$**: A multi-layer perceptron (MLP) or similar structure. The specific architecture is not detailed in the source, but it outputs density $\sigma$ and color $\mathbf{c}$ for any 3D point and viewing direction [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **Camera Positions**: A set of $K$ sampled positions $\mathcal{O} = \{\mathbf{o}_s \mid s = 1 \dots K\}$ along a pre-set trajectory (e.g., LLFF test-set trajectory) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **Masks**:
+    *   $M_u$: User-drawn mask on view $\mathbf{o}_u$.
+    *   $\mathcal{M} = \{M_s \mid s = 1 \dots K\}$: Transferred masks for sampled views, generated using a video object segmentation method (e.g., STCN) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **Guidance Materials**:
+    *   $\mathcal{I}_G = \{I_s^G \mid s = 1 \dots K\}$: Guiding color images, where $I_s^G = \rho(I_s, M_s)$ using an image inpainting method $\rho$ (e.g., MST inpainting network) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+    *   $\mathcal{D}_G = \{D_s^G \mid s = 1 \dots K\}$: Guiding depth images, where $D_s^G = \tau(D_s, M_s, I_s^G)$ using a depth completion method $\tau$ (e.g., Fast Bilateral Solver) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **View Sets**:
+    *   $\mathcal{O}_{all}$: Set of all views used for color loss. In the main framework, $\mathcal{O}_{all} = \{\mathbf{o}_u\}$ [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+    *   $\mathcal{O}_{out}$: Set of outside views. In the main framework, $\mathcal{O}_{out} = \mathcal{O}$ (all sampled views except $\mathbf{o}_u$) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
-1.  **User Input:** The user renders a view $I_u$ from the pre-trained NeRF $F_\Theta$ at camera position $o_u$ and draws a free-form mask $M_u$ to specify the unwanted object [S1, unofficial].
-2.  **View Sampling:** Sample $K$ camera positions $O = \{o_s \mid s = 1 \dots K\}$ along a pre-set trajectory (e.g., LLFF test-set trajectory) [S1, unofficial].
-3.  **Initial Rendering:** Render RGB images $I_s$ and depth images $D_s$ using the current NeRF model $F_\Theta$ for all sampled camera positions $o_s \in O$ [S1, unofficial].
-4.  **Mask Transfer:** Transfer the user-drawn mask $M_u$ to the sampled views to generate transferred masks $M = \{M_s \mid s = 1 \dots K\}$ using a video object segmentation method (e.g., STCN) [S1, unofficial].
-5.  **Guidance Generation:**
-    *   Generate guiding color images $I_s^G$ for each sampled view using an image inpainting method $\rho$: $I_s^G = \rho(I_s, M_s)$ [S1, unofficial].
-    *   Generate guiding depth images $D_s^G$ using a depth completion method $\tau$: $D_s^G = \tau(D_s, M_s, I_s^G)$ [S1, unofficial].
-    *   *Note:* The source specifies using MST inpainting network for $\rho$ and Fast Bilateral Solver for $\tau$ [S1, unofficial].
-6.  **Define View Sets:** Define the set of all views $O_{all}$ and outside views $O_{out}$. In the main framework, set $O_{all} = \{o_u\}$ (the user-chosen view) and $O_{out} = O$ (all other sampled views) [S1, unofficial].
-7.  **Optimization:** Optimize the NeRF parameters $\Theta$ to obtain updated parameters $\tilde{\Theta}$ by minimizing the joint inpainting formulation $\Phi(M_u, I_u^G, M, D_s^G)$, which consists of a color-guiding loss $L_{color}(\Theta)$ and a depth-guiding loss $L_{depth}(\Theta)$ [S1, unofficial].
-    *   The optimization is performed using the Adam optimizer for 50,000 steps [S1, unofficial].
+### Numbered Steps
 
-**Formulas:**
+1.  **Initialize**: Start with pre-trained NeRF parameters $\Theta$ [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+2.  **Sample Views**: Sample $K$ camera positions $\mathcal{O}$ along a pre-set trajectory [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+3.  **Render Initial Views**: Render RGB images $I_s$ and depth images $D_s$ for each $\mathbf{o}_s \in \mathcal{O}$ using $F_\Theta$ [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+4.  **Transfer Mask**: Transfer the user-drawn mask $M_u$ to the sampled views to generate $\mathcal{M} = \{M_s\}$ using a video object segmentation method (e.g., STCN) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+5.  **Generate Guidance**:
+    *   Generate guiding color images $\mathcal{I}_G$ using an image inpainting method $\rho$: $I_s^G = \rho(I_s, M_s)$ [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+    *   Generate guiding depth images $\mathcal{D}_G$ using a depth completion method $\tau$: $D_s^G = \tau(D_s, M_s, I_s^G)$ [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+6.  **Optimize**: Update $\Theta$ to $\tilde{\Theta}$ by minimizing the total loss $L_{total}(\Theta) = L_{color}(\Theta) + L_{depth}(\Theta)$ using the Adam optimizer for 50,000 steps [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
-The expected color $\hat{C}(r)$ of a camera ray $r(t) = o + td$ is computed via volume rendering integral [S1, unofficial]:
-$$ \hat{C}(r) = \sum_{i=1}^{N} T(t_i)(1 - \exp(-\sigma(t_i)\delta_i))c(t_i) $$
-where $T(t_i) = \exp(-\sum_{j=1}^{i-1} \sigma(t_j)\delta_j)$, $N$ is the number of quadrature points, $\delta_i = t_{i+1} - t_i$, and $c(t_i), \sigma(t_i)$ are color and density at point $t_i$ produced by $F_\Theta$ [S1, unofficial].
+### Formulas
 
-The total color-guiding loss $L_{color}(\Theta)$ is the sum of the all-view color loss $L_{all\_color}(\Theta)$ and the outside-view color loss $L_{out\_color}(\Theta)$ [S1, unofficial]:
-$$ L_{color}(\Theta) = L_{all\_color}(\Theta) + L_{out\_color}(\Theta) $$
+**Volume Rendering:**
+The expected color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is computed via numerical quadrature [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]:
 
-$L_{all\_color}$ measures the color difference of the entire image on the rendered view $o_u$ against the guiding image $I_u^G$ [S1, unofficial]:
-$$ L_{all\_color}(\Theta) = \| F_{\Theta_{image}}(o_u) - I_u^G \|_2^2 $$
-where $F_{\Theta_{image}}: o \rightarrow I$ is a function that takes a camera position as input and outputs the rendered image [S1, unofficial].
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T(t_i) (1 - \exp(-\sigma(t_i)\delta_i)) c(t_i)
+$$
 
-$L_{out\_color}$ measures the color difference outside the mask on the rendered views $o_s \in O_{out}$ against their guiding images $I_s^G$ [S1, unofficial]:
-$$ L_{out\_color}(\Theta) = \sum_{o_s \in O_{out}} \| (F_{\Theta_{image}}(o_s) - I_s^G) \odot M_s \|_2^2 $$
-where $\odot$ denotes element-wise multiplication [S1, unofficial].
+where $N$ is the number of quadrature points, $\delta_i = t_{i+1} - t_i$, and $T(t_i) = \exp\left(-\sum_{j=1}^{i-1} \sigma(t_j)\delta_j\right)$ is the accumulated transmittance [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
-The depth-guiding loss $L_{depth}(\Theta)$ measures the L2 distance between rendered fine/coarse depth images and guiding depth $D_s^G$ for sampled camera positions $o_s \in O$ [S1, unofficial]:
-$$ L_{depth}(\Theta) = \sum_{o_s \in O} \left( \| D_f(o_s) - D_s^G(o_s) \|_2^2 + \| D_c(o_s) - D_s^G(o_s) \|_2^2 \right) $$
-where $D_f(o_s)$ is the fine volume predicted depth image and $D_c(o_s)$ is the coarse volume predicted depth image [S1, unofficial]. Depth is computed by accumulating density $\sigma$ from ray batches during volume rendering [S1, unofficial].
+**Depth Rendering:**
+The rendered depth $D_f(\mathbf{o}_s)$ is computed by accumulating density $\sigma$ from ray batches during volume rendering [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. Similarly, $D_c(\mathbf{o}_s)$ is the coarse depth [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
-The final optimization objective is [S1, unofficial]:
-$$ \tilde{\Theta} := \arg \min_{\Theta} L_{color}(\Theta) + L_{depth}(\Theta) $$
+**Color-Guiding Loss:**
+The total color loss is the sum of the all-view color loss and the outside-view color loss [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]:
 
-**Pseudocode:**
+$$
+L_{color}(\Theta) = L_{all\_color}(\Theta) + L_{out\_color}(\Theta)
+$$
+
+where [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]:
+
+$$
+L_{all\_color}(\Theta) = \sum_{\mathbf{o} \in \mathcal{O}_{all}} \| F_{\Theta_{image}}(\mathbf{o}) - I_u^G \|_2^2
+$$
+
+$$
+L_{out\_color}(\Theta) = \sum_{\mathbf{o} \in \mathcal{O}_{out}} \| (F_{\Theta_{image}}(\mathbf{o}) - I_s^G) \odot M_s \|_2^2
+$$
+
+Note: The source defines $L_{all\_color}$ using $I_u^G$ for $\mathcal{O}_{all}=\{\mathbf{o}_u\}$ and $L_{out\_color}$ using $I_s^G$ and $M_s$ for $\mathcal{O}_{out}=\mathcal{O}$ [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. The term $I_u^G$ in $L_{all\_color}$ appears to be a typo in the source for $I_u^G$ corresponding to $\mathbf{o}_u$, or implies using the user view's guidance for the user view. Given $\mathcal{O}_{all}=\{\mathbf{o}_u\}$, the term is $\| F_{\Theta_{image}}(\mathbf{o}_u) - I_u^G \|_2^2$. The source formula (9) uses $I_o^G$ which is likely $I_u^G$ for $\mathbf{o}_u$. The source formula (10) uses $I_o^G$ and $M_o$ for $\mathbf{o} \in \mathcal{O}_{out}$.
+
+**Depth-Guiding Loss:**
+The depth loss measures the L2 distance between rendered fine/coarse depth images and guiding depth [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]:
+
+$$
+L_{depth}(\Theta) = \sum_{\mathbf{o}_s \in \mathcal{O}} \left( \| D_f(\mathbf{o}_s) - D_s^G(\mathbf{o}_s) \|_2^2 + \| D_c(\mathbf{o}_s) - D_s^G(\mathbf{o}_s) \|_2^2 \right)
+$$
+
+**Total Loss:**
+$$
+\tilde{\Theta} := \arg \min_{\Theta} \left( L_{color}(\Theta) + L_{depth}(\Theta) \right)
+$$
+
+### Parameters
+*   $K$: Number of sampled camera positions. Not given in the sources.
+*   Batch size: 4,096 [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   Sample points (fine model): 128 [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   Sample points (coarse model): 64 [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   Optimizer: Adam [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   Optimization steps: 50,000 [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   Hardware: Intel i7-7800X CPU and GTX-1080 GPU [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Masked MSE Only**: Optimizing only with masked MSE on transferred masks without explicit guidance causes the unwanted object to remain in the result [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **Depth Loss Only**: Using only $L_{depth}$ introduces color noise outside the masked region and loses color information in flat regions [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **Multiple Guidance Views**: Using multiple inpainted images as color guidance introduces visual inconsistency between views [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. The method restricts $\mathcal{O}_{all}$ to the user-chosen view to avoid this.
+*   **Guidance Artifacts**: If the initial guidance materials (generated by $\rho$ and $\tau$) contain artifacts, the optimized NeRF may output undesired results [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -72,184 +109,199 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-def nerf_in_inpainting_optimization(
-    nerf_model: nn.Module,  # F_Theta, outputs sigma and color
-    user_view_cam: Camera,  # o_u
-    user_mask: torch.Tensor, # M_u, shape (H, W), 1 for valid, 0 for masked
-    trajectory_cams: list[Camera], # O = {o_s}, length K
-    num_coarse_samples: int = 64,
-    num_fine_samples: int = 128,
-    num_steps: int = 50000,
-    batch_size: int = 4096,
-    lr: float = 0.0001, # Typical Adam lr, not specified in source, assumed standard
-    video_seg_model, # STCN or similar
-    image_inpaint_model, # rho, e.g., MST inpainting
-    depth_completion_model # tau, e.g., Fast Bilateral Solver
-) -> nn.Module:
-    """
-    Optimizes NeRF parameters to remove unwanted objects based on user mask and RGB-D priors.
-    """
-    optimizer = optim.Adam(nerf_model.parameters(), lr=lr)
-    
-    # Step 1: Render initial views from pre-trained NeRF
-    initial_images = []
-    initial_depths_fine = []
-    initial_depths_coarse = []
-    
-    for cam in trajectory_cams:
-        # Render RGB and Depth (Coarse and Fine)
-        # Note: Standard NeRF rendering returns color. Depth is computed from sigma and t.
-        # Assuming nerf_model.render() returns (color, sigma, t) or similar.
-        # For simplicity, we assume a helper function that renders full ray batches.
-        rgb, sigma_fine, t_fine = nerf_model.render_ray_batch(cam, num_samples=num_fine_samples)
-        rgb_c, sigma_coarse, t_coarse = nerf_model.render_ray_batch(cam, num_samples=num_coarse_samples)
-        
-        # Compute depth from sigma and t
-        # D = sum(t_i * weight_i) / sum(weight_i) ? Or just weighted sum of t?
-        # Source says "accumulation of sigma from ray batches". 
-        # Standard depth rendering: D = sum(t_i * alpha_i) where alpha_i = T_i * (1 - exp(-sigma_i * delta_i))
-        # We assume a helper for this.
-        depth_fine = compute_depth(t_fine, sigma_fine)
-        depth_coarse = compute_depth(t_coarse, sigma_coarse)
-        
-        initial_images.append(rgb)
-        initial_depths_fine.append(depth_fine)
-        initial_depths_coarse.append(depth_coarse)
+# Assume NeRF model F_Theta is defined and pre-trained
+# Assume STCN, MST Inpainting, Fast Bilateral Solver are available as functions
 
-    # Step 2: Transfer masks using video object segmentation
-    transferred_masks = []
-    # Use user_view_cam's image (rendered from nerf_model) and user_mask as input to STCN
-    # STCN typically takes a reference frame and mask, and propagates to subsequent frames.
-    # Here, we treat the sequence of rendered images as the video.
-    # Note: The source says "transfer... using STCN".
-    # We assume video_seg_model takes a list of images and a reference mask.
-    transferred_masks = video_seg_model.propagate_masks(initial_images, user_mask)
+def nerf_in_inpainting_optimization(F_Theta, o_u, M_u, trajectory, K, 
+                                    num_steps=50000, batch_size=4096, 
+                                    samples_fine=128, samples_coarse=64):
+    """
+    Optimizes NeRF parameters to remove unwanted object.
     
-    # Step 3: Generate Guidance Materials
-    guiding_images = []
-    guiding_depths = []
-    
-    for i, cam in enumerate(trajectory_cams):
-        # Generate guiding color image
-        # I_s^G = rho(I_s, M_s)
-        guide_img = image_inpaint_model.inpaint(initial_images[i], transferred_masks[i])
-        guiding_images.append(guide_img)
+    Args:
+        F_Theta: Pre-trained NeRF model.
+        o_u: User-chosen camera position.
+        M_u: User-drawn mask on view o_u (1 for outside, 0 for inside).
+        trajectory: Function to sample K camera positions.
+        K: Number of sampled views.
+        num_steps: Number of optimization steps.
+        batch_size: Batch size for training.
+        samples_fine: Number of sample points for fine model.
+        samples_coarse: Number of sample points for coarse model.
         
-        # Generate guiding depth image
-        # D_s^G = tau(D_s, M_s, I_s^G)
-        guide_depth = depth_completion_model.complete_depth(initial_depths_fine[i], transferred_masks[i], guide_img)
-        guiding_depths.append(guide_depth)
-
-    # Step 4: Define View Sets
-    # O_all = {o_u}, O_out = O (all other views)
-    # Note: The source sets O_all = o_u and O_out = O.
-    # This implies L_all_color is computed only on the user view, and L_out_color on the trajectory views.
+    Returns:
+        Theta_tilde: Updated NeRF parameters.
+    """
+    # 1. Sample Camera Positions
+    O = trajectory(K) # Returns list of K camera positions
     
-    # Step 5: Optimization Loop
+    # 2. Render Initial Views
+    I_s_list = []
+    D_s_list = []
+    for o_s in O:
+        # Render RGB and Depth using F_Theta
+        I_s, D_s = render_view(F_Theta, o_s, samples_fine, samples_coarse)
+        I_s_list.append(I_s)
+        D_s_list.append(D_s)
+        
+    # 3. Transfer Mask
+    # Use video object segmentation (e.g., STCN) to transfer M_u to all views
+    M_list = transfer_mask_stcn(M_u, I_s_list, o_u, O)
+    
+    # 4. Generate Guidance Materials
+    I_G_list = []
+    D_G_list = []
+    for i, o_s in enumerate(O):
+        I_s = I_s_list[i]
+        D_s = D_s_list[i]
+        M_s = M_list[i]
+        
+        # Generate guiding color image using image inpainting (e.g., MST)
+        I_s_G = image_inpainting_mst(I_s, M_s)
+        I_G_list.append(I_s_G)
+        
+        # Generate guiding depth image using depth completion (e.g., Fast Bilateral Solver)
+        D_s_G = depth_completion_bilateral(D_s, M_s, I_s_G)
+        D_G_list.append(D_s_G)
+        
+    # 5. Define View Sets
+    O_all = [o_u]
+    O_out = [o_s for o_s in O if o_s != o_u]
+    
+    # 6. Optimization Loop
+    optimizer = optim.Adam(F_Theta.parameters(), lr=0.0001) # Typical LR for Adam, not specified in source
+    
     for step in range(num_steps):
         optimizer.zero_grad()
         
-        total_loss = 0.0
+        # Compute Color Loss
+        L_all_color = 0.0
+        # L_all_color is defined on O_all. In main framework, O_all = {o_u}
+        # Render view for o_u
+        I_u_rendered = render_view_image(F_Theta, o_u, samples_fine)
+        I_u_G = I_G_list[O.index(o_u)] if o_u in O else I_G_list[0] # Assuming o_u is in O or handled separately
+        # Note: Source says O_all = o_u. If o_u is not in O, we need to render it.
+        # Assuming o_u is one of the sampled views for simplicity, or handled via separate render.
+        # Let's assume o_u is in O for the list indexing, or we render it explicitly.
+        # The source formula (9) uses I_o^G for o in O_all.
+        # If O_all = {o_u}, then L_all_color = || F(o_u) - I_u^G ||^2
         
-        # --- Color Guiding Loss ---
+        # To be precise with source:
+        # L_all_color = sum_{o in O_all} || F_image(o) - I_o^G ||^2
+        # L_out_color = sum_{o in O_out} || (F_image(o) - I_o^G) * M_o ||^2
         
-        # L_all_color: On user-chosen view o_u
-        # Render image at o_u
-        img_u, _, _ = nerf_model.render_ray_batch(user_view_cam, num_samples=num_fine_samples)
-        guide_img_u = guiding_images[0] # Assuming user view is part of guidance generation or handled separately?
-        # Source says: "generate guiding color image regions... I_s^G = rho(I_s, M_s)".
-        # And "O_all = o_u".
-        # It seems the user view's guidance is also generated.
-        # Let's assume guiding_images[0] corresponds to o_u if o_u is in trajectory, 
-        # OR we need to generate guidance for o_u specifically.
-        # The source says "sample K camera positions... render... transfer mask... generate guidance".
-        # It does not explicitly say o_u is in O. But O_all = o_u.
-        # Let's assume we render o_u and generate its guidance similarly.
-        # For implementation, we assume guiding_images includes o_u's guidance or we compute it.
-        # To be safe, let's assume the first element of guiding_images corresponds to the first cam in trajectory.
-        # If o_u is not in trajectory, we need to handle it. 
-        # The source says "O_all = o_u and O_out = O". This implies o_u is distinct from O.
-        # However, the guidance generation loop iterates over O.
-        # Let's assume we also generate guidance for o_u.
-        img_u_rendered, _, _ = nerf_model.render_ray_batch(user_view_cam, num_samples=num_fine_samples)
-        # Generate guidance for o_u
-        guide_img_u = image_inpaint_model.inpaint(img_u_rendered, user_mask)
-        guide_depth_u = depth_completion_model.complete_depth(compute_depth(t_fine, sigma_fine), user_mask, guide_img_u)
+        # Render all views for loss computation
+        I_rendered_all = []
+        for o in O_all:
+            I_rendered_all.append(render_view_image(F_Theta, o, samples_fine))
+            
+        I_rendered_out = []
+        for o in O_out:
+            I_rendered_out.append(render_view_image(F_Theta, o, samples_fine))
+            
+        # Calculate L_all_color
+        # Assuming I_G_list corresponds to O. If o_u is in O, find its index.
+        # If o_u is not in O, we need I_u^G. The source says I_u^G is generated from I_u and M_u.
+        # I_u is rendered from o_u. So I_u^G is available.
+        I_u_G = image_inpainting_mst(render_view_image(F_Theta, o_u, samples_fine), M_u)
         
-        # L_all_color = || F_theta_image(o_u) - I_u^G ||^2
-        loss_all_color = torch.mean((img_u_rendered - guide_img_u) ** 2)
-        total_loss += loss_all_color
+        L_all_color = torch.mean((I_rendered_all[0] - I_u_G) ** 2)
         
-        # L_out_color: On views O_out = O
-        for i, cam in enumerate(trajectory_cams):
-            img_s, _, _ = nerf_model.render_ray_batch(cam, num_samples=num_fine_samples)
-            guide_img_s = guiding_images[i]
-            mask_s = transferred_masks[i]
+        # Calculate L_out_color
+        L_out_color = 0.0
+        for i, o in enumerate(O_out):
+            I_o_rendered = I_rendered_out[i]
+            # Find corresponding I_o^G and M_o
+            # If O_out is a subset of O, we can index into I_G_list and M_list
+            # Assuming O_out indices are known
+            idx = O.index(o)
+            I_o_G = I_G_list[idx]
+            M_o = M_list[idx]
             
-            # L_out_color = sum || (F_theta_image(o_s) - I_s^G) * M_s ||^2
-            # Note: Source uses element-wise multiplication with mask.
-            # Mask M_s is 1 for valid, 0 for masked.
-            diff = img_s - guide_img_s
-            masked_diff = diff * mask_s.unsqueeze(-1) # Assuming mask is HxW, diff is HxWxC
-            loss_out_color = torch.mean(masked_diff ** 2)
-            total_loss += loss_out_color
+            # Masked difference
+            diff = (I_o_rendered - I_o_G) * M_o
+            L_out_color += torch.mean(diff ** 2)
             
-        # --- Depth Guiding Loss ---
-        # L_depth: On views O
-        for i, cam in enumerate(trajectory_cams):
-            # Render coarse and fine depth
-            # We need to render both coarse and fine passes to get D_c and D_f
-            # This requires two forward passes or a specific render function.
-            _, sigma_c, t_c = nerf_model.render_ray_batch(cam, num_samples=num_coarse_samples)
-            _, sigma_f, t_f = nerf_model.render_ray_batch(cam, num_samples=num_fine_samples)
+        L_color = L_all_color + L_out_color
+        
+        # Compute Depth Loss
+        L_depth = 0.0
+        for i, o_s in enumerate(O):
+            # Render fine and coarse depth
+            D_f = render_depth_fine(F_Theta, o_s, samples_fine)
+            D_c = render_depth_coarse(F_Theta, o_s, samples_coarse)
+            D_G = D_G_list[i]
             
-            depth_c = compute_depth(t_c, sigma_c)
-            depth_f = compute_depth(t_f, sigma_f)
+            L_depth += torch.mean((D_f - D_G) ** 2)
+            L_depth += torch.mean((D_c - D_G) ** 2)
             
-            guide_depth_s = guiding_depths[i]
-            
-            # L_depth = sum ( || D_f - D_G ||^2 + || D_c - D_G ||^2 )
-            loss_depth_f = torch.mean((depth_f - guide_depth_s) ** 2)
-            loss_depth_c = torch.mean((depth_c - guide_depth_s) ** 2)
-            total_loss += loss_depth_f + loss_depth_c
-            
-        total_loss.backward()
+        # Total Loss
+        L_total = L_color + L_depth
+        L_total.backward()
         optimizer.step()
         
-    return nerf_model
+    return F_Theta
 
-def compute_depth(t, sigma):
-    """
-    Computes depth from t and sigma.
-    D = sum(t_i * alpha_i) / sum(alpha_i) ?
-    Source says "accumulation of sigma".
-    Standard NeRF depth: D = sum(t_i * T_i * (1 - exp(-sigma_i * delta_i)))
-    """
-    # Assuming t is sorted, delta_i = t[i+1] - t[i]
-    # This is a simplified implementation.
-    # In practice, this is done during the forward pass of the renderer.
-    # We assume the renderer provides depth directly or we compute it here.
-    # For the purpose of this pseudocode, we assume a helper exists.
+def render_view(F_Theta, o, samples_fine, samples_coarse):
+    # Placeholder for actual volume rendering logic
+    # Returns RGB image and Depth image
+    pass
+
+def render_view_image(F_Theta, o, samples):
+    # Returns RGB image
+    pass
+
+def render_depth_fine(F_Theta, o, samples):
+    # Returns fine depth image
+    pass
+
+def render_depth_coarse(F_Theta, o, samples):
+    # Returns coarse depth image
+    pass
+
+def transfer_mask_stcn(M_u, I_s_list, o_u, O):
+    # Placeholder for STCN mask transfer
+    pass
+
+def image_inpainting_mst(I, M):
+    # Placeholder for MST inpainting
+    pass
+
+def depth_completion_bilateral(D, M, I_G):
+    # Placeholder for Fast Bilateral Solver
     pass
 ```
 
-**Edge Cases and Pitfalls:**
-*   Optimizing only with masked MSE (mmse) on transferred masks without explicit guidance causes the unwanted object to remain in the result [S1, unofficial].
-*   Using only depth-guiding loss ($L_{depth}$) introduces color noise outside the masked region and loses color information in flat regions [S1, unofficial].
-*   Using multiple inpainted images as color guidance introduces visual inconsistency between views. The framework restricts color guidance to the user-chosen view to maintain consistency [S1, unofficial].
-*   Artifacts in initial guidance materials (from $\rho$ and $\tau$) can lead to undesired results in the optimized NeRF [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** The optimization takes approximately 5 hours per scene on an Intel i7-7800X CPU and GTX-1080 GPU for 50,000 steps [S1, unofficial].
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Evaluated on the LLFF dataset and a custom dataset with 24 camera positions per scene [S1, unofficial].
-*   **Strengths:** Does not require category-specific training data or procedures; generates visually plausible inpainted results with correct geometry and view consistency [S1, unofficial].
-*   **Limitations:** Relies on the quality of external image inpainting and depth completion methods; may propagate artifacts from these methods; limited to object removal (not general editing) [S1, unofficial].
-*   **When to use:** When removing unwanted objects from a pre-trained NeRF without access to category-specific data or the ability to retrain the entire NeRF from scratch.
-*   **When not to use:** When high-fidelity texture synthesis is required beyond the capability of the external inpainting model, or when the scene geometry is highly complex and the depth completion method fails to provide accurate guidance.
+
+**Time and Memory Complexity:**
+*   The optimization takes approximately 5 hours per scene on an Intel i7-7800X CPU and GTX-1080 GPU [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   The initial training of the NeRF takes 18-20 hours for 200,000 steps [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   Memory usage is not explicitly given, but depends on the batch size (4,096 rays) and the number of sample points (128 fine, 64 coarse) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths**: No category-specific training data or procedure required [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. Jointly optimizes color and depth to ensure geometric consistency and visual plausibility [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+*   **Limitations**: Performance depends on the quality of the initial guidance materials (inpainting and depth completion) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. Using multiple views for color guidance can introduce inconsistencies [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+
+**When to Use:**
+*   When removing unwanted objects from a pre-trained NeRF without access to category-specific data.
+*   When geometric consistency is critical.
+
+**When Not to Use:**
+*   When high-quality initial guidance images are not available or difficult to generate.
+*   When real-time performance is required (optimization takes hours).
 
 ## Background
-NeRF-In was introduced by Hao-Kang Liu, I-Chao Shen, and Bing-Yu Chen in 2022 [S1, unofficial]. It is the first framework to enable free-form inpainting on NeRFs without category-specific data. It builds on the principles of differentiable volume rendering and leverages existing 2D image inpainting and depth completion techniques to provide guidance for 3D optimization. The method was implemented in PyTorch and Python 3.9 [S1, unofficial].
+
+**Origin:**
+NeRF-In was introduced by Hao-Kang Liu, I-Chao Shen, and Bing-Yu Chen in the paper "NeRF-In: Free-Form NeRF Inpainting with RGB-D Priors" (arXiv:2206.04901, June 10, 2022) [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+
+**History and Development:**
+The method addresses the unintuitive nature of editing pre-trained NeRFs, which lack explicit association between parameters and scene geometry/appearance [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. It builds on previous work in image inpainting and video object segmentation, applying them to the 3D NeRF domain via optimization [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
+
+**Usage:**
+Implemented in PyTorch and Python 3.9 [S1, 12372-nerf-in-inpainting-optimization.md, unofficial]. Evaluated on the LLFF dataset and a custom dataset with 24 camera positions per scene [S1, 12372-nerf-in-inpainting-optimization.md, unofficial].
 
 ## Sources
+
 [S1] NeRF-In: Free-Form NeRF Inpainting with RGB-D Priors, https://doi.org/10.48550/arxiv.2206.04901, fetched 2026-10-26 (unofficial)

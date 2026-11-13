@@ -1,0 +1,71 @@
+# Ambient Occlusion via Geometry/Neighbors
+
+
+## Overview
+This family of methods estimates local ambient occlusion in volume rendering by querying discrete voxel occupancy, geometric distances, or gradient-weighted density to approximate visibility, avoiding expensive global ray tracing or screen-space depth buffers [G]. Unlike [JAOCC Shading](3634-jaocc-shading.md) which uses fixed cubic neighborhoods, or [Local Ambient Occlusion](4977-local-ambient-occlusion.md) which integrates transmittance along stochastic rays, these techniques determine occlusion factors by directly evaluating geometric distance, neighbor occupancy, or gradient-weighted density, offering a computationally cheaper alternative suitable for real-time or interactive applications [G].
+
+## Shared principles
+Builds on [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md).
+
+## Subtopics
+
+### [Ambient Occlusion via SDF/Geometry](2527-ambient-occlusion-via-sdf-geometry.md)
+Estimates local ambient occlusion by querying geometric representations like Signed Distance Fields or structured voxel grids to approximate visibility without explicit ray tracing against triangle meshes or screen-space depth buffers. It sets itself apart from [JAOCC Shading](3634-jaocc-shading.md) and [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by directly evaluating geometric distance to determine occlusion factors.
+
+### [JAOCC Shading](3634-jaocc-shading.md)
+A voxel-based technique that computes a depth-weighted dimming factor by counting non-empty neighbors in a cubic neighborhood. It addresses hard, physically implausible lighting transitions at voxel boundaries by dynamically computing the normal of the cut voxel face from the local neighborhood geometry instead of using fixed AABB edge normals.
+
+### [Local Ambient Occlusion](4977-local-ambient-occlusion.md)
+Estimates the blocking of indirect light by analyzing local density distribution or sampling stochastic rays around a point, rather than relying on global geometry or hard shadow maps. Unlike siblings that use Signed Distance Fields [2527-ambient-occlusion-via-sdf-geometry.md] or precomputed voxel buffers [6646-voxel-ambient-occlusion.md], these methods typically compute occlusion on-the-fly or via lightweight precomputation tailored to the volume's statistical properties, providing softer, more volumetric shadow appearances [4502-local-ambient-occlusion-lao.md].
+
+### [Vertex Ambient Occlusion Approximation](6623-vertex-ambient-occlusion-approximation.md)
+A lightweight technique that darkens vertices based on the local density of solid voxels in their immediate neighborhood, simulating shadowing in crevices and concavities. It differs from [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by operating on discrete vertex data rather than continuous volume integration, and from [Gradient-based Occlusion Information Computation](9554-gradient-based-occlusion-information-computation.md) by relying on explicit neighbor sampling rather than analytical gradient estimation.
+
+### [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md)
+Estimates local shadowing and indirect illumination by sampling the solidity of neighboring voxels in a discrete grid relative to a surface point's normal. Unlike ray-based approaches such as Local AO, which integrate transmittance along continuous paths, Voxel AO approximates occlusion by querying the occupancy state of adjacent grid cells, offering a computationally cheaper alternative suitable for real-time voxel engines. It differs from SDF-based methods by operating directly on discrete voxel data rather than continuous signed distance fields.
+
+### [Gradient-based Occlusion Information Computation](9554-gradient-based-occlusion-information-computation.md)
+Computes a view-independent occlusion metric for volume data that preserves sharp boundaries between structures, addressing the isotropic blurring inherent in simple spherical mean ambient occlusion. It differs from sibling methods like [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by modulating the neighborhood mean with a gradient-based weight derived from Perona-Malik diffusion principles, ensuring that edges are not smoothed out during the occlusion calculation.
+
+### [Ambient Light Approximation](2244-ambient-light-approximation.md)
+Provides a computationally efficient estimate of indirect sky illumination in participating media by replacing the integration of the sky hemisphere with a single upward ray. It sets itself apart from siblings like [Lighting Models](2056-lighting-models.md) by specifically addressing the "dark edge" and blue tint artifacts caused by ignoring indirect light, using a pre-integrated sky value modulated by local density.
+
+### Ambient Aperture Lighting
+#### definition
+- [S1, unofficial] A technique that approximates the shape of unoccluded regions above the shading point via a cone to estimate occlusion of an area-light.
+#### step
+- [S1, unofficial] The set of 3D unoccluded directions is modeled as a circular aperture.
+#### pitfall
+- [S1, unofficial] If the set of unoccluded directions does not resemble an ellipse or a circle, it can produce incorrect shadowing results.
+#### comparison
+- [S1, unofficial] This method presents a lower storage requirement than horizon maps.
+
+### Standard Deviation of Ambient Occlusion
+#### definition
+- [S2] A metric that quantifies the variation of ambient occlusion values along all directions for a voxel, allowing distinction between objects with identical scalar field values but different local structures.
+#### formula
+- [S2] $O_{std}(p, \vec{d}) = \sqrt{\frac{1}{H} \sum_{i=1}^{H} (A(p, \hat{\omega}_i, \vec{d}))^2 - (\frac{1}{H} \sum_{i=1}^{H} A(p, \hat{\omega}_i, \vec{d}))^2}$ where $H$ is the number of different directions, $A$ is the directional occlusion function, $p$ is the voxel, and $\vec{d}$ is the direction vector.
+#### parameter
+- [S2] H: The number of different directions sampled for the ambient occlusion calculation.
+#### pitfall
+- [S2] In simple cases with few objects (e.g., two objects with same intensity/size), using the second derivative field $f''(x)$ as input to $O_{std}$ fails because boundaries are highlighted while interiors become near-zero, causing identical $O_{std}$ values for distinct objects. In these cases, use the original scalar field $f(x)$ as input instead. [S2]
+
+### Screen-space Ambient Occlusion and Halos (Interactive Control)
+#### definition
+- [S3, unofficial] A real-time screen-space method where ambient occlusion and halos are computed from scratch each frame, allowing interactive parameter changes without performance cost.
+#### step
+- [S3, unofficial] Compute average depths using Summed Area Tables (SAT) to allow changing halo size (size_x, size_y) with no extra cost (same number of texture accesses).
+#### parameter
+- [S3, unofficial] size_x and size_y: Resolution of the vicinity region used to compute the occlusion factor, adjustable to fine-tune results.
+- [S3, unofficial] Color_vic: The emphasizing color for depth variations, adjustable if depth variations need to be accentuated differently.
+- [S3, unofficial] factor_vic: A factor controlling the perceptibility of shading modification in ambient occlusion; higher values make the modification more perceptible.
+#### pitfall
+- [S3, unofficial] Fixed functions for ambient occlusion may excessively darken certain regions while barely modifying others if depth complexity varies across the volume.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S2] Boundary-structure-aware transfer functions for volume classification, https://doi.org/10.1145/3139295.3139306, fetched 2026-10-31
+[S3] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)

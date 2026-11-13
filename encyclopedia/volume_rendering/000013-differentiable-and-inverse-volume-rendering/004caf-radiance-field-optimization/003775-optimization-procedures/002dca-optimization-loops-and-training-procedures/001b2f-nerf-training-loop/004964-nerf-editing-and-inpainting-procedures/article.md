@@ -1,65 +1,61 @@
 # NeRF Editing and Inpainting Procedures
 
-Also called: NeRF Editing, NeRF Inpainting, 3D Content Editing
+Also called: NeRF Editing, NeRF Inpainting, 3D Scene Editing
 
 ## Overview
-NeRF Editing and Inpainting Procedures modify a pre-trained Neural Radiance Field (NeRF) to remove, add, or alter content while maintaining multi-view consistency. This family solves the problem of 3D-aware scene manipulation, which standard 2D inpainting cannot achieve due to geometric inconsistencies across viewpoints. These methods differ from standard training by either intercepting the rendering loop for real-time edits, optimizing network weights using 2D priors (diffusion, inpainting, or semantic masks), or distilling high-level features for semantic decomposition.
+NeRF Editing and Inpainting Procedures are optimization-based methods that modify a pre-trained Neural Radiance Field (NeRF) to remove objects, insert new content, or expand the viewpoint coverage without retraining the model from scratch. They solve the problem of visual inconsistency and geometric artifacts that arise when applying 2D image editing or inpainting priors directly to 3D volumes. Unlike methods that synthesize new objects from scratch or require semantic masks for every view, these procedures typically optimize the NeRF parameters $\Theta$ by guiding the volume rendering loop with external 2D priors (e.g., diffusion models, inpainting networks) or semantic feature fields, ensuring cross-view coherence.
 
 ## Shared principles
-All methods in this family operate on a NeRF representation $f_\theta$ mapping 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$. The core rendering equation used to compute the pixel color $\hat{C}(r)$ for a ray $r$ is:
-$$ \hat{C}(r) = \sum_{i=1}^{N} w_i \mathbf{c}_i $$
-where $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ is the weight, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the transmittance, $\delta_i$ is the distance between sample points, and $\mathbf{c}_i$ is the color at sample point $i$ [S1, 12491-nerf-editing-procedure.md].
+All methods in this family share the core mechanism of differentiable volume rendering optimization. The NeRF representation $f_\theta$ maps a 3D coordinate $\mathbf{x}$ and viewing direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$. The rendering process computes the expected color $\hat{C}(\mathbf{r})$ for a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ via numerical quadrature:
 
-Most optimization-based methods (e.g., [NeRF-In](12372-nerf-in-inpainting-optimization.md), [Blended-NeRF](12273-blended-nerf.md)) minimize a loss function $\mathcal{L}$ with respect to the NeRF parameters $\Theta$. Common loss components include:
-1.  **Photometric Loss:** L1 or L2 distance between rendered color $\hat{C}$ and a target color $C$ (ground truth, inpainted, or diffusion-guided) [S1, 12068-dff-decomposing-nerf-for-editing-via-feature-field-distillat.md].
-2.  **Depth/Geometry Loss:** L2 distance between rendered depth $D$ and a guiding depth map $D^G$ to prevent "ghosting" or geometric artifacts [S1, 12372-nerf-in-inpainting-optimization.md].
-3.  **Semantic/Feature Loss:** Distance between rendered feature fields and teacher network features, or similarity between rendered features and text/image embeddings [S1, 12068-dff-decomposing-nerf-for-editing-via-feature-field-distillat.md].
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T(t_i) (1 - \exp(-\sigma(t_i)\delta_i)) c(t_i)
+$$
+
+where $N$ is the number of sample points, $\delta_i = t_{i+1} - t_i$, and $T(t_i) = \exp\left(-\sum_{j=1}^{i-1} \sigma(t_j)\delta_j\right)$ is the accumulated transmittance [S1, 12372-nerf-in-inpainting-optimization.md].
+
+The optimization updates $\Theta$ to minimize a total loss function $L_{total}$, which typically combines a reconstruction loss against ground truth or guidance images and regularization terms. The general form is:
+
+$$
+\tilde{\Theta} := \arg \min_{\Theta} \left( L_{color}(\Theta) + L_{depth}(\Theta) + L_{reg}(\Theta) \right)
+$$
+
+where $L_{color}$ measures pixel-wise differences (e.g., L2 or LPIPS) between rendered and target images, and $L_{depth}$ constrains geometric consistency using depth maps [S1, 12372-nerf-in-inpainting-optimization.md].
 
 ## Subtopics
 
 ### [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md)
-A method for reconstructing a panoramic NeRF from a single input panorama by iteratively synthesizing novel views and refining the 3D geometry. It solves the problem of geometry conflicts that arise when inpainting invisible regions of a scene, ensuring that the generated content remains consistent with the already-learned visible geometry. Unlike methods that optimize a static NeRF from multiple views, PERF progressively expands the viewpoint range by alternating between collaborative RGBD inpainting of new views and erasing geometrically inconsistent regions from the training supervision.
+Expands a single-view NeRF into a panoramic representation by iteratively synthesizing novel views. It detects and erases conflicted regions from supervision to ensure geometric coherence between visible and newly generated invisible areas.
 
 ### [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md)
-A sparse-view reconstruction method that enhances NeRF or 3D Gaussian Splatting (3DGS) representations by continuously densifying input observations with synthetic pseudo-observations generated by a diffusion model during training. It distinguishes itself from sibling methods by explicitly enforcing 3D view consistency through an uncertainty map derived from epipolar reprojection of nearest input views, rather than relying on ensemble learning or variational inference. The method alternates between generating high-fidelity pseudo-observations conditioned on coarse renders and depth/uncertainty maps, and optimizing the radiance field using both real and synthetic data.
-
-### [DFF (Decomposing NeRF for Editing Via Feature Field Distillation)](12068-dff-decomposing-nerf-for-editing-via-feature-field-distillat.md)
-DFF enables 3D semantic segmentation and editable novel-view synthesis by distilling high-level semantic features from a pre-trained 2D teacher network (such as LSeg or DINO) into a neural radiance field. Unlike standard NeRFs, whose internal feature representations are entangled with low-level factors like color and spatial adjacency, DFF learns a dedicated feature field that allows for robust decomposition of scenes into semantic regions. This decomposition facilitates editing operations such as object deletion, extraction, and appearance modification while maintaining multi-view consistency, overcoming the inconsistencies often produced by 2D image inpainting baselines.
+Enhances sparse-view reconstruction by densifying input observations with synthetic pseudo-observations generated by a diffusion model. It enforces 3D view consistency through an uncertainty map derived from epipolar reprojection of nearest input views.
 
 ### [Blended-NeRF](12273-blended-nerf.md)
-Blended-NeRF is a framework for editing a specific region of interest (ROI) in an existing Neural Radiance Field (NeRF) scene using text prompts and a user-defined 3D bounding box. It differs from methods that synthesize objects from scratch (e.g., Dream Fields) or require semantic masks by initializing a generator NeRF with the original scene's weights and blending the synthesized content with the original scene via volumetric blending along rays. It solves the problem of local 3D editing while preserving the unedited scene outside the ROI.
+Edits a specific region of interest (ROI) in an existing NeRF using text prompts and a 3D box. It initializes a generator NeRF with the original weights and blends the synthesized content with the original scene using volumetric blending and distance smoothing.
 
 ### [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md)
-NeRF-In is a framework for removing unwanted objects from a pre-trained Neural Radiance Field (NeRF) by optimizing the model parameters $\Theta$ using color and depth guidance derived from 2D images, without requiring category-specific training data. It sets itself apart from sibling methods like [Blended-NeRF](12273-blended-nerf.md) or [DFF](12068-dff-decomposing-nerf-for-editing-via-feature-field-distillat.md) by relying on external 2D inpainting priors (color and depth) rather than semantic segmentation networks or feature distillation, and it explicitly optimizes for geometric consistency via a depth-guiding loss to prevent the "ghosting" of removed objects.
+Removes unwanted objects from a pre-trained NeRF using free-form user masks and external 2D inpainting/depth completion tools. It jointly optimizes color and depth guidance derived from these 2D priors without requiring category-specific training data.
 
 ### [Adaptive View Selection for Inpainting](12405-adaptive-view-selection-for-inpainting.md)
-Adaptive View Selection for Inpainting is a method for removing obstacles from Neural Radiance Fields (NeRFs) by combining 2D image inpainting priors with multi-view consistency constraints. It solves the problem of inconsistent geometry and texture in de-occluded regions by dynamically selecting whether to rely on a 2D inpainter or supplementary information from other training views based on local texture richness. Unlike methods that apply uniform inpainting priors or rely solely on multi-view geometry, this approach uses regional average gradients to adaptively weight the reconstruction loss, ensuring that high-texture areas leverage multi-view correlations while low-texture areas rely on 2D priors.
+Addresses single-view 2D inpainting inconsistency by dynamically selecting whether to rely on the 2D inpainter or multi-view geometric consistency based on the texture richness (average gradient) of specific sub-regions within the occluded area.
 
 ### [NeRF Editing Procedure](12491-nerf-editing-procedure.md)
-The NeRF Editing Procedure is an interception-based method that modifies the output of a pre-trained Neural Radiance Field (NeRF) $f_\theta$ during the ray-marching loop, rather than by re-optimizing the network weights $\Theta$. It solves the problem of real-time, consistent scene editing (deletion, colorization, transformation) without the computational cost and potential instability of iterative optimization. Unlike optimization-based siblings like [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md) or [Blended-NeRF](12273-blended-nerf.md), this method relies on a Distilled Feature Field (DFF) to query semantic probabilities for each 3D point, allowing for immediate, view-consistent modifications via simple algebraic transforms on density and color.
+Enables direct manipulation of a pre-trained NeRF by integrating a Distilled Feature Field (DFF) to guide density and color transformations. It defines edits through coordinate selection probabilities, allowing for deletion, colorization, and geometric translation/rescaling directly within the volume rendering loop.
 
 ### [Reference-guided Controllable Inpainting of NeRFs](13952-reference-guided-controllable-inpainting-of-nerfs.md)
-A 3D inpainting algorithm that uses a single inpainted reference view to guide the geometry and appearance of a NeRF, avoiding view inconsistencies and generating view-dependent effects. It differs from multi-view inpainting methods by requiring only one user-provided inpainted image rather than a full set of edited views, and from direct optimization methods by explicitly handling disocclusions and view-dependent effects (VDEs) through specialized loss terms rather than relying solely on pixel reconstruction.
+Uses a single inpainted reference view to guide the geometry and appearance of a NeRF. It explicitly handles view-dependent effects (VDEs) and disocclusions through specialized loss terms, requiring only one user-provided inpainted image.
 
 ### [RePaint-NeRF Limitations](14340-repaint-nerf-limitations.md)
-This article documents the specific failure modes and resource constraints of the RePaint-NeRF method, which edits NeRF content using 2D diffusion model guidance. It addresses the limitations that prevent the method from scaling to large scenes or handling drastic geometric transformations, distinguishing it from siblings that may use different priors or optimization strategies.
+Documents the failure modes of RePaint-NeRF, highlighting severe computational overhead (exceeding 30 minutes per object) and specific geometric artifacts arising from shape disparity and restricted view angles.
 
-#### Semantic Inpainting for Neural Fields
-- **Definition:** A 3D content editing capability allowing editing of neural fields through simple interfaces like free-form sketching or language instructions [S1].
-- **Step:** Given a user-supplied edit in a single reference view, the encoding of a neural field automatically propagates this edit to all views [S1]. The propagation promotes consistency between all views thanks to the implicit geometrical and photometric priors embodied by the neural network, preserving the structure of the whole scene [S1].
-- **History:** Described in reference [19] [S1].
-
-#### Post-Refinement Strategy
-- **Definition:** A strategy employed after the NeRF has been trained on updated data to enhance consistency by generating a more accurate target for each view using the modified Instruct-Pix2Pix with averaging architecture [S2].
-- **Step:** Use the rendered image as input while continuing to use the mixup image as a condition [S2].
-
-#### Mask+CLIP
-- **Pitfall:** CLIP provides weak guidance for NeRF optimization; after several epochs, the masked region develops unreasonable textures instead of converging to the target prompt [S3].
+### [Semantic and Language-Guided Editing](14393-semantic-and-language-guided-editing.md)
+Uses semantic and language cues to guide the editing process, allowing for high-level textual instructions to modify specific 3D regions.
+*   #### Post-Refinement Strategy
+    *   **Definition**: A strategy employed after the NeRF has been trained on updated data to enhance consistency by generating a more accurate target for each view using the modified Instruct-Pix2Pix with averaging architecture.
+    *   **Step**: Use the rendered image as input while continuing to use the mixup image as a condition.
 
 ## Background
-Neural rendering has evolved from explicit physical modeling to data-driven inference, enabling high real-time rates and intelligent creation [S1]. The fundamental idea of NeRF allows for novel view synthesis, but early methods lacked easy editing capabilities. Recent developments introduced "3D Content Editing," where edits in a single view propagate consistently to all views [S1]. This field has seen breakthroughs synergizing with generative approaches like DreamFusion, which distills 2D generative knowledge (e.g., Imagen) to 3D geometry without 3D supervision [S1]. Methods like ViCA-NeRF and RePaint-NeRF have further refined this by using view-consistency-aware editing and diffusion models, respectively [S2, S3].
+The field of NeRF editing emerged as a natural extension of the original NeRF paper [G], addressing the need for interactive 3D scene manipulation. Early methods focused on object removal and insertion by optimizing the NeRF parameters with 2D priors. The introduction of diffusion models and large language models (LLMs) enabled more semantically aware editing, such as text-guided stylization and object replacement. Key developments include the use of Distilled Feature Fields for semantic editing [12491-nerf-editing-procedure.md], the integration of ControlNet for diffusion-guided inpainting [11860-deceptive-nerf-3dgs-pipeline.md], and the development of progressive expansion techniques for single-view initialization [8658-progressive-inpainting-and-erasing.md]. These methods collectively address the challenges of view consistency, geometric accuracy, and semantic fidelity in 3D scene editing.
 
 ## Sources
-[S1] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26
-[S2] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
-[S3] RePaint-NeRF: NeRF Editting via Semantic Masks and Diffusion Models, https://doi.org/10.24963/ijcai.2023/201, fetched 2026-10-26
+[S1] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26

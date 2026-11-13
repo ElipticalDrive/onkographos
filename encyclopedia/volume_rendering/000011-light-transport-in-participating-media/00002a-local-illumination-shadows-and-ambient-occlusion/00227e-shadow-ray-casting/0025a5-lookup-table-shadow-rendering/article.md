@@ -3,72 +3,89 @@
 Also called: One-pass Shadow with Lookup Tables, Shadow Rendering, VolPack Shadow Algorithm
 
 ## Overview
-Lookup Table Shadow Rendering is a fast, one-pass shadowing technique implemented within the VolPack volume rendering library [S1]. It solves the problem of computing shadows for participating media by precomputing visibility information into lookup tables, avoiding the per-ray integration costs of standard shadow casting [S1]. Unlike [Shadow Ray Casting](2796-shadow-ray-casting.md), which evaluates transmittance along rays during rendering, this method accelerates shadow determination by mapping density or depth values to pre-calculated shadow factors [S1].
+Lookup Table Shadow Rendering is a fast, one-pass shadowing technique implemented within the VolPack volume rendering system [S1]. It solves the problem of computing shadows for participating media efficiently by precomputing shadow contributions into lookup tables, avoiding the per-voxel ray casting overhead of standard shadow ray methods [S1]. Unlike [Shadow Ray Casting](2796-shadow-ray-casting.md), which evaluates visibility per sample or per voxel via explicit integration, this method accelerates the process by mapping shadow conditions to pre-calculated values, trading flexibility for speed [S1].
 
 ## How it works
-The method relies on the VolPack library's internal data structures and configuration functions. The core mechanism involves configuring a "shadow lookup shader" that uses precomputed tables to determine the shadow factor for voxels based on their density and depth [S1].
+The method relies on the VolPack API to configure and execute the shadow pass [S1].
 
 **Inputs and Outputs:**
-*   **Input:** A volume dataset managed by VolPack, specifically the density field and the viewing volume parameters (front/back planes) [S1].
-*   **Output:** A rendered image where voxels are darkened according to their shadow status [S1].
+- **Input:** A volume dataset (voxels), light source parameters, and rendering context [S1].
+- **Output:** A rendered image with shadows applied to the volume [S1].
 
 **Data Structures:**
-*   **VolPack Context (`vpContext`):** Manages the state of the volume rendering, including the lookup tables for shadows [S1].
-*   **Lookup Table:** A precomputed array mapping input parameters (likely density/depth) to shadow factors [S1]. The exact layout and size of this table are not specified in the sources, but it is accessed via the `vpSetShadowLookupShader` function [S1].
+- **Lookup Table:** The specific layout of the lookup table is not defined in the sources. It is implied to store shadow factors or transmittance values indexed by depth or density [S1].
+- **VolPack Context:** A state structure managed by the VolPack library [S1].
 
 **Steps:**
-1.  Initialize the VolPack context and load the volume data [S1].
-2.  Configure the shadow lookup shader using `vpSetShadowLookupShader` [S1]. This function sets up the lookup table parameters. The specific parameters required by this function are not detailed in the provided sources [S1].
-3.  Render the volume. During rendering, for each voxel, the shadow factor is retrieved from the lookup table based on the voxel's properties (e.g., density, depth) [S1].
-4.  Apply the shadow factor to the voxel's color/transparency. The transparency $T$ of the fog is calculated as:
-    $$ T = front\_factor \cdot \exp(-density \cdot depth) $$
-    where $depth$ is 0 at the front plane and 1 at the back plane [S1]. The shadow factor modulates this transparency or the final color [S1].
+1.  **Initialize VolPack Context:** Create and configure the VolPack rendering context [S1].
+2.  **Configure Shadow Lookup Shader:** Call the function `vpSetShadowLookupShader` to define how shadows are computed using lookup tables [S1]. The specific parameters for this function are detailed in the VolPack man page [S1].
+3.  **Set Image Buffer:** Declare the array where the result will be stored using `vpSetImage` [S1].
+    ```python
+    # Pseudocode for setting the image buffer in VolPack
+    # Note: This is a C API call, adapted to Python-like pseudocode for clarity
+    def set_image_buffer(context, image_array, width, height, bytes_per_scan, pixel_type):
+        """
+        Declares the array that VolPack should store the image into.
+        """
+        # vpSetImage(vpc, image, width, height, bytes_per_scan, pixel_type)
+        context.image_buffer = image_array
+        context.image_width = width
+        context.image_height = height
+        context.bytes_per_scan = bytes_per_scan
+        context.pixel_type = pixel_type
+    ```
+4.  **Render:** Execute the rendering pass. VolPack internally uses the lookup table to apply shadow factors to the volume data [S1].
+
+**Formulas:**
+The transparency of the fog (which is modulated by shadowing) is calculated as [S1]:
+$$ T = front\_factor \cdot \exp(-density \cdot depth) $$
+Where:
+- $T$ is the transparency of the fog.
+- $front\_factor$ is a scaling factor (1.0 or larger to brighten the foreground) [S1].
+- $density$ controls the "density" of the fog, determining how rapidly objects recede into darkness [S1].
+- $depth$ is the distance from the front plane of the viewing volume (0 at the front, 1 at the back) [S1].
+
+Each voxel color component is multiplied by the fog transparency $T$ during rendering [S1].
 
 **Parameters:**
-*   **Density:** Controls the "density" of the fog, determining how rapidly objects recede into darkness [S1].
-*   **Front Factor:** A multiplier for the transparency, where larger numbers can brighten the foreground [S1].
-*   **Depth:** The normalized distance from the front plane (0) to the back plane (1) [S1].
+- **Density:** Controls fog density. Typical values are not specified, but it affects the exponential decay of light [S1].
+- **Front Factor:** Typically 1.0, but can be larger to brighten the foreground [S1].
 
 **Edge Cases and Pitfalls:**
-*   The exact implementation details of `vpSetShadowLookupShader` are not provided in the sources [S1].
-*   The size and content of the lookup table are not specified [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Initialize VolPack context
-vpc = vpCreateContext()
-
-# Load volume data (implementation specific to VolPack)
-# vpLoadVolume(vpc, volume_data)
-
-# Configure shadow lookup shader
-# The specific parameters for this function are not defined in the sources
-# vpSetShadowLookupShader(vpc, shadow_params)
-
-# Set the image buffer for rendering
-# vpSetImage(vpc, image_buffer, width, height, bytes_per_scan, pixel_type)
-
-# Render the volume
-# vpRender(vpc)
-```
+- The exact implementation details of the lookup table generation and indexing are not provided in the sources [S1].
+- Precision issues related to the lookup table resolution are not discussed [S1].
 
 ## Subtopics
 
 ### Voxel Shadow Raycasting
-A shadowing algorithm that casts rays from a light source to each voxel to determine if it is in shadow, darkening the voxel index accordingly [S2, unofficial]. It iterates through all voxels, casts a ray to the light, and if an occluding voxel is found, it subtracts a depth value from the voxel's palette index [S2, unofficial]. This method is CPU-based and uses a palette index system for color and shading [S2, unofficial]. It is suitable for simple voxel engines where GPU acceleration is not available [S2, unofficial]. The shadowing is applied by modifying the voxel index directly, which affects both color and shading [S2, unofficial]. A key pitfall is ensuring the voxel index does not drop below the lower bound of its tone group, requiring clamping [S2, unofficial].
+A shadowing algorithm that casts rays from a light source to each voxel to determine if it is in shadow, darkening the voxel index accordingly [S2, unofficial]. It is distinct from Lookup Table Shadow Rendering as it performs explicit ray casting per voxel rather than using precomputed tables [S2, unofficial]. Choose this method when explicit control over voxel-level shadowing is required and performance constraints are less critical than in large-scale volume rendering [S2, unofficial].
+
+**Steps:**
+1.  Iterate $x$ from 0 to $xsize-1$, $y$ from 0 to $ysize-1$, and $z$ from 0 to $zsize-1$ [S2, unofficial].
+2.  Retrieve the current voxel's palette index: `voxel = get_voxel_pal(x, y, z)` [S2, unofficial].
+3.  If the voxel is not empty (`voxel != 0`), cast a ray from the light position $(lx, ly, lz)$ to the voxel position $(x, y, z)$ using `throw_ray_to_pos` [S2, unofficial]. Let the result be $(hx, hy, hz, i)$, where $i$ is the index of the first non-empty voxel hit along the ray [S2, unofficial].
+4.  If the ray hit a voxel ($i \neq 0$), darken the current voxel by subtracting depth: `voxel = voxel - depth` [S2, unofficial].
+5.  Write the modified voxel index back: `set_voxel_pal(x, y, z, voxel)` [S2, unofficial].
+
+**Parameters:**
+- $lx, ly, lz$: The world coordinates of the light source [S2, unofficial].
+- $depth$: The amount to darken the voxel index if in shadow, typically between 1 and 32 [S2, unofficial].
+- $xsize, ysize, zsize$: The dimensions of the current level in voxels [S2, unofficial].
+
+**Pitfalls:**
+- The voxel index must not drop below the lower bound of its tone group [S2, unofficial]. Calculate `color_margin = math.floor((voxel-1)/32)*32 + 1`. If `voxel < color_margin`, clamp it to `color_margin` [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The lookup table approach is $O(1)$ per voxel for shadow determination after the table is built, making it very fast [S1]. The Voxel Shadow Raycasting method is $O(N)$ where $N$ is the number of voxels, with a constant factor depending on ray casting cost [S2, unofficial].
-*   **Memory Complexity:** The lookup table requires additional memory, the size of which is not specified [S1]. The Voxel Shadow Raycasting method requires minimal additional memory [S2, unofficial].
-*   **Performance:** VolPack's lookup table method is described as "fast" [S1]. The Voxel Shadow Raycasting method is CPU-based and may be slower than GPU-accelerated methods [S2, unofficial].
-*   **Strengths:** Fast shadow computation for VolPack [S1]. Simple implementation for CPU-based voxel engines [S2, unofficial].
-*   **Limitations:** Limited flexibility in shadow appearance due to precomputed tables [S1]. CPU-bound performance for Voxel Shadow Raycasting [S2, unofficial].
-*   **When to use:** Use VolPack's method when using the VolPack library and needing fast shadows [S1]. Use Voxel Shadow Raycasting for CPU-based voxel engines [S2, unofficial].
+- **Time Complexity:** Not given in the sources. The lookup table approach is described as "fast" and "one-pass" [S1].
+- **Memory Complexity:** Not given in the sources. The lookup table size is not specified [S1].
+- **Measured Performance:** Not given in the sources [S1].
+- **Strengths:** Fast, one-pass shadowing for volume rendering [S1].
+- **Limitations:** Limited flexibility due to the use of lookup tables; specific implementation details are opaque [S1].
+- **When to use:** When rendering volumes with VolPack and performance is a priority [S1].
+- **When not to use:** When dynamic, per-voxel shadow ray casting is required or when using non-VolPack systems [S1].
 
 ## Background
-The Lookup Table Shadow Rendering method is part of the VolPack volume rendering library [S1]. VolPack was developed by Stanford University and is documented in the VolPack User's Guide [S1]. The Voxel Shadow Raycasting method is part of the "Doommy" voxel engine, an unofficial project by jabberx [S2, unofficial].
+The method was introduced as part of the VolPack volume rendering system [S1]. VolPack is a software library for volume rendering, and this specific shadowing technique was designed to provide efficient shadowing within that framework [S1]. The Voxel Shadow Raycasting variant is part of the "Doommy" voxel engine, an unofficial CPU-based voxel renderer [S2, unofficial].
 
 ## Sources
 [S1] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28

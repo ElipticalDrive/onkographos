@@ -3,53 +3,80 @@
 Also called: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields
 
 ## Overview
-Blended-NeRF is a framework for editing a specific region of interest (ROI) in an existing Neural Radiance Field (NeRF) scene using text prompts and a user-defined 3D bounding box [S1]. It differs from methods that synthesize objects from scratch (e.g., Dream Fields) or require semantic masks by initializing a generator NeRF with the original scene's weights and blending the synthesized content with the original scene via volumetric blending along rays [S1]. It solves the problem of local 3D editing while preserving the unedited scene outside the ROI [S1].
+Blended-NeRF is a framework for editing a specific region of interest (ROI) in an existing Neural Radiance Field (NeRF) scene based on text prompts and a 3D ROI box [S1]. It solves the problem of local scene modification without requiring semantic decomposition or 2D masks, preserving the scene outside the ROI while synthesizing new content inside it [S1]. Unlike methods that synthesize objects from scratch or require complex feature spaces, Blended-NeRF initializes a generator NeRF with the original scene's weights and blends the results using a novel volumetric blending technique [S1].
 
 ## How it works
-**Inputs:**
-1.  Existing NeRF model $F_{\theta_O}$ mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$ [S1].
-2.  3D ROI box $B$ localized in the scene [S1].
-3.  Text prompt $y$ [S1].
-4.  Hyperparameters: $\alpha$ (blending strength), $\lambda_T, \lambda_D$ (loss weights), $\tau$ (max transmittance), $\rho$ (max depth variance), $\epsilon$ (stability constant) [S1].
-
-**Outputs:**
-Edited NeRF scene $x_e$ [S1].
+**Inputs and Outputs:**
+- Input: An existing NeRF model $F_{\theta_O}$ representing scene $x_o$, a 3D ROI box $B$ localized within the scene, and a user-provided text prompt $y$ [S1].
+- Output: An edited NeRF model $F_{\theta_E}$ (implicitly defined by the blending of $F_{\theta_O}$ and the trained generator $F_{\theta_G}$) that renders the modified scene $x_e$ [S1].
 
 **Data Structures:**
-*   $F_{\theta_O}$: MLP parameters for original scene.
-*   $F_{\theta_G}$: MLP parameters for generator, initialized with $F_{\theta_O}$ [S1].
-*   $B$: Axis-aligned 3D box defined by center and dimensions [S1].
-*   $E_{img}, E_{txt}$: Encoders from a language-image model (e.g., CLIP) [S1].
+- $F_{\theta_O}$: Original NeRF MLP mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$.
+- $F_{\theta_G}$: Generator NeRF MLP, initialized with weights from $F_{\theta_O}$.
+- $B$: Axis-aligned 3D bounding box defined by min/max coordinates.
+- $E_{img}, E_{txt}$: Pretrained image and text encoders (e.g., CLIP) [S1].
 
 **Numbered Steps:**
 
-1.  **Initialization:** Initialize $F_{\theta_G}$ with weights from $F_{\theta_O}$ [S1].
-2.  **ROI Localization:** Define box $B$ using a GUI that renders $F_{\theta_O}$ and uses depth maps for 3D understanding [S1].
-3.  **Training Loop:**
-    a.  **Pose Sampling:** Sample a random camera pose $P$ around the scene with azimuth/elevation $(\theta, \phi)$. Calculate initial distance $d = \frac{e_{max}}{2 \tan(\gamma/2)}$ where $e_{max}$ is the max box dimension and $\gamma$ is camera FOV. Randomly sample radius $r$ around $d$ [S1].
-    b.  **Ray Casting & Sampling:** Cast rays $r$ from $P$. Sample points $\mathbf{x}_i$ along rays.
-    c.  **Generator Rendering (Inside ROI):** For points $\mathbf{x}_i \in B$, query $F_{\theta_G}$ for $\sigma_G(\mathbf{x}_i)$ and $\mathbf{c}_G(\mathbf{x}_i)$. For points outside $B$, set density to zero. Render generated content $I_{ROI}$ using only points inside $B$ [S1]:
-        $$ C(r) = \begin{cases} \frac{\sum_{\mathbf{x}_i \in B} T_i (1 - e^{-\sigma_i \delta_i}) \mathbf{c}_i}{\sum_{\mathbf{x}_i \in B} T_i (1 - e^{-\sigma_i \delta_i})} & \exists \mathbf{x}_i \in r \text{ s.t. } \mathbf{x}_i \in B \\ 0 & \text{otherwise} \end{cases} $$
-        where $T_i = \exp(-\sum_{j < i} \sigma_j \delta_i)$ [S1].
-    d.  **Object Blending Mode (Optional):** If blending with existing content inside $B$, query both $F_{\theta_O}$ and $F_{\theta_G}$. Compute alphas: $\alpha_O(\mathbf{x}_i) = 1 - \exp(\phi(\sigma_O(\mathbf{x}_i)) \cdot \delta_i)$ and $\alpha_G(\mathbf{x}_i) = 1 - \exp(\phi(\sigma_G(\mathbf{x}_i)) \cdot \delta_i)$, where $\phi$ is a non-negative activation [S1]. Compute blended color:
-        $$ \mathbf{c}(\mathbf{x}_i) = S\left(\frac{\mathbf{c}_O(\mathbf{x}_i) \cdot \alpha_O(\mathbf{x}_i) + \mathbf{c}_G(\mathbf{x}_i) \cdot \alpha_G(\mathbf{x}_i)}{\epsilon + \alpha_O(\mathbf{x}_i) + \alpha_G(\mathbf{x}_i)}\right) $$
-        where $S$ is sigmoid [S1]. Compute blended density $\sigma(\mathbf{x}_i)$ using either sum-in-activation $\phi(\sigma_O + \sigma_G)$ or sum-out-activation $\phi(\sigma_O) + \phi(\sigma_G)$ [S1].
-    e.  **Loss Computation:**
-        i.  **Similarity Loss:** $L_{sim} = -E_{img}(I_{ROI})^T E_{txt}(y)$ [S1].
-        ii. **Transmittance Loss:** $L_T = -\min(\tau, \text{mean}(T(P)))$ [S1].
-        iii. **Depth Loss:** $L_D = -\min(\rho, \sigma^2(D(P)))$ where $\sigma^2$ is variance of disparity map [S1].
-        iv. **Total Loss:** $L_{total} = L_{sim} + \lambda_T L_T + \lambda_D L_D$ [S1].
-    f.  **Optimization:** Minimize $L_{total}$ with respect to $\theta_G$ [S1].
-    g.  **Augmentations:** Use random backgrounds (Gaussian noise, checkerboard, Fourier textures) and directional dependent prompts (concatenating view-dependent text to original caption) [S1]. Anneal $L_T$ and $L_D$ introduction [S1].
-4.  **Blending (Inference):**
-    a.  For each view ray, query both $F_{\theta_O}$ and $F_{\theta_G}$ [S1].
-    b.  Points outside $B$ use $F_{\theta_O}$ [S1].
-    c.  Points inside $B$ blend densities and colors using distance smoothing:
-        $$ f(\mathbf{x}) = 1 - \exp\left(-\alpha \frac{d(\mathbf{x})}{diag}\right) $$
-        $$ \sigma_{blend}(\mathbf{x}) = f(\mathbf{x}) \cdot \sigma_O(\mathbf{x}) + (1 - f(\mathbf{x})) \cdot \sigma_G(\mathbf{x}) $$
-        $$ \mathbf{c}_{blend}(\mathbf{x}) = f(\mathbf{x}) \cdot \mathbf{c}_O(\mathbf{x}) + (1 - f(\mathbf{x})) \cdot \mathbf{c}_G(\mathbf{x}) $$
-        where $d(\mathbf{x})$ is Euclidean distance from ROI center, $diag$ is box diagonal, and $\alpha$ controls blending strength [S1].
-    d.  Render final view $x_e$ using standard volume rendering on the blended field [S1].
+1.  **Initialization:** Initialize the generator NeRF $F_{\theta_G}$ with the weights of the original scene model $F_{\theta_O}$ [S1].
+2.  **ROI Localization:** Localize the 3D box $B$ inside the scene using a GUI that renders the original NeRF and uses the output depth map for 3D understanding [S1].
+3.  **Pose Sampling Prior:** For each training iteration, sample a random camera pose around the scene. The initial distance $d$ from the ROI is calculated as:
+    $$
+    d = \frac{e_{max}}{2 \tan(\gamma/2)}
+    $$
+    where $e_{max}$ is the maximum dimension of the box $B$, and $\gamma$ is the camera field of view (FOV). Randomly sample the radius $r$ around this value $d$ [S1].
+4.  **Ray Casting and Sampling:** Cast rays $r$ from the sampled camera pose. Sample points $x_i$ along the ray.
+    - If $x_i \notin B$, set density $\sigma_G(x_i) = 0$ for the generator [S1].
+    - If $x_i \in B$, query $F_{\theta_G}$ for density $\sigma_G(x_i)$ and color $\mathbf{c}_G(x_i)$ [S1].
+5.  **Training Optimization:** Optimize $F_{\theta_G}$ by minimizing the total loss $L_{total}$ [S1].
+    - **Similarity Loss ($L_{sim}$):** Render the generated content inside the ROI, $I_{ROI}$, using only points $x_i \in B$. Compute:
+        $$
+        L_{sim} = -E_{img}(I_{ROI})^T E_{txt}(y)
+        $$
+        where $E_{img}$ and $E_{txt}$ are the image and text encoders, and $y$ is the text prompt [S1].
+    - **Transmittance Loss ($L_T$):** Encourage sparse transmittance:
+        $$
+        L_T = -\min(\tau, \text{mean}(T(P)))
+        $$
+        where $T(P)$ is the transmittance of the rendered view from pose $P$, and $\tau$ is the max transmittance [S1].
+    - **Depth Loss ($L_D$):** Encourage volumetric geometry (variance of disparity):
+        $$
+        L_D = -\min(\rho, \sigma^2(D(P)))
+        $$
+        where $\sigma^2(D(P))$ is the variance of the disparity map, and $\rho$ is the max variance allowed [S1].
+    - **Total Loss:**
+        $$
+        L_{total} = L_{sim} + \lambda_T L_T + \lambda_D L_D
+        $$
+        where $\lambda_T, \lambda_D$ are weights. $L_T$ and $L_D$ are gradually introduced during training using an annealing strategy [S1].
+    - **Augmentations:** Use random backgrounds (Gaussian noise, checkerboard, random Fourier textures) to prevent scene diffusion [S1]. Use directional dependent prompts by concatenating view-dependent text to the original caption [S1].
+6.  **Blending (Inference):** After training, render the edited scene by blending $F_{\theta_O}$ and $F_{\theta_G}$ along each view ray [S1].
+    - **Object Insertion/Replacement Mode:** During training, only $F_{\theta_G}$ is active inside $B$. At inference, blend using distance smoothing [S1].
+    - **Object Blending Mode:** Query both $F_{\theta_O}$ and $F_{\theta_G}$ inside $B$. Compute alpha values:
+        $$
+        \alpha_O(x_i) = 1 - \exp(\phi(\sigma_O(x_i)) \cdot \delta_i), \quad \alpha_G(x_i) = 1 - \exp(\phi(\sigma_G(x_i)) \cdot \delta_i)
+        $$
+        where $\phi$ is a non-negative activation function [S1].
+        - **Density Blending Options:**
+            1.  Sum in activation: $\sigma(x_i) = \phi(\sigma_O(x_i) + \sigma_G(x_i))$ (allows $F_{\theta_G}$ to remove original densities) [S1].
+            2.  Sum out activation: $\sigma(x_i) = \phi(\sigma_O(x_i)) + \phi(\sigma_G(x_i))$ (allows only addition of new densities) [S1].
+        - **Color Blending:**
+            $$
+            c(x_i) = S\left(\frac{c_O(x_i) \cdot \alpha_O(x_i) + c_G(x_i) \cdot \alpha_G(x_i)}{\epsilon + \alpha_O(x_i) + \alpha_G(x_i)}\right)
+            $$
+            where $S$ is sigmoid, $\epsilon$ is a small constant [S1].
+    - **Distance Smoothing:** For points inside the ROI, blend densities and colors based on distance $d(x)$ from the ROI center and box diagonal $diag$:
+        $$
+        f(x) = 1 - \exp\left(-\alpha \frac{d(x)}{diag}\right)
+        $$
+        $$
+        \sigma_{blend}(x) = f(x) \cdot \sigma_O(x) + (1 - f(x)) \cdot \sigma_G(x)
+        $$
+        $$
+        c_{blend}(x) = f(x) \cdot c_O(x) + (1 - f(x)) \cdot c_G(x)
+        $$
+        where $\alpha$ is a hyperparameter controlling blending strength [S1].
+    - **Final Rendering:** Combine the blended samples inside $B$ and original samples outside $B$ using standard volume rendering [S1].
 
 **Pseudocode:**
 
@@ -57,196 +84,241 @@ Edited NeRF scene $x_e$ [S1].
 
 ```python
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
-class BlendedNeRF:
-    def __init__(self, F_theta_O, B, text_prompt, alpha=2.0, lambda_T=0.1, lambda_D=0.1, tau=0.9, rho=1.0, epsilon=1e-6):
-        """
-        F_theta_O: Original NeRF model (MLP)
-        B: 3D ROI box (center, dimensions)
-        text_prompt: String prompt
-        alpha: Blending strength hyperparameter
-        lambda_T, lambda_D: Loss weights
-        tau: Max transmittance for L_T
-        rho: Max variance for L_D
-        epsilon: Numerical stability constant
-        """
-        self.F_O = F_theta_O
-        # Initialize Generator with Original weights
-        self.F_G = copy_weights(F_theta_O) 
-        self.B = B
-        self.text_prompt = text_prompt
-        self.alpha = alpha
-        self.lambda_T = lambda_T
-        self.lambda_D = lambda_D
-        self.tau = tau
-        self.rho = rho
-        self.epsilon = epsilon
-        
-        # Load CLIP encoders
-        self.E_img, self.E_txt = load_clip_encoders()
-        
-        # Compute ROI center and diagonal
-        self.roi_center = B.center
-        self.diag = B.diagonal_length
+def sin_pos_encoding(x, L=10):
+    """High frequency sinusoidal positional encoding."""
+    # x is shape (N, 3)
+    freq_bands = 2.0 ** np.arange(L)
+    encoded = []
+    for l in range(L):
+        freq = freq_bands[l]
+        encoded.append(np.cos(freq * x))
+        encoded.append(np.sin(freq * x))
+    return np.concatenate(encoded, axis=-1)
 
-    def positional_encoding(self, x, L=10):
-        """High frequency sinusoidal positional encoding."""
-        # gamma(x) = [cos(2^l x), sin(2^l x)] for l in 0..L-1
-        freq_bands = 2.0 ** torch.arange(L, device=x.device).float()
-        x_expanded = x.unsqueeze(-1) * freq_bands.unsqueeze(0)
-        pe = torch.cat([torch.sin(x_expanded), torch.cos(x_expanded)], dim=-1)
-        return pe
+def volume_rendering(samples_sigma, samples_color, samples_transmittance):
+    """
+    Standard volume rendering equation.
+    samples_sigma: (N,) density
+    samples_color: (N, 3) color
+    samples_transmittance: (N,) accumulated transmittance T_i
+    """
+    # alpha_i = 1 - exp(-sigma_i * delta_i)
+    # Note: delta_i is assumed to be handled in the caller or fixed step
+    # Here we assume samples_transmittance is T_i = exp(-sum_{j<i} sigma_j * delta_j)
+    # We need delta_i. Assuming uniform sampling or passed separately.
+    # For this self-contained example, we assume delta is constant or precomputed.
+    # Let's assume delta is passed or derived. 
+    # Simplified: T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+    # We need delta. Let's assume a helper or fixed delta.
+    # To be strictly self-contained, we assume delta is available.
+    # If not, we cannot compute alpha. 
+    # The source eq 1: C(r) = sum T_i (1 - exp(-sigma_i delta_i)) c_i
+    # We will assume delta is a constant step size for this snippet or passed.
+    pass 
 
-    def render_ray_generator(self, ray_origin, ray_direction, num_samples, device):
-        """
-        Renders the generator's contribution inside the ROI box B.
-        Returns color and transmittance for points inside B.
-        """
-        # Sample points along ray
-        t_vals = torch.linspace(0, 1, num_samples, device=device)
-        points = ray_origin.unsqueeze(0) + ray_direction.unsqueeze(0) * t_vals.unsqueeze(1)
+def blended_nerf_inference(F_theta_O, F_theta_G, B, ray_o, ray_d, N_samples, alpha_blend):
+    """
+    Render a single ray using Blended-NeRF blending logic.
+    """
+    # Sample points along ray
+    t_vals = np.linspace(ray_o, ray_o + ray_d, N_samples) # Simplified 1D ray for example
+    # Actually ray is o + t*d. Let's assume t is sampled.
+    # Let's assume we have points x_i and delta_i
+    
+    # This function is complex because it handles the blend logic.
+    # We will implement the blending of two NeRFs along a ray.
+    
+    # 1. Query both NeRFs for all samples
+    # F_theta_O(x, d) -> sigma_O, c_O
+    # F_theta_G(x, d) -> sigma_G, c_G
+    
+    # 2. Determine if point is in B
+    # is_in_B = (x_min < x < x_max) ...
+    
+    # 3. Apply training-time logic (if in B, sigma_G might be 0 if not trained? 
+    # No, after training, F_theta_G is active. 
+    # The blending happens at inference time for the final image.
+    
+    # Let's implement the "Object Blending Mode" logic for a ray.
+    
+    sigma_O_list = []
+    c_O_list = []
+    sigma_G_list = []
+    c_G_list = []
+    
+    for x_i in points:
+        # Query Original
+        sigma_O, c_O = F_theta_O(x_i, ray_d)
+        # Query Generator
+        sigma_G, c_G = F_theta_G(x_i, ray_d)
         
-        # Check which points are inside B
-        inside_mask = self.is_inside_box(points, self.B)
+        sigma_O_list.append(sigma_O)
+        c_O_list.append(c_O)
+        sigma_G_list.append(sigma_G)
+        c_G_list.append(c_G)
         
-        if not torch.any(inside_mask):
-            return torch.zeros_like(ray_origin), torch.ones_like(ray_origin)
+    sigma_O = np.array(sigma_O_list)
+    c_O = np.array(c_O_list)
+    sigma_G = np.array(sigma_G_list)
+    c_G = np.array(c_G_list)
+    
+    # Apply ROI mask
+    # is_in_B is a boolean array
+    sigma_G[~is_in_B] = 0.0
+    
+    # Compute Alphas for each model
+    # phi is non-negative activation (e.g., softplus or relu)
+    phi = lambda s: np.maximum(s, 0.0) # Placeholder for activation
+    
+    alpha_O = 1.0 - np.exp(-phi(sigma_O) * delta)
+    alpha_G = 1.0 - np.exp(-phi(sigma_G) * delta)
+    
+    # Blend Colors (Eq 7)
+    # c(x_i) = S( (c_O * alpha_O + c_G * alpha_G) / (eps + alpha_O + alpha_G) )
+    eps = 1e-6
+    numerator = c_O * alpha_O[:, None] + c_G * alpha_G[:, None]
+    denominator = eps + alpha_O[:, None] + alpha_G[:, None]
+    c_blended = 1.0 / (1.0 + np.exp(-numerator / denominator)) # Sigmoid
+    
+    # Blend Densities (Eq 8 or 9)
+    # Option 1: Sum in activation
+    sigma_blended = phi(sigma_O + sigma_G)
+    
+    # Compute Transmittance for the blended field
+    # T_i = exp(-sum_{j<i} sigma_blended_j * delta_j)
+    # This requires sequential computation.
+    
+    # However, the source says: "The resulted raw densities and RGB values inside and outside 
+    # the ROI are then blended along each ray using eq. (1) to get the current rendered view"
+    # And for distance smoothing:
+    # sigma_blend(x) = f(x) * sigma_O(x) + (1-f(x)) * sigma_G(x)
+    
+    # Let's implement Distance Smoothing Blending (Eq 5) which is used for 
+    # "Object Insertion/Replacement" and general blending.
+    
+    # Calculate distance from ROI center
+    center = B.center
+    dist = np.linalg.norm(points - center, axis=1)
+    diag = B.diagonal
+    f = 1.0 - np.exp(-alpha_blend * dist / diag)
+    
+    sigma_final = f[:, None] * sigma_O + (1.0 - f[:, None]) * sigma_G
+    c_final = f[:, None] * c_O + (1.0 - f[:, None]) * c_G
+    
+    # Standard Volume Rendering on sigma_final, c_final
+    # T_0 = 1
+    # T_i = T_{i-1} * exp(-sigma_{i-1} * delta)
+    # C = sum T_i * (1 - exp(-sigma_i * delta)) * c_i
+    
+    T = np.ones(N_samples)
+    for i in range(1, N_samples):
+        T[i] = T[i-1] * np.exp(-sigma_final[i-1] * delta)
+        
+    alpha_final = 1.0 - np.exp(-sigma_final * delta)
+    weights = T * alpha_final
+    color = np.sum(weights[:, None] * c_final, axis=0)
+    
+    return color
 
-        # Query Generator for points inside B
-        # Note: In practice, only pass points inside B to F_G to save compute, 
-        # or pass all and mask outputs. Here we assume F_G handles input.
-        points_inside = points[inside_mask]
+def train_blended_nerf(F_theta_O, B, text_prompt, num_iterations):
+    """
+    Train the generator NeRF.
+    """
+    F_theta_G = copy_weights(F_theta_O)
+    
+    for i in range(num_iterations):
+        # 1. Sample Pose
+        d_init = B.max_dim / (2 * np.tan(camera_fov / 2))
+        r = np.random.uniform(d_init * 0.8, d_init * 1.2)
+        theta = np.random.uniform(0, 2 * np.pi)
+        phi = np.random.uniform(-np.pi/2, np.pi/2)
+        pose = sample_pose(r, theta, phi)
         
-        # Encode inputs
-        pe_points = self.positional_encoding(points_inside)
+        # 2. Cast Rays
+        rays = cast_rays(pose, B)
         
-        # Query F_G
-        sigma_G, c_G = self.F_G(pe_points) # Assuming F_G outputs (sigma, color)
+        # 3. Sample Points
+        points, deltas = sample_points_along_rays(rays)
         
-        # Apply non-negative activation if required for blending mode
-        # phi is typically ReLU or similar
-        sigma_G = torch.relu(sigma_G)
+        # 4. Mask for ROI
+        is_in_B = is_inside_box(points, B)
         
-        # Compute transmittance and alpha for these points
-        # delta is distance between samples (assume uniform for simplicity or compute from t_vals)
-        delta = t_vals[1] - t_vals[0] 
+        # 5. Query Generator
+        # Only compute for points in B, else sigma=0
+        sigma_G = np.zeros_like(points[:, 0])
+        c_G = np.zeros_like(points)
         
-        alpha_G = 1.0 - torch.exp(-sigma_G * delta)
-        T_G = torch.exp(-torch.cumsum(sigma_G * delta, dim=0)) # Cumulative transmittance
-        
-        # Weighted color
-        weights = T_G * alpha_G
-        color = torch.sum(weights.unsqueeze(1) * c_G, dim=0)
-        
-        # Return only the contribution from inside B
-        # For the final blend, we need to know the transmittance reaching the ROI
-        # This is a simplified return; full volume rendering requires integrating outside too.
-        # For training L_sim, we only care about I_ROI.
-        return color, T_G[-1] if len(T_G) > 0 else torch.ones(1)
-
-    def is_inside_box(self, points, box):
-        """Check if points are inside axis-aligned box B."""
-        # points shape: (N, 3)
-        # box.min, box.max
-        min_coords = box.min
-        max_coords = box.max
-        return torch.all((points >= min_coords) & (points <= max_coords), dim=1)
-
-    def compute_loss(self, ray_origin, ray_direction, device):
-        """Compute total loss for a single ray/pose."""
-        # 1. Render Generator inside ROI
-        c_gen, T_gen = self.render_ray_generator(ray_origin, ray_direction, 64, device)
-        
-        # 2. Similarity Loss
-        # Render I_ROI (simplified as c_gen for this step)
-        # In practice, I_ROI is the rendered image patch
-        img_feat = self.E_img(c_gen) # Placeholder for actual image encoding
-        txt_feat = self.E_txt(self.text_prompt)
-        L_sim = -torch.dot(img_feat, txt_feat)
-        
-        # 3. Transmittance Loss
-        # Mean transmittance of the view (simplified to T_gen for ROI)
-        mean_T = torch.mean(T_gen)
-        L_T = -torch.min(torch.tensor(self.tau), mean_T)
-        
-        # 4. Depth Loss
-        # Compute disparity map variance (simplified placeholder)
-        disparity = 1.0 / (ray_origin + ray_direction * 1.0) # Placeholder
-        var_D = torch.var(disparity)
-        L_D = -torch.min(torch.tensor(self.rho), var_D)
-        
-        L_total = L_sim + self.lambda_T * L_T + self.lambda_D * L_D
-        return L_total
-
-    def blend_and_render(self, ray_origin, ray_direction, num_samples, device):
-        """
-        Final inference blending.
-        """
-        t_vals = torch.linspace(0, 1, num_samples, device=device)
-        points = ray_origin.unsqueeze(0) + ray_direction.unsqueeze(0) * t_vals.unsqueeze(1)
-        
-        sigma_out = torch.zeros_like(points[..., 0])
-        c_out = torch.zeros_like(points[..., 0])
-        
-        inside_mask = self.is_inside_box(points, self.B)
-        
-        # Points outside B: Use Original
-        outside_mask = ~inside_mask
-        if torch.any(outside_mask):
-            pts_out = points[outside_mask]
-            pe_out = self.positional_encoding(pts_out)
-            sigma_O_out, c_O_out = self.F_O(pe_out)
-            sigma_out[outside_mask] = sigma_O_out
-            c_out[outside_mask] = c_O_out
+        in_B_indices = np.where(is_in_B)[0]
+        if len(in_B_indices) > 0:
+            pts_in_B = points[in_B_indices]
+            # Encode inputs
+            encoded_pts = sin_pos_encoding(pts_in_B)
+            encoded_dirs = sin_pos_encoding(rays_dirs[in_B_indices])
+            sigma_G[in_B_indices], c_G[in_B_indices] = F_theta_G(encoded_pts, encoded_dirs)
             
-        # Points inside B: Blend
-        if torch.any(inside_mask):
-            pts_in = points[inside_mask]
-            pe_in = self.positional_encoding(pts_in)
-            
-            sigma_O_in, c_O_in = self.F_O(pe_in)
-            sigma_G_in, c_G_in = self.F_G(pe_in)
-            
-            # Distance smoothing factor
-            dists = torch.norm(pts_in - self.roi_center, dim=1)
-            f = 1.0 - torch.exp(-self.alpha * dists / self.diag)
-            
-            sigma_blend = f * sigma_O_in + (1.0 - f) * sigma_G_in
-            c_blend = f * c_O_in + (1.0 - f) * c_G_in
-            
-            sigma_out[inside_mask] = sigma_blend
-            c_out[inside_mask] = c_blend
-            
-        # Standard Volume Rendering
-        delta = t_vals[1] - t_vals[0]
-        alpha = 1.0 - torch.exp(-sigma_out * delta)
-        T = torch.exp(-torch.cumsum(sigma_out * delta, dim=0))
-        weights = T * alpha
-        color = torch.sum(weights.unsqueeze(1) * c_out, dim=0)
+        # 6. Render I_ROI
+        # Use only points in B. Points outside B have sigma=0.
+        # This effectively renders the object inside the box.
+        # T calculation needs to account for 0 density outside?
+        # Source: "setting the density to zero for all sample points outside B"
+        # So sigma_final = sigma_G if in B else 0.
         
-        return color
-
-    def train_step(self, ray_origin, ray_direction, optimizer):
-        optimizer.zero_grad()
-        loss = self.compute_loss(ray_origin, ray_direction, ray_origin.device)
-        loss.backward()
-        optimizer.step()
-        return loss.item()
+        sigma_render = sigma_G.copy()
+        c_render = c_G.copy()
+        
+        # Volume Render
+        T = np.ones(N_samples)
+        for j in range(1, N_samples):
+            T[j] = T[j-1] * np.exp(-sigma_render[j-1] * deltas[j-1])
+            
+        alpha_render = 1.0 - np.exp(-sigma_render * deltas)
+        weights = T * alpha_render
+        I_ROI = np.sum(weights[:, None] * c_render, axis=0)
+        
+        # 7. Compute Losses
+        # L_sim
+        img_emb = E_img(I_ROI)
+        txt_emb = E_txt(text_prompt)
+        L_sim = -np.dot(img_emb, txt_emb)
+        
+        # L_T and L_D (Annealed)
+        # ... compute T(P) and D(P) ...
+        L_T = -np.min(tau, np.mean(T))
+        L_D = -np.min(rho, np.var(D))
+        
+        L_total = L_sim + lambda_T * L_T + lambda_D * L_D
+        
+        # 8. Backprop
+        update_weights(F_theta_G, L_total)
 ```
 
+**Parameters:**
+- $\alpha$ (Distance Smoothing): Controls blending strength. $\alpha=0$ gives all weight to the edited scene; higher $\alpha$ gives more attention to original scene points closer to the ROI center. Demonstrated values: 0, 0.5, 2, 4, 10 [S1].
+- $\lambda_T, \lambda_D$: Weights for transmittance and depth losses [S1].
+- $\tau, \rho$: Max transmittance and max variance allowed [S1].
+
+**Edge Cases and Pitfalls:**
+- **Scene Diffusion:** Without background augmentation (random noise, checkerboard), the scene may populate the background with artifacts [S1].
+- **Flat Geometry:** In forward-facing scenes, lack of depth constraints can lead to flat billboard effects. Depth loss $L_D$ mitigates this [S1].
+- **Transparency:** Without transmittance loss $L_T$, the scene may become completely transparent or amorphous [S1].
+
+## Subtopics
+
+### Object Insertion/Replacement Mode
+Adds a new object to an empty region or replaces an existing one. Uses only $F_{\theta_G}$ inside the ROI during training. Blends using distance smoothing after training [S1].
+
+### Object Blending Mode
+Blends new content with existing scene inside the ROI. Queries both $F_{\theta_O}$ and $F_{\theta_G}$ inside the box. Computes alpha values for both and blends colors using a sigmoid function. Offers two density blending options: sum in activation (allows removal of original density) or sum out activation (allows only addition) [S1].
+
 ## Operating characteristics
-*   **Time Complexity:** Training requires optimizing $F_{\theta_G}$ which is an MLP. Complexity is similar to standard NeRF training but restricted to rays passing through $B$ and augmented with CLIP encoding overhead. Inference involves querying two MLPs and blending.
-*   **Memory Complexity:** Requires storing weights for both $F_{\theta_O}$ and $F_{\theta_G}$, plus CLIP encoders.
-*   **Strengths:** Does not require 2D masks or semantic decomposition; works on any region defined by a 3D box; preserves the original scene outside the ROI; generates view-consistent results.
-*   **Limitations:** Quality depends on the text prompt and CLIP alignment; may produce amorphous or transparent scenes without priors ($L_T, L_D$); blending artifacts may occur at ROI boundaries if $\alpha$ is not tuned.
-*   **When to use:** When editing a specific object or region in an existing NeRF using text guidance without needing precise segmentation masks.
-*   **When not to use:** When global scene editing is required, or when high-fidelity texture preservation outside the ROI is critical and the ROI box cannot be accurately localized.
+- **Time Complexity:** Training requires iterative optimization of the generator NeRF $F_{\theta_G}$ using CLIP similarity, transmittance, and depth losses. Each iteration involves ray casting, sampling, and forward passes through both the original and generator NeRFs during blending evaluation [S1].
+- **Memory Complexity:** Requires storing the weights of the original NeRF $F_{\theta_O}$ and the generator NeRF $F_{\theta_G}$ [S1].
+- **Strengths:** Operates on any region using a 3D box without requiring semantic decomposition or 2D masks. Generates natural-looking and view-consistent results. Preserves the scene outside the ROI [S1].
+- **Limitations:** Relies on the quality of the pretrained language-image model (CLIP). May require careful tuning of blending parameters ($\alpha$) and loss weights ($\lambda_T, \lambda_D$) [S1].
 
 ## Background
-Blended-NeRF was introduced by Ori Gordon, Omri Avrahami, and Dani Lischinski from The Hebrew University in 2023 [S1]. It builds on Dream Fields [27] by adapting its priors (pose sampling, background augmentation, transmittance/depth losses) to the context of editing existing NeRFs rather than generating new ones from scratch. It addresses limitations of methods like Kobayashi [29] and Benaim et al. [8] which require semantic decomposition or 2D masks [S1].
+Blended-NeRF was introduced by Ori Gordon, Omri Avrahami, and Dani Lischinski from The Hebrew University in 2023 [S1]. It builds on previous works like Dream Fields, which synthesized new NeRF objects from scratch, and Volumetric Disentanglement, which required semantic decomposition [S1]. The method leverages pretrained language-image models (CLIP) to steer the synthesis, similar to Dream Fields and DreamFusion, but adapts it for local editing of existing scenes [S1].
 
 ## Sources
 [S1] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26

@@ -3,36 +3,38 @@
 Also called: Boundary-preserving occlusion, Perona-Malik inspired occlusion metric
 
 ## Overview
-This method computes a view-independent occlusion metric for volume data that preserves sharp boundaries between structures, addressing the isotropic blurring inherent in simple spherical mean ambient occlusion [S1, unofficial]. It differs from sibling methods like [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by modulating the neighborhood mean with a gradient-based weight derived from Perona-Malik diffusion principles, ensuring that edges are not smoothed out during the occlusion calculation [S1, unofficial].
+This method computes a view-independent occlusion metric for volume data that preserves structural boundaries, addressing the isotropic blurring inherent in simple spherical mean ambient occlusion [S1, unofficial]. It differs from sibling methods by modulating a neighborhood mean with a gradient-based weight derived from Perona-Malik diffusion principles, rather than relying on signed distance fields, screen-space halos, or vertex-based approximations [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Volume data $I$, a 3D grid of voxel intensities.
-- Radius $R$, defining the neighborhood size.
-- Parameter $\eta$, controlling boundary preservation strength.
+**Inputs and Outputs**
+*   **Input:** A 3D volume dataset $I$ (voxel values), a neighborhood radius $R$, and a boundary-preservation parameter $\eta$.
+*   **Output:** An occlusion volume $m$ where each voxel $m_x$ represents the boundary-preserving occlusion information for voxel $x$.
 
-**Outputs:**
-- Occlusion volume $m$, where each voxel $m_x$ contains the computed occlusion information.
+**Data Structures**
+*   **Volume $I$:** A 3D array of floating-point values representing the scalar field.
+*   **Gradient Field $\nabla I$:** A 3D array of vectors (or magnitude scalar) representing the spatial gradient at each voxel.
+*   **Occlusion Volume $m$:** A 3D array of floating-point values, same dimensions as $I$.
 
-**Data Structures:**
-- The input volume $I$ is stored as a 3D array.
-- The gradient $\nabla I_x$ is computed per voxel.
-- The output $m$ is stored in a 3D array of the same dimensions as $I$.
+**Parameters**
+*   $R$: Radius of the spherical neighborhood. Typical value: $R=40$ [S1, unofficial].
+*   $\eta$: Dataset-dependent parameter handling gradients of zero magnitude.
+    *   $\eta \in [0.001, 0.01]$ for preserving boundaries in CT/MRI data [S1, unofficial].
+    *   $\eta = 1.0$ for noisy synthetic data [S1, unofficial].
+    *   If $\eta \ge 1$, the filter behaves like a standard box filter [S1, unofficial].
 
-**Steps:**
-1.  **Compute Gradient Magnitude:** For each voxel $x$, calculate the gradient magnitude $\|\nabla I_x\|$. This is typically done using central differences or Sobel operators on the input volume $I$.
+**Algorithm Steps**
+1.  **Compute Gradient Magnitude:** Calculate the gradient magnitude $\|\nabla I_x\|$ for every voxel $x$ in the volume. This is typically done using central differences or Sobel operators.
 2.  **Compute Gradient Weight:** Calculate the weight $g_x$ for each voxel using the formula:
-    $$ g_x = \frac{\eta^2}{\|\nabla I_x\|^2 + \eta^2} $$
-    Here, $\eta$ is a dataset-dependent parameter. Small $\eta$ (e.g., $0.001$ to $0.01$) preserves boundaries by reducing the weight in high-gradient regions. Large $\eta$ (e.g., $\ge 1$) acts as a box filter, suitable for noisy data [S1, unofficial].
-3.  **Approximate Spherical Convolution:** The exact occlusion metric is defined as a spherical mean modulated by $g_x$:
-    $$ m_x = g_x \cdot (B_R * I_x) $$
-    where $B_R$ is a spherical filter of radius $R$ and $*$ denotes convolution [S1, unofficial]. To avoid the high complexity $O(mn)$ where $m = \frac{4}{3}\pi R^3 + 1$, the spherical filter $B_R$ is approximated by a box filter of width $2R$ [S1, unofficial].
-4.  **Separable Convolution:** The 3D convolution with the box filter is separated into three consecutive 1D box filter convolutions of width $2R+1$:
-    $$ m_x = g_x \cdot [b_{2R+1} * [b_{2R+1} * (b_{2R+1} * I_x)]] $$
-    This separability allows for efficient GPU implementation [S1, unofficial].
-5.  **Modulation:** Multiply the result of the separable convolution by the precomputed gradient weight $g_x$ to obtain the final occlusion value $m_x$ [S1, unofficial].
+    $$g_x = \frac{\eta^2}{\|\nabla I_x\|^2 + \eta^2}$$
+    This weight approaches 1 in smooth regions (low gradient) and approaches 0 near sharp boundaries (high gradient) [S1, unofficial].
+3.  **Approximate Spherical Filter:** Replace the computationally expensive spherical convolution $B_R$ with a separable box filter of width $2R+1$. This exploits GPU performance and reduces complexity from $O(mn)$ to $O(n)$ where $n$ is the number of voxels [S1, unofficial].
+4.  **Apply Separable Convolution:** Compute the spherical mean approximation by applying three consecutive 1D box filter convolutions of width $2R+1$ along the X, Y, and Z axes. Let $b_{2R+1}$ denote the 1D box filter kernel of width $2R+1$ with uniform weights. The convolution is:
+    $$M_x = b_{2R+1} * [b_{2R+1} * (b_{2R+1} * I_x)]$$
+    where $*$ denotes convolution. This $M_x$ approximates $\frac{1}{N} \sum_{i=1}^N x_i$ for the spherical neighborhood [S1, unofficial].
+5.  **Modulate by Gradient Weight:** Multiply the convolved result by the gradient weight to obtain the final occlusion information:
+    $$m_x = g_x \cdot M_x$$
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -41,100 +43,95 @@ def compute_gradient_based_occlusion(volume: Array3D, R: float, eta: float) -> A
     Computes gradient-based occlusion information for a volume.
     
     Args:
-        volume: 3D array of voxel intensities.
+        volume: 3D array of voxel values I.
         R: Radius of the neighborhood.
         eta: Boundary preservation parameter.
         
     Returns:
-        3D array of occlusion values.
+        3D array m of occlusion information.
     """
     # Step 1: Compute gradient magnitude
-    # Using central differences for interior voxels, clamping at boundaries
-    grad_x = np.zeros_like(volume)
-    grad_y = np.zeros_like(volume)
-    grad_z = np.zeros_like(volume)
+    # Using central differences for interior voxels, clamped at boundaries
+    grad_x = central_diff(volume, axis=0)
+    grad_y = central_diff(volume, axis=1)
+    grad_z = central_diff(volume, axis=2)
     
-    # Central differences
-    grad_x[1:-1, :, :] = (volume[2:, :, :] - volume[:-2, :, :]) / 2.0
-    grad_y[:, 1:-1, :] = (volume[:, 2:, :] - volume[:, :-2, :]) / 2.0
-    grad_z[:, :, 1:-1] = (volume[:, :, 2:] - volume[:, :, :-2]) / 2.0
-    
-    # Handle boundaries with forward/backward differences or zero padding
-    grad_x[0, :, :] = volume[1, :, :] - volume[0, :, :]
-    grad_x[-1, :, :] = volume[-1, :, :] - volume[-2, :, :]
-    grad_y[:, 0, :] = volume[:, 1, :] - volume[:, 0, :]
-    grad_y[:, -1, :] = volume[:, -1, :] - volume[:, -2, :]
-    grad_z[:, :, 0] = volume[:, :, 1] - volume[:, :, 0]
-    grad_z[:, :, -1] = volume[:, :, -1] - volume[:, :, -2]
-    
-    grad_magnitude_sq = grad_x**2 + grad_y**2 + grad_z**2
+    # Gradient magnitude squared
+    grad_mag_sq = grad_x**2 + grad_y**2 + grad_z**2
     
     # Step 2: Compute gradient weight g_x
-    # g_x = eta^2 / (||grad||^2 + eta^2)
-    g = (eta**2) / (grad_magnitude_sq + eta**2)
+    # g_x = eta^2 / (||grad I_x||^2 + eta^2)
+    weight = (eta**2) / (grad_mag_sq + eta**2)
     
-    # Step 3 & 4: Separable box filter convolution
-    # Approximate spherical filter with box filter of width 2R+1
-    # Note: R is typically an integer or rounded to nearest integer for filter width
-    filter_width = int(2 * R) + 1
-    box_filter = np.ones(filter_width) / filter_width
+    # Step 3 & 4: Apply separable box filter approximation of spherical mean
+    # Kernel width is 2*R + 1. Since R is typically integer, width is odd.
+    kernel_width = int(2 * R + 1)
+    kernel = np.ones(kernel_width) / kernel_width
     
-    # Apply 1D box filter along X
-    # Using convolution mode 'same' to maintain dimensions
-    temp_x = convolve1d(volume, box_filter, axis=0)
+    # Apply 1D box filter along X axis
+    conv_x = convolve_1d(volume, kernel, axis=0)
     
-    # Apply 1D box filter along Y
-    temp_y = convolve1d(temp_x, box_filter, axis=1)
+    # Apply 1D box filter along Y axis
+    conv_y = convolve_1d(conv_x, kernel, axis=1)
     
-    # Apply 1D box filter along Z
-    temp_z = convolve1d(temp_y, box_filter, axis=2)
+    # Apply 1D box filter along Z axis
+    conv_z = convolve_1d(conv_y, kernel, axis=2)
     
     # Step 5: Modulate by gradient weight
-    occlusion = g * temp_z
+    occlusion = weight * conv_z
     
     return occlusion
 
-def convolve1d(data: Array3D, kernel: Array1D, axis: int) -> Array3D:
-    """
-    Applies a 1D convolution along a specific axis.
-    """
-    # Pad data to handle boundaries
-    pad_width = len(kernel) // 2
-    padded_data = np.pad(data, ((pad_width, pad_width), (pad_width, pad_width), (pad_width, pad_width)), mode='edge')
+def central_diff(arr: Array3D, axis: int) -> Array3D:
+    """Computes central differences along a specific axis."""
+    diff = np.zeros_like(arr)
+    # Interior voxels
+    slices_forward = [slice(None)] * 3
+    slices_backward = [slice(None)] * 3
     
-    # Perform convolution
-    result = np.zeros_like(data)
-    if axis == 0:
-        for i in range(len(kernel)):
-            result += kernel[i] * padded_data[i:i+data.shape[0], :, :]
-    elif axis == 1:
-        for i in range(len(kernel)):
-            result += kernel[i] * padded_data[:, i:i+data.shape[1], :]
-    elif axis == 2:
-        for i in range(len(kernel)):
-            result += kernel[i] * padded_data[:, :, i:i+data.shape[2]]
+    # Create slice objects for forward and backward neighbors
+    for i in range(3):
+        if i == axis:
+            slices_forward[i] = slice(1, -1)
+            slices_backward[i] = slice(0, -2)
+        else:
+            slices_forward[i] = slice(None)
+            slices_backward[i] = slice(None)
             
-    return result
+    diff[tuple(slices_forward)] = (arr[tuple(slices_forward)] - arr[tuple(slices_backward)]) / 2.0
+    
+    # Handle boundaries: [G] Simple clamp or zero-gradient assumption for boundaries
+    # The source does not specify boundary handling for gradients, 
+    # but standard practice is to use one-sided differences or zero padding.
+    # Here we assume zero gradient at boundaries for simplicity, 
+    # which results in weight=1 at boundaries.
+    return diff
+
+def convolve_1d(arr: Array3D, kernel: Array1D, axis: int) -> Array3D:
+    """Applies a 1D convolution along a specific axis."""
+    # [G] Implementation detail: Use FFT or direct sliding window.
+    # For clarity, we assume a standard 1D convolution function exists.
+    # The source specifies separable convolution of width 2R+1.
+    return np.convolve(arr, kernel, mode='same') # Pseudocode abstraction
 ```
 
-**Parameters:**
-- $\eta$: Dataset-dependent parameter. Typical values: $\eta \in [0.001, 0.01]$ for preserving boundaries in CT/MRI data; $\eta = 1.0$ for noisy synthetic data [S1, unofficial]. If $\eta \ge 1$, the filter behaves like a box filter [S1, unofficial].
-- $R$: Radius of the spherical neighborhood. Typical value: $R=40$ for all datasets in the source results [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Isotropic Blurring:** Simple ambient occlusion (weighted sample mean of spherical neighborhood) results in isotropic blurring that does not preserve boundaries [S1, unofficial]. This method mitigates that by using $g_x$.
-- **Complexity:** The naive spherical convolution has complexity $O(mn)$ where $m = \frac{4}{3}\pi R^3 + 1$, which is infeasible for large $R$ [S1, unofficial]. The separable box filter approximation is necessary for performance.
-- **Boundary Conditions:** Gradient computation at volume boundaries requires careful handling (e.g., zero-padding, replication, or clamping) to avoid artifacts.
+**Edge Cases and Pitfalls**
+*   **Isotropic Blurring:** Simple ambient occlusion (weighted sample mean without gradient modulation) results in isotropic blurring that destroys boundary information [S1, unofficial].
+*   **High $\eta$:** If $\eta \ge 1$, the gradient weight $g_x$ becomes approximately 1 everywhere, causing the filter to behave like a standard box filter, losing boundary preservation [S1, unofficial].
+*   **Noisy Data:** Noisy volumes may require higher $\eta$ (e.g., 1.0) to prevent gradient noise from incorrectly suppressing occlusion [S1, unofficial].
+*   **Complexity:** The naive spherical convolution has complexity $O(mn)$ where $m = \frac{4}{3}\pi R^3 + 1$, which is infeasible for large $R$ [S1, unofficial]. The separable box filter approximation is used to mitigate this.
 
 ## Operating characteristics
-- **Time Complexity:** The naive spherical convolution is $O(mn)$ where $m = \frac{4}{3}\pi R^3 + 1$, which is very costly [S1, unofficial]. The separable box filter approximation reduces this significantly, allowing computation within seconds on modern GPUs [S1, unofficial].
-- **Memory Complexity:** Requires storage for the input volume, gradient volume, weight volume, and intermediate convolution results. Typically $O(N)$ where $N$ is the number of voxels.
-- **Performance:** The method is view-independent and can be precomputed and stored, not affecting visualization speed [S1, unofficial].
-- **Strengths:** Preserves boundaries between structures, avoiding the isotropic blurring of simple ambient occlusion [S1, unofficial]. Efficient via separable convolution.
-- **Limitations:** Requires tuning of $\eta$ and $R$. The box filter approximation may introduce slight artifacts compared to a true spherical filter, but this is negligible for large $R$ [S1, unofficial].
+*   **Time Complexity:** The naive spherical convolution is $O(mn)$ where $m = \frac{4}{3}\pi R^3 + 1$ and $n$ is the number of voxels, described as very costly [S1, unofficial]. The separable box filter approximation reduces this to $O(n)$, allowing computation within seconds on modern GPUs [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the input volume, gradient field, weight field, and output occlusion volume. $O(n)$ space.
+*   **Performance:** The method is view-independent, allowing precomputation and storage without affecting visualization speed [S1, unofficial].
+*   **Strengths:** Preserves boundaries of structures better than simple spherical mean occlusion; computationally efficient via separable filtering.
+*   **Limitations:** The box filter approximation is an approximation of the spherical filter; may introduce slight anisotropy compared to a true spherical convolution.
+*   **When to Use:** When boundary preservation is critical for volume visualization or transfer function design, and computational efficiency is required.
+*   **When Not to Use:** When exact spherical averaging is required and performance is not a constraint, or when the data is extremely noisy and requires different smoothing strategies.
 
 ## Background
-This method was introduced in the context of multivariate transfer function design for volume visualization, specifically to improve the statistical feature space construction by providing a boundary-preserving occlusion metric [S1, unofficial]. It is inspired by the Perona-Malik anisotropic diffusion equation, which is known for edge-preserving smoothing [S1, unofficial]. The method is used in conjunction with statistical transfer function spaces to classify volume data, such as tumors in MRI datasets [S1, unofficial].
+The method is inspired by the Perona-Malik anisotropic diffusion equation [S1, unofficial]. It was proposed in the context of multivariate transfer function design for volume visualization, specifically to create statistical feature spaces that include occlusion information while preserving structural boundaries [S1, unofficial]. The approach was applied to CT, MRI, and synthetic datasets, with typical parameters $R=40$ and $\eta$ varying based on data noise and boundary preservation needs [S1, unofficial].
 
 ## Sources
 [S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

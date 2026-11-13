@@ -3,26 +3,26 @@
 Also called: Alpha Discard Fragment Shader, Fragment Shader Texture Sampling, SPIRV_Cross_CombinedtextureArraytextureSampler Sampling
 
 ## Overview
-This method implements a fragment shader that samples a 3D texture array to retrieve voxel color and opacity [S1, unofficial]. It discards fragments with alpha below a specific threshold to avoid rendering transparent regions [S1, unofficial]. It relies on hardware texture sampling to retrieve voxel data rather than generating proxy geometry for occupied voxels [S1, unofficial].
+This method implements a GLSL fragment shader that samples a 3D texture array to retrieve voxel color and opacity [S1, unofficial]. It discards fragments with alpha below a specific threshold to avoid rendering transparent regions [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   `in_var_TEXCOORD0`: `vec2` (Location 0), representing 2D texture coordinates [S1, unofficial].
-*   `in_var_TEXCOORD1`: `flat int` (Location 1), representing the texture array layer index [S1, unofficial].
-*   `in_var_TEXCOORD2`: `vec3` (Location 2), representing a color multiplier [S1, unofficial].
-*   `SPIRV_Cross_CombinedtextureArraytextureSampler`: A `sampler2DArray` uniform binding the volume texture [S1, unofficial].
-*   `out_var_SV_TARGET`: `vec4` (Location 0), the final color with alpha [S1, unofficial].
+* `in_var_TEXCOORD0`: `vec2` (Location 0), representing 2D texture coordinates [S1, unofficial].
+* `in_var_TEXCOORD1`: `flat int` (Location 1), representing the texture array layer index [S1, unofficial].
+* `in_var_TEXCOORD2`: `vec3` (Location 2), representing a color multiplier [S1, unofficial].
+* `SPIRV_Cross_CombinedtextureArraytextureSampler`: A `sampler2DArray` uniform binding the volume texture [S1, unofficial].
+* `out_var_SV_TARGET`: `vec4` (Location 0), the final color with alpha [S1, unofficial].
 
 **Data Structures:**
 The uniform is a `sampler2DArray`, which maps 2D coordinates and a layer index to a 4D color value [S1, unofficial].
 
 **Steps:**
-1.  Construct a 3D coordinate by combining `in_var_TEXCOORD0` and `in_var_TEXCOORD1` cast to `float` [S1, unofficial].
-2.  Sample the texture array using the constructed coordinate and the sampler uniform [S1, unofficial].
-3.  Extract the alpha component from the sampled color [S1, unofficial].
-4.  Compare the alpha value against the discard threshold [S1, unofficial].
-5.  If the alpha is less than the threshold, discard the fragment [S1, unofficial].
-6.  Otherwise, multiply the sampled RGB components by `in_var_TEXCOORD2` and attach the original alpha to form the output [S1, unofficial].
+1. Construct a 3D coordinate by combining `in_var_TEXCOORD0` and `in_var_TEXCOORD1` cast to `float` [S1, unofficial].
+2. Sample the `SPIRV_Cross_CombinedtextureArraytextureSampler` uniform using the constructed coordinate [S1, unofficial].
+3. Extract the alpha component from the sampled color [S1, unofficial].
+4. Compare the alpha value against the discard threshold [S1, unofficial].
+5. If the alpha is less than the threshold, discard the fragment [S1, unofficial].
+6. Otherwise, multiply the sampled RGB components by `in_var_TEXCOORD2` and attach the original alpha to form the output [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -53,15 +53,15 @@ out_var_SV_TARGET = vec4(tex_color.xyz * color_multiplier, alpha)
 ```
 
 **Parameters:**
-*   **Alpha Discard Threshold:** `0.00999999977648258209228515625` (approximately `0.01`) [S1, unofficial].
+* **Alpha Discard Threshold:** `0.00999999977648258209228515625` (approximately `0.01`) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The threshold is an exact floating-point value emitted by SPIRV-Cross [S1, unofficial].
-*   **Layer Indexing:** The layer index must fall within the valid range of the texture array dimensions [G].
-*   **Color Multiplication:** The `in_var_TEXCOORD2` multiplier is applied to the RGB channels before output [S1, unofficial].
+* **Precision:** The threshold is an exact floating-point value emitted by SPIRV-Cross [S1, unofficial].
+* **Layer Indexing:** The layer index must fall within the valid range of the texture array dimensions [G].
+* **Color Multiplication:** The `in_var_TEXCOORD2` multiplier is applied to the RGB channels before output [S1, unofficial].
 
 ## Operating characteristics
-Time complexity is not given in the sources. Memory complexity is not given in the sources. Measured performance metrics are not given in the sources. Scaling behavior is not given in the sources. Strengths include simple fragment shader logic and early transparent region culling [S1, unofficial]. Limitations include the requirement for a `sampler2DArray` layout [S1, unofficial]. It is suitable when rendering voxel data stored in a texture array and transparent regions should be skipped [S1, unofficial].
+Time complexity is not given in the sources [S1, unofficial]. Memory complexity is not given in the sources [S1, unofficial]. Measured performance metrics are not given in the sources [S1, unofficial]. Scaling behavior is not given in the sources [S1, unofficial]. Strengths include simple fragment shader logic and early transparent region culling [S1, unofficial]. Limitations include the requirement for a `sampler2DArray` layout [S1, unofficial]. It is suitable when rendering voxel data stored in a texture array and transparent regions should be skipped [S1, unofficial].
 
 ## Background
 The method originates from a GLSL fragment shader generated by SPIRV-Cross for a voxel rendering engine [S1, unofficial]. It is used in real-time voxel rendering pipelines that store volume data in texture arrays [S1, unofficial].

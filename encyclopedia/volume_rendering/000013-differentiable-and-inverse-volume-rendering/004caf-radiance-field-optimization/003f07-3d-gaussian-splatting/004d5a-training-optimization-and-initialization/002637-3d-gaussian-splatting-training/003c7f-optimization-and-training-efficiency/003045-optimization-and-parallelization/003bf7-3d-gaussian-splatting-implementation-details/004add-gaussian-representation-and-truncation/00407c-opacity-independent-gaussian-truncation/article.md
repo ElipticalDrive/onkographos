@@ -3,67 +3,60 @@
 Also called: Modified truncation
 
 ## Overview
-Opacity-Independent Gaussian Truncation is a modification to the standard culling heuristic in 3D Gaussian Splatting that decouples the visibility threshold from the Gaussian's opacity parameter [S1, unofficial]. It solves the problem where the original implementation prevents consistent truncation at fewer than ~3.03 standard deviations because the transparency threshold $\tau_\alpha$ is bounded by the opacity reset clip value [S1, unofficial]. By checking the Gaussian response before applying opacity, this method allows for aggressive truncation (e.g., at 1$\sigma$) and enables gradient flow for Gaussians that would otherwise be culled due to low opacity [S1, unofficial].
+Opacity-Independent Gaussian Truncation modifies the standard culling condition in 3D Gaussian Splatting to allow truncation at fewer standard deviations by evaluating the geometric Gaussian response before applying the opacity scalar [S1, unofficial]. This addresses the limitation in the original implementation where low-opacity Gaussians are effectively invisible and receive no gradients, preventing consistent truncation below approximately 3.03 standard deviations [S1, unofficial]. It enables the investigation of opacity gradients that are otherwise ignored when the total transparency $\alpha$ is zero [S1, unofficial].
 
 ## How it works
-The method modifies the fragment processing loop in the rasterizer. Instead of computing the final transparency $\alpha$ and comparing it to a threshold, it compares the unweighted Gaussian response to the threshold.
-
 **Inputs:**
-- 2D Gaussian response $R$ (the exponential term of the Gaussian distribution at the pixel center).
-- Opacity parameter $\omega$ (often denoted as $\alpha$ in the Gaussian primitive, but distinct from the final fragment transparency).
+- Gaussian primitive parameters: mean $\mu$, covariance $\Sigma$ (or scale $s$ and rotation $r$), opacity $\omega$, and spherical harmonic coefficients.
+- Camera projection matrix and view vector.
 - Truncation threshold $\tau_\alpha$ (typically $1/255$).
 
 **Outputs:**
-- Boolean flag indicating whether the fragment should be processed (blended) or skipped.
+- Rendered pixel color (standard alpha blending).
+- Gradients for optimization.
 
 **Data Structures:**
-- The Gaussian primitive stores opacity $\omega$ separately from the spatial covariance.
-- The rasterizer computes the 2D response $R = \exp(-0.5 \cdot \mathbf{x}^T C \mathbf{x})$, where $C$ is the conic matrix [S1, unofficial].
+- Standard 3DGS Gaussian representation. No new data structures are introduced; the method modifies the evaluation logic within the rasterization kernel.
 
 **Steps:**
-1. Compute the 2D Gaussian response $R$ at the current pixel/screen-space coordinate.
-2. Compare $R$ against the threshold $\tau_\alpha$.
-3. If $R < \tau_\alpha$, skip the fragment (do not blend, do not compute gradients).
-4. If $R \ge \tau_\alpha$, proceed to compute the final transparency $\alpha = \omega \cdot R$ and perform alpha blending.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def process_fragment(gaussian, pixel):
-    # Compute 2D Gaussian response R at pixel center
-    # R = exp(-0.5 * (x, y) @ C @ (x, y)^T)
-    R = compute_gaussian_response(gaussian.conic_matrix, pixel.coords)
-    
-    # Opacity-independent truncation check
-    if R < 1/255:
-        return None  # Skip fragment
-    
-    # Compute final transparency
-    alpha = gaussian.opacity * R
-    
-    # Perform blending and gradient computation
-    return blend_and_backprop(gaussian, alpha, pixel)
-```
+1.  **Project Gaussian:** Compute the 2D mean $\mu_{2D}$ and 2D covariance matrix $\Sigma_{2D}$ of the Gaussian in screen space using the Jacobian of the affine approximation of the projective transformation [S1, unofficial].
+2.  **Compute Geometric Response:** Calculate the unnormalized Gaussian response (density) at the pixel center $(x, y)$ using the Mahalanobis distance $d_M^2$:
+    $$
+    d_M^2 = (\mathbf{x} - \mu_{2D})^T \Sigma_{2D}^{-1} (\mathbf{x} - \mu_{2D})
+    $$
+    $$
+    \text{response} = \exp\left(-\frac{1}{2} d_M^2\right)
+    $$
+3.  **Check Truncation Threshold:** Compare the geometric response against the threshold $\tau_\alpha$:
+    $$
+    \text{if } \text{response} < \tau_\alpha \text{ then skip fragment}
+    $$
+    This check occurs *before* multiplying by opacity $\omega$.
+4.  **Compute Transparency:** If the fragment passes the check, compute the final transparency $\alpha$:
+    $$
+    \alpha = \omega \cdot \text{response}
+    $$
+5.  **Blend:** Use $\alpha$ and the color $\mathbf{C}$ (sampled from spherical harmonics) for alpha blending into the accumulated color and depth buffers.
 
 **Parameters:**
-- $\tau_\alpha$: The transparency threshold. Default in original 3DGS is $1/255$ [S1, unofficial].
-- Truncation distance: The number of standard deviations $\sigma$ at which the Gaussian is truncated. The relationship between $\tau_\alpha$ and $\sigma$ depends on whether opacity is included in the check.
+- $\tau_\alpha$: The transparency threshold. Standard value is $1/255$ [S1, unofficial].
+- Truncation distance $\sigma_{cut}$: The number of standard deviations at which the Gaussian is truncated. The method allows setting this to values lower than the effective limit of the original implementation (e.g., $1\sigma, 2\sigma$).
 
 **Edge Cases and Pitfalls:**
-- **Minimum Opacity:** Aggressive truncation (e.g., 1$\sigma$) results in a minimum contributing fragment opacity of approximately $0.61$ ($\exp(-0.5) \approx 0.606$) [S1, unofficial]. This means truncated Gaussians are effectively close to opaque at their contribution boundary.
-- **Gradient Discrepancy:** The original 3DGS implementation ignores non-zero opacity gradients when the final opacity is zero, interpreting opacity as part of the response [S1, unofficial]. This modification allows these gradients to be computed and used, which may affect training dynamics [S1, unofficial].
-- **Opacity Reset:** In the original method, the opacity reset clip value of $1/100$ enforces an upper bound on $\tau_\alpha$, preventing truncation at fewer than $\approx 3.03\sigma$ for high-opacity Gaussians [S1, unofficial]. This modification removes that dependency.
+- **Low Opacity Gradients:** In the original 3DGS, if $\alpha < \tau_\alpha$, the fragment is skipped, and gradients for opacity are not computed. This modification allows gradients to flow even for low-opacity Gaussians if their geometric response is significant, addressing the issue where analytical derivatives provide non-zero gradients for opacity even when $\alpha$ is zero [S1, unofficial].
+- **Minimum Opacity:** Aggressive truncation (e.g., $1\sigma$) results in a minimum contributing fragment opacity of approximately $0.61$ (assuming $\omega=1$), meaning Gaussians are forced to be close to opaque [S1, unofficial].
+- **Opacity Reset:** The original implementation clips opacity to a maximum of $1/100$ during reset. In the original logic, this clipped opacity enforces an upper bound on $\tau_\alpha$, limiting truncation to $\approx 3.03\sigma$ for high-opacity Gaussians. The modified method decouples this constraint [S1, unofficial].
 
 ## Operating characteristics
-- **Training Time:** Aggressive truncation significantly reduces training time. At 1$\sigma$ truncation, training time drops to 2m26s compared to 4m31s for the default 3.33$\sigma$ [S1, unofficial]. However, the modification itself adds slight overhead; for example, 3.33$\sigma$ with modification takes 5m07s vs 4m31s default [S1, unofficial].
-- **VRAM Usage:** Aggressive truncation reduces VRAM usage. 1$\sigma$ truncation uses 4.5GiB vs 6.1GiB for default [S1, unofficial].
-- **Gaussian Count:** Fewer Gaussians are created during densification with aggressive truncation. 1$\sigma$ results in 1.39M Gaussians vs 2.70M for default [S1, unofficial].
-- **Quality (PSNR):** Aggressive truncation reduces reconstruction quality. 1$\sigma$ yields 25.86 PSNR vs 27.54 for default [S1, unofficial]. 2$\sigma$ yields 27.23 PSNR [S1, unofficial].
-- **Scaling:** The method scales with the number of active Gaussians, which is reduced by aggressive truncation.
+- **Time Complexity:** Training time increases compared to the default configuration. For example, on Mip-NeRF360, $1\sigma$ truncation takes 2m26s, $2\sigma$ takes 3m41s, and $3.33\sigma$ with modification takes 5m07s, compared to 4m31s for the default $3.33\sigma$ [S1, unofficial].
+- **Memory Complexity:** VRAM usage decreases with more aggressive truncation. $1\sigma$ uses 4.5GiB, $2\sigma$ uses 5.5GiB, and $3.33\sigma$ with modification uses 6.4GiB, compared to 6.1GiB for the default [S1, unofficial].
+- **Scene Complexity:** The number of Gaussians generated during densification decreases with more aggressive truncation. $1\sigma$ results in 1.39M Gaussians, $2\sigma$ in 2.22M, and $3.33\sigma$ with modification in 2.79M, compared to 2.70M for the default [S1, unofficial].
+- **Quality:** PSNR decreases with more aggressive truncation. $1\sigma$ yields 25.86 PSNR, $2\sigma$ yields 27.23 PSNR, and $3.33\sigma$ with modification yields 27.57 PSNR, compared to 27.54 PSNR for the default [S1, unofficial].
+- **Strengths:** Allows flexible truncation distances; enables gradient flow for low-opacity primitives; reduces memory footprint and Gaussian count at the cost of training time and potentially quality.
+- **Limitations:** Slower training; lower PSNR at aggressive truncation levels; requires careful tuning of $\tau_\alpha$ and $\sigma_{cut}$.
 
 ## Background
-This method was proposed in "Faster-GS: Analyzing and Improving Gaussian Splatting Optimization" [S1, unofficial]. It addresses limitations in the original 3DGS implementation regarding opacity-dependent culling and gradient computation for low-opacity primitives.
+This method was proposed in "Faster-GS: Analyzing and Improving Gaussian Splatting Optimization" to address inefficiencies in the original 3DGS truncation logic [S1, unofficial]. The original implementation implicitly truncated Gaussians at approximately 3.33 standard deviations but was constrained by the opacity reset mechanism to a minimum effective truncation of 3.03 standard deviations for high-opacity Gaussians [S1, unofficial]. The modification allows for a more consistent and aggressive truncation strategy, facilitating the study of opacity gradients that were previously discarded [S1, unofficial].
 
 ## Sources
 [S1] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)
