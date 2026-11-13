@@ -1,61 +1,142 @@
 # Viewing Plane Ray Generation
+Also called: Projection Plane Raycasting
+
 ## Overview
-Viewing Plane Ray Generation constructs initial ray origins and directions for an orthographic camera by defining a 2D grid of points in normalized screen space and transforming them into world space [S1, unofficial]. It builds on [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) [G].
+Viewing Plane Ray Generation constructs the initial rays for volume rendering by defining a projection plane parallel to the scanline and casting rays in the viewing direction within that plane [S1]. It serves as the geometric foundation for orthographic ray casting, where ray origins are distributed across a 2D grid and all rays share a single normalized direction [S1][S2, unofficial]. This method differs from perspective ray generation by maintaining parallel rays, eliminating vanishing points and depth-dependent field-of-view scaling [S2, unofficial].
+
 ## How it works
-**Inputs:** Image dimensions `width`, `height` (integers); transformation matrix `m_mat` (4×4, typically `translation_mat × rotation_mat × scaling_mat`); parameters `sample_period` (float, controls ray spacing or step size, typical value `2.0f`) and `CAMERA_SCALE` (float, scaling factor applied to viewing plane dimensions, typical value `0.25`) [S1, unofficial].
-**Outputs:** `ray_origins` and `ray_directions` arrays, containing one 3D vector per pixel [G].
-**Data Structures:** `ViewingPlane` stores `m_data` as a `std::vector<vec3>` of size `width × height` [S1, unofficial]. Each element represents a 2D screen coordinate normalized to `[-1, 1]` for x and y, with `z = 0` [S1, unofficial]. `m_mat` stores the combined transformation matrix [S1, unofficial].
+**Inputs:**
+- Image resolution: $W \times H$ (width, height).
+- Viewing direction vector: $\mathbf{d}_{view}$ (normalized).
+- Transformation matrix: $\mathbf{M}$ (combined translation, rotation, and scaling) [S2, unofficial].
+- Camera scale factor: $S_{cam}$ (typically 0.25) [S2, unofficial].
+- Sample period: $P_{sample}$ (typically 2.0) [S2, unofficial].
+
+**Outputs:**
+- A set of rays, each defined by an origin $\mathbf{o}_{i,j}$ and direction $\mathbf{d}_{ray}$.
+
+**Data Structures:**
+- `ViewingPlane`: A 2D grid of size $W \times H$.
+- `m_data`: A `std::vector<vec3>` of size $W \times H$. Each element at index $k = i + j \cdot W$ stores a 2D screen coordinate normalized to $[-1, 1]$ for $x$ and $y$, with $z=0$.
+- `m_mat`: The combined transformation matrix $\mathbf{M}$ [S2, unofficial].
+
 **Steps:**
-1. **Initialize Grid Points:** For each pixel `(i, j)` where `0 ≤ i < width` and `0 ≤ j < height`, compute normalized coordinates: `x = (2.0 * i / width) - 1.0`, `y = (2.0 * j / height) - 1.0`, `z = 0.0` [S1, unofficial].
-2. **Apply Transformation:** Transform the grid points using `m_mat` [S1, unofficial].
-3. **Compute Ray Direction:** Transform three reference points via `m_mat`: the origin `a`, the rightmost point `b` (e.g., `vec3(1, 0, 0)`), and the upmost point `c` (e.g., `vec3(0, 1, 0)`) [S1, unofficial]. Compute the direction: `d = normalize(cross(b - a, c - a))` [S1, unofficial].
-4. **Scale and Offset:** Apply `CAMERA_SCALE` to the transformed viewing plane dimensions to adjust physical size. Use `sample_period` to control ray spacing or step size [S1, unofficial].
+
+1. **Initialize Normalized Grid Points:**
+   For each pixel $(i, j)$ where $0 \le i < W$ and $0 \le j < H$:
+   $$ x_{norm} = \frac{2(i + 0.5)}{W} - 1 $$
+   $$ y_{norm} = \frac{2(j + 0.5)}{H} - 1 $$
+   Store $\mathbf{p}_{norm} = [x_{norm}, y_{norm}, 0]^T$ in `m_data` at index $k$ [S2, unofficial].
+
+2. **Compute Ray Direction:**
+   Define three reference points in local space:
+   - Origin $\mathbf{a} = [0, 0, 0]^T$
+   - Rightmost $\mathbf{b} = [1, 0, 0]^T$
+   - Upmost $\mathbf{c} = [0, 1, 0]^T$
+   
+   Transform these points using $\mathbf{M}$:
+   $$ \mathbf{a}' = \mathbf{M} \mathbf{a} $$
+   $$ \mathbf{b}' = \mathbf{M} \mathbf{b} $$
+   $$ \mathbf{c}' = \mathbf{M} \mathbf{c} $$
+   
+   Compute the ray direction as the normalized cross product of the transformed right and up vectors:
+   $$ \mathbf{d}_{ray} = \text{normalize}(\text{cross}(\mathbf{b}' - \mathbf{a}', \mathbf{c}' - \mathbf{a}')) $$
+   [S2, unofficial]
+
+3. **Compute Ray Origins:**
+   For each pixel $(i, j)$ with normalized coordinate $\mathbf{p}_{norm} = [x_{norm}, y_{norm}, 0]^T$:
+   - Scale the coordinate by $S_{cam}$:
+     $$ \mathbf{p}_{scaled} = [x_{norm} \cdot S_{cam}, y_{norm} \cdot S_{cam}, 0]^T $$
+   - Transform $\mathbf{p}_{scaled}$ by $\mathbf{M}$ to get the world-space origin:
+     $$ \mathbf{o}_{i,j} = \mathbf{M} \mathbf{p}_{scaled} $$
+   [S2, unofficial]
+
+4. **Cast Rays:**
+   For each pixel $(i, j)$, cast a ray $\mathbf{r}(t) = \mathbf{o}_{i,j} + t \cdot \mathbf{d}_{ray}$ into the volume data. Resample volume data planes in top-to-bottom order and accumulate color/opacity along the ray [S1].
+
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_viewing_plane_rays(width, height, m_mat, sample_period=2.0, camera_scale=0.25):
-    ray_origins = []
-    ray_directions = []
+def generate_viewing_plane_rays(W, H, M, S_cam=0.25, P_sample=2.0):
+    """
+    Generate rays for an orthographic viewing plane.
     
-    # Transform reference points to compute direction
-    a = mat4_mul_vec3(m_mat, vec3(0.0, 0.0, 0.0))
-    b = mat4_mul_vec3(m_mat, vec3(1.0, 0.0, 0.0))
-    c = mat4_mul_vec3(m_mat, vec3(0.0, 1.0, 0.0))
-    direction = normalize(cross(b - a, c - a))
+    Args:
+        W: Image width
+        H: Image height
+        M: 4x4 transformation matrix (translation * rotation * scaling)
+        S_cam: Camera scale factor
+        P_sample: Sample period (used in ray marching, not generation)
+        
+    Returns:
+        origins: List of vec3, size W*H
+        directions: List of vec3, size W*H (all identical)
+    """
+    origins = []
+    directions = []
     
-    for j in range(height):
-        for i in range(width):
-            x = (2.0 * i / width) - 1.0
-            y = (2.0 * j / height) - 1.0
-            point_norm = vec3(x, y, 0.0)
-            point_world = mat4_mul_vec3(m_mat, point_norm)
-            point_world = point_world * camera_scale
-            ray_origins.append(point_world)
-            ray_directions.append(direction)
-    return ray_origins, ray_directions
-
-def mat4_mul_vec3(m, v):
-    # Assumes column-major 4x4 matrix layout
-    return vec3(
-        m[0][0]*v.x + m[1][0]*v.y + m[2][0]*v.z + m[3][0],
-        m[0][1]*v.x + m[1][1]*v.y + m[2][1]*v.z + m[3][1],
-        m[0][2]*v.x + m[1][2]*v.y + m[2][2]*v.z + m[3][2]
-    )
+    # Step 2: Compute ray direction from transformation matrix
+    # Define reference points in local space
+    a = vec3(0, 0, 0)
+    b = vec3(1, 0, 0)
+    c = vec3(0, 1, 0)
+    
+    # Transform points
+    a_prime = M * a
+    b_prime = M * b
+    c_prime = M * c
+    
+    # Compute direction
+    right_vec = b_prime - a_prime
+    up_vec = c_prime - a_prime
+    ray_dir = normalize(cross(right_vec, up_vec))
+    
+    # Step 1 & 3: Generate origins for each pixel
+    for j in range(H):
+        for i in range(W):
+            # Normalize to [-1, 1]
+            x_norm = 2.0 * (i + 0.5) / W - 1.0
+            y_norm = 2.0 * (j + 0.5) / H - 1.0
+            
+            # Scale by camera scale
+            x_scaled = x_norm * S_cam
+            y_scaled = y_norm * S_cam
+            
+            # Transform to world space
+            p_scaled = vec3(x_scaled, y_scaled, 0)
+            origin = M * p_scaled
+            
+            origins.append(origin)
+            directions.append(ray_dir)
+            
+    return origins, directions
 ```
+
 **Edge Cases and Pitfalls:**
-- **Degenerate Input:** If `b - a` and `c - a` are collinear, the cross product yields a zero vector, making the direction undefined. Check for zero-length vectors and fallback to a default view direction [G].
-- **Precision:** Ensure `m_mat` is well-conditioned to avoid numerical instability in cross products and normalization [G].
-- **Boundaries:** Handle `width` or `height` equal to zero by returning empty arrays [G].
+- If $\mathbf{M}$ is singular or degenerate, the cross product may yield a zero vector. Guard against this by checking the magnitude of the cross product before normalization [G].
+- The normalization to $[-1, 1]$ assumes a centered projection plane. Off-center cameras require an offset in the transformation matrix [G].
+- Precision issues may arise if $S_{cam}$ is very small or very large, affecting the spatial distribution of origins [G].
+
 ## Subtopics
 
 ### Orthographic Camera Ray Generation
-A camera mode that generates parallel rays for isometric views, defined by a `height` parameter [S2, unofficial]. It is chosen when an isometric projection is required rather than perspective [G]. See [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md).
+A specific instance of viewing plane ray generation for isometric views, defined by a height parameter [S3, unofficial]. It generates parallel rays where the viewing direction is determined by the height setting, typically used for voxel-based rendering [S3, unofficial]. Choose this when an isometric perspective is required without perspective distortion [S3, unofficial].
 
 ## Operating characteristics
-Not given in the sources.
+- **Time Complexity:** $O(W \cdot H)$ to generate all ray origins and directions.
+- **Memory Complexity:** $O(W \cdot H)$ to store the origins and directions.
+- **Performance:** Linear scaling with image resolution. The direction computation is constant time per ray (all rays share the same direction in orthographic mode).
+- **Strengths:** Simple, deterministic, no perspective distortion, efficient for parallel processing.
+- **Limitations:** No depth cueing from perspective, limited to orthographic views.
+- **When to use:** Isometric views, technical visualizations, voxel rendering where perspective is not desired.
+- **When not to use:** Perspective views, scenes requiring depth-based field of view.
+
 ## Background
-Not given in the sources.
+The concept of projection plane raycasting originates from early volume rendering architectures, such as the VIRIM system, which used hardware-accelerated resampling and ray casting [S1]. The method was formalized in architectures for real-time volume rendering, emphasizing the separation of geometry resampling and ray casting [S1]. The specific implementation details, including the transformation matrix approach and normalization, are derived from modern implementations in procedural noise and voxel rendering libraries [S2, S3, unofficial].
+
 ## Sources
-[S1] Y-o-p/fog, https://github.com/Y-o-p/fog, fetched 2026-10-26 (unofficial)
-[S2] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
+[S1] Architectures for real-time volume rendering, https://doi.org/10.1016/s0167-739x(98)00051-x, fetched 2026-11-01
+[S2] Y-o-p/fog, https://github.com/Y-o-p/fog, fetched 2026-10-26 (unofficial)
+[S3] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)

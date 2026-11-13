@@ -1,0 +1,125 @@
+# Negative Gaussian Splatting
+
+Also called: NegGS, Diff-Gaussian
+
+## Overview
+Negative Gaussian Splatting (NegGS) is a variant of 3D Gaussian Splatting that extends the primitive set to include Gaussians with negative color values, enabling subtractive color blending and the modeling of high-frequency elements and complex nonlinear structures [S1, S2]. Unlike standard Gaussian Splatting, which requires many components to approximate complex shapes, NegGS uses negative Gaussians to alleviate time complexity while improving the representation of shadows and rapid color transitions [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of camera poses and corresponding 2D images; an initial set of 3D Gaussians.
+*   **Outputs:** A rendered image; optimized Gaussian parameters (mean, covariance, opacity, color).
+
+**Data Structures:**
+The method maintains a joint family of Gaussians $G_{NeGS} = G_{GS} \cup G_{-GS}$ [S1].
+*   $G_{GS}$: Tuples with positive color values $c_i$.
+*   $G_{-GS}$: Tuples with negative color values $c_i$ [S1].
+*   Implementation leverages the original Gaussian Splatting framework, tracking negative Gaussians via a binary mask to preserve rendering speed [S1].
+
+**Rendering Equation:**
+The standard alpha compositing equation is preserved, but $c_i$ can be negative [S1]:
+$$ C = \sum c_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
+where the product is over all Gaussians $j$ rendered before $i$ in depth-sorted order [S1].
+
+**Optimization and Initialization:**
+1.  **Initialization:** The initial number of negative Gaussians is a critical hyperparameter. Experiments indicate that approximately 20% of the total Gaussians should be negative during initialization for optimal efficacy [S1].
+2.  **Dynamic Adaptation:** The optimization strategy reduces Gaussians with low opacity and introduces new Gaussians into empty 3D regions, dynamically adapting the number of components [S1].
+3.  **Diff-Gaussian Interpretation:** The method can be interpreted as using "Diff-Gaussians," formed by dividing the probability density functions (PDFs) of two Gaussians [S2]. This allows the approximation of structures such as donut and moon-shaped datasets [S2].
+
+**Mathematical Formulation of Diff-Gaussian:**
+A Diff-Gaussian distribution is defined by the ratio of two Gaussian densities $f_{m_0, \Sigma_0}$ and $f_{m_1, \Sigma_1}$ [S1]. The optimal coefficient $c_{opt}$ is the minimum of this ratio [S1]:
+$$ c_{opt} := \min_x \frac{f_{m_0, \Sigma_0}(x)}{f_{m_1, \Sigma_1}(x)} = \frac{f_{m_0, \Sigma_0}(w)}{f_{m_1, \Sigma_1}(w)} $$
+if and only if $w$ satisfies [S1]:
+$$ \Sigma_1^{-1}(w - m_1) = \Sigma_0^{-1}(w - m_0) $$
+This condition is derived by minimizing the quadratic function $q(x) = x^T A x + 2b^T x$, where [S1]:
+$$ A = \Sigma_1^{-1} - \Sigma_0^{-1} $$
+$$ b = \Sigma_0^{-1} m_0 - \Sigma_1^{-1} m_1 $$
+assuming $A$ is positive semi-definite [S1].
+
+For diagonal covariance matrices $\Sigma_0 = \text{diag}(\sigma_1^2, \dots, \sigma_n^2)$ and $\Sigma_1 = \text{diag}(h_1 \sigma_1^2, \dots, h_n \sigma_n^2)$ with $0 < h_i \le 1$, the coordinates $w_i$ of the null density vector are [S1]:
+1.  $w_i = (m_{1,i} - h_i m_{0,i})/(1 - h_i)$ if $h_i < 1$
+2.  $w_i \in \mathbb{R}$ if $h_i = 1$ and $m_{1,i} = m_{0,i}$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# NegGS Optimization Step
+def optimize_neggs(gaussians, images, cameras, num_iterations):
+    # Initialize Gaussians
+    # G_GS: positive colors, G_-GS: negative colors
+    # Initial ratio of negative Gaussians ~ 20%
+    
+    for iteration in range(num_iterations):
+        # 1. Sample a random camera from the training set
+        camera = sample_camera(cameras)
+        
+        # 2. Render image using standard differentiable rasterization
+        #    with support for negative colors
+        rendered_image = render(gaussians, camera)
+        
+        # 3. Compute photometric loss (e.g., L1 or SSIM)
+        loss = compute_loss(rendered_image, camera.gt_image)
+        
+        # 4. Backpropagate to update Gaussian parameters
+        #    Gradients flow through negative colors naturally
+        loss.backward()
+        
+        # 5. Dynamic Adaptation
+        #    Prune Gaussians with low opacity
+        gaussians = prune_low_opacity(gaussians, threshold=0.005)
+        
+        #    Clone and split Gaussians based on gradient magnitude
+        gaussians = clone_and_split(gaussians, threshold=0.0002)
+        
+        #    Introduce new Gaussians in empty regions (if needed)
+        #    Ensure negative Gaussian count remains balanced
+        gaussians = add_new_gaussians(gaussians, camera)
+        
+        # 6. Optimizer Step (e.g., Adam)
+        optimizer.step()
+        optimizer.zero_grad()
+        
+    return gaussians
+```
+
+**Edge Cases and Pitfalls:**
+*   **Initialization Sensitivity:** The initial number of negative Gaussians is critical. Deviating significantly from the ~20% ratio may reduce efficacy [S1].
+*   **Positive Semi-Definite Condition:** The derivation of the optimal coefficient $c_{opt}$ assumes $\Sigma_0 - \Sigma_1$ is positive semi-definite. Violations may require careful handling of covariance matrices [S1].
+*   **Degenerate Covariances:** If $h_i = 1$ and $m_{1,i} = m_{0,i}$, the coordinate $w_i$ is unconstrained ($\in \mathbb{R}$), which may lead to numerical instability if not handled [S1].
+
+## Operating characteristics
+*   **Time Complexity:** NegGS alleviates the time complexity increase associated with using many Gaussian components to reflect complex nonlinear structures [S2].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** On the Mip-NeRF360 dataset, NegGS-30K achieved an average PSNR of 27.39, SSIM of 0.812, and LPIPS of 0.219, compared to GS-30K's 27.21 PSNR, 0.815 SSIM, and 0.214 LPIPS [S1]. On the NeRF Synthetic dataset, NegGS achieved comparable or slightly better PSNR/SSIM than GS [S1].
+*   **Hardware:** Experiments were conducted on a single NVIDIA RTX 4090 GPU [S1].
+*   **Strengths:** Modeling of high-frequency elements with rapid color transitions; improved representation of shadows; ability to approximate complex nonlinear structures with fewer components [S2].
+*   **Limitations:** Requires careful tuning of the initial proportion of negative Gaussians [S1].
+*   **When to Use:** When modeling scenes with high-frequency details, complex nonlinear structures, or shadows where standard Gaussians require excessive components [S2].
+*   **When Not to Use:** For simple scenes where standard Gaussian Splatting is sufficient and computational resources are limited [S2].
+
+## Background
+*   **Origin:** NegGS is the first paper to extend the simple ellipsoid shapes of Gaussian Splatting to more complex nonlinear structures [S2].
+*   **History:** The method was introduced to address the limitations of standard Gaussian Splatting in representing complex curves and highly nonlinear structures, which typically require a multitude of Gaussian components and increase time complexity [S2].
+*   **Usage:** Evaluated on NeRF Synthetic, Mip-NeRF360, Tanks and Temples, Deep Blending, and Shiny Blender datasets [S1].
+
+## Subtopics
+
+### Diff-Gaussian
+A distribution formed by dividing the PDFs of two Gaussians, used to approximate structures such as donut and moon-shaped datasets. It sets itself apart by enabling subtractive blending through negative colors. Choose it when modeling complex nonlinear structures with fewer components. [Link](#)
+
+### Scaffold-GS
+Replaces direct storage of Gaussian parameters with neural prediction. Choose it when memory efficiency is critical. [Link](9186-scaffold-gs.md)
+
+### GeoGaussian
+Adds geometric smoothness regularization. Choose it when geometric consistency is prioritized over photometric detail. [Link](9187-geogaussian.md)
+
+### DARBF-Splatting
+Changes the kernel function to a differentiable approximation of a radial basis function. Choose it for smoother transitions. [Link](9911-darbf-splatting.md)
+
+### Grid-based Blur Kernel
+Uses a grid-based approach for blur. Choose it for specific anti-aliasing requirements. [Link](14244-grid-based-blur-kernel.md)
+
+## Sources
+[S1] NegGS: Negative Gaussian Splatting, https://doi.org/10.1016/j.ins.2025.121912, fetched 2026-10-26
+[S2] NegGS: Negative Gaussian Splatting, https://core.ac.uk/download/630026911.pdf, fetched 2026-10-28

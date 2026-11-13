@@ -1,0 +1,166 @@
+--- v003.md
++++ v004.md
+@@ -9,5 +9,5 @@
+ **Inputs and Outputs:**
+ *   **Input:** Volume data (scalar field), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), transfer function definitions (parameters for 1D or 2D mapping), and optional acceleration structures (e.g., bounding cubes, depth buffers from opaque geometry) [S1][S2, unofficial].
+-*   **Output:** Final pixel color $C_{final}$ [S1][S2, unofficial].
++*   **Output:** Final pixel color $\mathbf{C}_{final}$ [S1][S2, unofficial].
+ 
+ **Data Structures:**
+@@ -19,23 +19,23 @@
+ **Numbered Steps:**
+ 1.  **Background Rendering:** Render a skybox as the background using standard skybox shaders [S1].
+-2.  **Opaque Geometry Rendering:** Render opaque objects (e.g., buildings, meshes) to establish depth information. This depth buffer is used later for early ray termination and occlusion [S1].
+-3.  **Ray Generation:** For each pixel, determine the ray segment $[t_{start}, t_{end}]$ intersecting the volume. This is done by intersecting the ray with the bounding cube's front and back faces, obtained from the framebuffer object [S1].
+-4.  **Ray Discretization:** Discretize the segment into $N$ samples at equidistant intervals $\Delta t = (t_{end} - t_{start}) / N$ [S5, S10, S17, unofficial].
++2.  **Opaque Geometry Rendering:** Render opaque objects (e.g., buildings, meshes) to establish depth information, which is used later for early ray termination and occlusion [S1].
++3.  **Ray Generation:** For each pixel, determine the ray segment $[t_{start}, t_{end}]$ intersecting the volume by intersecting the ray with the front and back faces of a bounding cube acceleration structure, obtained from a framebuffer object [S1].
++4.  **Ray Discretization:** Discretize the segment into $N$ samples at equidistant intervals $\Delta t = (t_{end} - t_{start}) / N$ [G].
+ 5.  **Sampling:** At each sample point $\mathbf{p}_i$, retrieve the scalar value $d_i$ from the volume data. If the volume is stored as a 2D array indexed by latitude/longitude, index the array and apply a z-component fall-off correction [S1].
+-6.  **Programmable Classification:** Call the Programmable Transfer Function (PTF) with the sample value $d_i$ (and optionally gradient magnitude for 2D TFs) to compute color $C_i$ and opacity $\alpha_i$ [S1][S2, unofficial]. This replaces the texture lookup $T(d_i)$ [S1].
++6.  **Programmable Classification:** Call the Programmable Transfer Function (PTF) with the sample value $d_i$ (and optionally gradient magnitude for 2D TFs) to compute color $\mathbf{c}_i$ and opacity $\alpha_i$ [S1][S2, unofficial]. This replaces the texture lookup $T(d_i)$ [S1].
+ 7.  **Compositing:** Accumulate color and opacity using the front-to-back equation:
+     $$
+-    C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i C_i
++    \mathbf{C}_{acc}^{(i)} = \mathbf{C}_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i \mathbf{c}_i
+     $$
+     $$
+     \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i
+     $$
+-    where $C_{acc}^{(0)} = 0$ and $\alpha_{acc}^{(0)} = 0$ [S12, S43, unofficial][S50, abstract only, unofficial].
++    where $\mathbf{C}_{acc}^{(0)} = \mathbf{0}$ and $\alpha_{acc}^{(0)} = 0$ [G].
+ 8.  **Early Ray Termination:** If $\alpha_{acc}$ exceeds a threshold (e.g., 1.0) or if the ray is occluded by opaque geometry (checked against the depth buffer from step 2), terminate the ray traversal for that pixel [S1][S2, unofficial].
+-9.  **Final Composition:** Composite the accumulated color over the background color $C_{bg}$ (from the skybox) using $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$ [S1, S14, unofficial].
++9.  **Final Composition:** Composite the accumulated color over the background color $\mathbf{C}_{bg}$ (from the skybox) using $\mathbf{C}_{final} = \mathbf{C}_{acc} + (1 - \alpha_{acc}) \mathbf{C}_{bg}$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_pixel_ray(o, d, volume_data, tf_function, depth_buffer, skybox_color):
++def render_pixel_ray(o, d, volume_data, tf_function, depth_buffer, skybox_color, num_samples=100):
+     # 1. Determine ray bounds using bounding cube
+     t_start, t_end = intersect_bounding_cube(o, d)
+@@ -44,41 +44,73 @@
+ 
+     # 2. Discretize ray
+-    num_samples = 100 # Not given in sources, typical value
+     dt = (t_end - t_start) / num_samples
+-    
+-    acc_color = vec3(0.0)
++
++    acc_color = [0.0, 0.0, 0.0]
+     acc_alpha = 0.0
+-    
++
+     for i in range(num_samples):
+         t = t_start + i * dt
+-        p = o + t * d
+-        
++        p = [o[axis] + t * d[axis] for axis in range(3)]
++
+         # 3. Sample volume data
+-        # Note: Specific indexing logic from [S1] for 2D latitude/longitude array
+-        # General case: d_val = interpolate_3d(volume_data, p)
+-        d_val = sample_volume_2d_lat_lon(volume_data, p) 
+-        # Apply fall-off if applicable [S1]
+-        d_val -= proportional_factor * p.z 
+-        
++        d_val = sample_volume_2d_lat_lon(volume_data, p)
++        d_val -= 0.1 * p[2]  # Apply fall-off [S1]
++
+         # 4. Programmable Transfer Function
+-        # Computes color and opacity without texture lookup [S1]
+         c_i, a_i = tf_function(d_val)
+-        
++
+         # 5. Early Ray Termination check
+         if acc_alpha >= 1.0:
+             break
+-            
++
+         # Check occlusion by opaque geometry using depth buffer [S1]
+         if is_occluded(p, depth_buffer):
+             break
+-            
++
+         # 6. Composite
+         transmittance = 1.0 - acc_alpha
+-        acc_color += transmittance * a_i * c_i
++        acc_color[0] += transmittance * a_i * c_i[0]
++        acc_color[1] += transmittance * a_i * c_i[1]
++        acc_color[2] += transmittance * a_i * c_i[2]
+         acc_alpha += transmittance * a_i
+-        
++
+     # 7. Final background composition
+-    final_color = acc_color + (1.0 - acc_alpha) * skybox_color
++    final_color = [
++        acc_color[0] + (1.0 - acc_alpha) * skybox_color[0],
++        acc_color[1] + (1.0 - acc_alpha) * skybox_color[1],
++        acc_color[2] + (1.0 - acc_alpha) * skybox_color[2]
++    ]
+     return final_color
++
++def intersect_bounding_cube(o, d):
++    cube_min = [-1.0, -1.0, -1.0]
++    cube_max = [1.0, 1.0, 1.0]
++    t_min, t_max = -float('inf'), float('inf')
++    for axis in range(3):
++        if abs(d[axis]) > 1e-8:
++            t1 = (cube_min[axis] - o[axis]) / d[axis]
++            t2 = (cube_max[axis] - o[axis]) / d[axis]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++        else:
++            if o[axis] < cube_min[axis] or o[axis] > cube_max[axis]:
++                return None, None
++    if t_min > t_max:
++        return None, None
++    return t_min, t_max
++
++def sample_volume_2d_lat_lon(volume_data, p):
++    lat_idx = int((p[0] + 1.0) * 0.5 * volume_data.width)
++    lon_idx = int((p[1] + 1.0) * 0.5 * volume_data.height)
++    lat_idx = max(0, min(lat_idx, volume_data.width - 1))
++    lon_idx = max(0, min(lon_idx, volume_data.height - 1))
++    return volume_data.data[lat_idx * volume_data.height + lon_idx]
++
++def is_occluded(p, depth_buffer):
++    screen_x = int((p[0] + 1.0) * 0.5 * depth_buffer.width)
++    screen_y = int((p[1] + 1.0) * 0.5 * depth_buffer.height)
++    screen_x = max(0, min(screen_x, depth_buffer.width - 1))
++    screen_y = max(0, min(screen_y, depth_buffer.height - 1))
++    return p[2] > depth_buffer.data[screen_y * depth_buffer.width + screen_x]
+ ```
+ 
+@@ -96,23 +128,23 @@
+ 
+ ### Shaded DVR
+-Enhances base DVR with local illumination models to improve volumetric perception. It supports early ray termination and can use multi-dimensional transfer functions, though these require additional computational resources [S2, unofficial].
++Enhances base DVR with local illumination models to improve volumetric perception [S2, unofficial]. It supports early ray termination and can use multi-dimensional transfer functions, though these require additional computational resources [S2, unofficial].
+ 
+ ### 2D Transfer Function DVR
+-Uses parameterized transfer functions with rectangular widgets in the argument space (data value vs. gradient magnitude) instead of 2D color table textures. This allows for more precise feature investigation but requires more computation [S2, unofficial].
++Uses parameterized transfer functions with rectangular widgets in the argument space (data value vs. gradient magnitude) instead of 2D color table textures [S2, unofficial]. This allows for more precise feature investigation but requires more computation [S2, unofficial].
+ 
+ ### Early Ray Termination
+-An optimization strategy where ray traversal stops if accumulated opacity is close to 1. This significantly improves performance without altering visible image quality, unlike MIP which must traverse the entire ray path [S2, unofficial].
++An optimization strategy where ray traversal stops if accumulated opacity is close to 1 [S2, unofficial]. This significantly improves performance without altering visible image quality, unlike MIP which must traverse the entire ray path [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray. The programmable transfer function call adds computational overhead compared to a simple texture lookup, but reduces memory bandwidth pressure [S1].
+-*   **Memory Complexity:** Low memory footprint for transfer functions compared to large 2D/3D lookup tables. Volume data storage depends on the dataset size [S1][S2, unofficial].
+-*   **Performance:** Early ray termination significantly improves rendering performance [S2, unofficial]. The trade-off of computation for memory fetches can be beneficial on hardware with high ALU throughput but limited memory bandwidth [S1].
++*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray [G]. The programmable transfer function call adds computational overhead compared to a simple texture lookup, but reduces memory bandwidth pressure [S1].
++*   **Memory Complexity:** Low memory footprint for transfer functions compared to large 2D/3D lookup tables [G]. Volume data storage depends on the dataset size [S1][S2, unofficial].
++*   **Performance:** Early ray termination significantly improves rendering performance [S2, unofficial]. The trade-off of computation for memory fetches reduces lookup time and enables swift modifications to the transfer function through parameter modification [S1].
+ *   **Strengths:** Real-time parameter modification, reduced CPU-GPU data transfer, support for complex multi-dimensional transfer functions, early ray termination [S1][S2, unofficial].
+ *   **Limitations:** Higher computational cost per sample due to function evaluation; potential precision loss in 1D TF mapping if not handled carefully [S1][S2, unofficial].
+ *   **When to use:** When interactive adjustment of transfer functions is required, or when memory bandwidth is a bottleneck. Suitable for visualizing complex scalar fields like WiFi signals or medical data [S1][S2, unofficial].
+-*   **When not to use:** When maximum raw performance is critical and transfer functions are static, or when the hardware has very limited ALU capability relative to memory bandwidth.
++*   **When not to use:** When maximum raw performance is critical and transfer functions are static, or when the hardware has very limited ALU capability relative to memory bandwidth [G].
+ 
+ ## Background
+-The concept of Programmable Transfer Functions was introduced to address the bottleneck of updating transfer function textures on the GPU, which requires CPU-GPU data transfers [S1]. It leverages the programmability of modern graphics pipelines to compute optical properties on the fly [S1]. Shaded DVR, a related technique, has been used in medical examinations, though its usage is more limited compared to MIP [S2, unofficial]. The technique is applicable to various domains, including scientific visualization and environmental signal mapping [S1][S2, unofficial].
++The concept of Programmable Transfer Functions was introduced to address the bottleneck of updating transfer function textures on the GPU, which requires CPU-GPU data transfers [S1]. It leverages the programmability of modern graphics pipelines to compute optical properties on the fly [S1]. Shaded DVR, a related technique, has been used in medical examinations, though its usage is more limited compared to MIP [S2, unofficial]. The technique is applicable to various domains, including scientific visualization and signal space mapping [S1][S2, unofficial].
+ 
+ ## Sources

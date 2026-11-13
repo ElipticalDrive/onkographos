@@ -1,129 +1,120 @@
 # Region Growing Segmentation
 
-Also called: Region-based segmentation, Seed-based segmentation
 
 ## Overview
-Region growing segmentation extracts a connected region of interest (ROI) from a 3D volume by expanding from a seed point based on pre-defined connectivity criteria, such as value range or gradient thresholds [S1, unofficial]. It differs from global optimization methods like [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md) by relying on local homogeneity checks rather than global energy minimization, and from [Watershed Segmentation](13875-watershed-segmentation.md) by growing from user or algorithmically defined seeds rather than flooding from topological minima [S1, unofficial][S6]. The primary output is a binary mask volume used to isolate specific anatomical structures or materials for subsequent volume rendering or analysis [S1, unofficial].
+Region growing segmentation is a voxel-based technique that extracts connected regions of interest from a 3D volume by iteratively expanding from user-defined seed points based on similarity criteria, such as density or intensity thresholds [S1, S2, unofficial]. It differs from global optimization methods like [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md) by relying on local connectivity and simple thresholding rather than solving a global energy minimization problem, making it computationally lighter but potentially more prone to leaking through weak boundaries if seeds are poorly placed [S1, S2, unofficial].
 
 ## How it works
-**Inputs:**
-*   $V$: Input 3D scalar volume (e.g., CT, MRI, or simulation data).
-*   $seed$: A single voxel coordinate $(x_s, y_s, z_s)$ or a set of seed voxels.
-*   $criteria$: A function or threshold defining connectivity. Common criteria include:
-    *   Value range: $|V(p) - V(seed)| \leq T_{val}$ [S1, unofficial].
-    *   Gradient threshold: $|\nabla V(p)| \leq T_{grad}$ [S1, unofficial].
-    *   Statistical similarity: $V(p)$ falls within the standard deviation of the seed region [S1, unofficial].
-
-**Outputs:**
-*   $M$: Binary mask volume of the same dimensions as $V$, where $M(p) = 1$ if voxel $p$ belongs to the ROI, and $0$ otherwise.
+**Inputs and Outputs:**
+- **Input:** A 3D scalar volume $V$ (e.g., density, intensity), a set of seed points $S = \{s_1, s_2, ..., s_k\}$, and a termination criterion (typically a threshold range $[T_{min}, T_{max}]$ or a gradient limit) [S1, S2, unofficial].
+- **Output:** A mask volume $M$ of the same resolution as $V$, where each voxel is labeled with an identifier corresponding to the seed region it belongs to, or 0 if unassigned [S1, unofficial].
 
 **Data Structures:**
-*   $M$: 3D array of booleans or uint8, initialized to 0.
-*   $Q$: Queue (FIFO) or Stack (LIFO) for voxels to be processed.
-*   $visited$: Boolean array or set to track processed voxels to prevent infinite loops and redundant checks.
+- **Volume $V$:** 3D array of scalar values.
+- **Mask $M$:** 3D array of integers (or labels). Initialized to 0 (background/unassigned).
+- **Queue $Q$:** A FIFO queue storing voxel coordinates $(x, y, z)$ to be processed.
+- **Visited Set:** Implicitly handled by checking if $M[x,y,z] \neq 0$ or explicitly maintained to avoid re-processing.
 
 **Algorithm Steps:**
-1.  **Initialization:**
-    *   Initialize mask $M$ to all zeros.
-    *   Initialize $visited$ to all false.
-    *   Push $seed$ into $Q$.
-    *   Mark $seed$ as visited.
-    *   Mark $M(seed) = 1$.
-
-2.  **Expansion Loop:**
-    *   While $Q$ is not empty:
-        *   Pop current voxel $p$ from $Q$.
-        *   For each neighbor $n$ of $p$ (typically 6-connected or 26-connected in 3D):
-            *   If $n$ is within volume bounds:
-                *   If $n$ is not visited:
-                    *   Evaluate $criteria(p, n)$ (e.g., check if $V(n)$ is within the target range relative to $V(seed)$ or $V(p)$).
-                    *   If $criteria$ is met:
-                        *   Mark $n$ as visited.
-                        *   Mark $M(n) = 1$.
-                        *   Push $n$ into $Q$.
-
-3.  **Termination:**
-    *   Return $M$.
+1. **Initialization:** Create mask $M$ initialized to 0. For each seed point $s_i \in S$:
+   - Assign $M[s_i] = i$ (or a unique label for the region).
+   - Push $s_i$ into queue $Q$.
+2. **Iteration:** While $Q$ is not empty:
+   - Dequeue voxel $p = (x, y, z)$.
+   - For each neighbor $n$ of $p$ (typically 6-connected or 26-connected in 3D):
+     - If $n$ is within volume bounds and $M[n] == 0$ (unvisited):
+       - Check if $V[n]$ satisfies the termination criterion relative to the seed region or local neighborhood.
+         - *Criterion Example:* $T_{min} \le V[n] \le T_{max}$ [S1, S2, unofficial].
+       - If the criterion is met:
+         - Assign $M[n] = \text{label}(p)$ (the label of the seed region $p$ belongs to).
+         - Enqueue $n$ into $Q$.
+3. **Termination:** The process stops when $Q$ is empty. The resulting $M$ contains the segmented regions.
 
 **Parameters:**
-*   $T_{val}$: Tolerance for intensity difference. Typical values depend on the data type (e.g., Hounsfield Units in CT). Not given in the sources.
-*   Connectivity: 6, 18, or 26 neighbors. 6-connected is standard for strict connectivity; 26-connected allows diagonal growth [S1, unofficial].
-*   Seed selection: Can be manual (user click) or automatic (e.g., finding local maxima) [S1, unofficial].
+- **Connectivity:** 6-connected (faces), 18-connected (faces+edges), or 26-connected (faces+edges+corners). 6-connected is common for strict connectivity; 26-connected for looser connectivity [S2, unofficial].
+- **Threshold:** User-defined density/intensity range. In [S1, unofficial], this is a "user-defined threshold for density values." In [S6], a single threshold $\epsilon$ is used to classify voxels as "cloud" or "empty" before labeling.
+- **Seed Selection:** Critical for success. Seeds must be placed within the target structure [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Leaking:** If the criteria are too loose, the region may "leak" through weak boundaries (e.g., noise or low-contrast interfaces) [S1, unofficial]. This is mitigated by using stricter gradient-based criteria or [Restricted Region Growing](9750-restricted-region-growing.md) which restricts seeds to areas with low gradients [S1, unofficial].
-*   **Precision:** Floating-point comparisons should use epsilon tolerances.
-*   **Boundaries:** Neighbors outside the volume must be checked explicitly to avoid out-of-bounds errors.
-*   **Degenerate Input:** If no neighbors meet the criteria, the region remains a single voxel.
+- **Leaking:** If the threshold is too permissive or boundaries are noisy, regions may leak through weak spots [S1, unofficial]. This is mitigated by [Restricted Region Growing](9750-restricted-region-growing.md) which uses gradient-based restrictions.
+- **Disjoint Components:** Standard region growing from multiple seeds can merge disjoint components if they fall within the same threshold range. To isolate specific structures, [Connected Component Segmentation](10882-connected-component-segmentation.md) is used as a post-processing step to select the largest contiguous region [S6].
+- **Precision:** Floating point comparisons for thresholds should use epsilon tolerance if values are noisy.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def region_grow_segmentation(volume: np.ndarray, seed: tuple, tolerance: float, connectivity: int = 6) -> np.ndarray:
+def region_growing_segmentation(volume, seeds, threshold_min, threshold_max, connectivity=6):
     """
-    Performs region growing segmentation on a 3D volume.
+    Segments a 3D volume using region growing from seed points.
     
     Args:
         volume: 3D numpy array of scalar values.
-        seed: Tuple (x, y, z) of the starting voxel.
-        tolerance: Maximum allowed difference in intensity between seed and neighbor.
-        connectivity: Number of neighbors to consider (6, 18, 26).
+        seeds: List of (x, y, z) tuples representing seed points.
+        threshold_min: Lower bound for voxel value inclusion.
+        threshold_max: Upper bound for voxel value inclusion.
+        connectivity: Integer, 6, 18, or 26 for 3D neighborhood.
         
     Returns:
-        Binary mask array.
+        mask: 3D numpy array of integers, where 0 is background and >0 are region labels.
     """
-    shape = volume.shape
-    mask = np.zeros(shape, dtype=np.uint8)
-    visited = np.zeros(shape, dtype=bool)
+    import numpy as np
+    from collections import deque
     
-    # Queue for BFS (FIFO)
-    queue = [seed]
-    visited[seed] = True
-    mask[seed] = 1
+    # Initialize mask with zeros
+    mask = np.zeros_like(volume, dtype=np.int32)
     
-    # Define neighbors based on connectivity
+    # Define neighborhood offsets based on connectivity
     # 6-connected: +/- x, y, z
     # 18-connected: 6-connected + face diagonals
-    # 26-connected: 18-connected + corner diagonals
+    # 26-connected: 18-connected + edge diagonals
+    # For simplicity, we use 6-connected here, but the logic extends.
     if connectivity == 6:
-        offsets = [(-1,0,0), (1,0,0), (0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]
-    elif connectivity == 18:
-        offsets = [(-1,0,0), (1,0,0), (0,-1,0), (0,1,0), (0,0,-1), (0,0,1),
-                   (-1,-1,0), (-1,1,0), (1,-1,0), (1,1,0),
-                   (-1,0,-1), (-1,0,1), (1,0,-1), (1,0,1),
-                   (0,-1,-1), (0,-1,1), (0,1,-1), (0,1,1)]
+        neighbors = [
+            (1, 0, 0), (-1, 0, 0),
+            (0, 1, 0), (0, -1, 0),
+            (0, 0, 1), (0, 0, -1)
+        ]
     elif connectivity == 26:
-        offsets = [(-1,0,0), (1,0,0), (0,-1,0), (0,1,0), (0,0,-1), (0,0,1),
-                   (-1,-1,0), (-1,1,0), (1,-1,0), (1,1,0),
-                   (-1,0,-1), (-1,0,1), (1,0,-1), (1,0,1),
-                   (0,-1,-1), (0,-1,1), (0,1,-1), (0,1,1),
-                   (-1,-1,-1), (-1,-1,1), (-1,1,-1), (-1,1,1),
-                   (1,-1,-1), (1,-1,1), (1,1,-1), (1,1,1)]
+        neighbors = [
+            (dx, dy, dz) for dx in [-1, 0, 1] for dy in [-1, 0, 1] for dz in [-1, 0, 1] if not (dx == 0 and dy == 0 and dz == 0)
+        ]
     else:
-        raise ValueError("Connectivity must be 6, 18, or 26")
+        raise ValueError("Connectivity must be 6 or 26 for this implementation.")
 
-    seed_val = volume[seed]
+    queue = deque()
+    label_counter = 1
     
+    # Initialize seeds
+    for seed in seeds:
+        x, y, z = seed
+        if 0 <= x < volume.shape[0] and 0 <= y < volume.shape[1] and 0 <= z < volume.shape[2]:
+            if mask[x, y, z] == 0:
+                mask[x, y, z] = label_counter
+                queue.append((x, y, z, label_counter))
+                label_counter += 1
+    
+    # Process queue
     while queue:
-        current = queue.pop(0) # BFS
-        # current_val = volume[current] # Optional: use current voxel value for local criteria
+        x, y, z, current_label = queue.popleft()
+        current_val = volume[x, y, z]
         
-        for dx, dy, dz in offsets:
-            nx, ny, nz = current[0] + dx, current[1] + dy, current[2] + dz
+        for dx, dy, dz in neighbors:
+            nx, ny, nz = x + dx, y + dy, z + dz
             
             # Check bounds
-            if not (0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]):
+            if not (0 <= nx < volume.shape[0] and 0 <= ny < volume.shape[1] and 0 <= nz < volume.shape[2]):
                 continue
-                
-            if visited[nx, ny, nz]:
+            
+            # Check if already visited
+            if mask[nx, ny, nz] != 0:
                 continue
-                
-            # Check criteria: intensity difference from seed
-            if abs(volume[nx, ny, nz] - seed_val) <= tolerance:
-                visited[nx, ny, nz] = True
-                mask[nx, ny, nz] = 1
-                queue.append((nx, ny, nz))
+            
+            # Check threshold criterion
+            val = volume[nx, ny, nz]
+            if threshold_min <= val <= threshold_max:
+                mask[nx, ny, nz] = current_label
+                queue.append((nx, ny, nz, current_label))
                 
     return mask
 ```
@@ -131,51 +122,52 @@ def region_grow_segmentation(volume: np.ndarray, seed: tuple, tolerance: float, 
 ## Subtopics
 
 ### [Valley Cell Construction](9747-valley-cell-construction.md)
-Valley Cell Construction decomposes a feature space (typically a 2D density plot or scalar field) into non-overlapping regions called valley cells, where each cell contains exactly one isolated local maximum. It solves the problem of structuring the feature space for clustering or segmentation by identifying the boundaries between basins of attraction for local maxima. It differs from [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md) by using topological region growing from maxima rather than global cut optimization, and from [Restricted Region Growing](9750-restricted-region-growing.md) by explicitly handling topological degeneracies (multi-maximum saddles) via node duplication to ensure a valid cell decomposition.
+Decomposes feature space into non-overlapping regions around local maxima.
 
 ### [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md)
-This method segments a 3D volume by treating voxels containing a specific isosurface as nodes in a graph, connected via neighborhood connectivity, and finding an optimal cut to separate user-defined foreground and background seed regions. Unlike traditional volume segmentation which operates on the entire voxel grid and suffers from label volume precision limits and computational expense, this approach restricts the graph to the sparse subset of voxels intersecting the isosurface, integrating directly with isosurface rendering pipelines. It is distinguished from its siblings by its explicit formulation of the segmentation problem as a min-cut optimization on the isosurface domain, whereas [Valley Cell Construction](9747-valley-cell-construction.md) focuses on geometric valley detection and [Restricted Region Growing](9750-restricted-region-growing.md) relies on iterative classification of doubt voxels.
+Segments isosurface voxels using min-cut optimization.
 
 ### [Restricted Region Growing](9750-restricted-region-growing.md)
-Restricted Region Growing is a segmentation technique that defines rough locations for each material part in a volumetric model by growing regions from seed voxels, restricted by noise distribution to prevent leaking through weak boundaries. It serves as a fast pre-processing step to classify the main bodies of materials, thereby reducing the graph size for subsequent Graph-cut operations. Unlike general region growing, which is prone to leaking through weak spots in object boundaries, this method ensures that selected initial seeds have neighborhoods with similar CT values and low gradients, preventing selection in boundary areas.
+Restricts growth by noise distribution to prevent leaking.
+
+### [Connected Component Segmentation](10882-connected-component-segmentation.md)
+Isolates largest contiguous region after thresholding.
 
 ### [Watershed Segmentation](13875-watershed-segmentation.md)
-Watershed Segmentation is a region-growing technique used to extract connected regions from 3D volumes, specifically applied here for brain mask extraction and vessel mask extraction in MRI data. It isolates regions of interest by treating the volume as a topographic landscape, where intensity values define elevation. Unlike [Restricted Region Growing](9750-restricted-region-growing.md) which relies on pre-defined connectivity criteria, this method leverages the gradient structure of the image to define boundaries. It serves as a preprocessing step for volume rendering, enabling the blending of anatomical details with pathological tissue indicators.
+Extracts regions by treating volume as topographic landscape.
 
 ### Out-of-core Region Growing
-An out-of-core region growing algorithm used to find a mask volume for segmentation of massive volumes (one or more orders of magnitude larger than free memory) [S1, unofficial]. It uses slab-projection slices and out-of-core bricking with a directed acyclic graph (DAG) of relative brick distances to manage data that exceeds available RAM [S1, unofficial].
+An out-of-core region growing algorithm designed to segment massive volumes (one or more orders of magnitude larger than free memory) [S2, unofficial]. It uses a slab-projection slice technique to gather data into orthographic projections and a slab-projected kd-tree partitioning to find partitions using non-empty voxel information [S2, unofficial]. Bricks of volumetric data are created with a directed acyclic graph (DAG) of relative distances along a view direction, and a heuristic evaluates coherency to manage memory efficiently [S2, unofficial].
 
 ### Watershed-based Morse-Smale Approximation
-Approximates the discrete Morse-Smale complex by intersecting watershed segmentations of a scalar field and its complement, avoiding explicit critical point extraction [S2, unofficial]. Steps: 1. Perform watershed segmentation on the normalized discrete scalar field $f$. 2. Perform watershed segmentation on the inverted field $1-f$. 3. Compute the intersection of the two resulting watershed segmentations to approximate the discrete Morse-Smale complex. The approximation is valid only if $f$ is a Morse function, which is not generally true for discrete scalar fields [S2, unofficial].
+Approximates the discrete Morse-Smale complex by intersecting watershed segmentations of a scalar field $f$ and its complement $1-f$, avoiding explicit critical point extraction [S3, unofficial]. Steps: 1. Perform watershed segmentation on normalized discrete scalar field $f$. 2. Perform watershed segmentation on inverted field $1-f$. 3. Compute the intersection of the two resulting segmentations [S3, unofficial]. The approximation is valid only if $f$ is a Morse function, which is not generally true for discrete scalar fields, requiring pre-processing to enforce this condition [S3, unofficial].
 
 ### Global/Local Segmentation
-A segmentation approach that uses global criteria to avoid errors from local decision making, often by confining automatic segmentation to a user-specified mask [S3]. Steps: 1. User interactively indicates a subset of $V$ (mask) for automatic segmentation. 2. Automatic segmentation is confined to this mask. 3. Optionally, automatically find globally optimal boundaries using 2D dynamic programming within the mask. A shell around the boundary is often all that is needed to minimize user interaction time [S3]. Considerable success is reported in automatically finding globally optimal boundaries using 2D dynamic programming when the search is confined to a mask [S3].
-
-### Connected Component Segmentation
-Applies Otsu's method to calculate an automatic threshold value for the volume data. Creates a binary segmentation mask where voxels greater than the threshold are 1, others 0. Labels connected components in the binary mask using connectivity=1 and returns the number of labels. Identifies the largest connected component by area among all labeled regions. Creates the final spine segmentation mask by checking if labeled voxels equal the largest region label, casting to uint8 [S4, unofficial].
+A segmentation approach that uses global criteria to avoid errors from local decision making, often by confining automatic segmentation to a user-specified mask [S4]. Steps: 1. User interactively indicates a subset of $V$ (mask) for automatic segmentation. 2. Automatic segmentation is confined to this mask. 3. Optionally, automatically find globally optimal boundaries using 2D dynamic programming within the mask [S4]. A shell around the boundary is often sufficient to minimize user interaction time [S4]. Considerable success is reported in automatically finding globally optimal boundaries using 2D dynamic programming when the search is confined to a mask [S4].
 
 ### Magic Wand Tool for Sample Selection
-A 2D segmentation tool based on Perona and Malik's anisotropic diffusion, used to alleviate the difficulty of perfectly drawing over feature boundaries with a lasso tool [S5, unofficial]. Solves the diffusion equation $\frac{\partial S(t,x,y)}{\partial t} = \text{div}(g(|\nabla V(t,x,y)|) \nabla S(t,x,y))$ numerically using the finite difference method with a given iteration number $T$. The conductivity term is $g(s) = v \cdot \exp(-s^2 / \kappa^2)$, where $s$ is the gradient magnitude. Parameter $K$ ($\kappa$) governs how fast $g(s)$ goes to zero for high gradients. Regular term $v$ is 1. Normalization term $h$ is $1/(n+1)$ for numerical stability, where $n=8$ [S5, unofficial].
+A 2D segmentation tool based on Perona and Malik's anisotropic diffusion, used to alleviate the difficulty of perfectly drawing over feature boundaries with a lasso tool [S5, unofficial]. It solves the diffusion equation $\frac{\partial S(t,x,y)}{\partial t} = \text{div}(g(|\nabla V(t,x,y)|) \nabla S(t,x,y))$ numerically using the finite difference method with a given iteration number $T$ [S5, unofficial]. The conductivity term is $g(s) = v \cdot \exp(-s^2 / \kappa^2)$, where $s$ is the gradient magnitude [S5, unofficial]. Parameter $K$ ($\kappa$) governs how fast $g(s)$ goes to zero for high gradients. Regular term $v$ is 1. Normalization term $h$ is $1/(n+1)$ for numerical stability, where $n$ is the number of neighbors (8) [S5, unofficial].
 
 ### Connected Component Labeling for Volume Extraction
-Classifies each voxel in the source volume into either a cloud voxel or an empty voxel. If the density $\rho$ at voxel $p$ is greater than a user-specified threshold $\epsilon$, it is classified as a cloud voxel. Applies a labeling process to the classified volume to assign unique labels to each region consisting of connected cloud voxels. Creates a bounding box for each connected region and extracts the volume enclosed by the bounding box as the cloud volume [S6].
+Classifies each voxel in the source volume into either a cloud voxel or an empty voxel based on a density threshold $\epsilon$ ($\rho > \epsilon$ is cloud) [S6]. Applies a labeling process to assign unique labels to each region of connected cloud voxels. Creates a bounding box for each connected region and extracts the volume enclosed by the bounding box as the cloud volume [S6].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the volume, as each voxel is visited at most once. However, the actual runtime depends heavily on the size of the resulting region and the connectivity check overhead.
-*   **Memory Complexity:** $O(N)$ for the mask and visited arrays. For out-of-core variants, memory usage is reduced to fit within available RAM by processing slabs or bricks [S1, unofficial].
-*   **Performance:** Fast for small to medium regions. Performance degrades if the region is large and connectivity is high (26-connected). Out-of-core methods add I/O overhead but enable processing of massive datasets [S1, unofficial].
-*   **Strengths:** Simple to implement; intuitive for users; effective for homogeneous regions; can be restricted to prevent leaking [S1, unofficial].
-*   **Limitations:** Prone to leaking through weak boundaries if criteria are not strict; sensitive to seed placement; may require manual intervention for complex structures [S1, unofficial].
-*   **When to use:** When a user can provide a reliable seed point; when regions are homogeneous; as a pre-processing step for more complex segmentation [S1, unofficial].
-*   **When not to use:** When boundaries are weak or noisy; when global context is required to resolve ambiguities; when the region is not connected [S1, unofficial].
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the volume, as each voxel is processed at most once. However, the actual time depends on the number of voxels in the segmented regions and the queue operations.
+- **Memory Complexity:** $O(N)$ for the mask volume and $O(N)$ for the queue in the worst case (e.g., a spiral filling the volume). Out-of-core variants reduce memory usage to fit within available RAM by processing slabs or bricks [S2, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with volume size for in-core implementations. Out-of-core methods scale to massive volumes by managing disk I/O and memory efficiently [S2, unofficial].
+- **Strengths:** Simple to implement, fast for small to medium regions, intuitive user interaction (seed placement).
+- **Limitations:** Prone to leaking through weak boundaries if thresholds are not carefully chosen [S1, unofficial]. Sensitive to seed placement. May require post-processing (like connected component analysis) to remove noise or isolate specific components [S6].
+- **When to use:** When regions are well-separated by intensity/density and seeds can be easily placed. Good for pre-processing or when computational resources are limited.
+- **When not to use:** When boundaries are weak or noisy, or when global context is needed to resolve ambiguities (use [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md) instead).
 
 ## Background
-Region growing is a classical image segmentation technique that has been widely used in medical imaging and volume visualization for decades. It was introduced as a method to isolate regions of interest based on local homogeneity criteria [S1, unofficial]. The technique is foundational in volume rendering pipelines, where it is used to create mask volumes that restrict rendering to specific anatomical structures or materials [S1, unofficial]. Variants such as out-of-core region growing have been developed to handle massive datasets that exceed available memory [S1, unofficial]. The method is often combined with other techniques, such as [Restricted Region Growing](9750-restricted-region-growing.md) for pre-processing or [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md) for refinement [S1, unofficial].
+Region growing is a classic image segmentation technique. In the context of volume rendering, it is used to create mask volumes that isolate regions of interest for rendering or further analysis [S2, unofficial]. The method has been applied in various visualization pipelines, including on-the-fly segmentation for real-time visualization [S1, unofficial]. It is often combined with other techniques, such as watershed segmentation for Morse-Smale complex approximation [S3, unofficial] or anisotropic diffusion for interactive selection [S5, unofficial]. The technique is foundational for many specialized segmentation methods in volume visualization, such as restricted region growing and out-of-core processing for massive datasets [S1, S2, unofficial].
 
 ## Sources
-[S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
-[S2] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)
-[S3] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29
-[S4] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
+[S1] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)
+[S2] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S3] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)
+[S4] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29
 [S5] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)
 [S6] A sketch-based system for cloud volume retrieval from simulated dataset for realistic image synthesis, https://doi.org/10.1145/2817675.2817690, fetched 2026-11-05

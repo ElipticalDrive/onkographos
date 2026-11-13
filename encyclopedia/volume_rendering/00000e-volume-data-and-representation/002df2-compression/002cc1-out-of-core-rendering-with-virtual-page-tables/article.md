@@ -3,46 +3,54 @@
 Also called: GPU-Based Out-of-Core Virtual Addressing, On-Demand Brick Transfer, Out-of-Core Algorithm, Page Table and LOD Management, Virtual Addressing Structure, Virtual Memory Page Table, Virtual Page Table Out-of-Core
 
 ## Overview
-Out-of-Core Rendering with Virtual Page Tables is a technique for visualizing volumetric datasets that exceed the capacity of CPU and GPU memory by loading only visible data bricks on demand [S1, unofficial][S3, unofficial]. It solves the memory bottleneck of large-scale simulations by using a GPU-managed virtual addressing structure to map voxel requests to physical GPU memory locations, minimizing CPU-GPU communication bottlenecks [S3, unofficial]. Unlike in-core methods that require the entire dataset to reside in memory, this approach allows interactive navigation of data exceeding hardware limits by treating the volume as a collection of loadable bricks [S1, unofficial][S3, unofficial]. It differs from sibling methods like [Sparse structures](5-sparse-structures.md) by focusing on the memory management and transfer architecture rather than the spatial data representation itself, though it often works in conjunction with them.
+Out-of-Core Rendering with Virtual Page Tables is a rendering technique for very large volume caches that exceed memory limits by loading only visible bricks on demand [S1, unofficial]. It solves the problem of managing simultaneous multivariate and temporal data access without requiring High-Performance Computing (HPC) systems by employing out-of-core brick-based storage and on-demand GPU transfers [S4, unofficial]. Unlike in-core methods, it uses a GPU-managed caching system that handles data exceeding GPU/CPU capacity, allowing interactive navigation of large-scale data without storing everything in CPU memory [S3, unofficial]. It differs from its siblings, such as [Sparse structures](5-sparse-structures.md) and [Deferred Filtering Architecture for Compressed Volumes](857-deferred-filtering-architecture-for-compressed-volumes.md), by explicitly managing virtual-to-physical address translation via a flat page table structure to minimize CPU-GPU communication bottlenecks [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A preprocessed volumetric dataset organized into bricks, typically with multiple Levels of Detail (LOD) and potentially temporal dimensions (3D+t). The dataset is stored on disk.
-*   **Output:** Rendered image frames, with GPU memory containing only the bricks currently required for visibility and LOD.
+*   **Input:** A preprocessed, mipmapped, and bricked volume dataset stored on disk. The dataset is organized into bricks of fixed voxel dimensions (typically $64^3$ voxels, resulting in approximately 4–1 MB per brick [S3, unofficial]). The data may include multiple Level of Detail (LOD) levels and temporal steps.
+*   **Output:** Rendered image pixels, with volume data dynamically loaded into GPU memory as needed.
 
 **Data Structures:**
-1.  **Brick:** A fixed-size sub-volume of the dataset. A standard configuration uses $64^3$ voxels per brick, resulting in approximately 4–16 MB per brick depending on data type [S3, unofficial].
-2.  **Brick Flat Array Table (BFAT):** A linear array that maps logical brick indices to physical storage locations. It is indexed by LOD level and spatial position (often using a Space-Filling Curve index like Morton code) [S3, unofficial].
-3.  **Virtual Page Table:** A single flat array of entries, where each entry manages a physical page (brick) in GPU memory. It avoids hierarchical page tables to reduce indirections and page misses [S2]. Each entry contains:
-    *   **State Flag:** Indicates if the brick is "Mapped" (in GPU memory) or "Not Mapped" [S3, unofficial].
-    *   **GPU Address:** The physical memory address in the GPU where the brick resides [S3, unofficial].
-    *   **LOD Index:** The level of detail associated with the brick [S3, unofficial].
-    *   **Time Step Index:** The temporal index associated with the brick [S3, unofficial].
+1.  **Brick Layout:** The volume is divided into bricks. Each brick is identified by a Space-Filling Curve (SFC) index.
+2.  **Brick Format Address Table (BFAT):** A 2D logical structure used to locate bricks.
+    *   **X-axis:** LOD level index.
+    *   **Y-axis:** Time step index ($\gamma$).
+    *   **Content:** Stores the SFC index of the brick for a given (LOD, Time Step) pair.
+3.  **Page Table:** A single flat array of entries (avoiding hierarchical page tables to reduce indirections and page misses [S2]).
+    *   **Entry Layout:**
+        *   `Key`: Composite key derived from (LOD, Time Step, SFC Index).
+        *   `State`: Flag indicating if the brick is `Mapped` (in GPU memory) or `Not Mapped`.
+        *   `GPU_Address`: The 3D GPU memory position where the brick is currently loaded.
+        *   `Linked_Pages`: Optional list of pointers to other page table entries (e.g., for LOD blending).
+4.  **Staging Buffer:** A host-visible memory buffer used for transferring data from CPU to GPU via Zero-Copy communication [S3, unofficial].
 
-**Algorithm Steps:**
-1.  **Preprocessing:** The volume is mipmapped to generate multiple LODs and partitioned into bricks. These bricks are stored on disk in a structure accessible via the BFAT [S4, unofficial].
-2.  **Voxel Request:** The application interface sends a voxel request (3D position and time step $\gamma$) to the GPU addressing data structure [S3, unofficial].
-3.  **LOD Selection:** The addressing structure identifies the finest available LOD for the requested time step. If the finest LOD (e.g., LOD3) is empty or not mapped, it falls back to the next finest available (e.g., LOD2) [S3, unofficial].
-4.  **Address Calculation:** The system calculates the offset in the BFAT using the time step (Y-axis) and LOD (X-axis) to locate the brick's Space-Filling Curve (SFC) index [S3, unofficial].
-5.  **Cache Check:** The virtual page table is checked for the corresponding entry.
-    *   If the state is "Mapped," the GPU address is returned to the application [S3, unofficial].
-    *   If the state is "Not Mapped," an asynchronous request is sent to the CPU to load the data from disk [S3, unofficial].
-6.  **Data Transfer:**
-    *   The CPU loads the brick from disk (if not already in CPU memory).
-    *   The CPU sends the data back to the GPU via Zero-Copy communication or direct memory access [S3, unofficial].
-7.  **Cache Update:** The virtual page table entry is updated with the new GPU address and the state is set to "Mapped" [S3, unofficial].
-8.  **Rendering:** The rendering engine uses the mapped bricks to render the frame [S4, unofficial].
+**Parameters:**
+*   **Voxels per Brick:** $64^3$ [S3, unofficial].
+*   **LOD Thresholds:** Target memory usage range of 50–80% [S2].
+*   **Threshold Adjustment Step:** 1% [S2].
 
-**LOD Management and Thresholds:**
-*   Transitions between LOD levels are adjusted at runtime based on the ratio of used-to-free GPU memory [S2].
-*   The target usage range is 50–80% [S2].
-*   If usage is outside this range, thresholds are moved:
-    *   Step size increases by 1% after successive similar adjustments.
-    *   Step size decreases by 1% if the direction of adjustment changes quickly [S2].
-*   To maintain quality under high load, important copies are prioritized, and LOD transitions are delayed to later frames if necessary [S2].
-*   Blending between LOD levels requires both levels to be in memory simultaneously, necessitating modification of page table entries to support linked pages [S2].
+**Numbered Steps:**
+
+1.  **Preprocessing:** Volumes are preprocessed, mipmapped, and bricked [S4, unofficial]. The BFAT is constructed to map (LOD, Time Step) coordinates to SFC indices.
+2.  **Voxel Request:** The application interface sends a voxel request (3D position) to the GPU addressing data structure [S3, unofficial].
+3.  **LOD Selection:** For the requested voxel at time step $\gamma$, identify the finest available LOD level. If the finest LOD (e.g., LOD3) is empty or not available, select the next finest (e.g., LOD2) [S3, unofficial].
+4.  **Address Calculation:** Calculate the offset in the BFAT using the time step ($\gamma$) on the Y-axis and the selected LOD on the X-axis. Retrieve the SFC index of the target brick [S3, unofficial].
+5.  **Cache Lookup:** Check the Page Table entry corresponding to the (LOD, SFC Index) key.
+    *   If `State` is `Mapped`: Return the `GPU_Address` to the application.
+    *   If `State` is `Not Mapped`: Proceed to Step 6.
+6.  **Asynchronous Load Request:** Send an asynchronous request to the CPU to load the data from disk (if not already in CPU memory) [S3, unofficial].
+7.  **Data Transfer:** The CPU sends the data back to the GPU via Zero-Copy communication into the staging buffer [S3, unofficial].
+8.  **Cache Update:** The addressing structure updates the page table entry: sets `State` to `Mapped`, records the `GPU_Address`, and returns the result to the application [S3, unofficial].
+9.  **Rendering:** The rendering engine samples the data from the GPU memory. Dynamic requests are handled throughout the visualization process [S4, unofficial].
+
+**LOD Threshold Management:**
+To maintain quality under high load, LOD transitions are adjusted at run-time based on the used-to-free memory ratio, targeting 50–80% usage [S2].
+*   If usage is outside the 50–80% range, thresholds are moved.
+*   The step size for adjustment increases by 1% after successive similar adjustments or decreases by 1% if the direction of adjustment changes quickly [S2].
+*   To maintain quality, important copies are prioritized, and LOD transitions are delayed to later frames if necessary [S2].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -50,107 +58,125 @@ Out-of-Core Rendering with Virtual Page Tables is a technique for visualizing vo
 class PageTableEntry:
     state: int  # 0: Not Mapped, 1: Mapped
     gpu_address: int
-    lod: int
-    time_step: int
-    sfc_index: int
+    linked_pages: list  # List of PageTableEntry references for LOD blending
 
 class BFAT:
-    # Maps (time_step, lod) -> list of sfc_indices
-    entries: dict
+    # 2D array: bfat[time_step][lod_level] -> sfc_index
+    pass
 
-def get_brick_address(page_table: list, bfat: BFAT, time_step: int, lod: int, sfc_index: int) -> int:
-    """
-    Retrieves the GPU address for a specific brick.
-    If not in memory, triggers async load.
-    """
-    # Calculate index in the flat page table array
-    # Assuming a simple linear mapping for demonstration
-    entry_index = calculate_entry_index(time_step, lod, sfc_index)
-    entry = page_table[entry_index]
+class VolumeRenderer:
+    def __init__(self, bfat: BFAT, page_table: dict, staging_buffer_size: int):
+        self.bfat = bfat
+        self.page_table = page_table  # Key: (lod, sfc_index), Value: PageTableEntry
+        self.staging_buffer_size = staging_buffer_size
 
-    if entry.state == MAPPED:
-        return entry.gpu_address
-
-    # Not mapped, trigger load
-    brick_data = load_brick_from_disk(bfat, time_step, lod, sfc_index)
-    gpu_address = allocate_gpu_memory(len(brick_data))
-    copy_to_gpu(gpu_address, brick_data)
-    
-    # Update page table
-    entry.state = MAPPED
-    entry.gpu_address = gpu_address
-    entry.lod = lod
-    entry.time_step = time_step
-    entry.sfc_index = sfc_index
-    
-    return gpu_address
-
-def select_lod(time_step: int, available_lods: list) -> int:
-    """
-    Selects the finest available LOD for a given time step.
-    """
-    for lod in sorted(available_lods, reverse=True):
-        if is_lod_available(time_step, lod):
-            return lod
-    return available_lods[0] # Fallback to coarsest
-
-def render_frame(camera: Camera, page_table: list, bfat: BFAT):
-    """
-    Main rendering loop.
-    """
-    for pixel in pixels:
-        ray = camera.generate_ray(pixel)
-        voxel_pos = ray.march()
-        time_step = get_current_time_step()
+    def get_voxel_value(self, x: int, y: int, z: int, time_step: int) -> float:
+        """
+        Step 1-2: Receive voxel request and determine LOD.
+        """
+        # Determine which LOD level contains the requested voxel coordinates
+        lod_level = self._find_finest_available_lod(x, y, z, time_step)
         
-        # Find finest LOD
-        lod = select_lod(time_step, available_lods)
+        # Step 3-4: Calculate BFAT offset and SFC index
+        sfc_index = self.bfat.get_sfc_index(time_step, lod_level)
         
-        # Get SFC index for voxel position
-        sfc_index = voxel_to_sfc(voxel_pos)
+        # Step 5: Cache Lookup
+        key = (lod_level, sfc_index)
+        entry = self.page_table.get(key)
         
-        # Get brick address
-        brick_addr = get_brick_address(page_table, bfat, time_step, lod, sfc_index)
+        if entry is None:
+            entry = PageTableEntry(state=0, gpu_address=0, linked_pages=[])
+            self.page_table[key] = entry
+            
+        if entry.state == 1:
+            # Data is in GPU memory
+            return self._sample_from_gpu(entry.gpu_address, x, y, z)
+        else:
+            # Step 6-8: Load data
+            self._load_brick_to_gpu(time_step, lod_level, sfc_index)
+            # After load, state is updated to 1 and gpu_address is set
+            return self._sample_from_gpu(entry.gpu_address, x, y, z)
+
+    def _find_finest_available_lod(self, x: int, y: int, z: int, time_step: int) -> int:
+        """
+        Step 3: Identify the finest available LOD.
+        Returns the highest LOD index where data exists for the given time step.
+        """
+        # Iterate from finest to coarsest
+        for lod in range(max_lod, -1, -1):
+            if self.bfat.has_data(time_step, lod):
+                return lod
+        return 0  # Fallback to coarsest
+
+    def _load_brick_to_gpu(self, time_step: int, lod_level: int, sfc_index: int):
+        """
+        Step 6-8: Asynchronous load and cache update.
+        """
+        key = (lod_level, sfc_index)
+        entry = self.page_table[key]
         
-        # Sample color from brick
-        color = sample_voxel(brick_addr, voxel_pos)
-        pixel.color = color
+        # Check memory budget and adjust thresholds if necessary
+        self._manage_memory_thresholds()
+        
+        # Send async request to CPU to load from disk
+        cpu_data = self._cpu_load_from_disk(time_step, lod_level, sfc_index)
+        
+        # Transfer to GPU via Zero-Copy staging buffer
+        gpu_address = self._copy_to_gpu_staging_buffer(cpu_data)
+        
+        # Update Page Table
+        entry.state = 1
+        entry.gpu_address = gpu_address
+
+    def _manage_memory_thresholds(self):
+        """
+        Adjust LOD thresholds based on memory usage (50-80% target).
+        """
+        current_usage = self._get_gpu_memory_usage_ratio()
+        if current_usage < 0.5 or current_usage > 0.8:
+            # Adjust thresholds logic
+            # Increase step size by 1% on successive similar adjustments
+            # Decrease step size by 1% if direction changes
+            pass
+
+    def _sample_from_gpu(self, gpu_address: int, x: int, y: int, z: int) -> float:
+        """
+        Sample voxel value from GPU memory.
+        """
+        # Hardware-specific sampling logic
+        return 0.0
 ```
 
-**Parameters:**
-*   **Voxels per Brick:** $64^3$ is a common configuration, balancing memory overhead and transfer granularity [S3, unofficial].
-*   **LOD Thresholds:** Target GPU memory usage of 50–80% [S2].
-*   **Step Size Adjustment:** 1% increase/decrease for threshold adjustments [S2].
-
 **Edge Cases and Pitfalls:**
-*   **Blending Artifacts:** LOD transitions require both levels to be in memory simultaneously, which can spike memory usage and require complex page table management [S2].
-*   **Pipeline Stalls:** Strict synchronization during frame rendering can cause GPU pipeline stalls. Asynchronous data copying is preferred but complex to implement [S2].
-*   **Monovariate Limitation:** Early implementations were designed for single-variable datasets, limiting flexibility for multivariate support [S4, unofficial].
-*   **Brick Structure Requirement:** The volume cache must be organized as loadable bricks; otherwise, the entire file must be loaded, defeating the purpose of out-of-core rendering [S1, unofficial].
+*   **Blending:** LOD transitions require both levels to be in memory simultaneously during the transition, necessitating modification of page table entries to support linked pages [S2].
+*   **Copy Budget:** LOD transitions and adding linked pages are less urgent than rendering visible Gaussian pages. The copy budget is limited by the staging buffer size and the time required [S2].
+*   **Synchronization:** Strict synchronization during frame rendering causes pipeline stalls. Asynchronous task separation is recommended to speed up rendering, especially data copying [S2].
+*   **Structure Requirement:** The cache must be structured as loadable bricks; otherwise, the entire file must be loaded [S1, unofficial].
+*   **Multivariate Limitations:** Previous implementations were designed for simultaneous single-variable dataset visualization (3D+t+w with fixed monovariate storage per voxel), limiting flexibility for multivariate support [S4, unofficial].
 
 ## Subtopics
 
 ### [Out-of-Core Volume Rendering Pipeline](5386-out-of-core-volume-rendering-pipeline.md)
 The Out-of-Core Volume Rendering Pipeline is an adaptive, modular architecture for the interactive visualization of large-scale 3D temporal multivariate (3D+t+w) gas and fluid datasets. It solves the problem of managing simultaneous multivariate and temporal data access without requiring High-Performance Computing (HPC) systems by employing out-of-core brick-based storage and on-demand GPU transfers. Unlike AMR-based bricking approaches, this method leverages prestructured datasets to enable parallel brick loading with a shared ID across different variables. It builds on the virtual page table strategy described in [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md), extending it to handle temporal and multivariate dimensions.
 
+### [Sparse Texture Binding](11857-sparse-texture-binding.md)
+Sparse Texture Binding is a lossless, hardware-level mechanism in modern graphics APIs (Vulkan, Direct3D 12, OpenGL) that decouples the virtual volume size from the physical memory footprint by using hardware-managed page tables. Unlike software-managed virtual texturing, it offloads virtual-to-physical address translation to the GPU hardware, allocating physical memory pages only for subregions actively being sampled. This distinguishes it from its parent method, [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md), by removing the need for explicit software page table management and residency queries in the shader, shifting control to the hardware driver and GPU.
+
 ### Dynamic VRAM Pruning
 Dynamic VRAM Pruning is a memory optimization technique that integrates an intelligent algorithm to prune points that do not lie in the camera's field of view (Frustum Culling) or points hidden behind opaque surfaces (Occlusion Culling) before sending data to CUDA cores, saving VRAM space [S5, unofficial].
 
-### Sparse Texture Binding
-Sparse Texture Binding is a lossless hardware-level solution in modern graphics APIs (Vulkan, Direct3D 12) that decouples virtual volume size from physical memory footprint using hardware-managed page tables [S6]. It utilizes hardware-managed page tables to perform virtual-to-physical address translation, allocating physical memory pages only for specific subregions actively being sampled [S6].
-
 ## Operating characteristics
-*   **Time Complexity:** Loading time depends on the number of bricks requested and the I/O bandwidth. The addressing structure lookup is $O(1)$ for a flat page table [S2].
-*   **Memory Complexity:** GPU memory usage is proportional to the number of visible bricks and the LOD level, targeting 50–80% of available VRAM [S2].
-*   **Measured Performance:** Tested on datasets with $64^3$ voxel bricks, resulting in 4–16 MB per brick [S3, unofficial].
-*   **Scaling:** Scales to large-scale data by avoiding storage of everything in CPU memory [S3, unofficial].
-*   **Strengths:** Enables interactive navigation of datasets exceeding GPU/CPU capacity [S3, unofficial]. Reduces CPU-GPU communication bottlenecks via Zero-Copy and asynchronous requests [S3, unofficial].
-*   **Limitations:** Requires preprocessing (mipmapping, bricking) [S4, unofficial]. LOD blending is complex and memory-intensive [S2]. Previous implementations were limited to single-variable datasets [S4, unofficial].
-*   **When to Use:** When visualizing very large volumetric datasets that do not fit in memory [S1, unofficial].
-*   **When Not to Use:** For small datasets that fit entirely in memory, as the overhead of page table management and brick loading may degrade performance.
+*   **Time Complexity:** Loading time depends on the number of bricks requested and the I/O bandwidth. The method ensures that only visible bricks are loaded, minimizing unnecessary I/O [S3, unofficial].
+*   **Memory Complexity:** Memory usage is bounded by the GPU VRAM capacity and the staging buffer size. The target usage is 50–80% [S2].
+*   **Measured Performance:** Evaluated on datasets with $64^3$ voxel bricks (4–1 MB per brick) [S3, unofficial]. The method allows interactive navigation of large-scale data that exceeds GPU/CPU capacity [S3, unofficial].
+*   **Scaling:** The single-array page table avoids hierarchical indirections, reducing page misses and improving scalability [S2].
+*   **Strengths:** Minimizes CPU-GPU communication bottlenecks via Zero-Copy and asynchronous requests [S3, unofficial]. Allows rendering of volumes larger than physical memory [S1, unofficial].
+*   **Limitations:** Requires preprocessed, bricked data [S1, unofficial]. LOD transitions can cause pipeline stalls if not managed asynchronously [S2]. Limited flexibility for multivariate data in original implementations [S4, unofficial].
+*   **When to use:** Interactive visualization of large-scale 3D datasets (e.g., AMR, fluid simulations) where the entire volume cannot fit in memory [S3, unofficial].
+*   **When not to use:** Small datasets that fit entirely in memory, or scenarios requiring strict synchronous rendering without asynchronous buffering [S2].
 
 ## Background
-The method was initially demonstrated for 3D datasets on GPUs [S4, unofficial]. It was later adapted for Adaptive Mesh Refinement (AMR) data in 3D + t contexts [S4, unofficial]. The approach differs from in-core methods by using a GPU-managed caching system that handles data exceeding GPU/CPU capacity [S3, unofficial]. It builds on the principle of out-of-core algorithms, where data is loaded on demand from disk to CPU and then to GPU [S3, unofficial].
+Initially demonstrated for 3D datasets on GPUs [6], this method has since been adapted for Adaptive Mesh Refinement (AMR) data in 3D + t contexts [5]. It was developed to address the limitations of in-core methods, which require storing all data in CPU/GPU memory, thus limiting the scale of visualizable datasets [S3, unofficial]. The approach leverages virtual addressing structures to map voxel requests to physical GPU memory locations via the BFAT, minimizing CPU-GPU communication bottlenecks [S3, unofficial].
 
 ## Sources
 [S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
@@ -158,4 +184,3 @@ The method was initially demonstrated for 3D datasets on GPUs [S4, unofficial]. 
 [S3] GPU-based out-of-core architecture for interactive volume visualization of AMR time series., https://www.youtube.com/watch?v=pbikH-Rd9hI, fetched 2026-10-27 (unofficial)
 [S4] Towards Scalable Out-of-Core Volume Rendering for High- ..., https://hal.science/hal-05141659v1/file/1030-file-i7.pdf, fetched 2026-10-30 (unofficial)
 [S5] Optimizing Real-Time Neural Radiance Fields (NeRF) for Dynamic 3D Scene Rendering on Consumer GPUs, https://doi.org/10.5281/zenodo.21889839, fetched 2026-10-26 (unofficial)
-[S6] A Hybrid CPU-GPU Approach for Memory-Efficient Volume Rendering of Medical Image Data, https://doi.org/10.24132/csrn.2026-d53, fetched 2026-10-26

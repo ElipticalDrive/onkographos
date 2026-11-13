@@ -1,146 +1,145 @@
 # Bounding Box Drawing
 
-Also called: debug box, Selection Box, edge highlight, AABB Wireframe Rendering, Wireframe Outline Rendering, Wireframe Bounding Box Visualization
+Also called: Bounding box and mesh grid overlay, Box wireframe, BoxOverlay, Wireframe Bounding Box Visualization, debug box
 
 ## Overview
-Bounding Box Drawing renders the wireframe outline of an Axis-Aligned Bounding Box (AABB) to provide visual context for voxel data, such as highlighting a selected voxel or defining the volume's spatial extent [S1, unofficial][S3, unofficial][S4, unofficial]. It differs from [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md) by explicitly using line primitives to draw edges rather than filled geometry, and serves as a debug or visualization aid rather than contributing to the final volumetric appearance [S1, unofficial][S3, unofficial][S4, unofficial].
+Bounding Box Drawing renders the geometric boundaries of a volume or selected voxel as wireframe lines to provide spatial context, highlight selection, or visualize data extents [S1, S3, S5, S6, unofficial]. It solves the problem of visual ambiguity in 3D volume rendering by explicitly defining the coordinate space or target object [S1, S5, unofficial]. Unlike [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md), which may generate full mesh primitives for collision or physics, this method focuses on lightweight line-based visualization for debugging or UI overlays [S1, S3, S5, unofficial]. Unlike [Debug Voxel Visualization](7095-debug-voxel-visualization.md), which renders individual voxel cubes, this method renders the container or selection frame [S5, S6, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** AABB bounds (min/max coordinates or center/size), camera view/projection matrices, and a color specification [S1, unofficial][S3, unofficial][S4, unofficial].
-*   **Outputs:** A wireframe rendering of 12 edges on the screen.
+**Inputs:**
+*   Volume bounds: Minimum corner $(min_x, min_y, min_z)$ and maximum corner $(max_x, max_y, max_z)$ [S1, S2, S4, unofficial].
+*   Optional: Region of Interest (ROI) texture coordinates $[0, 1]$ [S1, unofficial].
+*   Optional: Selected voxel center position and dimensions [S5, S6, unofficial].
+*   Rendering parameters: Line color, thickness, and mesh grid division count [S1, S3, S6, unofficial].
+
+**Outputs:**
+*   A set of line primitives (GL_LINES) submitted to the graphics pipeline [S1, S3, S4, unofficial].
 
 **Data Structures:**
-*   **Vertex Data:** A list of 24 vertices (3 floats per vertex: $x, y, z$) defining the 12 edges of a unit or scaled box [S4, unofficial]. The vertices are ordered to form 12 line segments: 4 for the bottom face, 4 for the top face, and 4 vertical connectors [S1, unofficial][S4, unofficial]. Implementations vary: some upload the 24 vertices to a vertex buffer object (VBO) with `GL_STATIC_DRAW` usage hint [S2, unofficial], while others generate vertices directly in a vertex shader without a vertex buffer [S3, unofficial].
+*   **Vertex Buffer (VBO):** A flat array of 32-bit floats storing vertex coordinates. For a standard AABB, this contains 24 vertices (3 floats each) representing 12 line segments [S1, S4, S6, unofficial].
+    *   Layout: `vec3` position, stride 12 bytes, offset 0, type `GL_FLOAT` [S1, unofficial].
+    *   Usage hint: `GL_DYNAMIC_DRAW` if updated frequently, `GL_STATIC_DRAW` if static [S1, S4, unofficial].
+*   **Vertex Array Object (VAO):** Binds the VBO to shader attribute location 0 [S1, S4, unofficial].
+*   **Shader Uniforms:** Model-view-projection matrix, color, line width, and depth offset [S1, S4, S5, unofficial].
 
 **Steps:**
-1.  **Setup Rendering State:** Push current attributes, disable lighting to ensure uniform color, set line color, set line width, enable line smooth and blending [S1, unofficial][S4, unofficial].
-2.  **Define Geometry:** Calculate the 8 corners of the AABB from the min/max bounds or center/size [S4, unofficial]. Define the 12 edges connecting these corners [S4, unofficial].
-3.  **Apply Transformation and Offset:** Translate the box to the target voxel position [S4, unofficial]. Scale the box slightly larger (by 0.002 to 0.005 units) to prevent z-fighting with voxel faces [S3, unofficial][S4, unofficial]. If scaling from the origin, apply a compensating translation to keep the box centered [S4, unofficial].
-4.  **Render:** Draw the 12 edges using `GL_LINES` (24 vertices) or `GL_LINE_LOOP` (two loops of 4 vertices for top/bottom faces plus 4 vertical lines) [S1, unofficial][S4, unofficial].
-5.  **Depth Handling:** Enable depth testing [S2, unofficial][S3, unofficial]. Apply a depth offset or move the lines slightly nearer to the camera in the vertex shader to prevent voxel faces from occluding the wireframe edges [S3, unofficial].
-6.  **Cleanup:** Disable line smooth and blend, re-enable lighting, and pop attributes [S1, unofficial].
 
-**Formulas:**
-*   **Transformation Matrix ($P$):**
-    $$ P = T(pos) \cdot S(scale) \cdot T(-center) $$
-    Where $T$ is translation, $S$ is scaling, $pos$ is the target center, and $center$ is the local box center (usually origin) [S4, unofficial].
-*   **Lattice Integration (R):**
-    $$ P = \begin{pmatrix} \text{scale} & \text{shift} \\ 0 & 1 \end{pmatrix} $$
-    $$ rot.mat_{new} = rot.mat_{old} \times P $$
-    $$ tr = \begin{pmatrix} x & y & z & 1 \end{pmatrix} \times pmat $$
-    $$ x_{out} = tr_x / tr_w, \quad y_{out} = tr_y / tr_w, \quad z_{out} = tr_z / tr_w $$
-    [S5]
+1.  **Compute Corner Coordinates:**
+    Determine the 8 corners of the bounding box.
+    *   If using ROI texture coordinates $t \in [0, 1]$, map to model space:
+        $$coord = (2 \cdot t - 1) \cdot half\_extent$$
+        where $half\_extent = aspect \cdot 0.5$ [S1, unofficial].
+    *   If using explicit min/max bounds, the corners are combinations of $min$ and $max$ components [S2, S4, unofficial].
+    *   If selecting a specific voxel at position $pos$ with size $s$, scale the unit box by $1.002$ and translate to center:
+        $$M = Translate(pos) \cdot Scale(1.002) \cdot Translate(-0.001)$$ [S6, unofficial].
+        Alternatively, offset by a small epsilon (e.g., 0.005 voxels) to prevent z-fighting [S5, unofficial].
 
-**Parameters:**
-*   **Line Width:** 1.5 [S1, unofficial] or 3.0 [S4, unofficial].
-*   **Scale Offset:** 0.002 [S4, unofficial] or 0.005 [S3, unofficial] larger than the voxel.
-*   **Color:** White (1,1,1,1) [S1, unofficial] or Black (0,0,0,1) [S3, unofficial].
+2.  **Generate Edge Vertices:**
+    Construct the 12 edges connecting the 8 corners.
+    *   **Bitwise Enumeration Method:** Iterate `combinedCoord1` from 0 to 7 (binary 000 to 111). For each bit shift `shift` in $\{1, 2, 4\}$ (representing X, Y, Z axes):
+        *   If `(combinedCoord1 & shift) != 0`, skip (to avoid duplicates/backwards edges) [S2, unofficial].
+        *   Compute `combinedCoord2 = combinedCoord1 + shift` [S2, unofficial].
+        *   Extract points $p_1$ and $p_2$ by checking bits of `combinedCoord1` and `combinedCoord2`. For each axis $a \in \{x, y, z\}$:
+            $$p.a = \begin{cases} min.a & \text{if bit is 0} \\ max.a & \text{if bit is 1} \end{cases}$$ [S2, unofficial].
+        *   Store pair $(p_1, p_2)$ [S2, unofficial].
+    *   **Explicit Loop Method:** Define 6 line loops (2 per axis plane) connecting the 8 corners explicitly [S3, unofficial].
+    *   **Vertex Shader Generation:** Compute vertices on-the-fly in the vertex shader using the bounding box parameters and a depth offset to push lines slightly toward the camera, preventing occlusion by volume faces [S5, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Z-Fighting/Occlusion:** Without a depth offset or depth bias, voxel faces occlude parts of the selection lines [S3, unofficial].
-*   **Precision:** Floating-point precision issues may cause gaps in the wireframe if vertices are not perfectly aligned on boundaries [S3, unofficial].
+3.  **Configure Rendering State:**
+    *   Disable lighting and enable blending (`GL_SRC_ALPHA`, `GL_ONE_MINUS_SRC_ALPHA`) [S1, S3, unofficial].
+    *   Set line width (e.g., 1.5 for mesh, 3.0 for selection) [S1, S3, S6, unofficial].
+    *   Enable line smooth and depth testing [S1, S3, S4, unofficial].
+    *   Set color: White semi-transparent for box edges $(1.0, 1.0, 1.0, 0.7)$, grey for mesh grid $(0.7, 0.7, 0.7, 0.35)$ [S1, unofficial].
+
+4.  **Draw Primitives:**
+    *   Upload geometry to VBO if not using shader generation [S4, unofficial].
+    *   Call `glDrawArrays(GL_LINES, 0, vertex_count)` [S1, S4, S6, unofficial].
+    *   For mesh grids, generate additional lines on the 6 faces of the ROI box, with $(divs-1)$ interior lines per face axis [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def draw_bounding_box(min_pos, max_pos, view_matrix, projection_matrix, color=(1.0, 1.0, 1.0, 1.0), line_width=1.5):
+def draw_bounding_box(min_v: Vec3, max_v: Vec3, thickness: float, color: Vec4):
     """
-    Draws a wireframe bounding box for the given AABB.
-    Implements state management, geometry generation, transformation, and rendering.
+    Draws the 12 edges of an axis-aligned bounding box defined by min_v and max_v.
+    Uses bitwise enumeration to generate edges.
     """
-    # 1. Setup Rendering State
-    push_attrib()
-    disable_lighting()
-    set_color(color)
-    set_line_width(line_width)
-    enable_line_smooth()
-    enable_blend()
-    set_blend_func(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    enable_depth_test()
-
-    # 2. Define Geometry
-    # Calculate 8 corners from min/max bounds
-    corners = [
-        (min_pos.x, min_pos.y, min_pos.z), (max_pos.x, min_pos.y, min_pos.z),
-        (max_pos.x, max_pos.y, min_pos.z), (min_pos.x, max_pos.y, min_pos.z),
-        (min_pos.x, min_pos.y, max_pos.z), (max_pos.x, min_pos.y, max_pos.z),
-        (max_pos.x, max_pos.y, max_pos.z), (min_pos.x, max_pos.y, max_pos.z)
-    ]
+    vertices = []
     
-    # Define 12 edges (24 vertices total)
-    edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0), # Bottom face
-        (4, 5), (5, 6), (6, 7), (7, 4), # Top face
-        (0, 4), (1, 5), (2, 6), (3, 7)  # Vertical connectors
-    ]
+    # Iterate through all 8 corners (0 to 7)
+    for combined_coord1 in range(8):
+        # Check each axis (1=x, 2=y, 4=z)
+        for shift in [1, 2, 4]:
+            # Skip if the bit is already set in coord1 to avoid duplicates
+            if (combined_coord1 & shift) != 0:
+                continue
+            
+            # Compute the second corner index
+            combined_coord2 = combined_coord1 + shift
+            
+            # Extract point 1 coordinates
+            p1 = Vec3(
+                min_v.x if (combined_coord1 & 1) else max_v.x,
+                min_v.y if (combined_coord1 & 2) else max_v.y,
+                min_v.z if (combined_coord1 & 4) else max_v.z
+            )
+            
+            # Extract point 2 coordinates
+            p2 = Vec3(
+                min_v.x if (combined_coord2 & 1) else max_v.x,
+                min_v.y if (combined_coord2 & 2) else max_v.y,
+                min_v.z if (combined_coord2 & 4) else max_v.z
+            )
+            
+            # Add edge vertices (p1 and p2)
+            vertices.append(p1)
+            vertices.append(p2)
+            
+    # Setup OpenGL state
+    glDisable(GL_LIGHTING)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_LINE_SMOOTH)
+    glLineWidth(thickness)
+    glColor4f(color.x, color.y, color.z, color.w)
     
-    # 3. Apply Transformation and Offset
-    # Scale slightly larger to prevent z-fighting, then translate to target
-    scale_factor = 1.002
-    offset = -0.001
-    transform_matrix = translate(max_pos) * scale(scale_factor) * translate(offset)
+    # Create VBO and VAO
+    vbo = create_vbo(vertices)
+    vao = create_vao(vbo, layout="vec3")
     
-    # 4. Render
-    begin(GL_LINES)
-    for v1_idx, v2_idx in edges:
-        p1 = apply_transform(corners[v1_idx], transform_matrix)
-        p2 = apply_transform(corners[v2_idx], transform_matrix)
-        # Apply depth offset in shader or here to prevent occlusion
-        p1.z += 0.0001
-        p2.z += 0.0001
-        vertex3f(p1.x, p1.y, p1.z)
-        vertex3f(p2.x, p2.y, p2.z)
-    end()
-
-    # 5. Cleanup
-    disable_line_smooth()
-    disable_blend()
-    enable_lighting()
-    pop_attrib()
-
-# Helper functions representing standard graphics pipeline state operations
-def push_attrib(): pass
-def disable_lighting(): pass
-def set_color(c): pass
-def set_line_width(w): pass
-def enable_line_smooth(): pass
-def enable_blend(): pass
-def set_blend_func(src, dst): pass
-def enable_depth_test(): pass
-def begin(mode): pass
-def vertex3f(x, y, z): pass
-def end(): pass
-def disable_line_smooth(): pass
-def disable_blend(): pass
-def enable_lighting(): pass
-def pop_attrib(): pass
-def translate(v): pass
-def scale(s): pass
-def apply_transform(point, matrix): pass
+    # Draw
+    glDrawArrays(GL_LINES, 0, len(vertices))
+    
+    # Cleanup state
+    glDisable(GL_LINE_SMOOTH)
+    glDisable(GL_BLEND)
+    glEnable(GL_LIGHTING)
 ```
 
 ## Subtopics
 
-### Wireframe Integration with Lattice/Persp
-Integrates bounding box drawing with R's `lattice` and `persp` plotting systems [S5]. It requires computing shifting and scaling matrices based on the lattice's coordinate transformations and incorporating them into the transformation matrix applied to the contour [S5]. The `drawScene` function is called with `add=TRUE` to draw in the graphics viewport [S5]. For `persp`, the bounding box is reconstructed using a `trans3dz` function that includes z-values of transformed coordinates, and the front-most corner is identified to redraw damaged parts of the box [S5]. This method handles the specific coordinate system and projection of R's 3D plotting tools [S5].
+### [Tree Topology Rendering](13035-tree-topology-rendering.md)
+Renders the internal structure of an OpenVDB grid by drawing wireframe boxes for each node (leaf and non-leaf) in the tree. It visualizes the hierarchical subdivision of the volume data rather than just the outer boundary. Choose this when debugging grid density or memory usage. It extends the basic bounding box concept to recursive spatial partitions.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per frame per box, as it draws a fixed number of primitives (12 lines) regardless of volume size [S1, unofficial][S3, unofficial][S4, unofficial].
-*   **Memory Complexity:** $O(1)$ for vertex data (24 vertices) [S4, unofficial].
-*   **Performance:** Negligible impact on frame rate [S3, unofficial].
-*   **Strengths:** Simple to implement, low overhead, effective for debugging and selection feedback [S1, unofficial][S3, unofficial][S4, unofficial].
-*   **Limitations:** Only shows bounds, not internal structure; can be occluded by voxels if depth offset is not applied [S3, unofficial].
-*   **When to Use:** Debugging voxel positions, highlighting selected voxels, visualizing volume extents [S1, unofficial][S3, unofficial][S4, unofficial].
-*   **When Not to Use:** When detailed internal structure visualization is required [S1, unofficial].
+*   **Time Complexity:** $O(1)$ for a single static bounding box (constant 12 lines). $O(N)$ for mesh grids where $N$ is proportional to the number of divisions [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ for static VBO (24 vertices). $O(N)$ for dynamic mesh grids [S1, S4, unofficial].
+*   **Performance:** Extremely lightweight; negligible impact on frame rate even with multiple overlays [S1, S5, unofficial].
+*   **Strengths:** Provides immediate spatial reference; helps identify volume extents and selected voxels [S1, S5, unofficial].
+*   **Limitations:** Does not convey internal data structure; can occlude volume details if not rendered with transparency or depth offset [S1, S5, unofficial].
+*   **When to use:** Debugging, UI overlays, selection highlighting [S1, S5, S6, unofficial].
+*   **When not to use:** When detailed internal structure visualization is required (use [Tree Topology Rendering](13035-tree-topology-rendering.md) or [Debug Voxel Visualization](7095-debug-voxel-visualization.md)) [S5, Tree Topology Rendering, unofficial].
 
 ## Background
-Used in a gene visualization tool to render volume bounds [S1, unofficial]. Used in a voxel raycasting engine as a debug overlay to highlight the voxel at the screen center [S3, unofficial]. Used in a voxel engine to highlight targeted blocks during construction and destruction [S4, unofficial]. Adapted for integration with R's `lattice` and `persp` plotting systems for 3D isosurface visualization [S5].
+Bounding box drawing is a standard technique in computer graphics for visualization and debugging. It is implemented in various volume rendering frameworks, including ClearVolume-plus (Python/PyOpenGL) [S1, unofficial], Volumetric-display (C++) [S2, unofficial], and voxel engines like Voxel Engine (C++/OpenGL) [S6, unofficial]. It is also used in scientific visualization tools like R's `lattice` package for integrating wireframes with 3D plots [S7]. The method relies on basic OpenGL line primitives and matrix transformations [S1, S3, S4, unofficial].
 
 ## Sources
-[S1] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
-[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
-[S3] feat(#40): Find the voxel at the screen center with a voxel ray, https://github.com/nicolas-goyon/Elysian-Outpost/pull/113, fetched 2026-10-27 (unofficial)
-[S4] GitHub - ernerdgn/voxel-engine: A voxel engine written from scratch in ..., https://github.com/ernerdgn/voxel-engine, fetched 2026-10-29 (unofficial)
-[S5] Computing and Displaying Isosurfaces inR, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27
+[S1] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)
+[S2] quertzuiop/Volumetric-display, https://github.com/quertzuiop/Volumetric-display, fetched 2026-10-26 (unofficial)
+[S3] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+[S4] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
+[S5] feat(#40): Find the voxel at the screen center with a voxel ray, https://github.com/nicolas-goyon/Elysian-Outpost/pull/113, fetched 2026-10-27 (unofficial)
+[S6] GitHub - ernerdgn/voxel-engine: A voxel engine written from scratch in ..., https://github.com/ernerdgn/voxel-engine, fetched 2026-10-29 (unofficial)
+[S7] Computing and Displaying Isosurfaces inR, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27

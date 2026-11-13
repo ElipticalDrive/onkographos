@@ -1,0 +1,47 @@
+# VDB-based Neural Rendering
+
+Also called: Hyan et al. VDB approach, Learning VDB from images
+
+## Overview
+VDB-based Neural Rendering directly learns a VDB (hierarchical data structure for sparse volumes) from a set of posed images to enable real-time rendering [S1]. It replaces the dense multi-layer perceptron of traditional NeRF with a sparse hierarchical structure inspired by classical computer graphics techniques like Bounding Volume Hierarchy (BVH) and Sparse Voxel Octree (SVO) [S1]. This architectural shift prioritizes rendering speed over the statistical generalization of implicit networks [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of posed images containing camera poses and corresponding 2D views [S1].
+*   **Output:** A learned VDB structure representing the scene's geometry and appearance, optimized for real-time rendering [S1].
+
+**Data Structures:**
+The core representation is a VDB, which functions as a hierarchical sparse volume structure [S1]. The exact internal layout, including block dimensions, tree depth, and node bit-packing, is not specified in the sources [S1].
+
+**Method Steps:**
+1.  Initialize a sparse hierarchical structure inspired by BVH and SVO principles [S1].
+2.  Optimize the VDB parameters directly from the posed images to encode scene geometry and appearance [S1].
+3.  Periodically update the sparse data structure during the training phase, as the target surfaces emerge progressively [S1].
+4.  Render the scene in real-time by traversing the learned VDB [S1].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Training Complexity:** The optimization requires periodic structural updates during training, making the process more complex than standard implicit methods [S1].
+*   **Precision-Memory Trade-off:** The voxel-based structure introduces an unavoidable trade-off between memory consumption and reconstruction precision [S1].
+
+## Subtopics
+
+### [Sparse Domain Decomposition with Expert Networks](8739-sparse-domain-decomposition-with-expert-networks.md)
+NeuralVDB is a hybrid representation that combines explicit VDB tree structures with implicit neural networks for voxel values and topology. It sets itself apart from standard neural implicit methods by deliberately over-fitting to the input volume to memorize it, which allows it to handle arbitrary input domains without normalized spaces. It should be chosen when high-resolution storage and random access are required within existing VDB pipelines, despite the increased training complexity.
+
+## Operating characteristics
+*   **Performance:** Achieves a 10× to 20× speed-up over traditional NeRF [S1].
+*   **Quality:** Rendering quality is comparable to Neural Volumes and Scene Representation Networks [S1].
+*   **Memory:** Introduces an unavoidable trade-off between memory usage and precision arising from the voxel structure and the density grid [S1].
+*   **Training:** Requires a complex training process with periodic updates to the sparse data structure as surfaces emerge progressively [S1].
+
+## Background
+The method was introduced by Hyan et al. [YLMM23] and draws inspiration from classical computer graphics acceleration structures, specifically Bounding Volume Hierarchy (BVH) [RW80] and Sparse Voxel Octree (SVO) [LK10] [S1]. It adapts these techniques to model scenes in a sparse hierarchical form specifically to accelerate ray tracing in neural rendering pipelines [S1].
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

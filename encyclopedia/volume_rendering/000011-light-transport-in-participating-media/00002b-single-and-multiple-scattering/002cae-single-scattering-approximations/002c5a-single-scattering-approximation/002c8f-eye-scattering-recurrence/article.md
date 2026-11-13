@@ -11,7 +11,7 @@ The Eye Scattering Recurrence computes the light exiting each particle in a volu
 *   **Output:** The exit radiance $E_k$ for each particle $k$, representing the light leaving particle $k$ toward the viewer [S1, unofficial].
 
 **Data Structures**
-The method operates on a linear array of particles. Each particle $k$ stores:
+The method operates on a linear array of particles [S1, unofficial]. Each particle $k$ stores:
 *   $a_k$: Albedo (dimensionless, $0 \le a_k \le 1$) [G].
 *   $\tau_k$: Extinction coefficient (inverse length) [G].
 *   $I_k$: Incident light intensity (radiance) at particle $k$, computed in the previous pass [S1, unofficial].
@@ -48,12 +48,6 @@ The transparency $T_k$ is calculated as $e^{-\tau_k \Delta d}$, where $\Delta d$
 ```python
 import math
 
-def evaluate_phase_function(view_dir, light_dir):
-    """Evaluates the phase function p(omega, -l) for given direction vectors."""
-    # Standard phase function evaluation (e.g., Henyey-Greenstein or isotropic)
-    # Returns a scalar float representing scattering probability [G]
-    return 1.0
-
 def eye_scattering_recurrence(particles, view_direction, light_direction):
     """
     Computes light exiting each particle toward the viewer.
@@ -74,9 +68,8 @@ def eye_scattering_recurrence(particles, view_direction, light_direction):
     E = [0.0] * N
     prev_E = 0.0
     
-    # Precompute phase function value: p(omega, -l)
-    neg_light = tuple(-v for v in light_direction)
-    phase_val = evaluate_phase_function(view_direction, neg_light)
+    # Evaluate phase function p(omega, -l). Standard isotropic phase function returns 1.0 [G]
+    phase_val = 1.0
     
     for k in range(N):
         p = particles[k]
@@ -85,7 +78,7 @@ def eye_scattering_recurrence(particles, view_direction, light_direction):
         I_k = p['incident_light']
         delta_d = p['thickness']
         
-        # Calculate transparency T_k = exp(-tau_k * delta_d)
+        # Calculate transparency T_k = exp(-tau_k * delta_d) [G]
         T_k = math.exp(-tau_k * delta_d)
         
         # Calculate scattered light S_k
@@ -106,9 +99,9 @@ def eye_scattering_recurrence(particles, view_direction, light_direction):
 ## Operating characteristics
 *   **Time Complexity:** $O(N)$, where $N$ is the number of particles along the ray. Each particle requires a constant number of arithmetic operations [G].
 *   **Memory Complexity:** $O(N)$ to store the incident light $I_k$ from the previous pass and the output $E_k$ [G].
-*   **Measured Performance and Scaling:** Not given in the sources.
+*   **Measured Performance and Scaling:** Not given in the sources [G].
 *   **Strengths:** Efficiently computes single scattering toward the viewer. It is simple to implement and integrates well with precomputed incident light [G].
-*   **Limitations:** Only accounts for single scattering toward the viewer. It does not account for multiple scattering events in the view direction (glow). It relies on the accuracy of the incident light $I_k$ computed in the previous pass [G].
+*   **Limitations:** Only accounts for single scattering toward the viewer. It does not account for multiple scattering events in the view direction (glow) [G]. It relies on the accuracy of the incident light $I_k$ computed in the previous pass [G].
 *   **When to Use:** When single scattering approximation is valid (low albedo/density) and computational efficiency is prioritized over full multiple scattering accuracy [G].
 
 ## Background

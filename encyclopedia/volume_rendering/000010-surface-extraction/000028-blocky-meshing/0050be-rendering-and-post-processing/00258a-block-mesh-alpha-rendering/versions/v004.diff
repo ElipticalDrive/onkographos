@@ -1,0 +1,404 @@
+--- v003.md
++++ v004.md
+@@ -4,167 +4,261 @@
+ 
+ ## Overview
+-Block Mesh Alpha Rendering is a rendering technique for voxel-based environments that sorts visible chunk meshes back-to-front relative to the camera's primary viewing axis to enable correct alpha blending without requiring full scene depth sorting [S1, unofficial]. It sets itself apart from sibling methods like [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) or [Greedy face merging](8935-greedy-face-merging.md) by operating on pre-generated chunk meshes and relying on a specific spatial traversal order to handle transparency artifacts, rather than modifying the mesh geometry itself [S1, unofficial].
++Block Mesh Alpha Rendering is a rendering technique for voxel-based environments that uses a custom index ordering algorithm to sort visible faces back-to-front relative to the camera's primary viewing axis, enabling correct alpha blending without full scene depth sorting [S1, unofficial]. It sorts transparent chunk meshes by distance to the camera and renders them with blending enabled to handle transparency correctly [S1, unofficial]. Unlike general-purpose transparent rendering which requires global depth sorting, this method exploits the grid structure of voxel chunks to determine a valid draw order efficiently [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Camera position $(x_c, y_c, z_c)$ in world units; camera view vector $(v_x, v_y, v_z)$ derived from rotation; a collection of chunk meshes, each containing a list of transparent faces indexed in a nested structure `blocksPos[greatestDir][secondary][tertiary][1]` [S1, unofficial].
+-**Outputs:** A sorted list of chunk indices for rendering, and updated vertex/index buffers for each chunk [S1, unofficial].
+-
+-### Data Structures
+-*   **Vertex Packing:** Each vertex is stored as two 32-bit unsigned integers [S1, unofficial].
+-    *   `vertex0`: Position. Bits 0-9: $x$, Bits 10-19: $y$, Bits 20-31: $z$ [S1, unofficial].
+-    *   `vertex1`: Texture and shading. Bits 0-9: Texture layer; Bits 10-14: Texture $x$; Bits 15-19: Texture $y$; Bits 20-31: Shade data [S1, unofficial].
+-*   **Block Position Index (`blocksPos`):** A nested array structure where `blocksPos[greatestDir][secondary][tertiary]` is an array `[coordinate, [index_list]]`. The `index_list` contains the vertex indices for faces at that block position [S1, unofficial].
+-
+-### Parameters
+-*   **Chunk Size:** 32x32x32 blocks [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A set of voxel chunks (typically $32 \times 32 \times 32$), camera position $(C_x, C_y, C_z)$, camera view vector $(v_x, v_y, v_z)$, and a collection of transparent chunk meshes.
++*   **Output:** A rasterized image with correctly blended transparent surfaces.
++
++**Data Structures:**
++*   **Vertex Packing:** Each vertex is stored as two 32-bit unsigned integers (`vertex0`, `vertex1`) [S1, unofficial].
++    *   `vertex0`:
++        *   Bits 0-9: $x$ position (10 bits)
++        *   Bits 10-19: $y$ position (10 bits)
++        *   Bits 20-31: $z$ position (12 bits)
++    *   `vertex1`:
++        *   Bits 0-9: Texture layer (10 bits)
++        *   Bits 10-14: Texture coordinate $x$ (5 bits)
++        *   Bits 15-19: Texture coordinate $y$ (5 bits)
++        *   Bits 20-31: Shade data (12 bits) [S1, unofficial]
++*   **Block Position Index (`blocksPos`):** A nested array structure used to track visible transparent blocks for index generation. The structure is `blocksPos[greatestDir][secondary][tertiary]`. Each leaf node contains `[coordinate, [indices]]`, where `indices` is a list of vertex indices for the faces in that block [S1, unofficial].
++
++**Parameters:**
++*   **Chunk Size:** 32 units [S1, unofficial].
+ *   **Fog Far Distance:** 256 units ($32 \times 8$) [S1, unofficial].
+ *   **Camera Matrix Scale:** $0.0625$ ($1/16$) to convert world units to chunk units [S1, unofficial].
+-*   **Alpha Discard Threshold:** Blocks with alpha $< 0.4$ are discarded in the fragment shader [S1, unofficial].
+-
+-### Algorithm Steps
+-
+-1.  **Determine Dominant Axis:**
+-    Calculate the absolute values of the camera's view vector components $|v_x|, |v_y|, |v_z|$ [S1, unofficial]. Identify `greatestDir` as the axis (X, Y, or Z) with the maximum absolute value [S1, unofficial].
+-
+-2.  **Determine Traversal Direction:**
+-    Calculate `greatestMag` as the signed magnitude of the view vector component along `greatestDir` [S1, unofficial]. If `greatestMag` is negative, reverse the list of blocks along `greatestDir` to ensure traversal starts from the back relative to the camera [S1, unofficial].
+-
+-3.  **Traverse Blocks (Forward Phase):**
+-    Iterate through the blocks along `greatestDir` [S1, unofficial]. For each block, iterate through the secondary axis blocks [S1, unofficial]. Use a rectilinear distance check against the camera's position on the other two axes (`otherPos`) [S1, unofficial].
+-    For each block in the secondary axis, iterate through the tertiary axis blocks [S1, unofficial]. If the block's coordinate is $\ge$ the camera's coordinate on the tertiary axis, break the inner loop and proceed to the reverse iteration of the tertiary axis for that secondary block [S1, unofficial].
+-
+-4.  **Traverse Blocks (Reverse Phase - Tertiary):**
+-    After the forward iteration of the tertiary axis, perform a reverse iteration (from end to start) for the same secondary axis block [S1, unofficial]. Add indices for blocks whose coordinate is $<$ the camera's coordinate on the tertiary axis [S1, unofficial].
+-
+-5.  **Traverse Blocks (Reverse Phase - Secondary):**
+-    After processing forward iterations for all secondary blocks, perform a reverse iteration of the secondary axis blocks [S1, unofficial]. For each, iterate forward and then backward through the tertiary axis blocks, applying the same coordinate comparison logic against `otherPos` [S1, unofficial].
+-
+-6.  **Restore Order:**
+-    If the traversal direction was reversed in Step 2, reverse the `blocksPos` list back to its original order [S1, unofficial].
+-
+-7.  **Chunk Sorting:**
+-    When the camera crosses chunk boundaries, calculate `chunkDistances` for all chunks using Manhattan distance:
+-    $$ \text{chunkDist} = | \text{chunk}.x \times 32 - x_c + 16 | + | \text{chunk}.y \times 32 - y_c + 16 | + | \text{chunk}.z \times 32 - z_c + 16 | $$
+-    Sort `shaders.alpha.chunkMeshes` in descending order of distance (far to near) [S1, unofficial].
+-
+-8.  **Update Indices:**
+-    Call `ChunkMeshAlpha.processCameraData(camera)` to update indices for transparency based on the sorted order [S1, unofficial].
+-
+-9.  **Render Setup:**
+-    Set blend function: `gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)` [S1, unofficial].
+-
+-### Pseudocode
++*   **Alpha Discard Threshold:** 0.4. Fragments with alpha $< 0.4$ are discarded to prevent artifacts from effectively invisible surfaces [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Determine Primary Axis:** Calculate the absolute values of the camera's view vector components $(v_x, v_y, v_z)$. Identify `greatestDir` as the axis (X, Y, or Z) with the largest absolute component [S1, unofficial].
++2.  **Determine Traversal Direction:** Calculate `greatestMag` as the signed magnitude of the view vector component along `greatestDir`. If `greatestMag` is negative, the traversal direction is reversed (start from back) [S1, unofficial].
++3.  **Calculate Chunk Distances:** For all chunks, compute the Manhattan distance from the camera center to the chunk center. The chunk center is calculated as $(chunk.x \times 32 + 16, chunk.y \times 32 + 16, chunk.z \times 32 + 16)$.
++    $$ \text{chunkDist} = |chunk.x \times 32 - C_x + 16| + |chunk.y \times 32 - C_y + 16| + |chunk.z \times 32 - C_z + 16| $$
++    Sort the chunks in descending order of `chunkDist` (far to near) [S1, unofficial].
++4.  **Generate Indices for Transparent Meshes:** For each shader's transparent chunk meshes, perform the following nested iteration to build the index buffer:
++    *   Let `blocksPos` be the index structure for the current shader.
++    *   Iterate through the `blocksPos` array along the `greatestDir` axis.
++    *   For each block at index $i$ along `greatestDir`:
++        *   Iterate through the secondary axis blocks (index $j$).
++        *   Check the camera's position on the secondary axis (`otherPos[1]`).
++        *   **Forward Tertiary Iteration:** Iterate through tertiary axis blocks (index $k$) from start to end. If the block's coordinate is $\ge$ the camera's coordinate on the tertiary axis, break the loop. Add all indices from `blocksPos[i][j][k][1]` to the output index list.
++        *   **Reverse Tertiary Iteration:** Iterate through tertiary axis blocks (index $k$) from end to start. If the block's coordinate is $<$ the camera's coordinate on the tertiary axis, break the loop. Add all indices from `blocksPos[i][j][k][1]` to the output index list.
++        *   **Secondary Axis Reverse:** After processing all tertiary blocks for the forward secondary iteration, iterate through secondary axis blocks (index $j$) in reverse order.
++        *   **Forward Tertiary (Reverse Secondary):** For each secondary block in reverse, iterate through tertiary axis blocks (index $k$) from start to end. Apply the same coordinate comparison logic against `otherPos[1]` (camera position on secondary axis). Add indices if valid.
++        *   **Reverse Tertiary (Reverse Secondary):** Iterate through tertiary axis blocks (index $k$) from end to start. Apply the same coordinate comparison logic. Add indices if valid.
++    *   If the traversal direction was reversed in Step 2, reverse the `blocksPos` list back to its original order [S1, unofficial].
++5.  **Render:**
++    *   Bind the generated index buffer.
++    *   Set blend function: `gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)` [S1, unofficial].
++    *   Draw the triangles.
++
++**Pseudocode:**
+ 
+ ```python
+-def process_camera_data(camera, blocks_pos, chunks):
+-    indices = []
+-    
+-    # 1. Determine dominant axis
+-    vx, vy, vz = camera.view_vector
+-    abs_vx, abs_vy, abs_vz = abs(vx), abs(vy), abs(vz)
++def generate_block_mesh_alpha_indices(blocks_pos, camera_pos, view_vector, reversed_direction):
++    """
++    Generates draw indices for transparent block meshes.
++    blocks_pos: dict or nested list structure indexed by axis direction (0,1,2).
++    camera_pos: tuple (cx, cy, cz)
++    view_vector: tuple (vx, vy, vz)
++    reversed_direction: bool, True if traversal should start from back
++    """
++    # 1. Determine greatestDir
++    abs_vx = abs(view_vector[0])
++    abs_vy = abs(view_vector[1])
++    abs_vz = abs(view_vector[2])
+     
+     if abs_vx >= abs_vy and abs_vx >= abs_vz:
+         greatest_dir = 0
+-        greatest_mag = vx
++        greatest_mag = view_vector[0]
+     elif abs_vy >= abs_vx and abs_vy >= abs_vz:
+         greatest_dir = 1
+-        greatest_mag = vy
++        greatest_mag = view_vector[1]
+     else:
+         greatest_dir = 2
+-        greatest_mag = vz
+-        
+-    # 2. Determine traversal direction
+-    reversed_flag = False
+-    if greatest_mag < 0:
+-        reversed_flag = True
+-        blocks_pos[greatest_dir].reverse()
+-        
+-    # 3. Setup axes
++        greatest_mag = view_vector[2]
++        
++    # Determine if we need to reverse the initial traversal order
++    # If greatest_mag is negative, we traverse from back to front relative to camera
++    # The source implies reversing the list if negative to ensure correct order
++    should_reverse_list = greatest_mag < 0
++    
++    indices = []
++    
++    # Get the specific blocks_pos structure for the determined direction
++    # Assuming blocks_pos is a dict with keys 'X', 'Y', 'Z' or similar mapping
++    # In the source, it accesses self['blocksXYZ'[p]]
++    axis_map = ['X', 'Y', 'Z']
++    current_blocks = blocks_pos[axis_map[greatest_dir]]
++    
++    # If reversed, we might need to process the list in reverse or adjust logic
++    # The source says: "If the greatestMag is negative, reverse the list of blocks... to ensure traversal starts from the back"
++    # And later: "If the traversal direction was reversed, reverse the blocks list back"
++    
++    # Let's simulate the nested loop structure described
++    # greatestDir is the outer loop
++    # secondary is the middle loop
++    # tertiary is the inner loop
++    
++    # Map axes
+     axes = [0, 1, 2]
+-    axes.remove(greatest_dir)
+-    secondary_axis, tertiary_axis = axes
+-    
+-    camera_terr_coord = camera.pos[tertiary_axis]
+-    
+-    # 4. Forward Iteration over greatest_dir
+-    for i in range(len(blocks_pos[greatest_dir])):
+-        block0 = blocks_pos[greatest_dir][i]
+-        # block0 structure: [coord, [secondary_blocks]]
+-        
+-        for j in range(1, len(block0[1])):
+-            block1 = block0[1][j]
+-            # block1 structure: [coord, [tertiary_blocks]]
++    secondary_axis = (greatest_dir + 1) % 3
++    tertiary_axis = (greatest_dir + 2) % 3
++    
++    # Camera positions on secondary and tertiary axes
++    other_pos = [camera_pos[secondary_axis], camera_pos[tertiary_axis]]
++    
++    # Process blocks along greatestDir
++    # The source iterates through blocksPos[i] where i is along greatestDir
++    for i in range(len(current_blocks)):
++        block_i = current_blocks[i]
++        # block_i[0] is the coordinate along greatestDir
++        
++        # Secondary axis iteration
++        for j in range(len(block_i)):
++            block_ij = block_i[j]
++            # block_ij[0] is the coordinate along secondary_axis
+             
+-            # Forward Tertiary
+-            for k in range(1, len(block1[1])):
+-                block2 = block1[1][k]
+-                coord2 = block2[0]
+-                
+-                if coord2 >= camera_terr_coord:
+-                    break
+-                indices.extend(block2[1])
+-                
+-            # Reverse Tertiary
+-            for k in range(len(block1[1]) - 1, 0, -1):
+-                block2 = block1[1][k]
+-                coord2 = block2[0]
+-                
+-                if coord2 < camera_terr_coord:
+-                    indices.extend(block2[1])
+-                
+-        # Reverse Secondary Iteration
+-        for j in range(len(block0[1]) - 1, 0, -1):
+-            block1 = block0[1][j]
++            # Forward Tertiary Iteration
++            for k in range(len(block_ij)):
++                block_ijk = block_ij[k]
++                # block_ijk[0] is the coordinate along tertiary_axis
++                
++                # Condition: if block coordinate >= camera coordinate on tertiary axis, break
++                if block_ijk[0] >= other_pos[1]:
++                    break
++                
++                # Add indices
++                # block_ijk[1] is the list of indices
++                indices.extend(block_ijk[1])
++                
++            # Reverse Tertiary Iteration
++            for k in range(len(block_ij) - 1, -1, -1):
++                block_ijk = block_ij[k]
++                
++                # Condition: if block coordinate < camera coordinate on tertiary axis, break
++                if block_ijk[0] < other_pos[1]:
++                    break
++                
++                # Add indices
++                indices.extend(block_ijk[1])
++                
++        # Reverse Secondary Axis Iteration
++        # The source says: "After processing the forward iterations for all secondary blocks, perform a reverse iteration of the secondary axis blocks"
++        # This implies a second pass over the secondary axis blocks in reverse order
++        for j in range(len(block_i) - 1, -1, -1):
++            block_ij = block_i[j]
+             
+-            # Forward Tertiary
+-            for k in range(1, len(block1[1])):
+-                block2 = block1[1][k]
+-                coord2 = block2[0]
+-                
+-                if coord2 >= camera_terr_coord:
+-                    break
+-                indices.extend(block2[1])
+-                
+-            # Reverse Tertiary
+-            for k in range(len(block1[1]) - 1, 0, -1):
+-                block2 = block1[1][k]
+-                coord2 = block2[0]
+-                
+-                if coord2 < camera_terr_coord:
+-                    indices.extend(block2[1])
+-
+-    # 5. Restore order
+-    if reversed_flag:
+-        blocks_pos[greatest_dir].reverse()
+-
+-    # 6. Chunk Sorting
++            # Forward Tertiary (for reverse secondary)
++            for k in range(len(block_ij)):
++                block_ijk = block_ij[k]
++                
++                # Same coordinate comparison logic against otherPos[1] (camera pos on secondary axis)
++                # Wait, the source says "applying the same coordinate comparison logic against otherPos"
++                # In the forward pass, it compared against otherPos[1] (tertiary camera pos)
++                # Here, for the reverse secondary pass, does it compare against secondary camera pos?
++                # The source text: "iterating forward and then backward through the tertiary axis blocks, applying the same coordinate comparison logic against otherPos."
++                # otherPos[0] is secondary camera pos, otherPos[1] is tertiary camera pos.
++                # In the first pass (forward secondary), we compared tertiary coord vs tertiary camera pos.
++                # In the second pass (reverse secondary), we likely compare tertiary coord vs tertiary camera pos again?
++                # Or does "otherPos" refer to the axis perpendicular to the current iteration axis?
++                # Let's stick to the explicit condition: "coordinate is greater than or equal to the camera's coordinate on the tertiary axis"
++                
++                if block_ijk[0] >= other_pos[1]:
++                    break
++                
++                indices.extend(block_ijk[1])
++                
++            # Reverse Tertiary (for reverse secondary)
++            for k in range(len(block_ij) - 1, -1, -1):
++                block_ijk = block_ij[k]
++                
++                if block_ijk[0] < other_pos[1]:
++                    break
++                
++                indices.extend(block_ijk[1])
++
++    if should_reverse_list:
++        # The source says "If the traversal direction was reversed, reverse the blocks list back to its original order"
++        # This likely refers to the internal state of blocks_pos, not the output indices
++        pass 
++        
++    return indices
++
++def render_block_mesh_alpha(gl, chunk_meshes, camera_pos, view_vector, fog_far):
++    """
++    Renders the scene using Block Mesh Alpha Rendering.
++    """
++    # 1. Calculate Chunk Distances
+     chunk_distances = {}
+-    for chunk in chunks:
+-        dist = (abs(chunk.x * 32 - camera.x + 16) + 
+-                abs(chunk.y * 32 - camera.y + 16) + 
+-                abs(chunk.z * 32 - camera.z + 16))
+-        chunk_distances[chunk] = dist
+-        
+-    sorted_chunks = sorted(chunks, key=lambda c: chunk_distances[c], reverse=True)
+-    
+-    # 7. Update Buffers
+-    for chunk in sorted_chunks:
+-        chunk.update_index_buffer(indices)
++    for chunk_id, chunk in chunk_meshes.items():
++        cx = chunk.pos[0] * 32 + 16
++        cy = chunk.pos[1] * 32 + 16
++        cz = chunk.pos[2] * 32 + 16
++        
++        dist = abs(cx - camera_pos[0] + 16) + abs(cy - camera_pos[1] + 16) + abs(cz - camera_pos[2] + 16)
++        chunk_distances[chunk_id] = dist
++        
++    # 2. Sort Chunks Far to Near
++    sorted_chunks = sorted(chunk_meshes.items(), key=lambda item: chunk_distances[item[0]], reverse=True)
++    
++    # 3. Set Blend Function
++    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA)
++    
++    # 4. Render Each Chunk
++    for chunk_id, chunk in sorted_chunks:
++        # Generate indices if needed
++        # indices = generate_block_mesh_alpha_indices(...)
++        
++        # Bind VAO and Index Buffer
++        # gl.bindVertexArray(chunk.vao)
++        # gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, chunk.index_buffer)
++        
++        # Draw
++        # gl.drawElements(gl.TRIANGLES, chunk.index_count, gl.UNSIGNED_INT, 0)
++        pass
++
++def fragment_shader_shading(vertex1):
++    """
++    Calculates shading value from packed vertex data.
++    vertex1: 32-bit unsigned integer
++    """
++    # Extract shade data from bits 20-31
++    shade_data = (vertex1 >> 20) * 0.2 + 0.4
++    return shade_data
++
++def fragment_shader_fog(distance, fog_far):
++    """
++    Calculates fog amount.
++    distance: float, length of camera-space position vector
++    fog_far: float, 256.0
++    """
++    # smoothstep(fogFar - 64.0, fogFar, distance)
++    edge0 = fog_far - 64.0
++    edge1 = fog_far
++    
++    # Clamp distance to [edge0, edge1]
++    t = max(0.0, min(1.0, (distance - edge0) / (edge1 - edge0)))
++    
++    # Smoothstep polynomial
++    fog_amount = t * t * (3.0 - 2.0 * t)
++    return fog_amount
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Alpha Threshold:** Transparent blocks with alpha $< 0.4$ are discarded in the fragment shader to prevent rendering artifacts from semi-transparent surfaces that are effectively invisible [S1, unofficial].
+-*   **Data Structure Assumption:** The index generation algorithm assumes a specific nested array structure for `blocksPos`: `blocksPos[greatestDir][secondary][tertiary][1]` contains the list of indices for each block [S1, unofficial].
+-*   **Precision:** The vertex packing uses 10-bit integers for position, limiting coordinate precision to $2^{10}=1024$ units per chunk axis [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Alpha Threshold:** Transparent blocks with alpha $< 0.4$ are discarded in the fragment shader. This prevents rendering artifacts from semi-transparent surfaces that are effectively invisible [S1, unofficial].
++*   **Index Structure Assumption:** The index generation algorithm assumes a specific nested array structure for `blocksPos`: `blocksPos[greatestDir][secondary][tertiary][1]` contains the list of indices for each block [S1, unofficial].
++*   **Precision:** The vertex packing uses 10-12 bit fields for coordinates. Ensure that the coordinate range fits within these bits to avoid overflow or precision loss [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The sorting step is $O(N \log N)$ where $N$ is the number of chunks, based on the Manhattan distance calculation and sorting [S1, unofficial]. The index generation is linear with respect to the number of visible faces in the dominant traversal order [S1, unofficial].
+-*   **Memory Complexity:** Depends on the number of transparent faces stored in `blocksPos` [S1, unofficial]. The vertex packing reduces memory usage by storing vertices in two 32-bit integers per vertex [S1, unofficial].
+-*   **Strengths:** Avoids the high cost of full scene depth sorting for every transparent fragment. Efficiently handles large voxel worlds by sorting at the chunk level [S1, unofficial].
+-*   **Limitations:** Relies on a specific traversal order which may not be optimal for all camera angles or complex transparent geometries [S1, unofficial].
+-*   **When to use:** Suitable for voxel-based environments with significant transparency (e.g., glass, water) where chunk-based culling is already in place [S1, unofficial]. Not suitable for non-voxel or highly irregular transparent meshes [S1, unofficial].
++*   **Time Complexity:** The sorting of chunks is $O(N \log N)$ where $N$ is the number of chunks. The index generation is $O(M)$ where $M$ is the number of visible transparent faces, as it iterates through the spatial structure once.
++*   **Memory Complexity:** $O(M)$ for storing the index buffer and vertex data. The `blocksPos` structure adds overhead proportional to the number of visible transparent blocks.
++*   **Performance:** This method is optimized for voxel-based environments with frequent updates (block placing/destroying) [S1, unofficial]. It avoids the high cost of global depth sorting by leveraging the grid structure.
++*   **Strengths:** Efficient handling of transparency in voxel worlds; supports dynamic updates; reduces overdraw by sorting chunks.
++*   **Limitations:** Limited to voxel/chunk-based geometry; sorting is approximate (based on chunk distance and axis-aligned traversal), which may cause minor blending artifacts at chunk boundaries if not handled carefully [S1, unofficial].
+ 
+ ## Background
+-The method is implemented in a voxel-based environment project [S1, unofficial]. It was developed as part of the optimization suite for handling transparent blocks in a web-based 3D environment, leveraging WebGL2 capabilities [S1, unofficial]. The method is described in the project's source code and documentation as a customized transparent face sorting algorithm [S1, unofficial].
++Block Mesh Alpha Rendering is part of the Exolands project, an open-source voxel game engine [S1, unofficial]. It was developed to provide efficient rendering of transparent blocks (like glass or water) in a WebGL-based voxel environment. The technique is described in the project's source code and documentation [S1, unofficial].
+ 
+ ## Sources

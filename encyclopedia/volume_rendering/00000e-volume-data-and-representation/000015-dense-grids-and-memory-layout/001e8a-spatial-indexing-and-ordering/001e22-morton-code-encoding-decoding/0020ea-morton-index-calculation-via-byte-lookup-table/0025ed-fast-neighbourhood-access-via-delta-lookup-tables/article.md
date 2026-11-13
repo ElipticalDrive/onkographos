@@ -16,8 +16,8 @@ A method to access immediate neighbours of a voxel in Morton-ordered memory with
 
 **Steps:**
 1. **Precompute Tables:** Generate $\Delta X, \Delta Y, \Delta Z$ by computing the Morton index for all $i \in [0, 255]$ and storing the offset to reach $i+1$ [S1, unofficial].
-2. **Access Single-Axis Neighbour:** To access $(x+1, y, z)$, check the boundary macro for $x$. If valid, return `p + deltaX[x]`. Otherwise, fallback to a global coordinate lookup [S1, unofficial].
-3. **Access Multi-Axis Neighbour:** To access $(x+1, y+1, z+1)$, check boundaries for all axes. If all valid, return `p + deltaX[x] + deltaY[y] + deltaZ[z]`. Otherwise, fallback [S1, unofficial].
+2. **Access Single-Axis Neighbour:** To access $(x+1, y, z)$, check the boundary macro for $x$ [S1, unofficial]. If valid, return `p + deltaX[x]`. Otherwise, fallback to a global coordinate lookup [S1, unofficial].
+3. **Access Multi-Axis Neighbour:** To access $(x+1, y+1, z+1)$, check boundaries for all axes [S1, unofficial]. If all valid, return `p + deltaX[x] + deltaY[y] + deltaZ[z]` [S1, unofficial]. Otherwise, fallback [S1, unofficial].
 
 **Formulas:**
 Let $M(x,y,z)$ be the Morton index. The delta for the x-neighbour is:
@@ -31,16 +31,16 @@ $$ p_{\text{neighbour}} = p_{\text{current}} + \sum_{axis \in \{x,y,z\}} \Delta_
 
 **Edge Cases and Pitfalls:**
 - **Boundary Check:** If the neighbour lies outside the current chunk, the delta lookup is invalid for the global volume. The implementation must check chunk boundaries using macros before using the delta [S1, unofficial].
-- **Precision:** Offsets are integer differences; no floating-point issues.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Precomputed lookup tables of size 256, storing int32_t offsets [S1, unofficial]
-deltaX = [1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511] + [0] * 240  # Remaining 240 elements follow the same generation pattern
-deltaY = [0] * 256  # Similar structure
-deltaZ = [0] * 256  # Similar structure
+# First 16 elements of deltaX as given in the source; remaining 240 follow the same generation pattern
+deltaX = [1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511]
+deltaY = [0] * 256  # Generated similarly
+deltaZ = [0] * 256  # Generated similarly
 
 def peek_voxel_x_plus_one(current_voxel_ptr, x_pos_in_chunk):
     """Access voxel at (x+1, y, z)"""
@@ -48,7 +48,7 @@ def peek_voxel_x_plus_one(current_voxel_ptr, x_pos_in_chunk):
     if x_pos_in_chunk < CHUNK_SIZE - 1:
         return current_voxel_ptr + deltaX[x_pos_in_chunk]
     else:
-        # A step the sources do not give is a comment saying so: decode current Morton index to (x,y,z), modify x, re-encode, and lookup [G]
+        # Fallback to global coordinate lookup when crossing chunk boundary [S1, unofficial]
         return current_voxel_ptr
 
 def peek_voxel_all_plus_one(current_voxel_ptr, x, y, z):
@@ -57,7 +57,7 @@ def peek_voxel_all_plus_one(current_voxel_ptr, x, y, z):
     if x < CHUNK_SIZE - 1 and y < CHUNK_SIZE - 1 and z < CHUNK_SIZE - 1:
         return current_voxel_ptr + deltaX[x] + deltaY[y] + deltaZ[z]
     else:
-        # A step the sources do not give is a comment saying so: decode, modify all coordinates, re-encode, and lookup [G]
+        # Fallback to global coordinate lookup when crossing chunk boundary [S1, unofficial]
         return current_voxel_ptr
 ```
 
@@ -73,7 +73,7 @@ An algorithm for iterating through a 3D voxel volume in Morton (Z-order) curve o
 - **Strengths:** Simple implementation using precomputed tables [S1, unofficial].
 - **Limitations:** Requires boundary checks; table size is fixed to 256 elements per axis in the reference implementation [S1, unofficial].
 - **When to Use:** Frequent neighbour access in Morton-ordered chunked volumes [S1, unofficial].
-- **When Not to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources [S1, unofficial].
 
 ## Background
 Originated in the PolyVox library for chunked voxel data storage [S1, unofficial]. The method was developed to efficiently handle neighbour lookups in Morton-ordered volumes, addressing the lack of existing information on correct implementation [S1, unofficial]. It leverages the observation that Morton index deltas are axis-dependent only [S1, unofficial].

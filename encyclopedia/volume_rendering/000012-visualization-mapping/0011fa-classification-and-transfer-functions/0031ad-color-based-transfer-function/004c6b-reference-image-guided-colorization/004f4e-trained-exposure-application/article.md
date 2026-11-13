@@ -3,179 +3,101 @@
 Also called: Learned per-image color transform, Per-image color correction
 
 ## Overview
-Trained Exposure Application is a post-processing step in volume rendering that applies a learned per-image 3x3 color transform and 3D bias vector to the rendered RGB image. It serves to match the exposure conditions of the rendered output to those present in the training data, ensuring visual consistency. It differs from its parent, Reference Image Guided Colorization, by applying a direct linear color correction rather than a complex semantic style transfer, and from its sibling, Reference Based Color Transfer, by relying on pre-computed per-viewpoint parameters rather than real-time reference image matching.
+Trained Exposure Application is a post-processing step in reference image guided colorization that applies a learned, per-image linear color transform and bias to a rendered RGB image. It ensures the final output matches the exposure conditions present in the training data [S1, unofficial]. It differs from sibling methods by using a fixed, pre-computed 3x3 matrix and 3D vector retrieved by image name, rather than learning a complex non-linear network or optimizing parameters per-pixel during rendering [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A rendered RGB image tensor $I_{in}$ of shape $(H, W, 3)$ and an exposure tensor $E$ of shape $(4, 4)$ (or similar structure) retrieved by image name.
-- Output: A corrected RGB image tensor $I_{out}$ of shape $(H, W, 3)$.
+- Input: Rendered RGB image $I_{in}$ with shape $(H, W, 3)$ and an image identifier (name).
+- Output: Color-corrected RGB image $I_{out}$ with shape $(H, W, 3)$.
 
 **Data Structures:**
-- `exposure`: A tensor of shape $(4, 4)$.
-  - `exposure[:3, :3]`: A $3 \times 3$ matrix representing the linear color transform.
-  - `exposure[:3, 3]`: A 3D vector representing the additive bias.
-  - The fourth row/column is unused for the calculation.
+- `exposure`: A tensor of shape $(4, 4)$ (or similar structure containing the first 4 rows/cols).
+  - `exposure[:3, :3]`: The $3 \times 3$ color transformation matrix $E_{3\times3}$.
+  - `exposure[:3, 3]`: The $3 \times 1$ bias vector $E_{3}$.
 
 **Steps:**
-1. Retrieve the exposure tensor $E$ using the unique identifier of the viewpoint camera (image name).
-2. Permute the input image $I_{in}$ from shape $(H, W, 3)$ to $(3, H, W)$ to facilitate matrix multiplication with the $3 \times 3$ transform.
-3. Multiply the permuted image by the $3 \times 3$ color transform matrix.
-4. Add the 3D bias vector to the result.
-5. Permute the result back to shape $(H, W, 3)$.
+1. Retrieve the `exposure` tensor associated with the current image name using a lookup function (e.g., `get_exposure_from_name`).
+2. Permute the input image $I_{in}$ from shape $(H, W, 3)$ to $(H, W, 3)$ layout suitable for matrix multiplication (typically $(H, W, 3)$ if treating pixels as vectors, or $(H \cdot W, 3)$ for batched matmul). The source code permutes to $(H, W, 3)$ then multiplies, implying the last dimension is the color channel.
+3. Apply the linear transform: Multiply the permuted image by the $3 \times 3$ matrix $E_{3\times3}$.
+4. Add the bias vector $E_{3}$ to each pixel.
+5. Permute the result back to the original spatial layout $(3, H, W)$ or $(H, W, 3)$ depending on the final tensor format required by the renderer.
 
 **Formula:**
-$$I_{out} = (I_{in} \cdot E_{3\times3})^T + E_{3}$$
-
+$$ I_{out} = (I_{in} \cdot E_{3\times3})^T + E_{3} $$
 Where:
 - $I_{in}$ is the input image tensor of shape $(H, W, 3)$.
-- $E_{3\times3}$ is the $3 \times 3$ color transform matrix extracted from $E[:3, :3]$.
-- $E_{3}$ is the 3D bias vector extracted from $E[:3, 3]$.
-- The operation is performed element-wise for the addition, broadcasting the bias vector across the spatial dimensions.
+- $E_{3\times3}$ is the $3 \times 3$ color transform matrix.
+- $E_{3}$ is the $3 \times 1$ bias vector.
+- The operation is performed per-pixel.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def trained_exposure_application(rendered_image: torch.Tensor, exposure: torch.Tensor) -> torch.Tensor:
+def trained_exposure_application(rendered_image, get_exposure_from_name, image_name):
     """
     Applies a learned per-image 3x3 color transform and 3D bias vector.
     
     Args:
-        rendered_image: Tensor of shape (H, W, 3).
-        exposure: Tensor of shape (4, 4), where exposure[:3, :3] is the color transform
-                  and exposure[:3, 3] is the bias vector.
-                  
+        rendered_image: Tensor of shape (3, H, W) or (H, W, 3).
+        get_exposure_from_name: Function to retrieve exposure tensor by image name.
+        image_name: String identifier for the current view.
+        
     Returns:
-        Tensor of shape (H, W, 3).
+        Tensor of shape (3, H, W) or (H, W, 3) matching input layout.
     """
-    # Permute from (H, W, 3) to (3, H, W)
-    permuted_image = rendered_image.permute(2, 0, 1)
+    # Retrieve the pre-computed exposure data
+    exposure = get_exposure_from_name(image_name)
     
-    # Extract 3x3 color transform and 3D bias
-    color_transform = exposure[:3, :3]
-    bias_vector = exposure[:3, 3]
+    # Extract the 3x3 matrix and 3D bias
+    # Note: Source assumes exposure is at least 4x4 or has these indices
+    color_transform = exposure[:3, :3]  # Shape (3, 3)
+    bias_vector = exposure[:3, 3]       # Shape (3,)
     
-    # Apply linear transform: (3, H, W) @ (3, 3)^T -> (3, H, W)
-    # Note: torch.matmul handles the batched matrix multiplication.
-    # If permuted_image is (3, H, W) and color_transform is (3, 3),
-    # we need to ensure dimensions align. 
-    # Standard matrix mult: (3, H, W) * (3, 3) implies (3, H, W) @ (3, 3)^T
-    # However, the source code uses: torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3])
-    # Let's re-read the source code carefully.
+    # Permute input to (H, W, 3) for matrix multiplication
+    # Assuming input is (3, H, W) as is common in PyTorch image tensors
+    if rendered_image.shape[0] == 3:
+        img_permuted = rendered_image.permute(1, 2, 0)  # (H, W, 3)
+    else:
+        img_permuted = rendered_image  # Already (H, W, 3)
+        
+    # Apply color transform: (H, W, 3) @ (3, 3) -> (H, W, 3)
+    # Using torch.matmul or equivalent
+    transformed = torch.matmul(img_permuted, color_transform)
     
-    # Source code:
-    # torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3]).permute(2, 0, 1)
-    # rendered_image is (H, W, 3)
-    # permute(1, 2, 0) -> (W, 3, H) ?? No, usually (H, W, 3) -> (W, H, 3) or (3, H, W).
-    # Let's look at the formula: I_out = (I_in * E)^T + E_3
-    # If I_in is (H, W, 3), and E is (3,3).
-    # The source code snippet:
-    # torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3])
-    # If rendered_image is (H, W, 3), permute(1, 2, 0) is (W, 3, H).
-    # matmul((W, 3, H), (3, 3)) -> (W, 3, H) if (3, H) is treated as a matrix?
-    # Actually, PyTorch matmul for 3D tensors: (b, m, n) @ (b, n, p) -> (b, m, p).
-    # Here, (W, 3, H) @ (3, 3) is invalid unless W=1 or broadcasting is used differently.
+    # Add bias: broadcast bias_vector (3,) to (H, W, 3)
+    # Bias is added to the last dimension
+    corrected = transformed + bias_vector
     
-    # Let's re-examine the source code snippet provided in the notes:
-    # torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3]).permute(2, 0, 1)
-    # + exposure[:3, 3, None, None]
-    
-    # If rendered_image is (H, W, 3).
-    # permute(1, 2, 0) -> (W, 3, H).
-    # exposure[:3, :3] is (3, 3).
-    # matmul((W, 3, H), (3, 3)) -> This requires the last dim of first arg (H) to match second arg's first dim (3)? No.
-    # matmul((A, B, C), (D, E)) -> If C != D, it fails.
-    # Wait, the source code might be assuming a specific layout or the notes are slightly misleading on the permutation.
-    # Let's look at the formula again: I_out = (I_in * E)^T + E_3
-    # If I_in is (H, W, 3), and we want to apply E (3x3) to each pixel.
-    # We can reshape to (H*W, 3), multiply by E^T (3x3), get (H*W, 3), reshape back.
-    # Or permute to (3, H, W), multiply by E (3x3) on the first dim?
-    # (3, H, W) @ (3, 3)^T -> (3, H, W).
-    
-    # Let's stick to the source code's logic as closely as possible, interpreting the permutation.
-    # If the source code is:
-    # torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3])
-    # And rendered_image is (H, W, 3).
-    # permute(1, 2, 0) is (W, 3, H).
-    # This only works if H=3? No.
-    # Maybe the source code meant permute(2, 0, 1) -> (3, H, W)?
-    # If (3, H, W) @ (3, 3)^T -> (3, H, W).
-    # Then permute(2, 0, 1) -> (H, W, 3).
-    
-    # Let's assume the standard implementation for per-pixel linear transform:
-    # 1. Reshape to (H*W, 3)
-    # 2. Multiply by E^T (3, 3) -> (H*W, 3)
-    # 3. Reshape to (H, W, 3)
-    # 4. Add bias.
-    
-    # However, the prompt says "Pseudocode ... rewritten in one clean common style".
-    # And "Sources disagree... merge them".
-    # The source code snippet is explicit. Let's try to interpret it correctly.
-    # Maybe rendered_image is (3, H, W) initially?
-    # "Permute rendered image to (H, W, 3)" is in the notes.
-    # So input is (H, W, 3).
-    # The source code: `torch.matmul(rendered_image.permute(1, 2, 0), exposure[:3, :3])`
-    # If `rendered_image` is (H, W, 3), `permute(1, 2, 0)` is (W, 3, H).
-    # This is mathematically invalid for matmul with (3, 3) unless H=3.
-    # There is likely a typo in the source code snippet provided in the notes or my interpretation of `permute`.
-    # In PyTorch, `permute(1, 2, 0)` on (H, W, 3) gives (W, 3, H).
-    # `permute(2, 0, 1)` on (H, W, 3) gives (3, H, W).
-    # If we use `permute(2, 0, 1)`, we get (3, H, W).
-    # `torch.matmul((3, H, W), (3, 3))` -> This is (3, H, W) @ (3, 3).
-    # PyTorch matmul: (b, m, n) @ (b, n, p) -> (b, m, p).
-    # Here, no batch dim. (3, H, W) is treated as (3, H*W) if we view it as a matrix?
-    # No, `matmul` on 3D tensors treats the last two dims as matrix dims.
-    # So (3, H, W) is not a valid matrix for matmul with (3, 3) in the standard sense unless we reshape.
-    # Actually, `torch.matmul` supports broadcasting.
-    # If A is (3, H, W) and B is (3, 3).
-    # It treats A as (3, H, W) and B as (1, 3, 3) broadcasted?
-    # No, matmul requires the last two dims to be matrices.
-    # (3, H, W) has last two dims (H, W). (3, 3) has last two dims (3, 3).
-    # H must equal 3? No.
-    
-    # Let's look at the formula again: $I_{out} = (I_{in} \cdot E_{3\times3})^T + E_{3}$
-    # If $I_{in}$ is (H, W, 3), then $I_{in} \cdot E_{3\times3}$ is not defined directly.
-    # It implies $I_{in}$ is treated as a matrix of pixels.
-    # Let's use the reshape method which is robust and standard.
-    
-    # Reshape to (H*W, 3)
-    h, w = rendered_image.shape[0], rendered_image.shape[1]
-    pixels = rendered_image.reshape(-1, 3)
-    
-    # Multiply by the transpose of the color transform to apply to column vectors
-    # If pixels are row vectors (1, 3), and E is (3, 3), then pixels @ E.T gives (1, 3).
-    transformed_pixels = torch.matmul(pixels, color_transform.T)
-    
-    # Add bias
-    transformed_pixels = transformed_pixels + bias_vector
-    
-    # Reshape back to (H, W, 3)
-    output = transformed_pixels.reshape(h, w, 3)
-    
+    # Permute back to original layout (3, H, W)
+    if rendered_image.shape[0] == 3:
+        output = corrected.permute(2, 0, 1)
+    else:
+        output = corrected
+        
     return output
 ```
 
+**Parameters:**
+- `exposure`: Specific to each image. Not given in the sources. Typical values are learned during training.
+
 **Edge Cases and Pitfalls:**
-- **Shape Mismatch:** Permutation operations must match tensor dimensions exactly. If the input image is not $(H, W, 3)$, the permutation will fail or produce incorrect results [S1, unofficial].
-- **Missing Data:** The method requires exposure data to be stored and retrievable by image name. If the exposure tensor is missing for a specific viewpoint, the method cannot proceed [S1, unofficial].
-- **Precision:** Floating-point precision issues may arise if the color transform values are very large or small, though this is generally mitigated by the linear nature of the operation [G].
+- Requires exposure data to be stored and retrievable by image name [S1, unofficial].
+- Permutation operations must match tensor dimensions exactly to avoid shape mismatches [S1, unofficial].
+- If the exposure tensor is not found, the method fails. [G] Handle missing keys with a default identity transform.
 
 ## Subtopics
 
-### [ExpModel](14212-expmodel.md)
-An Exposure model that applies a learned log-scale adjustment to RGB inputs based on an exposure condition. It extends the linear transform by incorporating non-linear log-scale adjustments, suitable for handling high dynamic range variations. Choose this when the exposure variation is non-linear or requires logarithmic compensation.
-
 ## Operating characteristics
-- **Time Complexity:** $O(H \times W)$, where $H$ and $W$ are the height and width of the image. The operation is a simple matrix multiplication and addition per pixel.
-- **Memory Complexity:** $O(H \times W)$ for the output image. The exposure tensor is small ($4 \times 4$) and negligible.
-- **Performance:** The operation is extremely fast, typically taking milliseconds for standard resolution images (e.g., $1024 \times 1024$) on modern GPUs.
-- **Strengths:** Simple to implement, computationally efficient, and effective for correcting global exposure mismatches.
-- **Limitations:** Only corrects linear color shifts and brightness. It cannot correct for non-linear tone mapping or complex lighting artifacts. It relies on pre-computed exposure data, which must be generated during training.
-- **When to use:** When the rendered image needs to be adjusted to match the exposure of the training data, and the relationship is approximately linear.
-- **When not to use:** When the exposure variation is non-linear, or when complex style transfer is required (use Reference Image Guided Colorization instead).
+- **Time Complexity**: $O(H \cdot W)$ for the matrix multiplication and bias addition. Very fast as it is a simple linear operation.
+- **Memory Complexity**: $O(H \cdot W)$ for the output image. The exposure tensor is small ($4 \times 4$).
+- **Strengths**: Computationally inexpensive; ensures consistency with training data exposure; simple to implement.
+- **Limitations**: Only applies linear color adjustments; cannot correct for non-linear lighting changes or complex shadows.
+- **When to use**: When the rendering pipeline produces images that need to match the exposure statistics of the training set for downstream tasks or visualization consistency.
+- **When not to use**: When non-linear color correction or style transfer is required.
 
 ## Background
-The method originates from the "Improved-GS" project by XiaoBin2001, an unofficial implementation of 3D Gaussian Splatting improvements. It was introduced to address exposure inconsistencies in rendered views by applying learned per-image color corrections. The approach leverages the fact that exposure conditions can vary between training and inference, and a simple linear transform can effectively align them.
+The method is part of the "Improved-GS" project, an unofficial implementation or extension of Gaussian Splatting techniques [S1, unofficial]. It builds on the principles of Reference Image Guided Colorization, specifically the need to map rendered colors to a target domain. The specific mechanism of using a learned per-image 3x3 transform is attributed to this source [S1, unofficial].
 
 ## Sources
 [S1] Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)

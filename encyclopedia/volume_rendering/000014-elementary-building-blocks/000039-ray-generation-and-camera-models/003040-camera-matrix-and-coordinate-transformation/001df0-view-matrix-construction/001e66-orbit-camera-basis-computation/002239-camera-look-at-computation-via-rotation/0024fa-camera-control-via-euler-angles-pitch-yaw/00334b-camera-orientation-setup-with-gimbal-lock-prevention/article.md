@@ -3,54 +3,32 @@
 Also called: Camera Matrix Setup, Spherical Camera Orientation with Up-Vector Flip, setCam, setCamera
 
 ## Overview
-This method constructs a camera's orientation matrix and position using spherical coordinates while explicitly handling the singularity where the camera points downwards or backwards to prevent gimbal lock and inverted views. It differs from standard Euler angle rotations by dynamically flipping the up-vector based on the vertical angle and distance, ensuring a stable coordinate frame without requiring roll compensation or complex quaternion interpolation.
+This method computes a camera's position, look-at target, and up-vector from spherical coordinates, explicitly handling the singularity where the camera points downwards or backwards to prevent gimbal lock and inverted views [S2, unofficial]. It constructs a 3x3 rotation matrix representing the camera's orientation using up, right, and forward vectors [S1, unofficial].
 
 ## How it works
-The method computes the camera position, look-at target, and up-vector from spherical parameters, then constructs the view basis. It addresses the singularity at the poles (specifically when looking straight down or backwards) by flipping the up-vector sign based on the product of the vertical rotation component and the distance.
-
 ### Inputs and Outputs
-- **Inputs**:
-  - `cam_vz`: Camera distance/zoom factor (scalar).
-  - `cam_dx`: Horizontal rotation angle (radians).
-  - `cam_dy`: Vertical rotation angle (radians).
-  - `cameraRoll`: Roll angle (radians), used in alternative basis construction [S1, unofficial].
-  - `cameraTarget`: Target point (vector), typically `(0,0,0)` [S2, unofficial].
-  - `cameraOrigin`: Origin point (vector), derived from spherical calculation [S2, unofficial].
-- **Outputs**:
-  - `cameraPosition`: 3D vector.
-  - `cameraUp`: Normalized up vector.
-  - `cameraRight`: Normalized right vector.
-  - `cameraForward`: Normalized forward vector.
-  - `viewMatrix`: 3x3 or 4x4 matrix constructed from basis vectors.
+- **Inputs**: `cam_vz` (distance/zoom), `cam_dx` (horizontal angle), `cam_dy` (vertical angle), `cameraRoll` (optional roll angle), and `cameraTarget` (look-at point) [S1, unofficial][S2, unofficial].
+- **Outputs**: `cameraPosition`, `cameraUp`, `cameraRight`, `cameraForward`, and `viewMatrix` [S1, unofficial][S2, unofficial].
 
 ### Data Structures
-- **Vector**: 3-component float vector `(x, y, z)`.
-- **Matrix**: 3x3 column-major or row-major matrix composed of basis vectors. Standard graphics APIs often expect 4x4, but the core orientation is 3x3 [S1, unofficial].
+- **Vector**: 3-component float vector `(x, y, z)` [S2, unofficial].
+- **Matrix**: 3x3 column-major matrix composed of basis vectors `[S1, unofficial]`.
 
 ### Steps
-1. **Compute Vertical Component**: Calculate the product of the vertical angle's cosine and the distance: $val = cam\_vz \cdot \cos(cam\_dy)$.
-2. **Determine Initial Up Sign**:
-   - If $val \ge 0$, set $up\_vektor = 1.0$.
-   - Else, set $up\_vektor = -1.0$.
-3. **Flip for Backward/Downward Orientation**:
-   - If $cam\_vz < 0$, flip the sign: $up\_vektor = -up\_vektor$.
-   - *Note*: This logic prevents the view from inverting when the camera passes through the singularity region [S2, unofficial].
-4. **Compute Camera Position**:
-   - Calculate position $\mathbf{p}$ using spherical coordinates:
-     $$
-     \mathbf{p} = \begin{pmatrix} -cam\_vz \cdot \sin(cam\_dx) \cdot \cos(cam\_dy) \\ cam\_vz \cdot \sin(cam\_dy) \\ -cam\_vz \cdot \cos(cam\_dx) \cdot \cos(cam\_dy) \end{pmatrix}
-     $$
-   - This places the camera at distance $cam\_vz$ from the origin, rotated by $cam\_dx$ around the Y-axis (horizontal) and $cam\_dy$ from the horizontal plane (vertical) [S2, unofficial].
-5. **Set Look-At Target**:
-   - Set target to $(0, 0, 0)$ or a specified center point [S2, unofficial].
-6. **Set Up Vector**:
-   - Set initial up vector to $(0, up\_vektor, 0)$ [S2, unofficial].
-   - *Alternative Basis Construction*: If using a roll angle, compute an intermediate plane vector $\mathbf{p}_{plane} = (\sin(\text{cameraRoll}), \cos(\text{cameraRoll}), 0.0)$, then compute $\mathbf{u} = \text{normalize}(\mathbf{f} \times \mathbf{p}_{plane})$ and $\mathbf{r} = \mathbf{u} \times \mathbf{f}$, where $\mathbf{f}$ is the forward vector [S1, unofficial].
-7. **Construct Basis**:
-   - Forward: $\mathbf{f} = \text{normalize}(\text{cameraTarget} - \text{cameraPosition})$.
-   - Right: $\mathbf{r} = \mathbf{u} \times \mathbf{f}$ (or $\mathbf{f} \times \mathbf{u}$ depending on handedness; source implies $\mathbf{u} \times \mathbf{f}$ for right-handed if $\mathbf{u}$ is up) [S1, unofficial].
-   - Up: $\mathbf{u}$ (normalized).
-   - Return matrix with columns $\mathbf{u}, \mathbf{r}, \mathbf{f}$ [S1, unofficial].
+1. Compute camera position using spherical coordinates [S2, unofficial].
+2. Set look-at target to `(0, 0, 0)` [S2, unofficial].
+3. Compute forward vector: `cameraForward = normalize(cameraTarget - cameraPosition)` [S1, unofficial].
+4. Calculate vertical component: `val = cam_vz * cos(cam_dy)` [S2, unofficial].
+5. Determine initial up-vector sign: if `val >= 0`, set `up_vektor = 1.0`; else `up_vektor = -1.0` [S2, unofficial].
+6. Flip sign for backward orientation: if `cam_vz < 0`, set `up_vektor = -up_vektor` [S2, unofficial].
+7. Set up-vector to `(0, up_vektor, 0)` [S2, unofficial].
+8. Compute right vector: `cameraRight = cross(cameraUp, cameraForward)` [S1, unofficial].
+9. Construct 3x3 matrix from columns `[cameraUp, cameraRight, cameraForward]` [S1, unofficial].
+
+### Formulas
+- Position: $\mathbf{p} = \begin{pmatrix} -v \sin \theta_x \cos \theta_y \\ v \sin \theta_y \\ -v \cos \theta_x \cos \theta_y \end{pmatrix}$ where $v = cam\_vz$, $\theta_x = cam\_dx$, $\theta_y = cam\_dy$ [S2, unofficial].
+- Up-vector: $\mathbf{u} = \begin{pmatrix} 0 \\ \pm 1 \\ 0 \end{pmatrix}$ [S2, unofficial].
+- The up-vector flips sign if $v \cos \theta_y < 0$ or $v < 0$ [S2, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -59,109 +37,69 @@ The method computes the camera position, look-at target, and up-vector from sphe
 import math
 
 def setup_camera_orientation(cam_vz, cam_dx, cam_dy, camera_roll=0.0, target=(0.0, 0.0, 0.0)):
-    """
-    Computes camera position, up, right, and forward vectors.
-    Handles gimbal lock prevention by flipping up-vector based on vertical angle and distance.
-    
-    Args:
-        cam_vz: Distance from target (scalar).
-        cam_dx: Horizontal rotation angle (radians).
-        cam_dy: Vertical rotation angle (radians).
-        camera_roll: Roll angle (radians).
-        target: Look-at target vector.
-        
-    Returns:
-        position: Camera position vector.
-        up: Up vector.
-        right: Right vector.
-        forward: Forward vector.
-    """
-    # Step 1 & 2: Determine up-vector sign to prevent inversion
-    val = cam_vz * math.cos(cam_dy)
-    if val >= 0:
-        up_vektor = 1.0
-    else:
-        up_vektor = -1.0
-        
-    # Step 3: Flip if distance is negative (backwards/downwards logic)
-    if cam_vz < 0:
-        up_vektor *= -1.0
-        
-    # Step 4: Compute camera position
-    # Formula: p = (-v*sin(dx)*cos(dy), v*sin(dy), -v*cos(dx)*cos(dy))
+    # Step 1: Compute camera position
     x = -cam_vz * math.sin(cam_dx) * math.cos(cam_dy)
     y = cam_vz * math.sin(cam_dy)
     z = -cam_vz * math.cos(cam_dx) * math.cos(cam_dy)
     position = (x, y, z)
-    
-    # Step 5: Target is fixed or provided
-    # target = (0.0, 0.0, 0.0) # Default
-    
-    # Step 6: Compute Forward Vector
-    # f = normalize(target - position)
+
+    # Step 2: Target is fixed at origin
+    # target = (0.0, 0.0, 0.0)
+
+    # Step 3: Compute forward vector
     dx = target[0] - position[0]
     dy = target[1] - position[1]
     dz = target[2] - position[2]
     length = math.sqrt(dx*dx + dy*dy + dz*dz)
     if length == 0:
-        forward = (0.0, 0.0, -1.0) # Guard against zero length
+        forward = (0.0, 0.0, -1.0) # Guard against zero length [G]
     else:
         forward = (dx/length, dy/length, dz/length)
-        
-    # Step 7: Compute Up and Right Vectors
-    # Method A: Simple Up-Vector Flip (from S2)
-    # up = (0.0, up_vektor, 0.0)
-    # right = cross(up, forward)
-    
-    # Method B: Roll-based Basis (from S1)
-    # Intermediate plane vector
-    plane_x = math.sin(camera_roll)
-    plane_y = math.cos(camera_roll)
-    plane_z = 0.0
-    
-    # Up = normalize(cross(forward, plane))
-    # cross(f, p) = (f_y*p_z - f_z*p_y, f_z*p_x - f_x*p_z, f_x*p_y - f_y*p_x)
-    up_x = forward[1]*plane_z - forward[2]*plane_y
-    up_y = forward[2]*plane_x - forward[0]*plane_z
-    up_z = forward[0]*plane_y - forward[1]*plane_x
-    
-    up_len = math.sqrt(up_x**2 + up_y**2 + up_z**2)
-    if up_len == 0:
-        up = (0.0, 1.0, 0.0) # Fallback
+
+    # Step 4-6: Determine up-vector sign to prevent inversion
+    val = cam_vz * math.cos(cam_dy)
+    if val >= 0:
+        up_vektor = 1.0
     else:
-        up = (up_x/up_len, up_y/up_len, up_z/up_len)
-        
-    # Right = cross(up, forward)
-    # Note: Source S1 says right = cross(up, forward). Standard right-handed is cross(up, forward) if up is Y, forward is -Z? 
-    # Let's stick to the source definition: right = cross(up, forward)
+        up_vektor = -1.0
+    if cam_vz < 0:
+        up_vektor *= -1.0
+
+    # Step 7: Set up-vector
+    up = (0.0, up_vektor, 0.0)
+
+    # Step 8: Compute right vector
     right_x = up[1]*forward[2] - up[2]*forward[1]
     right_y = up[2]*forward[0] - up[0]*forward[2]
     right_z = up[0]*forward[1] - up[1]*forward[0]
-    
+    right = (right_x, right_y, right_z)
+
     return position, up, right, forward
 ```
 
 ### Parameters
-- `cam_vz`: Camera distance/zoom. Typical values not specified, but clipping planes are near `0.1f` and far `30.0f` [S2, unofficial].
-- `cam_dx`: Horizontal rotation.
-- `cam_dy`: Vertical rotation.
-- `cameraRoll`: Roll angle.
+- `cam_vz`: Camera distance/zoom [S2, unofficial].
+- `cam_dx`: Horizontal rotation angle [S2, unofficial].
+- `cam_dy`: Vertical rotation angle [S2, unofficial].
+- `cameraRoll`: Roll angle [S1, unofficial].
+- Clipping planes: near `0.1f`, far `30.0f` [S2, unofficial].
+- Typical values for angles and distance: Not given in the sources.
 
 ### Edge Cases and Pitfalls
-- **Gimbal Lock/Inversion**: Occurs when the camera points straight down or backwards. The explicit check on `cam_vz * cos(cam_dy)` and `cam_vz` prevents the up-vector from flipping incorrectly, which would invert the view [S2, unofficial].
-- **Zero Length Forward Vector**: If the camera position equals the target, normalization fails. A guard is required [G].
-- **Precision**: Floating point comparisons for `val >= 0` are sensitive to precision near zero. [G] Consider a small epsilon if stability is critical.
+- **Gimbal Lock/Inversion**: Occurs when the camera points straight down or backwards [S2, unofficial].
+- **Zero Length Forward Vector**: If the camera position equals the target, normalization fails [S1, unofficial].
+- **Precision**: Floating point comparisons for `val >= 0` are sensitive to precision near zero [G].
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per frame. Involves basic trigonometric functions and vector operations.
-- **Memory Complexity**: $O(1)$. No persistent data structures required beyond the camera state.
-- **Strengths**: Simple to implement; avoids complex quaternion math; explicitly handles the singularity at the poles for spherical cameras.
-- **Limitations**: The "flip" logic is specific to the coordinate system and angle conventions used in [S2, unofficial]. It may not generalize to all camera models without adjustment. Roll handling in [S1, unofficial] is separate from the flip logic in [S2, unofficial].
-- **When to Use**: Spherical camera controls (orbit cameras) where the user rotates around a central point.
-- **When Not to Use**: First-person cameras with arbitrary roll, or when smooth interpolation across the pole is required (quaternions are better).
+- **Time Complexity**: $O(1)$ per frame [G].
+- **Memory Complexity**: $O(1)$ [G].
+- **Strengths**: Explicitly handles the singularity at the poles for spherical cameras [S2, unofficial].
+- **Limitations**: The flip logic is specific to the coordinate system and angle conventions used in [S2, unofficial] [S2, unofficial].
+- **When to Use**: Spherical camera controls where the user rotates around a central point [S2, unofficial].
+- **When Not to Use**: Not given in the sources.
 
 ## Background
-This method originates from implementations of spherical camera controls in volume rendering and 3D visualization tools. The specific up-vector flip logic is documented in the `parallel-volume-rendering` repository [S2, unofficial], addressing the common issue of view inversion when the camera passes through the vertical axis. The basis construction using roll is found in the `DivineVoxelEngine` [S1, unofficial].
+This method originates from implementations of spherical camera controls in volume rendering and 3D visualization tools [S2, unofficial]. The specific up-vector flip logic is documented in the `parallel-volume-rendering` repository [S2, unofficial]. The basis construction using roll is found in the `DivineVoxelEngine` [S1, unofficial].
 
 ## Sources
 [S1] Divine-Star-Software/DivineVoxelEngine, https://github.com/Divine-Star-Software/DivineVoxelEngine, fetched 2026-10-26 (unofficial)

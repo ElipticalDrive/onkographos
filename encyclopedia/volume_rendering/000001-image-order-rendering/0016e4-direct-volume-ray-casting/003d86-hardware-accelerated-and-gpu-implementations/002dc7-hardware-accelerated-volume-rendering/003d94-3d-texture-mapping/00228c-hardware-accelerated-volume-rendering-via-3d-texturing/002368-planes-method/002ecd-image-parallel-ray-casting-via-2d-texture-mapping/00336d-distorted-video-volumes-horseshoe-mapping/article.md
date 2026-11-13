@@ -2,7 +2,7 @@
 Also called: Backward-mapping for deformed volumes, Horseshoe Volume Rendering
 
 ## Overview
-This method renders deformed volumetric data, specifically video volumes bent into a horseshoe shape, by distorting texture coordinates rather than geometry [S1, unofficial]. It enables the use of standard planar, view-aligned texture slicing (as described in [Image-Parallel Ray Casting via 2D Texture Mapping](5854-image-parallel-ray-casting-via-2d-texture-mapping.md)) on non-planar data by computing inverse mappings in the fragment shader [S1, unofficial]. Unlike forward mapping, it avoids gaps and overlaps inherent in geometry deformation, ensuring every pixel is covered by a valid texture lookup [S1, unofficial].
+This method renders deformed volumetric data, specifically video volumes bent into a horseshoe shape, by distorting texture coordinates rather than geometry [S1, unofficial]. It enables the use of standard planar, view-aligned texture slicing (as described in [Image-Parallel Ray Casting via 2D Texture Mapping](5854-image-parallel-ray-casting-via-2d-texture-mapping.md)) on non-planar data by computing inverse mappings in the fragment shader [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,7 +12,7 @@ This method renders deformed volumetric data, specifically video volumes bent in
 - Output: Texture coordinates $(x_C, y_C, t_C)$ in computation space $C$, used to sample the video volume [S1, unofficial].
 
 **Data Structures:**
-- Video Volume $V$: Array of 2D images.
+- Video Volume $V$: Array of 2D images [S1, unofficial].
 - Parameters:
   - $r_{min}, r_{max}$: Floats defining the radial range of the horseshoe [S1, unofficial].
   - $y_s$: Float scaling the vertical dimension [S1, unofficial].
@@ -61,6 +61,7 @@ The following Python-like pseudocode implements the inverse mapping within a fra
 # g_fOutRad: float, outer radius r_max
 # g_vScaleCrd: float2, (offset, scale) for temporal mapping
 # PI: float, mathematical constant π
+# y_s: float, vertical scaling factor
 
 # 1. Preprocess x coordinate to match source coordinate system assumptions
 txCrd_x = ((txCrd.x * 2.0) - 1.0) * (-1.0)
@@ -71,24 +72,21 @@ rp_y = atan2(txCrd.z, txCrd_x)
 
 # 3. Compute C-space coordinates
 lkup_x = (rp_x - g_fInRad) / (g_fOutRad - g_fInRad)
-lkup_y = txCrd.y
-
-# 4. Compute temporal coordinate t_C
-tmpZ = rp_y / PI
-lkup_z = (tmpZ - g_vScaleCrd.x) * g_vScaleCrd.y
+lkup_y = txCrd.y / y_s  # Source code omits division, assuming y_s=1 or pre-scaled input
+lkup_z = ((rp_y / PI) - g_vScaleCrd.x) * g_vScaleCrd.y
 
 # Output: lkup = (lkup_x, lkup_y, lkup_z)
 ```
 
 **Parameters:**
-- $r_{min}, r_{max}$: Not given in the sources.
-- $y_s$: Not given in the sources.
-- $g_{vScaleCrd}$: Not given in the sources.
+- $r_{min}, r_{max}$: Define the inner and outer radii of the horseshoe geometry [S1, unofficial].
+- $y_s$: Scaling factor for the $y$ dimension [S1, unofficial].
+- $g_{vScaleCrd}$: Vector $(\text{offset}, \text{scale})$ applied to the normalized angle to compute the temporal coordinate $t_C$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **Gradient Transformation:** Since video volumes are typically unlit, the transformation of volume gradients for lighting calculations can be omitted [S1, unofficial]. If shading is required, the Jacobian of the transformation must be applied to gradients [G].
-- **Angle Continuity:** `atan2` has a discontinuity at the branch cut. Ensure texture coordinates wrap correctly if the horseshoe is not a full circle or if interpolation artifacts are visible [G].
-- **Radius Bounds:** If $r_p < r_{min}$ or $r_p > r_{max}$, $x_C$ will be outside $[0,1]$. Clamp or handle out-of-bounds sampling [G].
+- **Angle Continuity:** `atan2` has a discontinuity at the branch cut [G]. Ensure texture coordinates wrap correctly if the horseshoe is not a full circle or if interpolation artifacts are visible [G].
+- **Radius Bounds:** If $r_p < r_{min}$ or $r_p > r_{max}$, $x_C$ will be outside $[0,1]$ [G]. Clamp or handle out-of-bounds sampling [G].
 
 ## Subtopics
 
@@ -96,7 +94,7 @@ lkup_z = (tmpZ - g_vScaleCrd.x) * g_vScaleCrd.y
 Opaque flow geometry (arrows, lines) can be added to the scene to visualize optical flow fields alongside the distorted volume [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per fragment for the coordinate transformation. The cost is dominated by the texture lookup and compositing from the parent method [G].
+- **Time Complexity:** $O(1)$ per fragment for the coordinate transformation [G]. The cost is dominated by the texture lookup and compositing from the parent method [G].
 - **Memory Complexity:** $O(1)$ additional memory for temporary variables in the shader [G].
 - **Strengths:** No geometric deformation overhead; compatible with standard hardware texture mapping; handles complex deformations like horseshoes easily [S1, unofficial].
 - **Limitations:** Requires inverse mapping functions (`atan2`, `sqrt`) which may be slightly more expensive than linear transforms, though negligible on modern GPUs [G]. Not suitable for lighting without gradient transformation [S1, unofficial].

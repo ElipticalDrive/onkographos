@@ -1,0 +1,37 @@
+# Feature-Based Transfer Functions
+
+Also called: Feature-Based Classification, Local Classification
+
+## Overview
+Feature-Based Transfer Functions map volume data to color and opacity using local or spatial features (such as texture, distance to a structure, or local scale) rather than just scalar intensity [S1]. This family solves the ambiguity where different structures share similar scalar values but differ in their physical or geometric properties. It sets itself apart from scalar-based methods by incorporating neighborhood statistics or global spatial relationships, distinguishing it from siblings like [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) which focuses on gradients, and [Data Feature-Based Classification](5934-data-feature-based-classification.md) which may use broader feature sets.
+
+## Shared principles
+All methods in this family extend the standard 1D transfer function $T(v) \rightarrow (c, \alpha)$ to a multi-dimensional domain $T(v, f_1, \dots, f_n) \rightarrow (c, \alpha)$, where $v$ is the scalar data value and $f_i$ are computed feature metrics [S1].
+
+1.  **Preprocessing:** Most methods require computing auxiliary 3D volumes (feature maps) before rendering. This includes texture metrics, distance fields, or scale fields [S1, S2, S3].
+2.  **Lookup:** During raycasting, sample points retrieve both the scalar value $v$ and the feature value $f$ at position $\mathbf{x}$ [S1, S2, S3].
+3.  **Mapping:** The optical properties are determined by querying a 2D (or higher-dimensional) Lookup Table (LUT) or shader function using the pair $(v, f)$ [S1, S2, S3].
+4.  **Compositing:** The resulting color and opacity are used in the standard front-to-back volume rendering integral [S1, S2, S3].
+
+## Subtopics
+
+### [Texture-based Transfer Function](5450-texture-based-transfer-function.md)
+Maps volume data using scalar values and 20 computed texture metrics (6 first-order, 7 GLCM-based, 7 Run-Length based). It distinguishes structures with similar intensities but different textures. Choose it when intensity alone is insufficient to separate materials. It is computationally expensive due to preprocessing and sensitive to noise.
+
+### [Distance-based Transfer Function](5451-distance-based-transfer-function.md)
+Maps volume data using scalar values and the spatial distance to a segmented reference structure. It highlights neighborhoods around known objects (e.g., tumors). Choose it when spatial context relative to a specific structure is critical. It requires prior segmentation, making it unsuitable for unsegmented or time-dependent data without significant overhead.
+
+### [Size-Based Transfer Functions](5845-size-based-transfer-functions.md)
+Maps volume data using scalar values and the local scale (size) of features derived from continuous scale-space analysis. It distinguishes features by spatial extent (e.g., veins vs. skin) rather than intensity. Choose it when feature size is the distinguishing characteristic. It uses GPU-accelerated scale-space computation and includes a visibility test controlled by threshold $\tau$.
+
+### Feature Finding via Transfer Function Specification
+#### step
+Use a 1D histogram of the scalar values if the goal is to find one or more homogenous regions [S1].
+#### usage
+In Computed Tomography (CT) medical scans, prior knowledge of tissue densities allows highlighting scalar ranges corresponding to specific regions [S1].
+
+## Background
+The concept of feature-based classification emerged as a response to the limitations of manual, scalar-only transfer function specification, which is often time-consuming and ambiguous [S1]. The family builds on the idea that local differential properties and spatial relationships provide richer cues for classification than global intensity histograms alone [S1].
+
+## Sources
+[S1] Direct Volume Rendering: A 3D Plotting Technique for ..., https://www.sci.utah.edu/~cscheid/pubs/dvr.pdf, fetched 2026-10-27

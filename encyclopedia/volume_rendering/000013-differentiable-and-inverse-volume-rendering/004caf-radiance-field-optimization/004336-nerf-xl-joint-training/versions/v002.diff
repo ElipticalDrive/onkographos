@@ -1,0 +1,162 @@
+--- v001.md
++++ v002.md
+@@ -8,38 +8,30 @@
+ ## How it works
+ **Inputs:**
+-*   A set of $N$ images with known camera poses and intrinsics.
+-*   A scene bounding box partitioned into $K$ disjoint spatial regions (tiles), where $K$ is the number of available GPUs.
+-*   A NeRF architecture (MLP) with parameters $\theta_k$ assigned to region $k$.
++*   $N$ training images with known camera poses and intrinsics [G].
++*   A scene bounding box partitioned into $K$ disjoint spatial regions, one per GPU [S1].
++*   A NeRF architecture (MLP) with parameters $\theta_k$ assigned to region $k$ [S1].
+ 
+ **Outputs:**
+-*   Optimized NeRF parameters $\{\theta_1, \dots, \theta_K\}$ for each region.
+-*   A single set of per-camera embeddings (appearance/pose) optimized jointly.
++*   Optimized NeRF parameters $\{\theta_1, \dots, \theta_K\}$ for each region [S1].
++*   A single set of per-camera embeddings (appearance/pose) optimized jointly [S1].
+ 
+ **Data Structures:**
+-*   **Region Assignment:** A mapping from 3D coordinates to GPU ID. Each GPU $k$ stores parameters $\theta_k$ for its specific spatial tile.
+-*   **Per-Camera Embeddings:** A global list of embeddings, one per training image, shared across all GPUs.
+-*   **Sample Buffer:** For each ray, a list of samples $(t_i, \mathbf{x}_i)$ along the ray segment within the scene bounding box.
++*   **Region Assignment:** A mapping from 3D coordinates to GPU ID based on disjoint bounding boxes [S1]. Each GPU $k$ stores parameters $\theta_k$ for its tile [S1].
++*   **Per-Camera Embeddings:** A global list of embeddings, one per training image, shared across all GPUs [S1].
++*   **Sample Buffer:** For each ray, a list of samples $(t_i, \mathbf{x}_i)$ along the ray segment within the scene bounding box [G].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Partitioning:** Divide the 3D scene bounding box into $K$ disjoint, non-overlapping spatial regions. Assign each region to a distinct GPU $k \in \{1, \dots, K\}$ [S1].
+-2.  **Forward Pass (Local Evaluation):** For a given training image and its corresponding ray:
+-    *   Determine the intersection of the ray with the global bounding box.
+-    *   Sample points $\mathbf{x}_i$ along the ray.
+-    *   For each sample $\mathbf{x}_i$, identify the GPU $k$ responsible for the region containing $\mathbf{x}_i$.
+-    *   On GPU $k$, evaluate the local NeRF $\theta_k$ at $\mathbf{x}_i$ using the global per-camera embedding for the current image to obtain local color $\mathbf{c}_i$ and density $\sigma_i$ [S1].
++2.  **Forward Pass (Local Evaluation):** For a given training image and its corresponding ray: determine the intersection of the ray with the global bounding box and sample points $\mathbf{x}_i$ along the ray [G]. For each sample $\mathbf{x}_i$, identify the GPU $k$ responsible for the region containing $\mathbf{x}_i$ [S1]. On GPU $k$, evaluate the local NeRF $\theta_k$ at $\mathbf{x}_i$ using the global per-camera embedding for the current image to obtain local color $\mathbf{c}_i$ and density $\sigma_i$ [S1].
+ 3.  **Broadcast:** Collect the $(\mathbf{c}_i, \sigma_i)$ pairs from all GPUs. Broadcast these sample values to all GPUs so that every GPU possesses the complete set of samples for the ray [S1].
+ 4.  **Global Volume Rendering:** On each GPU, perform standard front-to-back volume rendering using the global set of samples to compute the final pixel color $\mathbf{C}$ and transmittance [S1]. The rendering equation is:
+-    $$
+-    \mathbf{C} = \sum_{i=1}^{M} T_i (1 - \alpha_i) \mathbf{c}_i
+-    $$
+-    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$, and $\delta_i$ is the distance between samples [S1].
++    $$C(t_n \rightarrow t_f) = \int_{t_n}^{t_f} T(t_n \rightarrow t) \sigma(t) c(t) dt, \quad T(t_n \rightarrow t) = \exp\left(-\int_{t_n}^t \sigma(s) ds\right)$$
++    where $T$ is transmittance, $\sigma$ is density, and $c$ is color [S1]. (Discrete approximation is standard [G].)
+ 5.  **Loss Computation:** Compute the photometric loss and the distortion loss $\mathcal{L}_{dist}$ on each GPU. The distortion loss is calculated as:
+-    $$
+-    \mathcal{L}_{dist} = \int_{t_n}^{t_f} w(t_i)w(t_j) |t_i - t_j| \, dt_i \, dt_j
+-    $$
++    $$\mathcal{L}_{dist}(t_n \rightarrow t_f) = \int_{t_n}^{t_f} w(t_i)w(t_j) |t_i - t_j| \, dt_i \, dt_j$$
+     where $w(t) = T(t_n \rightarrow t)\sigma(t)$ is the volume rendering weight [S1].
+-6.  **Backward Pass (Local Gradient):** Compute gradients for the local NeRF parameters $\theta_k$ and the global per-camera embeddings locally on each GPU. **No gradient synchronization** is required between GPUs during the backward pass [S1].
+-7.  **Parameter Update:** Update the local parameters $\theta_k$ and the global embeddings using the computed gradients [S1].
++6.  **Backward Pass (Local Gradient):** Compute gradients for the local NeRF parameters $\theta_k$ and the global per-camera embeddings locally on each GPU. No gradient synchronization is required between GPUs during the backward pass [S1].
++7.  **Parameter Update:** Update the local parameters $\theta_k$ locally on each GPU. Update the shared per-camera embeddings using standard distributed optimization techniques [G].
+ 
+ **Pseudocode:**
+@@ -48,53 +40,67 @@
+ # Global state
+ num_gpus = K
+-camera_embeddings = [Embedding() for _ in num_images] # Shared across GPUs
+-nerf_params = [MLP() for _ in range(num_gpus)] # Each GPU holds one MLP
+-region_bounds = [Box() for _ in range(num_gpus)] # Disjoint spatial regions
++camera_embeddings = [Embedding() for _ in range(num_images)]
++nerf_params = [MLP() for _ in range(num_gpus)]
++region_bounds = [Box(min_i, max_i) for i in range(num_gpus)]
++
++def sample_ray(origin, direction, num_samples):
++    t_vals = [i / num_samples for i in range(num_samples)]
++    return [origin + direction * t for t in t_vals]
++
++def get_gpu_for_point(point, region_bounds):
++    for k, box in enumerate(region_bounds):
++        if box.contains(point):
++            return k
++    return 0
++
++def volume_render(all_samples):
++    T = 1.0
++    color = [0.0, 0.0, 0.0]
++    prev_t = all_samples[0].t
++    for sample in all_samples:
++        delta = sample.t - prev_t
++        alpha = 1.0 - math.exp(-sample.sigma * delta)
++        color = [color[d] + T * alpha * sample.color[d] for d in range(3)]
++        T = T * (1.0 - alpha)
++        prev_t = sample.t
++    return color
++
++def compute_distortion_loss(all_samples):
++    loss = 0.0
++    for i in range(len(all_samples)):
++        for j in range(len(all_samples)):
++            t_i = all_samples[i].t
++            t_j = all_samples[j].t
++            w_i = all_samples[i].T * all_samples[i].sigma
++            w_j = all_samples[j].T * all_samples[j].sigma
++            delta_i = all_samples[i].t - (all_samples[i-1].t if i > 0 else 0)
++            delta_j = all_samples[j].t - (all_samples[j-1].t if j > 0 else 0)
++            loss += w_i * w_j * abs(t_i - t_j) * delta_i * delta_j
++    return loss
+ 
+ def forward_pass(ray_origin, ray_direction, image_idx):
+-    # 1. Sample points along the ray within the global bounding box
+     samples = sample_ray(ray_origin, ray_direction, num_samples=M)
+-    
+-    local_samples = [None] * num_gpus
+-    
+-    # 2. Evaluate local NeRFs on respective GPUs
+-    for i, point in enumerate(samples):
++    local_samples = [[] for _ in range(num_gpus)]
++
++    for point in samples:
+         gpu_id = get_gpu_for_point(point, region_bounds)
+-        # Evaluate local MLP with global camera embedding
+         color, density = nerf_params[gpu_id].forward(point, camera_embeddings[image_idx])
+-        
+-        if local_samples[gpu_id] is None:
+-            local_samples[gpu_id] = []
+         local_samples[gpu_id].append((point, color, density))
+-        
+-    # 3. Broadcast samples to all GPUs
+-    # In a real distributed system, this involves NCCL/PCIe transfers
+-    all_samples = gather_all(local_samples) 
+-    
+-    # 4. Global Volume Rendering on each GPU
+-    # Each GPU computes the final color using the full set of samples
++
++    all_samples = []
++    for gpu_samples in local_samples:
++        all_samples.extend(gpu_samples)
++    all_samples.sort(key=lambda x: x.point.t)
++
+     final_color = volume_render(all_samples)
+-    
+-    # 5. Compute Losses
+-    # Photometric loss against ground truth image
+     photometric_loss = mse(final_color, ground_truth_color)
+-    
+-    # Distortion loss using the weights derived from the global samples
+     distortion_loss = compute_distortion_loss(all_samples)
+-    
+     return final_color, photometric_loss, distortion_loss
+ 
+ def backward_pass(photometric_loss, distortion_loss):
+-    # 6. Local Gradient Computation
+-    # Gradients for local MLP parameters and global camera embeddings
+-    # No cross-GPU gradient sync needed for MLPs
+     grads_camera = compute_gradients(camera_embeddings, photometric_loss + distortion_loss)
+-    
+     for gpu_id in range(num_gpus):
+         local_grads = compute_gradients(nerf_params[gpu_id], photometric_loss + distortion_loss)
+         update(nerf_params[gpu_id], local_grads)
+-        
+-    # 7. Update Global Embeddings
+-    # Aggregating gradients for shared embeddings (e.g., via AllReduce or central optimizer)
+     update(camera_embeddings, grads_camera)
+ ```
+@@ -115,5 +121,4 @@
+ *   **Limitations:** Requires forward-pass synchronization (broadcasting samples), which can be a bottleneck if bandwidth is limited [S1].
+ *   **When to use:** Large-scale scenes requiring high capacity and detail, where blending artifacts of independent training are unacceptable [S1].
+-*   **When not to use:** Small scenes that fit on a single GPU; scenarios where forward-pass communication bandwidth is severely constrained [S1].
+ 
+ ## Background

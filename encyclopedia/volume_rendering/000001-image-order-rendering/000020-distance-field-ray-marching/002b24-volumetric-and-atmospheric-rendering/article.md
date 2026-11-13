@@ -3,44 +3,57 @@
 Also called: Standard 3ds Max atmospheric
 
 ## Overview
-Volumetric and Atmospheric Rendering is a family of techniques for visualizing participating media (such as smoke, fire, clouds, and planetary atmospheres) by integrating light transport along view rays through a density field. It solves the problem of rendering non-surface-based geometry where shading is defined by volumetric properties rather than surface materials. It is distinguished from sibling methods like [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) by its reliance on explicit density integration (often via ray marching) rather than implicit surface intersection, and from [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md) by its broader applicability to generic volumetric effects like fire and smoke without requiring specific planetary geometry models.
+Volumetric and Atmospheric Rendering is a family of techniques that visualize participating media by integrating light transport along view rays through a density field. It solves the problem of rendering non-surface-based phenomena such as smoke, fire, clouds, and planetary atmospheres, which lack explicit geometric boundaries. It is distinguished from sibling methods like [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) by its reliance on sampled density fields or explicit atmospheric models rather than implicit Signed Distance Fields, and from [Ray Marching with Single Scattering](2057-ray-marching-with-single-scattering.md) by its broader scope encompassing global atmospheric scattering and temporal accumulation strategies.
 
 ## Shared principles
-The family operates on the principle of the Radiative Transfer Equation (RTE), discretized along a ray $r(t) = \mathbf{o} + t\mathbf{d}$. The core mechanism involves marching through a density field $\rho(\mathbf{p})$ to accumulate color and opacity.
+The family operates on the principle of discretizing the Radiative Transfer Equation (RTE) along a ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector. The integration computes the accumulated color $C$ and transmittance $T$ by marching through a medium defined by density $\rho(\mathbf{p})$, scattering coefficient $\sigma_s$, and absorption coefficient $\sigma_a$.
 
-1.  **Ray Marching**: The ray is advanced in discrete steps $\Delta t$. At each step, the density $\rho$ is sampled from a 3D texture, procedural noise function, or SDF.
-2.  **Transmittance and Absorption**: The transmittance $T$ (fraction of light surviving) is updated using the Beer-Lambert law:
-    $$ T_{new} = T_{old} \cdot e^{-\sigma_T \cdot \rho \cdot \Delta t} $$
-    where $\sigma_T$ is the extinction coefficient (sum of scattering and absorption coefficients) [S1].
-3.  **In-scattering**: The color contribution $C_{scatter}$ from each step is calculated based on the light source, phase function, and local density, then accumulated:
-    $$ C_{accum} \leftarrow C_{accum} + T_{old} \cdot C_{scatter} \cdot \Delta t $$
-4.  **Composition**: The final pixel color is the sum of accumulated in-scattered light and the background color attenuated by the total transmittance:
-    $$ C_{final} = C_{accum} + C_{background} \cdot T_{final} $$
+The core integration step for a segment of length $\Delta t$ is:
+1.  **Density Evaluation**: Sample $\rho$ at the current position $\mathbf{p}$.
+2.  **Extinction**: Compute the extinction coefficient $\sigma_t = \sigma_s + \sigma_a$.
+3.  **Transmittance Update**: Update the ray's transmittance $T$ using Beer-Lambert law:
+    $$ T \leftarrow T \cdot e^{-\sigma_t \rho \Delta t} $$
+4.  **Inscattering**: Compute the light contributed by the segment. For single scattering, this involves the phase function $P(\theta)$ and the light source radiance $L_{source}$ attenuated by the optical depth to the light.
+5.  **Accumulation**: Add the inscattered light to the accumulated color, weighted by the current transmittance:
+    $$ C \leftarrow C + T \cdot \sigma_s \rho \Delta t \cdot L_{scattered} $$
+
+The process terminates when $T$ falls below a threshold (e.g., $0.01$) or the ray exits the volume bounds.
 
 ## Subtopics
 
 ### [Ray Marching with Single Scattering](2057-ray-marching-with-single-scattering.md)
-A real-time technique for rendering volumetric clouds by discretizing the RTE along view rays, combining procedural noise for density with a single-scattering illumination model. It is distinguished by its use of explicit ray marching through a sampled density field rather than implicit SDF evaluation, and focuses on discrete cloud layers with weather-map control.
+Focuses on general volumetric single scattering without specific planetary geometry or atmospheric density models. Choose when rendering generic fog or clouds rather than a planet's sky.
 
 ### [SDF Cloud Rendering](2064-sdf-cloud-rendering.md)
-Renders volumetric cloud-like structures using Signed Distance Fields (SDFs) via ray marching. It differs by representing cloud density implicitly through a single continuous distance function (warped spheres) rather than a sampled density volume, allowing for sharp, organic shapes with minimal memory overhead.
+Uses Signed Distance Fields for cloud geometry rather than exponential density falloff on a sphere. Choose when detailed cloud shapes are required over atmospheric scattering effects.
 
 ### [Volume Ray Marching with Temporal Accumulation](4804-volume-ray-marching-with-temporal-accumulation.md)
-Enhances standard ray marching by blending the current frame's result with a history texture. It solves the problem of noise and flickering in sparse or low-resolution volumetric data by leveraging temporal coherence.
+Adds temporal stability to the ray marching process. Choose when flickering artifacts in dynamic scenes are a concern.
 
 ### [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md)
-Renders planetary atmospheres by discretizing the RTE, utilizing single scattering approximation, exponential density falloff, and the Rayleigh phase function. It distinguishes itself by explicitly modeling the spherical geometry of a planet and its atmosphere, incorporating astronomical parameters like ozone absorption.
+Specializes in planetary atmospheres using spherical geometry and Rayleigh phase functions. Choose when rendering skyboxes or planetary atmospheres.
+
+### [X-Ray Visualization](8174-x-ray-visualization.md)
+Computes the average density along a ray rather than integrating light transport. Choose when visualizing internal structures without depth cues or opacity accumulation.
 
 ### Wax Volume Raymarching
-A specific implementation for rendering the interior of a glass container (e.g., a lava lamp). It raymarches the interior volume, computing the surface normal using the gradient of the density field and setting fragment depth explicitly using `gl_FragDepth` in the opaque pass. The shading model includes wrap lighting, soft Fresnel, fake subsurface scattering based on traversed thickness, and emission driven by temperature and proximity to a light bulb. It uses an occupancy grid to skip empty blocks, reducing texture reads by approximately 3x. Artifacts are negligible, with 0.00% of surface voxels causing a round-trip to the threshold, even at 60 Hz with ±30% jitter [S2, unofficial].
+Raymarches the interior volume of a glass container to simulate wax. It computes the surface normal using the gradient of the density field and sets fragment depth explicitly using `gl_FragDepth` in the opaque pass. The shading model includes wrap lighting, soft Fresnel, fake subsurface scattering based on traversed thickness, and emission driven by temperature and proximity to a light bulb. Artifacts are minimal, with 0.00% of surface voxels causing a round-trip to the threshold, even at 60 Hz with ±30% jitter [S2, unofficial].
 
-### X-Ray Visualization
-A visualization method that computes average density values along a ray cast through the data, visualizing the result as a grey scale image similar to a medical X-ray. The view of the data set can be rotated in any of the 3 directions (X, Y, Z axes) in degrees (-360 ... 0 ... 360) [S3].
+### fBm Noise Generation
+A technique to simulate the irregular density of water droplets in clouds by generating fractal Brownian motion (fBm) noise from a pre-computed 3D noise cube. The process involves pre-calculating uniform random noise values on the host CPU, transferring the 3D noise cube to GPU memory, and sampling the cube on the GPU to generate fBm noise for density simulation. The noise cube is a 3D array of dimensions $64 \times 64 \times 64$, storing single-precision floating-point values representing uniform random noise [S3].
 
 ## Background
-The method is exemplified by the "Volumetric" mode in Phoenix for 3ds Max, which visualizes grid content as a standard atmospheric volume, primarily used for fire and smoke simulations. Unlike surface render modes, volumetric modes do not generate a mesh, so standard 3ds Max and V-Ray materials cannot be used for shading; instead, shading is handled by Volumetric Render Settings using color gradients and graphs [S1]. Key parameters include `Step %` (controlling ray marching frequency relative to cell size) and `Shadow Step %` (for shadow rays), with `Border Fade` used to prevent sharp edges at grid boundaries. Sampler types (Box, Linear, Spherical) balance speed and quality by defining how adjacent voxels are blended [S1].
+The term "Volumetric and Atmospheric Rendering" in this context is closely associated with the "Standard 3ds Max atmospheric" rendering mode provided by Phoenix for 3ds Max. This mode visualizes grid content (such as fire and smoke simulations) as a standard atmospheric volume without generating a mesh surface, thereby preventing the use of standard 3ds Max and V-Ray materials for shading [S1]. Instead, shading is handled by Volumetric Render Settings using color gradients and graphs [S1].
+
+Key parameters defined in this implementation include:
+*   **Step % (`rendstep`)**: The ray marching step of camera rays as a percentage of cell size. Values >100 skip cells causing artifacts; values <90% are needed for render curves or texture maps to capture sub-voxel details [S1].
+*   **Shadow Step % (`rendshadstep`)**: The ray marching step for shadow rays, usually higher than Step % to speed up rendering [S1].
+*   **Border Fade (`borderFade`)**: Distance from grid boundaries where content becomes transparent to prevent sharp edges [S1].
+*   **Sampler Type (`sampler`)**: Blending method between adjacent voxels. Options include Box (fastest, no blending), Linear (20-30% faster than Spherical, may show grid structure), and Spherical (smoothest, weight-based sampling) [S1].
+
+This approach is distinct from surface render modes which generate a mesh and allow standard material shading [S1].
 
 ## Sources
 [S1] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
 [S2] Étape 4 : surface de cire raymarchée et liquide volumique, https://github.com/nathanddrl/lava-lamp/pull/4, fetched 2026-10-27 (unofficial)
-[S3] VOLUME RENDERING Application by Thomas Lidy, https://www.cg.tuwien.ac.at/courses/Visualisierung/2001-2002/Ergebnisse/Beispiel1/LidyT/description.html, fetched 2026-10-29
+[S3] Efficient Algorithms for Real-Time GPU Volumetric Cloud Rendering with Enhanced Geometry, https://doi.org/10.3390/sym10040125, fetched 2026-10-26

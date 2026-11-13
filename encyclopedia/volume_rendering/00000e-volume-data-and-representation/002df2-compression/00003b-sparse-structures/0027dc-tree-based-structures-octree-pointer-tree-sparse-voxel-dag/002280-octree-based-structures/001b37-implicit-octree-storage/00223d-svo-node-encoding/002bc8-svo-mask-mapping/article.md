@@ -6,34 +6,37 @@ SVO Mask Mapping is a bit-mapping scheme for encoding the existence of 8 child v
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A `uint32_t` mask field from an SVO node.
-- Output: Bitwise flags indicating child existence and leaf status for each of the 8 octants.
+- Input: A `uint32_t` mask field from an SVO node [S1, unofficial].
+- Output: Bitwise flags indicating child existence and leaf status for each of the 8 octants [S1, unofficial].
 
 **Data Structures:**
-The mask field packs three 8-bit fields into a 32-bit integer [S1, unofficial]:
-- Bits 24–31 (most significant): Valid mask (child existence).
-- Bits 16–23: Leaf mask (indicates if children are leaf nodes).
-- Bits 0–7: Child voxel indices.
+The mask field packs metadata into a 32-bit integer [S1, unofficial]:
+- Bits 24–31 (most significant): Valid mask (child existence) [S1, unofficial].
+- Bits 16–23: Leaf mask (indicates if children are leaf nodes) [S1, unofficial].
+- Bits 0–15: Not given in the sources.
+
+**Layout:**
+Within the 8-bit valid mask, positive Y children occupy bits 0–3 and negative Y children occupy bits 4–7 [S1, unofficial]. For positive Y voxels viewed from the top down, the bit mapping is: (+X, +Z) maps to bit 0, (-X, +Z) maps to bit 1, (-X, -Z) maps to bit 2, and (+X, -Z) maps to bit 3 [S1, unofficial]. Negative Y voxels follow the identical pattern in bits 4–7 [S1, unofficial].
 
 **Numbered Steps:**
-1. Identify the target child voxel index $i$ ($i \in [0, 7]$).
-2. Determine the bit position for the valid mask: $b_{\text{valid}} = i$.
-3. Determine the bit position for the leaf mask: $b_{\text{leaf}} = 16 + i$.
-4. Extract the valid bit: `exists = (mask >> b_valid) & 1`.
-5. Extract the leaf bit: `is_leaf = (mask >> b_leaf) & 1`.
+1. Identify the target child voxel index $i$ ($i \in [0, 7]$) [G].
+2. Determine the bit position for the valid mask: $b_{\text{valid}} = i$ [G].
+3. Determine the bit position for the leaf mask: $b_{\text{leaf}} = 16 + i$ [G].
+4. Extract the valid bit: `exists = (mask >> b_valid) & 1` [G].
+5. Extract the leaf bit: `is_leaf = (mask >> b_leaf) & 1` [G].
 
 **Formulas:**
-- Child existence: $\text{exists} = \left\lfloor \frac{\text{mask}}{2^{i}} \right\rfloor \bmod 2$
-- Leaf status: $\text{is\_leaf} = \left\lfloor \frac{\text{mask}}{2^{16 + i}} \right\rfloor \bmod 2$
-Where $\text{mask}$ is the 32-bit integer, $i$ is the child index ($0 \le i \le 7$), and $\lfloor \cdot \rfloor$ denotes integer division.
+- Child existence: $\text{exists} = \left\lfloor \frac{\text{mask}}{2^{i}} \right\rfloor \bmod 2$ [G].
+- Leaf status: $\text{is\_leaf} = \left\lfloor \frac{\text{mask}}{2^{16 + i}} \right\rfloor \bmod 2$ [G].
+Where $\text{mask}$ is the 32-bit integer, $i$ is the child index ($0 \le i \le 7$), and $\lfloor \cdot \rfloor$ denotes integer division [G].
 
 **Parameters:**
 - Mask type: `uint32_t` [S1, unofficial].
-- Bit positions: Fixed at $i$ for valid mask and $16 + i$ for leaf mask [S1, unofficial].
+- Bit positions: Fixed at $i$ for the valid mask and $16 + i$ for the leaf mask [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- If the valid mask is 0, no children exist.
-- Bitwise operations are exact; no floating-point precision issues occur.
+- If the valid mask is 0, no children exist [G].
+- Bitwise operations are exact; no floating-point precision issues occur [G].
 - The source code queries the mask during ray tracing traversal using helper functions [S1, unofficial].
 
 **Pseudocode:**
@@ -68,7 +71,7 @@ A technique to efficiently store point-cloud data using sparse voxel octrees, wh
 - When to use: Not given in the sources.
 
 ## Background
-The SVO Mask Mapping scheme is described in the SVO repository by Onlinerocker [S1, unofficial]. It is based on the implicit octree storage model where node metadata is packed into integers. The concept of using a single byte for child existence was introduced by Schnabel et al. in 2006 for point-cloud storage [S2].
+The SVO Mask Mapping scheme is described in the SVO repository by Onlinerocker [S1, unofficial]. It is based on the implicit octree storage model where node metadata is packed into integers [G]. The concept of using a single byte for child existence was introduced by Schnabel et al. in 2006 for point-cloud storage [S2].
 
 ## Sources
 [S1] Onlinerocker/SVO, https://github.com/Onlinerocker/SVO, fetched 2026-10-24 (unofficial)

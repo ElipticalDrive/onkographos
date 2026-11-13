@@ -1,0 +1,201 @@
+--- v005.md
++++ v006.md
+@@ -1,91 +1,134 @@
+ # DCT-based Volume Rendering
+-Also called: DCT Volume Rendering, DCT-based volume compression, Discrete Cosine Transform (DCT) Volume Rendering
++
++Also called: DCT Volume Rendering, DCT-based encoding, DCT-based out-of-core volume rendering, DCT-based volume compression, Discrete Cosine Transform (DCT) Volume Rendering
+ 
+ ## Overview
+-DCT-based Volume Rendering is a domain-transform method that represents a 3D scalar volume using cosine waves as basis functions, mapping real input values to real output values [S1, S2]. It differs from its siblings, such as Fourier Projection-Slice Volume Rendering and Hartley Transform for Memory Reduction, primarily in its handling of the compression domain: DCT does not allow direct rendering from the compression domain and requires on-demand decompression of data blocks during the rendering pipeline [S1, S2]. It is often chosen in practice because it offers independent bases and fast forward/inverse transforms [S1, S2].
++DCT-based Volume Rendering is a technique for rendering large volumetric datasets that exceed main memory capacity by compressing the data using the Discrete Cosine Transform (DCT) and decoding it during the rendering process [S1]. It differs from other domain-transform methods like Fourier Projection-Slice Volume Rendering [824-fourier-projection-slice-volume-rendering.md] by operating on compressed spatial blocks rather than a global frequency domain, allowing for out-of-core rendering of massive time-series data [S1]. Unlike Hartley Transform for Memory Reduction [895-hartley-transform-for-memory-reduction.md], which supports direct rendering from the transform domain, DCT requires on-demand decompression of data blocks before rendering [S3].
+ 
+ ## How it works
+-This method builds on the shared principles of [Domain-transform methods](28-domain-transform-methods.md).
+-
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume $f(x, y, z)$ of size $N_x \times N_y \times N_z$.
+-*   **Output:** A 2D projection image $I(u, v)$.
++*   **Input:** A 3D scalar volume $V$ of size $N_x \times N_y \times N_z$, potentially consisting of a sequence of time steps.
++*   **Output:** A 2D projection image rendered to the screen.
+ 
+ **Data Structures:**
+-*   **Coefficient Array:** A 3D array $F(\omega_1, \omega_2, \omega_3)$ containing the DCT coefficients [S2]. The exact storage layout is Not given in the sources.
+-*   **Decompressed Block:** A temporary 3D array of real numbers used during the slice extraction step [G].
++The volume is divided into non-overlapping 3D blocks (windows) of size $W_x \times W_y \times W_z$. For each block, a subset of the DCT coefficients is stored.
++*   **Coefficient Storage:** The selected coefficients are quantized and packed into an 8-bit integer value (or a small set of bytes). In the canonical implementation, only the first few coefficients (e.g., DC and low-frequency AC terms) are retained [S1].
++*   **Decoding Map:** A mapping table is pre-computed that associates each possible 8-bit index value with the corresponding decoded scalar value for each time frame, minimizing mean square error [S1].
++
++**Parameters:**
++*   **Window Size ($W$):** The dimensions of the block over which the DCT is applied. A typical example uses $W=4$ [S1].
++*   **Coefficients Stored ($K$):** The number of DCT coefficients retained per block. A typical example stores the first 3 coefficients [S1].
++*   **Compression Ratio:** Determined by $K$ relative to the total number of coefficients in a block ($W^3$). Higher compression yields lower quality but higher frame rates [S1].
+ 
+ **Steps:**
+-1.  **Global Transformation (Preprocessing):**
+-    *   Apply a 3D Discrete Cosine Transform (DCT) to the input volume $f(x, y, z)$ to obtain the coefficient array $F(\omega_1, \omega_2, \omega_3)$ [S2].
+-    *   The coefficients are stored in a compressed format that requires on-demand decompression, as direct rendering from the compression domain is not supported [S1, S2].
+-2.  **Slice Extraction (Per-Frame):**
+-    *   For a given viewing direction vector $V$, define a 2D plane passing through the origin of the frequency domain and perpendicular to $V$ [G].
+-    *   Identify the compressed blocks that intersect the slicing plane [S2].
+-    *   **On-Demand Decompression:** Decompress only the identified blocks into a temporary real-valued 3D array [S2].
+-    *   **Resampling:** Interpolate the decompressed coefficients onto the 2D slicing plane to obtain the 2D slice $I(u, v)$ [G].
+-3.  **Inverse Transformation:**
+-    *   Apply a 2D Inverse Discrete Cosine Transform (IDCT) to the extracted 2D slice $I(u, v)$ to generate the final 2D projection image [G].
++
++1.  **Encoding (Pre-processing):**
++    1.  Divide the input volume into $W \times W \times W$ blocks.
++    2.  Apply the 3D DCT to each block. The 3D DCT of a block $f(x,y,z)$ is defined as:
++        $$ C(u,v,w) = \alpha(u)\alpha(v)\alpha(w) \sum_{x=0}^{W-1} \sum_{y=0}^{W-1} \sum_{z=0}^{W-1} f(x,y,z) \cos\left[\frac{\pi(2x+1)u}{2W}\right] \cos\left[\frac{\pi(2y+1)v}{2W}\right] \cos\left[\frac{\pi(2z+1)w}{2W}\right] $$
++        where $\alpha(u) = \sqrt{1/W}$ if $u=0$ and $\sqrt{2/W}$ otherwise [S3].
++    3.  Select the first $K$ coefficients (typically low-frequency components).
++    4.  Quantize these coefficients and map them to an 8-bit index.
++    5.  Pre-compute a decoding palette: For each possible 8-bit index and each time step, calculate the inverse DCT of the stored coefficients to determine the representative scalar value that minimizes mean square error [S1].
++
++2.  **Rendering (Per Frame):**
++    1.  **Block Selection:** Determine which volume blocks intersect the current view frustum or ray casting path.
++    2.  **Decompression:** Retrieve the 8-bit indices for the active blocks. Use the pre-computed decoding map to expand these indices into the actual scalar values for the current time step. This step is performed on-demand [S3].
++    3.  **Rendering:** Render the decompressed data using standard volume rendering techniques. The implementation described in the primary source uses an extension of OpenGL that allows the palette of all textures to be changed at once to decode the compressed values efficiently [S1].
++    4.  **Geometry:** The volume is rendered using object-aligned textured polygons (e.g., 256 polygons) in an out-of-core fashion [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def dct_volume_render(volume, view_direction, image_width, image_height):
+-    # Step 1: Global Transformation
+-    # Apply 3D DCT to map real input to real output [S2]
+-    coefficients = volume.copy()
+-    # [G] Standard separable 1D DCT applied along each dimension
++import numpy as np
++
++def dct_3d_block(block):
++    """
++    Computes the 3D DCT of a WxWxW block.
++    Assumes W is small (e.g., 4).
++    """
++    W = block.shape[0]
++    coeffs = np.zeros((W, W, W))
++    for u in range(W):
++        for v in range(W):
++            for w in range(W):
++                alpha_u = np.sqrt(1/W) if u == 0 else np.sqrt(2/W)
++                alpha_v = np.sqrt(1/W) if v == 0 else np.sqrt(2/W)
++                alpha_w = np.sqrt(1/W) if w == 0 else np.sqrt(2/W)
++                
++                sum_val = 0.0
++                for x in range(W):
++                    for y in range(W):
++                        for z in range(W):
++                            sum_val += block[x, y, z] * \
++                                       np.cos(np.pi * (2*x + 1) * u / (2*W)) * \
++                                       np.cos(np.pi * (2*y + 1) * v / (2*W)) * \
++                                       np.cos(np.pi * (2*z + 1) * w / (2*W))
++                coeffs[u, v, w] = alpha_u * alpha_v * alpha_w * sum_val
++    return coeffs
++
++def encode_volume(volume, W=4, K=3):
++    """
++    Encodes the volume into compressed indices.
++    Returns a dictionary mapping (block_id, time_step) -> index.
++    """
++    compressed_data = {}
++    # Pre-compute decoding map: index -> value for each time step
++    # In practice, this is done for the specific quantization scheme.
++    # Here we assume a simplified mapping where the index directly 
++    # represents the quantized DC/low-freq energy.
+     
+-    # Step 2: Slice Extraction
+-    # Define 2D plane perpendicular to view direction through origin [G]
+-    plane_normal = [x / sum(x**2 for x in view_direction)**0.5 for x in view_direction]
+-    slice_data = [0.0] * (image_height * image_width)
++    num_time_steps = volume.shape[2] # Assuming last dim is time for this example
++    # Note: The source implies time steps are handled sequentially or as a sequence.
+     
+-    # Decompress blocks intersecting the plane on demand [S2]
+-    for block in find_intersecting_blocks(plane_normal, coefficients):
+-        decompressed = decompress_block(block)
+-        # [G] Interpolate 3D coefficients onto 2D plane
+-        interpolated = resample_3d_to_2d(decompressed, plane_normal, image_width, image_height)
+-        for i, val in enumerate(interpolated):
+-            slice_data[i] += val
+-            
+-    # Step 3: Inverse Transformation
+-    # Apply 2D IDCT to reconstruct projection image [G]
+-    projection = slice_data.copy()
+-    # [G] Standard separable 1D IDCT applied along each dimension
+-    return projection
++    for t in range(num_time_steps):
++        current_vol = volume[:, :, t]
++        # Process blocks
++        # ... (iterate over x, y, z blocks) ...
++        pass 
++    return compressed_data
+ 
+-def find_intersecting_blocks(plane_normal, grid):
+-    # Identify compressed blocks intersecting the slicing plane
+-    return []
++def decode_index(index, time_step, decoding_map):
++    """
++    Retrieves the scalar value for a given compressed index and time step.
++    """
++    return decoding_map[(index, time_step)]
+ 
+-def decompress_block(block):
+-    # Inverse of block compression scheme
+-    return block
+-
+-def resample_3d_to_2d(data, plane_normal, w, h):
+-    # Trilinear or windowed sinc interpolation onto 2D plane
+-    return [0.0] * (w * h)
++def render_frame(volume_compressed, view_params, decoding_map):
++    """
++    Renders a single frame by decompressing blocks on demand.
++    """
++    # 1. Identify visible blocks based on view_params
++    visible_blocks = get_visible_blocks(volume_compressed, view_params)
++    
++    # 2. Decompress on demand
++    decompressed_data = {}
++    for block_id in visible_blocks:
++        index = volume_compressed[block_id]
++        value = decode_index(index, current_time_step, decoding_map)
++        decompressed_data[block_id] = value
++        
++    # 3. Render using OpenGL extension for palette change
++    # This step is hardware-specific and abstracted here
++    render_with_opengl_extension(decompressed_data, view_params)
+ ```
+ 
+-**Parameters:**
+-*   **Block Size:** Not given in the sources.
+-*   **Interpolation:** Not given in the sources.
+-
+ **Edge Cases and Pitfalls:**
+-*   **No Direct Rendering:** DCT does not support direct rendering from the compression domain; it requires on-demand decompression of data blocks [S1].
+-*   **Limited Shading Support:** The approach does not allow the direct application of non-trivial shading models, transfer functions, and perspective projections in the compressed domain [S1].
++*   **No Direct Rendering:** DCT does not support direct rendering from the compression domain; data must be decompressed before rendering [S3].
++*   **Precision Loss:** Quantizing coefficients to 8-bit values introduces compression artifacts. The trade-off between compression ratio and quality must be managed by the user [S1].
++*   **Boundary Conditions:** DCT assumes periodic boundary conditions within each block. Discontinuities at block boundaries can cause artifacts, though less severe than global DFT if blocks are small [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Independent bases, fast forward/inverse transforms, real-to-real mapping [S2].
+-*   **Limitations:** Cannot render directly from the compressed domain; requires decompression overhead [S1, S2]. Does not allow direct application of non-trivial shading models, transfer functions, and perspective projections in the compressed domain [S1].
+-*   **When to Use:** When memory bandwidth is a bottleneck and the scene allows for block-based processing, or when the fast DCT algorithms are preferred over DFT [S2].
+-*   **When Not to Use:** When real-time performance is critical and the overhead of decompression is unacceptable, or when complex shading models are required [S1].
++*   **Time Complexity:** Encoding is $O(N^3)$ for the full volume, but typically performed offline. Rendering complexity depends on the number of visible blocks and the cost of on-demand decompression. The primary source reports rendering performance of 6.8 frames/s for a $256^3$ dataset with 1492 time steps on an AMD 1.2 GHz Athlon and GeForce 3 [S1].
++*   **Memory Complexity:** Significantly reduced compared to in-core storage. The example uses 64 MB texture memory to render a dataset that would require much more if uncompressed [S1].
++*   **Performance:** Out-of-core DCT rendering achieved 6.8 frames/s, compared to 11.5 frames/s for a memory-resident subset of uncompressed data and 25.8 frames/s for in-core compressed data [S1].
++*   **Strengths:** Enables visualization of very large time-series datasets that do not fit in main memory. Offers flexibility in choosing compression ratios for speed vs. quality [S1].
++*   **Limitations:** Cannot change opacity or lighting parameters interactively after compression, as the transformation is linear and global per block [S1]. Requires on-demand decompression, which adds CPU/GPU overhead compared to direct frequency-domain methods [S3].
+ 
+ ## Background
+-Yeo et al. [YL95] developed a strategy to decompress blocks of data on demand for frequency-domain rendering [S2]. DCT-based Volume Rendering is a simplified alternative to DFT since it uses only cosine waves as a basis representation [S2]. It is often chosen in practice since it offers independent bases as well as a fast forward and inverse transforms [S2].
++DCT-based Volume Rendering was developed by Yeo et al. [YL95] as a strategy to decompress blocks of data on demand for rendering [S3]. It is chosen in practice because it offers independent bases as well as fast forward and inverse transforms [S3]. The method is particularly useful for out-of-core rendering of large volumetric datasets [S1].
+ 
+ ## Sources
+-[S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+-[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27+[S1] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26
++[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
++[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

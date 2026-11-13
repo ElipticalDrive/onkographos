@@ -3,21 +3,21 @@
 Also called: VolumeSampler traversal, Z-order curve traversal
 
 ## Overview
-An algorithm for iterating through a 3D voxel volume in Morton (Z-order) curve order using precomputed delta tables to update the linear index incrementally, avoiding expensive coordinate-to-index conversions except at chunk boundaries [S1, unofficial]. It builds on [Fast Neighbourhood Access via Delta Lookup Tables](3652-fast-neighbourhood-access-via-delta-lookup-tables.md) to provide $O(1)$ neighbour access within a fixed-size spatial chunk, distinguishing itself from full re-encoding methods by maintaining state across traversal steps.
+An algorithm for iterating through a 3D voxel volume in Morton (Z-order) curve order using precomputed delta values to update the linear index incrementally, avoiding expensive coordinate-to-index conversions except at chunk boundaries [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D voxel volume organized into fixed-size chunks (typically $16^3$), a current global position $(X, Y, Z)$, and precomputed delta lookup tables for the chunk size.
-*   **Output:** The voxel data at the current position and an updated internal state for the next traversal step.
+*   **Input:** A 3D voxel volume organized into fixed-size chunks, a current global position $(X, Y, Z)$, and precomputed delta values for traversal directions [S1, unofficial].
+*   **Output:** The voxel data at the current position and an updated internal state for the next traversal step [S1, unofficial].
 
 **Data Structures:**
 1.  **Chunk State:**
-    *   `CurrentChunk`: Pointer or handle to the active chunk data.
-    *   `CurrentVoxelIndex`: The linear Morton index within the current chunk.
-    *   `XPosInChunk`, `YPosInChunk`, `ZPosInChunk`: Local coordinates within the chunk ($0 \dots \text{ChunkSideLength}-1$).
-    *   `XPosInVolume`, `YPosInVolume`, `ZPosInVolume`: Global coordinates.
+    *   `CurrentChunk`: Pointer or handle to the active chunk data [S1, unofficial].
+    *   `CurrentVoxelIndex`: The linear Morton index within the current chunk [S1, unofficial].
+    *   `XPosInChunk`, `YPosInChunk`, `ZPosInChunk`: Local coordinates within the chunk [S1, unofficial].
+    *   `XPosInVolume`, `YPosInVolume`, `ZPosInVolume`: Global coordinates [S1, unofficial].
 2.  **Lookup Tables:**
-    *   `deltaX`, `deltaY`, `deltaZ`: Static constant lookup tables of type `int32[256]`. These store the integer offset to add to `CurrentVoxelIndex` when moving one step in the positive X, Y, or Z direction within a chunk of side length 16. The index into these tables is derived from the local coordinate component (e.g., `deltaY[YPosInChunk]`) [S1, unofficial].
+    *   `deltaX`, `deltaY`, `deltaZ`: Static constant lookup tables storing the integer offset to add to `CurrentVoxelIndex` when moving one step in the positive X, Y, or Z direction within a chunk of side length 16 [S1, unofficial].
     *   `morton256_x`, `morton256_y`, `morton256_z`: Precomputed bit-interleaving tables used for initial index calculation [S1, unofficial].
 
 **Parameters:**
@@ -25,33 +25,31 @@ An algorithm for iterating through a 3D voxel volume in Morton (Z-order) curve o
 
 **Numbered Steps:**
 
-1.  **Initialization (SetPosition):**
-    When the global position changes significantly or at startup:
+1.  **Initialization (`SetPosition`):**
+    When the global position changes or at startup [S1, unofficial]:
     a. Calculate chunk coordinates:
        $$xChunk = XPosInVolume \gg sideLengthPower$$
        $$yChunk = YPosInVolume \gg sideLengthPower$$
-       $$zChunk = ZPosInVolume \gg sideLengthPower$$
-       where $sideLengthPower = \log_2(\text{ChunkSideLength})$.
+       $$zChunk = ZPosInVolume \gg sideLengthPower$$ [S1, unofficial].
     b. Calculate intra-chunk coordinates:
        $$XPosInChunk = XPosInVolume - (xChunk \ll sideLengthPower)$$
        $$YPosInChunk = YPosInVolume - (yChunk \ll sideLengthPower)$$
-       $$ZPosInChunk = ZPosInVolume - (zChunk \ll sideLengthPower)$$
+       $$ZPosInChunk = ZPosInVolume - (zChunk \ll sideLengthPower)$$ [S1, unofficial].
     c. Compute initial voxel index using Morton bit-interleaving:
-       $$CurrentVoxelIndex = morton256_x[XPosInChunk] \ | \ morton256_y[YPosInChunk] \ | \ morton256_z[ZPosInChunk]$$
-    d. Update `CurrentChunk` to the chunk at $(xChunk, yChunk, zChunk)$ [S1, unofficial].
+       $$CurrentVoxelIndex = morton256_x[XPosInChunk] \ | \ morton256_y[YPosInChunk] \ | \ morton256_z[ZPosInChunk]$$ [S1, unofficial].
+    d. Retrieve the chunk handle for $(xChunk, yChunk, zChunk)$ [G].
 
-2.  **Incremental Traversal (Move):**
-    To move to an immediate neighbour (e.g., positive Y):
-    a. Update global coordinate: $YPosInVolume \leftarrow YPosInVolume + 1$.
-    b. Check boundary condition: If $YPosInChunk < \text{ChunkSideLengthMinusOne}$:
-       i. Update local coordinate: $YPosInChunk \leftarrow YPosInChunk + 1$.
-       ii. Update linear index: $CurrentVoxelIndex \leftarrow CurrentVoxelIndex + deltaY[YPosInChunk]$.
-       iii. Access voxel: `CurrentChunk->GetDataAtIndex(CurrentVoxelIndex)` [S1, unofficial].
+2.  **Incremental Traversal:**
+    To move to an immediate neighbour (e.g., positive Y) [S1, unofficial]:
+    a. Update global coordinate: $YPosInVolume \leftarrow YPosInVolume + 1$ [S1, unofficial].
+    b. Check boundary condition: If $YPosInChunk < \text{ChunkSideLengthMinusOne}$ [S1, unofficial]:
+       i. Update local coordinate: $YPosInChunk \leftarrow YPosInChunk + 1$ [S1, unofficial].
+       ii. Update linear index: $CurrentVoxelIndex \leftarrow CurrentVoxelIndex + \text{POS\_Y\_DELTA}$ [S1, unofficial].
     c. If boundary reached ($YPosInChunk == \text{ChunkSideLengthMinusOne}$):
        i. Call `SetPosition` to recompute chunk and index from global coordinates [S1, unofficial].
 
 3.  **Voxel Access:**
-    *   If `CurrentChunk` is valid, return `CurrentChunk->GetDataAtIndex(CurrentVoxelIndex)`.
+    *   If `CurrentChunk` is valid, return `CurrentChunk->GetDataAtIndex(CurrentVoxelIndex)` [S1, unofficial].
     *   If `CurrentChunk` is null, fallback to `Volume->GetVoxelByCoordinates(XPosInVolume, YPosInVolume, ZPosInVolume)` [S1, unofficial].
 
 **Pseudocode:**
@@ -112,7 +110,8 @@ class MortonSampler:
         
         if self.y_pos_in_chunk < self.chunk_side_length_minus_one:
             self.y_pos_in_chunk += 1
-            self.current_voxel_index += self.delta_y[self.y_pos_in_chunk]
+            # delta_y[0] holds the fixed stride for the +Y direction within the chunk
+            self.current_voxel_index += self.delta_y[0]  
         else:
             self.set_position(self.x_pos_in_volume, self.y_pos_in_volume, self.z_pos_in_volume)
 
@@ -132,15 +131,10 @@ class MortonSampler:
 *   **Null Chunk:** If the chunk pointer is null, the sampler must fallback to global coordinate lookup [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ for moves within a chunk; $O(\log(\text{ChunkSize}))$ or $O(1)$ with lookup tables for boundary crossings.
-*   **Memory Complexity:** $O(1)$ additional state per sampler instance, plus static lookup tables ($256 \times 4$ bytes per table).
-*   **Strengths:** Avoids expensive bit-interleaving operations for every step, significantly speeding up traversal in dense volumes.
-*   **Limitations:** Requires chunked memory layout. Boundary handling adds branching overhead.
-*   **When to Use:** Ray marching, voxel-based rendering, or any traversal requiring sequential access to Morton-ordered data.
-*   **When Not to Use:** Random access patterns or non-chunked memory layouts.
+Not given in the sources.
 
 ## Background
-Originated in the PolyVox library implementation by Jay2645, this method is part of the `UVolumeSampler` class designed for efficient voxel data access in real-time applications [S1, unofficial]. It leverages the properties of the Z-order curve to maintain spatial locality while minimizing computational overhead during traversal.
+Found in the PolyVox library implementation within the VoxelGenerator repository [S1, unofficial].
 
 ## Sources
 [S1] Jay2645/VoxelGenerator, https://github.com/Jay2645/VoxelGenerator, fetched 2026-10-27 (unofficial)

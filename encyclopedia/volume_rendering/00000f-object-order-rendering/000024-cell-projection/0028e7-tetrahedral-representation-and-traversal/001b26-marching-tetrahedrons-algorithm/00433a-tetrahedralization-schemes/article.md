@@ -1,16 +1,15 @@
 # Tetrahedralization Schemes
 ## Overview
-Tetrahedralization Schemes are methods that decompose volumetric grid cells into tetrahedra to facilitate isosurface extraction via the Marching Tetrahedrons Algorithm. They solve the topological ambiguity and geometric distortion issues inherent in cubic grid decomposition by providing specific tessellation patterns. This family is distinguished from its siblings by the specific lattice structure (BCC, Diamond, or Centered Cubic) and the resulting tetrahedral connectivity used to define the local cell geometry.
+Tetrahedralization Schemes decompose volumetric grid cells into tetrahedra to facilitate isosurface extraction via the Marching Tetrahedrons Algorithm [G]. They resolve topological ambiguities inherent in cubic grid decomposition by providing specific tessellation patterns [G]. This family is distinguished from its siblings, such as [Regularised Marching Tetrahedra](1301-regularised-marching-tetrahedra.md) and [Subgrid Pipeline](1640-subgrid-pipeline.md), by the specific lattice structure (BCC, Diamond, or Centered Cubic) and the resulting tetrahedral connectivity used to define the local cell geometry [G].
 ## Shared principles
 All schemes in this family share the following mechanism:
-1.  **Cell Decomposition:** The parent algorithm processes a volumetric cell (typically a cube or super-cell) by decomposing it into a set of non-overlapping tetrahedra.
-2.  **Local Isosurface Extraction:** For each tetrahedron, the algorithm determines the intersection of the isosurface with the tetrahedron's edges based on the scalar values at the vertices.
-3.  **Linear Interpolation:** Intersection points $P$ on an edge between vertices $V_1$ and $V_2$ with scalar values $S_1$ and $S_2$ are calculated using linear interpolation:
-    $$ P = V_1 + \frac{T - S_1}{S_2 - S_1} (V_2 - V_1) $$
-    where $T$ is the isosurface threshold.
-4.  **Triangle Assembly:** The intersection points are connected to form triangles (or quads split into triangles) that approximate the isosurface within the cell.
-5.  **Connectivity Handling:** The schemes differ in how they define the vertices and edges of the tetrahedra, particularly regarding shared vertices between adjacent cells and the handling of zero-crossings.
-
+1. **Cell Decomposition:** The parent algorithm processes a volumetric cell (typically a cube or super-cell) by decomposing it into a set of non-overlapping tetrahedra [S1, S2, unofficial].
+2. **Local Isosurface Extraction:** For each tetrahedron, the algorithm determines the intersection of the isosurface with the tetrahedron's edges based on the scalar values at the vertices [S1, S2, unofficial].
+3. **Linear Interpolation:** Intersection points $P$ on an edge between vertices $V_1$ and $V_2$ with scalar values $S_1$ and $S_2$ are calculated using linear interpolation:
+$$ P = V_1 + \frac{T - S_1}{S_2 - S_1} (V_2 - V_1) $$
+where $T$ is the isosurface threshold [S1, S2, unofficial].
+4. **Triangle Assembly:** The intersection points are connected to form triangles that approximate the isosurface within the cell [S1, S2, unofficial].
+5. **Connectivity Handling:** The schemes differ in how they define the vertices and edges of the tetrahedra, particularly regarding shared vertices between adjacent cells and the handling of zero-crossings [S1, S2, unofficial].
 ## Subtopics
 
 ### [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md)
@@ -25,9 +24,11 @@ A method that splits the cube cell into 24 tetrahedra by introducing a new data 
 - **Step:** A new data value is computed for the center of gravity, typically as the arithmetic or weighted mean of the cell's vertices [S1, unofficial]. Each of the 24 resulting tetrahedra is processed separately, similar to MT5 or MT6 methods [S1, unofficial]. Interpolation is performed on new edges introduced by the decomposition, specifically edges among adjacent central points [S1, unofficial].
 - **Comparison:** All 24 tetrahedra in CCL are identical in dimensions, similar to the MT6 method [S1, unofficial].
 
-## Background
-The decomposition of cubic cells into tetrahedra was introduced to resolve the topological ambiguities present in Marching Cubes. Early work by [S1, unofficial] compared fundamental methods, including the Centered Cubic Lattice (CCL) method, which splits a cube into 24 tetrahedra by introducing a central sample [S1, unofficial]. The BCC and Diamond lattice approaches are more recent developments aimed at optimizing GPU performance and reducing geometric artifacts in specific data types like fiber surfaces or point clouds [S1, S2, unofficial].
+### 12 Tetrahedra Scheme
+A decomposition scheme using 12 tetrahedra per voxel, based on a body-centred cubic lattice with two neighboring voxels [S2, unofficial]. All tetrahedra are identical [S2, unofficial]. If $2a$ is the length of the voxel's edge, the tetrahedron edges are $a$, $a\sqrt{3}$, $a$, $a\sqrt{3}$ [S2, unofficial]. This scheme requires considering more neighbors for iso-surface extraction than the body-centred tetrahedronal scheme [S2, unofficial].
 
+## Background
+The decomposition of cubic cells into tetrahedra was introduced to resolve the topological ambiguities present in Marching Cubes [G]. Early work compared fundamental methods, including the Centered Cubic Lattice (CCL) method, which splits a cube into 24 tetrahedra by introducing a central sample [S1, unofficial]. Other decompositions, such as the 12 tetrahedra scheme based on a body-centred cubic lattice with two neighboring voxels, were also studied [S2, unofficial].
 ## Sources
 [S1] A Comparison of Fundamental Methods for Iso-surface Extraction, https://doi.org/10.48550/arxiv.2301.01715, fetched 2026-10-29 (unofficial)
-[S2] Unofficial documentation for Marching Tetrahedra 3, fetched 2026-10-29 (unofficial)
+[S2] Two Methods for Iso-Surface Extraction from Volumetric Data and Their Comparison, https://arxiv.org/abs/2201.03446v1, fetched 2026-10-26 (unofficial)

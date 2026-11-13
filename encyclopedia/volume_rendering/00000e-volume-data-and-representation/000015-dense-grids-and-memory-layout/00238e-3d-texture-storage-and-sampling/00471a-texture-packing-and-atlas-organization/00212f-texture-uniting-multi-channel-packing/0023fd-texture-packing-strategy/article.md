@@ -49,6 +49,11 @@ def trilinear_interpolate(volume, x, y, z):
     """Standard 3D trilinear interpolation over a 3D array."""
     ix, iy, iz = int(x), int(y), int(z)
     fx, fy, fz = x - ix, y - iy, z - iz
+    # Clamp indices to valid range to prevent out-of-bounds access [G]
+    W, H, D = volume.shape
+    ix = min(max(ix, 0), W - 2)
+    iy = min(max(iy, 0), H - 2)
+    iz = min(max(iz, 0), D - 2)
     # Fetch 8 neighboring voxels
     c000 = volume[ix, iy, iz]
     c100 = volume[ix+1, iy, iz]
@@ -87,6 +92,8 @@ def update_gpu_if_modified(volumes, device_memory):
         device_memory = volumes.data
         volumes.modified = False
     return device_memory
+
+# Gradient computation on the fly is optional and increases computational cost [S2]
 ```
 
 ## Subtopics
@@ -98,8 +105,8 @@ A specific application where frequently accessed attributes (like inside-outside
 *   **Memory Complexity:** Reduces GPU memory consumption by storing the base volume only once, regardless of the number of scalar multipliers [S2].
 *   **Bandwidth:** Optimizes bandwidth by avoiding the transfer of unused data, preventing 4x memory transfer overhead when packing unrelated attributes [S1, unofficial].
 *   **Performance:** Increases rendering performance for scenes with multiple images when volumes are copied only upon modification [S2]. Computing gradients on the fly increases computational expense [S2].
-*   **Strengths:** Significant memory savings for high-resolution volumes, flexible scalar multiplication, reduced host-to-GPU traffic.
-*   **Limitations:** Increased computational cost if gradients are computed on the fly, requires GPU texture mapping support for scalar multiplication.
+*   **Strengths:** Significant memory savings for high-resolution volumes, flexible scalar multiplication, reduced host-to-GPU traffic [S2].
+*   **Limitations:** Increased computational cost if gradients are computed on the fly, requires GPU texture mapping support for scalar multiplication [S2].
 
 ## Background
 The technique was introduced in a GPU-enabled volume renderer paper to save GPU memory by mapping one volume to multiple textures with scalar multipliers [S2]. It is also discussed in real-time fluid simulation literature, where avoiding the packing of multiple cell attributes into a single texture is recommended to prevent unnecessary memory bandwidth degradation [S1, unofficial].
