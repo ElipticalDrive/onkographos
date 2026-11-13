@@ -3,179 +3,179 @@
 Also called: Depth-guided Single-view NeRF, Single-view NeRF with Depth Initialization
 
 ## Overview
-This method addresses the under-constrained optimization problem of single-view NeRF reconstruction by initializing the geometry of visible regions using a 360-degree depth estimation [S1]. It sets itself apart from sibling methods like [Depth-Supervised NeRF](8687-depth-supervised-nerf.md) by specifically handling the scale ambiguity and field-of-view limitations inherent in projecting a single panorama into perspective views for depth estimation, using a deformable alignment step to create a canonical depth map before NeRF training [S1].
+This method addresses the under-constrained optimization problem of reconstructing a 3D scene from a single panoramic input by initializing the NeRF geometry using estimated depth maps [S1]. It differs from sibling methods like [Depth-Supervised NeRF](8687-depth-supervised-nerf.md) by explicitly performing a deformable alignment of multiple perspective depth estimates into a canonical panorama before training, rather than applying depth loss directly to raw monocular estimates [S1]. It builds on [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by integrating this aligned depth map into the NeRF training loop as a geometric prior.
 
 ## How it works
 **Inputs:**
-- A single input RGB panorama $I_{\text{rgb}}$.
-- A pre-trained monocular depth estimation model [S1].
+- A single input RGB panorama $I_{\text{rgb}}$ [S1].
+- A pre-trained monocular depth estimation model [S1, S52].
 
 **Outputs:**
-- A trained NeRF model $f_{\text{nerf}}$ representing the visible regions of the scene.
-- A canonical learnable panorama depth map $I_d$.
+- A trained NeRF model $f_{\text{nerf}}$ representing the visible regions of the scene [S1].
 
 **Data Structures:**
-- **Perspective Projections:** A set of $K$ perspective images $\{\bar{I}_{\text{rgb}}^k\}_{k=1}^K$ and corresponding depth maps $\{\bar{I}_d^k\}_{k=1}^K$.
-- **Canonical Depth Map:** $I_d$, a panorama-resolution depth map.
-- **Alignment Parameters:** For each perspective view $k$, a global scale factor $w_k$ and a local bias field $\{b_{k,i,j}\}$ corresponding to pixel coordinates $(i,j)$.
-- **Coordinate Mapping:** A function $M$ that maps perspective image coordinates to panorama image coordinates.
+- Perspective projection images: $\{\bar{I}_{\text{rgb}}^k\}_{k=1}^K$ [S1].
+- Perspective depth maps: $\{\bar{I}_d^k\}_{k=1}^K$ [S1].
+- Canonical panorama depth map: $I_d$ (learnable tensor) [S1].
+- Scale parameters: $\{w_k\}_{k=1}^K$ (scalar per perspective view) [S1].
+- Local bias parameters: $\{b_{k,i,j}\}$ (2D tensor per perspective view, matching resolution) [S1].
 
-**Numbered Steps:**
+**Steps:**
 
-1.  **Perspective Projection:** Project the single input panorama $I_{\text{rgb}}$ into $K$ perspective images $\{\bar{I}_{\text{rgb}}^k\}$ using different viewing directions. The standard value for $K$ is 20 [S1]. This is necessary because existing monocular depth estimators are trained on limited field-of-view images and do not work directly on 360-degree panoramas warped into rectangular matrices [S1].
+1.  **Perspective Projection:** Project the input panorama $I_{\text{rgb}}$ into $K$ perspective images $\{\bar{I}_{\text{rgb}}^k\}_{k=1}^K$ using different viewing directions [S1]. The number of projections is set to $K=20$ [S1]. This is necessary because existing monocular depth estimators are trained on limited field-of-view images and fail on 360-degree panoramas warped into rectangular matrices [S1].
 
-2.  **Depth Estimation:** Use a depth estimation model to estimate depth values for each perspective image $\bar{I}_{\text{rgb}}^k$, obtaining the set of perspective depth maps $\{\bar{I}_d^k\}$ [S1]. Note that due to scale ambiguity in single-view depth estimation, estimated depth values in overlapped regions between different perspectives may differ significantly [S1].
+2.  **Monocular Depth Estimation:** Pass each perspective image $\bar{I}_{\text{rgb}}^k$ through the depth estimation model to obtain corresponding depth maps $\{\bar{I}_d^k\}_{k=1}^K$ [S1]. Note that due to scale ambiguity in single-view depth estimation, depth values in overlapping regions of different perspective views may differ significantly [S1].
 
-3.  **Deformable Alignment:** Perform a deformable alignment to jointly align the perspective depth maps $\{\bar{I}_d^k\}$ to a canonical learnable panorama depth map $I_d$. This step resolves scale and bias inconsistencies. The alignment is achieved by optimizing the following objective function [S1]:
+3.  **Deformable Alignment:** Align the perspective depth maps $\{\bar{I}_d^k\}$ to a canonical learnable panorama depth map $I_d$ by optimizing the following objective [S1]:
+    $$
+    \sum_{k,i,j} \left\| \bar{v}_{i,j}^k w_k + b_{k,i,j} - v_{M(i,j)} \right\| + \mathcal{L}_s(b_{i,j+1}, b_{i,j}) + \mathcal{L}_s(b_{i+1,j}, b_{i,j})
+    $$
+    where:
+    - $\bar{v}_{i,j}^k$ is the pixel value at $(i,j)$ in perspective depth map $\bar{I}_d^k$ [S1].
+    - $v_{M(i,j)}$ is the pixel value at the corresponding coordinate in the canonical panorama depth map $I_d$, where $M$ maps perspective image coordinates to panorama image coordinates [S1].
+    - $w_k$ is the scale factor for perspective view $k$ [S1].
+    - $b_{k,i,j}$ is the local bias for pixel $(i,j)$ in perspective view $k$ [S1].
+    - $\mathcal{L}_s$ is the smooth L1 loss, acting as a total variation term to enforce spatial smoothness on the bias fields [S1].
+    
+    The optimization jointly learns $I_d$, $\{w_k\}$, and $\{b_{k,i,j}\}$ [S1].
 
-    $$ \sum_{k,i,j} \left\| \bar{v}_{i,j}^k w_k + b_{k,i,j} - v_{M(i,j)} \right\| + \lambda_s \left( L_s(b_{i,j+1}, b_{i,j}) + L_s(b_{i+1,j}, b_{i,j}) \right) $$
+4.  **NeRF Training:** Train the single-view NeRF using the RGB panorama $I_{\text{rgb}}$ and the aligned depth map $I_d$ by minimizing the combined color and depth reconstruction loss $\mathcal{L}_{\text{nerf}}'$ [S1]:
+    $$
+    \mathcal{L}_{\text{nerf}}' = \sum_{r \in R} \left( \|\hat{\mathbf{C}}(r) - \mathbf{C}(r)\|^2 + \|\hat{D}(r) - \bar{D}(r)\|^2 \right)
+    $$
+    where:
+    - $R$ is the set of rays sampled from the panorama [S1].
+    - $\hat{\mathbf{C}}(r)$ is the expected pixel color rendered by the NeRF for ray $r$ [S1].
+    - $\mathbf{C}(r)$ is the ground-truth pixel color for ray $r$ [S1].
+    - $\hat{D}(r)$ is the expected depth value rendered by the NeRF for ray $r$ [S1].
+    - $\bar{D}(r)$ is the corresponding depth pixel value computed by the depth estimator (derived from $I_d$) for ray $r$ [S1].
 
-    Where:
-    - $\bar{v}_{i,j}^k$ is the pixel value of the perspective depth map $\bar{I}_d^k$ at $(i,j)$.
-    - $v_{M(i,j)}$ is the pixel value of the canonical panorama depth map $I_d$ at the mapped coordinate.
-    - $w_k$ is the scale value for perspective view $k$.
-    - $b_{k,i,j}$ is the local bias value for pixel $(i,j)$ in view $k$.
-    - $L_s$ is the smooth L1 loss.
-    - The second term is a total variation regularization term [S1].
-
-4.  **NeRF Training:** Train the single-view NeRF using the RGB panorama $I_{\text{rgb}}$ and the aligned depth map $I_d$. The NeRF is optimized by minimizing the combined color and depth reconstruction loss $\mathcal{L}_{\text{nerf}}'$ [S1]:
-
-    $$ \mathcal{L}_{\text{nerf}}' = \sum_{r \in \mathcal{R}} \left( \|\hat{C}(r) - C(r)\|^2 + \|\hat{D}(r) - \bar{D}(r)\|^2 \right) $$
-
-    Where:
-    - $\mathcal{R}$ is the set of rays sampled from the panorama.
-    - $\hat{C}(r)$ is the expected pixel color rendered by the NeRF for ray $r$.
-    - $C(r)$ is the ground-truth pixel color from the panorama.
-    - $\hat{D}(r)$ is the expected depth value rendered by the NeRF for ray $r$.
-    - $\bar{D}(r)$ is the corresponding depth pixel computed by the depth estimator (derived from $I_d$) for ray $r$.
-
-    The trained NeRF $f_{\text{nerf}}$ is valid only for visible regions [S1].
+    The gradients are backpropagated through the differentiable volume rendering process to update the NeRF parameters [S1]. The resulting NeRF $f_{\text{nerf}}$ is valid only for visible regions [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def single_view_nerf_with_depth(panorama_rgb, depth_estimator, k=20):
-    """
-    Trains a single-view NeRF using depth-initialized geometry.
-    
-    Args:
-        panorama_rgb: Input RGB panorama image.
-        depth_estimator: Pre-trained monocular depth estimation model.
-        k: Number of perspective projections (default 20).
-        
-    Returns:
-        trained_nerf: The trained NeRF model.
-    """
-    
+def single_view_nerf_with_depth(panorama_rgb, depth_estimator, K=20):
     # Step 1: Project panorama to K perspective views
     perspective_images = []
-    for view_idx in range(k):
-        # Project panorama to perspective view using specific direction
-        # Implementation of projection M depends on camera intrinsics/extrinsics
-        img = project_panorama_to_perspective(panorama_rgb, view_idx)
-        perspective_images.append(img)
-        
+    for k in range(K):
+        # M_k maps perspective coordinates to panorama coordinates
+        # In practice, this involves sampling from the equirectangular projection
+        img_k = project_to_perspective(panorama_rgb, direction=k)
+        perspective_images.append(img_k)
+
     # Step 2: Estimate depth for each perspective view
-    perspective_depth_maps = []
-    for img in perspective_images:
-        # Get depth map from estimator
-        d_map = depth_estimator.predict(img)
-        perspective_depth_maps.append(d_map)
-        
-    # Step 3: Deformable Alignment to canonical panorama depth map
-    # Initialize canonical depth map I_d (e.g., zeros or mean of estimates)
-    canonical_depth_map = initialize_canonical_depth(panorama_rgb.shape)
+    perspective_depths = []
+    for img_k in perspective_images:
+        # depth_estimator returns depth map
+        d_k = depth_estimator(img_k)
+        perspective_depths.append(d_k)
+
+    # Step 3: Deformable Alignment
+    # Initialize learnable canonical panorama depth map
+    I_d = initialize_pano_depth(perspective_depths)
     
-    # Initialize alignment parameters
-    scales = [1.0 for _ in range(k)]
-    biases = [[[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(k)] for _ in range(k)] # Placeholder for structure
-    
-    # Optimize alignment parameters to minimize Eq. (2)
-    # This is an optimization loop over w_k, b_k,i,j
-    for iteration in range(num_alignment_iterations):
+    # Initialize scale and bias parameters
+    scales = [1.0 for _ in range(K)]
+    biases = [zeros_like(d_k) for d_k in perspective_depths]
+
+    # Optimize alignment objective
+    # Loss = sum_k || v_bar_k * w_k + b_k - v_M || + TV(bias)
+    optimizer = Optimizer([I_d, scales, biases])
+    for step in range(align_steps):
         loss = 0.0
-        for k_idx in range(k):
-            for i in range(height):
-                for j in range(width):
-                    # Get pixel value from perspective depth map
-                    v_bar = perspective_depth_maps[k_idx][i, j]
-                    
-                    # Map coordinates to panorama coordinates
-                    pano_i, pano_j = map_perspective_to_pano(i, j, k_idx)
-                    
-                    # Get pixel value from canonical depth map
-                    v_pano = canonical_depth_map[pano_i, pano_j]
-                    
-                    # Data alignment term: || v_bar * w_k + b_k,i,j - v_pano ||
-                    # Using L1 or Smooth L1 as per source
-                    data_term = smooth_l1_loss(v_bar * scales[k_idx] + biases[k_idx][i][j], v_pano)
-                    loss += data_term
-                    
-                    # Total variation regularization on biases
-                    if i < height - 1:
-                        loss += smooth_l1_loss(biases[k_idx][i+1][j], biases[k_idx][i][j])
-                    if j < width - 1:
-                        loss += smooth_l1_loss(biases[k_idx][i][j+1], biases[k_idx][i][j])
-                        
-        # Backpropagate to update scales, biases, and canonical_depth_map
-        update_parameters(loss)
+        for k in range(K):
+            d_bar_k = perspective_depths[k]
+            # Get corresponding pixels in I_d using mapping M
+            d_pano_aligned = sample_from_pano(I_d, perspective_images[k].coords)
+            
+            # Data alignment term
+            aligned_depth = d_bar_k * scales[k] + biases[k]
+            data_loss = smooth_l1_loss(aligned_depth, d_pano_aligned)
+            loss += data_loss
+            
+            # Total variation on biases
+            tv_loss = smooth_l1_loss(biases[k][:, 1:], biases[k][:, :-1])
+            tv_loss += smooth_l1_loss(biases[k][1:, :], biases[k][:-1, :])
+            loss += tv_loss
         
-    # Step 4: Train NeRF with RGB and Aligned Depth
-    nerf_model = initialize_nerf()
+        loss.backward()
+        optimizer.step()
+
+    # Step 4: NeRF Training
+    # Initialize NeRF model
+    nerf = NeRF()
+    optimizer_nerf = Optimizer(nerf.parameters())
     
-    for training_step in range(num_nerf_iterations):
+    for step in range(nerf_steps):
         # Sample rays from panorama
-        rays = sample_rays_from_panorama(panorama_rgb)
+        rays = sample_rays_from_pano(panorama_rgb)
         
-        # Render color and depth from NeRF
-        rendered_colors, rendered_depths = nerf_model.render(rays)
+        # Render color and depth
+        C_hat, D_hat = render_nerf(nerf, rays)
         
-        # Get ground truth color and depth
-        gt_colors = get_pixel_colors(rays, panorama_rgb)
-        gt_depths = get_depth_values(rays, canonical_depth_map)
+        # Get ground truth color
+        C_gt = get_pixel_color(panorama_rgb, rays)
         
-        # Compute Loss: L_nef' = sum(||C_hat - C||^2 + ||D_hat - D_bar||^2)
-        color_loss = mean_squared_error(rendered_colors, gt_colors)
-        depth_loss = mean_squared_error(rendered_depths, gt_depths)
-        total_loss = color_loss + depth_loss
+        # Get ground truth depth from aligned map I_d
+        D_bar = get_depth_from_pano(I_d, rays)
         
-        # Update NeRF weights
-        update_nerf_weights(total_loss)
+        # Compute loss
+        color_loss = mse_loss(C_hat, C_gt)
+        depth_loss = mse_loss(D_hat, D_bar)
+        loss = color_loss + depth_loss
         
-    return nerf_model
+        loss.backward()
+        optimizer_nerf.step()
+        
+    return nerf
 ```
 
 **Parameters:**
-- $K$: Number of perspective projections. Typical value is 20 [S1].
+- $K$: Number of perspective projections. Set to 20 [S1].
 
 **Edge Cases and Pitfalls:**
-- **Scale Ambiguity:** Monocular depth estimation suffers from scale ambiguity, leading to inconsistent depth values in overlapped regions between perspective views. The deformable alignment step is critical to resolve this [S1].
-- **Field of View:** Standard depth estimators fail on 360-degree panoramas. Projection to limited FOV perspective views is required [S1].
-- **Visible Regions Only:** The trained NeRF is only valid for visible regions in the single panorama. Invisible regions require separate inpainting/completion methods (e.g., using Stable Diffusion) [S1].
+- Scale Ambiguity: Monocular depth estimation suffers from scale ambiguity, causing significant discrepancies in overlapping regions of perspective views. The deformable alignment step is required to resolve this [S1].
+- Visible Regions Only: Since only a single panorama is available, the trained NeRF is only valid for visible regions. Invisible regions require separate inpainting procedures (e.g., using Stable Diffusion) which are outside the scope of this specific method [S1].
 
 ## Subtopics
 
-### Depth-Supervised NeRF
-Uses depth supervision but typically assumes multi-view consistency or direct depth input without the specific single-view panorama projection and deformable alignment pipeline [8687-depth-supervised-nerf.md].
+### [Geometric Baseline Regularization](7475-geometric-baseline-regularization.md)
+Enforces geometric consistency via baseline regularization. Choose when multi-view consistency is available.
 
-### Geometric Baseline Regularization
-Focuses on regularization terms for geometry without necessarily using explicit depth map initialization from a single view [7475-geometric-baseline-regularization.md].
+### [Guided Optimization of NeRF](7496-guided-optimization-of-nerf.md)
+Uses external guidance for optimization. Choose when auxiliary semantic or structural data is available.
 
-### 3D Point Supervision Loss
-Uses 3D points for supervision rather than dense depth maps [12693-3d-point-supervision-loss.md].
+### [Depth-Supervised NeRF](8687-depth-supervised-nerf.md)
+Applies depth loss directly to monocular estimates. Choose when alignment is not required or depth is already consistent.
+
+### [Depth Structural Consistency Regularization](9371-depth-structural-consistency-regularization.md)
+Enforces structural consistency in depth. Choose when structural priors are critical.
+
+### [Statistical Depth Refinement](10185-statistical-depth-refinement.md)
+Refines depth using statistical models. Choose when statistical priors are available.
+
+### [Novel View Regularization](10806-novel-view-regularization.md)
+Regularizes based on novel view synthesis. Choose when multi-view training data is available.
+
+### [3D Point Supervision Loss](12693-3d-point-supervision-loss.md)
+Uses 3D points for supervision. Choose when sparse 3D points are available.
+
+### [Generalized Ray Supervision](14127-generalized-ray-supervision.md)
+Generalizes ray-based supervision. Choose for generalized supervision frameworks.
 
 ## Operating characteristics
-- **Time Complexity:** The method involves an initial optimization step for deformable alignment over $K$ views and $N$ pixels, followed by standard NeRF training. The alignment step adds significant overhead compared to standard single-view NeRF.
-- **Memory Complexity:** Requires storing $K$ perspective depth maps and the canonical depth map. The alignment parameters (scales and biases) add memory overhead proportional to $K \times \text{resolution}$.
-- **Strengths:** Provides accurate geometry initialization for visible regions in single-view scenarios, addressing the under-constrained nature of the problem [S1].
-- **Limitations:** Only reconstructs visible regions. Invisible regions require additional inpainting steps. Performance depends on the quality of the monocular depth estimator [S1].
-- **When to Use:** When only a single panoramic image is available and accurate geometry for visible regions is required.
-- **When Not to Use:** When multi-view images are available (use multi-view NeRF methods) or when invisible regions are critical and cannot be inpainted [S1].
+- **Time Complexity:** The alignment step adds an optimization loop over $K$ perspective views and the canonical depth map. The NeRF training step adds depth loss computation to the standard volume rendering cost.
+- **Memory Complexity:** Requires storing $K$ perspective depth maps and the canonical panorama depth map $I_d$ during alignment. The NeRF training requires standard NeRF memory plus the aligned depth map.
+- **Strengths:** Addresses the under-constrained nature of single-view reconstruction by providing a geometric prior. Handles the limitation of monocular depth estimators on panoramas by using perspective projections and deformable alignment.
+- **Limitations:** Only reconstructs visible regions. Invisible regions require additional inpainting steps. Performance depends on the accuracy of the monocular depth estimator.
+- **When to use:** Single-view panoramic reconstruction where geometry initialization is critical.
+- **When not to use:** Multi-view scenarios where depth consistency is naturally enforced by geometry.
 
 ## Background
-This method was introduced in the paper "PERF: Panoramic Neural Radiance Field From a Single Panorama" [S1]. It addresses the limitations of previous single-view methods that did not fully address geometry consistency. The approach builds on 360MonoDepth [51] for depth estimation and integrates it with NeRF training. It is part of the broader effort to enable photo-realistic panoramic NeRF from single-view inputs [S1].
+This method was introduced in "PERF: Panoramic Neural Radiance Field From a Single Panorama" [S1]. It addresses the limitation of existing methods that do not fully address geometry consistency in single-view reconstruction. The approach follows similar principles to 360MonoDepth [S51] by fusing multiple perspective depth maps. It differs from concurrent works like [23] by focusing on single-view panoramic NeRF and directly predicting depth maps of regions of interest and stitching them, rather than using image-guided depth completion for mesh reconstruction.
 
 ## Sources
 [S1] PERF: Panoramic Neural Radiance Field From a Single Panorama, https://doi.org/10.1109/tpami.2024.3387307, fetched 2026-10-26

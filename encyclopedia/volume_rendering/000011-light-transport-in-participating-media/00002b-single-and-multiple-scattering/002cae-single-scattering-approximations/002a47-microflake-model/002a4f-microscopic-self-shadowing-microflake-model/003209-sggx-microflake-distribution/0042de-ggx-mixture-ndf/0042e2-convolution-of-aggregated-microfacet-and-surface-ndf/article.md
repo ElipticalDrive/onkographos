@@ -7,39 +7,43 @@ This method computes the effective normal distribution function (NDF) for a micr
 
 ## How it works
 **Inputs:**
-- Aggregated microfacet distribution $\hat{D}_{mic}$, represented as a mixture of $k$ lobes with weights $m_j$ and roughness parameters $\alpha_j$.
+- Aggregated microfacet distribution $\hat{D}_{mic}$, represented as a mixture of $k$ lobes with weights $m_j$ and roughness parameters $\alpha_j$ [S1, unofficial].
 - Surface NDF $p_N(n)$, represented as a mixture of 2 SGGX lobes with weights $w_i$, eigenbases $R_i$, and anisotropic roughness $\alpha_i$ [S1, unofficial].
 
 **Outputs:**
 - Convolved NDF $D_{conv}(\omega_h)$, represented as a mixture of SGGX distributions [S1, unofficial].
 
 **Data Structures:**
-- **Mapping Table $M_3$**: A 3D lookup table storing the mapping $\alpha^+ = M_3(\alpha, \alpha_i)$ for convolving roughness parameters [S1, unofficial]. The table maps the microflake roughness $\alpha$ and surface roughness $\alpha_i$ to the resulting roughness $\alpha^+$ [S1, unofficial].
+- **Mapping Table $M_3$**: A 3D lookup table storing the mapping $\alpha^+ = M_3(\alpha, \alpha_i)$ for convolving roughness parameters [S1, unofficial]. Exact sizes and bit packing are not given in the sources.
 - **Inverse LTC Table $T_{LTC}^{-1}$**: A 1D table for the inverse Linearly Transformed Cosine transform, varying only with roughness [S1, unofficial].
 - **Normalization Table $M_5$**: A 1D table storing the integral of the GGX distribution over the full sphere $S^2$ as a function of roughness $\alpha$ [S1, unofficial].
 
 **Steps:**
-1. **Decompose Mixtures**: Represent the surface NDF as a sum of $k$ SGGX lobes: $p_N(n) = \sum_{i=1}^{k} w_i D_{sggx}(n; R_i, \alpha_i)$ [S1, unofficial]. The aggregated microfacet distribution is similarly decomposed into $k$ lobes with weights $m_j$ and roughness $\alpha_j$ [S1, unofficial].
-2. **Per-Lobe Convolution Mapping**: For each pair of lobes $(i, j)$ from the surface NDF and microfacet distributions respectively, compute the effective roughness $\alpha^+_{ij}$ using the precomputed mapping table:
-   $$ \alpha^+_{ij} = M_3(\alpha_i, M_3(\alpha_j)) $$
-   where $M_3(\alpha_j)$ is a shorthand for fitting a beta distribution to $\alpha_j$ and querying the table for the roughness of the $j$-th microfacet lobe [S1, unofficial]. The eigenbasis $R_i$ remains fixed [S1, unofficial].
-3. **Construct Convolved NDF**: Sum the contributions of all lobe pairs to form the final convolved NDF:
-   $$ D_{conv}(\omega_h) = \sum_{i=1}^{2} \sum_{j=1}^{k} w_i m_j D_{conv}(\omega_h)_{ij} $$
-   where each term is approximated as:
-   $$ D_{conv}(\omega_h)_{ij} \approx D_{sggx}(\omega; R_i, \alpha^+_{ij}) $$
-   [S1, unofficial].
-4. **Correction for Conditioned Angular Domain**: To account for the Heaviside function terms $\mathbb{1}(n \cdot \omega_i)$ and $\mathbb{1}(n \cdot \omega_o)$ which restrict the integration domain to a spherical triangle rather than the full sphere $S^2$, apply a correction factor [S1, unofficial].
-   - Compute the normalization term using the precomputed table $M_5(\alpha)$ [S1, unofficial].
-   - Use the inverse LTC table $T_{LTC}^{-1}$ to handle the integration over the spherical triangle [S1, unofficial].
-   - Multiply the smooth microfacet shadowing-masking term $G$ post-convolution [S1, unofficial].
+1. Decompose mixtures: Represent the surface NDF as a sum of 2 SGGX lobes: $p_N(n) = \sum_{i=1}^{2} w_i D_{sggx}(n; R_i, \alpha_i)$ [S1, unofficial]. Decompose the aggregated microfacet distribution into $k$ lobes with weights $m_j$ and roughness $\alpha_j$ [S1, unofficial].
+2. Per-lobe convolution mapping: For each pair of lobes $(i, j)$, compute the effective roughness $\alpha^+_{ij}$ using the precomputed mapping table [S1, unofficial]. The eigenbasis $R_i$ remains fixed [S1, unofficial].
+3. Construct convolved NDF: Sum the contributions of all lobe pairs to form the final convolved NDF [S1, unofficial].
+4. Correction for conditioned angular domain: To account for Heaviside function terms $\mathbb{1}(n \cdot \omega_i)$ and $\mathbb{1}(n \cdot \omega_o)$ that restrict the integration domain to a spherical triangle rather than the full sphere $S^2$, apply a correction factor [S1, unofficial]. Compute the normalization term using $M_5(\alpha)$ [S1, unofficial]. Use $T_{LTC}^{-1}$ to handle integration over the spherical triangle [S1, unofficial]. Multiply the smooth microfacet shadowing-masking term $G$ post-convolution [S1, unofficial].
 
-**Pitfalls:**
-- The constant contribution assumption in the shape term for the conditioned angular domain correction can cause under- or overestimates, resulting in slightly darker or brighter results and stretched lobe shapes compared to ground truth [S1, unofficial].
+**Formulas:**
+- $D_{conv}(\omega_h) = \sum_{i=1}^{2} \sum_{j=1}^{k} w_i m_j D_{conv}(\omega_h)_{ij}$: Convolved NDF, where $w_i$ and $m_j$ are mixture weights, and $D_{conv}(\omega_h)_{ij}$ is the per-lobe convolution contribution [S1, unofficial].
+- $D_{conv}(\omega_h)_{ij} \approx D_{sggx}(\omega; R_i, \alpha^+_{ij})$: Approximation of the per-lobe convolution as a roughened SGGX distribution with fixed eigenbasis $R_i$ and mapped roughness $\alpha^+_{ij}$ [S1, unofficial].
+- $\alpha^+_{ij} = M_3(\alpha_i, M_3(\alpha_j))$: Mapped roughness, where $M_3$ is the 3D lookup table, $\alpha_i$ is the surface NDF lobe roughness, and $M_3(\alpha_j)$ is a shorthand for fitting a beta distribution to $\alpha_j$ and querying the table for the roughness of the $j$-th microfacet lobe [S1, unofficial].
+
+**Parameters:**
+- $M_3$: Stored as a 3D table [S1, unofficial]. Typical values are not given in the sources.
+- $T_{LTC}^{-1}$: 1D table varying only with roughness [S1, unofficial].
+- $M_5(\alpha)$: 1D table for the normalization term [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The constant contribution assumption in the shape term for the conditioned angular domain correction can cause under- or overestimates, resulting in slightly darker or brighter results and stretched lobe shapes compared to references [S1, unofficial].
 
 ## Subtopics
 
 ### [SGGX-based Precomputed Convolution](10897-sggx-based-precomputed-convolution.md)
 This method approximates the convolution of a SGGX microflake distribution with an isotropic spherical distribution (such as a GGX microfacet distribution or a Spherical Gaussian) as another SGGX distribution sharing the same eigenvectors. It solves the problem of efficiently computing the roughening effect of convolution in participating media by mapping the original roughness parameters to new parameters via a precomputed lookup table, avoiding expensive Monte Carlo integration at runtime. It builds on [Convolution of Aggregated Microfacet and Surface NDF](10871-convolution-of-aggregated-microfacet-and-surface-ndf.md).
+
+### Correction for Conditioned Angular Domain
+An approximation technique for the conditioned angular domain in SGGX convolution, which assumes constant contribution in the shape term [S1, unofficial]. It uses a 1D table for the inverse LTC transform varying only with roughness, denoted $T_{LTC}^{-1}$, and a 1D table for the normalization term (integral of GGX over full sphere), denoted $M_5(\alpha)$ [S1, unofficial]. The constant contribution assumption can cause under- or overestimates, resulting in slightly darker or brighter results, and stretched lobe shapes compared to references [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity**: $O(1)$ per lobe pair after precomputation, as it relies on table lookups for the mapping $M_3$ [S1, unofficial].

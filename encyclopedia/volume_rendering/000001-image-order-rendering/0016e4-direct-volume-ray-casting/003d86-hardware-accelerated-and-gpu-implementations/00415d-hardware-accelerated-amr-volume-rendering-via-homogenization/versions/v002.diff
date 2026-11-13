@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -11,94 +11,107 @@
+ 
+ **Data Structures:**
+-1.  **AMR Partition Tree:** A generalized kD-tree where each leaf represents a single grid patch. A grid patch is a rectangular subgrid of a single AMR grid, containing cells of identical size and data stored in a contiguous memory region [S1, unofficial].
+-2.  **Grid Patch:** Defined by its parent grid ID, local coordinates, and resolution.
++1. **AMR Partition Tree:** A generalized kD-tree where each leaf represents a single grid patch [S2, unofficial].
++2. **Grid Patch:** Defined as a rectangular subgrid of a single AMR grid, containing cells of identical size and data stored in a single contiguous memory region [S1, unofficial].
+ 
+ **Algorithm Steps:**
++1. **Initialize Tree:** Create a kD-tree with a single root leaf representing the entire AMR domain [S1, unofficial].
++2. **Insert Grids:** Iterate through AMR grids in order of increasing resolution (finest last) [S1, unofficial]. For each grid, traverse the kD-tree downwards [S1, unofficial]. Existing interior kD-tree nodes implicitly split the incoming grid into candidate patches [S1, unofficial]. If an interior node is completely contained inside one of the candidate patches created by the incoming grid, replace that node and its entire subtree with a single leaf representing that new higher-resolution patch [S1, unofficial]. If an existing kD-tree leaf is partially overlaid by the incoming grid patch, recursively split that leaf into a set of non-overlapped patches (retaining the coarse resolution) and a single overlaid patch [S1, unofficial]. Replace the overlaid patch with the new higher-resolution grid patch [S1, unofficial].
++3. **Enumerate Order:** Perform a directed depth-first traversal of the resulting kD-tree to determine rendering order [S1, unofficial]. At each internal node, compare the camera viewpoint with the node's dividing plane [S1, unofficial]. Traverse the subtree corresponding to the region "behind" the dividing plane (from the viewpoint's perspective) first [S1, unofficial]. Traverse the other region second [S1, unofficial]. This ensures that no patch rendered in the first traversal can occlude any patch rendered in the second, guaranteeing correct front-to-back compositing even if the viewpoint is inside the domain [S1, unofficial].
++4. **Render:** For each patch in the enumerated order, upload the patch data to 3D texture memory and execute standard hardware-accelerated DVR (ray generation, sampling, compositing) [S1, S2, unofficial]. Patches are composited into the frame buffer, typically using hardware alpha blending [S1, unofficial].
+ 
+-1.  **Initialize Tree:** Create a kD-tree with a single root leaf representing the entire AMR domain [S1, unofficial].
+-2.  **Insert Grids:** Iterate through AMR grids in order of increasing resolution (finest last) [S1, unofficial].
+-    *   For each grid, traverse the kD-tree downwards.
+-    *   Existing interior kD-tree nodes implicitly split the incoming grid into candidate patches [S1, unofficial].
+-    *   **Case A (Complete Containment):** If an interior node is completely contained inside one of the candidate patches created by the incoming grid, replace that node and its entire subtree with a single leaf representing that new higher-resolution patch [S1, unofficial].
+-    *   **Case B (Partial Overlay):** If an existing kD-tree leaf is partially overlaid by the incoming grid patch, recursively split that leaf into a set of non-overlapped patches (retaining the coarse resolution) and a single overlaid patch [S1, unofficial]. Replace the overlaid patch with the new higher-resolution grid patch [S1, unofficial].
+-3.  **Enumerate Order:** Perform a directed depth-first traversal of the resulting kD-tree to determine rendering order [S1, unofficial].
+-    *   At each internal node, compare the camera viewpoint with the node's dividing plane [S1, unofficial].
+-    *   Traverse the subtree corresponding to the region "behind" the dividing plane (from the viewpoint's perspective) first [S1, unofficial].
+-    *   Traverse the other region second [S1, unofficial].
+-    *   This ensures that no patch rendered in the first traversal can occlude any patch rendered in the second, guaranteeing correct front-to-back compositing even if the viewpoint is inside the domain [S1, unofficial].
+-4.  **Render:** For each patch in the enumerated order, upload the patch data to 3D texture memory and execute standard hardware-accelerated DVR (ray generation, sampling, compositing) [S1, S2, unofficial]. Patches are composited into the frame buffer, typically using hardware alpha blending [S1, unofficial].
++**Compositing Formulas:**
++The standard front-to-back emission-absorption model updates accumulated color $C'$ and opacity $\alpha'$ at each step $i$:
++$$
++C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
++$$
++$$
++\alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
++$$
++where $\alpha_i$ and $C_i$ are the sampled opacity and color at the current step, and $\alpha'$ is clamped to $1.0$ to prevent floating-point accumulation errors and enable early ray termination [G].
+ 
+ **Pseudocode:**
++```python
++class KDTreeNode:
++    def __init__(self, min_c, max_c, is_leaf=True, patch=None, children=None, plane=None):
++        self.min_c = min_c
++        self.max_c = max_c
++        self.is_leaf = is_leaf
++        self.patch = patch
++        self.children = children if children else []
++        self.plane = plane  # (axis, coord)
+ 
+-```python
+-def render_amr_homogenized(amr_grids, camera_viewpoint):
+-    # Step 1: Initialize kD-tree
+-    # Root leaf covers the entire domain bounding box
+-    kdtree_root = KDTreeNode(domain=amr_domain, is_leaf=True, patch=None)
+-    
+-    # Step 2: Insert grids by increasing resolution
+-    sorted_grids = sort_by_resolution(amr_grids) # Coarsest to finest
+-    
++class Patch:
++    def __init__(self, grid_id, min_c, max_c, res):
++        self.grid_id = grid_id
++        self.min_c = min_c
++        self.max_c = max_c
++        self.res = res
++
++def build_partition_tree(amr_grids, domain_min, domain_max):
++    root = KDTreeNode(domain_min, domain_max, is_leaf=True, patch=None)
++    sorted_grids = sorted(amr_grids, key=lambda g: g.resolution)
+     for grid in sorted_grids:
+-        insert_grid_into_kdtree(kdtree_root, grid)
+-        
+-    # Step 3: Enumerate patches in back-to-front order
+-    ordered_patches = []
+-    traverse_kdtree_for_order(kdtree_root, camera_viewpoint, ordered_patches)
+-    
+-    # Step 4: Render patches
+-    for patch in ordered_patches:
+-        # Upload patch data to GPU texture
+-        upload_texture(patch.data)
+-        # Execute standard hardware-accelerated DVR for this patch
+-        # The hardware compositing (alpha blending) handles the over operator
+-        render_patch_hardware(patch)
++        insert_grid(root, grid)
++    return root
+ 
+-def insert_grid_into_kdtree(node, grid):
++def insert_grid(node, grid):
+     if node.is_leaf:
+-        # Check if grid completely covers this leaf's domain
+-        if grid.contains(node.domain):
+-            # Case A: Replace leaf with new higher-res patch
++        if grid.min_c <= node.min_c and grid.max_c >= node.max_c:
+             node.is_leaf = False
+-            node.patch = Patch.from_grid(grid, node.domain)
++            node.patch = Patch(grid.id, node.min_c, node.max_c, grid.resolution)
+             node.children = []
+         else:
+-            # Case B: Partial overlap. Split leaf.
+-            # Note: Implementation detail [G] - split logic depends on 
+-            # intersection of grid bounds and leaf bounds.
+-            split_leaf_into_patches(node, grid)
++            split_leaf(node, grid)
+     else:
+-        # Interior node: Recurse into children
+-        # The grid is implicitly split by the node's dividing plane
+         for child in node.children:
+-            if grid.intersects(child.domain):
+-                insert_grid_into_kdtree(child, grid)
++            if box_intersects(child.min_c, child.max_c, grid.min_c, grid.max_c):
++                insert_grid(child, grid)
+ 
+-def split_leaf_into_patches(node, grid):
+-    # Split the current leaf domain into:
+-    # 1. Regions not covered by the new grid (coarse patches)
+-    # 2. Region covered by the new grid (fine patch)
+-    # Replace the leaf with an interior node representing these splits
+-    # [G] Specific splitting geometry depends on AMR grid boundaries
+-    # and the kD-tree plane.
++def split_leaf(node, grid):
++    # [G] Standard axis-aligned box subtraction to create non-overlapping children
++    covered_min = max(node.min_c, grid.min_c)
++    covered_max = min(node.max_c, grid.max_c)
++    node.is_leaf = False
++    node.children = []
++    # Add children for uncovered regions
++    # Add child for covered region with new fine patch
++    covered_patch = Patch(grid.id, covered_min, covered_max, grid.resolution)
++    # Attach to appropriate child based on axis alignment [G]
+     pass
+ 
+-def traverse_kdtree_for_order(node, viewpoint, result_list):
++def traverse_for_order(node, viewpoint, order_list):
+     if node.is_leaf:
+-        if node.patch is not None:
+-            result_list.append(node.patch)
++        if node.patch:
++            order_list.append(node.patch)
+         return
+-    
+-    # Compare viewpoint with node's dividing plane
+-    behind_plane = is_behind_plane(viewpoint, node.dividing_plane)
+-    
+-    if behind_plane:
+-        # Traverse behind child first
+-        traverse_kdtree_for_order(node.behind_child, viewpoint, result_list)
+-        traverse_kdtree_for_order(node.front_child, viewpoint, result_list)
++    behind_child, front_child = node.children[0], node.children[1]
++    if point_behind_plane(viewpoint, node.plane):
++        traverse_for_order(behind_child, viewpoint, order_list)
++        traverse_for_order(front_child, viewpoint, order_list)
+     else:
+-        # Traverse front child first
+-        traverse_kdtree_for_order(node.front_child, viewpoint, result_list)
+-        traverse_kdtree_for_order(node.behind_child, viewpoint, result_list)
++        traverse_for_order(front_child, viewpoint, order_list)
++        traverse_for_order(behind_child, viewpoint, order_list)
++
++def render_patches(patches, camera, transfer_function):
++    for patch in patches:
++        for pixel in patch.screen_bounds:
++            ray_o = camera.get_ray_origin(pixel)
++            ray_d = camera.get_ray_direction(pixel)
++            t_min, t_max = compute_intersection(ray_o, ray_d, patch.min_c, patch.max_c)
++            if t_max < t_min: continue
++            acc_color = [0.0, 0.0, 0.0]
++            acc_alpha = 0.0
++            t = t_min
++            dt = patch.res
++            while t < t_max and acc_alpha < 1.0:
++                sample_pos = ray_o + ray_d * t
++                val = sample_volume(patch.grid_id, sample_pos)
++                alpha_i, color_i = transfer_function(val)
++                weight = (1.0 - acc_alpha) * alpha_i
++                acc_color = [c + weight * color_i for c in acc_color]
++                acc_alpha += weight
++                acc_alpha = min(acc_alpha, 1.0)
++                t += dt
++            write_pixel(pixel, acc_color, acc_alpha)
+ ```
+ 
+@@ -114,5 +127,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Preprocessing (homogenization) is computationally efficient, relying on kD-tree insertions [S2, unofficial]. Rendering time scales with the number of grid patches and the complexity of the transfer function [S2, unofficial].
+-*   **Memory Complexity:** Requires storing the kD-tree structure and the AMR data. Grid patches are stored in contiguous memory regions, optimizing texture cache usage [S1, unofficial].
++*   **Memory Complexity:** Requires storing the kD-tree structure and the AMR data [S2, unofficial]. Grid patches are stored in contiguous memory regions [S1, unofficial].
+ *   **Performance:** Homogenization is cited as the most efficient way to render AMR hierarchies because it is computationally efficient and allows the use of standard, optimized hardware-accelerated methods [S2, unofficial].
+ *   **Strengths:** No resampling required; leverages standard DVR hardware; correct compositing order guaranteed by kD-tree traversal [S1, S2, unofficial].
+@@ -120,5 +133,5 @@
+ 
+ ## Background
+-The method was developed to address the challenges of rendering AMR data, which does not fit standard Cartesian grid rendering algorithms. It was presented in the context of interactive direct volume rendering for AMR data, specifically tested on a star cluster formation simulation (Root level 32x32x32, data from Greg Bryan, Theoretical Astronomy Group, MIT) [S2, unofficial]. The approach builds on earlier work by Kähler & Hege (2001/2002) regarding texture-based AMR volume rendering and was further refined for GPU-assisted raycasting [S2, unofficial].
++The method was developed to address the challenges of rendering AMR data, which does not fit standard Cartesian grid rendering algorithms [S1, unofficial]. It was presented in the context of interactive direct volume rendering for AMR data, specifically tested on a star cluster formation simulation (Root level 32x32x32, data from Greg Bryan, Theoretical Astronomy Group, MIT) [S2, unofficial]. The approach builds on earlier work by Kähler & Hege (2001/2002) regarding texture-based AMR volume rendering and was further refined for GPU-assisted raycasting [S2, unofficial].
+ 
+ ## Sources

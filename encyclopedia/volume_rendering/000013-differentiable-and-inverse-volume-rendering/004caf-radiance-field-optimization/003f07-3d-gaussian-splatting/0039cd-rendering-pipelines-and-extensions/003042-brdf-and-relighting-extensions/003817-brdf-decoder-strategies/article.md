@@ -3,111 +3,178 @@
 Also called: Physical and Neural BRDF Decoding
 
 ## Overview
-BRDF Decoder Strategies define how 3D Gaussian Splatting primitives store and interpret surface reflectance properties to enable relighting and physically-based rendering. While standard 3D Gaussian Splatting [3D Gaussian Splatting](52-3d-gaussian-splatting.md) encodes color as a view-dependent spherical harmonic expansion, BRDF decoders map geometric attributes (position, covariance) and material parameters (albedo, roughness, metalness) to a reflectance function. This approach solves the problem of view-independent material representation, allowing for dynamic illumination changes. It differs from [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) by explicitly regressing physical PBR parameters rather than learning implicit embeddings, and from [3D Gaussian Splatting with Reflection and Relighting](5873-3d-gaussian-splatting-with-reflection-and-relighting.md) by focusing on the specific architectural choices (MLP vs. analytical models) for decoding these parameters.
+BRDF Decoder Strategies define how 3D Gaussian Splatting primitives map their stored latent attributes to physically based or neural reflectance values during rendering. While the parent method handles geometry and visibility, these strategies determine the material appearance by either regressing physical parameters (albedo, roughness, metalness) for evaluation via analytical models or directly predicting reflection weights via neural networks. This approach enables relighting and inverse rendering capabilities within the Gaussian splatting framework, distinguishing it from standard appearance-only splatting by decoupling geometry from material properties.
 
 ## How it works
-The method involves regressing physical or neural BRDF parameters per Gaussian primitive and evaluating them during the deferred rendering pass.
+The method operates in two distinct modes depending on the availability of physical ground truth or desired interpretability: Physical Attribute Regression and Neural Reflection Weighting.
 
-**Inputs:**
-*   Gaussian primitive attributes: mean position $\mu$, covariance $\Sigma$, opacity $\alpha$, and base color/albedo $\mathbf{c}_{base}$.
-*   Incident light direction $\omega_i$ and view direction $\omega_o$.
-*   Optional: Scene lighting environment map.
+### Inputs and Outputs
+*   **Inputs:**
+    *   Gaussian primitive attributes: Position $\mathbf{x}$, Covariance $\Sigma$, Opacity $\alpha$, and learned latent features $\mathbf{z}$ (or physical parameters if pre-defined).
+    *   View direction $\mathbf{v}$ and Light direction $\mathbf{l}$ (for relighting).
+    *   Surface normal $\mathbf{n}$ (derived from covariance or explicit normal attributes).
+*   **Outputs:**
+    *   Reflected radiance $L_r$ or BRDF value $f_r(\mathbf{l}, \mathbf{v})$.
+    *   Physical parameters: Albedo $\rho$, Roughness $\alpha_r$, Metalness $m$.
 
-**Outputs:**
-*   Reflected radiance $L_o$ for each pixel.
+### Data Structures
+The Gaussian primitive stores attributes in a contiguous buffer. For physical decoding, the structure includes:
+*   `base_color`: 3 floats (RGB).
+*   `roughness`: 1 float.
+*   `metallic`: 1 float.
+*   `sh_coefficients`: $N$ floats for indirect illumination (Spherical Harmonics).
+*   `latent_vector`: Variable size (e.g., 32 features) for neural decoding [S3, unofficial].
 
-**Data Structures:**
-*   **Physical Attributes:** Stored as scalar or vector fields per Gaussian.
-    *   Albedo $\mathbf{c}_{base}$: RGB vector, clamped $[0, 1]$.
-    *   Roughness $\alpha_{rough}$: Scalar, scaled/shifted to $[0.09, 1]$ to prevent extreme specular highlights [S2, unofficial].
-    *   Metalness: Scalar, clamped $[0, 1]$ [S2, unofficial].
-    *   Indirect Illumination: Spherical Harmonic (SH) coefficients [S2, unofficial].
-*   **Neural Attributes:** If physical attributes are unavailable, MLP weights or LSTM states encode the BRDF as a light reflection weight [S1, unofficial].
+### Step 1: Attribute Regression or Latent Encoding
+**Mode A: Physical Attributes (Disney Model)**
+For datasets with known physical attributes, multiple Multi-Layer Perceptrons (MLPs) regress physical properties from the Gaussian's latent features or position [S1, unofficial].
+1.  Input latent features $\mathbf{z}$ into MLPs.
+2.  Output physical parameters: Albedo $\rho \in [0,1]^3$, Roughness $\alpha_r \in [0.09, 1]$, Metalness $m \in [0,1]$ [S2, unofficial].
+3.  Clamp values to valid ranges. Roughness is typically shifted to $[0.09, 1]$ to prevent singular specularities [S2, unofficial].
 
-**Steps:**
-1.  **Attribute Regression:**
-    *   *Physical Path:* Use multiple Multi-Layer Perceptrons (MLPs) to regress albedo, roughness, and metalness from the Gaussian's spatial coordinates or latent features [S1, unofficial].
-    *   *Neural Path:* Use MLPs or LSTMs to analyze the energy distribution of incident light and reflection directly, representing the BRDF as a reflection weight [S1, unofficial].
-2.  **BRDF Evaluation:**
-    *   *Simplified Disney Model:* Calculate the Normal Distribution Function (NDF), Fresnel term, and Geometry term using Neilf's formula [S1, unofficial].
-    *   *Neural Model:* Evaluate the neural network with inputs $\omega_i, \omega_o$ to output the reflection weight [S1, unofficial].
-3.  **Lighting Integration:**
-    *   Sample incident light directions $\omega_i$. For training, use Fibonacci sampling for random incoming light [S2, unofficial]. For relighting, use Multiple Importance Sampling (MIS) combining light importance rays and GGX importance rays [S2, unofficial].
-    *   Compute reflected radiance $L_o = f_r(\omega_i, \omega_o) L_i(\omega_i) \cos \theta_i$.
-4.  **Denoising (Deferred Pipeline):**
-    *   Apply a non-parametric bilateral denoiser to the PBR result to handle low samples per point (spp) [S2, unofficial].
+**Mode B: Neural Reflection Weighting**
+For datasets lacking physical attributes, MLPs or LSTMs directly analyze the energy distribution of incident light and reflection [S1, unofficial].
+1.  Input view $\mathbf{v}$, light $\mathbf{l}$, and normal $\mathbf{n}$ into the network.
+2.  Output a reflection weight $W$ representing the BRDF value.
+3.  This acts as a degenerate form of light reflection weight without physical constraints [S1, unofficial].
 
-**Pseudocode:**
+### Step 2: BRDF Evaluation
+**Physical Mode:**
+Calculate the BRDF using the simplified Disney principle-based model [S1, unofficial].
+1.  **Normal Distribution Function (NDF):** Use the formula from NeILF [S1, unofficial].
+    $$ D(\mathbf{h}, \alpha_r) = \frac{\alpha_r^2}{\pi ((\mathbf{n} \cdot \mathbf{h})^2 (\alpha_r^2 - 1) + 1)^2} $$
+    where $\mathbf{h}$ is the half-vector.
+2.  **Fresnel Term:** Calculate using Schlick's approximation or similar, dependent on metalness $m$ and base color $\rho$.
+3.  **Geometry Term:** Calculate using the NeILF geometry function $G(\mathbf{l}, \mathbf{v}, \mathbf{n}, \alpha_r)$ [S1, unofficial].
+4.  Combine terms to get $f_r$.
+
+**Neural Mode:**
+The network output $W$ is used directly as the reflectance scaling factor.
+$$ L_r = W \cdot E_i $$
+where $E_i$ is the incident irradiance [S1, unofficial].
+
+### Step 3: Relighting and Sampling
+For inverse rendering and relighting, light sampling is critical [S2, unofficial].
+1.  **Training:** Use Fibonacci sampling for random incoming light directions to ensure uniform coverage on the hemisphere [S2, unofficial].
+2.  **Relighting (Inference):** Use Multiple Importance Sampling (MIS) as implemented in NVDiffrecMC [S2, unofficial].
+    *   Cast equal amounts of "light importance" rays and "GGX importance" rays.
+    *   Combine samples using MIS weights to reduce variance.
+
+### Step 4: Denoising (Deferred Pipeline)
+To enable real-time rendering with low sample counts, a non-parametric bilateral denoiser is applied to the PBR result [S2, unofficial].
+1.  Render with low Samples Per Pixel (spp), e.g., 64 spp [S2, unofficial].
+2.  Apply bilateral filtering using spatial proximity and photometric similarity (based on albedo/normal buffers) to suppress noise while preserving edges.
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def evaluate_brdf_decoder(gaussian, omega_o, omega_i, lighting_env):
+def decode_brdf(gaussian, view_dir, light_dir, mode='physical'):
     """
-    Evaluates the BRDF for a single Gaussian primitive.
-    gaussian: object containing albedo, roughness, metalness, or neural weights.
-    omega_o: view direction.
-    omega_i: incident light direction.
-    lighting_env: environment map or light source data.
-    """
-    # 1. Retrieve or Regress Physical Parameters
-    if gaussian.has_physical_params:
-        albedo = clamp(gaussian.albedo, 0, 1)
-        roughness = scale_shift(gaussian.roughness, min=0.09, max=1.0)
-        metalness = clamp(gaussian.metalness, 0, 1)
-        
-        # 2. Calculate BRDF Terms (Simplified Disney/Neilf)
-        # NDF, Fresnel, Geometry terms calculated via Neilf's formula
-        ndf = calculate_ndf(roughness, dot_product(normal, omega_i))
-        fresnel = calculate_fresnel(metalness, albedo, dot_product(normal, omega_i))
-        geometry = calculate_geometry(roughness, dot_product(normal, omega_i), dot_product(normal, omega_o))
-        
-        brdf_value = (ndf * fresnel * geometry) / (4.0 * dot_product(normal, omega_i) * dot_product(normal, omega_o))
-    else:
-        # Neural Decoder Path
-        # MLP/LSTM analyzes energy distribution of incident light and reflection
-        brdf_value = neural_network_forward(gaussian.neural_weights, omega_i, omega_o)
-        
-    # 3. Apply Brightening if using Neural/Reflection Weight directly
-    # Mitigates highlight loss by boosting high-intensity pixels
-    if not gaussian.has_physical_params:
-        pixel_gray = luminance(brdf_value)
-        if pixel_gray > threshold:
-            brdf_value *= brightness_coefficient
-            
-    # 4. Integrate with Lighting
-    incident_radiance = sample_lighting(lighting_env, omega_i)
-    reflected_radiance = brdf_value * incident_radiance * dot_product(normal, omega_i)
+    Decodes BRDF for a single Gaussian primitive.
     
-    return reflected_radiance
+    Args:
+        gaussian: Object containing attributes (base_color, roughness, metallic, latent)
+        view_dir: Normalized view vector v
+        light_dir: Normalized light vector l
+        mode: 'physical' or 'neural'
+        
+    Returns:
+        reflected_radiance: Float or Vector3
+    """
+    n = gaussian.normal
+    v = view_dir
+    l = light_dir
+    h = normalize(v + l)
+    
+    if mode == 'physical':
+        # 1. Retrieve physical parameters
+        rho = clamp(gaussian.base_color, 0.0, 1.0)
+        alpha_r = clamp(gaussian.roughness, 0.09, 1.0) # Prevent extreme speculars [S2, unofficial]
+        m = clamp(gaussian.metallic, 0.0, 1.0)
+        
+        # 2. Calculate NeILF terms [S1, unofficial]
+        # NDF
+        nh = dot(n, h)
+        denom = (nh * nh) * (alpha_r * alpha_r - 1.0) + 1.0
+        D = (alpha_r * alpha_r) / (pi * denom * denom)
+        
+        # Fresnel (Schlick approximation for dielectrics, blended for metals)
+        F0 = mix(vec3(0.04), rho, m)
+        F = F0 + (1.0 - F0) * pow(1.0 - dot(v, h), 5.0)
+        
+        # Geometry (NeILF simplified)
+        # Note: Exact NeILF geometry formula is complex; simplified approximation often used
+        # G = G_Schlick(v, n, alpha_r) * G_Schlick(l, n, alpha_r)
+        G = geometry_term(v, l, n, alpha_r) 
+        
+        # 3. Combine
+        numerator = D * F * G
+        denominator = 4.0 * max(dot(v, n), 1e-5) * max(dot(l, n), 1e-5)
+        brdf = numerator / max(denominator, 1e-5)
+        
+        return brdf * rho # Diffuse component included in Disney model usually
+        
+    elif mode == 'neural':
+        # 1. Neural Network Forward Pass [S1, unofficial]
+        # Input: v, l, n, latent_vector
+        reflection_weight = neural_net(v, l, n, gaussian.latent)
+        
+        # 2. Mitigate highlight loss [S1, unofficial]
+        # If training, apply brightening to target images. 
+        # During inference, weight is used directly.
+        return reflection_weight
+
+def render_with_mis(gaussians, env_map, spp=64):
+    """
+    Renders using Multiple Importance Sampling for relighting [S2, unofficial].
+    """
+    color = vec3(0.0)
+    
+    # Split samples between Light Importance and GGX Importance
+    n_light = spp // 2
+    n_ggx = spp - n_light
+    
+    for i in range(n_light):
+        l = fibonacci_sample_hemisphere()
+        # Cast ray, find intersection/weight
+        weight = evaluate_gaussian_weight(gaussians, l)
+        Li = sample_env_map(env_map, l)
+        color += weight * Li / n_light
+        
+    for i in range(n_ggx):
+        # Sample based on GGX distribution (roughness-dependent)
+        l = ggx_sample_hemisphere(gaussians)
+        weight = evaluate_gaussian_weight(gaussians, l)
+        Li = sample_env_map(env_map, l)
+        color += weight * Li / n_ggx
+        
+    return color
 ```
 
-**Parameters:**
-*   **Roughness Bounds:** $[0.09, 1]$ [S2, unofficial].
-*   **Brightness Coefficient:** Multiplier for pixels exceeding a gray-value threshold [S1, unofficial].
-*   **Samples Per Pixel (spp):** 64 spp used with denoising for real-time rendering; 1,024 spp for comparison with voxel grid methods [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Highlight Loss:** Direct training of reflection weights without physical constraints leads to loss of highlight information [S1, unofficial]. Mitigated by brightening operations [S1, unofficial].
-*   **Degenerate Geometry:** Imperfect surface meshes and large gradients in HDR space during PBR training can cause dramatic position shifts of vertices, impairing visibility [S2, unofficial].
-*   **Overfitting:** Methods may overfit to the lighting conditions of the training dataset [S2, unofficial].
+### Parameters and Edge Cases
+*   **Roughness Clamping:** Must be clamped to $[0.09, 1]$ to prevent numerical instability and excessively strong specular highlights [S2, unofficial].
+*   **Highlight Loss:** Direct training of reflection weights without physical constraints leads to loss of highlight information [S1, unofficial]. Mitigation: Apply a brightening operation to training images by multiplying pixels with gray values surpassing a threshold by a brightness coefficient [S1, unofficial].
+*   **Mesh Degeneracy:** In deferred pipelines, imperfect surface meshes can cause dramatic position shifts during PBR training in HDR space, impairing visibility [S2, unofficial].
 
 ## Subtopics
 
 ### Deferred Rendering Pipeline for Phys3DGS
-A specific implementation of BRDF decoding used to train Physically-Based Rendering (PBR) parameters in Phys3DGS. It distinguishes itself by employing a deferred rendering pipeline that separates the geometry pass from the material/lighting pass. It uses multiple importance sampling (MIS) for light rays during training and applies a non-parametric bilateral denoiser to the PBR result. This allows for real-time rendering with only 64 samples per pixel (spp), compared to 1,024 spp required by voxel grid-based methods [S2, unofficial]. It is chosen when real-time relighting quality is prioritized over raw sample accuracy without denoising.
+A rendering pipeline specifically designed to train Physically Based Rendering (PBR) parameters (albedo, metalness, roughness, SH coefficients) within 3DGS [S2, unofficial]. It employs multiple importance sampling (MIS) for light rays and post-processing denoising to enable real-time rendering. It uses Fibonacci sampling for training light directions and NVDiffrecMC-style MIS (equal light and GGX rays) for relighting [S2, unofficial]. It applies a non-parametric bilateral denoiser to handle low sample counts (64 spp vs 1,024 spp for voxel methods) [S2, unofficial].
+
+### BRDF-SMAE
+A Smooth Material Auto-Encoder (SMAE) that encodes a single BRDF per point in a neural volume to enable spatially varying BRDF decomposition [S3, unofficial]. It uses an encoder, decoder, and discriminator, each consisting of 3 MLP layers with 32 output features [S3, unofficial]. It enforces smoothness in the latent space using loss weighting parameters $\lambda_1 = 0.01$, $\lambda_2 = 0.01$, $\lambda_3 = 0.001$ [S3, unofficial]. It uses 64 interpolation steps in the latent space and Mean Absolute Error (MAE) for reconstruction [S3, unofficial]. Training runs for 1.5 million steps with batch size 256 on an NVIDIA 1080 TI GPU using Adam optimizer (lr $1e-4$) [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Training involves iterative regression of MLPs or SH coefficients. Stage 2 (PBR training) takes approximately 10k steps, taking up to 30 minutes on an NVIDIA RTX 4090 [S2, unofficial].
-*   **Memory Complexity:** Requires storing additional attributes per Gaussian (albedo, roughness, metalness, SH coefficients) compared to standard 3DGS.
-*   **Performance:** The deferred pipeline with denoising achieves real-time rendering speeds (64 spp) with quality comparable to high-sample (1,024 spp) voxel methods [S2, unofficial].
-*   **Strengths:** Enables physically plausible relighting; separates material from lighting; efficient real-time rendering via denoising.
-*   **Limitations:** Sensitive to mesh quality; prone to highlight loss if physical constraints are not used; potential overfitting to training lighting [S1, unofficial][S2, unofficial].
-*   **When to use:** When dynamic lighting and physically-based material interaction are required.
-*   **When not to use:** When static lighting is sufficient (use standard 3DGS) or when hardware lacks support for efficient denoising.
+*   **Time Complexity:** Real-time rendering is achievable with the deferred pipeline and denoiser, requiring only 64 samples per pixel (spp) compared to 1,024 spp for voxel-based methods [S2, unofficial]. Training takes approximately 30 minutes for PBR parameters (10k steps) on an RTX 4090 [S2, unofficial]. Neural decoding adds inference overhead per Gaussian but avoids complex analytical evaluations.
+*   **Memory Complexity:** Increases with the storage of physical attributes (albedo, roughness, metalness, SH coefficients) or larger latent vectors for neural decoding [S3, unofficial]. BRDF-SMAE requires storing a latent vector per point [S3, unofficial].
+*   **Strengths:** Enables physically plausible relighting and material decomposition. The deferred pipeline allows real-time performance with low sample counts via denoising [S2, unofficial]. Physical decoding provides interpretable material parameters.
+*   **Limitations:** Direct neural decoding may lose highlight information without specific training mitigations (brightening) [S1, unofficial]. Physical decoding requires accurate normal estimation and can suffer from mesh degeneracy issues during optimization [S2, unofficial].
 
 ## Background
-BRDF decoding in 3D Gaussian Splatting emerged from the need to extend the static, view-dependent color representation of 3DGS [3D Gaussian Splatting](52-3d-gaussian-splatting.md) to support inverse rendering and relighting. Early approaches used neural networks to directly predict reflection weights, which suffered from highlight loss [S1, unofficial]. Subsequent work introduced physically-based models (Disney BRDF) and deferred rendering pipelines to stabilize training and enable real-time performance [S2, unofficial]. Key developments include the use of Neilf's formula for BRDF terms [S1, unofficial] and the integration of bilateral denoisers to reduce sample counts [S2, unofficial].
+BRDF decoding in 3D Gaussian Splatting emerged from the need to extend the fast rendering capabilities of 3DGS to inverse rendering and relighting tasks. Early methods focused on novel view synthesis with fixed lighting. The integration of PBR parameters (albedo, roughness, metalness) allowed for scene decomposition [S2, unofficial]. The use of simplified Disney models and NeILF formulas provided a bridge between differentiable rendering and physical optics [S1, unofficial]. The development of deferred pipelines and neural auto-encoders (SMAE) further refined the ability to handle spatially varying materials and real-time relighting [S2, S3, unofficial].
 
 ## Sources
 [S1] STensoRRF:Tensorial able Relighting Radiance Field for Single-Tensor Scene Representation, https://doi.org/10.20944/preprints202401.1085.v1, fetched 2026-10-30 (unofficial)
 [S2] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)
+[S3] Neural-PIL: Neural Pre-Integrated Lighting for Reflectance Decomposition, https://doi.org/10.48550/arxiv.2110.14373, fetched 2026-10-26 (unofficial)

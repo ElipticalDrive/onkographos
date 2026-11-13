@@ -7,29 +7,23 @@ This method provides a memory-efficient, runtime mechanism for selecting seed po
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A scalar volume dataset, an iso-value for surface illustration, and threshold constants $C_0$ (curvature) and $C_1$ (gradient).
+- **Input:** A scalar volume dataset, an iso-value for surface illustration, and threshold constants $C_0$ (curvature) and $C_1$ (gradient) [S1, unofficial].
 - **Output:** A set of 3D coordinates representing seed points, arranged statically to ensure temporal coherence across frames despite object or viewpoint transformations [S1, unofficial].
 
 **Data Structures:**
-The structure is a pointerless octree (pyramid) where each level $L$ has $1/8$ the entries of level $L-1$. Level 1 is the original data. All stored attributes are quantized to 8-bit integers [S1, unofficial].
-- **Level 1:** Original scalar values.
-- **Level 2:** For each node, store:
-  - Min scalar value
-  - Max scalar value
-  - Max gradient magnitude $|\nabla_{\max}|$
-  - Max mean curvature $\kappa_{\max} = \frac{1}{2}(\kappa_1 + \kappa_2)$
-- **Level $L > 2$:** For each node, store:
-  - Max mean curvature $\kappa_{\max}$
-  - Measure of local homogeneity [S1, unofficial]
+The structure is a pointerless octree (pyramid) where each level $L$ has $1/8$ the entries of level $L-1$ [S1, unofficial]. Level 1 is the original data [S1, unofficial]. All stored attributes are quantized to 8-bit integers [S1, unofficial].
+- **Level 1:** Original scalar values [S1, unofficial].
+- **Level 2:** For each node, store: min scalar value, max scalar value, max gradient magnitude $|\nabla_{\max}|$, and max mean curvature $\kappa_{\max} = \frac{1}{2}(\kappa_1 + \kappa_2)$ [S1, unofficial].
+- **Level $L > 2$:** For each node, store: max mean curvature $\kappa_{\max}$ and a measure of local homogeneity [S1, unofficial].
 
 **Algorithm Steps:**
-1. **Traversal:** Traverse the octree in depth-first order, starting from the coarsest level (highest level index).
+1. **Traversal:** Traverse the octree in depth-first order, starting from the coarsest level (highest level index) [S1, unofficial].
 2. **Pruning Conditions:** Terminate traversal for a specific node/region if any of the following are true:
-   - The region is empty (no data).
-   - An iso-surface is being illustrated, but the iso-value is not contained within the scalar range $[min, max]$ of the region.
-   - The maximal mean curvature $\kappa_{\max}$ is less than or equal to the constant $C_0$. This avoids computing principal curvature directions on planar structures where they are meaningless [S1, unofficial].
+   - The region is empty (no data) [S1, unofficial].
+   - An iso-surface is being illustrated, but the iso-value is not contained within the scalar range $[min, max]$ of the region [S1, unofficial].
+   - The maximal mean curvature $\kappa_{\max}$ is less than or equal to the constant $C_0$ [S1, unofficial]. This avoids computing principal curvature directions on planar structures where they are meaningless [S1, unofficial].
    - *Note:* If traversal terminates at a level $> 1$, no seeds are placed in that region [S1, unofficial].
-3. **Seed Probability Calculation:** For non-empty regions at Level 2 (or regions where traversal did not terminate early), calculate the probability $p$ of placing a seed in any non-empty $2 \times 2 \times 2$ voxel sub-region. Let $\kappa$ be the normalized mean curvature and $|\nabla_{\max}|$ be the normalized max gradient magnitude, both mapped to $(0, 1)$ [S1, unofficial].
+3. **Seed Probability Calculation:** For non-empty regions at Level 2 (or regions where traversal did not terminate early), calculate the probability $p$ of placing a seed in any non-empty $2 \times 2 \times 2$ voxel sub-region [S1, unofficial]. Let $\kappa$ be the normalized mean curvature and $|\nabla_{\max}|$ be the normalized max gradient magnitude, both mapped to $(0, 1)$ [S1, unofficial].
    $$
    p(\kappa, |\nabla_{\max}|) = 
    \begin{cases} 
@@ -38,15 +32,15 @@ The structure is a pointerless octree (pyramid) where each level $L$ has $1/8$ t
    \frac{1}{2}(\kappa + |\nabla_{\max}|) & \text{otherwise}
    \end{cases}
    $$
-   - $C_0$: Threshold for maximal mean curvature.
+   - $C_0$: Threshold for maximal mean curvature [S1, unofficial].
    - $C_1$: Threshold for gradient magnitude (value not specified in sources) [S1, unofficial].
-4. **Seed Placement:** Based on $p$, select specific cells within the $2 \times 2 \times 2$ region to host a seed point. The number of seeds correlates with gradient magnitude and curvature; fewer seeds in homogeneous/low-curvature regions, more at high-curvature boundaries [S1, unofficial].
+4. **Seed Placement:** Based on $p$, select specific cells within the $2 \times 2 \times 2$ region to host a seed point [S1, unofficial]. The number of seeds correlates with gradient magnitude and curvature; fewer seeds in homogeneous/low-curvature regions, more at high-curvature boundaries [S1, unofficial].
 5. **Gradient-Based Positioning (Refinement):** For opaque objects, ensure the stroke lies entirely in front of the iso-surface (scalar value $< $ iso-value) to survive depth testing [S1, unofficial].
-   - Place initial seed at the center of the selected cell.
-   - Interpolate the scalar value $S$ and the gray-scale gradient $\nabla S$ at the seed position.
-   - Compare $S$ with the iso-value $I$.
-   - If $S \geq I$, shift the seed along the gradient direction $\nabla S$.
-   - If $S < I$, shift the seed opposite to the gradient direction $-\nabla S$.
+   - Place initial seed at the center of the selected cell [S1, unofficial].
+   - Interpolate the scalar value $S$ and the gray-scale gradient $\nabla S$ at the seed position [S1, unofficial].
+   - Compare $S$ with the iso-value $I$ [S1, unofficial].
+   - If $S \geq I$, shift the seed along the gradient direction $\nabla S$ [S1, unofficial].
+   - If $S < I$, shift the seed opposite to the gradient direction $-\nabla S$ [S1, unofficial].
    - Repeat interpolation and shifting until the scalar value at the seed position is strictly less than $I$ [S1, unofficial].
 
 **Pseudocode:**
@@ -55,76 +49,63 @@ The structure is a pointerless octree (pyramid) where each level $L$ has $1/8$ t
 ```python
 def traverse_and_place_seeds(octree, iso_value, C0, C1):
     seeds = []
-    # Start from the highest level (coarsest)
-    max_level = octree.max_level
-    for node in octree.depth_first_traversal(start_level=max_level):
+    # Stack for depth-first traversal: (level, node_index)
+    stack = [(octree.max_level, 0)]
+    while stack:
+        level, idx = stack.pop()
+        node = octree.get_node(level, idx)
+
         # Pruning: Empty region
-        if node.is_empty():
+        if node.is_empty:
             continue
-        
-        # Pruning: Iso-value not in range (only if illustrating surface)
+        # Pruning: Iso-value not in range
         if node.min_scalar > iso_value or node.max_scalar < iso_value:
             continue
-            
-        # Pruning: Planar structure (Level > 1 check implied by structure)
-        # Note: C0 threshold check applies to mean curvature
+        # Pruning: Planar structure
         if node.max_mean_curvature <= C0:
             continue
-            
-        # If we are at Level 2 or below, we might place seeds
-        # The probability logic is defined for Level 2 attributes
-        if node.level == 2:
-            # Normalize attributes to (0, 1)
-            # Implementation detail: normalization function not specified in source
-            norm_kappa = normalize(node.max_mean_curvature)
-            norm_grad = normalize(node.max_gradient_magnitude)
-            
+
+        # If at Level 2, decide seed placement for the 2x2x2 child region
+        if level == 2:
+            # Normalize 8-bit quantized attributes to (0, 1) [G]
+            norm_kappa = node.max_mean_curvature / 255.0
+            norm_grad = node.max_gradient_magnitude / 255.0
+
             # Calculate probability
             if norm_kappa <= C0 or norm_grad <= C1:
                 prob = 0.0
             else:
                 prob = 0.5 * (norm_kappa + norm_grad)
-            
-            # Determine if seeds are placed in this 2x2x2 region
-            # Source implies probabilistic selection of cells within the region
-            # Exact randomization algorithm not specified [G]
-            if random() < prob:
-                # Select specific cells within the 2x2x2 region
-                # Source does not specify exact cell selection logic [G]
-                selected_cells = select_cells_in_region(node)
-                
-                for cell in selected_cells:
-                    seed = place_seed_in_cell(cell, iso_value)
-                    seeds.append(seed)
-        else:
-            # For levels > 2, the source states traversal continues 
-            # but does not explicitly detail seed placement logic 
-            # other than the pruning conditions. 
-            # Assuming seeds are placed at leaf nodes (Level 1 or 2)
-            # based on the hierarchy. If this node is not a leaf, 
-            # traversal continues to children.
-            pass
 
+            # Iterate over the 8 cells in the 2x2x2 region
+            for child_idx in range(8):
+                if random.uniform(0, 1) < prob:
+                    child_cell = octree.get_child(node, child_idx)
+                    seed_pos = place_seed_in_cell(child_cell, iso_value)
+                    seeds.append(seed_pos)
+        else:
+            # Push children in reverse order for DFS
+            for c in range(7, -1, -1):
+                stack.append((level + 1, node.child_index(c)))
     return seeds
 
 def place_seed_in_cell(cell, iso_value):
-    # Initial placement at center
     pos = cell.center()
-    
-    while True:
-        scalar_val = interpolate_scalar(pos)
-        grad = interpolate_gradient(pos)
-        
+    step = 0.01  # Step size not given in sources [G]
+    for _ in range(100): # Max iterations to prevent infinite loop [G]
+        scalar_val = trilinear_interpolate(cell.volume, pos)
+        grad = trilinear_interpolate(cell.gradient_volume, pos)
         if scalar_val < iso_value:
             break
-        
-        # Shift along gradient direction if scalar >= iso_value
-        # Shift opposite if scalar < iso_value (though loop condition handles <)
-        # Source says: "If scalar >= iso-value, shift along gradient... else shift opposite"
-        # Since we break if <, we only shift if >=
-        pos = pos + grad * step_size
-        
+        if scalar_val >= iso_value:
+            pos = pos + grad * step
+        else:
+            pos = pos - grad * step
     return pos
+
+def trilinear_interpolate(volume, pos):
+    # Standard trilinear interpolation of the scalar/gradient volume at pos [G]
+    ...
 ```
 
 **Parameters:**
@@ -133,20 +114,20 @@ def place_seed_in_cell(cell, iso_value):
 - Step size for gradient shifting: Not given in sources [G].
 
 **Edge Cases and Pitfalls:**
-- **Planar Structures:** If $\kappa_{\max} \leq C_0$, traversal stops. No seeds are placed, preventing meaningless curvature direction calculations [S1, unofficial].
-- **Opaque Objects:** Strokes must lie in front of the object (scalar $< $ iso-value) to survive depth tests. Failure to shift seeds correctly results in strokes being clipped or rendered incorrectly [S1, unofficial].
-- **Temporal Coherence:** Seeds are arranged statically. This ensures consistency across frames even if the object or viewpoint transforms, but requires the static arrangement to be computed based on the object's intrinsic geometry [S1, unofficial].
+- **Planar Structures:** If $\kappa_{\max} \leq C_0$, traversal stops [S1, unofficial]. No seeds are placed, preventing meaningless curvature direction calculations [S1, unofficial].
+- **Opaque Objects:** Strokes must lie in front of the object (scalar $< $ iso-value) to survive depth tests [S1, unofficial]. Failure to shift seeds correctly results in strokes being clipped or rendered incorrectly [S1, unofficial].
+- **Temporal Coherence:** Seeds are arranged statically [S1, unofficial]. This ensures consistency across frames even if the object or viewpoint transforms [S1, unofficial].
 
 ## Subtopics
 
 ### Gradient-Based Seed Positioning
-This variant/refinement focuses on the spatial adjustment of the seed point after initial selection. It ensures that for opaque volume rendering, the generated hatching stroke lies entirely in front of the iso-surface (scalar values $< $ iso-value) so that it survives the depth test during rendering [S1, unofficial]. It involves interpolating the scalar and gradient at the cell center, comparing the scalar to the iso-value, and iteratively shifting the seed along or opposite to the gradient until the condition is met [S1, unofficial].
+This variant focuses on the spatial adjustment of the seed point after initial selection [S1, unofficial]. It ensures that for opaque volume rendering, the generated hatching stroke lies entirely in front of the iso-surface (scalar values $< $ iso-value) so that it survives the depth test during rendering [S1, unofficial]. It involves interpolating the scalar and gradient at the cell center, comparing the scalar to the iso-value, and iteratively shifting the seed along or opposite to the gradient until the condition is met [S1, unofficial].
 
 ## Operating characteristics
-- **Memory:** Significantly reduced compared to pre-generating all seeds. The pointerless octree uses 8-bit quantization for attributes, and higher levels store only curvature and homogeneity, minimizing overhead [S1, unofficial].
-- **Time Complexity:** Depends on octree traversal. Depth-first traversal allows early pruning of empty or planar regions, reducing the number of cells evaluated for seed placement [S1, unofficial].
+- **Memory:** Significantly reduced compared to pre-generating all seeds [S1, unofficial]. The pointerless octree uses 8-bit quantization for attributes, and higher levels store only curvature and homogeneity, minimizing overhead [S1, unofficial].
+- **Time Complexity:** Depends on octree traversal [S1, unofficial]. Depth-first traversal allows early pruning of empty or planar regions, reducing the number of cells evaluated for seed placement [S1, unofficial].
 - **Performance:** The method dynamically adapts seed density to local features (curvature/gradient), placing more seeds at boundaries and fewer in homogeneous regions [S1, unofficial].
-- **Strengths:** Memory efficiency, temporal coherence, adaptive density.
+- **Strengths:** Memory efficiency, temporal coherence, adaptive density [S1, unofficial].
 - **Limitations:** Requires runtime computation of seeds; relies on accurate gradient and curvature estimation; specific threshold values ($C_0, C_1$) are not provided, requiring tuning [S1, unofficial].
 
 ## Background

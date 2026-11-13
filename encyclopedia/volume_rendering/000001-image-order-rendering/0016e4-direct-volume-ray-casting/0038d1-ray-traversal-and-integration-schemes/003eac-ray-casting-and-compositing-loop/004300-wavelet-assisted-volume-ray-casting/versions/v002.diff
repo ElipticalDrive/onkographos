@@ -1,0 +1,224 @@
+--- v001.md
++++ v002.md
+@@ -9,19 +9,19 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A 3D scalar volume $V$ of size $N^3$, a user-specified error bound $E$, and a standard sampling distance $d$.
+-*   **Output:** A rendered 2D image.
+-*   **Auxiliary Output:** An index volume $I$ of size $N^3$, where each voxel stores an integer $L$.
++*   **Input:** A 3D scalar volume $V$ of size $N^3$, a user-specified error bound $E$, and a standard sampling distance $d$ [S1, unofficial].
++*   **Output:** A rendered 2D image [S1, unofficial].
++*   **Auxiliary Output:** An index volume $I$ of size $N^3$, where each voxel stores an integer $L$ [S1, unofficial].
+ 
+ ### Data Structures
+ 
+ **Index Volume ($I$)**
+-*   **Layout:** A 3D array with the same resolution ($N^3$) as the spatial volume.
+-*   **Content:** Each voxel stores an integer $L$, representing the power of 2 by which the standard sampling distance is multiplied.
++*   **Layout:** A 3D array with the same resolution ($N^3$) as the spatial volume [S1, unofficial].
++*   **Content:** Each voxel stores an integer $L$, representing the power of 2 by which the standard sampling distance is multiplied [S1, unofficial].
+ *   **Size:** $L$ is bounded by $\log_2 N$. The implementation uses 4 bits per voxel [S1, unofficial].
+ *   **Lookup Table:** A small table stores the actual sampling distance multiplier $2^L$ to avoid runtime exponentiation [S1, unofficial].
+ 
+ **Wavelet Coefficients**
+-*   The volume is decomposed using the 3D Discrete Wavelet Transform (DWT).
+-*   Coefficients are organized by scale level $j$ (where $j$ decreases from fine to coarse, e.g., $-1, -2, \dots, -L$).
++*   The volume is decomposed using the 3D Discrete Wavelet Transform (DWT) [S1, unofficial].
++*   Coefficients are organized by scale level $j$ (where $j$ decreases from fine to coarse, e.g., $-1, -2, \dots, -L$) [S1, unofficial].
+ 
+ ### Formulas
+@@ -61,5 +61,5 @@
+     b. Find the largest integer $L$ such that the magnitudes of all relevant coefficients from level $-1$ to $-L$ are strictly less than $E$ [S1, unofficial].
+     c. Store $L$ in the corresponding voxel of $I$ [S1, unofficial].
+-    *Note: If no coefficients are below $E$ at level $-1$, $L=0$.*
++    *Note: If no coefficients are below $E$ at level $-1$, $L=0$ [S1, unofficial].*
+ 
+ 3.  **Rendering: Ray Casting**
+@@ -76,116 +76,71 @@
+ 
+ ```python
+-def wavelet_assisted_volume_rendering(volume, index_volume, error_bound, standard_step, image_width, image_height, camera):
++def wavelet_assisted_volume_rendering(volume, index_volume, standard_step, image_width, image_height, ray_origins, ray_directions, volume_bounds):
+     """
+     Renders a volume using wavelet-assisted adaptive sampling.
++    volume: 3D list of floats, dimensions [N, N, N]
++    index_volume: 3D list of ints, dimensions [N, N, N]
++    standard_step: float, base sampling distance d
++    image_width, image_height: ints
++    ray_origins: list of 3-tuples, one per pixel
++    ray_directions: list of 3-tuples, one per pixel
++    volume_bounds: tuple of (min_x, min_y, min_z, max_x, max_y, max_z)
++    """
++    # Precompute power of two lookup table for L up to 8 (covers N up to 256)
++    power_of_two = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+     
+-    Args:
+-        volume: 3D array of voxel values (spatial domain).
+-        index_volume: 3D array of integers L (same resolution as volume).
+-        error_bound: Threshold E for coefficient magnitudes (used in preprocessing, 
+-                     not directly in rendering loop).
+-        standard_step: Base sampling distance d.
+-        image_width, image_height: Output image dimensions.
+-        camera: Object providing ray origin and direction for each pixel.
+-        
+-    Returns:
+-        rendered_image: 2D array of pixel colors.
+-    """
+-    # Lookup table for 2^L. Max L is log2(N). 
+-    # Assuming N <= 256 for 4-bit storage, L_max = 8.
+-    power_of_two = [2**i for i in range(9)]
+-    
+-    rendered_image = zeros((image_height, image_width))
++    rendered_image = [[0.0, 0.0, 0.0, 0.0] for _ in range(image_height)]
++    N = len(volume)
+     
+     for y in range(image_height):
+         for x in range(image_width):
+-            ray_origin, ray_direction = camera.get_ray(x, y)
+-            color = [0.0, 0.0, 0.0, 0.0] # RGBA
++            origin = ray_origins[y * image_width + x]
++            direction = ray_directions[y * image_width + x]
++            acc_color = [0.0, 0.0, 0.0, 0.0]
++            acc_alpha = 0.0
++            t = 0.0
+             
+-            # Ray traversal parameters
+-            t = 0.0
+-            # Initial step might need to be adjusted to align with grid, 
+-            # but standard approach uses standard_step initially or 
+-            # reads L from the first voxel.
+-            # We assume the ray starts outside or at entry.
++            while True:
++                pos_x = origin[0] + t * direction[0]
++                pos_y = origin[1] + t * direction[1]
++                pos_z = origin[2] + t * direction[2]
++                
++                # Check bounds
++                if not (volume_bounds[0] <= pos_x <= volume_bounds[3] and
++                        volume_bounds[1] <= pos_y <= volume_bounds[4] and
++                        volume_bounds[2] <= pos_z <= volume_bounds[5]):
++                    break
++                
++                # Get voxel indices
++                ix = int(pos_x)
++                iy = int(pos_y)
++                iz = int(pos_z)
++                ix = max(0, min(N - 1, ix))
++                iy = max(0, min(N - 1, iy))
++                iz = max(0, min(N - 1, iz))
++                
++                # Read L from index volume
++                L = index_volume[ix][iy][iz]
++                step = standard_step * power_of_two[L]
++                
++                # [G] Standard trilinear interpolation is performed here to sample V at (pos_x, pos_y, pos_z)
++                value = volume[ix][iy][iz] 
++                
++                # [G] Standard transfer function maps value to (color, alpha)
++                alpha = min(1.0, value / 255.0)
++                if alpha > 0.001:
++                    c_r, c_g, c_b = value / 255.0, value / 255.0, value / 255.0
++                    acc_color[0] += c_r * alpha * (1.0 - acc_alpha)
++                    acc_color[1] += c_g * alpha * (1.0 - acc_alpha)
++                    acc_color[2] += c_b * alpha * (1.0 - acc_alpha)
++                    acc_alpha += alpha * (1.0 - acc_alpha)
++                    if acc_alpha >= 1.0:
++                        break
++                
++                t += step
+             
+-            while t < ray_max_distance:
+-                # Get current 3D position
+-                pos = ray_origin + t * ray_direction
+-                
+-                # Check if pos is inside volume bounds
+-                if not is_inside_volume(pos):
+-                    break
+-                
+-                # Get voxel coordinates (integer indices)
+-                ix, iy, iz = floor(pos)
+-                
+-                # Read L from index volume
+-                L = index_volume[ix, iy, iz]
+-                
+-                # Calculate adaptive step size
+-                step = standard_step * power_of_two[L]
+-                
+-                # Sample the spatial volume
+-                # Interpolation (e.g., trilinear) is performed here
+-                value = interpolate_volume(volume, pos)
+-                
+-                # Compositing (Front-to-Back)
+-                # Assuming standard volume rendering equation components:
+-                # alpha = transfer_function(value)
+-                # color = color + alpha * transfer_color(value) * (1 - accumulated_alpha)
+-                # accumulated_alpha += alpha * (1 - accumulated_alpha)
+-                
+-                # [G] Standard compositing logic placeholder. 
+-                # The core innovation is the 'step' calculation, not the compositing.
+-                alpha = compute_alpha(value)
+-                if alpha > 0:
+-                    c_val = compute_color(value)
+-                    color = color + c_val * alpha * (1 - color[3])
+-                    color[3] += alpha * (1 - color[3])
+-                
+-                # Advance ray
+-                t += step
+-                
+-            rendered_image[y, x] = color
++            rendered_image[y][x] = acc_color
+             
+     return rendered_image
+-
+-def build_index_volume(volume, error_bound, wavelet_type):
+-    """
+-    Preprocesses the volume to create the index volume.
+-    """
+-    # 1. Apply 3D DWT
+-    wavelet_coeffs = apply_3d_dwt(volume, wavelet_type)
+-    
+-    # 2. Determine L for each voxel
+-    # This requires mapping wavelet coefficients back to spatial influence.
+-    # The paper states relevance is decided by filter support length.
+-    # For each voxel (ix, iy, iz):
+-    #   Find max L such that |coeffs| < E for all levels -1 to -L affecting this voxel.
+-    
+-    N = volume.shape[0]
+-    index_volume = zeros((N, N, N), dtype=uint8)
+-    
+-    # [G] Detailed coefficient-to-voxel mapping depends on specific DWT implementation.
+-    # The paper simplifies this by stating the process is linear and based on support.
+-    # We iterate through the volume to fill the index.
+-    
+-    for ix in range(N):
+-        for iy in range(N):
+-            for iz in range(N):
+-                max_L = 0
+-                # Check levels from coarse to fine? Or fine to coarse?
+-                # We want the largest L (coarsest resolution) where coeffs are small.
+-                # Levels are -1, -2, ...
+-                for level in range(-1, -10, -1): # Arbitrary depth limit
+-                    # Check if all relevant coefficients at this level are < error_bound
+-                    if are_coefficients_below_threshold(wavelet_coeffs, level, ix, iy, iz, error_bound):
+-                        max_L = -level # L is positive integer
+-                    else:
+-                        break
+-                index_volume[ix, iy, iz] = max_L
+-                
+-    return index_volume
+ ```
+ 
+@@ -200,5 +155,5 @@
+ ### Time and Memory Complexity
+ *   **Preprocessing:** The 3D DWT decomposition and reconstruction for a volume of size $n^3$ is $O(n^3)$, which is asymptotically optimal [S1, unofficial]. Index volume construction is also linear relative to the volume size [S1, unofficial].
+-*   **Rendering:** The rendering loop traverses the spatial volume. The number of samples is reduced by the factor $2^L$ in smooth regions.
++*   **Rendering:** The rendering loop traverses the spatial volume. The number of samples is reduced by the factor $2^L$ in smooth regions [S1, unofficial].
+ *   **Memory:** Requires $O(n^3)$ for the spatial volume plus $O(n^3)$ for the index volume (4 bits per voxel) [S1, unofficial].
+ 
+@@ -229,5 +184,5 @@
+ 
+ ### Strengths and Limitations
+-*   **Strengths:** Avoids expensive on-the-fly wavelet reconstruction; avoids octree traversal overhead; allows controlled approximation quality via $E$; index volume is view-independent.
++*   **Strengths:** Avoids expensive on-the-fly wavelet reconstruction; avoids octree traversal overhead; allows controlled approximation quality via $E$; index volume is view-independent [S1, unofficial].
+ *   **Limitations:** Memory overhead for the index volume; index volume reconstruction is needed if $E$ changes; performance depends heavily on the choice of wavelet and the error bound [S1, unofficial].
+ 

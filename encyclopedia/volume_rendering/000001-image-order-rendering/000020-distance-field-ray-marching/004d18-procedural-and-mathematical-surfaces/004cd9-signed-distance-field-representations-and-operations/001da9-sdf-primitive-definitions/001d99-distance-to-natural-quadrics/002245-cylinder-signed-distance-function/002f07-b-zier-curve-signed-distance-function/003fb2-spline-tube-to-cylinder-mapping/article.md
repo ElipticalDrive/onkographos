@@ -1,132 +1,159 @@
 # Spline Tube to Cylinder Mapping
-
 Also called: Cylinder Mapping, Spline Tube Deformation, Spline tube deformation mapping
 
 ## Overview
-Spline Tube to Cylinder Mapping is a technique that maps a point from an arbitrary deformed spline tube back to a canonical vertical cylinder, enabling the direct querying of a pre-defined isotropic procedural density field without storing or transforming the field itself [S1, unofficial].
+Spline Tube to Cylinder Mapping is a technique for mapping points from an arbitrary spline tube (defined by a spline or Bézier curve) to a canonical vertical cylinder, enabling the direct querying of pre-defined isotropic procedural density fields [S1, unofficial]. It solves the problem of inverse parameterization in volumetric rendering by providing a robust Signed Distance Function (SDF) to the curve, which yields the curvilinear abscissa required for texture coordinate calculation. It is distinguished from its siblings, such as Footvector Representation, by its reliance on the Frenet frame and explicit curvilinear abscissa to define the mapping, whereas footvector methods typically rely on local surface normals and implicit distance fields without explicit tube parameterization [S1, unofficial][8501-footvector-representation.md].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A point $P$ in 3D space located within the deformed spline tube [S1, unofficial].
-- Output: Mapped coordinates $M$ in the canonical cylinder space, used to query the density field [S1, unofficial].
+**Inputs:**
+- A point $P$ in 3D space.
+- A spline curve $C(t)$ defining the axis of the tube.
+- The radius function $r(l)$ of the tube at curvilinear abscissa $l$ (default constant $r=1$ if not specified).
+- A reference cylinder defined with radius 1 and height 1, with its lower base centered at the origin.
+
+**Outputs:**
+- Mapped coordinates $M$ in the reference cylinder.
+- The distance to the tube surface (derived from the SDF, if solvable).
 
 **Data Structures:**
-- Spline Curve: Defined by control points or concatenated segments [S1, unofficial].
-- Frenet Frame at point $O$: Consists of the tangent vector $\vec{T}$, the normal vector $\vec{N}$, and the binormal vector $\vec{B}$ [S1, unofficial].
-- Curvilinear Abscissa $l$: The arc length from the start of the spline to point $O$ [S1, unofficial].
-- Radius $r$: The local radius of the tube at point $O$ [S1, unofficial].
+- Spline Curve $C(t)$: Defined by control points. For Bézier segments, this is a set of control points $A, B, C$ (quadratic) or $P_0, P_1, P_2, P_3$ (cubic).
+- Frenet Frame at $O$: Consisting of the tangent $\mathbf{T}$, normal $\mathbf{N}$, and binormal $\mathbf{B}$ vectors at the closest point $O$ on the curve.
 
 **Steps:**
-1. **Find Closest Point:** Find the point $O$ on the spline curve that is closest to the input point $P$ [S1, unofficial].
-2. **Construct Frenet Frame:** Using the Frenet–Serret formulas, compute the Frenet Frame ($\vec{T}, \vec{N}, \vec{B}$) associated with the spline curve at point $O$ [S1, unofficial].
-3. **Calculate Angle:** Calculate the angle $\alpha$ between the vector $\vec{OP}$ and the Frenet’s unit normal vector $\vec{N}$ [S1, unofficial].
-4. **Find Curvilinear Abscissa:** Determine the curvilinear abscissa $l$ of $O$, defined as the length of the spline curve from the beginning of the tube to $O$ [S1, unofficial].
-5. **Calculate Mapped Coordinates:** Compute the mapped coordinates $M$ in the original cylinder [S1, unofficial].
-
-**Formulas:**
-The reference cylinder is a vertical cylinder of radius 1 and height 1, with its lower base centered at the origin [S1, unofficial].
-
-The basic mapping formula is:
-$$ M = (\cos(\alpha) \cdot \|\vec{OP}\|, \; l, \; \sin(\alpha) \cdot \|\vec{OP}\|) $$
-
-To include stretching (where the density field stretches along the tube rather than just bending), replace $l$ with $t$, the ratio of $l$ to the total length of the spline curve $L_{total}$:
-$$ t = \frac{l}{L_{total}} $$
-$$ M = (\cos(\alpha) \cdot \|\vec{OP}\|, \; t, \; \sin(\alpha) \cdot \|\vec{OP}\|) $$
-
-To account for a varying local radius $r$ of the spline tube, the radial component must be normalized by $r$:
-$$ M = \left( \cos(\alpha) \cdot \frac{\|\vec{OP}\|}{r}, \; t, \; \sin(\alpha) \cdot \frac{\|\vec{OP}\|}{r} \right) $$
-
-**Parameters:**
-- Reference Cylinder: Vertical, radius 1, height 1, lower base at origin [S1, unofficial].
-- Stretching: Optional toggle to use $t$ instead of $l$ [S1, unofficial].
-- Radius Function: $r(l)$, defining the tube radius as a function of curvilinear abscissa [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Stretching vs. Bending:** Making a longer spline tube without stretching does not stretch the volume; it looks like a longer cylinder was bent [S1, unofficial].
-- **Varying Radius:** If the radius varies, the surface normal is no longer perpendicular to the curve axis [S1, unofficial].
-- **SDF Derivation:** If the closest point $O$ is solvable, an SDF function can be derived, justifying the use of Sphere Marching to detect bounding boxes [S1, unofficial].
+1. **Find Closest Point:** Find the point $O$ on the spline curve $C$ which is closest to $P$. Let $t$ be the parameter such that $O = C(t)$. This step is critical; if solvable, it justifies the use of Sphere Marching for bounding box detection [S1, unofficial].
+2. **Construct Frenet Frame:** Using the Frenet–Serret formulas, create the Frenet Frame associated with the spline curve at point $O$ [S1, unofficial].
+   - Calculate the tangent $\mathbf{T} = C'(t) / \|C'(t)\|$.
+   - Calculate the normal $\mathbf{N}$ and binormal $\mathbf{B}$ using the derivatives of $\mathbf{T}$ (specifically $\mathbf{N} = \mathbf{T}' / \|\mathbf{T}'\|$ and $\mathbf{B} = \mathbf{T} \times \mathbf{N}$) [S1, unofficial].
+3. **Calculate Angle:** Calculate the angle $\alpha$ between the vector $\vec{OP}$ and the Frenet’s unit normal vector $\mathbf{N}$.
+   - Let $\vec{V} = P - O$.
+   - $\alpha = \text{atan2}(\vec{V} \cdot \mathbf{B}, \vec{V} \cdot \mathbf{N})$.
+4. **Find Curvilinear Abscissa:** Find the curvilinear abscissa $l$ of $O$, defined as the arc length of the spline curve from the beginning of the tube to $O$.
+5. **Calculate Mapped Coordinates:** Calculate the mapped coordinates $M$ in the original cylinder.
+   - The curvilinear abscissa $l$ represents the height.
+   - The angle $\alpha$ deduces the unit direction $\text{dir}$ from the center of the disk at height $l$ toward $M$.
+   - The length of $\vec{OP}$ calculates the radial distance.
+   - Formula:
+     $$ M = (\cos(\alpha) \cdot \|\vec{OP}\| \cdot \frac{1}{r(l)} ; l ; \sin(\alpha) \cdot \|\vec{OP}\| \cdot \frac{1}{r(l)}) $$
+   - Note: If stretching is desired, replace $l$ with $t = l / L_{total}$, where $L_{total}$ is the total length of the spline curve [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def map_spline_to_cylinder(P, spline_curve, use_stretch=False, use_radius=False):
+import math
+import numpy as np
+
+def spline_to_cylinder_mapping(P, spline_curve, use_stretching=False):
     """
     Maps point P in a spline tube to a canonical cylinder.
     
     Args:
-        P: 3D point in world space.
-        spline_curve: Object providing methods for closest_point, frenet_frame, 
-                      arc_length, total_length, and radius_at.
-        use_stretch: Boolean, if True uses normalized length t instead of l.
-        use_radius: Boolean, if True normalizes radial distance by local radius r.
+        P: numpy array, point in 3D space.
+        spline_curve: Object with methods get_point(t), get_tangent(t), 
+                      get_normal(t), get_arc_length(t), get_total_length().
+        use_stretching: bool, if True, normalize height by total length.
         
     Returns:
-        M: 3D mapped coordinates in the canonical cylinder.
+        M: numpy array, mapped coordinates in cylinder [x, y, z].
     """
     # Step 1: Find closest point O on the spline curve to P
-    O = spline_curve.closest_point(P)
+    # This requires solving for t that minimizes ||C(t) - P||^2.
+    # For a cubic Bézier, this is a polynomial root finding problem.
+    # For quadratic, it is also solvable.
+    # [G] In practice, this is often done via Newton-Raphson or by 
+    # finding roots of the derivative of the distance function.
+    t_closest = find_closest_parameter(P, spline_curve)
+    O = spline_curve.get_point(t_closest)
     
-    # Step 2: Get Frenet Frame at O
-    T, N, B = spline_curve.frenet_frame(O)
+    # Step 2: Construct Frenet Frame at O
+    T = spline_curve.get_tangent(t_closest)
+    T = T / np.linalg.norm(T)
+    N = spline_curve.get_normal(t_closest)
+    B = np.cross(T, N)
     
-    # Step 3: Calculate angle alpha between OP and Normal N
-    vec_OP = P - O
-    dist_OP = length(vec_OP)
+    # Step 3: Calculate angle alpha
+    V = P - O
+    alpha = math.atan2(np.dot(V, B), np.dot(V, N))
     
-    # Guard against division by zero if P coincides with O
-    if dist_OP < 1e-6:
-        cos_a = 1.0
-        sin_a = 0.0
-    else:
-        # Project OP onto the normal-binormal plane to get cross-section coordinates
-        cos_a = dot(vec_OP, N) / dist_OP
-        sin_a = dot(vec_OP, B) / dist_OP
-
     # Step 4: Find curvilinear abscissa l
-    l = spline_curve.arc_length(O)
+    l = spline_curve.get_arc_length(t_closest)
     
     # Step 5: Calculate mapped coordinates M
-    if use_stretch:
-        L_total = spline_curve.total_length()
-        height = l / L_total if L_total > 1e-6 else 0.0
+    # Radius at this point
+    r = spline_curve.get_radius(l) # Default 1 if not varying
+    
+    dist_OP = np.linalg.norm(V)
+    
+    # Normalized radius for mapping to unit cylinder
+    normalized_radius = dist_OP / r
+    
+    # Height calculation
+    if use_stretching:
+        L_total = spline_curve.get_total_length()
+        height = l / L_total
     else:
         height = l
         
-    # Radial component
-    radial_dist = dist_OP
-    if use_radius:
-        r = spline_curve.radius_at(O)
-        radial_dist = dist_OP / r if r > 1e-6 else dist_OP
-        
-    x = cos_a * radial_dist
-    y = height
-    z = sin_a * radial_dist
+    # Map to cylinder of radius 1, height 1
+    # x = cos(alpha) * normalized_radius
+    # y = height
+    # z = sin(alpha) * normalized_radius
+    M = np.array([
+        math.cos(alpha) * normalized_radius,
+        height,
+        math.sin(alpha) * normalized_radius
+    ])
     
-    M = (x, y, z)
     return M
+
+def find_closest_parameter(P, spline_curve):
+    """
+    Finds the parameter t on the spline curve closest to P.
+    [G] This is a non-trivial optimization problem. For quadratic Bézier,
+    it involves solving a cubic equation. For general splines, iterative
+    methods are used.
+    """
+    # Placeholder for the specific solver implementation
+    # For quadratic Bézier with control points A, B, C:
+    # C(t) = (1-t)^2 A + 2(1-t)t B + t^2 C
+    # We minimize f(t) = ||C(t) - P||^2
+    # f'(t) = 0 leads to a cubic equation in t.
+    # Roots in [0, 1] are candidates.
+    pass
 ```
+
+**Parameters:**
+- Reference Cylinder: Vertical cylinder of radius 1 and height 1, with its lower base centered at the origin [S1, unofficial].
+- Stretching: Optional boolean flag. If true, height is normalized by total curve length [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Stretching vs. Bending:** Making a longer spline tube without stretching does not stretch the volume; it looks like a longer cylinder was bent. Stretching is required to simulate expansion [S1, unofficial].
+- **Varying Radius:** If the radius varies, the surface normal is no longer perpendicular to the curve axis. This makes the SDF function problematic and can create bugs where boundaries are not detected properly during sphere marching [S1, unofficial].
+- **Closest Point Solvability:** If the closest point $O$ is not solvable (e.g., due to numerical instability or complex curve geometry), the SDF function cannot be reliably derived, and sphere marching may fail [S1, unofficial].
 
 ## Subtopics
 
 ### [Quadratic Bezier Tube Deformation](10138-quadratic-bezier-tube-deformation.md)
-A deformation technique that maps points from an arbitrary quadratic Bezier spline tube to a canonical vertical cylinder, enabling the use of pre-defined density fields defined on the cylinder. It differs from cubic spline approaches by prioritizing computational simplicity for closest-point and curvilinear abscissa calculation, at the cost of more complex segment concatenation constraints.
+Quadratic Bezier Tube Deformation is a technique for mapping points from an arbitrary spline tube defined by quadratic Bezier segments to a canonical vertical cylinder, enabling the use of pre-defined density fields. It solves the problem of inverse parameterization in volumetric rendering by providing a robust Signed Distance Function (SDF) to the curve, which yields the curvilinear abscissa required for texture coordinate calculation. It is distinguished from cubic spline approaches by its computational simplicity in finding the closest point and curvilinear abscissa, though it imposes stricter constraints on segment concatenation.
 
 ### Varying Radius Spline Tube Mapping
-The radius of the Bezier/spline curve is defined as a function of the curvilinear abscissa, allowing shapes like cones or DNA-like tubes [S1, unofficial]. Pitfall: Varying radius makes the surface normal no longer perpendicular to the curve axis, which is problematic for the SDF function and sphere marching [S1, unofficial]. It can create bugs where boundaries are not detected properly [S1, unofficial].
+The radius of the Bezier/spline curve is defined as a function of the curvilinear abscissa, allowing shapes like cones or DNA-like tubes. Varying radius makes the surface normal no longer perpendicular to the curve axis, which is problematic for the SDF function and sphere marching. It can create bugs where boundaries are not detected properly [S1, unofficial].
 
 ### Twisting Spline Tube Mapping
-Altering the angle used for mapping to induce a twisting effect [S1, unofficial]. The angle can depend on the curvilinear abscissa or time [S1, unofficial].
+Altering the angle used for mapping to induce a twisting effect. The angle can depend on the curvilinear abscissa or time [S1, unofficial].
 
 ## Operating characteristics
-- Time and memory complexity: Not given in the sources.
-- Measured performance: Not given in the sources.
-- Scaling: Not given in the sources.
-- Strengths and limitations: Not given in the sources.
-- When to use it and when not: Not given in the sources.
+- **Time Complexity:** The dominant cost is finding the closest point on the spline curve to $P$. For a quadratic Bézier, this involves solving a cubic equation, which is $O(1)$ but involves complex arithmetic. For general splines, iterative methods may be required, making it $O(k)$ where $k$ is the number of iterations. The Frenet frame construction and mapping are $O(1)$.
+- **Memory Complexity:** $O(1)$ per point query, assuming the spline curve is stored efficiently.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The method scales with the complexity of the spline curve. More segments or higher-degree curves increase the cost of finding the closest point.
+- **Strengths:** Allows for complex, bent, and twisted volumetric shapes using simple procedural density fields defined on a cylinder. The SDF derivation justifies efficient bounding box culling via sphere marching [S1, unofficial].
+- **Limitations:** Varying radius complicates the SDF and boundary detection. The method assumes the spline curve is well-behaved enough to find a unique closest point.
+- **When to use:** When rendering procedural volumes inside bent or twisted tubes, such as smoke trails, solar flares, or DNA strands.
+- **When not to use:** When the radius varies significantly and accurate boundary detection is critical, as the SDF may become unreliable [S1, unofficial].
 
 ## Background
-The method originated in the context of real-time rendering of interstellar dust clouds and solar flares [S1, unofficial]. It was introduced to allow the deformation of procedural noise fields inside shapes without storing and transforming the density field [S1, unofficial]. It leverages the Frenet–Serret formulas, originally developed by Jean Frédéric Frenet (1847–1851) and Joseph Alfred Serret, to define the local coordinate system for the mapping [S1, unofficial].
+The method was introduced in the context of real-time rendering of interstellar dust clouds and solar flares. It allows for the deformation of procedural density fields without storing and transforming the density field itself. The technique relies on the Frenet–Serret formulas, originally developed by Jean Frédéric Frenet (1847–1851) and Joseph Alfred Serret [S1, unofficial]. The specific application to Bézier curves and spline tubes was detailed in a paper on sculpting procedural noise for volumetric rendering [S1, unofficial].
 
 ## Sources
 [S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)

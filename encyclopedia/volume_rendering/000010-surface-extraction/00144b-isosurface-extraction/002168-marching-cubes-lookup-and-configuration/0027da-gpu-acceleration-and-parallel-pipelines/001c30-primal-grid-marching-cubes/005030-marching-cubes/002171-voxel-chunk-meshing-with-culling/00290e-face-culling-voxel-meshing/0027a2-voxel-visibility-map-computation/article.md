@@ -1,0 +1,152 @@
+# Voxel Visibility Map Computation
+
+Also called: Face Visibility Culling, Voxel Block Visibility Types, VoxelOcclusionOptimizer.ComputeVisibleFaces, VoxelVisibility
+
+## Overview
+Voxel Visibility Map Computation determines which faces of solid voxels within a chunk are visible by checking the transparency of adjacent voxels and boundary conditions, producing a 3D map of visible face flags [S3, unofficial]. It differs from its sibling [Face Culling Voxel Meshing](2268-face-culling-voxel-meshing.md) by explicitly generating a pre-computed visibility map data structure that decouples face determination from mesh assembly, allowing downstream optimizers like [Disjoint-set quad merging](2268-face-culling-voxel-meshing.md) to operate on a unified visibility state [S3, unofficial].
+
+## How it works
+**Inputs:** A voxel chunk containing a 3D grid of voxels, where each voxel has a solid/empty state and potentially pipeline properties. The chunk dimensions are $X_{size}, Y_{size}, Z_{size}$.
+**Outputs:** A 3D array `visibilityMap` of type `VoxelFace[,,]` with dimensions $X_{size} \times Y_{size} \times Z_{size}$, where each element is a bitmask indicating which of the six faces are visible.
+
+**Data Structures:**
+1.  **Voxel:** Contains a boolean `IsSolid` field. In some implementations, it may also contain pipeline identifiers (e.g., `pipelineA`, `pipelineB`, `pipelineC`) or transparency flags [S1, S2, unofficial].
+2.  **VoxelFace:** A bitmask enum with flags `None`, `Xpos`, `Xneg`, `Ypos`, `Yneg`, `Zpos`, `Zneg` representing the six faces of a voxel [S3, unofficial].
+3.  **VoxelVisibilityMap:** A 3D array storing `VoxelFace` values for every coordinate in the chunk [S3, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize `visibilityMap` with `VoxelFace.None` for all coordinates.
+2.  Iterate through every coordinate $(x, y, z)$ in the chunk in ascending order of X, Y, and Z axes [S3, unofficial].
+3.  Retrieve the voxel at $(x, y, z)$. If `voxel.IsSolid` is false, skip to the next coordinate (the visibility remains `None`) [S3, unofficial].
+4.  For each of the six faces, determine visibility:
+    *   Calculate neighbor coordinates using face-specific deltas:
+        *   $Xpos: (x+1, y, z)$
+        *   $Xneg: (x-1, y, z)$
+        *   $Ypos: (x, y+1, z)$
+        *   $Yneg: (x, y-1, z)$
+        *   $Zpos: (x, y, z+1)$
+        *   $Zneg: (x, y, z-1)$
+    *   Check if the neighbor is transparent or out of bounds.
+    *   If the neighbor is transparent or out of bounds, set the corresponding flag in `visibleFaces` [S3, unofficial].
+5.  Store the computed `visibleFaces` in `visibilityMap[x, y, z]` [S3, unofficial].
+
+**Helper Function: IsAdjacentVoxelTransparent**
+This function checks if a neighbor voxel at $(nx, ny, nz)$ is transparent.
+1.  If $(nx, ny, nz)$ is out of the chunk bounds, return `true` (treat out-of-bounds as transparent/visible) [S3, unofficial].
+2.  Retrieve the neighbor voxel.
+3.  If the neighbor is empty or transparent, return `true` [S3, unofficial].
+4.  If the neighbor is solid, check the current voxel's pipeline properties. In some implementations, if the current voxel has specific pipeline properties (e.g., `pipelineA`, `pipelineB`, `pipelineC`), the visibility might be determined by these properties rather than just neighbor transparency [S2, unofficial]. However, the primary logic in [S3, unofficial] relies on neighbor transparency.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_visibility_map(chunk):
+    """
+    Computes the visibility map for a voxel chunk.
+    
+    Args:
+        chunk: An object containing voxel data and dimensions.
+        
+    Returns:
+        visibility_map: A 3D array of VoxelFace bitmasks.
+    """
+    x_size, y_size, z_size = chunk.dimensions
+    visibility_map = [[[VoxelFace.None for _ in range(z_size)] for _ in range(y_size)] for _ in range(x_size)]
+    
+    for x in range(x_size):
+        for y in range(y_size):
+            for z in range(z_size):
+                voxel = chunk.get_voxel(x, y, z)
+                
+                # If voxel is not solid, no faces are visible
+                if not voxel.is_solid:
+                    continue
+                
+                visible_faces = VoxelFace.None
+                
+                # Define face deltas and corresponding flags
+                faces = [
+                    (1, 0, 0, VoxelFace.Xpos),
+                    (-1, 0, 0, VoxelFace.Xneg),
+                    (0, 1, 0, VoxelFace.Ypos),
+                    (0, -1, 0, VoxelFace.Yneg),
+                    (0, 0, 1, VoxelFace.Zpos),
+                    (0, 0, -1, VoxelFace.Zneg)
+                ]
+                
+                for dx, dy, dz, flag in faces:
+                    nx, ny, nz = x + dx, y + dy, z + dz
+                    
+                    # Check if neighbor is transparent or out of bounds
+                    if is_neighbor_transparent(chunk, nx, ny, nz):
+                        visible_faces |= flag
+                
+                visibility_map[x][y][z] = visible_faces
+    
+    return visibility_map
+
+def is_neighbor_transparent(chunk, nx, ny, nz):
+    """
+    Checks if the neighbor voxel at (nx, ny, nz) is transparent.
+    
+    Args:
+        chunk: The voxel chunk.
+        nx, ny, nz: Neighbor coordinates.
+        
+    Returns:
+        True if the neighbor is transparent or out of bounds, False otherwise.
+    """
+    x_size, y_size, z_size = chunk.dimensions
+    
+    # Out of bounds is treated as transparent (visible face)
+    if not (0 <= nx < x_size and 0 <= ny < y_size and 0 <= nz < z_size):
+        return True
+    
+    neighbor_voxel = chunk.get_voxel(nx, ny, nz)
+    
+    # If neighbor is empty or transparent, the face is visible
+    if not neighbor_voxel.is_solid:
+        return True
+    
+    # If neighbor is solid, the face is occluded (unless specific pipeline logic applies)
+    # Note: Some implementations may check current voxel's pipeline properties here [S2, unofficial]
+    # For the standard algorithm described in [S3, unofficial], solid neighbor means occluded.
+    return False
+```
+
+**Parameters:**
+*   Chunk dimensions: Typically powers of 2 (e.g., 16x16x16) for efficient memory alignment and culling [S3, unofficial].
+*   Voxel types: `Empty`, `Transparent`, `Opaque` [S1, S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Out of Bounds:** Neighbor coordinates outside the chunk bounds must be treated as transparent to ensure boundary faces are visible [S3, unofficial].
+*   **Pipeline Properties:** Some implementations use pipeline properties to determine visibility even if the neighbor is solid [S2, unofficial]. This requires careful handling to avoid incorrect culling.
+*   **Precision:** Not applicable as the algorithm is discrete.
+*   **Degenerate Input:** Empty chunks or chunks with no solid voxels result in an all-`None` visibility map.
+
+## Subtopics
+
+### [Voxel Face Occlusion Culling with Chunk Boundary Wrapping](13197-voxel-face-occlusion-culling-with-chunk-boundary-wrapping.md)
+This method computes the occlusion status for all six faces of every voxel within a chunk, determining which faces are visible for mesh generation. It solves the problem of correctly identifying boundary conditions when a chunk is part of a larger, potentially toroidal or irregularly tiled world by wrapping coordinates to adjacent neighbor chunks. It differs from standard intra-chunk culling by explicitly handling cross-chunk neighbor lookups and coordinate wrapping, ensuring that faces on the chunk boundary are correctly marked as occluded or visible based on the state of neighboring chunks.
+
+### [Face State Propagation](14159-face-state-propagation.md)
+Face State Propagation is a method to reduce redundant neighbor checks when building voxel meshes by storing face visibility state directly within each voxel's data structure, allowing simultaneous determination of visibility for two adjacent voxels. It differs from naive neighbor checking by pre-computing and caching the visibility of shared faces, trading memory usage for reduced CPU checks during mesh generation.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is processed once, and for each voxel, six neighbor checks are performed [S3, unofficial].
+*   **Memory Complexity:** $O(N)$ for the `visibilityMap` array, where each element is a `VoxelFace` bitmask [S3, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with chunk size. Larger chunks may benefit from parallelization, but the algorithm is inherently sequential in its current description [S3, unofficial].
+*   **Strengths:** Simple to implement, efficient for sparse voxels (skips non-solid voxels), provides a clear visibility state for downstream meshing [S3, unofficial].
+*   **Limitations:** Does not handle cross-chunk visibility without additional logic (e.g., [Voxel Face Occlusion Culling with Chunk Boundary Wrapping](13197-voxel-face-occlusion-culling-with-chunk-boundary-wrapping.md)), may require additional memory for the visibility map [S3, unofficial].
+*   **When to Use:** When a pre-computed visibility map is needed for efficient mesh assembly or when working with static chunks [S3, unofficial].
+*   **When Not to Use:** When memory is constrained and a full visibility map cannot be stored, or when dynamic visibility changes require frequent recomputation [S3, unofficial].
+
+## Background
+Voxel Visibility Map Computation is a technique used in voxel mesh optimization libraries to efficiently determine which faces of voxels should be included in the final mesh. It is part of a pipeline that includes occlusion culling, disjoint-set quad merging, and mesh assembly [S3, unofficial]. The method is implemented in libraries such as `VoxelMeshOptimizerLibrary` [S3, unofficial].
+
+## Sources
+[S1] jameshiew/infinigen, https://github.com/jameshiew/infinigen, fetched 2026-10-27 (unofficial)
+[S2] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)
+[S3] GitHub - nicolas-goyon/Voxel-Mesh-Optimization-Library, https://github.com/nicolas-goyon/Voxel-Mesh-Optimization-Library, fetched 2026-10-29 (unofficial)

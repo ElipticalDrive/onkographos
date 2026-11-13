@@ -3,7 +3,7 @@
 Also called: Fire Simulation Volume Rendering, Fire Volume Raymarching, Fire Volume Rendering, Raymarched Fire, Raymarched Fire Simulation, Shared Voxel Fire Pipeline, Volumetric Fire Rendering, Voxel-based Fire Rendering
 
 ## Overview
-Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and smoke simulations by ray marching through 3D volume textures [S2, unofficial]. It decouples the simulation from the rendering pipeline, allowing multiple fire instances to share a fixed pool of simulation resources while rendering them via fragment shaders that sample temperature and smoke density fields [S2, unofficial]. Unlike standard smoke rendering which blends values, this method accumulates emissive fire colors and absorptive smoke alpha to simulate the self-luminous nature of flames [S1, unofficial]. It builds on [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md) by adding specific fire physics (temperature-based emission) and a shared simulation slot architecture.
+Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and smoke simulations by ray marching through 3D volume textures [S2, unofficial]. It decouples the simulation from the rendering pipeline, allowing multiple fire instances to share a fixed pool of simulation resources while rendering them via fragment shaders that sample temperature and smoke density fields [S2, unofficial]. It composites emissive fire and absorptive smoke using front-to-back alpha blending while using a scene depth buffer for occlusion culling [S2, unofficial]. The final pixel color is calculated as the average of the samples weighted by the length of the ray inside the target volume [S1, unofficial]. It builds on [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md) by adding specific fire physics (temperature-based emission) and a shared simulation slot architecture [S2, unofficial].
 
 ## How it works
 **Inputs:**
@@ -30,10 +30,11 @@ Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and
 
 **Algorithm Steps:**
 1. **Simulation Dispatch (Compute Shader):**
-   - Iterate over all `SIM_POOL_SIZE` slots.
-   - Calculate source intensity: $I = \text{clamp}(\frac{\text{fuel\_remaining}}{\text{initial\_fuel}}, 0.0, 1.0)$. If $\text{initial\_fuel} \le 0.0$, $I=0.0$ [S2, unofficial].
-   - If $I > 0$, update simulation parameters with $\Delta t \cdot \text{SIM\_TIME\_SCALE}$ and $t \cdot \text{SIM\_TIME\_SCALE}$.
-   - Dispatch compute shader for the slot.
+   - Iterate over all `SIM_POOL_SIZE` slots [S2, unofficial].
+   - Calculate source intensity: $I = \text{clamp}(\frac{\text{fuel\_remaining}}{\text{initial\_fuel}}, 0.0, 1.0)$ [S2, unofficial].
+   - If $\text{initial\_fuel} \le 0.0$, force $I=0.0$ to prevent division by zero or invalid states [S2, unofficial].
+   - If $I > 0$, update simulation parameters with $\Delta t \cdot \text{SIM\_TIME\_SCALE}$ and $t \cdot \text{SIM\_TIME\_SCALE}$ [S2, unofficial].
+   - Dispatch compute shader for the slot [S2, unofficial].
    - Transition the source field to `SHADER_READ_ONLY` outside the render pass [S2, unofficial].
 
 2. **Render Setup (Graphics Pipeline):**
@@ -42,7 +43,7 @@ Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and
    - Draw the unit cube [S2, unofficial].
 
 3. **Fragment Shader (Ray Marching):**
-   - Initialize `accum.rgb = (0,0,0)`, `accum.a = 0.0` [S2, unofficial].
+   - Initialize `accum.rgb = (0,0,0)` and `accum.a = 0.0` [S2, unofficial].
    - Set initial march distance $t = t_{near} + \text{stepSize} \cdot 0.5$ [S2, unofficial].
    - Loop `MAX_STEPS` times:
      a. Sample 3D texture at `rayOriginVol + rayDirVol * t` [S2, unofficial].
@@ -64,10 +65,10 @@ Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and
    - Output `vec4(accum.rgb, accum.a)` [S2, unofficial].
 
 **Pitfalls:**
-- Camera inside volume: $t_{near}$ can be negative. Clamp $t_{range}.x$ to $\max(t_{range}.x, 0.0)$ [S2, unofficial].
-- Numerical bounds overflow: Sample UVW may slightly exceed $[0,1]$. Explicit bounds check breaks the loop [S2, unofficial].
-- Descriptor set race condition: Use two descriptor sets per slot and swap them to avoid rewriting under a frame in flight [S2, unofficial].
-- Depth sampler: Use `NEAREST` filtering and `CLAMP_TO_EDGE` for consistent occlusion sampling [S2, unofficial].
+- Camera inside volume: $t_{near}$ can be negative [S2, unofficial]. Clamp $t_{range}.x$ to $\max(t_{range}.x, 0.0)$ [S2, unofficial].
+- Numerical bounds overflow: Sample UVW may slightly exceed $[0,1]$ due to precision [S2, unofficial]. Explicit bounds check breaks the loop [S2, unofficial].
+- Descriptor set race condition: Rewriting descriptor sets every frame could change them under a frame still in flight [S2, unofficial]. Maintain two descriptor sets per slot and swap them [S2, unofficial].
+- Depth sampler: Use `NEAREST` filtering and `CLAMP_TO_EDGE` for all address modes to ensure consistent occlusion sampling during raymarching [S2, unofficial].
 
 ## Subtopics
 
@@ -79,10 +80,10 @@ Ember effect consists of distinct spurts of burning particles caused by incomple
 
 ## Operating characteristics
 - **Time Complexity:** Compute cost is $O(\text{pool\_size})$ regardless of active fire count, due to the fixed simulation slot pool [S2, unofficial]. Raymarch cost is $O(\text{MAX\_STEPS})$ per pixel per fire [S2, unofficial].
-- **Memory Complexity:** Fixed pool of 3D volume textures. `SIM_POOL_SIZE` is 5, meaning only 5 concurrent simulation states are maintained in GPU memory [S2, unofficial].
+- **Memory Complexity:** Fixed pool of 3D volume textures [S2, unofficial]. `SIM_POOL_SIZE` is 5, meaning only 5 concurrent simulation states are maintained in GPU memory [S2, unofficial].
 - **Performance:** Achieved real-time (60+ fps) on an NVIDIA RTX 2060 with a voxel grid size of $128 \times 128 \times 128$ [S1, unofficial].
-- **Strengths:** Decouples simulation from rendering; multiple fires share simulation slots via least-used allocation, reducing memory and dispatch overhead compared to per-fire simulation [S2, unofficial].
-- **Limitations:** Fixed step size may require many steps for high accuracy; occlusion culling relies on depth buffer precision [S2, unofficial].
+- **Strengths:** Decouples simulation from rendering [S2, unofficial]. Multiple fires share simulation slots via least-used allocation, reducing memory and dispatch overhead compared to per-fire simulation [S2, unofficial].
+- **Limitations:** Fixed step size may require many steps for high accuracy [S2, unofficial]. Occlusion culling relies on depth buffer precision [S2, unofficial].
 - **Usage:** Used in the `migaelstrydom/VoxelPhase` project for transparent pass rendering, executed after water and before particles [S2, unofficial].
 
 ## Background

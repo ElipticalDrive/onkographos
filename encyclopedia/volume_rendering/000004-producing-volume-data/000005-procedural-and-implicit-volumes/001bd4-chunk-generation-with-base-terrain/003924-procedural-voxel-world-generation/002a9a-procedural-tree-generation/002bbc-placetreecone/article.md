@@ -1,135 +1,101 @@
 # PlaceTreeCone
 
-Also called: Conical Leaf Canopy Tree, Truncated Cone Tree
 
 ## Overview
-PlaceTreeCone generates a procedural voxel tree consisting of a cylindrical trunk and a leaf canopy shaped as a truncated cone (or inverted cone) with a circular cross-section check [S1, S2, unofficial]. It solves the problem of creating visually distinct, organic-looking trees in voxel worlds that differ from the boxy shapes of sibling methods like PlaceTreeBox [4826-procedural-tree-generation.md]. The method is distinguished by its use of a radial gradient to determine leaf width based on height and a Manhattan distance heuristic for the canopy shape in some implementations [S1, S2, unofficial].
+PlaceTreeCone generates a procedural voxel tree consisting of a trunk and a leaf canopy shaped as a truncated cone [S1, S2, unofficial]. It places wood blocks for the trunk and leaf blocks in a conical shape, respecting chunk boundaries [S2, unofficial]. The method is distinguished by two documented implementations: a radial gradient with a circular cross-section check [S1, unofficial], and a fixed Manhattan distance heuristic for the canopy shape [S2, unofficial].
 
 ## How it works
 **Inputs:**
 - `baseX`, `baseZ`: Integer coordinates of the tree center on the ground plane.
-- `terrainHeight`: The Y-coordinate of the ground at `(baseX, baseZ)`.
-- `trunkHeight`: The height of the trunk in voxels.
-- `leafRadius`: The maximum radius of the leaf canopy at its base.
-- `ChunkHeight`: The maximum Y-coordinate of the current chunk (boundary check).
-- `BlockType.Wood`: Voxel ID for the trunk.
-- `BlockType.Leaves`: Voxel ID for the leaves.
-- `BlockType.Fruit` (optional): Voxel ID for fruit, used with a random chance [S1, unofficial].
+- `baseY` or `terrainHeight`: The Y-coordinate of the ground at `(baseX, baseZ)`.
+- `height` or `trunkHeight`: The height of the trunk in voxels.
+- `radius` or `leafRadius`: The maximum radius of the leaf canopy at its base.
+- `leafBase`: The starting Y offset for leaf generation relative to the base.
+- `ChunkHeight`: The maximum Y-coordinate of the current chunk (boundary check) [S2, unofficial].
+- `BlockType.Wood`, `BlockType.Leaves`, `BlockType.Fruit`: Voxel IDs for trunk, leaves, and optional fruit [S1, S2, unofficial].
 
 **Outputs:**
-- Voxel grid updated with wood and leaf blocks.
+- Voxel grid updated with wood and leaf blocks [S1, S2, unofficial].
 
 **Data Structures:**
-- The voxel grid is accessed via 3D coordinates `(x, y, z)`.
-- Block IDs are integers. Air is typically ID 0 [S1, unofficial].
+- The voxel grid is accessed via 3D coordinates `(x, y, z)` [G].
+- Air is represented by ID 0 [S1, unofficial].
 
 **Steps:**
 
 1. **Trunk Generation:**
-   - Iterate `y` from `terrainHeight` to `terrainHeight + trunkHeight` (exclusive of the top voxel if using half-open intervals, or inclusive depending on implementation; S2 uses `terrainHeight + 1` to `terrainHeight + trunkHeight` inclusive for wood, implying trunk occupies `trunkHeight` blocks starting from ground) [S2, unofficial].
-   - Set voxel at `(baseX, y, baseZ)` to `BlockType.Wood` [S1, S2, unofficial].
-   - *Note:* S1 loops `y` from `baseY` to `baseY + height` (exclusive) [S1, unofficial]. S2 loops from `terrainHeight + 1` to `terrainHeight + trunkHeight` [S2, unofficial]. We assume the trunk starts at the ground level `terrainHeight` or `terrainHeight + 1`. S2 explicitly sets `terrainHeight + 1` to `terrainHeight + trunkHeight`. Let's align with S2's explicit range for wood: `y` in `[terrainHeight + 1, terrainHeight + trunkHeight]`.
+   - Iterate `y` from `baseY` to `baseY + height` (exclusive) [S1, unofficial], or from `terrainHeight + 1` to `terrainHeight + trunkHeight` inclusive [S2, unofficial].
+   - Set voxel at `(baseX, y, baseZ)` to `BlockType.Wood` (or ID 6) [S1, S2, unofficial].
 
 2. **Boundary Check:**
-   - Calculate `treeTopY = terrainHeight + trunkHeight` [S2, unofficial].
+   - Calculate `treeTopY = baseY + height` (or `terrainHeight + trunkHeight`) [S2, unofficial].
    - If `treeTopY >= ChunkHeight`, abort generation to prevent out-of-bounds writes [S2, unofficial].
 
 3. **Leaf Canopy Generation:**
-   - Determine leaf vertical bounds.
-     - S2 defines `leafStartY = terrainHeight + trunkHeight - 1` and `leafEndY = terrainHeight + trunkHeight + 1` [S2, unofficial].
-     - S1 defines a loop from `baseY + leafBase` to `baseY + height + 1` (inclusive) [S1, unofficial].
-     - We follow S2's explicit bounds for the truncated cone logic: `leafY` ranges from `leafStartY` to `leafEndY`.
-
-   - **Method A (S2 - Manhattan Distance Heuristic):**
-     - Iterate `leafY` from `leafStartY` to `leafEndY` [S2, unofficial].
-     - Iterate `offsetZ` from `-2` to `2` [S2, unofficial].
-     - Iterate `offsetX` from `-2` to `2` [S2, unofficial].
+   - Two distinct algorithms are documented in the sources:
+   - **Method A (S1 - Radial Gradient):**
+     - Iterate `y` from `baseY + leafBase` to `baseY + height + 1` (inclusive) [S1, unofficial].
+     - Calculate radial gradient: `radGradient = (baseY + height + 1 - y) / height` [S1, unofficial].
+     - Calculate current width: `thisWidth = Math.round(radGradient * radius)` [S1, unofficial].
+     - Iterate `x` and `z` across the bounding box of `thisWidth`.
+     - Check if `(x, z)` is inside the circle: `(x - baseX)^2 + (z - baseZ)^2 <= thisWidth^2` [S1, unofficial].
+     - If inside the circle and the block is air (ID 0), apply `RandomChance` for `BlockType.Leaves` and `BlockType.Fruit` identical to PlaceTreeBox [S1, unofficial].
+   - **Method B (S2 - Manhattan Distance):**
+     - Calculate leaf vertical bounds: `leafStartY = terrainHeight + trunkHeight - 1` and `leafEndY = terrainHeight + trunkHeight + 1` [S2, unofficial].
+     - Iterate `leafY` from `leafStartY` to `leafEndY`, `offsetZ` from `-2` to `2`, and `offsetX` from `-2` to `2` [S2, unofficial].
      - Compute Manhattan distance: `distance = |offsetX| + |offsetZ|` [S2, unofficial].
-     - If `distance > 3`, skip this voxel [S2, unofficial].
-     - If `leafY == leafEndY` and `distance > 1`, skip to taper the top [S2, unofficial].
+     - Skip if `distance > 3` [S2, unofficial].
+     - Skip if `leafY == leafEndY` and `distance > 1` to taper the top [S2, unofficial].
      - Compute `leafX = baseX + offsetX`, `leafZ = baseZ + offsetZ` [S2, unofficial].
-     - Check for trunk overlap: If `leafX == baseX` and `leafZ == baseZ` and `leafY <= terrainHeight + trunkHeight`, skip [S2, unofficial].
+     - Skip if position overlaps trunk (`leafX == baseX` and `leafZ == baseZ` and `leafY <= terrainHeight + trunkHeight`) [S2, unofficial].
      - Set voxel at `(leafX, leafY, leafZ)` to `BlockType.Leaves` [S2, unofficial].
 
-   - **Method B (S1 - Radial Gradient with Circular Check):**
-     - Iterate `y` from `terrainHeight + trunkHeight` to `terrainHeight + trunkHeight + leafRadius` (or similar height range) [S1, unofficial].
-     - Calculate radial gradient: `radGradient = (topY - y) / trunkHeight` (where `topY` is the peak height) [S1, unofficial].
-     - Calculate current width: `thisWidth = round(radGradient * leafRadius)` [S1, unofficial].
-     - Iterate `x` from `baseX - thisWidth` to `baseX + thisWidth` [S1, unofficial].
-     - Iterate `z` from `baseZ - thisWidth` to `baseZ + thisWidth` [S1, unofficial].
-     - Check if `(x, z)` is inside the circle: `(x - baseX)^2 + (z - baseZ)^2 <= thisWidth^2` [S1, unofficial].
-     - If inside circle and block is air (ID 0), apply random chance for `BlockType.Leaves` and `BlockType.Fruit` [S1, unofficial].
-
-   *Note:* The sources provide two distinct algorithms for the leaf canopy. S2 uses a fixed small radius with Manhattan distance, while S1 uses a radial gradient with a circular check. An implementer should choose one based on the desired visual style. S2's method is more efficient for small canopies, while S1's method allows for variable radius and smoother circular shapes.
-
-**Parameters:**
-- `trunkHeight`: Typically 5-17 voxels (S1: `random(3,5)+5` -> 8-12; S2: variable) [S1, unofficial].
-- `leafRadius`: Typically 4-16 voxels (S1: `random(4,12)+4` -> 8-16) [S1, unofficial].
-- `ChunkHeight`: Defined by the chunk size (e.g., 256) [S2, unofficial].
+**Parameters:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Chunk Boundary:** If the tree top exceeds `ChunkHeight`, generation must abort to avoid writing outside the chunk [S2, unofficial].
-- **Trunk Overlap:** Leaf generation must not overwrite the trunk voxels [S2, unofficial].
-- **Precision:** Use integer arithmetic for voxel coordinates. Floating point operations should be minimized or rounded explicitly [S1, unofficial].
+- Chunk boundary overflow must be checked before generation [S2, unofficial].
+- Leaf generation must avoid overwriting trunk voxels [S2, unofficial].
+- Random chance application for leaves and fruit is identical to PlaceTreeBox [S1, unofficial].
 
-**Pseudocode (Combining S2's structure with S1's radial logic for a general implementation):**
+**Pseudocode (Method A - Radial Gradient):**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def PlaceTreeCone(baseX, baseZ, terrainHeight, trunkHeight, leafRadius, ChunkHeight, BlockType):
-    # 1. Generate Trunk
-    # S2: Loop y from terrainHeight + 1 to terrainHeight + trunkHeight
-    # S1: Loop y from baseY to baseY + height (exclusive)
-    # We assume trunk occupies blocks from terrainHeight to terrainHeight + trunkHeight - 1
-    for y in range(terrainHeight, terrainHeight + trunkHeight):
-        SetBlock(baseX, y, baseZ, BlockType.Wood)
+import random
+
+def PlaceTreeCone(baseX, baseZ, baseY, height, radius, leafBase, ChunkHeight, voxel_grid):
+    # 1. Trunk Generation
+    for y in range(baseY, baseY + height):
+        voxel_grid[baseX, y, baseZ] = 6  # ID 6 for wood [S1, unofficial]
 
     # 2. Boundary Check
-    treeTopY = terrainHeight + trunkHeight
+    treeTopY = baseY + height
     if treeTopY >= ChunkHeight:
-        return  # Abort generation
+        return  # Abort generation [S2, unofficial]
 
-    # 3. Generate Leaves (Using S1's Radial Gradient approach for generality)
-    # S1: Loop y from baseY + leafBase to baseY + height + 1
-    # Let's assume leaf canopy starts at the top of the trunk
-    leafStartY = treeTopY
-    leafEndY = treeTopY + leafRadius  # Approximate height of canopy
-
-    for y in range(leafStartY, leafEndY + 1):
-        # Calculate radial gradient
-        # S1: radGradient = (baseY + height + 1 - y) / height
-        # Here, 'height' in S1 refers to trunkHeight.
-        # The peak is at leafEndY.
-        radGradient = (leafEndY - y) / trunkHeight
-        
-        # Calculate current width
-        thisWidth = round(radGradient * leafRadius)
-        
-        # Iterate over the bounding box of the circle
+    # 3. Leaf Canopy Generation
+    for y in range(baseY + leafBase, baseY + height + 1):
+        radGradient = (baseY + height + 1 - y) / height
+        thisWidth = round(radGradient * radius)
         for x in range(baseX - thisWidth, baseX + thisWidth + 1):
             for z in range(baseZ - thisWidth, baseZ + thisWidth + 1):
-                # Circular cross-section check
-                distSq = (x - baseX)**2 + (z - baseZ)**2
-                if distSq <= thisWidth**2:
-                    # Check if air
-                    if GetBlock(x, y, z) == 0:
-                        # Apply random chance for leaves and fruit
-                        if RandomChance(0.8):  # Example chance
-                            SetBlock(x, y, z, BlockType.Leaves)
-                        if RandomChance(0.1):  # Example chance for fruit
-                            SetBlock(x, y, z, BlockType.Fruit)
+                if (x - baseX)**2 + (z - baseZ)**2 <= thisWidth**2:
+                    if voxel_grid[x, y, z] == 0:  # Air check [S1, unofficial]
+                        if RandomChance(0.8):
+                            voxel_grid[x, y, z] = 2  # Leaf ID [G]
+                        if RandomChance(0.1):
+                            voxel_grid[x, y, z] = 3  # Fruit ID [G]
+
+def RandomChance(p):
+    return random.random() < p
 ```
 
 ## Operating characteristics
-- **Time Complexity:** $O(H \cdot R^2)$ where $H$ is canopy height and $R$ is leaf radius, as it iterates over the bounding box of the canopy. S2's method is $O(1)$ for small fixed canopies.
-- **Memory Complexity:** $O(1)$ auxiliary space, as it modifies the voxel grid in place.
-- **Strengths:** Creates organic, tapered tree shapes. S1's method allows for variable canopy sizes. S2's method is simple and fast for small canopies.
-- **Limitations:** S1's method may produce holes if random chance is low. S2's method is limited to small, blocky canopies due to the fixed Manhattan distance range.
-- **When to use:** When a more natural, conical tree shape is desired compared to boxy trees. S2 is suitable for low-detail, fast generation. S1 is suitable for higher-detail, variable-sized trees.
+Not given in the sources.
 
 ## Background
-PlaceTreeCone is a procedural generation technique used in voxel-based games and simulations to create tree models. It is derived from the broader field of procedural terrain and object generation. The specific implementations cited are from unofficial repositories: `bad-minecraft` [S1, unofficial] and `voxel-forge` [S2, unofficial]. These implementations demonstrate different approaches to generating the leaf canopy, highlighting the flexibility of procedural methods in voxel worlds.
+PlaceTreeCone is a procedural generation technique used in voxel-based games to create tree models. The specific implementations cited are from unofficial repositories: `bad-minecraft` [S1, unofficial] and `voxel-forge` [S2, unofficial]. These implementations demonstrate different approaches to generating the leaf canopy, highlighting the flexibility of procedural methods in voxel worlds.
 
 ## Sources
 [S1] mayakeele/bad-minecraft, https://github.com/mayakeele/bad-minecraft, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,434 @@
+--- v002.md
++++ v003.md
+@@ -4,218 +4,244 @@
+ 
+ ## Overview
+-Gradient-Based Interpolation by Sample Splatting is a real-time technique for reconstructing source radiance $L_x$ in inhomogeneous, single-scattering media by interpolating values and gradients from a sparse set of sample points [S1]. It solves the problem of severe rendering artifacts (e.g., in light shafts and volumetric shadows) that occur when standard interpolation methods, such as Radial Basis Functions (RBF), fail to capture sharp, high-frequency shading variations [S1]. Unlike RBF methods which assume smooth shading, this method uses first-order Taylor approximations weighted by distance, enabling accurate reconstruction of local and directional illumination effects with significantly lower relative error (4.3% vs 14.7% for RBF) at comparable performance levels [S1].
++Gradient-Based Interpolation by Sample Splatting is a real-time technique for reconstructing source radiance $L_x$ in inhomogeneous, single-scattering media from a sparse set of sample points [S1]. It solves the problem of severe rendering artifacts (such as broken light shafts and incorrect volumetric shadows) that occur when standard interpolation methods (like RBF) fail to capture high-frequency shading variations near light sources [S1]. Unlike sibling methods that rely solely on radiance values, this method uses both the radiance value and its spatial gradient at each sample point to construct a first-order Taylor approximation, significantly reducing relative error (4.3% vs 14.7% for RBF) while maintaining real-time performance [S1].
+ 
+ ## How it works
+-The method consists of three main phases: (1) computing source radiance and gradients at sparse sample points, (2) splatting these samples into a 3D volume texture to interpolate radiance, and (3) ray marching through the resulting volume to compute final image radiance.
++The method operates in three phases: (1) computing source radiance and gradients at sparse sample points, (2) splatting these samples into a 3D volume texture to interpolate radiance at all voxels, and (3) ray marching through the resulting volume texture to compute final image radiance [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   Scene geometry and density field $D(x)$ [S1].
+-    *   Light source parameters (e.g., point source intensity $I_0$, position $s$) [S1].
+-    *   View parameters (camera position, viewing axis) [S1].
+-    *   Sample points $\{x_j\}$, their source radiances $\{L_{x_j}\}$, gradients $\{\nabla L_{x_j}\}$, and valid radii $\{R_j\}$ [S1].
+-*   **Outputs:**
+-    *   A 3D volume texture containing interpolated source radiance $L_x$ at every voxel [S1].
+-    *   Final image radiance $L$ [S1].
++*   **Inputs**:
++    *   Scene geometry and density field $D(\mathbf{x})$.
++    *   Light source parameters (e.g., point source intensity $I_0$, position $\mathbf{s}$).
++    *   View parameters (camera position $\mathbf{o}$, direction $\mathbf{d}$).
++    *   User-defined intervals $\Delta_1$ (for source radiance tracing) and $\Delta_2$ (for gradient estimation) [S1].
++*   **Outputs**:
++    *   A 3D volume texture containing the interpolated source radiance $L_x$ at every voxel [S1].
++    *   The final rendered image after ray marching [S1].
+ 
+ ### Data Structures
+-*   **Sample $j$:** A tuple $(x_j, L_{x_j}, \nabla L_{x_j}, R_j)$ [S1].
+-    *   $x_j$: 3D position in media volume [S1].
+-    *   $L_{x_j}$: Scalar source radiance at $x_j$ [S1].
+-    *   $\nabla L_{x_j}$: 3D vector gradient of source radiance at $x_j$ [S1].
+-    *   $R_j$: Scalar valid radius. For comparison with RBF, $R_j = 3r_j$ where $r_j$ is the culling radius of the corresponding Gaussian center [S1].
+-*   **3D Volume Texture:** Stores interpolated $L_x$ values. Dimensions match the discretized volume grid [S1].
+-
+-### Parameters
+-*   $\Delta_1$: User-defined step size for volume tracing to compute $L_x$. Controls precision of radiance evaluation [S1].
+-*   $\Delta_2$: User-defined step size for numerical gradient estimation. Controls precision of gradient evaluation [S1].
++*   **Sample**: Defined by a tuple $(\mathbf{x}_j, L_{\mathbf{x}_j}, \nabla L_{\mathbf{x}_j}, R_j)$ [S1].
++    *   $\mathbf{x}_j$: 3D position in the media volume.
++    *   $L_{\mathbf{x}_j}$: Scalar source radiance at $\mathbf{x}_j$.
++    *   $\nabla L_{\mathbf{x}_j}$: 3D vector gradient of source radiance at $\mathbf{x}_j$.
++    *   $R_j$: Valid radius of the sample. In the reference implementation, $R_j = 3r_j$, where $r_j$ is the culling radius of the corresponding Gaussian center $c_j$ (where $\mathbf{x}_j = c_j$) [S1].
++*   **Valid Sphere**: The sphere centered at $\mathbf{x}_j$ with radius $R_j$. A sample $j$ contributes to the interpolation of a point $\mathbf{x}$ if $\|\mathbf{x} - \mathbf{x}_j\| < R_j$ [S1].
++*   **3D Volume Texture**: Stores the interpolated source radiance $L_x$ for all voxels in the volume [S1].
+ 
+ ### Step-by-Step Method
+ 
+-1.  **Evaluate Source Radiance at Sample Points:**
+-    For each sample point $x_j$, compute $L_{x_j}$ by tracing a ray from $x_j$ to the light source $s$. Discretize the ray into intervals of $\Delta_1$.
+-    $$ L_{x_j} = \frac{I_0}{4\pi d_{sv}^2} \exp\left(-\sigma_t \Delta_1 \sum_{u \in \mathbb{U}} D(u)\right) $$
+-    where:
+-    *   $I_0$ is the point source intensity [S1].
+-    *   $d_{sv}$ is the distance from source to viewer (or source to sample, context implies source-to-point distance for local radiance, but Eq 1 uses $d_{sx}$ in text and $d_{sv}$ in formula snippet; the formula snippet in notes says $d_{sv}$ but text says $d_{sx}$. Standard physics for source radiance at $x$ from $s$ uses distance $d_{sx}$. The note formula has a typo $d_{sv}$ in denominator but $d_{sx}$ in text description. We use $d_{sx}$ as per the text definition of source radiance at $x$ [S1]). *Correction*: The note formula explicitly writes $d_{sv}$ in the denominator for $L_x$. However, the text defines $L_x$ as source radiance at $x$ from $s$. The standard inverse square law uses distance from source to point. The note formula likely contains a typo ($v$ instead of $x$). We follow the text definition: $d_{sx}$ is distance from source to $x$.
+-    *   $\sigma_t$ is the extinction coefficient [S1].
+-    *   $\mathbb{U} = \{u_k : u_k = x_j + v k \Delta_1, k = 0, 1, \dots \lfloor \|s-x_j\|/\Delta_1 \rfloor \}$, where $v = (s - x_j)/\|s - x_j\|$ is the ray direction [S1].
+-    *   $D(u)$ is the density at sample point $u$ [S1].
+-
+-2.  **Evaluate Gradient at Sample Points:**
+-    Compute $\nabla L_{x_j}$ numerically using central differences at six points surrounding $x_j$ along the X, Y, and Z axes with interval $\Delta_2$:
+-    $$ \nabla L_{x_j} = \left( \frac{L_{x_j+\Delta_2 \hat{x}} - L_{x_j-\Delta_2 \hat{x}}}{2\Delta_2}, \frac{L_{x_j+\Delta_2 \hat{y}} - L_{x_j-\Delta_2 \hat{y}}}{2\Delta_2}, \frac{L_{x_j+\Delta_2 \hat{z}} - L_{x_j-\Delta_2 \hat{z}}}{2\Delta_2} \right) $$
+-    where $\hat{x}, \hat{y}, \hat{z}$ are unit vectors [S1]. Note that $L_{x_j \pm \Delta_2 \hat{x}}$ etc. must be computed using Step 1.
+-
+-3.  **Splat Samples into Volume (Interpolation):**
+-    Interpolate $L_x$ for all points $x$ in the volume using the gradient-based scheme. This is performed efficiently by splatting samples onto X-Y slices (assuming +Z aligned to viewing axis) [S1].
+-    
+-    For each sample $j$:
+-    a.  Intersect the valid sphere (center $x_j$, radius $R_j$) with each X-Y slice of the volume.
+-    b.  Find the bounding quad of the intersection circle for each slice.
+-    c.  Group bounding quads by slice.
+-    
+-    For each slice, render the bounding quads with alpha blending enabled. For each pixel (representing a point $x$ in the slice), accumulate the numerator and denominator of the weighted average:
+-    $$ \text{Numerator}(x) = \sum_{j \in S} W_j(x) \left( L_{x_j} + (x - x_j) \cdot \nabla L_{x_j} \right) $$
+-    $$ \text{Denominator}(x) = \sum_{j \in S} W_j(x) $$
+-    where:
+-    *   $S = \{j : \|x - x_j\| < R_j\}$ is the set of samples whose valid sphere covers $x$ [S1].
+-    *   $W_j(x) = R_j / \|x - x_j\|$ is the weighting function [S1].
+-    
+-    Compute $L_x$ for each pixel:
+-    $$ L_x = \frac{\text{Numerator}(x)}{\text{Denominator}(x)} $$
+-    
+-    Render $L_x$ into the 3D volume texture [S1].
+-
+-4.  **Ray Marching for Final Radiance:**
+-    Perform a ray march from the viewer through the volume to compute the final radiance $L$ seen at the viewer. Discretely compute the integral in Eq. (2):
+-    $$ L = \frac{I_0}{d_{sv}^2} \tau_{sv} + \frac{\Omega}{4\pi} \int_{x_{out}}^{x_{in}} D(x) L_x \tau_{xv} dx $$
+-    where:
+-    *   First term is direct transmission from source to viewer [S1].
+-    *   Second term is single scattered radiance [S1].
+-    *   $\tau_{sv}$ is transmittance from source to viewer [S1].
+-    *   $\Omega$ is the solid angle factor (or related to scattering coefficient, context implies integration weight) [S1].
+-    *   $\tau_{xv}$ is transmittance from point $x$ to viewer [S1].
+-    *   $L_x$ is the interpolated source radiance from the volume texture [S1].
++#### 1. Sample Point Selection
++Sample points $\{\mathbf{x}_j\}$ are dynamically distributed in the medium to minimize shading error [S1]. The reference implementation uses a recursive sample splitting procedure [S1]. For comparison with RBF, samples may be taken from Gaussian centers $c_j$ of a density representation [S1].
++
++#### 2. Evaluate Source Radiance and Gradient at Samples
++For each sample point $\mathbf{x}_j$:
++
++**A. Compute Source Radiance $L_{\mathbf{x}_j}$**
++Evaluate the integral along the ray from $\mathbf{x}_j$ to the light source $\mathbf{s}$ [S1]. The source radiance for a point source is given by:
++$$
++L_{\mathbf{x}_j} = \frac{I_0}{4\pi d_{s\mathbf{x}_j}^2} \tau_{s\mathbf{x}_j}
++$$
++where $d_{s\mathbf{x}_j}$ is the distance from source to $\mathbf{x}_j$, and $\tau_{s\mathbf{x}_j}$ is the transmittance [S1]. Transmittance is computed via discrete volume tracing at intervals of $\Delta_1$ [S1]:
++$$
++\tau_{s\mathbf{x}_j} = \exp\left(-\sigma_t \Delta_1 \sum_{u \in \mathbb{U}} D(u)\right)
++$$
++where $\mathbb{U} = \{u_k : u_k = \mathbf{x}_j + \mathbf{v} k \Delta_1, k = 0, 1, \dots \lfloor \|\mathbf{s} - \mathbf{x}_j\|/\Delta_1 \rfloor \}$, $\mathbf{v} = (\mathbf{s} - \mathbf{x}_j)/\|\mathbf{s} - \mathbf{x}_j\|$, and $u_k \in \mathbb{V}$ (inside the volume) [S1].
++
++**B. Compute Gradient $\nabla L_{\mathbf{x}_j}$**
++Numerically evaluate the gradient using central differences at six points surrounding $\mathbf{x}_j$ along the X, Y, and Z axes with interval $\Delta_2$ [S1]:
++$$
++\nabla L_{\mathbf{x}_j} = \left( \frac{L_{\mathbf{x}_j + \Delta_2 \mathbf{x}} - L_{\mathbf{x}_j - \Delta_2 \mathbf{x}}}{2\Delta_2}, \frac{L_{\mathbf{x}_j + \Delta_2 \mathbf{y}} - L_{\mathbf{x}_j - \Delta_2 \mathbf{y}}}{2\Delta_2}, \frac{L_{\mathbf{x}_j + \Delta_2 \mathbf{z}} - L_{\mathbf{x}_j - \Delta_2 \mathbf{z}}}{2\Delta_2} \right)
++$$
++where $L_{\mathbf{x}_j \pm \Delta_2 \mathbf{x}}$ etc. are computed using the same volume tracing procedure as in step A [S1].
++
++#### 3. Gradient-Based Interpolation by Sample Splatting
++Reconstruct $L_{\mathbf{x}}$ for all points $\mathbf{x}$ in the volume using the samples [S1]. The interpolation is a weighted average of first-order Taylor approximations [S1]:
++$$
++L_{\mathbf{x}} = \frac{\sum_{j \in S} W_j(\mathbf{x}) \left( L_{\mathbf{x}_j} + (\mathbf{x} - \mathbf{x}_j) \cdot \nabla L_{\mathbf{x}_j} \right)}{\sum_{j \in S} W_j(\mathbf{x})}
++$$
++where $S = \{j : \|\mathbf{x} - \mathbf{x}_j\| < R_j\}$ and the weight function is $W_j(\mathbf{x}) = R_j / \|\mathbf{x} - \mathbf{x}_j\|$ [S1].
++
++**Implementation via Splatting (GPU):**
++1.  **Intersection**: For each sample $j$, intersect its valid sphere with each X-Y slice of the volume (assuming +Z aligned to viewing axis) [S1].
++2.  **Bounding Quads**: Find the bounding quads of the intersection circles for each slice [S1].
++3.  **Grouping**: Group bounding quads by slice [S1].
++4.  **Rendering**: For each slice, render the bounding quads with alpha blending enabled [S1].
++    *   For each pixel (representing a point $\mathbf{x}$ in the slice), evaluate and accumulate two values:
++        *   Numerator term: $N_j(\mathbf{x}) = W_j(\mathbf{x}) \left( L_{\mathbf{x}_j} + (\mathbf{x} - \mathbf{x}_j) \cdot \nabla L_{\mathbf{x}_j} \right)$
++        *   Denominator term: $D_j(\mathbf{x}) = W_j(\mathbf{x})$
++    *   Accumulate these into two separate buffers (or textures) for the slice [S1].
++5.  **Division**: After all samples are splatted, compute $L_{\mathbf{x}} = N(\mathbf{x}) / D(\mathbf{x})$ for each pixel [S1].
++6.  **Volume Texture**: Render the result into a 3D volume texture [S1].
++
++#### 4. Final Radiance Computation
++Perform a ray march to discretely compute the integral in Eq. (2) for final radiance [S1]:
++$$
++L = \frac{I_0}{d_{sv}^2} \tau_{sv} + \frac{\Omega}{4\pi} \int_{x_{out}}^{x_{in}} D(x) L_x \tau_{xv} dx
++$$
++where the first term is direct transmission and the second is single scattered radiance [S1]. The integral is computed using the interpolated $L_x$ values from the volume texture [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def gradient_based_interpolation_volume_rendering(scene, light, camera, density_field):
++def gradient_based_interpolation_by_sample_splatting(scene, view_params, delta1, delta2):
+     """
+-    Main pipeline for Gradient-Based Interpolation by Sample Splatting.
++    Reconstructs source radiance in a volume using gradient-based interpolation.
++    
++    Args:
++        scene: Contains density field D(x), light sources, geometry.
++        view_params: Camera position, direction, volume bounds.
++        delta1: Step size for source radiance tracing.
++        delta2: Step size for gradient estimation.
++        
++    Returns:
++        final_image: Rendered image.
+     """
+-    # 1. Dynamic Sampling (Simplified: using Gaussian centers for this description)
+-    # In practice, use recursive sample splitting to minimize shading error [S1].
+-    samples = get_gaussian_centers(scene.density_representation)
+-    
+-    # 2. Evaluate Source Radiance and Gradients at Sample Points
++    
++    # 1. Dynamic Sampling (Simplified: using Gaussian centers for reference)
++    samples = get_dynamic_samples(scene.density_field)
++    
++    # 2. Evaluate Source Radiance and Gradient at Samples
+     for sample in samples:
+         x_j = sample.position
+-        R_j = 3 * sample.culling_radius  # Valid radius [S1]
+-        
+-        # Compute L_xj
+-        L_xj = compute_source_radiance(x_j, light, density_field, delta_1=0.1)
+-        
+-        # Compute Gradient
+-        grad_x = compute_source_radiance(x_j + delta_2 * vec(1,0,0), light, density_field, delta_1=0.1)
+-        grad_m_x = compute_source_radiance(x_j - delta_2 * vec(1,0,0), light, density_field, delta_1=0.1)
+-        grad_y = compute_source_radiance(x_j + delta_2 * vec(0,1,0), light, density_field, delta_1=0.1)
+-        grad_m_y = compute_source_radiance(x_j - delta_2 * vec(0,1,0), light, density_field, delta_1=0.1)
+-        grad_z = compute_source_radiance(x_j + delta_2 * vec(0,0,1), light, density_field, delta_1=0.1)
+-        grad_m_z = compute_source_radiance(x_j - delta_2 * vec(0,0,1), light, density_field, delta_1=0.1)
+-        
+-        sample.gradient = vec(
+-            (grad_x - grad_m_x) / (2 * delta_2),
+-            (grad_y - grad_m_y) / (2 * delta_2),
+-            (grad_z - grad_m_z) / (2 * delta_2)
+-        )
++        R_j = 3 * sample.culling_radius  # Reference implementation
++        
++        # Compute Source Radiance L_xj
++        # Trace ray from x_j to light source s
++        direction = normalize(scene.light_source.position - x_j)
++        distance = length(scene.light_source.position - x_j)
++        
++        # Discrete integration for transmittance
++        sum_density = 0.0
++        num_steps = int(distance / delta1)
++        for k in range(num_steps + 1):
++            u_k = x_j + direction * k * delta1
++            if is_inside_volume(u_k, scene.volume_bounds):
++                sum_density += scene.density_field(u_k)
++        
++        transmittance = exp(-scene.extinction_coefficient * delta1 * sum_density)
++        L_xj = (scene.light_source.intensity / (4 * PI * distance**2)) * transmittance
+         sample.L = L_xj
+-        sample.R = R_j
+-
+-    # 3. Splat Samples into 3D Volume Texture
+-    volume_texture = create_3d_texture(scene.volume_bounds)
+-    
+-    # Group samples by X-Y slices (Z aligned to viewing axis)
+-    slices = group_samples_by_xy_slices(samples, scene.volume_bounds)
+-    
+-    for z_slice in slices:
+-        # Intersect valid spheres with this Z slice
+-        quads = []
+-        for sample in z_slice.samples:
+-            center_2d = sample.position.xy
+-            radius_2d = sample.R  # Intersection of sphere with plane is circle with same radius if plane is perpendicular to Z? 
+-                                  # Note: Sphere center is (x,y,z). Slice is at Z_k. 
+-                                  # Intersection radius r_int = sqrt(R_j^2 - (z_j - Z_k)^2).
+-                                  # If |z_j - Z_k| >= R_j, no intersection.
+-            dist_z = abs(sample.position.z - z_slice.z)
+-            if dist_z < sample.R:
+-                r_int = sqrt(sample.R**2 - dist_z**2)
+-                quads.append(BoundingQuad(center_2d, r_int))
+-        
+-        # Render quads to accumulate numerator and denominator
+-        numerator_texture = create_2d_texture(z_slice.bounds)
+-        denominator_texture = create_2d_texture(z_slice.bounds)
+-        
+-        for quad in quads:
+-            render_quad_to_textures(quad, sample, numerator_texture, denominator_texture)
++        
++        # Compute Gradient Nabla L_xj
++        # Central differences along X, Y, Z axes
++        grad_x = (trace_source_radiance(x_j + delta2 * vec(1,0,0), scene) - 
++                  trace_source_radiance(x_j - delta2 * vec(1,0,0), scene)) / (2 * delta2)
++        grad_y = (trace_source_radiance(x_j + delta2 * vec(0,1,0), scene) - 
++                  trace_source_radiance(x_j - delta2 * vec(0,1,0), scene)) / (2 * delta2)
++        grad_z = (trace_source_radiance(x_j + delta2 * vec(0,0,1), scene) - 
++                  trace_source_radiance(x_j - delta2 * vec(0,0,1), scene)) / (2 * delta2)
++        sample.gradient = vec(grad_x, grad_y, grad_z)
++        
++        sample.valid_radius = R_j
++
++    # 3. Gradient-Based Interpolation by Sample Splatting
++    # Initialize accumulation buffers for numerator and denominator
++    volume_texture_num = create_3d_texture(scene.volume_resolution)
++    volume_texture_den = create_3d_texture(scene.volume_resolution)
++    
++    # Iterate over each sample and splat into volume
++    for sample in samples:
++        x_j = sample.position
++        L_xj = sample.L
++        grad_L_xj = sample.gradient
++        R_j = sample.valid_radius
++        
++        # Determine bounding box of valid sphere in volume coordinates
++        min_x = max(0, floor(x_j.x - R_j))
++        max_x = min(width, ceil(x_j.x + R_j))
++        min_y = max(0, floor(x_j.y - R_j))
++        max_y = min(height, ceil(x_j.y + R_j))
++        min_z = max(0, floor(x_j.z - R_j))
++        max_z = min(depth, ceil(x_j.z + R_j))
++        
++        # Render bounding quads for each Z slice (assuming Z is viewing axis)
++        for z in range(min_z, max_z + 1):
++            # Calculate intersection circle radius at this Z slice
++            dist_z_sq = (z - x_j.z)**2
++            if dist_z_sq >= R_j**2:
++                continue
++            circle_radius = sqrt(R_j**2 - dist_z_sq)
+             
+-        # Compute L_x for this slice
+-        for x, y in z_slice.pixels:
+-            num = numerator_texture[x, y]
+-            den = denominator_texture[x, y]
+-            if den > 0:
+-                L_x = num / den
+-            else:
+-                L_x = 0
+-            volume_texture[x, y, z_slice.z] = L_x
+-
+-    # 4. Ray Marching for Final Radiance
+-    image = render_image(camera, volume_texture, density_field, light)
+-    return image
+-
+-def compute_source_radiance(point_x, light, density_field, delta_1):
+-    """
+-    Computes L_x using Eq. (1) with discrete integration.
+-    """
+-    # Direction from point to light
+-    v = normalize(light.position - point_x)
+-    dist = length(light.position - point_x)
+-    
+-    # Discrete integration steps
+-    num_steps = floor(dist / delta_1)
+-    sum_density = 0
++            # Bounding quad for this slice
++            quad_min_x = max(0, floor(x_j.x - circle_radius))
++            quad_max_x = min(width, ceil(x_j.x + circle_radius))
++            quad_min_y = max(0, floor(x_j.y - circle_radius))
++            quad_max_y = min(height, ceil(x_j.y + circle_radius))
++            
++            # For each pixel in the quad
++            for y in range(quad_min_y, quad_max_y + 1):
++                for x in range(quad_min_x, quad_max_x + 1):
++                    # Point x in world space (assuming voxel centers)
++                    point_x = vec(x + 0.5, y + 0.5, z + 0.5)
++                    
++                    # Check if point is inside valid sphere
++                    dist_sq = length_sq(point_x - x_j)
++                    if dist_sq >= R_j**2:
++                        continue
++                    
++                    dist = sqrt(dist_sq)
++                    
++                    # Weight function W_j(x) = R_j / ||x - x_j||
++                    W_j = R_j / dist
++                    
++                    # Taylor approximation: L_xj + (x - x_j) . grad_L_xj
++                    displacement = point_x - x_j
++                    approx_L = L_xj + dot(displacement, grad_L_xj)
++                    
++                    # Accumulate numerator and denominator
++                    volume_texture_num[x, y, z] += W_j * approx_L
++                    volume_texture_den[x, y, z] += W_j
++
++    # Compute final interpolated source radiance
++    for z in range(scene.volume_resolution.z):
++        for y in range(scene.volume_resolution.y):
++            for x in range(scene.volume_resolution.x):
++                if volume_texture_den[x, y, z] > 0:
++                    volume_texture[x, y, z] = volume_texture_num[x, y, z] / volume_texture_den[x, y, z]
++                else:
++                    volume_texture[x, y, z] = 0.0
++
++    # 4. Final Radiance Computation (Ray Marching)
++    final_image = render_with_ray_marching(scene, view_params, volume_texture)
++    
++    return final_image
++
++def trace_source_radiance(point_x, scene):
++    """Helper to compute source radiance at a given point."""
++    # Same logic as in step 2A
++    direction = normalize(scene.light_source.position - point_x)
++    distance = length(scene.light_source.position - point_x)
++    sum_density = 0.0
++    num_steps = int(distance / delta1) # delta1 from outer scope
+     for k in range(num_steps + 1):
+-        u = point_x + v * k * delta_1
+-        sum_density += density_field.sample(u)
+-        
+-    # Transmittance
+-    tau = exp(-light.extinction * delta_1 * sum_density)
+-    
+-    # Source Radiance
+-    # Note: Formula uses d_sv in note, but d_sx in text. Using d_sx (distance from source to x)
+-    # However, Eq 1 in text says L_x = I0 / (4 pi d_sx^2) * tau_sx.
+-    # The note formula had d_sv. We follow the text definition.
+-    d_sx = dist
+-    L_x = (light.intensity / (4 * pi * d_sx**2)) * tau
+-    return L_x
+-
+-def render_quad_to_textures(quad, sample, numerator_tex, denominator_tex):
+-    """
+-    For each pixel in the quad, accumulate weighted radiance and weight.
+-    """
+-    for pixel in quad.pixels:
+-        x = pixel.position
+-        x_j = sample.position
+-        dist = length(x - x_j)
+-        
+-        if dist < sample.R and dist > 0:
+-            W_j = sample.R / dist
+-            # Linear approximation: L_xj + (x - x_j) . grad_L_xj
+-            approx_L = sample.L + dot(x - x_j, sample.gradient)
+-            
+-            numerator_tex.accumulate(pixel, W_j * approx_L)
+-            denominator_tex.accumulate(pixel, W_j)
++        u_k = point_x + direction * k * delta1
++        if is_inside_volume(u_k, scene.volume_bounds):
++            sum_density += scene.density_field(u_k)
++    transmittance = exp(-scene.extinction_coefficient * delta1 * sum_density)
++    return (scene.light_source.intensity / (4 * PI * distance**2)) * transmittance
+ ```
+ 
++### Parameters
++*   $\Delta_1$: User-defined step size for volume tracing to compute source radiance. Controls precision of $L_{\mathbf{x}_j}$ [S1].
++*   $\Delta_2$: User-defined step size for numerical gradient estimation. Controls precision of $\nabla L_{\mathbf{x}_j}$ [S1].
++*   $R_j$: Valid radius. In the reference implementation, $R_j = 3r_j$ where $r_j$ is the culling radius of the corresponding Gaussian center [S1].
++
+ ### Edge Cases and Pitfalls
+-*   **Sharp Shading Variations:** RBF-based methods fail with sharp shading variations (e.g., light shafts, volumetric shadows) caused by local/directional/high-frequency illumination, producing severe artifacts [S1]. Gradient-based interpolation handles these better [S1].
+-*   **Precision:** The precision of numerical evaluation is controlled by user-defined intervals $\Delta_1$ and $\Delta_2$. Too large intervals lead to inaccurate radiance and gradient estimates [S1].
+-*   **Valid Radius:** The valid radius $R_j$ determines the extent of interpolation. Setting $R_j = 3r_j$ (where $r_j$ is the culling radius) is suggested for comparison with RBF [S1].
+-*   **Boundary Conditions:** When computing gradients, points $x_j \pm \Delta_2 \hat{x}$ etc. must be within the volume. If outside, density should be treated as 0 or handled via boundary conditions [G].
++*   **Sharp Shading Variations**: RBF-based methods fail with sharp shading variations (e.g., light shafts, volumetric shadows) caused by local/directional/high-frequency illumination, producing severe artifacts [S1]. This method handles them well [S1].
++*   **Precision**: The precision of numerical evaluation is controlled by $\Delta_1$ and $\Delta_2$. Smaller values increase accuracy but also computation time [S1].
++*   **Boundary Conditions**: When tracing rays for source radiance or gradients, points may exit the volume $\mathbb{V}$. The summation should only include points $u_k \in \mathbb{V}$ [S1].
++*   **Division by Zero**: If no samples contribute to a voxel (denominator is zero), the interpolated radiance should be set to 0 or a default value [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Real-time performance is achieved by leveraging GPU parallelism for radiance evaluation and splatting [S1]. The dynamic sampling strategy minimizes the number of samples needed, reducing computation [S1].
+-*   **Memory Complexity:** Requires storing source radiance, gradients, and valid radii for each sample, plus a 3D volume texture for interpolated radiance [S1].
+-*   **Measured Performance:** In tests with a $128 \times 128 \times 128$ volume, the method achieved 23.4 fps with dynamic lighting and media [S1]. Relative error was 4.3% compared to 14.7% for RBF-based interpolation at comparable performance levels [S1].
+-*   **Strengths:** Captures all-frequency shading effects (glows, light shafts, volumetric shadows) in real-time; no precomputation of light transport needed; supports dynamic lighting, media, and scene configurations [S1].
+-*   **Limitations:** Assumes single scattering; accuracy depends on the dynamic sampling strategy; requires careful tuning of $\Delta_1$ and $\Delta_2$ [S1].
+-*   **When to Use:** When rendering inhomogeneous, single-scattering media with sharp shading variations (e.g., volumetric shadows, light shafts) in real-time applications [S1].
+-*   **When Not to Use:** For multi-scattering media or when precomputed light transport is acceptable and real-time performance is not critical [S1].
++*   **Time Complexity**: The method is designed for real-time performance. The source radiance and gradient computations are parallelized on the GPU [S1]. The splatting process involves rendering bounding quads, which is efficient on modern GPUs [S1].
++*   **Memory Complexity**: Requires storage for the sample set and a 3D volume texture for interpolated source radiance [S1].
++*   **Measured Performance**: In the reference implementation, the method achieves real-time performance (e.g., 23.4 fps) for dynamic lighting and scenes [S1].
++*   **Accuracy**: Relative error of 4.3% compared to 14.7% for RBF-based interpolation at comparable performance levels [S1].
++*   **Strengths**: Captures all-frequency shading effects (glows, light shafts, volumetric shadows) in real-time [S1]. No precomputation of light transport is needed [S1]. Supports dynamic changes in lighting, media, and scene configurations [S1].
++*   **Limitations**: Assumes single scattering [S1]. Accuracy depends on the dynamic sampling strategy; poor sampling can lead to artifacts [S1].
+ 
+ ## Background
+-*   **Origin:** Proposed in "Gradient-based Interpolation and Sampling for Real-time Rendering of Inhomogeneous, Single-scattering Media" (2008) [S1].
+-*   **History:** Builds on previous works that used RBF-based interpolation for source radiance reconstruction [S1]. Previous methods determined sample points based on density distributions, which failed to capture sharp shading variations [S1]. This method introduces dynamic sampling and gradient-based interpolation to address these limitations [S1].
+-*   **Usage:** Used in real-time volumetric rendering for computer graphics, particularly for effects like fog, smoke, and clouds with complex lighting [S1].
++*   **Origin**: Proposed by [S1] (2008) for real-time rendering of inhomogeneous, single-scattering media.
++*   **History**: Builds on previous works that used interpolation to optimize volume rendering [S1]. Previous works (e.g., RBF-based) struggled with high-frequency shading variations [S1].
++*   **Usage**: Used in real-time volumetric rendering applications where dynamic lighting and high-quality shading effects are required [S1].
+ 
+ ## Sources

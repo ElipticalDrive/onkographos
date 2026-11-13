@@ -3,124 +3,166 @@
 Also called: Bounding Box Volume Texture Mapping, axis-aligned bounding box, min-max vertex bounds
 
 ## Overview
-Computes the axis-aligned bounding box (AABB) that encloses a mesh by determining the minimum and maximum coordinates across all its vertices [S1, unofficial]. It provides a tight spatial bound for ray-primitive intersection tests and volume texture generation [S2, unofficial].
+Computes the axis-aligned bounding box (AABB) of a mesh by finding the minimum and maximum coordinates across all vertices [S1, S2, unofficial]. It serves as the foundational step for defining the computational domain in raycasting, voxelization, and volume texture generation [S1, S3, unofficial]. Unlike [Bounding Cube Creation](4007-bounding-cube-creation.md) which expands the box to a cube, or [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md) which targets specific parametric primitives, this method computes the tightest possible rectangular enclosure for arbitrary vertex sets [S1, S2, S3, S4, unofficial].
 
 ## How it works
-**Inputs:** A list of 3D vertices $V = \{v_0, v_1, \dots, v_{n-1}\}$, where each vertex $v_i$ has coordinates $(x_i, y_i, z_i)$ [S1, unofficial].
-**Outputs:** An AABB defined by a minimum corner $mn = (mn_x, mn_y, mn_z)$ and a maximum corner $mx = (mx_x, mx_y, mx_z)$ [S1, unofficial].
+**Inputs:**
+- `vertices`: A list/array of 3D points (vertices) representing the mesh. Each point has coordinates $(x, y, z)$.
+- `precision`: Floating-point type (float or double) [S1, unofficial].
+
+**Outputs:**
+- `bbox_min`: A 3D vector containing the minimum coordinates $(min_x, min_y, min_z)$.
+- `bbox_max`: A 3D vector containing the maximum coordinates $(max_x, max_y, max_z)$.
+- `offset`: (Optional) A 3D vector representing the displacement from the mesh's geometric center to the bounding box center, used for volume texture alignment [S2, unofficial].
 
 **Data Structures:**
-The AABB is stored as two 3D vectors or arrays of size 3 [S1, unofficial].
-- `mn`: Array of 3 values representing the lower bounds [S1, unofficial].
-- `mx`: Array of 3 values representing the upper bounds [S1, unofficial].
-- `v`: Array of vertices, each containing 3 floating-point values [S1, unofficial].
+- `Vec3`: A structure containing three floating-point components `m_x`, `m_y`, `m_z` [S1, unofficial].
+- `bbox_min`, `bbox_max`: Instances of `Vec3`.
 
 **Steps:**
-1. **Initialization:** Initialize `mn` and `mx` to the coordinates of the first vertex $v_0$ [S1, unofficial].
-2. **Iteration:** Loop through each remaining vertex $v_i$ for $i$ from 1 to $n-1$ [S1, unofficial].
-3. **Update Bounds:** For each dimension $d \in \{0, 1, 2\}$ (corresponding to X, Y, Z), update $mn_d = \min(v_i[d], mn_d)$ and $mx_d = \max(v_i[d], mx_d)$ [S1, unofficial].
-4. **Transformation:** Transform the 6 edge points of the bounding box with the model's world matrix to align it to the mesh's rotation, size, and position [S2, unofficial].
-5. **Texture Fitting:** Order sampling points inside the untransformed bounding box, then fit the volume texture to the bounding box at runtime [S2, unofficial].
+1. **Initialization**: If the vertex list is empty, the behavior is undefined (pitfall) [S1, unofficial]. Initialize `bbox_min` and `bbox_max` to the coordinates of the first vertex `v[0]` [S1, S2, unofficial].
+2. **Iteration**: Loop through each vertex `v[i]` from index $1$ to $N-1$ (where $N$ is the number of vertices) [S1, unofficial].
+3. **Update Bounds**: For each dimension $d \in \{0, 1, 2\}$ (corresponding to X, Y, Z):
+   - Update minimum: $bbox\_min[d] = \min(bbox\_min[d], v[i][d])$
+   - Update maximum: $bbox\_max[d] = \max(bbox\_max[d], v[i][d])$
+4. **Offset Calculation** (Optional, for Volume Texture Mapping):
+   - Compute the mesh center: $C_{mesh} = \frac{1}{N} \sum_{i=0}^{N-1} v[i]$ [G].
+   - Compute the bounding box center: $C_{bbox} = \frac{bbox\_min + bbox\_max}{2}$ [S2, unofficial].
+   - Compute offset: $Offset = C_{bbox} - C_{mesh}$ [S2, unofficial].
+   - This offset is stored to correctly center sampling when fitting a volume texture to the bounding box, as the mesh origin is not necessarily the bounding box center [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_mesh_aabb(vertices):
+def compute_mesh_bounding_box(vertices):
     """
-    Computes the AABB for a mesh given a list of 3D vertices.
+    Computes the AABB for a list of 3D vertices.
     
     Args:
-        vertices: List of tuples/arrays, each with 3 floats (x, y, z).
+        vertices: List of tuples/objects with x, y, z attributes.
         
     Returns:
-        Tuple (min_corner, max_corner), each a tuple/array of 3 floats.
-        
-    Raises:
-        ValueError: If vertices list is empty.
+        bbox_min: Tuple (min_x, min_y, min_z)
+        bbox_max: Tuple (max_x, max_y, max_z)
+        offset: Tuple (off_x, off_y, off_z) representing mesh center to bbox center
     """
     if not vertices:
-        raise ValueError("Cannot compute AABB for empty vertex list.")
+        raise ValueError("Empty vertex list causes undefined behavior")
+
+    # Initialize with first vertex
+    first = vertices[0]
+    min_x, min_y, min_z = first.x, first.y, first.z
+    max_x, max_y, max_z = first.x, first.y, first.z
     
-    # Initialize min and max with the first vertex
-    min_corner = [vertices[0][0], vertices[0][1], vertices[0][2]]
-    max_corner = [vertices[0][0], vertices[0][1], vertices[0][2]]
-    
-    # Iterate through the rest of the vertices
-    for i in range(1, len(vertices)):
+    # Accumulate for mesh center calculation
+    sum_x, sum_y, sum_z = first.x, first.y, first.z
+    n = len(vertices)
+
+    # Iterate through remaining vertices
+    for i in range(1, n):
         v = vertices[i]
+        x, y, z = v.x, v.y, v.z
         
-        # Update X bounds
-        if v[0] < min_corner[0]:
-            min_corner[0] = v[0]
-        if v[0] > max_corner[0]:
-            max_corner[0] = v[0]
-            
-        # Update Y bounds
-        if v[1] < min_corner[1]:
-            min_corner[1] = v[1]
-        if v[1] > max_corner[1]:
-            max_corner[1] = v[1]
-            
-        # Update Z bounds
-        if v[2] < min_corner[2]:
-            min_corner[2] = v[2]
-        if v[2] > max_corner[2]:
-            max_corner[2] = v[2]
-            
-    return min_corner, max_corner
+        # Update bounds
+        if x < min_x: min_x = x
+        if x > max_x: max_x = x
+        if y < min_y: min_y = y
+        if y > max_y: max_y = y
+        if z < min_z: min_z = z
+        if z > max_z: max_z = z
+        
+        # Accumulate for center
+        sum_x += x
+        sum_y += y
+        sum_z += z
+
+    # Calculate centers
+    mesh_center_x = sum_x / n
+    mesh_center_y = sum_y / n
+    mesh_center_z = sum_z / n
+    
+    bbox_center_x = (min_x + max_x) / 2.0
+    bbox_center_y = (min_y + max_y) / 2.0
+    bbox_center_z = (min_z + max_z) / 2.0
+    
+    # Calculate offset from mesh center to bbox center
+    offset_x = bbox_center_x - mesh_center_x
+    offset_y = bbox_center_y - mesh_center_y
+    offset_z = bbox_center_z - mesh_center_z
+
+    return (min_x, min_y, min_z), (max_x, max_y, max_z), (offset_x, offset_y, offset_z)
 ```
 
 **Parameters:**
-- Precision: Sources use `float` or `double` depending on configuration flags (e.g., `USE_DOUBLE`) [S1, unofficial].
-- Epsilon: A small constant `EPSILON` ($10^{-9}$) is defined in some implementations but not explicitly used in the basic min/max loop [S1, unofficial].
-- Offset Vector: Stores the vector from the mesh's middle to the bounding box middle to correctly center the sampling [S2, unofficial].
+- **SDF Size Padding**: The Signed Distance Field (SDF) or volume texture size does not have to conform exactly to the bounding box dimensions. Making the SDF slightly larger introduces empty space around the mesh, which can be useful for later processing [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Empty Input:** Accessing `v[0]` on an empty vertex list causes undefined behavior [S1, unofficial]. The implementation must check for an empty list before initialization [G].
-- **Degenerate Mesh:** If all vertices are identical, the resulting AABB will have zero volume (min equals max) [G]. This is a valid result but may cause issues in subsequent intersection tests if not handled (e.g., division by zero in ray-box intersection if box extents are used as divisors) [G].
-- **Origin Mismatch:** The mesh's origin is not necessarily the middle of the bounding box, requiring an offset calculation [S2, unofficial].
-- **SDF Padding:** The SDF size does not have to conform exactly to the bounding box; making it slightly larger introduces space with no mesh touching it [S2, unofficial].
+- **Empty Input**: Accessing `v[0]` on an empty vertex list causes undefined behavior [S1, unofficial].
+- **Origin Mismatch**: The mesh's geometric origin (e.g., pivot point) is not necessarily the middle of the bounding box. Failing to account for this when generating volume textures leads to misaligned sampling [S2, unofficial].
+- **Precision**: Use of `float` vs `double` should be consistent with the rest of the pipeline to avoid precision loss in large scenes [S1, unofficial].
 
 ## Subtopics
 
 ### [Bounding Cube Creation](4007-bounding-cube-creation.md)
-Adjusts an AABB to be a perfect cube by expanding the smaller dimensions to match the largest dimension, centered on the original bounding box center. It is used in voxelization pipelines to ensure uniform grid resolution across all axes. Choose it when uniform grid spacing is required for downstream processing [G].
+Adjusts an axis-aligned bounding box (AABB) to be a perfect cube by expanding the smaller dimensions to match the largest dimension, centered on the original bounding box center. This method is used in voxelization pipelines to ensure uniform grid resolution across all axes. It differs from sibling methods like [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md) which may account for specific character proportions, and [Volume Bounds Computation](5114-volume-bounds-computation.md) which may define bounds for existing volumetric data rather than mesh primitives [G].
 
 ### [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md)
-Computes the AABB that encloses specific geometric primitives (arcs and line segments) representing characters. It optimizes sphere tracing queries by providing a tight spatial bound for ray-primitive intersection tests. Choose it when working with explicit parametric primitives rather than vertex lists [G].
+Computes the axis-aligned bounding box (AABB) that encloses a set of geometric primitives representing specific characters (such as 'S', 'A', 'N', 'G') and arcs. This method is used to optimize sphere tracing queries by providing a tight spatial bound for ray-primitive intersection tests. It differs from [Mesh Bounding Box Calculation](3612-mesh-bounding-box-calculation.md) by operating on explicit parametric primitives (arcs and line segments) rather than vertex lists, and from [Bounding Cube Creation](4007-bounding-cube-creation.md) by computing a tight AABB rather than a potentially looser cube.
 
 ### [Volume Bounds Computation](5114-volume-bounds-computation.md)
-Computes an AABB that encloses a set of 3D points with optional padding. It operates on arbitrary point clouds or sample sets rather than mesh vertex coordinates. Choose it when defining bounds for existing volumetric data or point clouds [G].
+Identifies and extracts a Volume of Interest (VOI) or computes an Axis-Aligned Bounding Box (AABB) that encloses a set of 3D points or active voxels, ignoring blank regions or outliers to prevent them from dominating the spatial extent. Unlike sibling methods such as [Bounding Cube Creation](4007-bounding-cube-creation.md) which may use fixed geometric primitives, or [Character Bounding Box Initialization](4016-character-bounding-box-initialization.md) tailored for specific skeletal structures, this method adapts to the data distribution, using techniques ranging from simple min/max iteration with padding to percentile clipping for 3D Gaussian Splatting (3DGS) or silhouette backprojection for novel view synthesis. It serves as the foundational step for efficient raycasting, voxelization, and memory allocation by defining the tightest possible computational domain.
+
+### [Host-side Bounding Box Computation](13468-host-side-bounding-box-computation.md)
+Computes the bounding box for each triangle in a mesh on the CPU host. It calculates two arrays, `bbox0` (minima) and `bbox1` (maxima), where each triangle has its own bounding box defined by 3D coordinates.
 
 ### AABB Vertex Coordinate Encoding
-Determines the coordinates of any of the 8 vertices of an AABB using a vertex index (0-7) and bit manipulation, avoiding floating-point arithmetic for coordinate selection [S3, unofficial]. Bit 0 of the index corresponds to X, Bit 1 to Y, Bit 2 to Z [S3, unofficial]. If the bit is 0, the coordinate is the min value; if 1, it is the max value [S3, unofficial]. For vertex index $i$, the coordinates are $x = \text{minmax}_x[i \& 1]$, $y = \text{minmax}_y[(i \& 2) >> 1]$, $z = \text{minmax}_z[(i \& 4) >> 2]$ [S3, unofficial].
+A method to determine the coordinates of any of the 8 vertices of an AABB using a vertex index (0-7) and bit manipulation, avoiding floating-point arithmetic for coordinate selection [S3, unofficial].
+- **Definition**: The index of an AABB vertex (0-7) fully encodes the coordinate values. Bit 0 corresponds to X, bit 1 to Y, bit 2 to Z. If the bit is 0, the coordinate is the min value; if 1, it is the max value [S3, unofficial].
+- **Steps**:
+  1. For a given vertex index `i` (0-7):
+  2. Extract X coordinate: `x = aabb.x_minmax[(i & 1) >> 0]`
+  3. Extract Y coordinate: `y = aabb.y_minmax[(i & 2) >> 1]`
+  4. Extract Z coordinate: `z = aabb.z_minmax[(i & 4) >> 2]` [S3, unofficial].
 
 ### AABB Enclosure (Union)
-Computes the AABB enclosing two input AABBs ($b_0$ and $b_1$) [S3, unofficial]. The new AABB's min is the component-wise minimum of the inputs' mins, and the max is the component-wise maximum of the inputs' maxs [S3, unofficial].
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def enclosing_aabb(b0, b1):
-    return {
-        'min': [min(b0['min'][d], b1['min'][d]) for d in range(3)],
-        'max': [max(b0['max'][d], b1['max'][d]) for d in range(3)]
-    }
-```
+To compute the AABB enclosing two input AABBs (`b0` and `b1`), create a new AABB where each axis's min is the minimum of the two inputs' mins, and each axis's max is the maximum of the two inputs' maxs [S3, unofficial].
+- **Code**:
+  ```python
+  def enclosing_aabb(b0, b1):
+      return {
+          'x': (min(b0['x_minmax'][0], b1['x_minmax'][0]), max(b0['x_minmax'][1], b1['x_minmax'][1])),
+          'y': (min(b0['y_minmax'][0], b1['y_minmax'][0]), max(b0['y_minmax'][1], b1['y_minmax'][1])),
+          'z': (min(b0['z_minmax'][0], b1['z_minmax'][0]), max(b0['z_minmax'][1], b1['z_minmax'][1]))
+      }
+  ```
+  [S3, unofficial].
 
 ### Bounding Box and Camera Center Calculation
-Computes the AABB of a vertex set and calculates an orthographic/perspective camera center position based on the max edge length and a 45-degree field of view [S4, unofficial]. It initializes min/max to the first vertex, iterates through all vertices, computes the size vector and center midpoint, and calculates the maximum X or Y edge length [S4, unofficial]. The camera center Z coordinate is calculated as $C_z = Z_{max} + \frac{E_{max}}{\tan(22.5^\circ)}$ [S4, unofficial]. The result is stored in a `CenteredView` struct containing a transform matrix and camera center vector [S4, unofficial].
+Computes the axis-aligned bounding box of a set of vertices and calculates an orthographic/perspective camera center position based on the max edge length and a 45-degree field of view [S4, unofficial].
+- **Steps**:
+  1. Initialize `min_x, max_x, min_y, max_y, min_z, max_z` to the first vertex coordinates.
+  2. Iterate through all vertices, updating min/max for each axis.
+  3. Compute size vector: $Size = (max_x - min_x, max_y - min_y, max_z - min_z)$.
+  4. Compute center: $Center = (\frac{min_x+max_x}{2}, \frac{min_y+max_y}{2}, \frac{min_z+max_z}{2})$.
+  5. Compute max edge length: $E_{max} = \max(max_x - min_x, max_y - min_y)$ [S4, unofficial].
+  6. Calculate camera center Z: $C_z = Z_{max} + \frac{E_{max}}{\tan(22.5^\circ)}$ [S4, unofficial].
+- **Formula**:
+  $$C_z = Z_{max} + \frac{E_{max}}{\tan(22.5^\circ)}$$
+  where $C_z$ is the camera center Z coordinate, $Z_{max}$ is the maximum Z bound, and $E_{max}$ is the maximum X or Y edge length [S4, unofficial].
+- **Layout**:
+  - `CenteredView` struct: contains `glm::mat4 transform` and `glm::vec3 cameracenter` [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(n)$, where $n$ is the number of vertices, as each vertex is visited exactly once [G].
-- **Memory Complexity:** $O(1)$ auxiliary space, requiring only two 3D vectors for min/max storage regardless of input size [G].
-- **Strengths:** Extremely fast, simple to implement, and robust for static meshes [G].
-- **Limitations:** Does not account for mesh orientation, so the AABB may be significantly larger than the mesh's actual bounding volume for rotated meshes [G]. This leads to less efficient culling in ray-box intersection tests compared to oriented bounding boxes (OBBs) [G].
-- **When to use:** When axis-aligned culling is sufficient, or as a first-pass approximation before more expensive calculations [G].
-- **When not to use:** When tight bounds are critical for performance and the mesh is arbitrarily rotated, or when the mesh is dynamic and frequent updates are required [G].
+- **Time Complexity**: $O(N)$, where $N$ is the number of vertices. Each vertex is visited once to update min/max values [S1, S2, unofficial].
+- **Memory Complexity**: $O(1)$ auxiliary space, storing only the current min/max vectors and optional offset [S1, S2, unofficial].
+- **Strengths**: Simple to implement, computationally inexpensive, provides a tight enclosure for subsequent intersection tests or voxelization grids [S1, S2, S3, S4, unofficial].
+- **Limitations**: Does not account for mesh rotation (result is axis-aligned), which may require transformation to world space for ray-box intersection if the mesh is rotated [S2, unofficial]. Empty inputs cause undefined behavior if not guarded [S1, unofficial].
+- **When to use**: As a first-pass culling step in raycasting, for initializing voxel grids, or for setting up camera frustums [S1, S2, S3, S4, unofficial].
+- **When not to use**: When a tighter fit is required for rotated objects (use oriented bounding box instead), or when the mesh is empty.
 
 ## Background
-The method of computing an AABB by iterating over vertex coordinates is a fundamental technique in computer graphics, originating from the need for efficient spatial partitioning and collision detection [G]. It is widely used in ray tracing, voxelization, and scene graph management [G]. The bit-twiddling trick for vertex coordinate selection was independently discovered by graphics programmers and documented in informal online resources [S3, unofficial].
+The method of computing bounding boxes via min/max vertex iteration is a fundamental technique in computer graphics, originating from the need for efficient spatial partitioning and collision detection. It is widely used in voxelization pipelines [S1, S2, unofficial], signed distance field generation [S2, unofficial], and ray tracing acceleration structures [S3, unofficial]. The specific bit-manipulation trick for AABB vertex encoding is noted as a common but rarely explicitly documented optimization [S3, unofficial]. The integration of bounding box calculation with camera center positioning for volume rendering slices is documented in educational implementations [S4, unofficial].
 
 ## Sources
 [S1] kctess5/voxelizer, https://github.com/kctess5/voxelizer, fetched 2026-10-26 (unofficial)

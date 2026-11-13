@@ -1,0 +1,109 @@
+# 3D Transfer Function Classification
+
+Also called: 3-D dependent texture classification
+
+## Overview
+3D Transfer Function Classification is a hardware-accelerated method for mapping multi-dimensional data features to optical properties using 3D dependent textures [S1][S2, unofficial]. It solves the problem of defining complex, non-linear classification boundaries in higher-dimensional feature spaces (specifically Data Value, Gradient Magnitude, and Second Derivative) by storing the classification function as a volumetric texture [S1][S2, unofficial]. It is distinguished from 1D or 2D transfer functions by its ability to explicitly model the relationship between local intensity, edge strength, and curvature, allowing for precise boundary emphasis and material separation [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset where each voxel contains a scalar data value $v$. Derived features are computed per sample: gradient magnitude $g = \|\nabla f(\mathbf{x})\|$ and second derivative $d = \nabla^2 f(\mathbf{x})$ [S2, unofficial].
+*   **Output:** A 4-component color/opacity value $(r, g, b, \alpha)$ sampled from a 3D texture [S1][S2, unofficial].
+
+**Data Structures:**
+The core data structure is a 3D dependent texture (3D pixel texture) [S1][S2, unofficial].
+*   **Dimensions:** The texture has three axes corresponding to the classification features:
+    1.  **Data Value Axis:** Resolution is full 8-bit (256 entries) [S2, unofficial].
+    2.  **Gradient Magnitude Axis:** Resolution is full 8-bit (256 entries) [S2, unofficial].
+    3.  **Second Derivative Axis:** Resolution is limited. Instead of full bit-depth, it uses a small number of control points represented as "sheets" [S2, unofficial].
+*   **Texture Format:** Each texel stores the output optical properties (Color and Opacity) [S2, unofficial].
+*   **Coordinate Mapping:** The input features $(v, g, d)$ are mapped to texture coordinates $(u, v, w)$. The second derivative $d$ is signed; a scale and bias are applied to maintain the sign information for proper interpolation [S2, unofficial].
+
+**Parameters:**
+*   **Boundary Emphasis Slider:** A global parameter that scales the opacity on the outer sheets (positive/negative second derivatives) relative to the central sheet (zero second derivative) [S2, unofficial].
+*   **Default Transfer Function:** A preset configuration that assigns opacity to high gradient magnitudes and low-magnitude second derivatives, while varying hue along the data value axis [S2, unofficial].
+
+**Numbered Steps:**
+1.  **Compute Features:** For each sample point along the ray, compute the scalar data value $v$, gradient magnitude $g$, and second derivative $d$ [S2, unofficial].
+2.  **Map to Texture Coordinates:** Convert $(v, g, d)$ into normalized texture coordinates $(u, v, w)$. Apply scale and bias to $d$ to preserve sign [S2, unofficial].
+3.  **Sample 3D Texture:** Perform trilinear interpolation in the 3D texture at $(u, v, w)$ to retrieve the color $(r, g, b)$ and opacity $\alpha$ [S1][S2, unofficial].
+4.  **Apply Boundary Emphasis (Optional):** If global boundary emphasis is desired, modulate the retrieved opacity $\alpha$ by a per-sample boundary emphasis value derived from the second derivative [S2, unofficial]. This can be implemented as a separable operation: $\alpha_{final} = \alpha_{2D} \times \text{emphasis}(d)$ [S2, unofficial].
+5.  **Composite:** Use the resulting $(r, g, b, \alpha)$ for ray casting accumulation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def classify_3d(v, g, d, tf_texture, boundary_emphasis_slider):
+    """
+    Classify a sample using a 3D dependent texture.
+    
+    Args:
+        v: Scalar data value (float)
+        g: Gradient magnitude (float)
+        d: Second derivative (float)
+        tf_texture: 3D texture object with dimensions (256, 256, N_sheets)
+        boundary_emphasis_slider: Global scalar for boundary emphasis (float)
+        
+    Returns:
+        color: (r, g, b) tuple
+        alpha: float
+    """
+    # 1. Map features to texture coordinates
+    # Data Value and Gradient Magnitude use full 8-bit resolution (0-255)
+    u = clamp(v / max_v, 0.0, 1.0)
+    v_coord = clamp(g / max_g, 0.0, 1.0)
+    
+    # Second Derivative uses limited resolution (sheets)
+    # Scale and bias to maintain sign and map to sheet indices
+    # N_sheets is small (e.g., 3 for negative, zero, positive)
+    d_normalized = scale_and_bias(d)
+    w = clamp(d_normalized, 0.0, 1.0)
+    
+    # 2. Sample the 3D texture
+    # Trilinear interpolation is performed by the hardware
+    texel = tf_texture.sample(u, v_coord, w)
+    
+    color = texel.rgb
+    alpha = texel.a
+    
+    # 3. Apply global boundary emphasis if needed
+    # Modulate opacity based on second derivative sign/magnitude
+    # This implements the separable portion described in [S2, unofficial]
+    emphasis_factor = compute_boundary_emphasis(d, boundary_emphasis_slider)
+    alpha = alpha * emphasis_factor
+    
+    return color, alpha
+
+def compute_boundary_emphasis(d, slider):
+    """
+    Computes the boundary emphasis factor based on the second derivative.
+    Implements the scaling of outer sheets relative to the center sheet.
+    """
+    # If d is near zero, emphasis is 1.0 (center sheet)
+    # If d is positive or negative, emphasis is scaled by slider
+    # This logic corresponds to the "boundary emphasis slider" in [S2, unofficial]
+    if abs(d) < epsilon:
+        return 1.0
+    else:
+        return slider
+```
+
+**Edge Cases and Pitfalls:**
+*   **Texture Size:** Full 8-bit resolution for all three axes is prohibitively large. The method relies on limiting the second derivative axis resolution to mitigate this [S2, unofficial].
+*   **Sign Preservation:** The second derivative is signed. Failing to apply scale and bias to maintain the sign will result in incorrect interpolation between positive and negative curvature regions [S2, unofficial].
+*   **Separability Trade-off:** Implementing the transfer function as separable 2D and 1D functions reduces texture size but reduces control over the mapping types [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Classification is $O(1)$ per sample, dominated by the 3D texture lookup and interpolation [S1][S2, unofficial].
+*   **Memory Complexity:** The texture size is $W \times H \times D \times 4$ bytes. With $W=256, H=256$, and $D$ being small (number of sheets), memory usage is manageable compared to a full 3D LUT [S2, unofficial].
+*   **Strengths:** Allows intuitive, direct manipulation of classification boundaries in a 3D feature space using widgets [S2, unofficial]. Provides a "default" transfer function that effectively highlights boundaries without user interaction [S2, unofficial].
+*   **Limitations:** Limited control over the second derivative axis due to reduced resolution [S2, unofficial]. Separable implementations sacrifice mapping flexibility [S1].
+*   **When to use:** When visualizing boundaries between materials is the primary goal, and the user needs to adjust classification based on curvature and edge strength simultaneously [S2, unofficial].
+
+## Background
+The method was introduced by Kniss et al. [S1]. It leverages hardware-accelerated volume rendering capabilities, specifically dependent texture sampling, to implement higher-dimensional classification functions [S1]. The approach was further detailed in the context of interactive volume rendering using multi-dimensional transfer functions and direct manipulation widgets [S2, unofficial]. It represents a shift from 1D scalar-based classification to multi-dimensional feature-based classification, enabling more sophisticated material separation [S1][S2, unofficial].
+
+## Sources
+[S1] Recent advances in hardware-accelerated volume rendering, https://doi.org/10.1016/s0097-8493(03)00146-8, fetched 2026-10-26
+[S2] Interactive Volume Rendering Using Multi-Dimensional Transfer Functions and Direct Manipulation Widgets, https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, fetched 2026-11-01 (unofficial)

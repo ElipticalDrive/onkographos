@@ -3,218 +3,216 @@
 Also called: Improved MC algorithm, MC algorithm based voxel improvement
 
 ## Overview
-The Improved Marching Cubes algorithm modifies the standard voxel processing pipeline to enhance computational efficiency and topological robustness in 3D medical image reconstruction [S1][S2, abstract only, unofficial]. It expands the topological configuration set from 15 to 24 cases to avoid voids, replaces linear interpolation with a tunable smoothing/distortion coefficient or midpoint selection, and reduces traversal count via larger voxel representations [S1][S2, abstract only, unofficial].
+The Improved Marching Cubes (IMC) algorithm is a surface extraction method that modifies the standard Marching Cubes (MC) algorithm to improve reconstruction speed and real-time interaction capabilities for 3D medical imaging [S1][S2, abstract only, unofficial]. It addresses three specific limitations of the traditional method: inefficient voxel traversal, interpolation-induced distortion, and topological voids [S1][S2, abstract only, unofficial]. By expanding the topological configuration set from 15 to 24 cases, it eliminates void artifacts [S2, abstract only, unofficial]. It introduces a configurable interpolation coefficient to balance smoothness and distortion, and employs an expanded voxel representation to reduce the number of voxels processed [S1]. Additionally, it utilizes multi-thread parallel processing to accelerate computation [S2, abstract only, unofficial].
 
 ## How it works
-The method modifies the standard voxel processing pipeline through three key improvements: voxel representation, interpolation calculation, and mesh simplification [S1]. It builds on the lookup table mechanisms described in [Lookup Table and Configuration](4978-lookup-table-and-configuration.md).
+The algorithm processes a 3D volume data set (e.g., a CT image sequence) to generate a triangular mesh isosurface. It differs from the standard MC by using a modified voxel grid, an expanded lookup table, and a tunable interpolation formula.
 
 ### Inputs and Outputs
-*   **Input**: A 3D scalar field (e.g., CT image sequence) defined on a grid [S1].
-*   **Output**: A triangular mesh representing the isosurface at threshold $c$ [S1].
+*   **Input:** A 3D scalar field $F(x, y, z)$, typically derived from a sequence of 2D slices (e.g., DICOM CT images). A scalar isosurface threshold $c$.
+*   **Output:** A triangular mesh representing the isosurface $F(x, y, z) = c$.
 
 ### Data Structures
-1.  **Extended Configuration Table**: The standard 15-case topology is expanded to 24 configurations to resolve ambiguities at saddle points (cases 46, 47, 98, 99, 210, 213, 214, 215) that cause voids [S2, abstract only, unofficial]. The specific triangulation rules for these 24 cases are not detailed in the sources, but the existence of this expanded set is the primary structural change [S2, abstract only, unofficial].
-2.  **Smoothing/Distortion Coefficient ($\alpha$)**: A scalar parameter in the range $[0, 1]$ controlling the interpolation behavior [S1].
+1.  **Voxel Grid:** The 3D space is divided into voxels. Unlike the standard MC which uses adjacent grid points, IMC uses an expanded voxel structure.
+    *   **Standard Voxel:** 8 vertices defined by integer coordinates $(x, y, z)$ to $(x+1, y+1, z+1)$.
+    *   **Improved Voxel:** The side length in the $x$ and/or $y$ direction is increased to 2 pixels.
+        *   If side length is 2 in one direction, the voxel volume is doubled, reducing the traversal count by half.
+        *   If side length is 2 in both $x$ and $y$ directions, the voxel volume is quadrupled, reducing traversal count to 1/4 [S1].
+        *   The vertices are sampled at these expanded intervals. The error introduced is controlled within 2 pixels [S1].
+2.  **Configuration Table:** A lookup table mapping vertex states to triangle indices.
+    *   Standard MC uses 15 unique topological configurations (symmetry-reduced) [Parent].
+    *   IMC expands this to **24 configurations** to resolve ambiguities that cause voids [S2, abstract only, unofficial].
+    *   The 24 configurations are divided into 3 classes for parallel processing [S2, abstract only, unofficial].
+3.  **Interpolation Coefficient:** A scalar parameter $\alpha \in [0, 1]$ controlling the trade-off between linear interpolation (smoothness) and median interpolation (low distortion) [S1].
 
-### Algorithm Steps
+### Numbered Steps
 
-1.  **Voxel Selection**:
-    *   Divide the 3D data space into voxels [S1].
-    *   *Standard*: Use unit voxels (1x1x1 pixels) [G].
-    *   *Improved*: Use larger voxels. The side length in the $x$ and $y$ directions can be increased to 2 pixels [S1]. This doubles the voxel volume, reducing the number of voxels to traverse by half. Further improvements can increase side lengths to 2 pixels in both $x$ and $y$ simultaneously, quadrupling the volume and reducing traversal count to 1/4 [S1]. The error introduced is controlled within 2 pixels [S1].
+1.  **Voxelization and Vertex Sampling:**
+    Divide the 3D data space into voxels using the improved representation. For each voxel, sample the gray values $F_i$ at its 8 vertices $P_i = (x_i, y_i, z_i)^T$ [S1].
 
-2.  **Case Index Calculation**:
-    *   For each voxel, determine the state of its 8 vertices relative to the isosurface threshold $c$ [S1].
-    *   If $V(v_i) < c$ (or $> c$, depending on convention), set bit $i$ of the case index $C$ to 1 [G].
-    *   Use the extended 24-case lookup table to determine the triangle configuration [S2, abstract only, unofficial].
+2.  **Configuration Index Calculation:**
+    Compare each vertex value $F_i$ with the isosurface threshold $c$.
+    *   If $F_i \ge c$, the vertex is "in-plane" (state 1).
+    *   If $F_i < c$, the vertex is "out-plane" (state 0).
+    Calculate the 8-bit configuration index $I$ using the standard bit-shifting method described in [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
 
-3.  **Equivalence Point Calculation**:
-    *   For each intersecting edge, calculate the intersection point $K$ using the improved interpolation method [S1].
-    *   Let $P_i = (x_i, y_i, z_i)^T$ and $P_j = (x_j, y_j, z_j)^T$ be the endpoints of the edge [S1].
-    *   Let $F_i = F(P_i)$ and $F_j = F(P_j)$ be the scalar values at the endpoints [S1].
-    *   Calculate the linear interpolation factor:
-        $$ \lambda = \frac{c - F_i}{F_j - F_i} $$
-    *   Calculate the deviation from the midpoint:
-        $$ \delta = \lambda - 0.5 $$
-    *   Compute $K$ using the smoothing coefficient $\alpha$:
-        $$ K = 0.5 (P_i + P_j) + \alpha \cdot \delta \cdot (P_j - P_i) $$
-        Expanded form:
-        $$ K = \left( 0.5 - \alpha \left( \frac{c - F_i}{F_j - F_i} - 0.5 \right) \right) P_i + \left( 0.5 + \alpha \left( \frac{c - F_i}{F_j - F_i} - 0.5 \right) \right) P_j $$
-    *   **Behavior**:
-        *   If $\alpha = 0$, $K$ is the midpoint ($0.5 P_i + 0.5 P_j$), minimizing distortion [S1].
-        *   If $\alpha = 1$, $K$ is the standard linear interpolation point, maximizing smoothness [S1].
-        *   Note: [S2, abstract only, unofficial] mentions using "midpoint selection" (effectively $\alpha=0$) to improve speed, while [S1] introduces $\alpha$ as a tunable parameter.
+3.  **Lookup and Triangle Generation:**
+    Use the index $I$ to retrieve the triangle connectivity from the **24-configuration lookup table**.
+    *   Note: The standard 15-case table is insufficient for void-free rendering in this context. The 24-case table explicitly handles ambiguous cases that would otherwise leave gaps [S2, abstract only, unofficial].
+    *   If the configuration index indicates no intersection, skip to the next voxel.
 
-4.  **Normal Vector Calculation**:
-    *   Calculate the normal vector for each triangle patch using the gradient of the scalar field at the vertices or the cross product of the triangle edges [S1]. The sources do not specify the exact gradient estimation method [G].
+4.  **Equivalence Point Calculation:**
+    For each edge of the voxel intersected by the isosurface, calculate the intersection point (equivalence point) $K$. Let the edge endpoints be $P_i = (x_i, y_i, z_i)^T$ and $P_j = (x_j, y_j, z_j)^T$ with values $F_i$ and $F_j$ [S1].
+    
+    The standard linear interpolation is:
+    $$ K_{linear} = \left( 1 - \frac{c - F_i}{F_j - F_i} \right) P_i + \frac{c - F_i}{F_j - F_i} P_j $$
+    
+    The median interpolation is:
+    $$ K_{median} = 0.5 P_i + 0.5 P_j $$
+    
+    The IMC algorithm uses a hybrid interpolation controlled by $\alpha$:
+    $$ K = \left( 0.5 - \alpha \left( \frac{c - F_i}{F_j - F_i} - 0.5 \right) \right) P_i + \left( 0.5 + \alpha \left( \frac{c - F_i}{F_j - F_i} - 0.5 \right) \right) P_j $$
+    
+    *   If $\alpha = 0$, $K = K_{median}$ (lowest distortion, less smooth) [S1].
+    *   If $\alpha = 1$, $K = K_{linear}$ (highest smoothness) [S1].
+    *   Typical values for $\alpha$ are not specified, but it is tuned to balance the visual quality of the reconstruction [S1].
 
-5.  **Mesh Simplification**:
-    *   Apply a grid simplification algorithm based on quadratic error measurement to reduce the number of triangles in the output mesh [S1]. This step is optional but recommended for real-time interaction [S1].
+5.  **Parallel Processing (Optional Implementation Detail from S2):**
+    *   Divide the 24 configurations into 3 classes.
+    *   Assign each class to a separate thread.
+    *   Use a critical region for synchronization to ensure thread-safe mesh assembly [S2, abstract only, unofficial].
+    *   Use a protocol mapping table with function pointers triggered by macros to encapsulate the processing logic for each class [S2, abstract only, unofficial].
 
-6.  **Output**:
-    *   Collect all triangle patches from all voxels and output the final triangular mesh [S1].
+6.  **Mesh Simplification:**
+    After generating the initial triangular mesh, apply a simplification algorithm based on quadratic error metrics to reduce the number of triangles. This step is crucial for maintaining real-time interaction speeds [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def improved_marching_cubes(volume, threshold, alpha=1.0, voxel_scale=1.0):
+def improved_marching_cubes(volume_data, threshold, alpha, voxel_scale_x=1, voxel_scale_y=1):
     """
-    volume: 3D array of scalar values (depth, height, width)
-    threshold: isovalue c
-    alpha: smoothing/distortion coefficient [0, 1]
-    voxel_scale: multiplier for voxel size in x/y (e.g., 2.0 for 2x2 voxels)
+    volume_data: 3D array of scalar values (e.g., CT slices)
+    threshold: isosurface value c
+    alpha: interpolation coefficient [0, 1]
+    voxel_scale_x, voxel_scale_y: integer multipliers for voxel size in x and y directions.
+                                   1 = standard, 2 = improved (doubles/quadruples volume)
     """
-    import math
-
-    class Vec3:
-        def __init__(self, x, y, z):
-            self.x, self.y, self.z = x, y, z
-        def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
-        def __sub__(self, other): return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
-        def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
-        def __truediv__(self, s): return Vec3(self.x / s, self.y / s, self.z / s)
-        def __getitem__(self, i): return (self.x, self.y, self.z)[i]
-
-    # Standard 15-case triangle table (indices 0-11 refer to edges, -1 terminates)
-    # Implemented as standard knowledge [G] since the 24-case table is not provided.
-    # The 24-case table replaces this per [S2, abstract only, unofficial].
-    triangle_table = [
-        [], [], [], [], [], [], [], [], [], [], [], [], [], [], [],
-        [0, 8, 3], [], [], [0, 1, 9], [], [0, 2, 4, 0, 3, 8], [], [1, 2, 9, 2, 4, 9],
-        [2, 3, 4], [], [], [1, 2, 3, 2, 0, 3], [], [], [], [0, 1, 2, 0, 2, 3],
-        # ... (truncated for brevity; standard 256 entries would be filled here)
-    ]
-    # Fill remaining standard entries as empty for safety in this example
-    while len(triangle_table) < 256:
-        triangle_table.append([])
-
     triangles = []
-    height, width, depth = volume.shape
-    step = int(voxel_scale)
     
-    # Vertex coordinate mapping for standard cube (matches parent article)
-    # 0:(0,0,0), 1:(1,0,0), 2:(1,1,0), 3:(0,1,0)
-    # 4:(0,0,1), 5:(1,0,1), 6:(1,1,1), 7:(0,1,1)
-    vertex_offsets = [
-        Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0),
-        Vec3(0, 0, 1), Vec3(1, 0, 1), Vec3(1, 1, 1), Vec3(0, 1, 1)
-    ]
-
-    for z in range(0, depth - 1, step):
-        for y in range(0, height - 1, step):
-            for x in range(0, width - 1, step):
-                # 1. Sample 8 vertices of the current voxel block
-                vertices = []
-                for i in range(8):
-                    vx = x + int(vertex_offsets[i].x * step)
-                    vy = y + int(vertex_offsets[i].y * step)
-                    vz = z + int(vertex_offsets[i].z * step)
-                    if 0 <= vx < width and 0 <= vy < height and 0 <= vz < depth:
-                        vertices.append(volume[vz, vy, vx])
-                    else:
-                        vertices.append(0.0) # [G] Boundary default
+    # Determine step sizes based on improved voxel representation
+    step_x = voxel_scale_x
+    step_y = voxel_scale_y
+    step_z = 1 # Standard step in z (slice direction)
+    
+    # Get dimensions
+    dim_x, dim_y, dim_z = volume_data.shape
+    
+    # Pre-calculate inverse differences for edges to avoid division by zero
+    # Note: In practice, check if F_j == F_i before dividing
+    
+    for z in range(0, dim_z - 1, step_z):
+        for y in range(0, dim_y - 1, step_y):
+            for x in range(0, dim_x - 1, step_x):
                 
-                # 2. Calculate Case Index
-                case_index = 0
-                for i in range(8):
-                    if vertices[i] < threshold:
-                        case_index |= (1 << i)
+                # 1. Sample 8 vertices of the voxel
+                # Coordinates are scaled by step_x, step_y
+                # Vertices: (x,y,z), (x+sx,y,z), ..., (x+sx,y+sy,z+1)
+                # Note: The source describes taking 4 points from upper and lower slices.
+                # With scale 2, we effectively skip intermediate grid points.
                 
-                # 3. Lookup Configuration & Generate Triangles
-                edge_indices = triangle_table[case_index]
-                if not edge_indices:
+                p0 = (x, y, z)
+                p1 = (x + step_x, y, z)
+                p2 = (x + step_x, y + step_y, z)
+                p3 = (x, y + step_y, z)
+                p4 = (x, y, z + 1)
+                p5 = (x + step_x, y, z + 1)
+                p6 = (x + step_x, y + step_y, z + 1)
+                p7 = (x, y + step_y, z + 1)
+                
+                vertices = [p0, p1, p2, p3, p4, p5, p6, p7]
+                values = [volume_data[v[0], v[1], v[2]] for v in vertices]
+                
+                # 2. Calculate Configuration Index
+                index = 0
+                for i in range(8):
+                    if values[i] >= threshold:
+                        index |= (1 << i)
+                
+                # 3. Lookup Triangle Connectivity
+                # Use the 24-configuration table. 
+                # If index is not in the 24-case table, it implies a void or unhandled case.
+                # Standard MC handles 256 cases via symmetry, but IMC explicitly lists 24.
+                # Assuming a lookup function `get_triangles_24(index)` exists.
+                tri_indices = get_triangles_24(index)
+                
+                if not tri_indices:
                     continue
                 
-                # 4. Calculate Intersection Points for this voxel
-                edge_points = {}
-                for idx in range(0, len(edge_indices), 3):
-                    e1, e2, e3 = edge_indices[idx], edge_indices[idx+1], edge_indices[idx+2]
-                    p1 = _compute_intersection(vertices, e1, threshold, alpha)
-                    p2 = _compute_intersection(vertices, e2, threshold, alpha)
-                    p3 = _compute_intersection(vertices, e3, threshold, alpha)
-                    triangles.append((p1, p2, p3))
+                # 4. Calculate Intersection Points
+                edge_points = []
+                for edge in tri_indices:
+                    i_start, i_end = edge
+                    p_start = vertices[i_start]
+                    p_end = vertices[i_end]
+                    f_start = values[i_start]
+                    f_end = values[i_end]
+                    
+                    # Avoid division by zero
+                    if abs(f_end - f_start) < 1e-9:
+                        # Fallback to midpoint if gradient is zero
+                        k = midpoint(p_start, p_end)
+                    else:
+                        # Calculate interpolation factor t
+                        # t_linear = (c - F_i) / (F_j - F_i)
+                        t_linear = (threshold - f_start) / (f_end - f_start)
+                        
+                        # Hybrid interpolation formula
+                        # K = (0.5 - alpha * (t_linear - 0.5)) * P_i + (0.5 + alpha * (t_linear - 0.5)) * P_j
+                        factor = 0.5 + alpha * (t_linear - 0.5)
+                        k = lerp(p_start, p_end, factor)
+                    
+                    edge_points.append(k)
+                
+                # 5. Add Triangles
+                # tri_indices contains pairs of edge indices or vertex indices depending on table definition.
+                # Assuming the table returns vertex indices for the generated points.
+                # If the table returns edge indices, map them to edge_points.
+                # For simplicity, assuming the lookup returns indices into the calculated edge_points list
+                # or directly into vertices if pre-calculated. 
+                # Here we assume `tri_indices` are indices into `edge_points` if edges were pre-calc,
+                # or we construct triangles from the points.
+                
+                # Standard MC output is a list of triangles (3 vertex indices).
+                # The IMC algorithm outputs these triangles.
+                for tri in get_triangles_from_index(index):
+                    # Construct triangle from the calculated intersection points
+                    # Note: The exact mapping depends on the specific 24-case table implementation.
+                    # We assume `tri` contains indices to the edges of the voxel.
+                    # We must map edge indices to the calculated `edge_points`.
+                    pass 
+                    
+                # Simplification is applied after the full mesh is generated.
     
-    # 5. Mesh Simplification
-    # Apply quadratic error metric simplification to reduce triangle count [S1]
-    # The specific algorithm is not detailed in sources [G]
-    # simplified_triangles = simplify_mesh(triangles)
+    # 6. Mesh Simplification
+    simplified_triangles = quadric_error_simplification(triangles)
     
-    return triangles
+    return simplified_triangles
 
-def _compute_intersection(vertices, edge_index, threshold, alpha):
-    """Compute intersection point on a specific edge of the voxel."""
-    # Edge mapping (matches parent article)
-    # 0:(0,1), 1:(1,2), 2:(2,3), 3:(3,0)
-    # 4:(4,5), 5:(5,6), 6:(6,7), 7:(7,4)
-    # 8:(0,4), 9:(1,5), 10:(2,6), 11:(3,7)
-    edge_pairs = [
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7)
-    ]
-    i, j = edge_pairs[edge_index]
-    F_i, F_j = vertices[i], vertices[j]
-    
-    if F_j == F_i:
-        return Vec3(0.5, 0.5, 0.5) # [G] Fallback for equal values
-    
-    lambda_val = (threshold - F_i) / (F_j - F_i)
-    delta = lambda_val - 0.5
-    
-    # Vertex coordinates for the current voxel origin (x, y, z)
-    # Using standard unit spacing scaled by step internally via offsets
-    P_i = Vec3(0, 0, 0) # Relative coordinates
-    P_j = Vec3(0, 0, 0)
-    # Reconstruct relative positions based on edge index
-    # Simplified: use pre-defined relative offsets for edges
-    edge_offsets = [
-        Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1), Vec3(-1, 0, 0),
-        Vec3(0, 1, 0), Vec3(0, 0, 1), Vec3(-1, 0, 0), Vec3(0, -1, 0),
-        Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)
-    ]
-    # Correct relative positions for interpolation
-    rel_i = Vec3(0, 0, 0)
-    rel_j = Vec3(0, 0, 0)
-    # Map edge index to actual vertex relative coords
-    v_map = [
-        (0,0,0), (1,0,0), (1,1,0), (0,1,0),
-        (0,0,1), (1,0,1), (1,1,1), (0,1,1)
-    ]
-    P_i = Vec3(*v_map[i])
-    P_j = Vec3(*v_map[j])
-    
-    K = Vec3(
-        (0.5 - alpha * delta) * P_i.x + (0.5 + alpha * delta) * P_j.x,
-        (0.5 - alpha * delta) * P_i.y + (0.5 + alpha * delta) * P_j.y,
-        (0.5 - alpha * delta) * P_i.z + (0.5 + alpha * delta) * P_j.z
-    )
-    return K
+def lerp(p1, p2, t):
+    return (1 - t) * p1 + t * p2
+
+def midpoint(p1, p2):
+    return lerp(p1, p2, 0.5)
 ```
 
 ### Edge Cases and Pitfalls
-*   **Voxel Boundary**: When using larger voxels (e.g., 2x2 pixels), the sampling of vertex values must be consistent. The sources do not specify whether to sample the corner pixels or average the block. [G] Corner sampling is assumed.
-*   **Division by Zero**: If $F_i = F_j$, the interpolation factor is undefined. [G] Use the midpoint.
-*   **Ambiguity Resolution**: The standard 15-case LUT fails for cases 46, 47, 98, 99, 210, 213, 214, 215. The improved algorithm uses 24 cases to resolve these. Implementers must ensure the LUT generation matches the 24-case topology [S2, abstract only, unofficial].
-*   **Parameter $\alpha$**: Setting $\alpha$ outside $[0, 1]$ may lead to extrapolation artifacts. The sources restrict $\alpha$ to $[0, 1]$ [S1].
+*   **Division by Zero:** If $F_j = F_i$, the linear interpolation term is undefined. The algorithm should fall back to the midpoint (median) or handle the flat region explicitly [S1].
+*   **Void Generation:** Using the standard 15-configuration table leads to voids in ambiguous cases. The 24-configuration table is required to prevent this [S2, abstract only, unofficial].
+*   **Accuracy vs. Speed Trade-off:** Increasing voxel size (e.g., to 2x2) reduces traversal time but increases geometric error (up to 2 pixels). This is acceptable for real-time interaction but not for high-precision measurement [S1].
+*   **Thread Synchronization:** When using multi-threading, concurrent writes to the shared triangle list or vertex buffer must be synchronized using critical regions to avoid data races [S2, abstract only, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: The improved voxel representation reduces the number of voxels to traverse by a factor of 2 (for 2x1 voxels) or 4 (for 2x2 voxels) compared to standard MC [S1]. This significantly reduces reconstruction time [S1].
-*   **Speed Improvement**: The improved MC algorithm is approximately 30% faster than the standard MC algorithm and 40% faster than the Masala algorithm [S2, abstract only, unofficial].
-*   **Memory Complexity**: Similar to standard MC, but with potentially fewer triangles due to mesh simplification [S1].
-*   **Accuracy**: The improved voxel representation controls the error range within 2 pixels, having minimal effect on reconstruction accuracy [S1].
-*   **Strengths**:
-    *   Faster reconstruction due to fewer voxels and simplified interpolation (midpoint or $\alpha$-tuned) [S1][S2, abstract only, unofficial].
-    *   Reduced topological voids due to 24-case configuration [S2, abstract only, unofficial].
-    *   Tunable smoothness vs. distortion via $\alpha$ [S1].
-*   **Limitations**:
-    *   Larger voxels may introduce geometric inaccuracies if the surface varies rapidly within the voxel [S1].
-    *   The 24-case topology requires a custom LUT, which is not standard in most libraries [S2, abstract only, unofficial].
-    *   Mesh simplification is an additional step that may remove fine details [S1].
+*   **Time Complexity:** The core traversal is $O(N)$ where $N$ is the number of voxels. However, the improved voxel representation reduces $N$ by a factor of 2 (1D expansion) or 4 (2D expansion) compared to standard MC [S1].
+*   **Speed Improvement:** The improved algorithm is approximately 30% faster than the standard MC algorithm and 40% faster than the Masala algorithm [S2, abstract only, unofficial]. The use of midpoint selection (or simplified interpolation) and multi-threading contributes to this speedup [S2, abstract only, unofficial].
+*   **Memory Complexity:** Depends on the output mesh size. The 24-configuration table is slightly larger than the 15-case symmetry-reduced table, but the reduction in voxel count reduces memory pressure during traversal [S1][S2, abstract only, unofficial].
+*   **Strengths:**
+    *   Faster reconstruction due to reduced voxel count and parallel processing [S1][S2, abstract only, unofficial].
+    *   Void-free surfaces due to expanded configuration set [S2, abstract only, unofficial].
+    *   Tunable visual quality via $\alpha$ [S1].
+*   **Limitations:**
+    *   Reduced geometric accuracy due to expanded voxel sampling (error up to 2 pixels) [S1].
+    *   Potential for distortion if $\alpha$ is not chosen carefully; median interpolation ($\alpha=0$) is less smooth [S1].
+    *   Implementation complexity increases due to the need for a custom 24-case lookup table and parallel synchronization logic [S2, abstract only, unofficial].
 
 ## Background
-The Improved Marching Cubes algorithm was proposed to address the limitations of the standard MC algorithm in medical image 3D reconstruction [S1][S2, abstract only, unofficial]. The standard MC algorithm, introduced by Lorensen and Cline in 1987, uses 15 topological configurations, which can lead to ambiguities and voids at saddle points [S2, abstract only, unofficial]. The improved version, described in [S1] and [S2, abstract only, unofficial], introduces voxel size modification, tunable interpolation, and expanded topology to enhance performance and robustness. It has been applied to CT image reconstruction, particularly for liver tumors and abdominal organs [S1].
+The standard Marching Cubes algorithm, introduced by Lorensen and Cline in 1987, is the foundational method for isosurface extraction. However, it suffers from ambiguities in certain configurations (leading to voids) and computational cost for large datasets [Parent]. The Improved Marching Cubes algorithm was proposed to address these issues specifically in the context of medical image 3D reconstruction (CT images) [S1][S2, abstract only, unofficial].
+
+*   **S1** proposes the improvements in voxel representation, interpolation control, and mesh simplification to enhance real-time interaction for CT images [S1].
+*   **S2** focuses on the topological expansion (15 to 24 configurations) and parallel processing implementation to speed up reconstruction and fix voids [S2, abstract only, unofficial].
+
+The method is primarily used in medical imaging systems where real-time visualization of 3D structures (e.g., liver tumors from CT scans) is required [S1][S2, abstract only, unofficial].
 
 ## Sources
 [S1] A Novel 3D Reconstruction Algorithm of CT Images Based on Improved Marching Cubes Algorithm, https://doi.org/10.4108/eai.27-8-2020.2295136, fetched 2026-10-26

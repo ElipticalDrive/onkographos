@@ -1,0 +1,106 @@
+# Face Visibility Check
+
+Also called: Full Cube Face Culling
+
+## Overview
+Face Visibility Check determines whether a specific voxel face needs to be meshed based on its own visibility state, the neighbor's visibility state, and whether the face has already been processed [S1, S2, unofficial]. It solves the problem of redundant geometry generation by culling hidden faces between two opaque full cubes; if two opaque cube faces touch, the internal faces do not need to be emitted into the mesh [S1, S2, unofficial]. It sets itself apart from sibling methods like [Culled Voxel Meshing](2392-culled-voxel-meshing.md) by focusing on the binary decision logic for full cubes rather than complex partial shape intersection or global visibility maps [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `current_voxel`: The voxel data for the current cell.
+- `neighbor_voxel`: The voxel data for the adjacent cell sharing the face.
+- `current_face`: The orientation of the face being checked (e.g., North, South, Up, etc.).
+- `visited`: A boolean array or set tracking which voxels or faces have already been processed to avoid double-counting [S1, unofficial].
+
+**Outputs:**
+- `bool`: `true` if the face should be meshed (is visible), `false` if it should be culled.
+
+**Data Structures:**
+- `Voxel`: An enum or struct representing voxel states. Common states include `Empty`, `Translucent`, and `Opaque` [S1, unofficial].
+- `Face`: An enum representing the six orientations of a cube face: `North`, `South`, `East`, `West`, `Up`, `Down` [S2, unofficial].
+- `visited`: A 1D boolean array indexed by voxel coordinates or a hash set of visited voxel indices [S1, unofficial].
+
+**Steps:**
+1. **Check Current Voxel State:** If the `current_voxel` is `Empty`, return `false` [S1, unofficial].
+2. **Check Visited Status:** If the `current_voxel` index is already marked as `visited`, return `false` [S1, unofficial].
+3. **Retrieve Neighbor:** Calculate the index of the adjacent voxel using the current voxel's stride plus the visibility offset determined by the face orientation [S1, unofficial].
+   - The visibility offset is typically the stride in the direction normal to the face. If the face normal points in the positive direction, the offset is `+stride`; if negative, it is `-stride` [S1, unofficial].
+4. **Determine Opposite Face:** Identify the opposite face on the neighbor voxel. The mapping is:
+   - `North` $\leftrightarrow$ `South`
+   - `East` $\leftrightarrow$ `West`
+   - `Up` $\leftrightarrow$ `Down` [S2, unofficial].
+5. **Check Neighbor State:**
+   - If the `neighbor_voxel` is `Empty`, return `true` (the face is exposed to empty space) [S1, unofficial].
+   - If the `neighbor_voxel` is `Translucent` AND the `current_voxel` is `Opaque`, return `true` (opaque faces translucent) [S1, unofficial].
+   - If the `neighbor_voxel` is `Opaque`, return `false` (both are opaque, so the face is internal) [S1, unofficial].
+   - *Note:* If the `neighbor_voxel` is `Translucent` and the `current_voxel` is also `Translucent` or `Empty`, the behavior depends on specific implementation details not fully specified in the primary sources, but typically such faces are not meshed or require further transparency handling [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def face_visibility_check(current_voxel, neighbor_voxel, current_face, visited):
+    # Step 1: Check current voxel state
+    if current_voxel.state == VoxelState.EMPTY:
+        return False
+    
+    # Step 2: Check visited status
+    # Assuming visited is indexed by voxel coordinate or ID
+    if visited[current_voxel.index]:
+        return False
+    
+    # Step 3: Retrieve neighbor
+    # neighbor_voxel is passed as input, but in practice, it is retrieved using stride and offset
+    # neighbor_voxel = get_voxel_at_offset(current_voxel, current_face)
+    
+    # Step 4 & 5: Check neighbor state and cull logic
+    if neighbor_voxel.state == VoxelState.EMPTY:
+        return True
+    
+    if neighbor_voxel.state == VoxelState.OPAQUE:
+        # Both current and neighbor are opaque (current must be opaque to reach here)
+        return False
+    
+    if neighbor_voxel.state == VoxelState.TRANSLUCENT:
+        if current_voxel.state == VoxelState.OPAQUE:
+            return True
+        else:
+            # Current is not opaque (e.g., Translucent or Empty, but Empty is handled above)
+            # If both are translucent, sources do not explicitly define this case
+            # [G] Typically, translucent-to-translucent faces are not meshed to avoid double rendering
+            # or require alpha blending logic not covered in basic face culling.
+            return False
+            
+    # Default case for other states (e.g., if VoxelState has more variants)
+    return True
+```
+
+**Parameters:**
+- `VoxelState`: Enum values `Empty`, `Translucent`, `Opaque`. Typical values depend on the voxel engine [S1, unofficial].
+- `visited`: Boolean array. Size equals the number of voxels in the chunk or world [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Transparent Voxels:** Faces between two transparent voxels are not meshed by the basic logic. A TODO exists to extend the `IsOpaque` trait for different transparency levels [S1, unofficial].
+- **Partial Shapes:** The basic `should_cull_full_face` logic assumes full cubes. For partial shapes (stairs, slabs), this simple boolean check is insufficient because a face may be partially covered [S2, unofficial].
+
+## Subtopics
+
+### Unit Face Emission
+A helper function shared by both naive and merged meshers to test a single cell and emit a unit quad if it holds a paintable, exposed block face [S3, unofficial]. It filters out air, cross-plants, fluids, and special blocks [S3, unofficial]. It retrieves the neighbor block ID across the face boundary, checks if the face is exposed, calculates lighting and ambient occlusion, and pushes a quad with height 1 and width 1 [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per face check. The check involves a constant number of state comparisons and lookups [S1, S2, unofficial].
+- **Memory Complexity:** $O(N)$ for the `visited` array, where $N$ is the number of voxels in the chunk [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Simple to implement, effective for full cubes, reduces vertex and index count by eliminating internal faces [S2, unofficial].
+- **Limitations:** Does not handle partial shapes (stairs, slabs) correctly without additional logic; does not handle transparency levels beyond basic opaque/translucent distinction [S1, S2, unofficial].
+- **When to Use:** When meshing full cube voxels where performance is critical and partial shapes are not present or are handled separately [S2, unofficial].
+- **When Not to Use:** When meshing partial shapes or complex transparency effects [S1, S2, unofficial].
+
+## Background
+Face culling in voxel rendering started with the simple observation that if two opaque cube faces touch, the internal faces do not need to be emitted [S2, unofficial]. The method was formalized in discussions around voxel cube culling and partial shapes, highlighting the limitations of boolean face solidity for non-cube shapes [S2, unofficial]. It is used in voxel meshing libraries such as `block-mesh-rs` and `mc-meshing` [S1, S3, unofficial].
+
+## Sources
+[S1] GitHub - bonsairobo/block-mesh-rs: Generate voxel block meshes in Rust ..., https://github.com/bonsairobo/block-mesh-rs, fetched 2026-10-27 (unofficial)
+[S2] Face Culling for Voxel Cubes and Partial Shapes, https://ogyrecdev.github.io/posts/face-culling/, fetched 2026-10-28 (unofficial)
+[S3] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)

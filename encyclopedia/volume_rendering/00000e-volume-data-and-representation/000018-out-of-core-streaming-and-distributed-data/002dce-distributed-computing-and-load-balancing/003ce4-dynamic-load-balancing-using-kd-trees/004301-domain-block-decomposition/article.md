@@ -6,76 +6,95 @@ Domain Block Decomposition is a view-independent parallel volume rendering strat
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A homogenizing kd-tree representing the volume data, where each node has an associated cost (e.g., number of grid cells or voxels). The number of rendering nodes $n$.
-*   **Output:** An assignment of each node in the kd-tree to one of the $n$ rendering nodes, and the resulting composite image.
+*   **Input:** A homogenizing kd-tree and the number of rendering nodes $n$ [S1, unofficial].
+*   **Output:** An assignment of each resulting subtree to one of the $n$ rendering nodes [S1, unofficial].
 
 **Data Structures:**
-*   **Priority Queue:** A max-heap storing nodes from the kd-tree, ordered by their cost. The root of the kd-tree is initially the only element.
-*   **Subtree Assignment:** A mapping from each kd-tree node to a rendering node ID $0 \dots n-1$.
+*   **Priority Queue:** A max-heap storing nodes from the kd-tree, ordered by their cost [S1, unofficial].
 
 **Algorithm Steps:**
-1.  Initialize a priority queue $Q$ containing only the root node of the homogenizing kd-tree [S1, unofficial].
-2.  While the size of $Q$ is less than $n$:
-    a.  Extract the node $u$ with the highest cost from $Q$ [S1, unofficial].
-    b.  Insert the two children of $u$ into $Q$ [S1, unofficial].
-3.  Assign each node currently in $Q$ (which forms the leaves of the decomposition subtrees) to a unique rendering node. The remaining internal nodes of the kd-tree are implicitly assigned to the same rendering node as their children or handled during traversal [S1, unofficial].
-4.  Each rendering node renders its assigned subtree.
-5.  Composite the partial images from the $n$ nodes. This requires $\lceil \log_2 n \rceil$ compositing rounds. The node assigned the "farthest" subtree (in terms of compositing depth) produces the final image [S1, unofficial].
-6.  If the final image is not on the master node, send it to the master node [S1, unofficial].
+1. Initialize a priority queue $Q$ containing only the root node of the homogenizing kd-tree [S1, unofficial].
+2. While the number of nodes in $Q$ is smaller than $n$: remove the most expensive node from $Q$, and insert its two children [S1, unofficial].
+3. Assign each resulting subtree (the nodes remaining in $Q$) to one of the $n$ rendering nodes [S1, unofficial].
+4. After $\lceil \log n \rceil$ compositing rounds, the node assigned to the "farthest" subtree creates the final image [S1, unofficial].
+5. If the final image is not on the master node, send it to the master node [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def domain_block_decomposition(kd_tree_root, num_nodes):
-    # Priority queue stores (cost, node_id)
-    # Max-heap behavior: higher cost has higher priority
-    queue = MaxHeap()
-    queue.push((kd_tree_root.cost, kd_tree_root))
+    # Max-heap storing tuples of (-cost, node_id, node)
+    heap = []
+    
+    def push(item):
+        heap.append(item)
+        i = len(heap) - 1
+        while i > 0:
+            p = (i - 1) // 2
+            if heap[i][0] > heap[p][0]:
+                heap[i], heap[p] = heap[p], heap[i]
+                i = p
+            else:
+                break
+                
+    def pop():
+        if not heap: return None
+        heap[0], heap[-1] = heap[-1], heap[0]
+        item = heap.pop()
+        if heap:
+            i = 0
+            while True:
+                l, r = 2*i + 1, 2*i + 2
+                largest = i
+                if l < len(heap) and heap[l][0] > heap[largest][0]: largest = l
+                if r < len(heap) and heap[r][0] > heap[largest][0]: largest = r
+                if largest != i:
+                    heap[i], heap[largest] = heap[largest], heap[i]
+                    i = largest
+                else:
+                    break
+        return item
+
+    push((-kd_tree_root.cost, id(kd_tree_root), kd_tree_root))
     
     # Step 2: Split until we have n subtrees
-    while queue.size() < num_nodes:
-        # Extract most expensive node
-        cost, node = queue.pop()
-        
-        # Insert children if they exist
-        if node.has_left_child():
-            queue.push((node.left_child.cost, node.left_child))
-        if node.has_right_child():
-            queue.push((node.right_child.cost, node.right_child))
+    while len(heap) < num_nodes:
+        _, _, node = pop()
+        if node.left_child is not None:
+            push((-node.left_child.cost, id(node.left_child), node.left_child))
+        if node.right_child is not None:
+            push((-node.right_child.cost, id(node.right_child), node.right_child))
             
     # Step 3: Assign subtrees to nodes
-    # The nodes remaining in the queue are the roots of the subtrees
     assignments = {}
-    for i in range(queue.size()):
-        cost, subtree_root = queue.pop()
-        assignments[subtree_root.id] = i # Assign to rendering node i
+    for i in range(len(heap)):
+        _, _, subtree_root = pop()
+        assignments[subtree_root] = i
         
-    # Note: Internal nodes not in the queue must be assigned to the 
-    # rendering node of their children for traversal purposes.
-    # This is typically done via a post-order traversal or by 
-    # propagating the assignment from leaves up.
+    # Compositing phase: After ceil(log n) rounds, the node assigned to the "farthest" subtree creates the final image [S1, unofficial].
+    # If needed, send the final image to the master node [S1, unofficial].
     
     return assignments
 ```
 
 **Parameters:**
-*   $n$: Number of rendering nodes.
-*   Cost metric: Typically the number of voxels or grid cells in the subtree.
+*   $n$: Number of rendering nodes [S1, unofficial].
+*   Cost metric: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Tree Balance:** Good load balancing is contingent on the homogenizing kd-tree being well-balanced. If the tree is skewed, the decomposition will be uneven [S1, unofficial].
-*   **Insertion Order:** Grids at the same hierarchy level can be inserted into the kd-tree in any order. This freedom can be exploited to construct better-balanced trees, but poor insertion order leads to poor load balancing [S1, unofficial].
-*   **Data Replication:** Data replication can occur if grid patches belonging to the same grid are assigned to multiple subtrees, though this is generally limited in practice [S1, unofficial].
+*   **Tree Balance:** Good load balancing can only be achieved if the homogenizing kd-tree is well-balanced [S1, unofficial].
+*   **Insertion Order:** Grids inside the same hierarchy level can be inserted into the kd-tree in any order, which affects balance [S1, unofficial].
+*   **Data Replication:** Data replication can still occur if grid patches belonging to the same grid are assigned to multiple subtrees [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The decomposition phase takes $O(n \log N)$ where $N$ is the total number of nodes in the kd-tree, assuming a heap operation is $O(\log N)$. The compositing phase takes $O(\log n)$ rounds [S1, unofficial].
 *   **Memory Efficiency:** Favors memory efficiency over load balancing compared to Cost-range Decomposition [S1, unofficial].
-*   **View Independence:** The decomposition is view-independent, meaning data does not need to be loaded or re-evaluated during interactive rendering based on the camera position [S1, unofficial].
-*   **Communication:** May require an additional step to send the final image to the master node, as the final image is created by the node assigned to the "farthest" subtree, not necessarily the master [S1, unofficial].
+*   **View Independence:** The decomposition is view-independent, so it does not require loading of data during interactive rendering [S1, unofficial].
+*   **Communication:** May require an additional step to send the final image to the master node, as the final image is created by the node assigned to the "farthest" subtree rather than always node 0 [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
 
 ## Background
-Domain Block Decomposition was developed for distributed AMR (Adaptive Mesh Refinement) volume rendering to support datasets too large for desktop memory and to leverage high-end graphics hardware at supercomputing centers [S1, unofficial]. It is part of a suite of algorithms including Cost-range Decomposition and Incremental Load Balancing with Brick Caching.
+Domain Block Decomposition was developed for distributed AMR volume rendering to support rendering of AMR data sets that are too large to fit into desktop computer memory, and to support using high-end graphics hardware available at supercomputing centers [S1, unofficial].
 
 ## Sources
 [S1] Remote Interactive Direct Volume Rendering of AMR Data, https://www.osti.gov/servlets/purl/799586, fetched 2026-10-26 (unofficial)

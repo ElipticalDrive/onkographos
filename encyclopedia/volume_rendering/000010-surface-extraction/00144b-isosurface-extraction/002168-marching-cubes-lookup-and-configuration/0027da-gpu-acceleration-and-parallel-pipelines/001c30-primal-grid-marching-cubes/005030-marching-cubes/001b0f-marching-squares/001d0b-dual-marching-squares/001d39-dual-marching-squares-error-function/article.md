@@ -1,0 +1,79 @@
+# Dual Marching Squares Error Function
+
+Also called: QEF3D (in specific implementations)
+
+## Overview
+The Dual Marching Squares Error Function is an optimization applied to the Dual Marching Squares surface extraction method. While standard Dual Marching Squares places dual vertices at cell centers, this variant attempts to improve geometric accuracy by solving a Quadratic Error Function (QEF) to position vertices more accurately relative to the implicit surface. It addresses the loss of sharp features inherent in the base Dual Marching Squares approach [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** A 2D scalar field grid (shared read-only).
+*   **Output:** Indexed geometric primitives (lines or polygons) defined by an array of 2D vertices and short integer offsets [S2].
+
+### Data Structures
+*   **Intersections:** A list of 2D vertex positions.
+*   **Normals:** A list of 2D normal vectors.
+*   **Error:** A scalar value representing the minimized QEF error.
+*   **Mass Point:** A central vertex position used in the QEF calculation [S1, unofficial].
+
+### Steps
+1.  **Parallel Processing:** Process each cell independently. The algorithm is embarrassingly parallel, assuming a shared read-only input scalar field and a shared append-only geometry output stream [S2].
+2.  **Interpolation Caching:** To reduce computational overhead, cache interpolation results. For a single-threaded serial version, caching results for one row of the input grid is sufficient [S2].
+3.  **QEF Calculation:** Instead of simple linear interpolation, calculate the vertex position by minimizing a Quadratic Error Function. This involves solving for a point that best fits the implicit surface constraints derived from the grid values [S1, unofficial].
+4.  **Indexed Output:** Reduce output size by creating an array of unique 2D vertices and specifying lines or polygons using short integer offsets into this array, rather than duplicating vertex data for every cell [S2].
+
+### Pitfalls
+*   **Feature Preservation:** The implementation may substitute the standard error-reducing function with a faster alternative, which can result in the loss of sharp feature preservation. In some implementations, this feature is disabled by default [S1, unofficial].
+*   **Planarity:** In 3D extensions, quadrilaterals embedded in 3D space are not necessarily planar, requiring a choice of geometric interpolation scheme to draw banded surfaces [S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Simplified representation of the QEF-based vertex placement
+def compute_dual_vertex_qef(cell_data, grid_values):
+    """
+    Computes the position of a dual vertex using QEF minimization.
+    Note: Specific QEF matrix construction details are implementation-dependent.
+    """
+    # 1. Gather constraints from the cell's scalar field values
+    constraints = gather_surface_constraints(cell_data, grid_values)
+    
+    # 2. Construct the QEF matrix (A^T * A) and vector (A^T * b)
+    # This step minimizes the error ||Ax - b||^2
+    A, b = build_qef_system(constraints)
+    
+    # 3. Solve the linear system for the optimal vertex position
+    # Using a standard solver (e.g., Cholesky decomposition for positive definite matrices)
+    vertex_position = solve_linear_system(A, b)
+    
+    return vertex_position
+
+def process_grid_parallel(grid, output_stream):
+    """
+    Embarrassingly parallel processing of the grid.
+    """
+    # Shared read-only input: grid
+    # Shared append-only output: output_stream
+    
+    for cell in grid.cells:
+        # Cache interpolation if serial, or process independently if parallel
+        vertex = compute_dual_vertex_qef(cell, grid.values)
+        
+        # Add to indexed output
+        output_stream.add_vertex(vertex)
+        output_stream.add_primitive(cell.primitive_type, vertex_index)
+```
+
+## Operating characteristics
+*   **Complexity:** The algorithm is embarrassingly parallel, allowing for linear scaling with the number of cells and available threads [S2].
+*   **Memory:** Output size is reduced by using indexed geometric primitives, storing unique vertices once and referencing them via offsets [S2].
+*   **Performance:** Caching interpolation results reduces computational overhead, particularly in serial implementations [S2].
+*   **Limitations:** The trade-off for accuracy is potential loss of sharp features if the QEF is not carefully configured or if a faster, less accurate approximation is used [S1, unofficial].
+
+## Background
+The Dual Marching Squares Error Function is derived from the broader Marching Squares algorithm family. The base Dual Marching Squares method was introduced to address the ambiguity of planar quadrilaterals in 3D space by placing vertices at cell centers [S2]. The QEF approach was later applied to improve geometric fidelity, as seen in implementations like the one by Lin20 [S1, unofficial].
+
+## Sources
+[S1] isosurface, https://github.com/Lin20/isosurface, fetched 2026-10-29 (unofficial)
+[S2] Marching squares, https://smunix.github.io/en.wikipedia.org/wiki/Marching_squares.html, fetched 2026-10-30

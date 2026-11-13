@@ -6,19 +6,21 @@ Also called: Position-Based Dynamics Fluids
 Position Based Fluids (PBF) is a Lagrangian particle-based fluid simulation method that enforces incompressibility by correcting particle positions based on density constraints, allowing real-time simulation without meshing [S1, unofficial][S2]. It distinguishes itself from Smoothed Particle Hydrodynamics (SPH) by treating fluid dynamics as a constraint satisfaction problem solved via iterative position projections rather than solving the Navier-Stokes equations through pressure gradients [S2]. This approach provides superior stability for incompressible flows and simplifies the handling of surface tension and boundary conditions [S1, unofficial][S2].
 
 ## How it works
-PBF simulates fluid as a collection of particles, each carrying position, velocity, and mass. The core mechanism involves predicting particle motion under external forces and then iteratively correcting positions to satisfy physical constraints (primarily density incompressibility and surface tension) [S2].
+PBF simulates fluid as a collection of particles, each carrying position, velocity, and mass [S1, unofficial][S2]. The core mechanism involves predicting particle motion under external forces and then iteratively correcting positions to satisfy physical constraints (primarily density incompressibility and surface tension) [S2].
 
 ### Inputs and Outputs
-*   **Inputs**: Particle positions $\mathbf{p}_i$, velocities $\mathbf{v}_i$, masses $m_i$, rest density $\rho_0$, kernel radius $h$ (or $r$), time step $\Delta t$, external forces $\mathbf{f}_{ext}$, and boundary definitions.
-*   **Outputs**: Updated particle positions $\mathbf{p}_i^{new}$ and velocities $\mathbf{v}_i^{new}$.
+*   **Inputs**: Particle positions $\mathbf{p}_i$, velocities $\mathbf{v}_i$, masses $m_i$, rest density $\rho_0$, kernel radius $r$, time step $\Delta t$, external forces $\mathbf{f}_{ext}$, and boundary definitions [S1, unofficial][S2].
+*   **Outputs**: Updated particle positions $\mathbf{p}_i^{new}$ and velocities $\mathbf{v}_i^{new}$ [S1, unofficial][S2].
 
 ### Data Structures
-*   **Particles**: An array of structures or parallel arrays containing:
+*   **Particles**: An array of structures containing:
     *   `position`: 3D vector $(x, y, z)$.
     *   `velocity`: 3D vector $(v_x, v_y, v_z)$.
     *   `mass`: Scalar float.
-    *   `is_surface`: Boolean flag (optional, for surface tension).
-*   **Neighbor List**: A spatial hash grid or linked list to efficiently find neighbors within kernel radius $h$ for each particle.
+    *   `old_position`: 3D vector for velocity reconstruction.
+    *   `pos_delta`: 3D vector accumulating constraint corrections.
+    *   `grad_norm_sq`: Scalar float accumulating gradient norms for the constraint denominator.
+*   **Neighbor List**: A spatial hash grid or brute-force search to efficiently find neighbors within kernel radius $r$ for each particle [S1, unofficial][S2].
 
 ### Kernel Functions
 PBF uses the Cubic SPH kernel $W(\mathbf{p}, r)$ and its gradient $\nabla_{\mathbf{p}} W(\mathbf{p}, r)$, where $r$ is the kernel radius and $q = \frac{\|\mathbf{p}\|}{r}$ [S2].
@@ -46,9 +48,9 @@ $$
 ### Simulation Steps
 
 1.  **Initialization**:
-    *   Initialize particle positions in a grid pattern within the domain.
-    *   Initialize velocities to zero or small random values [S1, unofficial].
-    *   Set `old_positions` equal to current positions.
+    *   Initialize particle positions in a grid pattern within the domain using $\delta = h \times 0.8$ and boundary offsets [S1, unofficial].
+    *   Initialize velocities with random values between $-2$ and $2$ [S1, unofficial].
+    *   Set `old_position` equal to current position [S1, unofficial].
 
 2.  **Prediction Step**:
     *   For each particle $i$, predict the new position $\tilde{\mathbf{p}}_i$ using explicit Euler integration:
@@ -56,20 +58,20 @@ $$
         where $\mathbf{a}_i = \mathbf{f}_{ext, i} / m_i$ [S2].
 
 3.  **Constraint Solving (Iterative Projection)**:
-    *   Initialize position deltas $\Delta \mathbf{p}_i = \mathbf{0}$ for all particles.
-    *   Repeat for a fixed number of solver iterations (e.g., 10 for fluids) [S2]:
+    *   Initialize position deltas $\Delta \mathbf{p}_i = \mathbf{0}$ and gradient norms $\text{grad\_norm\_sq}_i = 0$ for all particles [S1, unofficial].
+    *   Repeat for `pbf_num_iters` iterations [S1, unofficial]:
         *   **Density Constraint**:
-            *   For each particle $i$, compute the density constraint violation $C_{i\rho}$:
+            *   For each particle $i$, compute the density constraint violation:
                 $$ C_{i\rho} = \frac{1}{\rho_0} \sum_{j \in \text{neighbors}(i)} m_j W(\mathbf{p}_i - \mathbf{p}_j, r) - 1 $$
                 where $C_{i\rho} = 0$ indicates incompressibility [S2].
             *   Compute the gradient of the constraint with respect to particle $k$ ($i$ or $j$):
                 $$ \nabla_{\mathbf{p}_k} C_{i\rho} = \frac{m_j}{\rho_0} \nabla_{\mathbf{p}_k} W(\mathbf{p}_i - \mathbf{p}_j, r) $$
-            *   Solve for the Lagrange multiplier $\Delta \lambda_i$ for particle $i$ using the XPBD-like update formula (assuming diagonal mass matrix approximation $M_{ii} = m_i$):
-                $$ \Delta \lambda_i = \frac{-C_{i\rho} - \alpha \lambda_i}{\Delta t^2 \sum_{k \in \{i, \text{neighbors}\}} \frac{1}{m_k} \|\nabla_{\mathbf{p}_k} C_{i\rho}\|^2 + \alpha} $$
-                where $\alpha$ is a compliance parameter (often 0 for hard constraints in standard PBF) [S2].
+            *   Solve for the Lagrange multiplier $\Delta \lambda_i$ using the XPBD-like update formula (assuming diagonal mass matrix approximation $M_{ii} = m_i$):
+                $$ \Delta \lambda_i = \frac{-C_{i\rho}}{\Delta t^2 \sum_{k \in \{i, \text{neighbors}\}} \frac{1}{m_k} \|\nabla_{\mathbf{p}_k} C_{i\rho}\|^2 + \alpha} $$
+                where $\alpha$ is a compliance parameter for XPBD [S2].
             *   Update position deltas:
-                $$ \Delta \mathbf{p}_i += \frac{\Delta \lambda_i}{m_i} \nabla_{\mathbf{p}_i} C_{i\rho} $$
-                $$ \Delta \mathbf{p}_j += \frac{\Delta \lambda_i}{m_j} \nabla_{\mathbf{p}_j} C_{i\rho} $$
+                $$ \Delta \mathbf{p}_k += \frac{\Delta \lambda_i}{m_k} \nabla_{\mathbf{p}_k} C_{i\rho} $$
+            *   Finally divide $\Delta \mathbf{p}_i$ by $\rho_0$ as per implementation convention [S1, unofficial].
         *   **Surface Tension (Optional)**:
             *   Detect surface particles using occlusion estimation: enclose particle in a spherical screen, project neighbors, and classify as surface if cumulative projection area is below a threshold [S2].
             *   For surface particles, compute normal $\mathbf{n}_i = \text{normalize}(-\nabla_{\mathbf{p}_i} C_{i\rho})$ [S2].
@@ -80,7 +82,7 @@ $$
             *   Compute Jacobians for area constraint vertices $\mathbf{t}_1, \mathbf{t}_2, \mathbf{t}_3$:
                 $$ \nabla_{\mathbf{t}_1} C_{tA} = \frac{(\mathbf{p}_{t2} - \mathbf{p}_{t1}) \times (\mathbf{p}_{t3} - \mathbf{p}_{t1}) \times (\mathbf{p}_{t3} - \mathbf{p}_{t2})}{2 \|(\mathbf{p}_{t2} - \mathbf{p}_{t1}) \times (\mathbf{p}_{t3} - \mathbf{p}_{t1})\|} $$
                 $$ \nabla_{\mathbf{t}_2} C_{tA} = \frac{(\mathbf{p}_{t3} - \mathbf{p}_{t2}) \times (\mathbf{p}_{t1} - \mathbf{p}_{t2}) \times (\mathbf{p}_{t1} - \mathbf{p}_{t3})}{2 \|(\mathbf{p}_{t2} - \mathbf{p}_{t1}) \times (\mathbf{p}_{t3} - \mathbf{p}_{t1})\|} $$
-                $$ \nabla_{\mathbf{t}_3} C_{tA} = \frac{(\mathbf{p}_{t1} - \mathbf{p}_{t3}) \times (\mathbf{p}_{t2} - \mathbf{p}_{t3}) \times (\mathbf{p}_{t2} - \mathbf{p}_{t1})}{2 \|(\mathbf{p}_{t1} - \mathbf{p}_{t3}) \times (\mathbf{p}_{t3} - \mathbf{p}_{t1})\|} $$
+                $$ \nabla_{\mathbf{t}_3} C_{tA} = \frac{(\mathbf{p}_{t1} - \mathbf{p}_{t3}) \times (\mathbf{p}_{t2} - \mathbf{p}_{t3}) \times (\mathbf{p}_{t2} - \mathbf{p}_{t1})}{2 \|(\mathbf{p}_{t1} - \mathbf{p}_{t3}) \times (\mathbf{p}_{t2} - \mathbf{p}_{t3})\|} $$
             *   Solve for area constraint multipliers and update position deltas similarly to density constraints [S2].
         *   **Distance Constraint (Optional)**:
             *   Enforce minimum distance $d_0$ between particles:
@@ -89,10 +91,12 @@ $$
                 $$ \nabla_{\mathbf{p}_i} C_{ij}^D = \begin{cases} 0 & \|\mathbf{p}_i - \mathbf{p}_j\| > d_0 \\ \frac{\mathbf{p}_i - \mathbf{p}_j}{\|\mathbf{p}_i - \mathbf{p}_j\|} & \text{otherwise} \end{cases} $$
                 $$ \nabla_{\mathbf{p}_j} C_{ij}^D = \begin{cases} 0 & \|\mathbf{p}_i - \mathbf{p}_j\| > d_0 \\ \frac{\mathbf{p}_j - \mathbf{p}_i}{\|\mathbf{p}_i - \mathbf{p}_j\|} & \text{otherwise} \end{cases} $$
             *   Update position deltas [S2].
+        *   Surface particles are updated every two time steps to optimize performance [S2].
 
 4.  **Position Update**:
     *   Apply the accumulated position deltas:
         $$ \mathbf{p}_i^{new} = \tilde{\mathbf{p}}_i + \Delta \mathbf{p}_i $$
+        [S1, unofficial].
 
 5.  **Boundary Confinement**:
     *   Confine particles to the simulation domain boundaries [S1, unofficial].
@@ -100,174 +104,35 @@ $$
 6.  **Velocity Update**:
     *   Update velocities based on the change in position:
         $$ \mathbf{v}_i^{new} = \frac{\mathbf{p}_i^{new} - \mathbf{p}_i^{old}}{\Delta t} $$
+        [S1, unofficial].
     *   Note: Vorticity confinement and XSPH correction may be disabled in 2D contexts or specific implementations [S1, unofficial].
-
-7.  **Surface Particle Update Frequency**:
-    *   Surface particles are updated every two time steps to optimize performance [S2].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def simulate_pbf(particles, dt, num_iterations, boundary):
-    """
-    Simulate one time step for Position Based Fluids.
-    
-    Args:
-        particles: List of particle objects with attributes:
-                   - position: Vector3
-                   - velocity: Vector3
-                   - mass: float
-                   - is_surface: bool (optional)
-        dt: Time step size
-        num_iterations: Number of constraint solver iterations
-        boundary: Boundary object with method confine(pos)
-        
-    Returns:
-        Updated particles list
-    """
-    
-    # 1. Prediction Step
-    for p in particles:
-        # Assume external force f_ext is pre-calculated or zero
-        acceleration = p.f_ext / p.mass
-        p.predicted_position = p.position + dt * p.velocity + dt**2 * acceleration
-        
-    # 2. Constraint Solving
-    # Initialize position deltas
-    for p in particles:
-        p.pos_delta = Vector3(0, 0, 0)
-        
-    for iteration in range(num_iterations):
-        # Reset multipliers if using XPBD with memory (standard PBF often resets)
-        # For standard PBF, lambda is often recomputed from scratch or accumulated
-        # Here we assume standard PBF projection where we compute delta lambda
-        
-        # Density Constraint
-        for p_i in particles:
-            neighbors = get_neighbors(p_i.position, kernel_radius)
-            density_constraint = 0.0
-            gradient_sum_sq = 0.0
-            
-            # Compute constraint value and gradient norm squared
-            for p_j in neighbors:
-                diff = p_i.position - p_j.position
-                q = diff.length() / kernel_radius
-                
-                # Evaluate Kernel Gradient
-                grad_W = compute_kernel_gradient(diff, kernel_radius)
-                
-                # Contribution to density constraint
-                density_constraint += (p_j.mass / rest_density) * compute_kernel(diff, kernel_radius)
-                
-                # Contribution to gradient norm squared for the constraint equation
-                # Gradient of C_i_rho w.r.t p_i is (m_j/rho_0) * grad_W
-                # Gradient of C_i_rho w.r.t p_j is -(m_j/rho_0) * grad_W
-                # Norm squared contribution for p_i: ||(m_j/rho_0) * grad_W||^2
-                # Norm squared contribution for p_j: ||-(m_j/rho_0) * grad_W||^2
-                
-                grad_factor = p_j.mass / rest_density
-                grad_norm_sq_i = (grad_factor ** 2) * grad_W.dot(grad_W)
-                grad_norm_sq_j = (grad_factor ** 2) * grad_W.dot(grad_W)
-                
-                # Accumulate for the denominator of lambda calculation
-                # Note: In a full implementation, we need to sum contributions from all neighbors for each particle
-                # This requires a two-pass or accumulation structure
-                pass 
-            
-            # Corrected approach for accumulation:
-            # We need to accumulate grad_norm_sq for each particle from all its constraints
-            pass
+import math
 
-        # Simplified Pseudocode for Lambda Calculation assuming pre-computed sums
-        # In practice, one iterates over constraints and updates particle deltas directly
-        
-        for p_i in particles:
-            neighbors = get_neighbors(p_i.position, kernel_radius)
-            c_rho = 0.0
-            grad_norm_sq = 0.0
-            
-            for p_j in neighbors:
-                diff = p_i.position - p_j.position
-                q = diff.length() / kernel_radius
-                
-                # Kernel Value
-                w = compute_kernel(diff, kernel_radius)
-                c_rho += (p_j.mass / rest_density) * w
-                
-                # Kernel Gradient
-                grad_W = compute_kernel_gradient(diff, kernel_radius)
-                grad_factor = p_j.mass / rest_density
-                
-                # Gradient of constraint w.r.t p_i
-                grad_i = grad_factor * grad_W
-                grad_norm_sq += grad_i.dot(grad_i)
-                
-                # Gradient of constraint w.r.t p_j
-                grad_j = -grad_factor * grad_W
-                # Accumulate grad_norm_sq for p_j separately (requires storing in particle struct)
-                p_j.grad_norm_sq_accumulator += grad_j.dot(grad_j)
-                
-            c_rho -= 1.0 # C_i_rho = sum(...) - 1
-            
-            # Solve for Delta Lambda
-            # Denominator: dt^2 * sum(1/m_k * ||grad||^2) + alpha
-            # Assuming alpha = 0 for hard constraints
-            denom = dt**2 * (grad_norm_sq / p_i.mass + p_i.grad_norm_sq_accumulator / p_i.mass)
-            
-            if denom > 1e-8:
-                delta_lambda = -c_rho / denom
-            else:
-                delta_lambda = 0.0
-                
-            # Apply Delta Lambda to position deltas
-            # Delta p_i = (delta_lambda / m_i) * grad_i_sum
-            # We need the sum of gradients for p_i
-            
-            grad_sum_i = Vector3(0, 0, 0)
-            for p_j in neighbors:
-                diff = p_i.position - p_j.position
-                grad_W = compute_kernel_gradient(diff, kernel_radius)
-                grad_factor = p_j.mass / rest_density
-                grad_sum_i += grad_factor * grad_W
-                
-            p_i.pos_delta += (delta_lambda / p_i.mass) * grad_sum_i
-            
-            # Apply to neighbors
-            for p_j in neighbors:
-                diff = p_i.position - p_j.position
-                grad_W = compute_kernel_gradient(diff, kernel_radius)
-                grad_factor = p_j.mass / rest_density
-                grad_sum_j = -grad_factor * grad_W # Gradient w.r.t p_j
-                
-                # Note: p_j's delta lambda is computed in its own loop
-                # This simplified code assumes symmetric update or separate neighbor loop
-                # Standard PBF updates neighbors immediately
-                p_j.pos_delta += (delta_lambda / p_j.mass) * grad_sum_j
-                
-        # Surface Tension Constraints (if enabled)
-        # Similar process: identify surface particles, compute area constraints, solve for lambda, update pos_delta
-        
-        # Update positions with deltas
-        for p in particles:
-            p.position = p.predicted_position + p.pos_delta
-            
-        # Reset predicted position for next iteration if using multiple passes on same step
-        # Or keep predicted position as base and accumulate deltas
-        for p in particles:
-            p.predicted_position = p.position # Base for next iteration's delta accumulation
-            
-    # 3. Boundary Confinement
-    for p in particles:
-        p.position = boundary.confine(p.position)
-        
-    # 4. Velocity Update
-    for p in particles:
-        p.velocity = (p.position - p.old_position) / dt
-        p.old_position = p.position
-        
-    return particles
+class Vector3:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other): return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __mul__(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
+    def __rmul__(self, s): return self.__mul__(s)
+    def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
+    def length(self): return math.sqrt(self.dot(self))
+    def normalize(self):
+        l = self.length()
+        return Vector3(self.x / l, self.y / l, self.z / l) if l > 1e-8 else Vector3()
+
+def get_neighbors(positions, idx, kernel_radius):
+    neighbors = []
+    for j, p in enumerate(positions):
+        if j != idx and (positions[idx] - p).length() <= kernel_radius:
+            neighbors.append(j)
+    return neighbors
 
 def compute_kernel(p, r):
     q = p.length() / r
@@ -275,8 +140,7 @@ def compute_kernel(p, r):
         return (8.0 / (math.pi * r**3)) * (6 * q**2 * (q - 1) + 1)
     elif q <= 1.0:
         return (16.0 / (math.pi * r**3)) * ((1 - q)**3)
-    else:
-        return 0.0
+    return 0.0
 
 def compute_kernel_gradient(p, r):
     q = p.length() / r
@@ -284,14 +148,89 @@ def compute_kernel_gradient(p, r):
         return (48.0 / (math.pi * r**5)) * (3 * q - 2) * p
     elif q <= 1.0:
         return -(48.0 / (math.pi * r**5)) * q * p
-    else:
-        return Vector3(0, 0, 0)
+    return Vector3()
+
+def simulate_pbf(particles, dt, num_iterations, boundary, kernel_radius, rest_density):
+    # particles: list of dicts with keys: 'pos', 'vel', 'mass', 'old_pos', 'predicted_pos', 'pos_delta', 'grad_norm_sq'
+    # boundary: object with 'confine(pos)' method
+    
+    # 1. Prediction
+    for p in particles:
+        acc = p.get('f_ext', Vector3()) / p['mass']
+        p['predicted_pos'] = p['pos'] + dt * p['vel'] + dt**2 * acc
+
+    # 2. Constraint Solving
+    for p in particles:
+        p['pos_delta'] = Vector3(0, 0, 0)
+        p['grad_norm_sq'] = 0.0
+
+    for _ in range(num_iterations):
+        for i in range(len(particles)):
+            neighbors = get_neighbors([p['pos'] for p in particles], i, kernel_radius)
+            c_rho = -1.0
+            grad_sum_i = Vector3(0, 0, 0)
+
+            for j in neighbors:
+                diff = particles[i]['pos'] - particles[j]['pos']
+                grad_W = compute_kernel_gradient(diff, kernel_radius)
+                factor = particles[j]['mass'] / rest_density
+
+                c_rho += factor * compute_kernel(diff, kernel_radius)
+                grad_sum_i += factor * grad_W
+
+                # Accumulate gradient norm squared for neighbor j
+                grad_norm_j_sq = factor**2 * grad_W.dot(grad_W)
+                particles[j]['grad_norm_sq'] += grad_norm_j_sq
+
+            # Compute gradient norm squared for particle i
+            grad_norm_i_sq = 0.0
+            for j in neighbors:
+                diff = particles[i]['pos'] - particles[j]['pos']
+                grad_W = compute_kernel_gradient(diff, kernel_radius)
+                factor = particles[j]['mass'] / rest_density
+                grad_norm_i_sq += factor**2 * grad_W.dot(grad_W)
+
+            # Solve for Delta Lambda
+            denom = dt**2 * (grad_norm_i_sq / particles[i]['mass'] + particles[i]['grad_norm_sq'] / particles[i]['mass'])
+            alpha = 0.0 # Hard constraint for standard PBF
+            
+            if denom > 1e-8:
+                delta_lambda = -c_rho / (denom + alpha)
+            else:
+                delta_lambda = 0.0
+
+            # Apply Delta Lambda to position deltas
+            particles[i]['pos_delta'] += (delta_lambda / particles[i]['mass']) * grad_sum_i
+            
+            for j in neighbors:
+                diff = particles[i]['pos'] - particles[j]['pos']
+                grad_W = compute_kernel_gradient(diff, kernel_radius)
+                factor = particles[j]['mass'] / rest_density
+                grad_sum_j = -factor * grad_W
+                particles[j]['pos_delta'] += (delta_lambda / particles[j]['mass']) * grad_sum_j
+
+        # Apply accumulated deltas to positions
+        for p in particles:
+            p['pos'] = p['predicted_pos'] + p['pos_delta']
+            # Reset predicted position base for next iteration accumulation
+            p['predicted_pos'] = p['pos']
+
+    # 3. Boundary Confinement
+    for p in particles:
+        p['pos'] = boundary.confine(p['pos'])
+
+    # 4. Velocity Update
+    for p in particles:
+        p['vel'] = (p['pos'] - p['old_pos']) / dt
+        p['old_pos'] = p['pos']
+
+    return particles
 ```
 
 ### Parameters
-*   **Rest Density ($\rho_0$)**: Target density for incompressibility. Typical values depend on the fluid (e.g., water $\approx 1000$ kg/m³, but normalized units vary).
-*   **Kernel Radius ($h$ or $r$)**: Determines the interaction range. Typically set based on particle spacing (e.g., $h = 1.2 \times \text{particle\_spacing}$) [S1, unofficial].
-*   **Time Step ($\Delta t$)**: Small enough to satisfy CFL conditions for stability.
+*   **Rest Density ($\rho_0$)**: Target density for incompressibility [S2].
+*   **Kernel Radius ($r$)**: Determines the interaction range [S2].
+*   **Time Step ($\Delta t$)**: Small enough to satisfy CFL conditions for stability [G].
 *   **Solver Iterations**: 10 iterations for fluids, 50 for solids (in coupled systems) [S2].
 *   **Distance Threshold ($d_0$)**: Minimum distance for particle repulsion [S2].
 
@@ -306,15 +245,17 @@ def compute_kernel_gradient(p, r):
 ### [XPBD Simulation Loop](7968-xpbd-simulation-loop.md)
 The XPBD simulation loop is a numerical integration method that treats a dynamic system as a set of $N$ vertices and $M$ constraints, converting variational energy minimization into sequential constraint projections. It distinguishes itself from standard Position-Based Dynamics (PBD) by introducing a compliance matrix $\alpha$, allowing constraints to be satisfied with variable stiffness rather than binary hard constraints, which enables stable simulation of both fluids and hyperelastic solids.
 
+### Surface Tension Application
+Surface tension is applied to minimize local surface area by enforcing an area constraint on detected surface particles [S2]. Surface particles are identified via occlusion estimation: each particle is enclosed in a spherical screen, neighbors are projected onto it, and the particle is classified as surface if the cumulative projection area falls below a threshold [S2]. The normal $\mathbf{n}_i$ is computed as $\text{normalize}(-\nabla_{\mathbf{p}_i} C_{i\rho})$ [S2]. Neighboring surface particles are triangulated on the plane perpendicular to $\mathbf{n}_i$, and the area constraint $C_{iA} = \sum_{t \in T(i)} \frac{1}{2} \|(\mathbf{p}_{t2} - \mathbf{p}_{t1}) \times (\mathbf{p}_{t3} - \mathbf{p}_{t1})\|$ is enforced using its Jacobians with respect to triangle vertices [S2]. A distance constraint $C_{ij}^D = \min\{0, \|\mathbf{p}_i - \mathbf{p}_j\| - d_0\}$ is also applied to promote uniform particle distribution [S2]. Surface particles are updated every two time steps to optimize performance [S2].
+
 ## Operating characteristics
-*   **Time Complexity**: $O(N \cdot k)$ per iteration, where $N$ is the number of particles and $k$ is the average number of neighbors. With $I$ iterations, total time is $O(I \cdot N \cdot k)$. Spatial hashing reduces neighbor search to $O(N)$ on average.
-*   **Memory Complexity**: $O(N)$ for particle data and neighbor lists.
-*   **Measured Performance**: PBF is generally faster than SPH for incompressible flows due to the lack of pressure solving and simpler constraint projection [S2]. It runs in real-time on modern GPUs for millions of particles [S2].
+*   **Time Complexity**: $O(N \cdot k)$ per iteration, where $N$ is the number of particles and $k$ is the average number of neighbors. With $I$ iterations, total time is $O(I \cdot N \cdot k)$. Spatial hashing reduces neighbor search to $O(N)$ on average [G].
+*   **Memory Complexity**: $O(N)$ for particle data and neighbor lists [G].
+*   **Measured Performance**: PBF runs in real-time on modern GPUs for millions of particles [S2].
 *   **Scaling**: Scales well with GPU parallelization due to independent particle updates and neighbor searches [S2].
-*   **Strengths**: Stability for incompressible fluids, easy handling of surface tension, no need for pressure solvers, real-time performance.
-*   **Limitations**: Less physically accurate for compressible flows or complex rheology compared to SPH or grid-based methods; surface tension implementation can be computationally expensive due to triangulation [S2].
-*   **When to Use**: Real-time fluid simulation, visual effects, interactive applications where stability and speed are prioritized over strict physical accuracy.
-*   **When Not to Use**: Scientific simulations requiring high-fidelity compressible flow dynamics or complex non-Newtonian fluid behavior.
+*   **Strengths**: Stability for incompressible fluids, easy handling of surface tension, no need for pressure solvers, real-time performance [S2].
+*   **When to Use**: Real-time fluid simulation, visual effects, interactive applications where stability and speed are prioritized [S2].
+*   **When Not to Use**: Scientific simulations requiring high-fidelity compressible flow dynamics or complex non-Newtonian fluid behavior [G].
 
 ## Background
 Position Based Fluids (PBF) is based on Position-Based Dynamics (PBD), which was introduced by Müller et al. in 2007 [S2][S1, unofficial]. PBF specifically applies PBD to fluid simulation, enforcing incompressibility via density constraints [S2]. It has been widely adopted in computer graphics for real-time fluid effects due to its stability and efficiency [S1, unofficial][S2]. Recent developments include coupling PBF with Gaussian Splatting for rendering (Gaussian Splashing) [S2].

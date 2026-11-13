@@ -1,0 +1,119 @@
+# TT Reconstruction for Time-Dependent Rendering
+
+Also called: TT Reconstruction, TT-based Time Step Reconstruction
+
+## Overview
+TT Reconstruction is a method to reconstruct a specific 3D volume slice at a given time step $t$ from the Tensor-Train (TT) cores of a 4D dataset for time-dependent volume rendering [S1][S2, unofficial]. It solves the problem of efficiently accessing individual time steps without decompressing the entire 4D tensor into memory. It sets itself apart from naive TT evaluation by pre-multiplying the spatial cores, allowing the reconstruction of any time step via a single tensor-vector multiplication with the time-specific core [S1][S2, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   The set of TT cores $\{C_1, C_2, C_3, C_4\}$ for a 4D dataset.
+*   The target time step index $t$.
+
+**Outputs:**
+*   A 3D volume tensor $V_t \in \mathbb{R}^{N_1 \times N_2 \times N_3}$ representing the volume at time step $t$.
+
+### Data Structures
+The 4D dataset is represented by $d=4$ TT cores $C_i$. Each core $C_i$ has dimensions $R_{i-1} \times N_i \times R_i$, where $R_i$ are the TT ranks and $N_i$ are the mode sizes [S2, unofficial].
+*   $C_1 \in \mathbb{R}^{1 \times N_1 \times R_1}$
+*   $C_2 \in \mathbb{R}^{R_1 \times N_2 \times R_2}$
+*   $C_3 \in \mathbb{R}^{R_2 \times N_3 \times R_3}$
+*   $C_4 \in \mathbb{R}^{R_3 \times N_4 \times 1}$
+
+Here, $N_4$ corresponds to the number of time steps. The boundary ranks are fixed: $R_0 = 1$ and $R_4 = 1$ [S2, unofficial].
+
+### Steps
+1.  **Preprocessing**: Multiply the first three TT cores ($C_1, C_2, C_3$) together to form a preprocessed 3D tensor $P$. This tensor has dimensions $N_1 \times N_2 \times N_3 \times R_3$.
+2.  **Extraction**: Extract the $t$-th column vector from the last TT core $C_4$. Since $C_4 \in \mathbb{R}^{R_3 \times N_4 \times 1}$, the $t$-th column vector $v_t$ has dimensions $R_3 \times 1$ (effectively a vector of size $R_3$).
+3.  **Reconstruction**: Multiply the preprocessed tensor $P$ with the extracted vector $v_t$ to produce the 3D volume $V_t$.
+
+### Formulas
+The TT decomposition of the 4D tensor $T$ is defined as:
+$$ T_{i_1, i_2, i_3, i_4} = \sum_{r_1, r_2, r_3} C_1(1, i_1, r_1) C_2(r_1, i_2, r_2) C_3(r_2, i_3, r_3) C_4(r_3, i_4, 1) $$
+
+The preprocessing step computes the tensor $P$:
+$$ P_{i_1, i_2, i_3, r_3} = \sum_{r_1, r_2} C_1(1, i_1, r_1) C_2(r_1, i_2, r_2) C_3(r_2, i_3, r_3) $$
+
+The extraction step selects the vector $v_t$ from $C_4$ corresponding to time index $t$ (where $i_4 = t$):
+$$ v_t(r_3) = C_4(r_3, t, 1) $$
+
+The final reconstruction is the contraction of $P$ and $v_t$ over the rank index $r_3$:
+$$ V_t(i_1, i_2, i_3) = \sum_{r_3} P_{i_1, i_2, i_3, r_3} v_t(r_3) $$
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstruct_time_step(C1, C2, C3, C4, t):
+    """
+    Reconstructs the 3D volume at time step t from TT cores.
+    
+    Args:
+        C1: Tensor of shape (1, N1, R1)
+        C2: Tensor of shape (R1, N2, R2)
+        C3: Tensor of shape (R2, N3, R3)
+        C4: Tensor of shape (R3, N4, 1)
+        t: Integer index of the time step (0 <= t < N4)
+        
+    Returns:
+        V_t: Tensor of shape (N1, N2, N3)
+    """
+    # Step 1: Preprocess by multiplying C1, C2, and C3
+    # Contract C1 and C2 over R1
+    # Result shape: (1, N1, N2, R2) -> squeeze dim 0 -> (N1, N2, R2)
+    temp1 = einsum('ijk,klm->ijlm', C1, C2) 
+    # Squeeze the first dimension (size 1)
+    temp1 = temp1.squeeze(0)
+    
+    # Contract temp1 and C3 over R2
+    # temp1 shape: (N1, N2, R2)
+    # C3 shape: (R2, N3, R3)
+    # Result shape: (N1, N2, N3, R3)
+    P = einsum('ijk,klm->ijlm', temp1, C3)
+    
+    # Step 2: Extract the t-th column vector from C4
+    # C4 shape: (R3, N4, 1)
+    # We want the slice at index t along the second dimension (N4)
+    # Result shape: (R3, 1) -> squeeze dim 1 -> (R3,)
+    v_t = C4[:, t, 0]
+    
+    # Step 3: Multiply preprocessed tensor P with vector v_t
+    # P shape: (N1, N2, N3, R3)
+    # v_t shape: (R3,)
+    # Contract over the last dimension of P (R3)
+    # Result shape: (N1, N2, N3)
+    V_t = einsum('ijkl,l->ijk', P, v_t)
+    
+    return V_t
+```
+
+### Parameters and Edge Cases
+*   **Time Index $t$**: Must be within bounds $0 \le t < N_4$. Accessing out-of-bounds indices is an error [S2, unofficial].
+*   **Ranks $R_i$**: The computational cost depends linearly on the ranks. If ranks are large, the preprocessed tensor $P$ becomes large, increasing memory usage during reconstruction [S1][S2, unofficial].
+*   **Precision**: Standard floating-point arithmetic is used. No specific precision requirements are noted, but standard double precision is assumed for stability [G].
+
+## Subtopics
+
+### TT Decomposition for 4D Volumes
+*   **What it is**: The parent method that generates the TT cores from the raw 4D data.
+*   **Difference**: While TT Reconstruction focuses on *accessing* a specific time step from existing cores, the parent method focuses on *compressing* the full 4D dataset into those cores.
+*   **When to choose**: Use this when you need to compress the data first. Use TT Reconstruction when you already have the cores and need to render specific frames.
+*   **Link**: [Tensor-Train Decomposition for 4D Volumes](14070-tensor-train-decomposition-for-4d-volumes.md)
+
+## Operating characteristics
+
+*   **Time Complexity**: The preprocessing step (multiplying $C_1, C_2, C_3$) is performed once. Its cost is proportional to $N_1 N_2 N_3 R_1 R_2 R_3$. The reconstruction of a single time step $t$ involves contracting the preprocessed tensor $P$ (size $N_1 N_2 N_3 R_3$) with the vector $v_t$ (size $R_3$), costing $O(N_1 N_2 N_3 R_3)$ [S1][S2, unofficial].
+*   **Memory Complexity**: Storing the cores requires $O(N_1 R_1 + N_2 R_1 R_2 + N_3 R_2 R_3 + N_4 R_3)$. The preprocessed tensor $P$ requires $O(N_1 N_2 N_3 R_3)$ additional memory if kept in memory for fast access [S1][S2, unofficial].
+*   **Strengths**: Allows fast reconstruction of any time step without re-processing the entire dataset. The linear growth of TT representation with dimensionality makes it suitable for high-dimensional data [S2, unofficial].
+*   **Limitations**: Requires preprocessing step which can be memory-intensive for large volumes. Performance depends heavily on the TT ranks [S1][S2, unofficial].
+*   **When to use**: When rendering time-dependent volumes where random access to time steps is required, and the dataset is too large to store in full 4D format.
+*   **When not to use**: If only a few time steps are needed and preprocessing cost is prohibitive, or if the TT ranks are very large.
+
+## Background
+The method is described in the context of Tensor-Train-based 4D Time-Dependent Volume Rendering [S1][S2, unofficial]. The TT decomposition itself was introduced by Oseledets [Ose11] and further detailed in [LLLZ22]. The specific application to 4D volume rendering and the optimization of reconstruction via preprocessing of spatial cores is presented in [S1] and [S2, unofficial].
+
+## Sources
+[S1] TT4D: Tensor‐Train‐based 4D Time‐Dependent Volume Rendering, https://doi.org/10.1111/cgf.70471, fetched 2026-10-27
+[S2] Tensor-Train-based 4D Time-Dependent Volume Rendering, https://repositorio.ie.edu/entities/publication/348991b8-1dff-4bea-acbc-433ce708313d/full, fetched 2026-10-29 (unofficial)

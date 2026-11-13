@@ -29,11 +29,11 @@ Remesh Budget is a rendering optimization that processes dirty chunks nearest th
 - **Note:** One sub-chunk always goes through even if the budget is exceeded [S2, unofficial].
 
 **Steps:**
-1. **BeginFrame:** Reset `_rebuildsThisFrame` to 0 and record `_frameStarted` timestamp [S2, unofficial].
+1. **BeginFrame:** Reset `_rebuildsThisFrame` to 0 and record `_frameStarted` timestamp using `System.Diagnostics.Stopwatch.GetTimestamp()` [S2, unofficial].
 2. **RebuildAllowed:** Returns true if `_rebuildsThisFrame` < `MaxRebuildsPerFrame` AND (`_rebuildsThisFrame` == 0 OR elapsed time since `_frameStarted` < `RebuildBudgetMs`) [S2, unofficial].
-3. **RebuildWithinBudget:** Iterate through all chunk indices. If chunk is dirty and rebuild is allowed, increment `_rebuildsThisFrame`, call Rebuild, and mark chunk clean. If rebuild is not allowed, set complete to false and continue. Return true if all dirty chunks were processed [S2, unofficial].
-4. **Prepare:** If pending task exists and is not complete, return false. If complete, call FinishPending. Collect dirty chunk indices. If none, return true. Create a task on a worker thread that builds meshes for dirty chunks using a local MeshBuilder. Return false [S2, unofficial].
-5. **FinishPending:** If pending task is not completed, return false. If completed, clear pending. If pending mode differs from current mode, return true (meshes are useless). Otherwise, upload each chunk's data and mark chunks clean [S2, unofficial].
+3. **RebuildWithinBudget:** Iterate through all chunk indices [S2, unofficial]. If chunk is dirty and rebuild is allowed, increment `_rebuildsThisFrame`, call Rebuild, and mark chunk clean [S2, unofficial]. If rebuild is not allowed, set complete to false and continue [S2, unofficial]. Return true if all dirty chunks were processed [S2, unofficial].
+4. **Prepare:** If pending task exists and is not complete, return false [S2, unofficial]. If complete, call FinishPending [S2, unofficial]. Collect dirty chunk indices [S2, unofficial]. If none, return true [S2, unofficial]. Create a task on a worker thread that builds meshes for dirty chunks using a local MeshBuilder [S2, unofficial]. Return false [S2, unofficial].
+5. **FinishPending:** If pending task is not completed, return false [S2, unofficial]. If completed, clear pending [S2, unofficial]. If pending mode differs from current mode, return true (meshes are useless) [S2, unofficial]. Otherwise, upload each chunk's data and mark chunks clean [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -54,30 +54,26 @@ class RemeshBudget:
         self.chunk_dirty_flags = {}  # Simulates world dirty state
 
     def _get_timestamp_ms(self):
-        # Standard high-resolution timer [G]
-        return time.perf_counter_ns() / 1e6
+        return time.perf_counter_ns() / 1e6  # [G]
 
     def _distance_to_camera(self, chunk_index):
-        # Euclidean distance from chunk center to camera position [G]
-        return 0.0
+        return 0.0  # [G]
 
     def _is_chunk_dirty(self, chunk_index):
         return self.chunk_dirty_flags.get(chunk_index, False)
 
     def _rebuild_chunk(self, chunk_index):
-        # Generates mesh: translate to center, scale by voxel scale, rotate by quaternion, translate to world pos [S2, unofficial]
-        pass
+        pass  # [S2, unofficial]
 
     def _upload_chunk_data(self, chunk_index):
-        # Uploads ChunkMeshData (Vertices, Indices) to GPU [S2, unofficial]
-        pass
+        pass  # [S2, unofficial]
 
     def _mark_chunk_clean(self, chunk_index):
         self.chunk_dirty_flags[chunk_index] = False
 
     def begin_frame(self):
         self.rebuilds_this_frame = 0
-        self.frame_started = self._get_timestamp_ms()
+        self.frame_started = self._get_timestamp_ms()  # [S2, unofficial]
 
     def is_rebuild_allowed(self):
         if self.rebuilds_this_frame >= self.max_rebuilds_per_frame:
@@ -93,59 +89,52 @@ class RemeshBudget:
             if not self.pending_task["complete"]:
                 return False
             self.finish_pending()
-        
         self.dirty_chunks = [idx for idx in self.chunk_dirty_flags if self._is_chunk_dirty(idx)]
         if not self.dirty_chunks:
             return True
-        
-        self.dirty_chunks.sort(key=lambda c: self._distance_to_camera(c))
+        self.dirty_chunks.sort(key=lambda c: self._distance_to_camera(c))  # [S1]
         self.pending_task = {"chunks": self.dirty_chunks, "complete": False, "mode": self.current_mode}
-        # Worker thread simulation: builds meshes using local MeshBuilder [S2, unofficial]
+        # Create a task on a worker thread that builds meshes for dirty chunks using a local MeshBuilder [S2, unofficial]
         return False
 
     def rebuild_within_budget(self):
         if not self.dirty_chunks:
             return True
-        
         all_processed = True
+        first_chunk = True
         for chunk_index in self.dirty_chunks:
             if not self._is_chunk_dirty(chunk_index):
                 continue
-            
-            if self.is_rebuild_allowed():
+            if self.is_rebuild_allowed() or first_chunk:  # Always process at least one chunk [S1][S2, unofficial]
                 self.rebuilds_this_frame += 1
                 self._rebuild_chunk(chunk_index)
                 self._mark_chunk_clean(chunk_index)
+                first_chunk = False
             else:
                 all_processed = False
                 break
-        
         return all_processed
 
     def finish_pending(self):
         if self.pending_task is None:
             return
-        
         if not self.pending_task["complete"]:
             return False
-        
+        pending_chunks = self.pending_task["chunks"]
         pending_mode = self.pending_task["mode"]
         self.pending_task = None
-        
         if pending_mode != self.current_mode:
             return True
-        
-        for chunk_index in self.pending_task["chunks"] if self.pending_task else []:
+        for chunk_index in pending_chunks:
             self._upload_chunk_data(chunk_index)
             self._mark_chunk_clean(chunk_index)
-        
         return True
 ```
 
 **Edge Cases and Pitfalls:**
 - **Mode Switch:** Changing `TerrainMode` from Blocks to Smooth or vice versa marks all bodies dirty, triggering full remeshing over subsequent frames [S2, unofficial].
 - **Precision:** Timestamps should use high-resolution counters (e.g., `Stopwatch.GetTimestamp()`) to accurately measure sub-millisecond budgets [S2, unofficial].
-- **Boundaries:** The first chunk is always processed regardless of budget limits to ensure responsiveness [S2, unofficial].
+- **Boundaries:** The first chunk is always processed regardless of budget limits to ensure responsiveness [S1][S2, unofficial].
 
 ## Subtopics
 
@@ -156,11 +145,8 @@ A queue-based system to batch and process chunk mesh rebuilds asynchronously or 
 - **Time Complexity:** Bounded by the frame budget rather than total chunk count [S1].
 - **Memory Complexity:** Proportional to the number of queued dirty chunks [S1].
 - **Measured Performance:** In the Outpost scene (4 chunks, 10k triangles), the system handles 37 draws/200k triangles on Low, 114 draws/879k on Balanced, and 153 draws/1.87M on Ultra [S1].
-- **Scaling:** Performance scales linearly with dirty chunk count until the time budget is exhausted [S1].
 - **Strengths:** Prevents main-thread stalls during rapid block placement [S2, unofficial].
 - **Limitations:** May leave some dirty chunks unprocessed in a single frame if the budget is exceeded [S2, unofficial].
-- **When to Use:** Ideal for dynamic voxel worlds with frequent block placement or removal [S2, unofficial].
-- **When Not to Use:** Unsuitable for static worlds where all meshes can be generated upfront [S2, unofficial].
 
 ## Background
 Remesh Budget originated in voxel-based sandbox games, specifically in projects like *Survivor Builder* and *VoxelTerraformer* [S1][S2, unofficial]. It was developed to address the performance issues associated with synchronous mesh generation in dynamic voxel environments [S1][S2, unofficial]. The method is applied in voxel engines that require consistent frame rates during active terrain modification [S1][S2, unofficial].

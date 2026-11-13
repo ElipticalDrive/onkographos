@@ -1,0 +1,145 @@
+# Finite State Machine for Interpolant Modelling
+
+Also called: FSM for Interpolant Modelling, Sweep-based FSM
+
+## Overview
+This method models the evolution of isosurface configurations within a voxel by sweeping from high to low isovalues, representing the sequence of marching cases as a finite state machine (FSM) [S1]. It is used to impose geometric and topological constraints on possible interpolant configurations, such as proving the completeness of specific case sets like Nielson's cases or modeling watertight Marching Cubes cases [S1]. Unlike standard lookup tables that map static vertex signs to triangles, this approach captures the dynamic path of case transitions as the isovalue changes, revealing details of the interpolant that symmetry-reduced static counts miss [S2, book].
+
+## How it works
+The method constructs an FSM where states correspond to marching cases and transitions correspond to vertices changing status from "white" (value < isovalue) to "black" (value > isovalue) during a high-to-low sweep [S1].
+
+### Inputs and Outputs
+*   **Input:** A set of valid marching cases (e.g., all 256 cases, or a subset like watertight cases [MSS94]).
+*   **Output:** A directed graph (FSM) where nodes are cases and edges are valid transitions. This defines the possible paths an interpolant can take as the isovalue varies.
+
+### Data Structures
+*   **State:** An integer or identifier representing a specific marching case (defined by the binary pattern of black/white vertices).
+*   **Transition:** A directed edge from State $A$ to State $B$.
+*   **FSM:** A graph $G = (V, E)$ where $V$ is the set of cases and $E$ is the set of valid transitions.
+
+### Steps
+1.  **Initialize:** Define the set of states $V$ as the set of all valid marching cases. For a standard cube, this is typically 256 cases, though constraints may reduce this [S1].
+2.  **Define Start State:** Each cube processing begins in Case 0 (all vertices white, i.e., all values < isovalue) [S1].
+3.  **Construct Transitions:** For every state $S_i \in V$, identify all states $S_j \in V$ that can be reached by flipping exactly one white vertex to black [S1].
+    *   Let $W(S)$ be the set of white vertices in case $S$.
+    *   Let $B(S)$ be the set of black vertices in case $S$.
+    *   A transition $S_i \to S_j$ exists if and only if:
+        1.  $S_j$ has exactly one more black vertex than $S_i$.
+        2.  The single black vertex in $S_j$ that is not in $S_i$ was white in $S_i$.
+        3.  The transition respects topological constraints of the specific interpolant (e.g., edge adjacency preservation) [S1].
+4.  **Validate Topology:** Ensure transitions do not violate topological invariants. For example, Case 2 (two edge-adjacent black vertices) cannot transition to Case 7 (no edge-adjacent black vertices) because losing edge adjacency is forbidden in the specific interpolant model [S1].
+5.  **Identify Paths:** A valid path through the FSM corresponds to a sequence of cases encountered as the isovalue sweeps from high to low. Each segment of the path between case changes corresponds to a patch of the interpolant [S2, book].
+
+### Formulas and Definitions
+*   **Vertex Status:**
+    $$
+    \text{status}(v) = \begin{cases} 
+    \text{Black} & \text{if } T(v) > h \\
+    \text{White} & \text{if } T(v) < h 
+    \end{cases}
+    $$
+    Where $T(v)$ is the scalar value at vertex $v$ and $h$ is the current isovalue [S1].
+*   **Trilinear Interpolant (Context):** The underlying function $T(x,y,z)$ for a cube with vertex values $T_{000} \dots T_{111}$ is:
+    $$
+    T(x,y,z) = axz + bxy + cyz + dxz + ex + fyz + gz + h
+    $$
+    (Note: Source [S1] contains a typo in the formula listing $dxz$ twice; standard trilinear form is $T(x,y,z) = c_0 + c_1 x + c_2 y + c_3 z + c_4 xy + c_5 xz + c_6 yz + c_7 xyz$) [S1].
+
+### Parameters
+*   **Sweep Direction:** High to low isovalue [S1].
+*   **Case Set:** Can be all 256 cases or a constrained subset (e.g., watertight cases) [S1].
+
+### Edge Cases and Pitfalls
+*   **Symmetry Reduction:** Symmetry reductions cannot be applied to the FSM path counting directly. Different paths (e.g., cyclic vs. zigzag) may have identical symmetry-reduced case sequences but result in different interpolant details [S2, book].
+*   **Non-Linear Patches:** If surface fragments are not interpolated along edges sharing a common vertex, the patch exhibits non-linear behavior and lacks polynomial spline properties [S2, book].
+*   **Discontinuities:** Regions defined by contours immediately above and below a vertex's isovalue are assigned that isovalue, generating a piecewise-continuous but not smooth interpolant [S2, book].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_fsm(case_set):
+    """
+    Constructs a Finite State Machine for interpolant modelling.
+    
+    Args:
+        case_set: A list or set of valid marching case identifiers.
+                  Each case is represented by an 8-bit integer where
+                  bit i is 1 if vertex i is black, 0 if white.
+    
+    Returns:
+        fsm: A dictionary mapping case_id -> list of next_case_ids.
+    """
+    fsm = {}
+    
+    # Step 1: Initialize states
+    states = set(case_set)
+    
+    # Step 2: Build transitions
+    for current_case in states:
+        next_cases = []
+        
+        # Get vertex indices that are currently white (0)
+        white_vertices = [i for i in range(8) if not (current_case & (1 << i))]
+        
+        # Step 3: Add transition to each case with one extra black vertex
+        for v in white_vertices:
+            next_case = current_case | (1 << v)
+            
+            # Check if next_case is in the valid set
+            if next_case in states:
+                # Step 4: Validate Topology (Example: Edge Adjacency Constraint)
+                # Specific constraints depend on the interpolant model.
+                # For standard watertight MC, we check if the transition
+                # preserves necessary topological features.
+                if is_valid_transition(current_case, next_case):
+                    next_cases.append(next_case)
+        
+        fsm[current_case] = next_cases
+        
+    return fsm
+
+def is_valid_transition(current_case, next_case):
+    """
+    Checks if a transition respects topological constraints.
+    This is a placeholder for specific interpolant rules.
+    Example: Case 2 cannot go to Case 7.
+    """
+    # Example constraint from [S1]:
+    # Case 2 (binary 00000011, vertices 0,1 black) has edge-adjacent black vertices.
+    # Case 7 (binary 00000111, vertices 0,1,2 black) also has edge-adjacent.
+    # The source example says Case 2 cannot sweep to Case 7 because 
+    # "Case 2 has two edge-adjacent black vertices and Case 7 has no edge-adjacent black vertices."
+    # Note: This specific example in [S1] seems to refer to a specific labeling or 
+    # a different case numbering convention. Implementers must consult the specific 
+    # case definition for their interpolant.
+    
+    # Generic check: Ensure the added vertex creates a valid configuration
+    # according to the specific interpolant's rules.
+    return True # Placeholder for specific logic
+```
+
+## Subtopics
+
+### Watertight Marching Cubes
+A specific application of the FSM to model watertight cases, ensuring topological consistency [S1].
+
+### Nielson's Cases
+The FSM was used to prove the completeness of Nielson's case set [S1].
+
+### Marching Hypercubes
+The approach extends to higher dimensions (Marching Hypercubes) by computing the convex hull of white vertices and edge points [S2, book].
+
+## Operating characteristics
+*   **Complexity:** The number of states is $2^N$ for an $N$-cube (256 for 3D). The number of transitions is proportional to $N \cdot 2^N$.
+*   **Performance:** The FSM construction is a pre-processing step. Runtime contouring uses the FSM to determine valid paths, which can constrain the search space for interpolant details [S1][S2, book].
+*   **Strengths:** Captures dynamic interpolant behavior that static lookup tables miss; proves completeness of case sets; handles topological constraints explicitly [S1][S2, book].
+*   **Limitations:** Does not enumerate all paths for Marching Cubes due to complexity; symmetry reduction is not straightforward for path counting [S2, book].
+
+## Background
+The method was introduced in "More Marching Cubes" [S1] and further detailed in "Interpolants Induced by Marching Cases" [S2, book]. It builds on the concept of sweeping isovalues to analyze the topology of the trilinear interpolant [S1]. It is used in research to understand the geometric properties of Marching Cubes interpolants and to derive constraints for robust surface extraction [S1][S2, book].
+
+## Sources
+[S1] More Marching Cubes, https://doi.org/10.2312/vg/vg07/081-090, fetched 2026-10-26
+[S2] Interpolants Induced by Marching Cases, https://doi.org/10.4230/dfu.vol2.sciviz.2011.48, fetched 2026-10-26 (book)

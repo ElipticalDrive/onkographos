@@ -1,0 +1,287 @@
+--- v002.md
++++ v003.md
+@@ -4,166 +4,148 @@
+ 
+ ## Overview
+-A deformation technique that maps points from an arbitrary quadratic Bezier spline tube to a canonical vertical cylinder, enabling the use of pre-defined density fields defined on the cylinder [S1, unofficial]. It differs from cubic spline approaches by prioritizing computational simplicity for closest-point and curvilinear abscissa calculation, at the cost of more complex segment concatenation constraints [S1, unofficial]. It builds on [Spline Tube to Cylinder Mapping](10061-spline-tube-to-cylinder-mapping.md).
++Quadratic Bezier Tube Deformation is a technique for mapping points from an arbitrary spline tube defined by quadratic Bezier segments to a canonical vertical cylinder, enabling the use of pre-defined density fields. It solves the problem of inverse parameterization in volumetric rendering by providing a robust Signed Distance Function (SDF) to the curve, which yields the curvilinear abscissa required for texture coordinate calculation. It is distinguished from cubic spline approaches by its computational simplicity in finding the closest point and curvilinear abscissa, though it imposes stricter constraints on segment concatenation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D point $P$ in world space, a list of quadratic Bezier segments defining the curve, and the ray direction/origin for bounding box caching [S1, unofficial].
+-- Output: The mapped point in canonical cylinder space (radius 1, height 1) and the SDF value of the tube [G].
++*   **Input:** A query point $P$ in world space; a list of quadratic Bezier segments defining the curve. Each segment $i$ is defined by three control points $A_i, B_i, C_i$.
++*   **Output:** The deformed coordinates $(u, v, w)$ in the canonical cylinder space, where $u$ and $v$ are angular/radial coordinates and $w$ is the curvilinear abscissa (normalized height).
+ 
+ **Data Structures:**
+-- **Bezier Segment:** Defined by three control points $A, B, C \in \mathbb{R}^3$ [S1, unofficial].
+-  - $A$: Start point ($t=0$) [S1, unofficial].
+-  - $B$: Control point influencing curvature [S1, unofficial].
+-  - $C$: End point ($t=1$) [S1, unofficial].
+-- **Segment List:** An ordered array of Bezier segments [S1, unofficial]. For continuity, the start point $A_i$ of segment $i$ must equal the end point $C_{i-1}$ of segment $i-1$ [S1, unofficial].
++*   **Bezier Segment:** Defined by three 3D vectors $A, B, C$.
++    *   $A$: Start point ($t=0$).
++    *   $B$: Control point (pulls the curve).
++    *   $C$: End point ($t=1$).
++*   **Segment List:** An ordered array of segments. For concatenation, the start of segment $i+1$ must equal the end of segment $i$ ($A_{i+1} = C_i$).
+ 
+ **Formulas:**
+-The quadratic Bezier curve $Q(t)$ for $t \in [0, 1]$ is:
+-$$ Q(t) = (1-t)^2 A + 2(1-t)t B + t^2 C $$
+-The tangent vectors at the endpoints are:
+-$$ Q'(0) = 2(B - A) $$
+-$$ Q'(1) = 2(C - B) $$
++The quadratic Bezier curve for a segment is defined as:
++$$ Q(t) = (1-t)^2 A + 2(1-t)t B + t^2 C, \quad t \in [0, 1] $$
++The tangent at $t=0$ is parallel to vector $\vec{AB} = B - A$. The tangent at $t=1$ is parallel to vector $\vec{BC} = C - B$.
++
++To find the deformation, we must find the closest point on the curve to $P$. This is achieved by computing the SDF to the quadratic Bezier segment. The SDF implementation (based on Quilez 2013) returns both the distance and the parameter $t$ of the closest point, which corresponds to the curvilinear abscissa.
+ 
+ **Steps:**
+-1. **Bounding Box Caching (Per Ray):**
+-   - For the current ray, determine which Bezier segments' bounding boxes intersect the ray [S1, unofficial].
+-   - Cache this subset of segment indices for the duration of the ray march [S1, unofficial].
+-   - This avoids re-evaluating bounding box intersections for every ray-marching step [S1, unofficial].
+-   - Note: Explicit bounding box computation per segment (e.g., using Quilez 2020) is omitted due to high overhead; simple ray-box intersection tests are used instead [S1, unofficial].
+-
+-2. **Closest Segment Selection:**
+-   - Initialize `min_dist` to infinity and `closest_segment` to null [G].
+-   - Iterate through each segment $S_i$ in the cached subset [S1, unofficial].
+-   - Compute the SDF from point $P$ to the Bezier *curve* (not the tube) for segment $S_i$ [S1, unofficial].
+-   - Retrieve the curvilinear abscissa $t$ of the closest point on the curve [S1, unofficial].
+-   - If the SDF value is less than `min_dist`, update `min_dist` and `closest_segment` [S1, unofficial].
+-   - If no segments are in the cached subset, return the SDF of the entire curve as infinity (or handle as outside) [S1, unofficial].
+-
+-3. **Tube SDF Calculation:**
+-   - Let $d_{curve}$ be the minimum SDF value found in Step 2 [G].
+-   - Let $r_{tube}$ be the radius of the tube [G].
+-   - The SDF of the tube is $d_{tube} = d_{curve} - r_{tube}$ [G].
+-   - The signed distance is negative inside the tube [G].
+-
+-4. **Mapping to Cylinder:**
+-   - Using the curvilinear abscissa $t$ from the closest point, map the point $P$ to the canonical cylinder [S1, unofficial].
+-   - The canonical cylinder has radius 1 and height 1 [G].
+-   - The mapping involves rotating the local frame of the Bezier segment at $t$ to align with the cylinder's axis and scaling the radial distance [G].
++1.  **Initialize:** Set `min_dist` to infinity and `best_t` to 0.
++2.  **Iterate Segments:** For each segment $i$ in the curve:
++    a.  **Optimization (Ray Casting):** Perform a ray-casting test against the bounding box of segment $i$ relative to the ray origin. If the ray does not intersect the bounding box, skip this segment. Cache this result per pixel to avoid re-evaluation during ray marching [S1, unofficial].
++    b.  **SDF Evaluation:** Compute the SDF from point $P$ to the quadratic Bezier segment $i$. Let the result be $d_i$ and the closest point parameter be $t_i$.
++    c.  **Update Minimum:** If $d_i < \text{min\_dist}$, set $\text{min\_dist} = d_i$ and $\text{best\_t} = t_i$.
++3.  **Map to Cylinder:** Using the best $t$ found, map the point to the canonical cylinder. The height $w$ is normalized based on the total length of the curve or the segment's contribution. The radial and angular coordinates are derived from the vector from the closest point on the curve to $P$.
+ 
+ **Pseudocode:**
+ ```python
+-def quadratic_bezier_tube_deformation(P, ray_origin, ray_direction, segments, r_tube):
+-    # Step 1: Cache intersecting segments for this ray
+-    cached_indices = []
++def quadratic_bezier_sdf_segment(P, A, B, C):
++    """
++    Computes SDF to a quadratic Bezier segment.
++    Returns (distance, t) where t is the parameter of the closest point.
++    Based on Quilez 2013 implementation logic.
++    """
++    # Implementation details for quadratic Bezier SDF are assumed available
++    # as per the source reference [S1, unofficial].
++    # This function solves for the closest point on the curve Q(t).
++    return distance, t
++
++def get_bounding_box(A, B, C):
++    """
++    Computes the axis-aligned bounding box for the quadratic Bezier segment.
++    """
++    # Calculate extrema of the quadratic function for each axis
++    # This is a standard geometric computation for Bezier bounds.
++    # Note: The source notes that a specific reference implementation 
++    # by Quilez 2020 was found to be slower than simple ray-casting,
++    # so this function is used primarily for the ray-casting check.
++    pass
++
++def ray_intersects_bounding_box(ray_origin, ray_direction, bbox):
++    """
++    Checks if a ray intersects an AABB.
++    Returns True if intersection is possible.
++    """
++    # Standard slab method for ray-AABB intersection
++    pass
++
++def deform_point(P, ray_origin, ray_direction, segments, pixel_cache):
++    """
++    Deforms point P to cylinder coordinates using quadratic Bezier segments.
++    """
++    min_dist = float('inf')
++    best_t = 0.0
++    best_segment_idx = -1
++    
++    # Optimization: Check bounding boxes
++    # Cache results per pixel to avoid redundant ray-casting during marching
+     for i, seg in enumerate(segments):
+-        # Compute conservative AABB from control points
+-        bbox_min = min(seg.A, seg.B, seg.C)
+-        bbox_max = max(seg.A, seg.B, seg.C)
+-        if ray_intersects_bbox(ray_origin, ray_direction, bbox_min, bbox_max):
+-            cached_indices.append(i)
++        A, B, C = seg
++        
++        # Check cache
++        cache_key = (i, ray_origin, ray_direction) # Simplified key
++        if cache_key in pixel_cache:
++            if not pixel_cache[cache_key]:
++                continue
++        
++        bbox = get_bounding_box(A, B, C)
++        intersects = ray_intersects_bounding_box(ray_origin, ray_direction, bbox)
++        
++        # Cache the result
++        pixel_cache[cache_key] = intersects
++        
++        if not intersects:
++            continue
++            
++        # Compute SDF
++        dist, t = quadratic_bezier_sdf_segment(P, A, B, C)
++        
++        if dist < min_dist:
++            min_dist = dist
++            best_t = t
++            best_segment_idx = i
++            
++    # Map to cylinder space
++    # The exact mapping of t to w depends on the specific spline tube definition
++    # and normalization used in the parent method [10061-spline-tube-to-cylinder-mapping.md].
++    # Typically, w is normalized by the total curve length or segment length.
+     
+-    # Cache this list for subsequent ray-marching steps (implementation detail)
++    # Get the closest point on the curve
++    # Q(t) = (1-t)^2 * A + 2*(1-t)*t * B + t^2 * C
++    inv_t = 1.0 - best_t
++    closest_point = (inv_t * inv_t) * A + (2.0 * inv_t * best_t) * B + (best_t * best_t) * C
+     
+-    min_dist = float('inf')
+-    closest_t = 0.0
+-    closest_seg_idx = -1
++    # Vector from curve to point
++    vec = P - closest_point
+     
+-    # Step 2: Iterate over cached segments
+-    for i in cached_indices:
+-        seg = segments[i]
+-        # Compute SDF to the Bezier curve (not tube) and get curvilinear abscissa
+-        # This function returns (distance_to_curve, t)
+-        dist_curve, t = sdf_bezier_curve(P, seg)
+-        
+-        if dist_curve < min_dist:
+-            min_dist = dist_curve
+-            closest_t = t
+-            closest_seg_idx = i
+-            
+-    if closest_seg_idx == -1:
+-        return float('inf'), None # Point is far from all segments
+-        
+-    # Step 3: Tube SDF
+-    tube_sdf = min_dist - r_tube
++    # Cylinder coordinates (u, v, w)
++    # u, v are derived from vec (e.g., polar coordinates)
++    # w is derived from best_t and segment index
++    u = atan2(vec.y, vec.x) # Example projection
++    v = length(vec.xz)      # Example radius
++    w = best_t              # Normalized parameter
+     
+-    # Step 4: Mapping
+-    # Get the frame at closest_t on the closest segment
+-    seg = segments[closest_seg_idx]
+-    closest_point = eval_bezier(seg, closest_t)
+-    tangent = eval_bezier_derivative(seg, closest_t)
+-    tangent = normalize(tangent)
+-    
+-    # Map P to canonical cylinder space
+-    # This requires constructing a local coordinate system
+-    # and transforming P relative to the curve's geometry [G]
+-    mapped_point = map_to_canonical_cylinder(P, closest_point, tangent, closest_t)
+-    
+-    return tube_sdf, mapped_point
+-
+-def ray_intersects_bbox(origin, direction, bbox_min, bbox_max):
+-    # Standard slab test for AABB
+-    t_min = (bbox_min.x - origin.x) / direction.x if direction.x != 0 else float('inf')
+-    t_max = (bbox_max.x - origin.x) / direction.x if direction.x != 0 else float('-inf')
+-    if t_min > t_max: t_min, t_max = t_max, t_min
+-    ty_min = (bbox_min.y - origin.y) / direction.y if direction.y != 0 else float('inf')
+-    ty_max = (bbox_max.y - origin.y) / direction.y if direction.y != 0 else float('-inf')
+-    if ty_min > ty_max: ty_min, ty_max = ty_max, ty_min
+-    if t_min > ty_max or ty_min > t_max: return False
+-    t_min = max(t_min, ty_min)
+-    t_max = min(t_max, ty_max)
+-    tz_min = (bbox_min.z - origin.z) / direction.z if direction.z != 0 else float('inf')
+-    tz_max = (bbox_max.z - origin.z) / direction.z if direction.z != 0 else float('-inf')
+-    if tz_min > tz_max: tz_min, tz_max = tz_max, tz_min
+-    if t_min > tz_max or tz_min > t_max: return False
+-    return True
+-
+-def sdf_bezier_curve(P, seg):
+-    # Sources do not provide the exact closest-point solver; 
+-    # standard polynomial root finding or Newton iteration is used [G].
+-    # Matches the Quilez 2013 implementation referenced in the sources [S1, unofficial].
+-    t = find_closest_t(P, seg.A, seg.B, seg.C)
+-    Q = eval_bezier(seg, t)
+-    return distance(P, Q), t
+-
+-def find_closest_t(P, A, B, C):
+-    # Solve |P - Q(t)|^2 derivative = 0 for t in [0, 1] [G]
+-    # Returns a valid parameter t
+-    return 0.5 # Placeholder for standard solver implementation [G]
+-
+-def eval_bezier(seg, t):
+-    A, B, C = seg.control_points
+-    u = 1 - t
+-    return u*u*A + 2*u*t*B + t*t*C
+-
+-def eval_bezier_derivative(seg, t):
+-    A, B, C = seg.control_points
+-    u = 1 - t
+-    return 2*u*(B-A) + 2*t*(C-B)
+-
+-def map_to_canonical_cylinder(P, closest_point, tangent, t):
+-    # Construct local frame (e.g., Frenet or rotation matrix aligning tangent with Z-axis)
+-    # Apply affine transform to map radial offset and curvilinear position to cylinder space [G]
+-    return P # Placeholder for standard frame transformation [G]
++    return u, v, w
+ ```
+ 
+ **Parameters:**
+-- Tube radius $r_{tube}$: Not given in the sources [G].
+-- Number of segments: Scales linearly; performance degrades with more segments if caching is ineffective [S1, unofficial].
++*   **Ray Casting Cache:** Enabled per pixel.
++*   **Bounding Box Check:** Used for early rejection. Note: The source indicates that a complex bounding box calculation was removed in favor of simpler ray-casting because the former was slower on average [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Concatenation Constraints:** Only one control point per segment is "free" [S1, unofficial]. The start point $A$ must match the end point $C$ of the previous segment [S1, unofficial]. The middle point $B$ must be chosen to ensure derivative continuity (G1 continuity) with the previous segment [S1, unofficial]. Modifying one segment affects all subsequent segments [S1, unofficial].
+-- **Performance:** Iterating over all segments is expensive [S1, unofficial]. Bounding box checks using explicit formulas (Quilez 2020) are slower than simple ray-box intersection tests and were removed in favor of caching [S1, unofficial].
+-- **Precision:** The SDF for the Bezier curve (not tube) must be accurate to ensure correct curvilinear abscissa retrieval [S1, unofficial].
++*   **Concatenation:** Quadratic Bezier segments are difficult to concatenate smoothly. Only one control point ($B$) is "free" per segment. $A$ is fixed by the previous segment's $C$. $B$ must be constrained to ensure derivative continuity. Modifying one segment affects all subsequent segments [S1, unofficial].
++*   **Performance:** The SDF evaluation scales linearly with the number of segments. Without bounding box/ray-casting optimization, this is expensive. The ray-caching optimization is critical for performance in volumetric rendering [S1, unofficial].
++*   **SDF Availability:** The method relies on the availability of an SDF for quadratic Bezier segments that returns the curvilinear abscissa. This is a key reason for choosing quadratic over cubic splines [S1, unofficial].
++
++## Subtopics
++
++### [Curve-based Volumetric Free-Form Deformation](14160-curve-based-volumetric-free-form-deformation.md)
++Uses open uniform B-splines instead of Bezier curves. It constructs a lattice of curves in world space to avoid inverse parameterization issues, allowing flexible shape manipulation on the CPU. Choose this when smooth, global deformation of complex volumes (like fire) is needed and CPU-side evaluation is acceptable.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of Bezier segments $N$ in the worst case ($O(N)$) [S1, unofficial]. With bounding box caching, the average case is significantly lower, depending on the spatial distribution of segments and ray direction [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ to store the segment list [G]. Additional $O(1)$ per ray for caching intersecting segments [S1, unofficial].
+-- **Strengths:** Simpler closest-point and curvilinear abscissa calculation compared to cubic splines [S1, unofficial]. Fast SDF implementation available (Quilez 2013) [S1, unofficial].
+-- **Limitations:** Difficult to concatenate segments smoothly [S1, unofficial]. Performance degrades with many segments if bounding box optimization is not effective [S1, unofficial].
+-- **When to Use:** When computational simplicity for closest-point calculation is prioritized over ease of curve editing/concatenation [S1, unofficial]. Suitable for real-time rendering where cubic spline SDFs are too expensive [S1, unofficial].
+-- **When Not to Use:** When complex curve editing with independent segment control is required [S1, unofficial].
++*   **Time Complexity:** Linear $O(N)$ with respect to the number of Bezier segments, where $N$ is the number of segments. With ray-casting optimization, the constant factor is significantly reduced, often evaluating only a small subset of segments per ray step.
++*   **Memory Complexity:** Low. Requires storing control points for the segments and a small cache per pixel for bounding box intersection results.
++*   **Strengths:** Computationally simpler than cubic splines for finding the closest point and curvilinear abscissa. Robust SDF implementation available.
++*   **Limitations:** Difficult to concatenate segments smoothly. Modifications to one segment propagate to all subsequent segments. Bounding box calculation overhead can negate benefits if not optimized (ray-casting is preferred).
++*   **When to Use:** When a simple, robust deformation is needed for procedural volumes and the curve structure is relatively static or simple.
++*   **When Not to Use:** When high-degree smoothness across many segments is required, or when the curve topology changes frequently.
+ 
+ ## Background
+-Quadratic Bezier curves were chosen over cubic splines for this deformation technique because solving for the closest point and curvilinear abscissa is computationally simpler for quadratics [S1, unofficial]. An SDF implementation returning the curvilinear abscissa for Bezier segments is available (Quilez 2013), making implementation straightforward [S1, unofficial]. However, concatenating quadratic Bezier segments is more restrictive than cubic splines, as only one control point per segment is free, and modifications impact subsequent segments [S1, unofficial].
++The technique was developed for the real-time rendering of interstellar dust clouds and solar flares. Quadratic Bezier curves were chosen over cubic splines because solving for the closest point and curvilinear abscissa is computationally simpler, and a suitable SDF implementation returning the curvilinear abscissa was available (Quilez 2013). The method was implemented in a renderer using Sphere Marching for bounding box detection. A reference implementation for bounding box computation by Quilez (2020) was tested but found to be slower than simple ray-casting, leading to its removal [S1, unofficial].
+ 
+ ## Sources

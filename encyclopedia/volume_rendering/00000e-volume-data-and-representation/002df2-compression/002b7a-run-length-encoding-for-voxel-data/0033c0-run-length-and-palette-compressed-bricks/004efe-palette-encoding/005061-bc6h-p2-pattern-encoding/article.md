@@ -1,0 +1,191 @@
+# BC6H P2 Pattern Encoding
+Also called: EncodeP2Pattern
+
+## Overview
+BC6H P2 Pattern Encoding compresses a 4x4 texel block by partitioning the 16 texels into two subsets (partitions 0 and 1) based on a predefined binary pattern, then encoding each subset with a separate 3D line segment in RGB space. It solves the problem of encoding blocks with bimodal color distributions where a single linear interpolation (P1) is insufficient. It sets itself apart from P1 encoding by using two endpoints per color channel per partition, allowing for more complex color transitions, and from P0 encoding by allowing arbitrary partitioning patterns rather than fixed geometric splits.
+
+## How it works
+**Inputs:** A 4x4 block of 16 RGB texels (stored as `float3` or `half3`), and a pattern index (0–255) defining which texel belongs to partition 0 or 1.
+**Outputs:** A compressed block represented as four 32-bit integers (`uint4 block`), and the Mean Squared Log Error (`float blockMSLE`) for rate-distortion optimization.
+
+**Data Structures:**
+*   `texels[16]`: Array of `float3` representing the input RGB values.
+*   `block`: `uint4` output container.
+*   `p0BlockMin`, `p0BlockMax`, `p1BlockMin`, `p1BlockMax`: `float3` bounding box extremes for each partition.
+*   `p0BlockDir`, `p1BlockDir`: Normalized direction vectors for each partition.
+*   `endpoint0Pos`, `endpoint1Pos`: `float` positions along the direction vector, quantized to half-precision.
+
+**Steps:**
+
+1.  **Initialize Bounding Boxes:**
+    Initialize `p0BlockMin` and `p1BlockMin` to `(HALF_MAX, HALF_MAX, HALF_MAX)` and `p0BlockMax` and `p1BlockMax` to `(0.0f, 0.0f, 0.0f)`. Iterate over all 16 texels. If `Pattern(pattern, i) == 0`, update `p0BlockMin` and `p0BlockMax` with `texels[i]`. Otherwise, update `p1BlockMin` and `p1BlockMax` with `texels[i]`. [S1, unofficial]
+
+2.  **Compute Direction Vectors:**
+    Calculate the direction vector for each partition:
+    $$ \vec{d}_0 = \frac{\vec{p0BlockMax} - \vec{p0BlockMin}}{(\vec{p0BlockMax} - \vec{p0BlockMin})_x + (\vec{p0BlockMax} - \vec{p0BlockMin})_y + (\vec{p0BlockMax} - \vec{p0BlockMin})_z} $$
+    $$ \vec{d}_1 = \frac{\vec{p1BlockMax} - \vec{p1BlockMin}}{(\vec{p1BlockMax} - \vec{p1BlockMin})_x + (\vec{p1BlockMax} - \vec{p1BlockMin})_y + (\vec{p1BlockMax} - \vec{p1BlockMin})_z} $$
+    [S1, unofficial]
+
+3.  **Compute Endpoint Positions:**
+    Project the min and max bounds onto the direction vectors and quantize to half-precision:
+    $$ pos_{0,0} = \text{f32tof16}(\vec{d}_0 \cdot \vec{p0BlockMin}) $$
+    $$ pos_{0,1} = \text{f32tof16}(\vec{d}_0 \cdot \vec{p0BlockMax}) $$
+    $$ pos_{1,0} = \text{f32tof16}(\vec{d}_1 \cdot \vec{p1BlockMin}) $$
+    $$ pos_{1,1} = \text{f32tof16}(\vec{d}_1 \cdot \vec{p1BlockMax}) $$
+    [S1, unofficial]
+
+4.  **Fixup Check:**
+    For each partition, check if swapping endpoints improves the index mapping.
+    For partition 0:
+    $$ idx_0 = \text{ComputeIndex3}(\text{f32tof16}(\vec{d}_0 \cdot \vec{texels}[0]), pos_{0,0}, pos_{0,1}) $$
+    $$ idx_{fixup} = \text{ComputeIndex3}(\text{f32tof16}(\vec{d}_0 \cdot \vec{texels}[\text{fixupID}]), pos_{0,0}, pos_{0,1}) $$
+    If `idx_0 > 3` or `idx_{fixup} > 3`, swap `pos_{0,0}` and `pos_{0,1}`, and swap `p0BlockMin` and `p0BlockMax`. Repeat for partition 1 with its respective `fixupID`. [S1, unofficial]
+    *Note: `ComputeIndex3` maps a position to an integer index in [0, 7] based on the two endpoint positions.*
+
+5.  **Generate Indices:**
+    For each texel `i`:
+    $$ pos = \text{f32tof16}(\vec{d}_{paletteID} \cdot \vec{texels}[i]) $$
+    $$ indices[i] = \text{ComputeIndex3}(pos, pos_{paletteID,0}, pos_{paletteID,1}) $$
+    where `paletteID = Pattern(pattern, i)`. [S1, unofficial]
+
+6.  **Quantize Endpoints:**
+    Two formats are evaluated: 7.6 and 9.5.
+    *   **7.6 Format:**
+        $$ E_{0,0} = \text{Quantize7}(p0BlockMin) $$
+        $$ E_{0,1} = \text{Quantize7}(p0BlockMax) - E_{0,0} $$
+        Clamp $E_{0,1}$ to $[-0x1F, 0x1F]$. Similarly for partition 1.
+    *   **9.5 Format:**
+        $$ E_{0,0} = \text{Quantize9}(p0BlockMin) $$
+        $$ E_{0,1} = \text{Quantize9}(p0BlockMax) - E_{0,0} $$
+        Clamp $E_{0,1}$ to $[-0xF, 0xF]$. [S1, unofficial]
+
+7.  **Calculate MSLE:**
+    Unquantize endpoints for both formats. For each texel `i`, calculate the reconstructed color and the weighted squared error.
+    Weight for 7.6: $w_i = \lfloor (indices[i] \times 64.0) / 7.0 + 0.5 \rfloor$.
+    Weight for 9.5: $w_i = \lfloor (indices[i] \times 64.0) / 15.0 + 0.5 \rfloor$.
+    $$ \text{MSLE} = \sum_{i=0}^{15} \text{CalcMSLE}(\vec{texels}[i], \text{FinishUnquantize}(E_{0,0}, E_{0,1}, w_i)) $$
+    [S1, unofficial]
+
+8.  **Sign-Extend:**
+    Sign-extend the difference endpoints. For 7.6: `SignExtend(E_diff, 0x1F, 0x20)`. For 9.5: `SignExtend(E_diff, 0xF, 0x10)`. [S1, unofficial]
+
+9.  **Select Best Format:**
+    Compare MSLE of 7.6 and 9.5. Select the format with lower MSLE.
+    *   If 7.6 is better: Set `block.x = 0x1`. Pack endpoints into `block.x`, `block.y`, `block.z`.
+    *   If 9.5 is better: Set `block.x = 0xE`. Pack endpoints into `block.x`, `block.y`, `block.z`.
+    [S1, unofficial]
+
+10. **Pack Pattern Index:**
+    Pack the pattern index into `block.z` starting at bit 13:
+    $$ block.z \ |= \ (pattern \ll 13) $$
+    [S1, unofficial]
+
+11. **Pack Fixup Indices:**
+    Pack the 16 indices into `block.z` and `block.w` based on `PatternFixupID(pattern)`.
+    *   If `PatternFixupID(pattern) == 15`: Pack `indices[0..15]` into `block.z` (bits 18-30) and `block.w` (bits 0-30).
+    *   If `PatternFixupID(pattern) == 2`: Pack `indices[0..4]` into `block.z`, `indices[5]` split between `block.z` and `block.w`, `indices[6..15]` into `block.w`.
+    *   Otherwise: Pack `indices[0..4]` into `block.z`, `indices[5..15]` into `block.w`.
+    [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def EncodeP2Pattern(texels: List[float3], pattern: int) -> Tuple[uint4, float]:
+    # 1. Initialize Bounding Boxes
+    half_max = float('inf') # Assuming HALF_MAX is large enough float
+    p0_min = float3(half_max, half_max, half_max)
+    p0_max = float3(0.0, 0.0, 0.0)
+    p1_min = float3(half_max, half_max, half_max)
+    p1_max = float3(0.0, 0.0, 0.0)
+
+    for i in range(16):
+        palette_id = Pattern(pattern, i)
+        if palette_id == 0:
+            p0_min = min(p0_min, texels[i])
+            p0_max = max(p0_max, texels[i])
+        else:
+            p1_min = min(p1_min, texels[i])
+            p1_max = max(p1_max, texels[i])
+
+    # 2. Compute Direction Vectors
+    p0_dir = p0_max - p0_min
+    p0_dir = p0_dir / (p0_dir.x + p0_dir.y + p0_dir.z)
+    
+    p1_dir = p1_max - p1_min
+    p1_dir = p1_dir / (p1_dir.x + p1_dir.y + p1_dir.z)
+
+    # 3. Compute Endpoint Positions
+    p0_ep0 = f32tof16(dot(p0_dir, p0_min))
+    p0_ep1 = f32tof16(dot(p0_dir, p0_max))
+    p1_ep0 = f32tof16(dot(p1_dir, p1_min))
+    p1_ep1 = f32tof16(dot(p1_dir, p1_max))
+
+    # 4. Fixup Check (Simplified for Partition 0, assume fixupID logic is handled)
+    # Note: Real implementation checks specific texels based on pattern
+    # This is a placeholder for the complex fixup logic described in sources
+    # In practice, this involves ComputeIndex3 and swapping if index > 3
+    
+    # 5. Generate Indices
+    indices = [0] * 16
+    for i in range(16):
+        palette_id = Pattern(pattern, i)
+        if palette_id == 0:
+            pos = f32tof16(dot(p0_dir, texels[i]))
+            indices[i] = ComputeIndex3(pos, p0_ep0, p0_ep1)
+        else:
+            pos = f32tof16(dot(p1_dir, texels[i]))
+            indices[i] = ComputeIndex3(pos, p1_ep0, p1_ep1)
+
+    # 6 & 7. Quantize and Calculate MSLE for both formats
+    # This part is complex and involves optimization loops.
+    # For brevity, we assume a function that returns best format and MSLE
+    best_format, msle, ep0_76, ep1_76, ep0_95, ep1_95 = EvaluateFormats(texels, indices, p0_dir, p1_dir, p0_min, p0_max, p1_min, p1_max)
+
+    # 8. Sign-Extend
+    # Handled within EvaluateFormats or packing step
+
+    # 9. Select Best Format and Pack
+    block = uint4(0, 0, 0, 0)
+    if best_format == '7.6':
+        block.x = 0x1
+        # Pack 7.6 endpoints into block.x, y, z
+        # ... specific bit shifts ...
+    else:
+        block.x = 0xE
+        # Pack 9.5 endpoints into block.x, y, z
+        # ... specific bit shifts ...
+
+    # 10. Pack Pattern Index
+    block.z |= (pattern << 13)
+
+    # 11. Pack Fixup Indices
+    fixup_id = PatternFixupID(pattern)
+    if fixup_id == 15:
+        # Pack indices[0..15] into block.z (bits 18-30) and block.w (bits 0-30)
+        pass
+    elif fixup_id == 2:
+        # Pack indices[0..4] into block.z, indices[5] split, indices[6..15] into block.w
+        pass
+    else:
+        # Pack indices[0..4] into block.z, indices[5..15] into block.w
+        pass
+
+    return block, msle
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per block, but with a high constant factor due to the evaluation of two quantization formats and potential optimization loops.
+*   **Memory Complexity:** $O(1)$ per block.
+*   **Performance:** Significantly slower than P1 encoding due to the need to evaluate two formats and perform fixup checks. [S1, unofficial]
+*   **Strengths:** Better quality for blocks with bimodal color distributions compared to P1. [S1, unofficial]
+*   **Limitations:** Higher computational cost. [S1, unofficial]
+*   **When to use:** When P1 encoding results in high MSLE, indicating a bimodal distribution. [S1, unofficial]
+*   **When not to use:** When computational resources are limited and P1 quality is acceptable. [S1, unofficial]
+
+## Background
+BC6H P2 Pattern Encoding is part of the BC6H texture compression standard, designed for high-quality compression of HDR floating-point textures. It was developed to handle complex color distributions that single-line interpolation (P1) cannot represent. The method is implemented in various GPU compression libraries, including the unofficial GPURealTimeBC6H implementation. [S1, unofficial]
+
+## Sources
+[S1] Real-time BC6H compression on GPU, https://github.com/knarkowicz/GPURealTimeBC6H, fetched 2026-10-27 (unofficial)
