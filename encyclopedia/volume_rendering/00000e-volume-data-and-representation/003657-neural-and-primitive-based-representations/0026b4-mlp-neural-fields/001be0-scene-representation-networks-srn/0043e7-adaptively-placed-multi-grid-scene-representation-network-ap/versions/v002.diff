@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -36,5 +36,5 @@
+         *   The top-left $3 \times 3$ submatrix handles scale, rotation, and shearing [S1].
+         *   The 4th column handles translation [S1].
+-        *   Note: The source notation uses $G_{i,r,c}$ for rows/cols. The bottom row is fixed as $[0, 0, 0, 1]$ for affine transformation in homogeneous coordinates [S1].
++        *   The bottom row is fixed as $[0, 0, 0, 1]$ for affine transformation in homogeneous coordinates [S1].
+ 
+ 3.  **Decoder MLP ($m$):**
+@@ -50,5 +50,5 @@
+     *   Transformation matrices ($\mathbf{G}$): Learning rate $0.001$, $\beta_1=0.9$, $\beta_2=0.99$ [S1].
+ *   **Batch Size:** 100,000 coordinates sampled uniformly from $[-1, 1]^3$ per iteration [S1].
+-*   **Flat-top Gaussian Strength ($p$):** Controls the box-like shape of the density approximation. Not given in the sources.
++*   **Flat-top Gaussian Strength ($p$):** Controls the box-like shape of the density approximation [S1].
+ *   **Scaling Parameters:** Pre-computed global minimum ($min$) and maximum ($max$) of the training volume [S1].
+ 
+@@ -94,7 +94,7 @@
+ 
+ ### Feature Density Loss and Training
+-To adaptively move grids, a feature density loss is used. The true feature density $\rho(\mathbf{x})$ is defined by the determinant of the transformation matrix, but this is non-differentiable at boundaries. It is approximated by a flat-top Gaussian [S1].
+-
+-1.  **Determinant Calculation:** For grid $i$, calculate the determinant of the top-left $3 \times 3$ submatrix of $\mathbf{G}_i$, denoted $\det(\mathbf{G}_{i,0:3,0:3})$. This represents the feature density contribution if the point is inside the grid [S1].
++To adaptively move grids, a feature density loss is used [S1]. The true feature density $\rho(\mathbf{x})$ is defined by the determinant of the transformation matrix, but this is non-differentiable at boundaries [S1]. It is approximated by a flat-top Gaussian [S1].
++
++1.  **Determinant Calculation:** For grid $i$, calculate the determinant of the top-left $3 \times 3$ submatrix of $\mathbf{G}_i$, denoted $\det(\mathbf{G}_{i,0:3,0:3})$ [S1]. This represents the feature density contribution if the point is inside the grid [S1].
+ 2.  **Flat-top Gaussian Approximation:** Approximate the box function of the grid boundary using:
+     $$
+@@ -107,5 +107,5 @@
+     $$
+     [S1]
+-4.  **Loss Calculation:** Compute the relative entropy between the current feature density $\rho$ and a target feature density $\rho^*$ (derived from reconstruction error). Higher feature density is encouraged in high-error regions [S1].
++4.  **Loss Calculation:** Compute the relative entropy between the current feature density $\rho$ and a target feature density $\rho^*$ (derived from reconstruction error) [S1]. Higher feature density is encouraged in high-error regions [S1].
+ 5.  **Optimization:** Update $\mathbf{G}$ and MLP weights using the combined reconstruction loss and feature density loss [S1].
+ 
+@@ -136,7 +136,5 @@
+         # Transformation matrices: [M, 4, 4]
+         # Initialize at global scale with small random perturbations [S1]
+-        # Identity for rotation/scale, zero translation, then perturb
+         self.G = nn.Parameter(torch.eye(4).unsqueeze(0).repeat(M, 1, 1))
+-        # Add small random noise to G to break symmetry [S1]
+         self.G.data += torch.randn_like(self.G) * 0.01
+         
+@@ -159,11 +157,7 @@
+         # G: [M, 4, 4]
+         # We want local coords for each grid for each point
+-        # Result shape: [M, N, 4]
+-        x_local_h = torch.bmm(G, x_h.transpose(1, 2).unsqueeze(0).expand(M, -1, -1)) # [M, 4, N] -> [M, 4, N]
+-        # x_local_h is [M, 4, N]. Transpose to [M, N, 4]
+-        x_local_h = x_local_h.transpose(1, 2) # [M, N, 4]
+-        
+-        # Extract x, y, z
+-        x_local = x_local_h[:, :, :3] # [M, N, 3]
++        # Result shape: [M, 4, N]
++        x_local_h = torch.bmm(G, x_h.transpose(0, 1).unsqueeze(0).expand(M, -1, -1))
++        x_local = x_local_h[:, :, :3].transpose(1, 2) # [M, N, 3]
+         return x_local
+ 
+@@ -175,42 +169,10 @@
+         """
+         M, N, _ = x_local.shape
+-        features = torch.zeros(M, N, self.C, device=grids.device)
+-        
+-        # Normalize local coords to [0, 1] for grid sampling
+-        # Local extent is [-1, 1], so map to [0, 1]
+-        x_norm = (x_local + 1.0) / 2.0 # [M, N, 3]
+-        
+-        # Clamp to [0, 1] to handle out-of-bounds gracefully before mask
+-        x_clamped = torch.clamp(x_norm, 0.0, 1.0)
+-        
+-        # Reshape for grid_sample: [M*N, C, 1, D, H, W] -> grid_sample expects [N, C, H, W] or similar
+-        # PyTorch grid_sample expects input [N, C, H, W] and grid [N, H_out, W_out, 2] for 2D
+-        # For 3D, input [N, C, D, H, W] and grid [N, D_out, H_out, W_out, 3]
+-        
+-        # We need to sample at specific points. 
+-        # Reshape grids to [M*N, C, D, H, W]
++        # grid_sample expects coordinates in [-1, 1]
++        # padding_mode='zeros' returns 0 for out-of-bounds coordinates
+         grids_flat = grids.view(M * N, self.C, self.D, self.H, self.W)
+-        
+-        # Reshape x_clamped to [M*N, 1, 1, 1, 3] for grid_sample
+-        x_grid = x_clamped.view(M * N, 1, 1, 1, 3)
+-        
+-        # Sample
+-        # grid_sample for 3D: input [N, C, D, H, W], grid [N, D_out, H_out, W_out, 3]
+-        # We want 1 point per grid, so D_out=H_out=W_out=1
+-        sampled = F.grid_sample(grids_flat, x_grid, mode='trilinear', padding_mode='zeros', align_corners=False)
+-        
+-        # sampled shape: [M*N, C, 1, 1, 1]
+-        features_flat = sampled.squeeze(-1).squeeze(-1).squeeze(-1) # [M*N, C]
+-        features = features_flat.view(M, N, self.C)
+-        
+-        # Mask out-of-bounds points (where original x_norm was not in [0,1])
+-        # If any coord was <0 or >1, the value should be 0.
+-        # x_norm < 0 or x_norm > 1 implies out of bounds
+-        mask = (x_norm >= 0.0) & (x_norm <= 1.0) # [M, N, 3]
+-        mask = mask.all(dim=2) # [M, N]
+-        mask = mask.unsqueeze(-1) # [M, N, 1]
+-        
+-        features = features * mask.float()
+-        
++        x_grid_flat = x_local.view(M * N, 1, 1, 1, 3)
++        sampled = F.grid_sample(grids_flat, x_grid_flat, mode='trilinear', padding_mode='zeros', align_corners=False)
++        features = sampled.squeeze(-1).squeeze(-1).squeeze(-1).view(M, N, self.C)
+         return features
+ 
+@@ -248,10 +210,8 @@
+         
+         # Determinants of top-left 3x3
+-        # G is [M, 4, 4]. Extract 3x3
+         G_3x3 = self.G[:, :3, :3] # [M, 3, 3]
+         det_G = torch.linalg.det(G_3x3) # [M]
+         
+         # Local coords raised to 2p
+-        # x_local: [M, N, 3]
+         x_local_pow = torch.pow(torch.abs(x_local), 2 * p) # [M, N, 3]
+         sum_pow = torch.sum(x_local_pow, dim=2) # [M, N]
+@@ -278,8 +238,8 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** Encoding requires $M$ transformations and interpolations per query point. Decoding is $O(M \cdot C)$ for the MLP.
++*   **Time Complexity:** Encoding requires $M$ transformations and interpolations per query point [S1]. Decoding is $O(M \cdot C)$ for the MLP.
+ *   **Memory Complexity:** $O(M \cdot C \cdot D \cdot H \cdot W)$ for the feature grids plus $O(M)$ for transformation matrices and MLP weights [S1].
+ *   **Performance:**
+-    *   Decoding speed: ~500 million points per second [S1].
++    *   Decoding speed: on the order of 500 million points per second [S1].
+     *   Training: 5 minutes on 8 GPUs for 250GB data [S1].
+     *   Compression: 1432x compression ratio on 250GB rotstrat data with 44.29 dB PSNR [S1].
+@@ -297,5 +257,5 @@
+ ## Background
+ 
+-*   **Origin:** Introduced by [S1] in 2023.
++*   **Origin:** Introduced by [S1].
+ *   **Context:** Developed to address the lack of adaptivity in state-of-the-art SRNs for large-scale scientific data visualization, which often have static surfaces and high sparsity [S1].
+ *   **Development:** Builds on the concept of feature grid SRNs (like fVSRN) but replaces the single dense grid with multiple adaptive grids [S1]. It avoids octree-based methods (like NGLOD) by using learned transformation matrices [S1].

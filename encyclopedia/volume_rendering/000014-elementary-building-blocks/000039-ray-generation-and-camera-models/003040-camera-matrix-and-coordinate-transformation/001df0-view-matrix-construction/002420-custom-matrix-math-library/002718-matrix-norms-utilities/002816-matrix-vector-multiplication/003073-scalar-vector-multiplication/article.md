@@ -3,7 +3,7 @@
 Also called: operator* (scalar, Vec4)
 
 ## Overview
-Scalar-vector multiplication multiplies a scalar by a 4-dimensional vector [S1]. It uniformly scales the vector's magnitude without altering its direction [G].
+Scalar-vector multiplication multiplies a scalar by a 4-dimensional vector [S1], building on [Matrix-Vector Multiplication](4208-matrix-vector-multiplication.md). It uniformly scales the vector's magnitude without altering its direction [G].
 
 ## How it works
 **Inputs:**
@@ -17,7 +17,7 @@ Scalar-vector multiplication multiplies a scalar by a 4-dimensional vector [S1].
 The vector `vec` is a template struct `Vec4<T2>` containing four fields: `x`, `y`, `z`, and `w`, all of type `T2` [S1]. The scalar is a primitive numeric type `T1` [S1].
 
 **Algorithm:**
-1. Initialize a result vector `res` of type `Vec4<T2>`.
+1. Initialize a result vector `res` of type `Vec4<T2>` [G].
 2. Compute `res.x = scalar * vec.x`.
 3. Compute `res.y = scalar * vec.y`.
 4. Compute `res.z = scalar * vec.z`.
@@ -48,11 +48,11 @@ def scalar_vector_multiply(scalar, vec):
 ```
 
 **Parameters:**
-- `T1`: The type of the scalar. Typical values are not given in the sources.
-- `T2`: The type of the vector components. The return type matches `T2` [S1].
+- `T1`: The type of the scalar [S1].
+- `T2`: The type of the vector components, which also determines the return type [S1].
 
 **Edge Cases and Pitfalls:**
-- **Type Compatibility:** `T1` must be compatible with `T2` for multiplication [S1].
+- **Type Compatibility:** `T1` must be implicitly convertible to `T2` for multiplication [S1].
 - **NaN/Inf:** If the scalar or any component is `NaN` or `Inf`, the result follows IEEE 754 floating-point rules [G].
 
 ## Subtopics
@@ -61,13 +61,13 @@ def scalar_vector_multiply(scalar, vec):
 Divides a scalar by a 4-dimensional vector component-wise [S1]. Given a scalar `s` and vector `v`, the result is a vector where each component is `s / v_i` [G]. The return type matches the vector's component type `T2` [S1].
 
 ## Operating characteristics
-- Time Complexity: Not given in the sources.
-- Memory Complexity: Not given in the sources.
-- Performance: Not given in the sources.
-- Strengths and Limitations: Not given in the sources.
+- Time Complexity: Not given in the sources. [S1]
+- Memory Complexity: Not given in the sources. [S1]
+- Performance: Not given in the sources. [S1]
+- Strengths and Limitations: Not given in the sources. [S1]
 
 ## Background
-This operation is implemented as a template function in the `nanovdb::math` namespace [S1]. The `__hostdev__` specifier indicates it is designed to execute on both host (CPU) and device (GPU) architectures [S1].
+This operation is implemented as a template function in the `nanovdb::math` namespace [S1]. The `__hostdev__` specifier indicates it is designed to execute on both host (CPU) and device (GPU) architectures [G].
 
 ## Sources
 [S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24

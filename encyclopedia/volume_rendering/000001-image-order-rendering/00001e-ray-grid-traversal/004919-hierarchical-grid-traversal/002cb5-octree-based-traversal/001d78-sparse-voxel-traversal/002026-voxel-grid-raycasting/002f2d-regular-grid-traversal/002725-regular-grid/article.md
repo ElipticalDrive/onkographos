@@ -38,7 +38,7 @@ The goal is to map each primitive to all voxels it intersects. This mapping must
        $$ x_1 = \lfloor (bound_{min}.x - p_1.x) \cdot dx_{reci} \rfloor, \quad x_2 = \lfloor (bound_{max}.x - p_1.x) \cdot dx_{reci} \rfloor + 1 $$
        (Repeat for $y$ and $z$) [S1, unofficial].
     c. **Clamp**: Ensure coordinates are within $[0, N-1]$: $x_1 = \max(0, \min(x_1, N-1))$, $x_2 = \max(0, \min(x_2, N-1))$ (Repeat for $y, z$) [S1, unofficial].
-    d. **Insert**: Loop over all cells $(x, y, z)$ from $(x_1, y_1, z_1)$ to $(x_2, y_2, z_2)$. For each cell, add primitive $p$ to the cell's object list [S1, unofficial].
+    d. **Insert**: Loop over all cells $(x, y, z)$ from $(x_1, y_1, z_1)$ to $(x_2, y_2, z_2)$ [S1, unofficial]. For each cell, add primitive $p$ to the cell's object list [S1, unofficial].
 
 ### Grid Traversal
 Uses 3D-DDA to step through the grid [G].
@@ -52,9 +52,9 @@ Uses 3D-DDA to step through the grid [G].
     e. Determine step directions: $stepX = 1$ if $dir_x > 0$ else $-1$ (Repeat for $Y, Z$) [G].
 2.  **Traversal Loop**:
     While the ray is within the grid bounds:
-    a. **Process Cell**: Let current cell be $(X, Y, Z)$. If `m_Grid[idx]` is not `NULL`, iterate through the `ObjectList` and perform intersection tests [S1, unofficial].
+    a. **Process Cell**: Let current cell be $(X, Y, Z)$ [S1, unofficial]. If `m_Grid[idx]` is not `NULL`, iterate through the `ObjectList` and perform intersection tests [S1, unofficial].
     b. **Pitfall Handling**: If an intersection is found but the point lies outside the current cell, advance the ray to subsequent cells and test their primitives until the intersection point is within the current cell or a closer intersection is found [S1, unofficial]. Mark primitives as tested to avoid redundant checks across multiple voxels [S2, unofficial].
-    c. **Advance Ray**: Find $t_{min} = \min(tMaxX, tMaxY, tMaxZ)$. If $t_{min} > t_{far}$, break. Update coordinates and $tMax$: if $tMaxX == t_{min}$, $tMaxX += tDeltaX, X += stepX$; else if $tMaxY == t_{min}$, $tMaxY += tDeltaY, Y += stepY$; else $tMaxZ += tDeltaZ, Z += stepZ$ [S1, unofficial]. Check bounds: if $X, Y, Z$ are outside $[0, N-1]$, terminate [G].
+    c. **Advance Ray**: Find $t_{min} = \min(tMaxX, tMaxY, tMaxZ)$ [S1, unofficial]. If $t_{min} > t_{far}$, break. Update coordinates and $tMax$: if $tMaxX == t_{min}$, $tMaxX += tDeltaX, X += stepX$; else if $tMaxY == t_{min}$, $tMaxY += tDeltaY, Y += stepY$; else $tMaxZ += tDeltaZ, Z += stepZ$ [S1, unofficial]. Check bounds: if $X, Y, Z$ are outside $[0, N-1]$, terminate [G].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -82,6 +82,7 @@ def build_regular_grid(primitives, p1, p2, N):
         y2 = max(0, min(y2, N - 1))
         z1 = max(0, min(z1, N - 1))
         z2 = max(0, min(z2, N - 1))
+        # Source code uses x < x2; range(x1, x2 + 1) ensures inclusive upper bound per notes
         for x in range(x1, x2 + 1):
             for y in range(y1, y2 + 1):
                 for z in range(z1, z2 + 1):
@@ -150,20 +151,20 @@ def trace_ray_grid(ray_origin, ray_dir, p1, p2, N, m_grid):
 
 ### Edge Cases and Pitfalls
 1.  **Intersection Outside Cell**: A primitive stored in cell $F$ may be intersected by a ray while traversing cell $F$, but the intersection point lies in cell $G$. Testing only the current cell misses this or requires redundant checks [S1, unofficial]. Solution: Verify if the intersection point lies within the current cell's bounds. If not, continue advancing to subsequent cells and test their primitives until the intersection point is within the current cell or a closer intersection is found [S1, unofficial].
-2.  **Redundant Tests**: A single triangle may span multiple voxels. Without marking, the same primitive may be tested multiple times. Solution: Mark primitives as tested for the current ray or rely on the closest intersection logic combined with cell-boundary checks [S2, unofficial].
+2.  **Redundant Tests**: A single triangle may span multiple voxels [S2, unofficial]. Without marking, the same primitive may be tested multiple times [S2, unofficial]. Solution: Mark primitives as tested for the current ray or rely on the closest intersection logic combined with cell-boundary checks [S2, unofficial].
 3.  **Ray Origin Outside Grid**: If the ray starts outside the grid, $tMax$ calculations must account for the entry point into the grid's bounding box. If the ray misses the grid entirely, traversal should terminate immediately [S1, unofficial].
 4.  **Zero Direction Component**: If a ray direction component is zero (e.g., $dir_x = 0$), $tDelta$ and $tMax$ calculations for that axis must be handled to avoid division by zero. The ray never crosses a boundary in that axis [G].
 
 ## Operating characteristics
-*   **Time Complexity**: Construction: $O(P \cdot V)$, where $P$ is primitives and $V$ is average voxels per primitive. Naive construction is $O(N^3 \cdot P)$ [S1, unofficial]. Traversal: $O(C + K \cdot I)$, where $C$ is cells visited, $K$ is average primitives per cell, $I$ is intersection cost [G].
-*   **Memory Complexity**: $O(N^3 + P \cdot V)$. The grid array is $N^3$ pointers. Memory usage is high for sparse scenes because the grid is uniform and cannot adapt to primitive density; many empty voxels are allocated [S2, unofficial].
+*   **Time Complexity**: Construction: $O(P \cdot V)$, where $P$ is primitives and $V$ is average voxels per primitive [S1, unofficial]. Naive construction is $O(N^3 \cdot P)$ [S1, unofficial]. Traversal: $O(C + K \cdot I)$, where $C$ is cells visited, $K$ is average primitives per cell, $I$ is intersection cost [G].
+*   **Memory Complexity**: $O(N^3 + P \cdot V)$ [S2, unofficial]. The grid array is $N^3$ pointers. Memory usage is high for sparse scenes because the grid is uniform and cannot adapt to primitive density; many empty voxels are allocated [S2, unofficial].
 *   **Performance**: GPU: Considered optimal on GPU for scenes with uniform data distribution due to high spatial locality. Successive elements are spatially close in memory, leading to a high probability of cached texture accesses (up to 100x faster than non-localized access) [S3, unofficial]. CPU: Can be slower than hierarchical structures for sparse or clustered scenes due to poor cache locality and high memory bandwidth usage for empty cells [S2, unofficial].
 *   **Strengths**: Simple implementation, constant-time access to cells, good data locality on GPU, effective for secondary rays in uniform scenes [S1, S3, unofficial].
 *   **Limitations**: High memory usage for sparse scenes, no adaptivity, performance degrades with high primitive density in small areas, not suitable for dynamic scenes if using advanced acceleration like Proximity Clouds (too costly to update) [S2, S3, unofficial].
 
 ## Background
 *   **Origin**: The Regular Grid is one of the earliest spatial subdivision structures used in ray tracing. It was prominently featured in early GPU ray tracing experiments [S3, unofficial]. The traversal algorithm (3D-DDA) is heavily based on the paper by Amanatides & Woo [S1, unofficial].
-*   **History**: Early implementations used brute-force cell-primitive intersection checks during construction, which was slow for large scenes. Optimizations involved mapping primitives to voxels based on their AABBs first [S1, unofficial]. The structure was favored in early GPU ray tracers due to its regular memory access pattern, which aligned well with texture caches [S3, unofficial].
+*   **History**: Early implementations used brute-force cell-primitive intersection checks during construction, which was slow for large scenes [S1, unofficial]. Optimizations involved mapping primitives to voxels based on their AABBs first [S1, unofficial]. The structure was favored in early GPU ray tracers due to its regular memory access pattern, which aligned well with texture caches [S3, unofficial].
 *   **Usage**: Used in early GPU ray tracers, volume rendering, and scenes with uniform object distribution. It serves as a baseline for more complex structures like Octrees and K-D trees [S2, S3, unofficial].
 
 ## Sources

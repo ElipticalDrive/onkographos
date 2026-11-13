@@ -1,9 +1,9 @@
 # Uniform Grid Indexing
 
-Also called: 3D Grid Index Calculation, Position Index Calculation, getPositionIndex
+Also called: 3D Grid Index Calculation, 3D to 1D Grid Mapping, Froxel Index Calculation, Position Index Calculation, getPositionIndex
 
 ## Overview
-Uniform Grid Indexing converts a 3D world position into a linear array index within a dense, axis-aligned voxel grid [S1, S2, unofficial]. It solves the problem of spatial lookup in volume rendering by mapping continuous coordinates to discrete storage locations using an axis-aligned bounding box (AABB) and fixed grid resolution [S1, S2, unofficial]. It sets itself apart from [Spatial Hashing](5002-spatial-hashing.md) by guaranteeing deterministic, collision-free indexing for all points within the grid bounds without hash collisions, and from [Sparse Voxel Grid](8021-sparse-voxel-grid.md) by using a fixed memory footprint regardless of data sparsity [S1, S2, unofficial].
+Uniform Grid Indexing converts a 3D world position into a linear array index within a dense, axis-aligned voxel grid [S1, S2, unofficial]. It solves the problem of spatial lookup in volume rendering by mapping continuous coordinates to discrete storage locations using an axis-aligned bounding box (AABB) and fixed grid resolution [S1, S2, unofficial]. It sets itself apart from [Spatial Hashing](5002-spatial-hashing.md) by guaranteeing deterministic, collision-free indexing for all points within the grid bounds, and from [Sparse Voxel Grid](8021-sparse-voxel-grid.md) by using a fixed memory footprint regardless of data sparsity [G].
 
 ## How it works
 **Inputs:**
@@ -16,8 +16,8 @@ Uniform Grid Indexing converts a 3D world position into a linear array index wit
 - `linearIndex`: A single integer representing the position in a 1D array storing the grid data.
 
 **Data Structures:**
-- The grid is stored as a 1D array of size $N^3$ using row-major ordering.
-- Row-major layout implies that the $z$-axis is the most significant dimension, followed by $y$, then $x$.
+- The grid is stored as a 1D array of size $N^3$ using row-major ordering [G].
+- Row-major layout implies that the $z$-axis is the most significant dimension, followed by $y$, then $x$ [G].
 
 **Steps:**
 1. **Edge Case Handling:** If `cellsPerEdge` is 1, the grid contains only one voxel. Return `0` immediately [S2, unofficial].
@@ -43,7 +43,7 @@ $$ z = \text{clamp}\left(\frac{\text{position}.z - \text{_aabb.min}.z}{\text{_ce
 
 $$ \text{index} = x \cdot \text{_numDivs}.y \cdot \text{_numDivs}.z + y \cdot \text{_numDivs}.z + z $$
 
-Note: In the formula above, $\text{_cellSize}$ is equivalent to $\text{BoxSize} / \text{cellsPerEdge}$ [S1, unofficial]. The terms $\text{_numDivs}.y \cdot \text{_numDivs}.z$ and $\text{_numDivs}.z$ correspond to the stride for the $y$ and $z$ dimensions respectively in a non-cubic grid, but for a uniform cubic grid where $\text{cellsPerEdge}$ is constant, this simplifies to the row-major formula in Step 8 [S1, unofficial].
+Note: In the formula above, $\text{_cellSize}$ is equivalent to $\text{BoxSize} / \text{cellsPerEdge}$ [G]. The terms $\text{_numDivs}.y \cdot \text{_numDivs}.z$ and $\text{_numDivs}.z$ correspond to the stride for the $y$ and $z$ dimensions respectively in a non-cubic grid, but for a uniform cubic grid where $\text{cellsPerEdge}$ is constant, this simplifies to the row-major formula in Step 8 [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -79,10 +79,11 @@ def uniform_grid_indexing(position, bounds_min, bounds_max, cells_per_edge):
     rel_y = position[1] - bounds_min[1]
     rel_z = position[2] - bounds_min[2]
 
-    # Normalize to [0, 1]
-    norm_x = rel_x / box_size_x
-    norm_y = rel_y / box_size_y
-    norm_z = rel_z / box_size_z
+    # Normalize to [0, 1] with epsilon check [S2, unofficial]
+    eps = 1e-9
+    norm_x = rel_x / max(box_size_x, eps)
+    norm_y = rel_y / max(box_size_y, eps)
+    norm_z = rel_z / max(box_size_z, eps)
 
     # Scale to grid coordinates
     scaled_x = norm_x * cells_per_edge
@@ -108,10 +109,10 @@ def uniform_grid_indexing(position, bounds_min, bounds_max, cells_per_edge):
 
 **Parameters:**
 - `cells_per_edge`: Typically a power of 2 (e.g., 64, 128, 256) for efficient bit-shifting in optimized implementations, though the algorithm works for any integer [S2, unofficial].
-- `boundsMin`, `boundsMax`: Define the spatial extent of the volume. Must be axis-aligned.
+- `boundsMin`, `boundsMax`: Define the spatial extent of the volume. Must be axis-aligned [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero:** If `boundsMin` equals `boundsMax` in any dimension, `BoxSize` is zero. The implementation must check for this and return a default index or error [S2, unofficial].
+- **Division by Zero:** If `boundsMin` equals `boundsMax` in any dimension, `BoxSize` is zero. The implementation must check for this and return a default index or error [G].
 - **Boundary Precision:** Points exactly on the boundary may suffer from floating-point inaccuracies. Clamping ensures the index remains within bounds [S2, unofficial].
 - **Out-of-Bounds:** Points outside the AABB are clamped to the nearest edge voxel, which may cause multiple distinct world positions to map to the same voxel [S1, unofficial].
 
@@ -124,17 +125,18 @@ Regular Grid Decomposition is a spatial partitioning strategy for neural volume 
 The Compact Grid Method is a static data structure for representing a uniform grid acceleration structure with minimal memory requirements: exactly one index per grid cell and exactly one index per object reference, built in linear time. It solves the problem of efficiently mapping objects to grid cells for ray tracing without the memory overhead of linked lists or dynamic arrays. It sets itself apart from its siblings by using a two-pass counting-sort-like algorithm to pack object indices into a single contiguous array, managed by a cell offset array that defines list boundaries implicitly, avoiding null pointers or extra tracking arrays.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for index calculation. The operations involve a constant number of arithmetic operations and comparisons [S1, S2, unofficial].
-- **Memory Complexity:** $O(N^3)$ for the grid storage, where $N$ is `cells_per_edge`. The indexing function itself uses $O(1)$ auxiliary memory [S1, S2, unofficial].
-- **Measured Performance:** Performance is limited by memory bandwidth when accessing the grid data, not by the indexing calculation [S1, unofficial].
-- **Scaling:** Scales linearly with the number of queries. Grid size grows cubically with resolution, making high-resolution grids memory-intensive [S1, S2, unofficial].
-- **Strengths:** Deterministic access time, no hash collisions, simple implementation, cache-friendly for sequential access if rays traverse the grid in order [S1, S2, unofficial].
-- **Limitations:** Memory usage is high for large volumes or high resolutions, even if the scene is sparse. Fixed resolution cannot adapt to local detail requirements [S1, S2, unofficial].
-- **When to Use:** Suitable for dense volumes, small to medium scenes, or when uniform sampling is required. Not suitable for highly sparse or extremely large open-world scenes where [Sparse Voxel Grid](8021-sparse-voxel-grid.md) or [Spatial Hashing](5002-spatial-hashing.md) would be more efficient [S1, S2, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to Use:** Not given in the sources.
 
 ## Background
-Uniform Grid Indexing is a fundamental technique in volume rendering and spatial data structures. It originates from the need to efficiently map continuous 3D space to discrete storage for voxel-based representations. The method is widely used in early volume rendering systems and remains a baseline for comparison with more advanced adaptive structures. The specific implementation details, such as the use of `KINDA_SMALL_NUMBER` for epsilon checks, are derived from game engine and real-time rendering contexts [S2, unofficial]. The formulaic approach using AABB normalization is common in graphics programming literature [S1, unofficial].
+Not given in the sources.
 
 ## Sources
 [S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)
-[S2] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)
+[S2] ArminTajik/ue5-froxel-lighting, https://github.com/ArminTajik/ue5-froxel-lighting, fetched 2026-10-27 (unofficial)
+[S3] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)

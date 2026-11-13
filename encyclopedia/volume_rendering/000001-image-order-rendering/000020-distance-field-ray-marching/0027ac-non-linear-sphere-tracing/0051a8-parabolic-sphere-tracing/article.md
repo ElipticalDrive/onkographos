@@ -1,0 +1,166 @@
+# Parabolic Sphere Tracing
+
+Also called: Analytical tracing in a single cell, Parabolic ray tracing
+
+## Overview
+Parabolic Sphere Tracing is a ray marching method for rendering heterogeneous media where the squared refractive index (RIF) varies linearly within a cell, resulting in a parabolic ray trajectory. It solves the problem of accurately tracing rays through complex refractive fields, such as hand-blown glass with bubbles, by providing an analytical solution for the ray path within each tetrahedral cell. It differs from standard sphere tracing by replacing linear steps with second-order polynomial curves, allowing for exact intersection tests with planar boundaries and SDFs without iterative approximation within the cell.
+
+## How it works
+**Inputs:**
+- Initial ray position $\mathbf{x}_0$ and momentum $\mathbf{p}_0$ (where $\|\mathbf{p}_0\| = \eta(\mathbf{x}_0)$).
+- A voxel grid defining the medium, where each voxel is divided into tetrahedral cells.
+- Squared RIF values $\eta^2_i$ at the vertices of the current tetrahedral cell.
+- A Signed Distance Field (SDF) $S(\mathbf{x})$ for the medium boundaries (e.g., bubbles).
+
+**Outputs:**
+- The next intersection point $\mathbf{x}_{next}$ and the ray parameter $\tau_{next}$ along the parabolic trajectory.
+- The updated momentum $\mathbf{p}_{next}$ at the intersection.
+
+**Data Structures:**
+- **RIF Grid:** A 3D array of voxels. Each voxel contains 8 vertices. Each vertex stores a scalar $\eta^2$.
+- **Tetrahedral Decomposition:** Each voxel is decomposed into 6 tetrahedra. The coefficients for the linear RIF function are computed per tetrahedron.
+- **SDF:** A function or grid providing the distance to the nearest surface (e.g., bubble surface).
+
+**Method Steps:**
+
+1.  **Compute RIF Coefficients for the Current Cell:**
+    Define the squared refractive index $\eta^2(\mathbf{x})$ as a linear function of position within the current tetrahedral cell:
+    $$ \eta^2(\mathbf{x}) = A_0 + \boldsymbol{\gamma} \cdot \mathbf{x} $$
+    where $\boldsymbol{\gamma} = [A_1, A_2, A_3]^T$ is the constant gradient of the squared RIF. The coefficients $\{A_0, A_1, A_2, A_3\}$ are determined by barycentric interpolation of the squared RIF values $\{\eta^2_0, \eta^2_1, \eta^2_2, \eta^2_3\}$ stored at the four vertices of the tetrahedron [S1].
+
+2.  **Define the Parabolic Ray Trajectory:**
+    The ray position $\mathbf{x}(\tau)$ and momentum $\mathbf{p}(\tau)$ as functions of the ray parameter $\tau$ are given by second-order polynomials:
+    $$ \mathbf{x}(\tau) = \frac{1}{4}\boldsymbol{\gamma} \tau^2 + \mathbf{p}_0\tau + \mathbf{x}_0 $$
+    $$ \mathbf{p}(\tau) = \frac{1}{2}\boldsymbol{\gamma} \tau + \mathbf{p}_0 $$
+    Here, $\mathbf{x}_0$ and $\mathbf{p}_0$ are the position and momentum at $\tau=0$. The condition $\|\mathbf{p}(\tau)\| = \eta(\mathbf{x}(\tau))$ is satisfied for all $\tau$ if it holds at $\tau=0$, because both $\|\mathbf{p}(\tau)\|^2$ and $\eta^2(\mathbf{x}(\tau))$ are quadratic functions of $\tau$ that match at $\tau=0$ and have matching derivatives due to the constant gradient $\boldsymbol{\gamma}$ [S1].
+
+3.  **Determine the Step Size $\Delta \tau$:**
+    The goal is to step to the next intersection with an SDF boundary (e.g., a bubble surface). Let $S(\mathbf{x})$ be the SDF value at the current position $\mathbf{x}_k$.
+    - **Pitfall:** The ray parameter $\tau$ is not arc length $s$. The relationship is $ds = \eta d\tau$. Since $\eta \ge 1$, using $\Delta \tau = S(\mathbf{x}_k)$ may lead to missed intersections because the physical distance covered is larger than $S(\mathbf{x}_k)$ [S1].
+    - **Safe Step Calculation:** To avoid missing intersections, compute a safe upper bound for $\Delta \tau$. The arc length is:
+      $$ \Delta s = \int_{\tau_k}^{\tau_k + \Delta \tau} \eta(\mathbf{x}(\tau)) d\tau = \int_{\tau_k}^{\tau_k + \Delta \tau} \sqrt{A_0 + \boldsymbol{\gamma} \cdot \mathbf{x}(\tau)} d\tau $$
+      Approximate $\eta$ by its minimum value within the current cell, $\eta_{min} = \sqrt{\min(\eta^2_i)}$. Then, a safe step in $\tau$ is:
+      $$ \Delta \tau \le \frac{S(\mathbf{x}_k)}{\eta_{min}} $$
+      [S1].
+    - **Edge Case:** If the ray starts near an SDF discontinuity, $S(\mathbf{x}_k)$ may be overestimated. To avoid errors, ensure the RIF grid resolution is larger than 1 in the glass thickness direction so that a ray inside a tetrahedron does not cover both the discontinuity zone and a panel face [S1].
+
+4.  **Find Intersection with SDF:**
+    Solve for the smallest positive $\tau > 0$ such that the distance from $\mathbf{x}(\tau)$ to the SDF surface is zero. This typically involves solving a non-linear equation or using a secondary sphere tracing step within the parabolic segment if an analytical solution is not available for the specific SDF shape. However, for planar boundaries, an analytical solution exists (see Step 5). For general SDFs, the parabolic path is used to guide the search, and the intersection is found by checking if $\|\mathbf{x}(\tau) - \mathbf{x}_{surface}\| = 0$ [S1].
+
+5.  **Intersection with Planar Boundaries:**
+    If the boundary is a plane defined by $\mathbf{n} \cdot \mathbf{x} = q$, substitute $\mathbf{x}(\tau)$ into the plane equation:
+    $$ \mathbf{n} \cdot \left( \frac{1}{4}\boldsymbol{\gamma} \tau^2 + \mathbf{p}_0\tau + \mathbf{x}_0 \right) = q $$
+    This yields a quadratic equation for $\tau$:
+    $$ \frac{1}{4}(\mathbf{n} \cdot \boldsymbol{\gamma}) \tau^2 + (\mathbf{n} \cdot \mathbf{p}_0) \tau + (\mathbf{n} \cdot \mathbf{x}_0 - q) = 0 $$
+    Solve for the smallest positive real root $\tau$ [S1].
+
+6.  **Update State:**
+    - Update position: $\mathbf{x}_{next} = \mathbf{x}(\tau_{next})$.
+    - Update momentum: $\mathbf{p}_{next} = \mathbf{p}(\tau_{next})$.
+    - If the intersection is with a refractive boundary, apply Snell's law using the surface normal and the new momentum.
+    - If the intersection is with an SDF (e.g., bubble surface), handle reflection/refraction or terminate the ray.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parabolic_sphere_tracing(x0, p0, rif_grid, sdf_function):
+    """
+    Trace a ray using parabolic sphere tracing.
+    
+    Args:
+        x0: Initial position (vec3)
+        p0: Initial momentum (vec3), must satisfy ||p0|| == eta(x0)
+        rif_grid: Grid of squared RIF values at vertices
+        sdf_function: Function returning distance to nearest surface
+        
+    Returns:
+        x_next: Next intersection position
+        tau_next: Ray parameter at intersection
+        p_next: Momentum at intersection
+    """
+    # 1. Determine current tetrahedral cell and compute RIF coefficients
+    cell = get_tetrahedral_cell(x0, rif_grid)
+    A0, gamma = compute_rif_coefficients(cell.vertices, cell.rif_values)
+    
+    # 2. Compute minimum RIF in the cell for safe step size
+    eta_min_sq = min(cell.rif_values)
+    eta_min = sqrt(eta_min_sq)
+    
+    # 3. Get SDF value at current position
+    s_val = sdf_function(x0)
+    
+    # 4. Calculate safe step size in tau
+    # Avoid division by zero if s_val is 0 (already at surface)
+    if s_val <= 0:
+        return x0, 0, p0
+        
+    delta_tau = s_val / eta_min
+    
+    # 5. Find intersection along the parabolic path
+    # For planar boundaries, solve quadratic equation
+    # For general SDFs, use a root-finding method on the distance function
+    # along the curve x(tau) = 0.25 * gamma * tau^2 + p0 * tau + x0
+    
+    tau_intersection = find_intersection_parabolic(
+        x0, p0, gamma, sdf_function, delta_tau
+    )
+    
+    # 6. Compute next state
+    tau_next = tau_intersection
+    x_next = 0.25 * gamma * tau_next**2 + p0 * tau_next + x0
+    p_next = 0.5 * gamma * tau_next + p0
+    
+    return x_next, tau_next, p_next
+
+def find_intersection_parabolic(x0, p0, gamma, sdf_function, max_tau):
+    """
+    Find the smallest positive tau <= max_tau where the ray intersects the SDF.
+    Uses a simple bisection or Newton's method on the distance function.
+    """
+    # Define the distance function along the ray
+    def dist_func(tau):
+        x_tau = 0.25 * gamma * tau**2 + p0 * tau + x0
+        return sdf_function(x_tau)
+    
+    # Check if intersection exists within max_tau
+    # If dist_func(0) > 0 and dist_func(max_tau) < 0, there is an intersection
+    if dist_func(0) > 0 and dist_func(max_tau) < 0:
+        # Bisection method to find root
+        tau_low = 0
+        tau_high = max_tau
+        for _ in range(50): # 50 iterations for high precision
+            tau_mid = (tau_low + tau_high) / 2
+            if dist_func(tau_mid) > 0:
+                tau_low = tau_mid
+            else:
+                tau_high = tau_mid
+        return tau_high
+    else:
+        # No intersection within the safe step, return max_tau
+        return max_tau
+```
+
+## Subtopics
+
+### [Parabolic Sphere Tracing for Heterogeneous Media Gradient Estimation](14538-parabolic-sphere-tracing-for-heterogeneous-media-gradient-es.md)
+A method to estimate transmitted caustics by finding stationary optical paths through a heterogeneous refractive medium (glass panel) using a gradient-based optimizer. It computes the gradient of the optical path length (OPL) using paraxial ray theory to handle non-linear ray trajectories in varying index of refraction (RIF) fields.
+
+### [Paraxial Ray Tracing](14547-paraxial-ray-tracing.md)
+A method to trace rays in the vicinity of a central ray by computing first-order perturbations $\delta \mathbf{x}$ and $\delta \mathbf{p}$, allowing for the estimation of caustics and light transport.
+
+## Operating characteristics
+- **Time Complexity:** The cost per cell is dominated by the evaluation of the RIF coefficients and the root-finding for the SDF intersection. The analytical solution for planar boundaries is $O(1)$. For general SDFs, the root-finding iteration count depends on the desired precision.
+- **Memory Complexity:** $O(N)$ where $N$ is the number of voxels in the RIF grid. The grid must be a multiple of the bubble voxel grid resolution to guarantee no intersection with a bubble is missed while stepping through the tetrahedron [S1].
+- **Measured Performance:** In the source example, rendering was done at 1024x1024 resolution with 1M samples per pixel. The RIF grid size was 1024x1024x2, and the bubble voxel grid was 64x64x1 [S1].
+- **Strengths:** Provides exact analytical solutions for ray trajectories in linear RIF fields, avoiding numerical integration errors. Efficient for rendering complex glass structures with bubbles.
+- **Limitations:** Requires the squared RIF to be linear within each cell, which limits the types of media that can be represented. The step size must be carefully calculated to avoid missing intersections due to the non-linear relationship between $\tau$ and arc length.
+- **When to Use:** Ideal for rendering heterogeneous glass, such as hand-blown glass with bubbles, where the RIF varies smoothly within small cells.
+- **When Not to Use:** Not suitable for media with highly non-linear RIF variations that cannot be approximated by linear functions within cells.
+
+## Background
+Parabolic Sphere Tracing was introduced in the paper "Parabolic Sphere Tracing of Signed Distance Fields for Old Glass Modelling and Rendering" [S1]. It is designed to handle the complex refraction and reflection effects in old glass, which often contains bubbles and surface irregularities. The method builds on the idea that defining the squared RIF as a linear function leads to second-order polynomial ray trajectories, which can be solved analytically. This approach allows for efficient and accurate rendering of glass panels with heterogeneous refractive indices.
+
+## Sources
+[S1] Parabolic Sphere Tracing of Signed Distance Fields for Old Glass Modelling and Rendering, https://doi.org/10.1109/tvcg.2025.3613853, fetched 2026-11-05

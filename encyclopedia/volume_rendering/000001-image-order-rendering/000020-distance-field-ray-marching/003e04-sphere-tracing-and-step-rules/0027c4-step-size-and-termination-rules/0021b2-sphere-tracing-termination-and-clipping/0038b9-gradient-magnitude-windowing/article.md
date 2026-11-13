@@ -1,94 +1,83 @@
 # Gradient Magnitude Windowing
 
+Also called: Gradient Thresholding, Gradient Magnitude Culling
 
 ## Overview
-Gradient Magnitude Windowing is a binary windowing function used to determine if a ray sample's gradient magnitude satisfies requirements for further rendering, specifically for contour rendering where high gradient magnitude indicates an object surface [S1, unofficial]. It serves as a hard filter that discards samples below a specified threshold [S1, unofficial].
+Gradient Magnitude Windowing is a binary filtering technique used in distance-field ray marching to discard ray samples that do not lie on significant object surfaces. It solves the problem of rendering noise or empty space by ensuring that only samples with a gradient magnitude exceeding a specific threshold $t_g$ contribute to the final image. It sets itself apart from siblings like [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md) by relying on local derivative magnitude rather than geometric bounds or arithmetic error propagation.
 
 ## How it works
-**Inputs:**
-*   Gradient magnitude $|g|$ at the current sample position.
-*   Gradient magnitude threshold $t_g$.
-*   Normalized view vector $V$ and normalized gradient vector $G$ (for the shading variant).
-*   Exponent $n$ (for the shading variant).
-
-**Outputs:**
-*   Binary windowing weight $w(|g|) \in \{0, 1\}$.
-*   Contour intensity $I_c$ (when shading is applied).
+**Inputs and Outputs:**
+- Input: The gradient vector $\mathbf{g}$ at the current ray sample position, and the threshold parameter $t_g$.
+- Output: A binary weight $w(|\mathbf{g}|)$ indicating whether the sample is valid for further rendering.
 
 **Data Structures:**
-*   Gradient vector $G = \nabla V(P)$.
-*   Gradient magnitude $|g| = \|G\|$.
+- No specific data structures are required beyond the scalar threshold $t_g$ and the computed gradient magnitude $|\mathbf{g}|$.
 
 **Steps:**
-1. Estimate the gradient vector $G$ at the sample position using a gradient estimation method [S1, unofficial].
-2. Compute the gradient magnitude $|g| = \sqrt{G_x^2 + G_y^2 + G_z^2}$ [S1, unofficial].
-3. Evaluate the binary windowing function $w(|g|)$ by comparing $|g|$ against $t_g$ [S1, unofficial].
-4. If $w(|g|) = 0$, the sample is discarded [S1, unofficial]. If $w(|g|) = 1$, the sample is retained for shading and compositing [S1, unofficial].
-5. For contour rendering, compute the dot product $\kappa = V \cdot G$ [S1, unofficial].
-6. Compute the contour weight $s(\kappa) = (1 - \kappa)^n$ [S1, unofficial].
-7. Compute the final intensity $I_c = w(|g|) \cdot s(\kappa)$ [S1, unofficial].
+1. Compute the gradient magnitude $|\mathbf{g}|$ from the gradient vector $\mathbf{g}$ at the current sample point.
+2. Compare $|\mathbf{g}|$ against the threshold $t_g$.
+3. Apply the windowing function $w(|\mathbf{g}|)$:
+   - If $|\mathbf{g}| > t_g$, set $w(|\mathbf{g}|) = 1$.
+   - If $|\mathbf{g}| < t_g$, set $w(|\mathbf{g}|) = 0$.
+   - Note: The source defines the condition for zero as strictly less than ($<$), implying equality ($|\mathbf{g}| = t_g$) is not explicitly defined in the provided text, though typically treated as valid or invalid based on implementation. [S1, unofficial]
 
 **Formulas:**
-*   $w(|g|) = \begin{cases} 1 & \text{if } |g| > t_g \\ 0 & \text{if } |g| < t_g \end{cases}$ [S1, unofficial].
-*   $\kappa = V \cdot G$, where $V$ is the normalized view vector and $G$ is the normalized gradient vector [S1, unofficial].
-*   $s(\kappa) = (1 - \kappa)^n$, where $n$ is an exponent controlling contour line thickness [S1, unofficial].
-*   $I_c = w(|g|) \cdot s(\kappa)$ [S1, unofficial].
+The windowing function is defined as:
+$$
+w(|\mathbf{g}|) = \begin{cases} 
+1 & \text{if } |\mathbf{g}| > t_g \\
+0 & \text{if } |\mathbf{g}| < t_g 
+\end{cases}
+$$
+Where:
+- $|\mathbf{g}|$ is the magnitude of the gradient vector.
+- $t_g$ is the gradient magnitude threshold.
 
 **Parameters:**
-*   $t_g$: The gradient magnitude threshold. No typical value is given in the sources [S1, unofficial].
-*   $n$: The exponent in the contour weight formula. Controls the thickness of the contour lines; higher $n$ results in thinner lines. No typical value is given [S1, unofficial].
+- $t_g$: The gradient magnitude threshold. No typical value is given in the sources. [S1, unofficial]
 
-**Pitfalls:**
-*   Vectors $V$ and $G$ must be normalized before calculating the dot product $\kappa$ to ensure values lie between $0$ and $1$ [S1, unofficial].
-*   The source defines the windowing function as a strict binary step function with no transition region, which can lead to aliasing or jagged contours if the gradient estimation is noisy or if the threshold is not carefully chosen relative to the data's dynamic range [S1, unofficial].
-*   The definition provided in the sources does not specify behavior for the exact boundary case $|g| = t_g$ [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Precision:** The binary nature of the window means small fluctuations in gradient estimation near $t_g$ can cause flickering or discontinuous artifacts.
+- **Boundary:** The case $|\mathbf{g}| = t_g$ is not explicitly defined in the source equations (9)-(11). Implementers must decide whether to include equality in the valid set. [S1, unofficial]
+- **Gradient Estimation:** The quality of this method depends heavily on the gradient estimation method. The source notes that 4D linear regression produces better results than central differences, which affects the reliability of $|\mathbf{g}|$. [S1, unofficial]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def gradient_magnitude_windowing(gradient_magnitude, threshold):
-    """Returns binary weight w(|g|) based on gradient magnitude threshold."""
-    if gradient_magnitude > threshold:
+def gradient_magnitude_windowing(gradients, threshold):
+    """
+    Applies binary windowing to gradient magnitudes.
+    
+    Args:
+        gradients (float): The magnitude of the gradient |g|.
+        threshold (float): The gradient magnitude threshold t_g.
+        
+    Returns:
+        float: 1 if |g| > t_g, 0 if |g| < t_g.
+    """
+    if gradients > threshold:
         return 1.0
-    else:
+    elif gradients < threshold:
         return 0.0
-
-def contour_rendering_shading(view_vector, gradient_vector, threshold, exponent):
-    """Computes contour intensity Ic using gradient magnitude windowing and view-angle weighting."""
-    # Note: Gradient estimation is a prerequisite step; sources recommend 4D linear regression 
-    # over central differences for better results [S1, unofficial].
-    
-    # 1. Normalize vectors to ensure dot product is in [0, 1]
-    v_norm = view_vector / math.sqrt(sum(c**2 for c in view_vector))
-    g_norm = gradient_vector / math.sqrt(sum(c**2 for c in gradient_vector))
-    
-    # 2. Compute dot product kappa
-    kappa = sum(v * g for v, g in zip(v_norm, g_norm))
-    
-    # 3. Compute contour weight s(kappa)
-    s_kappa = (1.0 - kappa) ** exponent
-    
-    # 4. Compute windowing weight w(|g|)
-    gradient_magnitude = math.sqrt(sum(c**2 for c in gradient_vector))
-    w_g = 1.0 if gradient_magnitude > threshold else 0.0
-    
-    # 5. Final intensity
-    return w_g * s_kappa
+    else:
+        # Equality case not defined in source [S1, unofficial]
+        # [G] Defaulting to 0 for safety, but implementation may vary
+        return 0.0
 ```
 
 ## Subtopics
 
-### Contour Rendering Shading
-A view-dependent shading method that combines gradient magnitude windowing with a view-angle weighting to produce contour lines [S1, unofficial]. It calculates contour intensity based on the dot product between the view vector and the gradient vector, weighted by the windowing function [S1, unofficial]. The method produces an intensity $I_c$ that is high for samples on object surfaces (high gradient) and aligned with the view direction (perpendicular gradient to view) [S1, unofficial]. The intensity can also be used as opacity for compositing [S1, unofficial].
-
 ## Operating characteristics
-Not given in the sources.
+- **Time Complexity:** $O(1)$ per sample, as it involves a single magnitude calculation and a comparison.
+- **Memory Complexity:** $O(1)$, requiring only the storage of the threshold.
+- **Strengths:** Effectively removes noise and empty space samples, reducing computational load for subsequent shading steps.
+- **Limitations:** Binary decision can lead to aliasing or missing thin structures if $t_g$ is set too high. It does not account for the direction of the gradient, only its magnitude.
+- **When to use:** When rendering contour-based visualizations or when noise suppression is critical in distance-field marching.
+- **When not to use:** When smooth shading or continuous opacity transfer is required without hard cutoffs.
 
 ## Background
-The method was introduced by Thurner in 2005 as part of an importance-driven volume rendering pipeline [S1, unofficial]. It was demonstrated on medical volume data, specifically a human head dataset [S1, unofficial]. The technique operates within a three-step volume rendering pipeline consisting of classification, shading, and compositing [S1, unofficial].
+Gradient Magnitude Windowing was introduced in the context of importance-driven volume rendering. It is used to filter ray samples based on their proximity to object surfaces, identified by high gradient magnitudes. The method is particularly relevant for contour rendering techniques where surface alignment is key. [S1, unofficial]
 
 ## Sources
 [S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

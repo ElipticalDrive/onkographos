@@ -3,44 +3,45 @@
 Also called: ViewSampler Abstract Base Class
 
 ## Overview
-The View Sampler is an abstract base class that defines the interface for selecting context and target camera views during the training or inference of radiance-field models [S1, S2, unofficial]. It solves the problem of determining which camera poses provide the necessary geometric constraints (context) and which are reserved for evaluation or novel view synthesis (target) [S2, unofficial]. It sets itself apart from sibling training configurations by decoupling the view selection logic from the data loading pipeline, allowing for dynamic strategies such as diverse view selection or iterative viewpoint blending [S1, S2, S3, unofficial].
+The View Sampler is an abstract base class that defines the interface for selecting context and target camera views during the training or inference of neural radiance fields. It solves the problem of determining which subset of available scene cameras should be used to render images for gradient computation at each training step. It differs from sibling components like [Learning Rate Scheduling](2701-learning-rate-scheduling.md) or [Randomized Background Colors](2736-randomized-background-colors.md) by specifically managing the spatial and temporal selection of input geometry (cameras) rather than hyperparameters or rendering artifacts.
 
 ## How it works
-The View Sampler operates as a factory or interface for view selection strategies. It does not perform sampling itself but defines the contract that concrete implementations (such as [Diverse View Selection via Overlap and Distance](10788-diverse-view-selection-via-overlap-and-distance.md) or [Viewpoint Sampling with Blend Iteration](10788-viewpoint-sampling-with-blend-iteration.md)) must fulfill.
+The View Sampler operates as a factory or interface for view selection strategies. Implementations must define how to map the current training state to specific camera indices.
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   `scene`: The scene object containing camera data.
-    *   `extrinsics`: A tensor of shape `Float[Tensor, 'view 4 4']` representing the world-to-camera transformation matrices for all available views [S2, unofficial].
-    *   `intrinsics`: A tensor of shape `Float[Tensor, 'view 3 3']` representing the camera intrinsic matrices [S2, unofficial].
-    *   `device`: The compute device (e.g., CPU, GPU) [S2, unofficial].
-    *   `cfg`: Configuration object [S2, unofficial].
-    *   `stage`: The current training stage (e.g., 'train', 'val') [S1, unofficial].
-    *   `is_overfitting`: Boolean flag indicating if the model is overfitting to a single scene [S1, unofficial].
-    *   `cameras_are_circular`: Boolean flag indicating if the camera setup is circular [S1, unofficial].
-    *   `step_tracker`: Optional tracker for the global training step [S1, unofficial].
-*   **Outputs**:
-    *   `context_view`: A tensor of shape `Int64[Tensor, 'context_view']` containing the indices of the context views [S1, S2, unofficial].
-    *   `target_view`: A tensor of shape `Int64[Tensor, 'target_view']` containing the indices of the target views [S1, S2, unofficial].
-    *   `overlap`: A tensor of shape `Float[Tensor, 'overlap']` representing overlap metrics between views [S2, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `scene`: The scene object containing available camera poses.
+    *   `extrinsics`: Tensor of shape `Float[Tensor, 'view 4 4']` containing world-to-camera transformation matrices.
+    *   `intrinsics`: Tensor of shape `Float[Tensor, 'view 3 3']` containing camera intrinsic matrices.
+    *   `device`: The compute device (e.g., CUDA, CPU).
+    *   `cfg`: Configuration object passed to the constructor.
+    *   `stage`: The current training stage (e.g., 'train', 'val').
+    *   `is_overfitting`: Boolean flag indicating if the model is overfitting to a single scene.
+    *   `cameras_are_circular`: Boolean flag indicating if the camera setup is circular.
+    *   `step_tracker`: Optional tracker for the global training step.
+*   **Outputs:**
+    *   `context_view`: `Int64[Tensor, 'context_view']` indices of the context cameras.
+    *   `target_view`: `Int64[Tensor, 'target_view']` indices of the target cameras.
+    *   `overlap`: `Float[Tensor, 'overlap']` metric indicating the overlap between context and target views.
 
-### Data Structures
-The abstract base class maintains the following instance variables [S2, unofficial]:
+**Data Structures:**
+The base class instance stores the following fields:
 *   `cfg`: Configuration parameters.
-*   `stage`: Current stage enum.
+*   `stage`: Current training stage.
 *   `is_overfitting`: Boolean.
 *   `cameras_are_circular`: Boolean.
 *   `step_tracker`: `StepTracker` object or `None`.
 
-### Steps
-1.  **Initialization**: The constructor `__init__` accepts `cfg`, `stage`, `is_overfitting`, `cameras_are_circular`, and `step_tracker`, assigning them to instance variables [S2, unofficial].
-2.  **Step Tracking**: The property `global_step` returns `0` if `step_tracker` is `None`; otherwise, it returns `step_tracker.get_step()` [S2, unofficial].
-3.  **Sampling**: The abstract method `sample` is called with `scene`, `extrinsics`, `intrinsics`, and `device`. Concrete implementations must return the tuple `(context_view, target_view, overlap)` [S2, unofficial].
-4.  **Dimension Queries**: The properties `num_target_views` and `num_context_views` return the integer count of views in the respective output tensors [S2, unofficial].
+**Algorithm Steps:**
+1.  **Initialization:** The constructor `__init__` receives `cfg`, `stage`, `is_overfitting`, `cameras_are_circular`, and `step_tracker`, assigning them to instance variables.
+2.  **Step Tracking:** The property `global_step` returns `0` if `step_tracker` is `None`; otherwise, it returns `step_tracker.get_step()`.
+3.  **Sampling:** The abstract method `sample` is called with `scene`, `extrinsics`, `intrinsics`, and `device`.
+    *   The implementation determines the number of context and target views using the abstract properties `num_context_views` and `num_target_views`.
+    *   The implementation selects specific indices from the available cameras based on the chosen strategy (e.g., random, diverse, blended).
+    *   The implementation calculates an overlap metric between the selected context and target views.
+    *   The method returns the tuple `(context_view, target_view, overlap)`.
 
-### Pseudocode
-The following pseudocode represents the abstract base class interface as defined in the sources [S2, unofficial].
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -55,20 +56,11 @@ class ViewSampler(ABC):
     def __init__(
         self,
         cfg: object,
-        stage: object,
+        stage: str,
         is_overfitting: bool,
         cameras_are_circular: bool,
         step_tracker: Optional[object] = None
     ):
-        """Initialize the view sampler.
-        
-        Args:
-            cfg: Configuration object.
-            stage: Current training stage.
-            is_overfitting: Boolean flag for overfitting mode.
-            cameras_are_circular: Boolean flag for circular camera setup.
-            step_tracker: Optional tracker for global training step.
-        """
         self.cfg = cfg
         self.stage = stage
         self.is_overfitting = is_overfitting
@@ -77,10 +69,21 @@ class ViewSampler(ABC):
 
     @property
     def global_step(self) -> int:
-        """Return the current global step."""
         if self.step_tracker is None:
             return 0
         return self.step_tracker.get_step()
+
+    @property
+    @abstractmethod
+    def num_target_views(self) -> int:
+        """Returns the number of target views to sample."""
+        pass
+
+    @property
+    @abstractmethod
+    def num_context_views(self) -> int:
+        """Returns the number of context views to sample."""
+        pass
 
     @abstractmethod
     def sample(
@@ -90,68 +93,47 @@ class ViewSampler(ABC):
         intrinsics: Tensor,
         device: torch.device
     ) -> Tuple[Tensor, Tensor, Tensor]:
-        """Sample context and target views.
+        """
+        Sample context and target views.
         
         Args:
-            scene: The scene object.
-            extrinsics: Float[Tensor, 'view 4 4'] camera extrinsics.
-            intrinsics: Float[Tensor, 'view 3 3'] camera intrinsics.
-            device: Compute device.
+            scene: Scene object containing camera data.
+            extrinsics: Float[Tensor, 'view 4 4'] Camera extrinsics.
+            intrinsics: Float[Tensor, 'view 3 3'] Camera intrinsics.
+            device: Target device for tensors.
             
         Returns:
-            Tuple of (context_view indices, target_view indices, overlap tensor).
+            Tuple of (context_view, target_view, overlap)
+            context_view: Int64[Tensor, 'context_view']
+            target_view: Int64[Tensor, 'target_view']
+            overlap: Float[Tensor, 'overlap']
         """
-        pass
-
-    @property
-    @abstractmethod
-    def num_target_views(self) -> int:
-        """Return the number of target views."""
-        pass
-
-    @property
-    @abstractmethod
-    def num_context_views(self) -> int:
-        """Return the number of context views."""
         pass
 ```
 
-### Parameters
-*   `stage`: The current training stage (e.g., training, validation) [S1, unofficial].
-*   `is_overfitting`: Boolean flag indicating if the model is overfitting to a single scene [S1, unofficial].
-*   `cameras_are_circular`: Boolean flag indicating if the camera setup is circular [S1, unofficial].
-*   `step_tracker`: Optional tracker for the global training step [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Missing Step Tracker**: If `step_tracker` is not provided, `global_step` defaults to 0 [S2, unofficial].
-*   **Empty Stacks**: In variants like Viewpoint Sampling with Blend Iteration, if the viewpoint stack is empty, it must be initialized with a copy of the scene's training or origin cameras [S3, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Empty Stacks:** In blended sampling strategies, if the viewpoint stack is empty, it must be initialized with a copy of the available training cameras to prevent runtime errors during popping [S3, unofficial].
+*   **Step Tracking:** If `step_tracker` is not provided, `global_step` defaults to 0, which may affect iteration-dependent sampling logic [S2, unofficial].
 
 ## Subtopics
 
 ### [Diverse View Selection via Overlap and Distance](10788-diverse-view-selection-via-overlap-and-distance.md)
-An iterative algorithm to select a diverse set of $N_v$ camera views from a 3D scene by ensuring minimum overlap and distance between newly sampled views and previously selected views [10788-diverse-view-selection-via-overlap-and-distance.md]. Choose this when view diversity is critical for geometric reconstruction and computational resources allow for iterative selection.
+This method selects a diverse subset of $N_v$ camera views from a 3D scene by iteratively sampling candidates and accepting them only if they satisfy minimum thresholds for spatial overlap and geometric distance relative to already selected views. It differs from simple random sampling or uniform grid sampling by explicitly enforcing diversity constraints to ensure broad coverage of the scene geometry, which is critical for training generalizable neural radiance fields.
 
 ### Viewpoint Sampling with Blend Iteration
-Selects training cameras from a standard viewpoint stack or an origin viewpoint stack based on the current training iteration, enabling a transition from standard to origin viewpoints after a specified blend threshold [S3, unofficial]. Choose this when the training process requires a gradual shift from general training views to specific origin views to stabilize learning or improve specific aspects of the reconstruction.
-*   **Definition**: Selects training cameras from a standard viewpoint stack or an origin viewpoint stack based on the current training iteration [S3, unofficial].
-*   **Steps**:
-    1.  If the viewpoint stack is empty, initialize it with a copy of `scene.getTrainCameras()` [S3, unofficial].
-    2.  If the origin viewpoint stack is empty, initialize it with a copy of `scene.getOriginCameras()` [S3, unofficial].
-    3.  If `iteration < opt.blend_until_iter`, pop a random camera from `viewpoint_stack` [S3, unofficial].
-    4.  Otherwise, pop a random camera from `origin_viewpoint_stack` [S3, unofficial].
-*   **Parameters**:
-    *   `opt.blend_until_iter`: Integer threshold specifying the iteration at which viewpoint sampling switches from the standard training stack to the origin stack [S3, unofficial].
+This variant selects training cameras from a standard viewpoint stack or an origin viewpoint stack based on the current training iteration, enabling a transition from standard to origin viewpoints after a specified blend threshold [S3, unofficial].
+*   **Logic:** If the viewpoint stack is empty, initialize it with a copy of `scene.getTrainCameras()`. If the origin viewpoint stack is empty, initialize it with a copy of `scene.getOriginCameras()`. If the current iteration is less than `opt.blend_until_iter`, pop a random camera from the viewpoint stack. Otherwise, pop a random camera from the origin viewpoint stack [S3, unofficial].
+*   **Parameters:** `opt.blend_until_iter`: Integer threshold specifying the iteration at which viewpoint sampling switches from the standard training stack to the origin stack [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Depends on the concrete implementation. The abstract class itself has $O(1)$ overhead for property access [S2, unofficial].
-*   **Memory Complexity**: $O(1)$ for the abstract class state [S2, unofficial].
-*   **Strengths**: Decouples view selection logic from data loading, allowing for complex, dynamic sampling strategies [S1, S2, unofficial].
-*   **Limitations**: Requires concrete implementations to handle the actual sampling logic; the abstract class provides no default behavior [S2, unofficial].
-*   **When to use**: When training radiance-field models that require specific view selection strategies (e.g., diverse views, blended viewpoints) [S1, S2, S3, unofficial].
-*   **When not to use**: When a simple random or sequential view selection is sufficient and dynamic strategies are not needed.
+*   **Time Complexity:** Depends on the specific implementation. Random sampling is $O(1)$ or $O(N)$ for stack initialization. Diverse selection involves iterative distance/overlap calculations, potentially $O(N^2)$ or $O(N \log N)$ depending on optimization.
+*   **Memory Complexity:** $O(N)$ to store the camera stacks or candidate lists.
+*   **Strengths:** Provides a unified interface for various view selection strategies. Allows dynamic switching of sampling behavior based on training stage or iteration.
+*   **Limitations:** As an abstract base class, it provides no default implementation, requiring subclasses to handle all selection logic.
+*   **When to use:** When training neural radiance fields where the selection of input camera views impacts convergence or generalization.
 
 ## Background
-The View Sampler was introduced as part of the training infrastructure for differentiable volume rendering and radiance-field optimization frameworks [S1, S2, unofficial]. It evolved to support complex training schedules that require dynamic view selection, such as blending between standard and origin viewpoints [S3, unofficial]. It is used in projects like PixelSplat and AnySplat [S1, S2, unofficial].
+The View Sampler is part of the training configuration infrastructure for differentiable volume rendering and neural radiance field optimization. It originates from the software engineering practices of modern NeRF training frameworks, specifically those found in repositories like AnySplat and PixelSplat, which abstract data loading and view selection to support various sampling strategies [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)

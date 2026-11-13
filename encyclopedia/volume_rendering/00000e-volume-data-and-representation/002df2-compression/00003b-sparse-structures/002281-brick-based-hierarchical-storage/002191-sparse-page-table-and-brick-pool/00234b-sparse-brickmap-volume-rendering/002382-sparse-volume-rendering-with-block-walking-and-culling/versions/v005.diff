@@ -1,0 +1,316 @@
+--- v004.md
++++ v005.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-This method renders sparse volumetric data efficiently by combining hardware ray tracing with a two-level sparse data structure (blocks and subblocks) [S1][S2, unofficial]. It distinguishes itself from standard hardware ray tracing by introducing **Block Walking**, which uses precomputed adjacency information to skip ray-tracing API calls when moving between neighboring blocks, and **Block Culling**, which uses density-based bitmasks to let the hardware skip irrelevant blocks [S1][S2, unofficial]. It builds on [Sparse Brickmap Volume Rendering](2978-sparse-brickmap-volume-rendering.md) by replacing the brick-based hierarchy with a block/subblock structure optimized for hardware ray query acceleration [S1][S2, unofficial].
++This method renders sparse volumetric data efficiently by combining hardware ray tracing with a two-level sparse data structure (blocks and subblocks) [S1][S2, unofficial]. It distinguishes itself from standard hardware ray tracing by introducing Block Walking, which uses precomputed adjacency information to skip ray-tracing API calls when moving between neighboring blocks, and Block Culling, which uses density-based bitmasks to let the hardware skip irrelevant blocks [S1][S2, unofficial]. It builds on [Sparse Brickmap Volume Rendering](2978-sparse-brickmap-volume-rendering.md) by replacing the brick-based hierarchy with a block/subblock structure optimized for hardware ray query acceleration [S1][S2, unofficial].
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-*   **Input:** Sparse RGBA volume data where the last component (A) represents density (8-bit unsigned integer, range 0–256) [S1][S2, unofficial]. No transfer function is applied [S1][S2, unofficial].
+-*   **Output:** Rendered image (or scalar traversal count) based on the selected mode (e.g., alpha=1 termination or first-hit) [S1][S2, unofficial].
++*   **Input:** Sparse RGBA volume data where the last component (A) represents density as an 8-bit unsigned integer in the range 0–256 [S1][S2, unofficial]. No transfer function is applied during preprocessing [S1][S2, unofficial].
++*   **Output:** Rendered image or scalar traversal count based on the selected mode, such as alpha=1 termination or first-hit [S1][S2, unofficial].
+ 
+ ### Data Structures
+ 
+ **1. Subblock**
+-*   **Layout:** Dense 3D grid of voxels.
+-*   **Size:** Default $8 \times 8 \times 8$ voxels ($N=8$) [S1][S2, unofficial]. Parametric [S1][S2, unofficial].
++*   **Layout:** Dense 3D grid of voxels [S1][S2, unofficial].
++*   **Size:** Default $8 \times 8 \times 8$ voxels ($N=8$) [S1][S2, unofficial]. Parametric implementation allows tweaking this size [S1][S2, unofficial].
+ *   **Content:** 4-component unsigned 8-bit integers per voxel (RGBA) [S1][S2, unofficial].
+ *   **Metadata:** Stores minimum and maximum density values of its voxels [S1][S2, unofficial].
+ 
+ **2. Block**
+-*   **Layout:** Sparse container holding indices of active subblocks.
++*   **Layout:** Sparse container holding indices of active subblocks [S1][S2, unofficial].
+ *   **Subblock Index Storage:** Indices are stored as unsigned 8-bit integers [S1][S2, unofficial].
+ *   **Capacity Limit:** Since $2^8 = 256$, the maximum number of subblocks per block is limited to $6^3 = 216$ (as $6^3 \le 256$) [S1][S2, unofficial].
+@@ -30,5 +30,5 @@
+ **3. Acceleration Structure**
+ *   **Type:** BVH (Bounding Volume Hierarchy) compatible with hardware ray tracing [S1][S2, unofficial].
+-*   **Primitives:** The top-level instances are the **Blocks** [S1][S2, unofficial].
++*   **Primitives:** The top-level instances are the Blocks [S1][S2, unofficial].
+ *   **Annotation:** Each block instance is annotated with its 8-bit culling mask [S1][S2, unofficial].
+ 
+@@ -37,168 +37,158 @@
+ 1.  **Build Subblocks:** Group voxels into uniform-sized subblocks ($8 \times 8 \times 8$) [S1][S2, unofficial].
+ 2.  **Compute Subblock Metadata:** For each subblock, compute the minimum ($min$) and maximum ($max$) density values among its voxels [S1][S2, unofficial].
+-3.  **Build Blocks:** Group subblocks into blocks. Store indices of active subblocks in the block [S1][S2, unofficial].
+-4.  **Compute Block Metadata:**
+-    *   Compute the global minimum ($min_b$) and maximum ($max_b$) density for all voxels in the block [S1][S2, unofficial].
+-    *   Compute adjacency information for the block (which blocks are neighbors) [S1][S2, unofficial].
+-5.  **Compute Culling Masks:**
+-    *   Determine the quantization divider $q$. For Vulkan, the cull mask is 8-bit, and the max density is 256. The API allows 32 bits for annotation (implied by the division factor) [S1][S2, unofficial].
+-    *   Calculate $q = 256 / 32 = 8$ [S1][S2, unofficial].
+-    *   Calculate bin indices: $minb = \lfloor min_b / q \rfloor$ and $maxb = \lfloor max_b / q \rfloor$ [S1][S2, unofficial].
+-    *   Create an 8-bit mask where bits from $minb$ to $maxb$ are set to 1 [S1][S2, unofficial].
+-6.  **Build Acceleration Structure:**
+-    *   Request an acceleration structure from the API (e.g., Vulkan) [S1][S2, unofficial].
+-    *   Pass the AABBs of all blocks to the API [S1][S2, unofficial].
+-    *   Annotate each block instance with its computed culling mask [S1][S2, unofficial].
+-7.  **Ray Generation (Compute Kernel):**
+-    *   Launch a compute kernel for each pixel/ray [S1][S2, unofficial].
+-    *   Pass runtime configuration (including the user-specified **Traversal Mask**) via push constants [S1][S2, unofficial].
+-8.  **Initial Ray Query:**
+-    *   Launch a hardware ray tracing query to find the first intersection (closest hit AABB) with the blocks [S1][S2, unofficial].
+-9.  **Block Traversal (Inside Block):**
+-    *   Once a block is hit, perform a two-level DDA (Digital Differential Analyzer) traversal within the block [S1][S2, unofficial].
+-    *   Iterate through active subblocks using the stored indices [S1][S2, unofficial].
+-    *   Access subblock data by computing the device address: `base_address + (subblock_index * subblock_size)` [S1][S2, unofficial].
+-    *   Render/accumulate voxels along the ray within the subblocks [S1][S2, unofficial].
+-10. **Block Walking (Exit Block):**
+-    *   After finishing the current block, calculate the parametric $t$ value after the Half-Disk Distance Approximation (HDDA) or DDA exit [S1][S2, unofficial].
+-    *   **Check Neighbor:** If $t$ is inside a neighboring block (and an adjacent block exists in the adjacency data):
+-        *   Perform **Block Walking**: Start a new DDA traversal directly into the adjacent block using the stored adjacency information [S1][S2, unofficial].
+-        *   Skip the ray-tracing API query [S1][S2, unofficial].
+-    *   **Fallback:** If no adjacent block exists or $t$ is not inside a neighbor:
+-        *   Launch another hardware ray tracing query to find the next closest block [S1][S2, unofficial].
+-        *   Only proceed if $t < t_{max}$ (volume boundary) [S1][S2, unofficial].
+-11. **Block Culling (During Ray Query):**
+-    *   When launching a ray query, pass the runtime **Traversal Mask** [S1][S2, unofficial].
+-    *   The hardware skips any block if `(block_culling_mask & traversal_mask) == 0` [S1][S2, unofficial].
+-12. **Termination:**
+-    *   Repeat steps 9–11 until:
+-        *   The ray exits the volume [S1][S2, unofficial].
+-        *   Accumulated alpha reaches 1 (opaque) [S1][S2, unofficial].
+-        *   First-hit condition is met (depending on rendering mode) [S1][S2, unofficial].
++3.  **Build Blocks:** Group subblocks into blocks and store indices of active subblocks in the block [S1][S2, unofficial].
++4.  **Compute Block Metadata:** Compute the global minimum ($min_b$) and maximum ($max_b$) density for all voxels in the block [S1][S2, unofficial]. Compute adjacency information for the block [S1][S2, unofficial].
++5.  **Compute Culling Masks:** Determine the quantization divider $q = 256 / 32 = 8$ for Vulkan's 8-bit mask and 256 max density [S1][S2, unofficial]. Calculate bin indices $minb = \lfloor min_b / q \rfloor$ and $maxb = \lfloor max_b / q \rfloor$ [S1][S2, unofficial]. Create an 8-bit mask where bits from $minb$ to $maxb$ are set to 1 [S1][S2, unofficial].
++6.  **Build Acceleration Structure:** Request an acceleration structure from the API [S1][S2, unofficial]. Pass the AABBs of all blocks to the API [S1][S2, unofficial]. Annotate each block instance with its computed culling mask [S1][S2, unofficial].
++7.  **Ray Generation:** Launch a compute kernel for each pixel/ray [S1][S2, unofficial]. Pass runtime configuration including the user-specified Traversal Mask via push constants [S1][S2, unofficial].
++8.  **Initial Ray Query:** Launch a hardware ray tracing query to find the first intersection (closest hit AABB) with the blocks [S1][S2, unofficial].
++9.  **Block Traversal:** Once a block is hit, perform a two-level DDA traversal within the block [S1][S2, unofficial]. Iterate through active subblocks using the stored indices [S1][S2, unofficial]. Access subblock data by computing the device address: `base_address + (subblock_index * sizeof(Subblock))` [S1][S2, unofficial]. Render/accumulate voxels along the ray within the subblocks [S1][S2, unofficial].
++10. **Block Walking:** After finishing the current block, calculate the parametric $t$ value after the Half-Disk Distance Approximation (HDDA) or DDA exit [S1][S2, unofficial]. If $t$ is inside a neighboring block (and an adjacent block exists in the adjacency data), perform Block Walking by starting a new DDA traversal directly into the adjacent block using the stored adjacency information [S1][S2, unofficial]. Skip the ray-tracing API query [S1][S2, unofficial]. If no adjacent block exists or $t$ is not inside a neighbor, launch another hardware ray tracing query to find the next closest block [S1][S2, unofficial]. Only proceed if $t < t_{max}$ (volume boundary) [S1][S2, unofficial].
++11. **Block Culling:** When launching a ray query, pass the runtime Traversal Mask [S1][S2, unofficial]. The hardware skips any block if `(block_culling_mask & traversal_mask) == 0` [S1][S2, unofficial].
++12. **Termination:** Repeat steps 9–11 until the ray exits the volume, accumulated alpha reaches 1, or first-hit condition is met depending on the rendering mode [S1][S2, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Data Structures
+-struct Subblock:
+-    voxels: array[8][8][8] of uint8_4 # RGBA, A is density
+-    min_density: uint8
+-    max_density: uint8
+-
+-struct Block:
+-    subblock_indices: array[216] of uint8 # Indices of active subblocks
+-    adjacency: array[26] of Block* # Neighbor pointers (or null)
+-    culling_mask: uint8 # 8-bit bitmask
+-    aabb: AABB
+-    min_density: uint8
+-    max_density: uint8
+-
+-# Constants
++import math
++
++class Subblock:
++    def __init__(self, voxels):
++        self.voxels = voxels  # List of 4-tuples (r, g, b, a)
++        self.min_density = min(v[3] for v in voxels)
++        self.max_density = max(v[3] for v in voxels)
++
++class Block:
++    def __init__(self, grid_pos):
++        self.grid_pos = grid_pos  # (x, y, z) integer coordinates
++        self.subblock_indices = []
++        self.adjacency = {}  # Maps neighbor grid_pos to Block
++        self.culling_mask = 0
++        self.min_density = 256
++        self.max_density = 0
++        self.aabb_min = [0.0, 0.0, 0.0]
++        self.aabb_max = [0.0, 0.0, 0.0]
++
+ SUBBLOCK_SIZE = 8
+-QUANTIZATION_DIVIDER = 8 # 256 / 32
++QUANTIZATION_DIVIDER = 8  # 256 / 32
+ MAX_DENSITY = 256
+ 
+-# Preprocessing
+-function build_structure(volume_data):
++def build_structure(blocks_data):
++    # blocks_data: list of dicts, each with 'grid_pos', 'subblock_voxels' (list of lists)
++    subblocks = []
++    blocks = {}
++
+     # 1. Create Subblocks
+-    subblocks = []
+-    for each chunk in volume_data:
+-        sb = Subblock()
+-        sb.voxels = chunk
+-        sb.min_density = min(chunk.voxels.A)
+-        sb.max_density = max(chunk.voxels.A)
+-        subblocks.append(sb)
++    for block_info in blocks_data:
++        for voxels in block_info['subblock_voxels']:
++            sb = Subblock(voxels)
++            subblocks.append(sb)
+ 
+     # 2. Create Blocks
+-    blocks = []
+-    for each group of subblocks:
+-        block = Block()
++    for block_info in blocks_data:
++        bx, by, bz = block_info['grid_pos']
++        block = Block((bx, by, bz))
+         active_indices = []
+         global_min = MAX_DENSITY
+         global_max = 0
+-        
+-        for i, sb in enumerate(group):
+-            if sb has valid data:
+-                active_indices.append(i)
+-                global_min = min(global_min, sb.min_density)
+-                global_max = max(global_max, sb.max_density)
+-        
++
++        for i, voxels in enumerate(block_info['subblock_voxels']):
++            sb = Subblock(voxels)
++            active_indices.append(i)
++            global_min = min(global_min, sb.min_density)
++            global_max = max(global_max, sb.max_density)
++
+         block.subblock_indices = active_indices
+         block.min_density = global_min
+         block.max_density = global_max
+-        
++
+         # Compute Culling Mask
+-        minb = floor(global_min / QUANTIZATION_DIVIDER)
+-        maxb = floor(global_max / QUANTIZATION_DIVIDER)
++        minb = math.floor(global_min / QUANTIZATION_DIVIDER)
++        maxb = math.floor(global_max / QUANTIZATION_DIVIDER)
+         mask = 0
+-        for b from minb to maxb:
++        for b in range(minb, maxb + 1):
+             mask |= (1 << b)
+         block.culling_mask = mask
+-        
+-        # Compute Adjacency (implementation specific)
+-        block.adjacency = compute_neighbors(block, all_blocks)
+-        
+-        # Compute AABB
+-        block.aabb = compute_aabb(block, all_blocks)
+-        
+-        blocks.append(block)
+-
+-    # 3. Build Acceleration Structure
+-    # Pass block AABBs and culling masks to API
++
++        # Compute AABB (standard for uniform grid blocks) [G]
++        block.aabb_min = [bx * SUBBLOCK_SIZE, by * SUBBLOCK_SIZE, bz * SUBBLOCK_SIZE]
++        block.aabb_max = [bx * SUBBLOCK_SIZE + SUBBLOCK_SIZE, by * SUBBLOCK_SIZE + SUBBLOCK_SIZE, bz * SUBBLOCK_SIZE + SUBBLOCK_SIZE]
++
++        blocks[block.grid_pos] = block
++
++    # 3. Compute Adjacency [G]
++    for pos, block in blocks.items():
++        for dx in (-1, 0, 1):
++            for dy in (-1, 0, 1):
++                for dz in (-1, 0, 1):
++                    if dx == 0 and dy == 0 and dz == 0:
++                        continue
++                    neighbor_pos = (pos[0] + dx, pos[1] + dy, pos[2] + dz)
++                    if neighbor_pos in blocks:
++                        block.adjacency[neighbor_pos] = blocks[neighbor_pos]
++
++    # 4. Build Acceleration Structure (API call)
+     accel_struct = api.build_bvh(blocks)
+-    return accel_struct, subblocks
+-
+-# Rendering Kernel
+-function render_ray(ray_origin, ray_direction, traversal_mask, accel_struct, subblocks, blocks):
++    return accel_struct, subblocks, blocks
++
++def render_ray(ray_origin, ray_direction, traversal_mask, accel_struct, subblocks, blocks, base_address):
+     t = 0.0
+-    t_max = volume_depth # or infinity
+-    
++    t_max = 1000.0  # Volume boundary
++
+     # Initial Ray Query
+     hit_block = api.ray_query(accel_struct, ray_origin, ray_direction, t, t_max, traversal_mask)
+-    
+-    while hit_block is not null:
++
++    while hit_block is not None:
+         # Traverse inside the block
+-        t_exit = traverse_block(hit_block, ray_origin, ray_direction, t, t_max, subblocks)
+-        
++        t_exit = traverse_block(hit_block, ray_origin, ray_direction, t, t_max, subblocks, base_address)
++
+         # Check for Block Walking
+-        next_block = null
++        next_block = None
+         if t_exit < t_max:
+-            # Determine if t_exit falls into a neighbor
+-            neighbor = find_neighbor_at_t(hit_block, ray_direction, t_exit)
+-            if neighbor is not null:
+-                next_block = neighbor
++            # Determine block coordinate at t_exit
++            exit_pos = ray_origin + ray_direction * t_exit
++            current_block_pos = hit_block.grid_pos
++            # Check if exit_pos falls into an adjacent block
++            neighbor_pos = (
++                math.floor(exit_pos[0] / SUBBLOCK_SIZE),
++                math.floor(exit_pos[1] / SUBBLOCK_SIZE),
++                math.floor(exit_pos[2] / SUBBLOCK_SIZE)
++            )
++            if neighbor_pos in hit_block.adjacency:
++                next_block = hit_block.adjacency[neighbor_pos]
+             else:
+                 # Fallback to Ray Query
+                 next_block = api.ray_query(accel_struct, ray_origin, ray_direction, t_exit, t_max, traversal_mask)
+-        
++
+         hit_block = next_block
+         t = t_exit
+-        
++
+         # Check Termination Conditions
+         if alpha >= 1.0 or first_hit_met:
+             break
+ 
+-function traverse_block(block, ray_origin, ray_direction, t_start, t_max, subblocks):
+-    # Two-level DDA
+-    # 1. DDA through subblocks in the block
+-    # 2. DDA through voxels in each subblock
+-    
++def traverse_block(block, ray_origin, ray_direction, t_start, t_max, subblocks, base_address):
+     current_t = t_start
+-    
+-    for index in block.subblock_indices:
++    # Two-level DDA: iterate through subblocks in the block
++    for idx in block.subblock_indices:
+         # Access subblock via device address
+-        sb_ptr = base_address + (index * sizeof(Subblock))
+-        sb = sb_ptr
+-        
++        sb_ptr = base_address + (idx * 8 * 8 * 8 * 4)  # sizeof(Subblock) approx
++        sb = subblocks[idx]
++
+         # DDA through voxels in sb
+         voxel_t_exit = dda_voxels(sb, ray_origin, ray_direction, current_t, t_max)
+-        
++
+         if voxel_t_exit < t_max:
+             current_t = voxel_t_exit
+-            # Accumulate color/alpha
++            # Accumulate color/alpha [G]
+         else:
+             break
+-            
++
+     return current_t
++
++def dda_voxels(sb, ray_origin, ray_direction, t_start, t_max):
++    # Standard 3D DDA for 8x8x8 grid [G]
++    # Returns exit t from this subblock
++    return t_max  # Placeholder for standard DDA logic [G]
+ ```
+ 

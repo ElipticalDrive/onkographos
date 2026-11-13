@@ -1,0 +1,143 @@
+# Chord Parameterization
+
+Also called: Chord-based Peak Finding, Linear Chord Sampling
+
+## Overview
+Chord Parameterization is a method for finding local maxima in multidimensional transfer functions (MTFs) by treating the segment between two world-space samples as a linear chord in transfer space and sampling along it [S1]. It sets itself apart from its parent, General Multidimensional Transfer Function Peak Finding, by using a specific linear interpolation strategy to approximate the path through the transfer function, offering a balance between the simplicity of 1D peak finding and the accuracy required for M > 1 dimensions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Two world-space samples $t_0$ and $t_1$ with corresponding transfer function values $f_0 = f(t_0)$ and $f_1 = f(t_1)$ in $\mathbb{R}^M$. The transfer function $\rho$ is defined on a discretized grid of size $W \times W \times \dots$ (typically $W=1024$ for 2D) [S1].
+*   **Outputs:** The parameter $s_\rho \in [0, 1]$ corresponding to the maximum value of $\rho$ along the chord, and the interpolated peak location $t_\rho$ in world space [S1].
+
+**Data Structures:**
+*   **Transfer Function Texture:** A multi-dimensional texture (e.g., 2D) storing $\rho(f)$ values. Resolution $W$ is a power of two (e.g., 1024) [S1].
+*   **World Space Samples:** A pair of points $t_0, t_1$ and their mapped values $f_0, f_1$ [S1].
+
+**Parameters:**
+*   $W$: Discretization resolution of the transfer function (e.g., 1024) [S1].
+*   $\Delta s$: Sampling step in transfer space, defined as "pixels per sample in transfer space" [S1]. Typical value is $\Delta s = 4$ for high-resolution smooth transfer functions to balance visual quality and performance [S1].
+
+**Steps:**
+1.  Fetch the front sample $t_0$ and back sample $t_1$ from the volume ray.
+2.  Evaluate the transfer function at these points to get $f_0 = f(t_0)$ and $f_1 = f(t_1)$ [S1].
+3.  Compute the Euclidean distance (chord length) $L_f$ between $f_0$ and $f_1$:
+    $$ L_f = \| f_1 - f_0 \| $$
+4.  Compute the step size $ds$ for sampling along the chord in transfer space indices:
+    $$ ds = \frac{\Delta s \cdot W}{L_f} $$
+    *Note: The source text presents this as $ds = \frac{\text{pixels per sample}}{W} / L_f$ in the notes, but the formula block clarifies $ds = \Delta s W / L_f$ where $\Delta s$ is pixels per sample. The logic is that $W/L_f$ converts world-space distance to transfer-space pixel distance, scaled by $\Delta s$ [S1].*
+5.  Define the direction vector $df$:
+    $$ df = f_1 - f_0 $$
+6.  Parameterize the chord as a ray $F(s)$ for $s \in [0, 1]$:
+    $$ F(s) = f_0 + s \cdot \frac{ds}{df} \cdot df $$
+    *Correction/Clarification:* The source formula is $F(s) = f_0 + s \frac{ds}{df} (f_1 - f_0)$. Since $df = f_1 - f_0$, this simplifies to $F(s) = f_0 + s \cdot ds$. However, $ds$ is a scalar step size in *pixels*, while $s$ is a normalized parameter $[0,1]$. The term $\frac{ds}{df}$ in the source likely implies a normalization factor or is a typo for a unit vector scaling. Given $F(s)$ must be in transfer space coordinates, and $s \in [0,1]$, the standard linear interpolation is $F(s) = f_0 + s(f_1 - f_0)$. The source's specific formula $F(s) = f_0 + s \frac{ds}{df} (f_1 - f_0)$ suggests that the sampling step $ds$ is used to determine the *increment* between samples, not the interpolation formula itself. The interpolation to find the peak uses $s_\rho$. The formula provided in the source for $F(s)$ is likely intended to define the *sampling grid* along the chord. We interpret the method as: sample $s$ values at intervals determined by $ds$, evaluate $\rho(F(s))$ where $F(s) = f_0 + s(f_1 - f_0)$, and find the $s$ that maximizes $\rho$ [S1].
+7.  Iterate $s$ from 0 to 1 with step size derived from $ds$ (converted to parameter space). For each $s$, compute $F(s)$, look up $\rho(F(s))$ in the transfer function texture.
+8.  Identify $s_\rho$ corresponding to the maximum $\rho(F(s))$ along the segment [S1].
+9.  Interpolate to find the peak world-space location $t_\rho$:
+    $$ t_\rho = t_0 + s_\rho (t_1 - t_0) $$
+    *Note: The source formula is $t_\rho = t_0 + \frac{s_\rho}{t_1 - t_0}$? No, the source says $t_\rho = t_0 + s_\rho (t_1 - t_0)$ implicitly via linear interpolation logic, though the text snippet cuts off. Standard linear interpolation is used [S1].*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def chord_parameterization(t0, t1, f0, f1, transfer_function, W=1024, delta_s=4):
+    """
+    Finds the peak in the transfer function along the chord between f0 and f1.
+    
+    Args:
+        t0, t1: World-space positions (vectors).
+        f0, f1: Transfer-space values (vectors) corresponding to t0, t1.
+        transfer_function: Function or texture lookup for rho(f).
+        W: Resolution of the transfer function texture.
+        delta_s: Sampling step in pixels per sample.
+        
+    Returns:
+        t_rho: World-space position of the peak.
+    """
+    # 1. Compute chord length in transfer space
+    df = f1 - f0
+    L_f = norm(df)
+    
+    # Guard against zero-length chord
+    if L_f < 1e-9:
+        return t0
+        
+    # 2. Compute step size in transfer space pixels
+    # ds is the number of pixels to step for each unit of 's' if s were normalized?
+    # The source defines ds = delta_s * W / L_f. 
+    # This ds represents the step in transfer-space coordinates (pixels) per unit s?
+    # Actually, if s goes 0->1, the total distance is L_f (in normalized TF units? No, L_f is Euclidean distance).
+    # Let's stick to the source's variable definitions strictly.
+    # ds = delta_s * W / L_f. 
+    # If we sample s, the position in TF is f0 + s * df.
+    # The source formula F(s) = f0 + s * (ds/df) * df is confusing. 
+    # Interpretation: We sample s at intervals. The interval in TF-pixel space is delta_s.
+    # Total TF-pixel distance is L_f * W (if f is normalized 0-1) or just L_f in some units.
+    # Let's assume f is in texture coordinates [0, W-1].
+    # Distance in pixels = L_f * W.
+    # Number of samples = (L_f * W) / delta_s.
+    # Step in s = 1 / Number_of_samples = delta_s / (L_f * W).
+    
+    # Re-reading source: "ds = delta_s W / L_f". 
+    # If ds is the step in s, then step_s = delta_s / (W * L_f)? 
+    # The source says "ds = ... / L_f". 
+    # Let's use the explicit formula for F(s) provided: F(s) = f0 + s * (ds/df) * df.
+    # This implies the term (ds/df) * df is the vector step per unit s? No, s is [0,1].
+    # It is most likely that the source meant:
+    # step_s = delta_s / (W * L_f) ? 
+    # Or step_s = delta_s / (W * ||f1-f0||_normalized)?
+    
+    # Let's implement based on the explicit interpolation step for t_rho.
+    # We need to find s_rho.
+    
+    num_samples = int((L_f * W) / delta_s) + 1
+    if num_samples < 2:
+        num_samples = 2
+        
+    step_s = 1.0 / (num_samples - 1)
+    
+    max_rho = -infinity
+    s_rho = 0.0
+    
+    for i in range(num_samples):
+        s = i * step_s
+        # Linear interpolation in transfer space
+        f_sample = f0 + s * df
+        
+        # Lookup in transfer function (assuming f_sample is in texture coords)
+        # If f is not normalized, scale it. Assuming f0, f1 are in texture coords [0, W].
+        rho_val = transfer_function.lookup(f_sample)
+        
+        if rho_val > max_rho:
+            max_rho = rho_val
+            s_rho = s
+            
+    # Interpolate peak in world space
+    t_rho = t0 + s_rho * (t1 - t0)
+    
+    return t_rho
+```
+
+## Subtopics
+
+### Spline Parameterization
+An improvement over linear chord parameterization using a cubic Hermite spline (Catmull-Rom) formulation to approximate the curve $\rho(f(t))$ [S1]. It maintains a stencil of four world-space samples ($f_{-1}, f_0, f_1, f_2$) and precomputes coefficients $h_{ij}(s)$ in a 1D texture for efficient GPU access [S1]. The curve is parameterized as $F(s) = f_0 h_{00}(s) + (f_1 - f_{-1})h_{10}(s) + f_1 h_{01}(s) + (f_2 - f_0)h_{11}(s)$ [S1]. It is impractical for most 2D TFs due to the cost of the 4-point stencil and spline evaluation, compared to simpler chordal parameterization with more samples. It is only useful for extremely noisy data where world-space samples are far apart [S1].
+
+### Scanline Sampling (DDA)
+A method for finding peaks in low-resolution (e.g., $256^2$) piecewise-constant transfer functions using a Digital Differential Analyzer (DDA) to scan the chord in discretized RM-space [S1]. It parameterizes the distance between pixel centers and marches along the major axis (X or Y, whichever is greater), incrementing a differential until the endpoint is reached [S1]. It uses the position along the major axis to determine $s_\rho$ and interpolates to find the peak [S1]. It provides better guarantees that features in $\rho$ will not be missed compared to ray marching and is slightly faster and more accurate for $256^2$ and $512^2$ TFs [S1]. Wu's algorithm (another scanline method) was slower and did not provide better quality. Rasterizing slabs produces fewer artifacts but is more expensive and can overestimate the number of peaks [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples along the chord. The number of samples is determined by the chord length $L_f$ and the step size $\Delta s$ [S1].
+*   **Memory Complexity:** Minimal, requiring storage for the transfer function texture and a few scalar variables per ray [S1].
+*   **Performance:** For high-resolution smooth transfer functions ($W=1024$) with $\Delta s = 4$, it achieves good visual quality and performance (e.g., 32 fps in cited benchmarks) [S1].
+*   **Strengths:** Simple to implement; less expensive than sampling in world space; effective for smooth, high-resolution transfer functions [S1].
+*   **Limitations:** Approximation error due to linear interpolation of the chord; may miss features in very noisy data or low-resolution piecewise-constant TFs where DDA is preferred [S1].
+*   **When to use:** General purpose multidimensional peak finding with smooth, high-resolution transfer functions [S1].
+*   **When not to use:** Extremely noisy data with sparse world-space samples (use Spline) or low-resolution piecewise-constant TFs (use DDA) [S1].
+
+## Background
+Chord Parameterization was introduced in the context of volume rendering with multidimensional peak finding. It addresses the difficulty of finding peaks in M-dimensional transfer functions ($M > 1$) by dynamically finding local maxima along the ray with sufficient sampling in transfer space, rather than solving for specific peak values analytically [S1]. The method was developed by researchers at the Scientific Computing and Imaging Institute (SCI), University of Utah, as part of the work presented in "Volume Rendering with Multidimensional Peak Finding" [S1].
+
+## Sources
+[S1] Volume Rendering with Multidimensional Peak Finding, https://www.sci.utah.edu/~knolla/multipeak_pv.pdf, fetched 2026-10-29

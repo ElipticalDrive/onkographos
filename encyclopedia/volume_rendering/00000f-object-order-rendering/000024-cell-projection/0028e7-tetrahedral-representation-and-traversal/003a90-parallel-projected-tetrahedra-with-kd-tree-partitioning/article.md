@@ -10,33 +10,36 @@ This method enables parallel volume rendering of large unstructured tetrahedral 
 **Outputs:** Composite image of the volume [S1].
 
 **Data Structures:**
-1.  **KD-Tree:** A spatial partitioning tree built on the bounding boxes of the tetrahedra. Each node represents a region in 3D space. The tree is used to assign tetrahedra to specific processes [S1].
-2.  **Partitioned Tetrahedra:** The original tetrahedra are split if they intersect with kd-tree region boundaries. This results in a set of clipped tetrahedra assigned to each process. The data size grows due to splitting [S1].
+1.  **KD-Tree:** A spatial partitioning tree built on the bounding boxes of the tetrahedra [G]. Each node represents a region in 3D space [G]. The tree is used to assign tetrahedra to specific processes [S1].
+2.  **Partitioned Tetrahedra:** The original tetrahedra are split if they intersect with kd-tree region boundaries [S1]. This results in a set of clipped tetrahedra assigned to each process [S1]. The data size grows due to splitting [S1].
 
 **Steps:**
 1.  **KD-Tree Construction and Partitioning:**
     *   Build a kd-tree over the tetrahedral data to create $P$ regions (partitions) [S1].
-    *   Split any tetrahedron that intersects a boundary between two kd-tree regions. The split tetrahedra are assigned to the respective processes [S1].
+    *   Split any tetrahedron that intersects a boundary between two kd-tree regions [S1].
     *   This partitioning is performed whenever the data changes, not every render frame [S1].
     *   Distribute the clipped tetrahedra among the $P$ processes [S1].
-
 2.  **Local Rendering:**
-    *   Each process renders its assigned subset of tetrahedra using the **Projected Tetrahedra** method [S1].
-    *   The projected tetrahedra method projects 3D vertices to 2D screen space, subdivides the image plane into polygons based on projected edges, and performs scalar interpolation and opacity calculation for each polygon [S1, see Parent].
+    *   Each process renders its assigned subset of tetrahedra using the projected tetrahedra method [S1].
+    *   The projected tetrahedra method projects 3D vertices to 2D screen space, subdivides the image plane into polygons based on projected edges, and performs scalar interpolation and opacity calculation for each polygon [Parent].
     *   Generate a local image for the process's portion of the volume [S1].
-
 3.  **Parallel Image Compositing (Sort-Last):**
-    *   Transfer only the generated image data from each process to a designated compositing process (or use a parallel image compositing algorithm) [S1].
-    *   Composite the images using the Porter-Duff over operation in back-to-front order to produce the final image [S1, see Parent].
+    *   Transfer only the generated image data from each process to a designated compositing process or use a parallel image compositing algorithm [S1].
+    *   Composite the images using a traditional sort-last compositing algorithm to produce the final image [S1].
+
+**Formulas:**
+*   Integrated opacity for a segment of length $l$ with average differential opacity $\tau_{avg}$:
+    $$ \alpha = 1 - \exp(-\tau_{avg} l) $$
+    [S1, Parent].
 
 **Parameters:**
 *   **Image Resolution:** Experiments used $800 \times 800$ pixels [S1].
 *   **Number of Processes ($P$):** Varies; performance scales with $P$ but shows diminishing returns [S1].
-*   **KD-Tree Depth:** Determines the number of partitions ($2^d$ for depth $d$). Adding a single level doubles the partitions [S1].
+*   **KD-Tree Depth:** Determines the number of partitions ($2^d$ for depth $d$) [S1]. Adding a single level doubles the partitions [S1].
+*   **Data Growth:** Splitting cells increases the dataset size [S1]. On average, data size grows by ~15% per kd-tree level, with variance between 5% and 30% [S1]. Larger datasets exhibit smaller relative growth [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Data Growth:** Splitting cells increases the dataset size. On average, data size grows by ~15% per kd-tree level, with variance between 5% and 30% [S1]. Larger datasets exhibit smaller relative growth [S1].
-*   **Memory Constraints:** Redistribution requires holding at least two copies of the data simultaneously (original and partitioned). Insufficient hardware memory can drop rendering rates impractically low [S1].
+*   **Memory Constraints:** Redistribution requires holding at least two copies of the data simultaneously (original and partitioned) [S1]. Insufficient hardware memory can drop rendering rates impractically low [S1].
 *   **Geometry Changes:** Changes in viewable geometry require lengthy redistribution of the data, which can be a bottleneck [S1].
 *   **Diminishing Returns:** Adding more processors than necessary for a given dataset size yields diminishing returns due to fixed overheads like image readback and compositing [S1].
 
@@ -44,125 +47,104 @@ This method enables parallel volume rendering of large unstructured tetrahedral 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def parallel_projected_tetrahedra(tetrahedra, num_processes, image_width, image_height):
-    """
-    Parallel volume rendering of unstructured tetrahedral grid.
-    
-    Args:
-        tetrahedra: List of tetrahedra, each defined by 4 vertices and scalar values.
-        num_processes: Number of parallel processes.
-        image_width: Width of the output image in pixels.
-        image_height: Height of the output image in pixels.
-        
-    Returns:
-        Composite image (2D array).
-    """
-    # Step 1: Partition Data
-    # Build kd-tree and split tetrahedra intersecting boundaries
-    # This is done once when data changes, not every frame.
-    partitions = build_kd_tree_partitions(tetrahedra, num_processes)
-    
-    # Step 2: Local Rendering (per process)
-    # Each process renders its assigned tetrahedra using projected tetrahedra method
-    local_images = []
-    for i in range(num_processes):
-        assigned_tetrahedra = partitions[i]
-        # Render using projected tetrahedra method
-        # This involves projecting vertices, subdividing image plane,
-        # interpolating scalars, and calculating opacity for each polygon.
-        local_image = render_projected_tetrahedra(
-            assigned_tetrahedra, 
-            image_width, 
-            image_height
-        )
-        local_images.append(local_image)
-        
-    # Step 3: Parallel Image Compositing (Sort-Last)
-    # Transfer only image data between processes
-    composite_image = composite_images_sort_last(local_images)
-    
-    return composite_image
-
-def build_kd_tree_partitions(tetrahedra, num_processes):
-    """
-    Partition tetrahedra using a kd-tree.
-    Splits tetrahedra intersecting region boundaries.
-    """
-    # Build kd-tree over tetrahedra bounding boxes
+def parallel_projected_tetrahedra(tetrahedra, num_partitions, image_width, image_height):
+    # Step 1: Partition data using a kd-tree [S1]
+    # Build kd-tree over tetrahedron bounding boxes to create regions [G]
     kd_tree = build_kd_tree(tetrahedra)
-    
-    # Split tetrahedra at boundaries
-    # This increases the number of tetrahedra
-    split_tetrahedra = []
+    # Split tetrahedra intersecting region boundaries [S1]
+    # This causes dataset size to grow by ~15% on average [S1]
+    # Partitioning is performed when data changes, not every frame [S1]
+    partitions = [[] for _ in range(num_partitions)]
     for tet in tetrahedra:
         if intersects_boundary(tet, kd_tree):
-            split_tetrahedra.extend(split_tetrahedron(tet, kd_tree))
+            split_tets = split_tetrahedron(tet, kd_tree)
+            for st in split_tets:
+                pid = get_partition_id(st, kd_tree)
+                partitions[pid].append(st)
         else:
-            split_tetrahedra.append(tet)
-            
-    # Assign split tetrahedra to processes based on kd-tree regions
-    partitions = [[] for _ in range(num_processes)]
-    for tet in split_tetrahedra:
-        process_id = get_process_id(tet, kd_tree)
-        partitions[process_id].append(tet)
-        
-    return partitions
+            pid = get_partition_id(tet, kd_tree)
+            partitions[pid].append(tet)
 
-def render_projected_tetrahedra(tetrahedra, width, height):
-    """
-    Render a set of tetrahedra using the projected tetrahedra method.
-    """
-    # Initialize image buffer
-    image = initialize_image(width, height)
-    
-    # For each tetrahedron:
-    for tet in tetrahedra:
-        # Project vertices to 2D screen space
-        projected_vertices = project_to_screen(tet.vertices)
-        
-        # Subdivide image plane based on projected edges
-        # This creates polygons within the projection of front/back faces
-        polygons = subdivide_image_plane(projected_vertices, width, height)
-        
-        # For each polygon:
+    # Step 2: Local rendering per partition [S1]
+    local_images = []
+    for pid, assigned_tets in enumerate(partitions):
+        # Render assigned tetrahedra using projected tetrahedra method [S1]
+        # Projects 3D vertices to 2D, subdivides image plane, interpolates scalars, calculates opacity [Parent]
+        img = render_local(assigned_tets, image_width, image_height)
+        local_images.append(img)
+
+    # Step 3: Parallel image compositing (sort-last) [S1]
+    # Transfer only image data between processes [S1]
+    # Composite images using a traditional sort-last algorithm [S1]
+    final_image = sort_last_composite(local_images)
+    return final_image
+
+def render_local(tetrahedra, width, height):
+    # Initialize image buffers for color and accumulated opacity [G]
+    color_buf = zeros((height, width, 3))
+    alpha_buf = zeros((height, width))
+    # Process tetrahedra back-to-front by depth [G]
+    sorted_tets = sort_by_depth(tetrahedra)
+    for tet in sorted_tets:
+        # Project vertices to screen space [Parent]
+        proj_verts = project_to_screen(tet.vertices)
+        # Subdivide image plane into polygons based on projected edges [Parent]
+        polygons = subdivide_image_plane(proj_verts, width, height)
         for poly in polygons:
-            # Interpolate scalar values at polygon vertices
+            # Interpolate scalar values at polygon vertices [Parent]
             scalars = interpolate_scalars(tet, poly.vertices)
-            
-            # Calculate opacity for the segment
-            # alpha = 1 - exp(-tau_avg * l)
-            opacity = calculate_opacity(scalars, poly.length)
-            
-            # Composite into image buffer
-            composite_into_image(image, poly, opacity)
-            
-    return image
+            # Calculate integrated opacity: alpha = 1 - exp(-tau_avg * l) [Parent]
+            tau_avg = map_scalar_to_opacity(scalars)
+            opacity = 1.0 - exp(-tau_avg * poly.length)
+            # Composite into image buffer [Parent]
+            composite_polygon(color_buf, alpha_buf, poly, opacity)
+    return color_buf
 
-def composite_images_sort_last(images):
-    """
-    Composite multiple images using sort-last compositing.
-    Assumes images are already in back-to-front order or can be sorted.
-    """
-    # Sort images by depth (if not already sorted)
-    sorted_images = sort_by_depth(images)
-    
-    # Initialize composite image
-    composite = initialize_image_like(sorted_images[0])
-    
-    # Porter-Duff over operation
-    for image in sorted_images:
-        composite = porter_duff_over(composite, image)
-        
-    return composite
+def sort_last_composite(images):
+    # Sort images by average depth or use parallel merge [G]
+    sorted_imgs = sort_by_depth(images)
+    # Initialize composite buffer [G]
+    comp_color = zeros_like(sorted_imgs[0])
+    comp_alpha = zeros_like(sorted_imgs[0])
+    for img in sorted_imgs:
+        # Porter-Duff over operation for each pixel [G]
+        for y, x in pixels(img):
+            c, a = img[y, x, :3], img[y, x, 3]
+            new_a = a + comp_alpha[y, x] * (1.0 - a)
+            new_c = (c * a + comp_color[y, x] * comp_alpha[y, x] * (1.0 - a)) / new_a
+            comp_color[y, x] = new_c
+            comp_alpha[y, x] = new_a
+    return comp_color
 ```
 
 ## Subtopics
 
 ### Projected Tetrahedra
-The core rendering method used locally by each process. It projects tetrahedra to screen space and composites fragments. [Link](877-projected-tetrahedra.md)
+Projects tetrahedra to screen space and composites fragments locally. Chosen when high-quality unstructured grid rendering is required without grid sampling. [Projected Tetrahedra](877-projected-tetrahedra.md)
 
-### Tetrahedral representation and traversal
-The parent method describing the decomposition of volumes into tetrahedra and the general traversal principles. [Link](4396-tetrahedral-representation-and-traversal.md)
+### Marching Tetrahedrons Algorithm
+Extracts isosurfaces from tetrahedral data rather than volume rendering. Chosen for surface visualization instead of volumetric opacity. [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md)
+
+### Early Tetrahedron Termination
+Stops traversal when opacity thresholds are met. Chosen to optimize rendering performance on transparent volumes. [Early Tetrahedron Termination](1451-early-tetrahedron-termination.md)
+
+### Adaptive Delaunay Update
+Dynamically refines the tetrahedral mesh during rendering. Chosen when adaptive resolution is needed for varying data density. [Adaptive Delaunay Update](4923-adaptive-delaunay-update.md)
+
+### Grid-based Traversal
+Traverses regular grids instead of unstructured tetrahedra. Chosen when data is already structured or can be efficiently sampled into a grid. [Grid-based Traversal](7083-grid-based-traversal.md)
+
+### Tetrahedral Mesh Connectivity Encoding
+Stores adjacency information for tetrahedral meshes. Chosen to accelerate neighbor lookups during traversal. [Tetrahedral Mesh Connectivity Encoding](8957-tetrahedral-mesh-connectivity-encoding.md)
+
+### Delaunay Triangulation for Tetrahedral Representation
+Generates tetrahedral meshes from point clouds. Chosen when creating unstructured grids from scattered simulation data. [Delaunay Triangulation for Tetrahedral Representation](9905-delaunay-triangulation-for-tetrahedral-representation.md)
+
+### TetraSDF
+Represents volumes using signed distance functions within tetrahedra. Chosen for high-fidelity implicit surface rendering. [TetraSDF](11632-tetrasdf.md)
+
+### Tetrahedral Primitive Representation
+Defines volumes as collections of tetrahedral primitives. Chosen as the foundational geometric abstraction for this method. [Tetrahedral Primitive Representation](12385-tetrahedral-primitive-representation.md)
 
 ## Operating characteristics
 *   **Time Complexity:** Rendering speed increases with the number of processors but shows diminishing returns when adding more processors than necessary for a given dataset size [S1]. The partitioning time reduces with larger jobs [S1].

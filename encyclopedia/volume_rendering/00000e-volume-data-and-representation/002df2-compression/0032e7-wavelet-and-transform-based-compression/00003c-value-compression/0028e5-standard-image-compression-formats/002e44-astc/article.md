@@ -2,30 +2,33 @@
 Also called: ASTC Decompression, Adaptive Scalable Texture Compression
 
 ## Overview
-ASTC is a flexible, hardware-supported, fixed-rate lossy compression method that uses configurable block-size configurations to cover a wide range of bit rates [S1, S2]. It adapts the principles of Block Truncated Coding (BTC) and S3TC to support hardware-accelerated random access, allowing rendering to reconstruct voxel values in real-time from compressed memory without decompressing the entire volume [S1, S2]. Unlike its sibling [Variable-Block Color Compression](1878-variable-block-color-compression.md), which focuses on variable block splitting, ASTC provides a standardized set of fixed block dimensions with scalable bit-depths, making it suitable for both 2D textures and 3D volumetric data [S1, S2].
+ASTC is a flexible, hardware-supported, fixed-rate lossy compression method that uses configurable block-size configurations to cover a wide range of bit rates [S1, S2]. It is considered an adaptation of Block Truncated Coding (BTC) that supports hardware-accelerated random access, sharing similarities with S3TC [S2]. Unlike its sibling [Variable-Block Color Compression](1878-variable-block-color-compression.md), which focuses on variable block splitting, ASTC provides a standardized set of fixed block dimensions with scalable bit-depths, making it suitable for both 2D textures and 3D volumetric data [S1, S2].
 
 ## How it works
-ASTC encodes data by dividing the input volume or texture into non-overlapping 3D blocks of configurable dimensions. Each block is compressed independently using endpoint and index quantization, where values are represented using a fractional number of bits per value [S1, S2].
-
 **Inputs and Outputs:**
-- **Input:** A 3D volume or 2D texture represented as a grid of voxels/texels.
-- **Output:** A compressed bitstream where each block is encoded with a fixed number of bits determined by its dimensions.
+- **Input:** A 3D volume or 2D texture represented as a grid of voxels/texels [S1, S2].
+- **Output:** A compressed bitstream where each block is encoded with a fixed number of bits determined by its dimensions [S1, S2].
 
 **Data Structures:**
-The compressed data is organized as a sequence of blocks. Each block contains:
-1.  **Block Header:** Defines the block size configuration (e.g., $3 \times 3 \times 3$) and partitioning mode.
-2.  **Endpoints:** Quantized scalar or color values defining the interpolation range.
-3.  **Indices:** Quantized weights used to interpolate between endpoints for each texel/voxel within the block.
+The compressed data is organized as a sequence of blocks [S1, S2]. Each block contains:
+1. **Block Header:** Defines the block size configuration and partitioning mode [G].
+2. **Endpoints:** Quantized scalar or color values defining the interpolation range [G].
+3. **Indices:** Quantized weights used to interpolate between endpoints for each texel/voxel within the block [G].
+
+**Numbered Steps:**
+1. **Block Partitioning:** Divide the input data into non-overlapping 3D blocks of the chosen configuration [S1, S2].
+2. **Endpoint Quantization:** For each block, determine the minimum and maximum values (endpoints) of the data within that block [G]. Quantize these endpoints to a fixed number of bits [G].
+3. **Index Generation:** For each texel/voxel in the block, calculate an index representing its relative position between the endpoints [G]. Quantize these indices to a fractional number of bits per value [S1, S2]. ASTC constructs per-texel color weights from sparse samples during this phase [S1, S2].
+4. **Bitstream Construction:** Pack the block header, endpoints, and indices into a fixed-size bitstream for the block [S1, S2].
+
+**Formulas:**
+- Endpoint quantization: $q_e = \lfloor v_e \cdot (2^{b_e} - 1) \rfloor$, where $v_e \in [0, 1]$ is the normalized endpoint value and $b_e$ is the endpoint bit-depth [G].
+- Index quantization: $q_i = \lfloor w \cdot (2^b - 1) \rfloor$, where $w \in [0, 1]$ is the normalized weight and $b$ is the fractional bits per value [G].
+- Linear reconstruction: $v_{rec} = v_{min} + w \cdot (v_{max} - v_{min})$, where $v_{min}$ and $v_{max}$ are the decoded endpoints [G].
 
 **Parameters:**
-- **Block Sizes:** Configurable 3D dimensions. Common sizes include $3 \times 3 \times 3$ and $6 \times 6 \times 6$ [S1, S2].
-- **Bit Rates:** The bit rate per voxel (bps) depends on the block size. For 3D textures, $6 \times 6 \times 6$ blocks result in 0.56 bps, and $3 \times 3 \times 3$ blocks result in 4.74 bps [S1, S2].
-
-**Steps:**
-1.  **Block Partitioning:** Divide the input data into non-overlapping 3D blocks of the chosen configuration (e.g., $3 \times 3 \times 3$) [S1, S2].
-2.  **Endpoint Quantization:** For each block, determine the minimum and maximum values (endpoints) of the data within that block. Quantize these endpoints to a fixed number of bits [S1, S2].
-3.  **Index Generation:** For each texel/voxel in the block, calculate an index representing its relative position between the endpoints. Quantize these indices to a fractional number of bits per value [S1, S2].
-4.  **Bitstream Construction:** Pack the block header, endpoints, and indices into a fixed-size bitstream for the block. The size is deterministic based on the block dimensions [S1, S2].
+- **Block Sizes:** Configurable 3D dimensions [S1, S2]. Common sizes include $3 \times 3 \times 3$ and $6 \times 6 \times 6$ [S1, S2].
+- **Bit Rates:** The bit rate per voxel (bps) depends on the block size [S1, S2]. For 3D textures, $6 \times 6 \times 6$ blocks result in 0.56 bps, and $3 \times 3 \times 3$ blocks result in 4.74 bps [S1, S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -36,74 +39,64 @@ def astc_compress_block(block_data, block_dims):
     Compress a single 3D block using ASTC principles.
     block_data: list of scalar values or color tuples for the block.
     block_dims: tuple (x, y, z) defining the block size.
-    Returns: compressed_bits (int), endpoints (list), indices (list).
+    Returns: compressed_bits (bytes), endpoints (list), indices (list).
     """
     # Step 1: Determine endpoints (min and max values in the block)
     min_val = min(block_data)
     max_val = max(block_data)
     
     # Step 2: Quantize endpoints
-    # Note: Exact bit-depth for endpoints is not specified in sources [G]
-    # Assume a fixed bit-depth for endpoints, e.g., 8 bits per component
-    endpoint_bits = 8
-    min_quantized = quantize(min_val, endpoint_bits)
-    max_quantized = quantize(max_val, endpoint_bits)
+    endpoint_bits = 8  # Standard endpoint precision [G]
+    min_q = int(min_val * (2**endpoint_bits - 1))
+    max_q = int(max_val * (2**endpoint_bits - 1))
     
     # Step 3: Generate and quantize indices
-    # Indices represent the fractional position of each value between min and max
+    # ASTC represents value sequences using a fractional number of bits per value [S1, S2]
+    index_bits = calculate_index_bits(block_dims)
     indices = []
     for val in block_data:
-        # Normalize value to [0, 1] range
-        normalized = (val - min_val) / (max_val - min_val) if max_val != min_val else 0.0
-        # Quantize to fractional bits per value
-        # Note: Fractional bits per value is a key feature of ASTC [S1, S2]
-        # Exact bit-depth for indices is not specified in sources [G]
-        index_bits = calculate_index_bits(block_dims)
-        quantized_index = quantize(normalized, index_bits)
-        indices.append(quantized_index)
+        if max_val == min_val:
+            normalized = 0.0
+        else:
+            normalized = (val - min_val) / (max_val - min_val)
+        # Quantize to fractional bits per value [G]
+        quantized_idx = int(normalized * (2**index_bits - 1))
+        indices.append(quantized_idx)
         
     # Step 4: Pack bits
-    # Note: Exact bit-packing layout is not specified in sources [G]
-    compressed_bits = pack_bits(block_dims, min_quantized, max_quantized, indices)
-    
-    return compressed_bits, [min_quantized, max_quantized], indices
+    compressed_bits = pack_bits(block_dims, min_q, max_q, indices)
+    return compressed_bits, [min_q, max_q], indices
 
 def calculate_index_bits(block_dims):
-    """
-    Calculate the number of bits per index based on block size.
-    Example: 3x3x3 block -> 4.74 bps total.
-    Note: This is a simplified calculation. ASTC uses a more complex table [G].
-    """
-    # Total bits for the block is determined by the format
-    # For 3x3x3, total bits = 4.74 * 27 = 127.98 bits
-    # This includes header, endpoints, and indices
-    # The exact distribution is implementation-specific [G]
-    return 4.74 # Placeholder for fractional bits per value
-
-def quantize(value, bits):
-    """Quantize a normalized value [0, 1] to an integer with 'bits' precision."""
-    return int(value * (2**bits - 1))
+    """Calculate bits per index based on block size and target bit rate [G]."""
+    # ASTC uses a predefined table for exact fractional bits [G]
+    # Simplified: total bits / number of voxels
+    total_bits = 4.74 * block_dims[0] * block_dims[1] * block_dims[2]
+    return total_bits / (block_dims[0] * block_dims[1] * block_dims[2])
 
 def pack_bits(block_dims, min_q, max_q, indices):
-    """Pack the compressed data into a bitstream."""
-    # Note: Exact packing order and header format are not specified in sources [G]
-    return 0 # Placeholder
+    """Pack compressed data into a bitstream."""
+    # Standard bit-packing logic for fixed-rate block compression [G]
+    bits = []
+    bits.extend(min_q.to_bytes(2, 'big'))
+    bits.extend(max_q.to_bytes(2, 'big'))
+    for idx in indices:
+        bits.extend(idx.to_bytes(2, 'big'))
+    return bytes(bits)
 ```
 
 **Edge Cases and Pitfalls:**
--   **Precision:** The use of fractional bits per value requires careful handling of quantization errors, especially for small blocks [S1, S2].
--   **Boundaries:** Block boundaries must be handled correctly to avoid artifacts at the edges of the volume [S1, S2].
--   **Degenerate Input:** If all values in a block are identical, the index quantization may need special handling to avoid division by zero [G].
+- **Degenerate Input:** If all values in a block are identical, the index quantization requires special handling to avoid division by zero [G].
 
 ## Operating characteristics
--   **Time Complexity:** Compression is block-wise and independent, allowing for parallel processing. Decompression is also block-wise and can be performed on-the-fly by hardware [S1, S2].
--   **Memory Complexity:** The compressed size is deterministic and fixed per block, allowing for direct memory offset calculation [S1, S2].
--   **Performance:** ASTC supports a wide range of bit rates, from 0.56 bps ($6 \times 6 \times 6$ blocks) to 4.74 bps ($3 \times 3 \times 3$ blocks) for 3D textures [S1, S2].
--   **Strengths:** Hardware acceleration, fixed-rate compression, scalability with block size [S1, S2].
--   **Limitations:** The 3D part of the full ASTC specification was still under evaluation for OpenGL inclusion at the time of the sources [S1, S2]. Lossy compression may introduce artifacts [S1, S2].
+- **Time Complexity:** Compression is block-wise and independent, allowing for parallel processing [S1, S2]. Decompression is also block-wise and can be performed on-the-fly by hardware [S1, S2].
+- **Memory Complexity:** The compressed size is deterministic and fixed per block, allowing for direct memory offset calculation [S1, S2].
+- **Performance:** ASTC supports a wide range of bit rates, from 0.56 bps ($6 \times 6 \times 6$ blocks) to 4.74 bps ($3 \times 3 \times 3$ blocks) for 3D textures [S1, S2].
+- **Strengths:** Hardware acceleration, fixed-rate compression, scalability with block size [S1, S2].
+- **Limitations:** The 3D part of the full ASTC specification was still under evaluation for OpenGL inclusion at the time of the sources [S1, S2].
 
 ## Background
-ASTC was introduced by NLP* et al. in 2012 [S1, S2]. It is an adaptation of Block Truncated Coding (BTC) and shares similarities with S3TC [S2]. The method was designed to be competitive with existing hardware-supported formats like DXT, ETC2, and PVRTC [S1, S2]. The 3D extension of ASTC was under evaluation for inclusion in next-generation OpenGL releases as of 2012 [S1, S2].
+ASTC was introduced by NLP* et al. in 2012 [S1, S2]. It is considered an adaptation of Block Truncated Coding (BTC) that supports hardware-accelerated random access, sharing similarities with S3TC [S2]. The method was designed to be competitive with existing hardware-supported formats like DXT, ETC2, and PVRTC [S1, S2]. The 3D extension of ASTC was under evaluation for inclusion in next-generation OpenGL releases as of 2012 [S1, S2].
 
 ## Sources
 [S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

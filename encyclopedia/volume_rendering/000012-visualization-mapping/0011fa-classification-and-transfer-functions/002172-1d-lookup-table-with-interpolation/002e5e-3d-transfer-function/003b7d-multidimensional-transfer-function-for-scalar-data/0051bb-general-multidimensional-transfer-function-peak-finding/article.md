@@ -1,0 +1,122 @@
+# General Multidimensional Transfer Function Peak Finding
+
+Also called: Dynamic Peak Finding in Transfer Space, Multidimensional Peak Finding, Peak finding in higher dimensions, ρ-space Peak Sampling
+
+## Overview
+General Multidimensional Transfer Function Peak Finding is a direct volume rendering technique that samples directly at local maxima along the image of the ray in multidimensional transfer function space, rather than at the maxima of the transfer function itself [S1]. It solves for the spatial location of isosurfaces corresponding to these peaks to accurately render high-frequency features and noisy data at lower sampling rates [S1]. Unlike 1D peak finding, which finds maxima of the transfer function, this method finds local maxima along the approximated image of the ray, which usually do not coincide with the maxima of the N-dimensional function [S1]. It sets itself apart from its siblings by using ray marching to reduce the search in transfer space to 1D regardless of the dimension of classification, allowing accurate rendering of noisy data and precise transfer functions at lower sampling costs [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multidimensional transfer function $\rho(\mathbf{f})$ where $\mathbf{f} = (f_0, \dots, f_{M-1})$ is the vector of scalar data values at a point, and $M > 1$ is the dimensionality. A ray defined by origin $\mathbf{O}$ and direction $\mathbf{D}$. World-space sampling rate $\Delta t$. Transfer function space sampling rate $\Delta s$.
+*   **Output:** The color and opacity for each pixel, derived from integration along the ray with samples taken at peak locations.
+
+**Data Structures:**
+*   **Transfer Function:** Evaluated as a function $\rho: \mathbb{R}^M \to \mathbb{R}$. For higher dimensions, it may be constructed by convolving lower-dimensional functions, e.g., $\rho(\mathbf{f}) = \nu(f_0, f_1) * \mu(f_2, f_3)$ [S1].
+*   **Ray Segment:** Defined by world-space endpoints $\mathbf{f}_0 = \mathbf{f}(t_0)$ and $\mathbf{f}_1 = \mathbf{f}(t_1)$.
+
+**Steps:**
+1.  **World-Space Sampling:** Sample the scalar data $\mathbf{f}(t)$ along the ray at intervals determined by $\Delta t$. Let the samples be $\mathbf{f}_i = \mathbf{f}(t_i)$.
+2.  **Transfer Space Approximation:** For each segment between world-space samples $[\mathbf{f}_0, \mathbf{f}_1]$, parameterize an approximation of the segment in transfer space. The sources propose using **chord parameterization** (linear interpolation between $\mathbf{f}_0$ and $\mathbf{f}_1$ in transfer space) or spline parameterization [S1]. The chord approximation is defined by the line segment connecting $\rho(\mathbf{f}_0)$ and $\rho(\mathbf{f}_1)$ in the transfer space image, or more precisely, sampling $\rho$ along the linear interpolation of $\mathbf{f}$ in world space, but evaluating $\rho$ at those points [S1].
+3.  **Transfer Space Sampling:** Sample the transfer function $\rho$ along the approximated segment in transfer space at intervals determined by $\Delta s$. The sampling rate $\Delta s$ controls behavior and acceleration [S1]. The requirement is that $\rho$ is monotonic on each sub-segment $[\mathbf{f}_0, \mathbf{f}_1]$; this is a less stringent requirement than the Nyquist limit in $\rho$-space [S1].
+4.  **Peak Detection:** Query the transfer function along these segments to identify a local maximum. Let this local maximum be $\tilde{\mathbf{p}}$ [S1].
+5.  **Isosurface Solving:** Use the identified peak to solve for the isosurface root $t_\rho$ along the world-space ray. The value $t_\rho$ is the root of the isosurface along the world-space ray corresponding to the peak value [S1].
+6.  **Shading:** Use $\mathbf{R}(t_\rho)$ as the position at which to shade. For multifield data, choose a gradient for shading:
+    *   Option 1: Shade multiple data gradients $\nabla f_0, \nabla f_1, \dots$ separately using multiple central-difference neighbor stencils [S1].
+    *   Option 2: Compute the gradient $\nabla \rho(\mathbf{f})$ of the transfer function, classifying $\mathbf{f}$ at each point of a single central-difference stencil [S1].
+    *   The first approach is preferred because $\nabla \mathbf{f}$ tends to exhibit higher frequency than separate individual gradients [S1].
+7.  **Integration:** Integrate along the ray using the samples at $t_\rho$ and standard samples, similar to 1D peak finding but adapted for the multidimensional context [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_multidimensional_peak_finding(ray_origin, ray_direction, transfer_function, delta_t, delta_s):
+    # 1. World-space sampling
+    t = 0.0
+    samples = []
+    while t < ray_length:
+        f = evaluate_data(ray_origin + ray_direction * t)
+        samples.append((t, f))
+        t += delta_t
+    
+    # 2. Process each segment
+    for i in range(len(samples) - 1):
+        t0, f0 = samples[i]
+        t1, f1 = samples[i+1]
+        
+        # 3. Parameterize chord in transfer space
+        # Approximate segment in transfer space by sampling f linearly between f0 and f1
+        # and evaluating rho at those points.
+        # Number of samples in transfer space based on delta_s
+        num_samples = ceil(distance(f0, f1) / delta_s) 
+        if num_samples < 2:
+            num_samples = 2
+            
+        rho_values = []
+        for k in range(num_samples + 1):
+            alpha = k / num_samples
+            f_interp = lerp(f0, f1, alpha)
+            rho_val = transfer_function.evaluate(f_interp)
+            rho_values.append((alpha, rho_val))
+            
+        # 4. Peak Detection
+        # Find local maximum in rho_values
+        max_alpha, max_rho = find_local_max(rho_values)
+        
+        # 5. Isosurface Solving
+        # Solve for t_rho such that rho(f(t_rho)) == max_rho
+        # Since we sampled along the chord, we approximate the root
+        # In practice, this might involve a bisection or secant method on the world-space ray
+        # to find the exact t where rho(f(t)) matches the peak value found.
+        # However, the source notes that we use t_rho as the root of the isosurface.
+        # For implementation, we can interpolate t_rho based on max_alpha
+        t_rho = lerp(t0, t1, max_alpha)
+        
+        # 6. Shading
+        f_at_peak = evaluate_data(ray_origin + ray_direction * t_rho)
+        # Option 1: Multiple gradients
+        grad0 = compute_gradient(f0, neighbor0) # Placeholder for actual gradient computation
+        grad1 = compute_gradient(f1, neighbor1)
+        # Use grad0, grad1 for shading calculation
+        
+        # 7. Integration
+        color += integrate_sample(t_rho, max_rho, grad0, grad1)
+
+    return final_color
+```
+
+**Parameters:**
+*   $\Delta t$: World-space sampling rate. Typical values: $\Delta t = 4$ for DDA slabs, $\Delta t = 0.5$ for postclassified examples [S1].
+*   $\Delta s$: Transfer function space sampling rate. Typical value: $\Delta s = 2$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Monotonicity:** Multidimensional peak finding is expensive and unnecessary wherever the transfer function $\mathbf{f}$ is monotonic, as it must sample transfer space between every world-space segment [S1].
+*   **Shading Ambiguities:** Using bisection for multiple dimensions can yield shading ambiguities when peaks are close together or when the assumption of one peak per segment fails [S1].
+*   **High Frequencies:** High frequencies occur more easily in multidimensional space than in 1D scalar fields, even with relatively low-frequency transfer functions due to convolution [S1].
+*   **Peak Existence:** Unlike 1D, a peak must be looked for on each segment because it is not known in advance if one exists in $[\mathbf{f}_0, \mathbf{f}_1]$ [S1].
+
+## Subtopics
+
+### Separable Transfer Function Peak Finding
+A technique for multidimensional transfer functions that are separable into 1D functions, using 1D peak finding with modifications [S1]. It assumes one peak per ray segment and employs one isosurface solving routine instead of separate solvers for separate dimensions [S1]. It uses bisection to determine whether a root for any dimension exists in the left or right half of a bracket, instead of the secant method [S1]. Shading ambiguities may occur when roots exist in both subfields of $\mathbf{f}$, but in practice the quality is good and performance matches 1D peak finding [S1]. This trivial extension only works for a small subset of multidimensional classifications [S1].
+
+### Integration and Shading for Multifield DVR
+This subtopic addresses how to handle shading when using multidimensional peak finding. It uses $t_\rho$ as the root of the isosurface along the world-space ray and $\mathbf{R}(t_\rho)$ as the position at which to shade [S1]. Two principal options exist for choosing the gradient of a multifield volume $\mathbf{f}$ when shading:
+1.  Shading multiple data gradients $\nabla f_0, \nabla f_1, \dots$ separately, using multiple central-difference neighbor stencils [S1].
+2.  Computing the gradient $\nabla \rho(\mathbf{f})$ of the transfer function, classifying $\mathbf{f}$ at each point of a single central-difference stencil [S1].
+Both approaches are expensive, and are responsible for a significant share of the cost of multifield DVR regardless of whether peak finding is used or not [S1]. The first approach is preferred because $\nabla \mathbf{f}$ tends to exhibit higher frequency than separate individual gradients [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear per ray segment in the worst case, but average-case is constant time per segment assuming $\rho$ is Lipschitz [S1].
+*   **Memory Complexity:** No precomputation or storage requirements are needed; it is an alternative to preintegration which requires lookup tables [S1].
+*   **Measured Performance:** In a 4-channel combustion simulation visualization at 1200 × 600 resolution, postclassified renderings with $\Delta t = 0.5$ rendered at 0.8 and 0.75 fps, while peak finding with chordal ray marching ($\Delta t = 1, \Delta s = 2$) rendered at 1.6 fps [S1].
+*   **Strengths:** Produces comparable image quality with order-of-magnitude better performance than standard classification, and can reproduce features omitted entirely by standard classification [S1]. It ensures scale-invariance [S1].
+*   **Limitations:** Multidimensional peak finding is expensive and unnecessary wherever the transfer function $\mathbf{f}$ is monotonic [S1]. High frequencies occur more easily in multidimensional space [S1].
+*   **When to Use:** When rendering noisy volume data or specifying more precise transfer functions in multidimensional space [S1].
+*   **When Not to Use:** When the transfer function is monotonic along the ray, or when isosurfaces cause occlusion and scale-invariant volume rendering is not the best modality [S1].
+
+## Background
+The method was introduced in the paper "Volume Rendering with Multidimensional Peak Finding" [S1]. It extends the 1D peak finding technique to higher-dimensional transfer functions (e.g., 2D, 4D) [S1]. The work was supported by the International Research Training Group at the University of Kaiserslautern and the Computational Postdoctoral Fellowship at Argonne National Laboratory [S1]. The authors thank Rick Wagner at the San Diego Supercomputing Center for the Enzo data, Jacqueline Chen at Sandia National Laboratory for the combustion data, and Tolga Tasdizen at the University of Utah for the zebrafish data [S1].
+
+## Sources
+[S1] Volume Rendering with Multidimensional Peak Finding, https://www.sci.utah.edu/~knolla/multipeak_pv.pdf, fetched 2026-10-29
