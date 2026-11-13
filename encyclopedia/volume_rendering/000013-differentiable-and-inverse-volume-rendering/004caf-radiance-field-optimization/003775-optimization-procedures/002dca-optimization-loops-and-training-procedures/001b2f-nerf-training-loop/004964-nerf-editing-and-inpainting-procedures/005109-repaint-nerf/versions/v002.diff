@@ -1,0 +1,407 @@
+--- v001.md
++++ v002.md
+@@ -1,208 +1,243 @@
+ # RePaint-NeRF
+ 
++Also called: RePaint-NeRF: NeRF Editing via Semantic Masks and Diffusion Models
+ 
+ ## Overview
+-RePaint-NeRF is a framework for editing 3D content in Neural Radiance Fields (NeRF) using text prompts by leveraging a pre-trained diffusion model to guide changes in designated 3D content, ensuring view consistency and scene integrity [S1]. It solves the problem of modifying specific objects within a complex 3D scene without altering the surrounding environment or introducing artifacts like "black holes" where previously occluded geometry is exposed [S1]. It sets itself apart from standard NeRF optimization by decoupling the process into a semantic mask extraction stage and a diffusion-guided editing stage, using CLIP features for segmentation and Stable Diffusion for generation [S1].
++RePaint-NeRF is a framework for editing 3D content in Neural Radiance Fields (NeRF) using text prompts, leveraging pre-trained diffusion models to guide changes in designated 3D content while ensuring view consistency and scene integrity [S1]. It solves the problem of modifying specific objects within a complex 3D scene without altering the surrounding environment or introducing artifacts in previously occluded regions. Unlike methods that rely solely on text-to-3D optimization, RePaint-NeRF first extracts a view-consistent semantic mask to isolate the target object, then uses a diffusion model (Stable Diffusion) for shape/appearance guidance and a CLIP model for background filling, distinguishing it from siblings like [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md) which may use different guidance mechanisms or lack the explicit two-stage semantic decomposition.
+ 
+ ## How it works
+-RePaint-NeRF operates in two distinct stages: Semantic Mask Extraction and Text-to-3D Content Editing. It builds on [NeRF Training Loop](970-nerf-training-loop.md) by adding a semantic feature branch and diffusion-based loss terms.
++RePaint-NeRF operates on a pre-trained NeRF representation $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$ and consists of two distinct stages: Semantic Mask Extraction and Text-to-3D Content Editing [S1].
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   A set of training images $I$ with known camera poses $P$ (extracted via COLMAP) [S1].
+-*   A target text prompt describing the new object (e.g., "a blue rose") [S1].
+-*   A background text prompt (BGT) describing the surrounding environment (e.g., "leaves") to fill exposed areas [S1].
+-*   A user-selected patch on a training image to define the target object for mask generation [S1].
+-
+-**Outputs:**
+-*   An edited NeRF model $\theta$ that renders the scene with the modified object while preserving the background [S1].
++*   **Inputs:**
++    *   Training images $I$ with known camera poses (extracted via COLMAP) [S1].
++    *   Target object selection: Either a user-selected image patch or a text prompt [S1].
++    *   Text prompt for the new object appearance ($P_{obj}$) [S1].
++    *   Background prompt ($P_{BGT}$) to guide the filling of exposed areas [S1].
++    *   Pre-trained models: CLIP (for features), LSeg (for semantic segmentation), MiDAS (for depth), and Stable Diffusion (for generation) [S1].
++*   **Outputs:**
++    *   A modified NeRF model $f_{\theta'}$ that renders the edited scene with view consistency [S1].
+ 
+ ### Data Structures
+-*   **NeRF Model ($g_\theta$):** Implemented using Instant-NGP [Müller et al., 2022], utilizing a multi-resolution hash grid structure [S1]. It outputs color $C$ and density $\sigma$ for 3D points [S1].
+-*   **Semantic Feature Network ($s$):** A network outputting a feature vector $f$ for each 3D point $x$. The feature map size is $H \times W \times 512$ [S1].
+-*   **Depth Map:** Size $H \times W \times 1$, normalized to range $[0, 1]$, predicted by MiDAS [Ranftl et al., 2022] [S1].
+-*   **Feature Map ($F_I$):** Rendered semantic feature map from the feature network, size $H \times W \times 512$ [S1].
+-*   **Mask ($I_{mask}$):** Binary mask of size $H \times W \times 1$ [S1].
++*   **NeRF Model:** Instant-NGP [Müller et al., 2022] based on a multi-resolution hash grid structure [S1].
++*   **Feature Map:** Size $H \times W \times 512$. Extracted from LSeg, interpolated to this size [S1].
++*   **Depth Map:** Size $H \times W \times 1$. Predicted by MiDAS, normalized to range $[0, 1]$ [S1].
++*   **Mask:** Binary mask $I_{mask}^{H \times W \times 1}$ where $1$ indicates the target object and $0$ indicates the background [S1].
+ 
+ ### Stage 1: Semantic Mask Extraction
+ The goal is to extract a view-consistent semantic mask for the target object.
+ 
+-1.  **Initialize:** Train the NeRF color/density modules and the semantic feature module $s: x \to f$ jointly.
+-2.  **Loss Function:** Minimize $L_{first-stage}$:
+-    $$ L_{first-stage} = L_{color} + \lambda_{feature} L_{feature} + \lambda_{depth} L_{depth} $$
++1.  **Feature Distillation:** Optimize a feature network $s: \mathbf{x} \to \mathbf{f}$ alongside the vanilla NeRF color and density modules. The network outputs a 512-dimensional semantic feature vector $\mathbf{f}$ for each 3D point [S1].
++2.  **Loss Function:** Minimize the first-stage loss:
++    $$
++    L_{\text{first-stage}} = L_{\text{color}} + \lambda_{\text{feature}} L_{\text{feature}} + \lambda_{\text{depth}} L_{\text{depth}}
++    $$
+     where:
+-    *   $L_{color}$ is the standard photometric loss between rendered and ground truth colors [S1].
+-    *   $L_{feature}$ encourages the rendered feature map $F_I$ to match the features from a pre-trained semantic model (LSeg) [S1].
+-    *   $L_{depth}$ is a coarse depth supervision loss:
+-        $$ L_{depth} = \sum_{r \in R} (D(r) - \hat{D}(r))^2 $$
+-        where $D(r)$ is the depth predicted by MiDAS and $\hat{D}(r)$ is the depth predicted by the NeRF [S1].
+-3.  **Optimization:** Use Adam optimizer with learning rate $1e-2$ and batch size 4096 for 2000 steps [S1].
++    *   $L_{\text{color}}$ is the standard photometric reconstruction loss [S1].
++    *   $L_{\text{feature}}$ aligns rendered features with ground-truth features from LSeg [S1].
++    *   $L_{\text{depth}}$ aligns rendered depth with monocular depth predictions from MiDAS to mitigate noise and speed up convergence:
++        $$
++        L_{\text{depth}} = \sum_{\mathbf{r} \in R} \| D(\mathbf{r}) - \hat{D}(\mathbf{r}) \|^2
++        $$
++        where $D(\mathbf{r})$ is the depth predicted by MiDAS and $\hat{D}(\mathbf{r})$ is the depth predicted by the NeRF [S1].
++3.  **Optimization:** Use the Adam optimizer with a learning rate of $10^{-2}$ and batch size 4096 for 2000 steps [S1].
+ 4.  **Mask Generation:**
+-    *   Render the feature map $F_I$ for training views.
+-    *   Compute the mean feature $F_{patch}$ of the user-selected patch.
+-    *   Compute the mask:
+-        $$ I_{mask}^{H \times W \times 1} = 1(Sim(F_{patch}, F_I) > \alpha) $$
+-        where $Sim$ is a similarity function (e.g., cosine similarity) and $\alpha$ is a threshold [S1].
+-    *   *Note:* Patch features are preferred over text features for mask generation to allow higher thresholds and more accurate segmentation [S1].
++    *   Render the feature map $F_I$ for each training view.
++    *   Compute the mean feature $F_{\text{patch}}$ of the user-selected patch (preferred over text features for higher threshold accuracy) [S1].
++    *   Generate the mask using a similarity function $\text{Sim}$ and threshold $\alpha$:
++        $$
++        I_{\text{mask}} = 1(\text{Sim}(F_{\text{patch}}, F_I) > \alpha)
++        $$
++        where $1(\cdot)$ is the indicator function [S1].
+ 
+ ### Stage 2: Text-to-3D Content Editing
+-The goal is to modify the masked region according to the text prompt while preserving the unmasked region and filling "black holes" (previously occluded areas).
+-
+-1.  **Initialize:** Use the NeRF from Stage 1. Pre-train the base NeRF for 3000 steps using standard NeRF loss [S1].
+-2.  **Loss Function:** Minimize $L_{repaint}$:
+-    $$ L_{repaint} = \lambda_{unmask} L_{unmask} + \lambda_{clip} L_{clip} $$
+-    where:
+-    *   $L_{unmask}$ constrains the unmasked region to remain stable:
+-        $$ L_{unmask} = \sum_{r \in R} (C(r)_{unmask} - \hat{C}(r)_{unmask})^2 $$
+-        where:
+-        $$ C(r)_{unmask} = C(r) \times 1(I_{mask} < 0.5) $$
+-        $$ \hat{C}(r)_{unmask} = \hat{C}(r) \times 1(I_{mask} < 0.5) $$
+-        This ensures that pixels not in the target mask do not change significantly [S1].
+-    *   $L_{clip}$ guides the generation of background content in exposed areas:
+-        $$ L_{clip} = -Sim(Z_I, Z_{BGT}) $$
+-        where $Z_I$ is the latent feature of the rendered image $I$ encoded by CLIP, and $Z_{BGT}$ is the latent feature of the background text prompt encoded by CLIP [S1].
+-3.  **Diffusion Guidance:** Use Stable Diffusion [Rombach et al., 2022] to guide the update direction of the NeRF. The gradient $\nabla_\theta L_{SDS}$ is used to update the NeRF parameters $\theta$ [S1].
+-4.  **Optimization:** Use Adan optimizer with learning rate decaying from $1e-3$ to $1e-4$ and batch size 1. Train for 10,000 steps (generation/editing phase) [S1].
++The goal is to modify the masked region according to the text prompt while preserving the unmasked region and filling "black holes" (previously occluded areas) [S1].
++
++1.  **Base NeRF Training:** Train a base NeRF using the standard rendering equation for 3000 steps to establish a stable starting point [S1].
++2.  **Optimization:** Optimize the NeRF parameters $\theta$ to minimize the repaint loss:
++    $$
++    L_{\text{repaint}} = \lambda_{\text{unmask}} L_{\text{unmask}} + \lambda_{\text{clip}} L_{\text{clip}}
++    $$
++    *   **Unmasked Region Loss ($L_{\text{unmask}}$):** Ensures the background remains unchanged. It applies the reconstruction loss only to pixels where the mask is 0:
++        $$
++        L_{\text{unmask}} = \sum_{\mathbf{r} \in R} (C(\mathbf{r})_{\text{unmask}} - \hat{C}(\mathbf{r})_{\text{unmask}})^2
++        $$
++        where $C(\mathbf{r})_{\text{unmask}} = C(\mathbf{r}) \times 1(I_{\text{mask}} < 0.5)$ and $\hat{C}(\mathbf{r})_{\text{unmask}} = \hat{C}(\mathbf{r}) \times 1(I_{\text{mask}} < 0.5)$ [S1].
++    *   **CLIP Loss ($L_{\text{clip}}$):** Guides the generation of the background in "black hole" areas (regions exposed because the new object is smaller than the old one). It encourages the rendered image $I$ to match the background prompt $P_{BGT}$:
++        $$
++        L_{\text{clip}} = -\text{Sim}(Z_I, Z_{BGT})
++        $$
++        where $Z_I$ is the latent feature of the rendered image $I$ and $Z_{BGT}$ is the latent feature of the background prompt encoded by CLIP [S1].
++    *   **Diffusion Guidance:** The Stable Diffusion model provides the primary gradient for the masked region. The gradient $\nabla_\theta L_{\text{SDS}}$ (Stable Diffusion Score Distillation) is used to update the NeRF, guiding the masked area to conform to the object text prompt $P_{obj}$ [S1]. *Note: The sources define $L_{\text{repaint}}$ as the sum of unmask and clip losses, but explicitly state that SDS guides the update direction for the target region. The total optimization effectively combines SDS for the mask and $L_{\text{repaint}}$ terms for consistency/background.*
++3.  **Optimization Settings:** Use the Adan optimizer with a learning rate decaying from $10^{-3}$ to $10^{-4}$ and batch size 1. Train for 10,000 steps (3000 for pre-training/base, 10,000 for generation/editing) [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def repaint_nerf(training_images, poses, target_prompt, background_prompt, patch_selection):
+-    """
+-    RePaint-NeRF editing pipeline.
+-    """
+-    # Stage 1: Semantic Mask Extraction
+-    # Initialize NeRF with Instant-NGP structure and semantic feature branch
+-    nerf_model = InstantNGPNeRF()
+-    feature_network = SemanticFeatureNetwork()
+-    
+-    # Optimization parameters for Stage 1
+-    optimizer_stage1 = Adam(lr=1e-2, batch_size=4096)
++# RePaint-NeRF Implementation
++
++def stage_1_semantic_mask_extraction(training_images, poses, target_patch_features):
++    """
++    Extracts view-consistent semantic masks.
++    """
++    # Initialize NeRF with Instant-NGP structure
++    nerf_model = InstantNGP()
++    
++    # Initialize feature network s: x -> f
++    feature_net = FeatureNetwork()
++    
++    # Load pre-trained models
++    depth_model = MiDAS() # Predicts D(r)
++    lseg_model = LSeg()   # Provides ground truth features
++    
++    optimizer = Adam(params=nerf_model.parameters() + feature_net.parameters(), lr=1e-2)
+     
+     for step in range(2000):
++        # Sample rays from training images
++        rays = sample_rays(training_images, poses)
++        
++        # Render NeRF output
++        sigma, color, depth_pred = nerf_model(rays)
++        features = feature_net(rays)
++        
++        # Get ground truth depth from MiDAS
++        depth_gt = depth_model(training_images)
++        
++        # Get ground truth features from LSeg
++        features_gt = lseg_model(training_images)
++        
++        # Compute Losses
++        l_color = mse_loss(color, rays.color)
++        l_feature = mse_loss(features, features_gt)
++        l_depth = mse_loss(depth_pred, depth_gt)
++        
++        # Total Loss
++        loss = l_color + lambda_feature * l_feature + lambda_depth * l_depth
++        
++        # Backpropagate
++        optimizer.zero_grad()
++        loss.backward()
++        optimizer.step()
++        
++    # Generate Masks
++    masks = []
++    for img in training_images:
++        # Render feature map F_I
++        F_I = feature_net.render_feature_map(img)
++        # Compute similarity with patch features
++        similarity = cosine_similarity(F_I, target_patch_features)
++        # Apply threshold alpha
++        mask = (similarity > alpha).float()
++        masks.append(mask)
++        
++    return nerf_model, masks
++
++def stage_2_text_to_3d_editing(nerf_model, masks, obj_prompt, bg_prompt):
++    """
++    Edits the masked region using diffusion guidance and CLIP background filling.
++    """
++    # Load pre-trained models
++    diffusion_model = StableDiffusion()
++    clip_model = CLIP()
++    
++    # Encode prompts
++    z_obj = clip_model.encode(obj_prompt)
++    z_bg = clip_model.encode(bg_prompt)
++    
++    optimizer = Adan(params=nerf_model.parameters(), lr=1e-3, lr_decay=1e-4)
++    
++    for step in range(10000):
+         # Sample rays
+-        rays = sample_rays(training_images, poses)
+-        
+-        # Forward pass
+-        colors, depths, features = nerf_model(rays), feature_network(rays)
+-        gt_colors, gt_depths = get_ground_truth(rays)
+-        gt_features = get_semantic_features(rays) # From LSeg/CLIP
+-        
+-        # Compute losses
+-        l_color = mse_loss(colors, gt_colors)
+-        l_feature = mse_loss(features, gt_features)
+-        l_depth = mse_loss(depths, gt_depths) # Supervised by MiDAS
+-        
+-        l_first_stage = l_color + lambda_feature * l_feature + lambda_depth * l_depth
+-        
+-        # Backward pass
+-        optimizer_stage1.zero_grad()
+-        l_first_stage.backward()
+-        optimizer_stage1.step()
+-
+-    # Generate Mask
+-    # Render feature map for all training views
+-    feature_maps = render_feature_maps(nerf_model, feature_network, training_images, poses)
+-    
+-    # Compute mean feature of selected patch
+-    f_patch = mean_feature(patch_selection, feature_maps)
+-    
+-    # Compute binary mask
+-    # Sim is cosine similarity, alpha is threshold
+-    masks = (cosine_similarity(f_patch, feature_maps) > alpha).float()
+-
+-    # Stage 2: Text-to-3D Content Editing
+-    # Pre-train base NeRF for 3000 steps (standard NeRF loss)
+-    train_base_nerf(nerf_model, training_images, poses, steps=3000)
+-    
+-    # Optimization parameters for Stage 2
+-    optimizer_stage2 = Adan(lr=1e-3, lr_decay=1e-4, batch_size=1)
+-    
+-    # Load Stable Diffusion and CLIP models
+-    diffusion_model = StableDiffusion()
+-    clip_encoder = CLIP()
+-    
+-    # Encode background prompt
+-    z_bg = clip_encoder.encode(background_prompt)
+-    
+-    for step in range(10000):
+-        # Sample ray
+-        ray = sample_ray(training_images, poses)
+-        
+-        # Forward pass through NeRF
+-        color, depth, _ = nerf_model(ray)
+-        
+-        # Render full image for diffusion guidance
+-        rendered_image = render_image(nerf_model, poses)
+-        
+-        # Compute Unmasked Loss
+-        # Apply mask to ensure unmasked regions stay stable
+-        mask = masks[ray.view_id]
+-        color_unmasked = color * (mask < 0.5)
+-        gt_color_unmasked = get_gt_color(ray) * (mask < 0.5)
+-        l_unmask = mse_loss(color_unmasked, gt_color_unmasked)
+-        
+-        # Compute CLIP Loss for background filling
+-        # Encode rendered image and background prompt
+-        z_img = clip_encoder.encode(rendered_image)
+-        l_clip = -cosine_similarity(z_img, z_bg)
+-        
+-        # Compute Diffusion Loss (SDS)
+-        # This guides the masked region to match target_prompt
+-        # Note: SDS gradient is computed w.r.t the rendered image, then backprop to NeRF
+-        l_sds = compute_sds_loss(diffusion_model, rendered_image, target_prompt)
++        rays = sample_rays()
++        
++        # Render NeRF
++        sigma, color, depth = nerf_model(rays)
++        
++        # Get mask for current view
++        mask = get_corresponding_mask(rays, masks)
++        
++        # 1. Diffusion Guidance for Masked Region
++        # Render image I
++        I = render_image(color, rays)
++        
++        # Compute SDS gradient for the masked region
++        # Note: SDS typically requires sampling noise and predicting noise residual
++        noise = torch.randn_like(I)
++        # ... (Standard SDS implementation details from DreamFusion) ...
++        grad_sds = compute_sds_gradient(diffusion_model, I, z_obj, mask)
++        
++        # 2. Unmasked Region Loss
++        # Only compute reconstruction loss for unmasked pixels
++        unmask_mask = 1 - mask
++        color_unmask = color * unmask_mask
++        target_unmask = rays.color * unmask_mask
++        l_unmask = mse_loss(color_unmask, target_unmask)
++        
++        # 3. CLIP Loss for Background/Black Holes
++        # Encode rendered image
++        z_I = clip_model.encode(I)
++        # Compute similarity with background prompt
++        l_clip = -cosine_similarity(z_I, z_bg)
+         
+         # Total Loss
+-        # Note: The paper defines L_repaint = lambda_unmask * L_unmask + lambda_clip * L_clip
+-        # However, it also states SDS guides the update direction.
+-        # Combining them:
+-        l_repaint = lambda_unmask * l_unmask + lambda_clip * l_clip + l_sds
+-        
+-        # Backward pass
+-        optimizer_stage2.zero_grad()
+-        l_repaint.backward()
+-        optimizer_stage2.step()
+-
++        # Note: The source defines L_repaint = lambda_unmask * L_unmask + lambda_clip * L_clip
++        # The SDS gradient is applied separately to guide the masked region
++        loss_repaint = lambda_unmask * l_unmask + lambda_clip * l_clip
++        
++        # Combine gradients
++        # grad_total = grad_sds + grad_loss_repaint
++        # grad_loss_repaint = gradient(loss_repaint, nerf_model)
++        
++        optimizer.zero_grad()
++        # loss_repaint.backward() # Backpropagate repaint loss
++        # grad_sds.backward()     # Backpropagate SDS guidance
++        # optimizer.step()
++        
++        # Simplified step for clarity as per source description
++        loss = loss_repaint
++        loss.backward()
++        optimizer.step()
++        
++        # Apply SDS gradient update manually if using standard PyTorch loop
++        # nerf_model.apply_gradient(grad_sds)
++        
+     return nerf_model
+ ```
+ 
+ ### Parameters
+-*   $\lambda_{feature}$: Weight for feature loss in Stage 1. Value not explicitly given in text [S1].
+-*   $\lambda_{depth}$: Weight for depth loss in Stage 1. Value not explicitly given in text [S1].
+-*   $\lambda_{unmask}$: Weight for unmasked region stability in Stage 2. Typical value: 100. Too large values severely restrict the diffusion model's generative ability and slow generation speed [S1].
+-*   $\lambda_{clip}$: Weight for CLIP loss in Stage 2. Used to balance change of target object and other regions. Value not explicitly given in text [S1].
+-*   $\alpha$: Threshold for mask generation. Value not explicitly given in text [S1].
+-*   Learning Rate (Stage 1): $1e-2$ [S1].
+-*   Learning Rate (Stage 2): $1e-3$ decaying to $1e-4$ [S1].
+-*   Batch Size (Stage 1): 4096 [S1].
+-*   Batch Size (Stage 2): 1 [S1].
+-*   Steps (Stage 1): 2000 [S1].
+-*   Steps (Stage 2 Pre-training): 3000 [S1].
+-*   Steps (Stage 2 Generation): 10000 [S1].
++*   $\lambda_{\text{feature}}$: Weight for feature loss in Stage 1. Value not explicitly given in text [S1].
++*   $\lambda_{\text{depth}}$: Weight for depth loss in Stage 1. Value not explicitly given in text [S1].
++*   $\alpha$: Threshold for mask generation. Value not explicitly given, but higher values allow more accurate segmentation [S1].
++*   $\lambda_{\text{unmask}}$: Weight for unmasked region stability in Stage 2. Typical value: 100. Too large values restrict the diffusion model's generative ability and slow generation speed [S1].
++*   $\lambda_{\text{clip}}$: Weight for CLIP loss in Stage 2. Used to balance change of target object and other regions. Value not explicitly given [S1].
++*   **Optimizer Stage 1:** Adam, LR $10^{-2}$, Batch Size 4096 [S1].
++*   **Optimizer Stage 2:** Adan, LR $10^{-3}$ decaying to $10^{-4}$, Batch Size 1 [S1].
++*   **Training Steps Stage 1:** 2000 steps [S1].
++*   **Training Steps Stage 2:** 3000 steps (pre-training/base) + 10,000 steps (generation/editing) [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Black Holes:** If the newly generated object is smaller than the original, previously covered areas become "black holes" because the content is unknown to the model [S1]. Mitigated by adding a background prompt (BGT) and CLIP loss [S1].
++*   **Black Holes:** If the newly generated object is smaller than the original, previously covered areas become "black holes" (unknown content). Mitigated by adding a background prompt ($P_{BGT}$) and CLIP loss [S1].
+ *   **Depth Noise:** Noise in depth estimation causes imprecise semantic mask segmentation. Mitigated by adding coarse depth supervision from MiDAS [S1].
+-*   **Unwanted Background Changes:** If $\lambda_{unmask} = 0$, the diffusion model may alter the background completely. Gradually increasing $\lambda_{unmask}$ enforces shape/appearance preservation [S1].
+-*   **Computation Time:** The process is time-consuming and space-consuming. Actual generation time depends on the complexity of the edit (e.g., 5 minutes for color change, >40 minutes for shape change) [S1].
++*   **Unwanted Background Changes:** Without $L_{\text{unmask}}$, the diffusion model may alter the background completely. Mitigated by setting $\lambda_{\text{unmask}} > 0$ (typically 100) [S1].
++*   **Generation Speed:** Complex edits (e.g., changing shape) take significantly longer (40+ minutes) than simple color changes (5 minutes) [S1].
+ 
+ ## Subtopics
+ 
+ ### Unmasked Region Weighting
+-A scalar weight $\lambda_{unmask}$ applied to the loss function that constrains the unmasked region to prevent unwanted diffusion model changes. When $\lambda_{unmask} = 0$, no constraints are applied to the background, allowing the diffusion model to alter it completely. Gradually increasing $\lambda_{unmask}$ enforces shape/appearance preservation. Typical value is 100. Too large values severely restrict the diffusion model's generative ability and slow generation speed [S1].
++A scalar weight $\lambda_{\text{unmask}}$ applied to the unmasked region loss to constrain the background and prevent unwanted diffusion model changes. When $\lambda_{\text{unmask}} = 0$, the background is unconstrained. Typical value is 100; too large values restrict generative ability and slow speed [S1].
+ 
+ ### Mask+SDS
+-A variant of the editing guidance where the Stable Diffusion Score Distillation Sampling (SDS) loss is used to guide the masked part. It produces significantly better texture and shape than Mask+CLIP because SDS provides stronger gradient guidance for the diffusion model [S1].
++A variant configuration using only Stable Diffusion Score Distillation (SDS) for guidance without the explicit CLIP background loss. It produces significantly better texture and shape than Mask+CLIP because SDS provides stronger gradient guidance for the diffusion model [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** High. The method requires two stages of optimization. Stage 1 takes 2000 steps. Stage 2 takes 3000 steps for pre-training and 10,000 steps for generation. Each iteration renders a whole view, consuming significant memory and time [S1].
+-*   **Memory Complexity:** High. Requires storing the Instant-NGP hash grids, feature maps, and depth maps. Batch size of 1 in Stage 2 is used to manage GPU memory [S1].
++*   **Time Complexity:** High. Training Stage 1 takes 2000 steps. Stage 2 takes 13,000 steps (3000 + 10,000). Actual generation time depends on edit complexity (5 to 40+ minutes on a single NVIDIA RTX 3090) [S1].
++*   **Memory Complexity:** High. Requires storing Instant-NGP hash grids, feature networks, and rendering full-resolution images for diffusion guidance. Batch size is limited to 1 in Stage 2 to fit GPU memory [S1].
+ *   **Hardware:** Tested on a single NVIDIA RTX 3090 GPU [S1].
+-*   **Resolution:** LLFF resized to 504 x 378; Blender resized to 400 x 400 [S1].
+-*   **Strengths:** View-consistent editing; ability to edit complex scenes; handles "black holes" via background prompts and CLIP loss [S1].
+-*   **Limitations:** Time-consuming; space-consuming; limited by view angle (occluded content may not be edited correctly if not visible in training views) [S1].
++*   **Resolution:** LLFF resized to $504 \times 378$; Blender resized to $400 \times 400$ to save memory [S1].
++*   **Strengths:** View-consistent editing, ability to change shape and appearance via text, handles complex scenes better than patch-only methods [S1].
++*   **Limitations:** Time-consuming and space-consuming. Limited by view angle (occluded content may not be reconstructed correctly if not guided) [S1].
+ 
+ ## Background
+-RePaint-NeRF was proposed in 2023 by Kobayashi et al. (IJCAI-23) [S1]. It builds on DreamFusion [Poole et al., 2022] for text-to-3D generation and DFF [Kobayashi et al., 2022] for semantic feature extraction. It uses Instant-NGP [Müller et al., 2022] for acceleration, Stable Diffusion [Rombach et al., 2022] for guidance, and CLIP [Radford et al., 2021] for semantic understanding [S1].
++RePaint-NeRF was proposed in 2023 by authors from the IJCAI-23 conference [S1]. It builds on DreamFusion [Poole et al., 2022] for text-to-3D optimization and DFF [Kobayashi et al., 2022] for semantic feature distillation. It addresses the limitation of previous methods that could not edit invisible content or maintain view consistency in complex scenes [S1].
+ 
+ ## Sources

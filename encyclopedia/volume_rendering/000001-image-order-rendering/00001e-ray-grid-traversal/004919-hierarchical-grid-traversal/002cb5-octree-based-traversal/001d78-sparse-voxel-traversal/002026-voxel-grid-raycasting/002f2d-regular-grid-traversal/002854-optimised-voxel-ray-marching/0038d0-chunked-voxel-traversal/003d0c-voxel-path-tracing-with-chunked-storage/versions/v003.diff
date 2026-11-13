@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -9,6 +9,6 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Voxel Map:** A sparse grid of chunks. Each chunk contains a 3D array of voxels.
+-*   **Lighting Request Buffer:** A `std430` buffer (`binding 3`) containing `uint chunkIndices[]`. Each entry packs a chunk index (28 bits) and a voxel offset within that chunk (4 bits) [S1, unofficial].
++*   **Voxel Map:** A sparse grid of chunks [S1, unofficial]. Each chunk contains a 3D array of voxels [S1, unofficial].
++*   **Lighting Request Buffer:** A `std430` buffer (`binding 3`) containing `uint chunkIndices[]` [S1, unofficial]. Each entry packs a chunk index (28 bits) and a voxel offset within that chunk (4 bits) [S1, unofficial].
+ *   **Scene Data:**
+     *   `mapSize`: Uniform `uvec3` defining the global map dimensions [S1, unofficial].
+@@ -46,7 +46,6 @@
+ **Chunk Indices Buffer Layout:**
+ Each `uint` in `lightingRequestBuffer` contains:
+-*   Bits 0-3: Voxel offset within the chunk (4 bits).
+-*   Bits 4-31: Chunk index (28 bits).
+-[S1, unofficial]
++*   Bits 0-3: Voxel offset within the chunk (4 bits) [S1, unofficial].
++*   Bits 4-31: Chunk index (28 bits) [S1, unofficial].
+ 
+ **Sphere Points:**
+@@ -191,16 +190,16 @@
+ 
+ def decompress_voxel(map_data, voxel_index):
+-    # Implementation not provided in sources [G]
++    # Not given in the sources
+     pass
+ 
+ def step_map(ray_dir, inv_ray_dir, ray_pos, flag1, flag2, temp_normal, hit_voxel, color_add, color_mult):
+-    # Implementation not provided in sources [G]
++    # Not given in the sources
+     pass
+ 
+ def encode_uint_RGBA(voxel_index, albedo, spec_light, diffuse_light_16bit):
+-    # Implementation not provided in sources [G]
++    # Not given in the sources
+     pass
+ 
+-def specular_ray(ray_dir, ray_pos, hit_voxel, hit_material, bounce_limit, sphere_points, map_data, chunks_data, last_pos):
++def specular_ray(ray_dir, ray_pos, last_pos, hit_voxel, hit_material, bounce_limit, sphere_points, map_data, chunks_data):
+     color = vec3(0.0, 0.0, 0.0)
+     multiplier = 1.0
+@@ -217,5 +216,4 @@
+ 
+         if hit:
+-            # get_hit_map_index is not defined, assuming hit_voxel_out provides index or map lookup [G]
+             hit_map_index = 0
+             if map_data[hit_map_index].flags & 4:
+@@ -306,9 +304,60 @@
+         return (sun_strength * color_mult + color_add[0], sun_strength * color_mult + color_add[1], sun_strength * color_mult + color_add[2])
+     return vec3(0.0, 0.0, 0.0)
++
++def main():
++    enable_refraction = False
++    map_index = chunk_indices[gl_WorkGroupID.x] >> 4
++    map_pos = ivec3(chunks[map_index].pos.xyz)
++    vox_num = gl_LocalInvocationID.x + (chunk_indices[gl_WorkGroupID.x] & 15) * gl_WorkGroupSize.x
++    chunk_pos = get_voxel_position(map_index, vox_num)
++    if not in_chunk_bounds(chunk_pos):
++        return
++
++    voxel_index = map[map_index].voxel_index + vox_num
++    this_voxel, this_material = decompress_voxel(map, voxel_index)
++    indirect_samples = min(chunks[map_index].num_indirect_samples, max_diffuse_samples)
++
++    if indirect_samples == 0:
++        first_sample = True
++    else:
++        first_sample = False
++
++    ray_pos = (INV_CHUNK_SIZE * chunk_pos[0] + map_pos[0] + HALF_INV_CHUNK_SIZE,
++               INV_CHUNK_SIZE * chunk_pos[1] + map_pos[1] + HALF_INV_CHUNK_SIZE,
++               INV_CHUNK_SIZE * chunk_pos[2] + map_pos[2] + HALF_INV_CHUNK_SIZE)
++    ray_pos = (ray_pos[0] + (HALF_INV_CHUNK_SIZE - EPSILON) * this_voxel.normal[0],
++               ray_pos[1] + (HALF_INV_CHUNK_SIZE - EPSILON) * this_voxel.normal[1],
++               ray_pos[2] + (HALF_INV_CHUNK_SIZE - EPSILON) * this_voxel.normal[2])
++
++    spec_light = vec3(0.0, 0.0, 0.0)
++    if this_material.specular > 0.0 and dot(view_dir, this_voxel.normal) < 0.0 and this_material.reflect_type <= 1:
++        reflected = reflect(normalize(view_dir), this_voxel.normal)
++        for i in range(15):
++            spec_dir = normalize(reflected * this_material.shininess + sphere_points[i]) + vec3(EPSILON, EPSILON, EPSILON)
++            spec_light = (spec_light[0] + specular_ray(spec_dir, ray_pos, ray_pos, this_voxel, this_material, specular_bounce_limit, sphere_points, map, chunks)[0],
++                          spec_light[1] + specular_ray(spec_dir, ray_pos, ray_pos, this_voxel, this_material, specular_bounce_limit, sphere_points, map, chunks)[1],
++                          spec_light[2] + specular_ray(spec_dir, ray_pos, ray_pos, this_voxel, this_material, specular_bounce_limit, sphere_points, map, chunks)[2])
++        spec_light = (spec_light[0] / 15.0, spec_light[1] / 15.0, spec_light[2] / 15.0)
++
++    diffuse_light = vec3(0.0, 0.0, 0.0)
++    if this_material.specular < 1.0:
++        diffuse_light = (diffuse_light[0] + ambient_strength, diffuse_light[1] + ambient_strength, diffuse_light[2] + ambient_strength)
++        for i in range(num_diffuse_samples):
++            d_ray = diffuse_ray(ray_pos, this_voxel, this_material, diffuse_bounce_limit, first_sample, seed, indirect_samples, map, chunks, sun_dir, sun_strength, ray_pos)
++            s_ray = shadow_ray(ray_pos, this_voxel, this_material, sun_dir, shadow_softness, first_sample, seed, map)
++            diffuse_light = (diffuse_light[0] + d_ray[0] + s_ray[0], diffuse_light[1] + d_ray[1] + s_ray[1], diffuse_light[2] + d_ray[2] + s_ray[2])
++        diffuse_light = ((this_voxel.diffuse_light[0] * indirect_samples + diffuse_light[0]) / (indirect_samples + num_diffuse_samples),
++                         (this_voxel.diffuse_light[1] * indirect_samples + diffuse_light[1]) / (indirect_samples + num_diffuse_samples),
++                         (this_voxel.diffuse_light[2] * indirect_samples + diffuse_light[2]) / (indirect_samples + num_diffuse_samples))
++
++    spec_light = clamp_vec(spec_light, 0.0, 1.0)
++    diffuse_light = clamp_vec(diffuse_light, 0.0, 1.0)
++    write_diffuse_light = uvec3(round(diffuse_light[0] * 65535), round(diffuse_light[1] * 65535), round(diffuse_light[2] * 65535))
++    encode_uint_RGBA(voxel_index, this_voxel.albedo, spec_light, write_diffuse_light)
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Lighting is computed per-voxel for visible chunks. Diffuse lighting accumulates over frames, reducing per-frame cost after convergence. Specular and direct lighting are calculated instantly per frame using fixed sample counts [S1, unofficial].
+-*   **Memory Complexity:** Requires storage for `normal`, `material`, `albedo`, `specLight`, and `diffuseLight` per voxel. Diffuse light is stored in 16-bit per channel format [S1, unofficial].
++*   **Time Complexity:** Lighting is computed per-voxel for visible chunks [S1, unofficial]. Diffuse lighting accumulates over frames, reducing per-frame cost after convergence [S1, unofficial]. Specular and direct lighting are calculated instantly per frame using fixed sample counts [S1, unofficial].
++*   **Memory Complexity:** Requires storage for `normal`, `material`, `albedo`, `specLight`, and `diffuseLight` per voxel [S1, unofficial]. Diffuse light is stored in 16-bit per channel format [S1, unofficial].
+ *   **Strengths:** Enables dynamic streaming and fast map edits because only edited chunks need re-uploading. Empty chunks are skipped during ray casting [S1, unofficial].
+ *   **Limitations:** Diffuse lighting requires multiple frames to converge. The method is a work-in-progress and may lack polish [S1, unofficial].

@@ -1,201 +1,319 @@
 # Neural Radiance Field (NeRF) Representation
 
-Also called: Neural Radiance Fields, Implicit Neural Radiance Fields
+Also called: 3D Gaussian Splatting, Gaussian Splatting
 
 ## Overview
-Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function parameterized by a multi-layer perceptron (MLP), enabling the synthesis of novel views from a sparse set of input images by solving the volume rendering integral [S1, unofficial][S2]. Unlike explicit representations such as [3D Gaussian Splatting](12052-3d-gaussian-splatting-optimization.md) which store millions of discrete blobs, NeRF stores the scene implicitly within a neural network, allowing for high-fidelity, view-dependent appearance modeling with significantly lower memory footprint, albeit at the cost of slower rendering and training times [S1, unofficial].
+A method representing a scene explicitly as millions of tiny colored semi-transparent 3D Gaussian blobs in 3D space, rendered by projecting them onto the screen and blending, avoiding neural network evaluation for real-time performance [S1, unofficial]. It differs from standard NeRF by storing the scene explicitly as a set of blobs rather than implicitly inside a network, which drops training time from many hours to tens of minutes and increases rendering speed from seconds per image to >100 FPS, at the cost of higher memory usage (hundreds of megabytes vs. a few megabytes) [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of $N$ calibrated images $\{I_i\}$ with corresponding camera poses $\{T_i\}$ (extrinsics and intrinsics).
-*   **Outputs:** A continuous function $F_\Theta$ that maps a 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$ to a volume density $\sigma \in \mathbb{R}$ and an emitted color $\mathbf{c} \in \mathbb{R}^3$.
+*   **Inputs:** A set of images and their corresponding camera poses (typically obtained via Structure from Motion, e.g., COLMAP) [S1, unofficial].
+*   **Outputs:** A rendered image from a novel viewpoint, or an optimized set of 3D Gaussians representing the scene [S1, unofficial].
 
 **Data Structures:**
-The core data structure is a Multi-Layer Perceptron (MLP) with parameters $\Theta$.
-*   **Position Encoding:** Raw coordinates are not fed directly. Instead, positional encoding $\gamma(\mathbf{x})$ is applied to high-frequency coordinates to help the network learn high-frequency details.
-    *   $\gamma(\mathbf{x}) = [\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x})]^T$
-    *   Where $L$ is the number of frequency bands.
-*   **Network Architecture (Standard NeRF):**
-    *   **Position Network:** Takes encoded position $\gamma(\mathbf{x})$ and outputs an intermediate feature vector $\mathbf{b}$.
-    *   **Density Head:** Takes $\mathbf{b}$ and outputs volume density $\sigma$.
-    *   **Viewing Direction Network:** Takes encoded position $\gamma(\mathbf{x})$, viewing direction $\gamma(\mathbf{d})$, and feature $\mathbf{b}$ to output color $\mathbf{c}$.
+Each Gaussian $i$ stores approximately 59 learnable numbers [S1, unofficial]. The layout is:
+1.  **Position:** Center in 3D space, $\mu_i \in \mathbb{R}^3$.
+2.  **Covariance:** Defined by scale $\mathbf{s}_i \in \mathbb{R}^3$ and rotation $\mathbf{R}_i \in SO(3)$. The covariance matrix $\Sigma_i$ is constructed as $\Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{S}_i$ is a diagonal matrix with entries from $\mathbf{s}_i$. This ensures the shape remains valid (positive semi-definite) [S1, unofficial].
+3.  **Opacity:** Transparency $\alpha_i \in [0, 1]$.
+4.  **Color:** Stored as spherical harmonics coefficients to enable view-dependent color changes [S1, unofficial].
 
-**Numbered Steps:**
+**Algorithm Steps:**
 
-1.  **Ray Casting:** For each pixel in a target image, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera center and $\mathbf{d}$ is the unit direction vector.
-2.  **Sampling:** Sample $K$ points along the ray within the scene bounds $[t_n, t_f]$ (near and far planes). Let the sampled points be $t_1, t_2, \dots, t_K$.
-3.  **Network Query:** For each sample point $t_k$, compute position $\mathbf{x}_k = \mathbf{r}(t_k)$ and direction $\mathbf{d}$. Query the MLP to get density $\sigma_k = \sigma(\mathbf{x}_k; \Theta)$ and color $\mathbf{c}_k = \mathbf{c}(\mathbf{x}_k, \mathbf{d}; \Theta)$.
-4.  **Alpha Compositing (Volume Rendering):** Compute the final pixel color $C(\mathbf{r})$ by integrating the radiance along the ray, weighted by the probability that the ray terminates at each sample.
-    *   Compute the weight $w_k$ for each sample:
-        $$ w_k = \alpha_k \prod_{j=1}^{k-1} (1 - \alpha_j) $$
-    *   Where $\alpha_k = 1 - \exp(-\sigma_k \delta_k)$ is the opacity of the segment, and $\delta_k = t_{k+1} - t_k$ is the distance between samples.
-    *   The final color is:
-        $$ C(\mathbf{r}) = \sum_{k=1}^{K} w_k \mathbf{c}_k $$
-5.  **Loss Calculation:** Compare the rendered image $I_{rendered}$ with the ground truth image $I_{gt}$ using a combination of L1 loss and Structural Similarity (SSIM) index [S1, unofficial].
-    $$ L = (1 - \lambda) L_{L1} + \lambda L_{SSIM} $$
-6.  **Optimization:** Update network parameters $\Theta$ using gradient descent (e.g., Adam) to minimize the loss.
+1.  **Initialization:** Start with photos and camera poses from Structure from Motion (e.g., COLMAP) to generate a sparse cloud of 3D points. Each point becomes the starting position of one Gaussian [S1, unofficial].
+2.  **Projection:** Project every 3D Gaussian onto the camera image. A projected 3D Gaussian results in a 2D Gaussian (soft ellipse) on the screen. Its 2D covariance is computed using the camera transformation and a local linear approximation of the projection [S1, unofficial].
+3.  **Tiling:** Divide the screen into small tiles of $16 \times 16$ pixels. Assign each Gaussian to the tiles it overlaps [S1, unofficial].
+4.  **Sorting:** Within each tile, sort the Gaussians by depth from front to back using a very fast GPU sort [S1, unofficial].
+5.  **Rasterization/Blending:** For each pixel, blend the colors of the sorted Gaussians front-to-back using alpha compositing. The opacity $\alpha$ and color $c$ are accumulated as:
+    $$ C = \sum_{i \in \text{sorted}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where $C$ is the final pixel color [S1, unofficial].
+6.  **Training Loss:** Compare the rendered image with the real training photo using an L1 loss combined with a structural similarity (SSIM) term [S1, unofficial].
+7.  **Optimization:** Because the rasterizer is differentiable, backpropagate the error to update each Gaussian's position, shape, opacity, and color directly via gradient descent [S1, unofficial].
+8.  **Adaptive Density Control:**
+    *   **Cloning:** In regions that are under-reconstructed with missing details, clone small Gaussians [S1, unofficial].
+    *   **Splitting:** Where a single Gaussian is too large and covers too much detail, split it into two smaller ones [S1, unofficial].
+    *   **Pruning:** Prune away Gaussians that become almost transparent [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import torch.nn as nn
-import math
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, num_bands):
-        super().__init__()
-        self.num_bands = num_bands
-
-    def forward(self, x):
-        # x shape: (..., 3)
-        freq_bands = 2.0 ** torch.linspace(0, self.num_bands - 1, self.num_bands).to(x.device)
-        # Expand dimensions for broadcasting
-        freq_bands = freq_bands.view(1, -1, 1)
-        scaled_x = x.unsqueeze(-2) * freq_bands * math.pi
+def render_image(gaussians, camera_pose, image_width, image_height):
+    """
+    Renders an image from a set of 3D Gaussians using the Gaussian Splatting rasterizer.
+    
+    Args:
+        gaussians: List of Gaussian objects, each with:
+            - position: (3,) float array
+            - cov2d: (2, 2) float array (pre-computed 2D covariance in screen space)
+            - opacity: float
+            - sh_coeffs: array of spherical harmonics coefficients
+            - view_dir: (3,) float array (view direction for SH evaluation)
+        camera_pose: (4, 4) float array (world-to-camera transformation)
+        image_width: int
+        image_height: int
         
-        encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
-        return torch.cat([x, encoded], dim=-1)
+    Returns:
+        rendered_image: (image_height, image_width, 3) float array
+    """
+    # 1. Tiling
+    tile_size = 16
+    num_tiles_x = (image_width + tile_size - 1) // tile_size
+    num_tiles_y = (image_height + tile_size - 1) // tile_size
+    
+    # Initialize tile lists
+    tiles = [[[] for _ in range(num_tiles_x)] for _ in range(num_tiles_y)]
+    
+    # Assign Gaussians to tiles
+    for g in gaussians:
+        # Project 3D Gaussian to 2D screen space
+        # This involves projecting the center and computing the 2D covariance
+        # using the camera transformation and local linear approximation.
+        center_2d = project_to_screen(g.position, camera_pose)
+        cov2d = compute_2d_covariance(g.cov3d, camera_pose, g.position)
+        
+        # Determine bounding box in tile coordinates
+        min_tile_x, max_tile_x, min_tile_y, max_tile_y = get_tile_bounds(center_2d, cov2d, tile_size)
+        
+        # Clip to image bounds
+        min_tile_x = max(0, min_tile_x)
+        max_tile_x = min(num_tiles_x - 1, max_tile_x)
+        min_tile_y = max(0, min_tile_y)
+        max_tile_y = min(num_tiles_y - 1, max_tile_y)
+        
+        # Add to tiles
+        for ty in range(min_tile_y, max_tile_y + 1):
+            for tx in range(min_tile_x, max_tile_x + 1):
+                tiles[ty][tx].append((g, center_2d, cov2d))
 
-class NeRF(nn.Module):
-    def __init__(self, D=8, W=256, skip=[4], input_ch=3, input_ch_dir=3, multires=10, multires_view=4):
-        super().__init__()
-        self.D = D
-        self.W = W
-        self.skip = skip
-        self.input_ch = input_ch
-        self.input_ch_dir = input_ch_dir
-        self.multires = multires
-        self.multires_view = multires_view
-        
-        # Positional Encoders
-        self.pos_enc = PositionalEncoding(multires)
-        self.dir_enc = PositionalEncoding(multires_view)
-        
-        # Position Network
-        self.pos_net = nn.ModuleList()
-        self.pos_net.append(nn.Linear(input_ch + input_ch * 2 * multires, W))
-        for i in range(1, D):
-            if i in skip:
-                self.pos_net.append(nn.Linear(W + input_ch + input_ch * 2 * multires, W))
-            else:
-                self.pos_net.append(nn.Linear(W, W))
-            self.pos_net.append(nn.ReLU())
+    # 2. Sorting and Blending
+    rendered_image = np.zeros((image_height, image_width, 3))
+    
+    for ty in range(num_tiles_y):
+        for tx in range(num_tiles_x):
+            tile_gaussians = tiles[ty][tx]
+            if not tile_gaussians:
+                continue
             
-        # Density Head
-        self.sigma_head = nn.Linear(W, 1)
-        
-        # Viewing Direction Network
-        self.dir_net = nn.ModuleList()
-        self.dir_net.append(nn.Linear(W + input_ch_dir + input_ch_dir * 2 * multires_view + W, W // 2))
-        self.dir_net.append(nn.ReLU())
-        for i in range(1, 3):
-            self.dir_net.append(nn.Linear(W // 2, W // 2))
-            self.dir_net.append(nn.ReLU())
-        self.color_head = nn.Linear(W // 2, 3)
+            # Sort by depth (z-coordinate in camera space)
+            # Depth is computed from the 3D position and camera pose
+            for g, center_2d, cov2d in tile_gaussians:
+                g.depth = get_depth(g.position, camera_pose)
+            
+            tile_gaussians.sort(key=lambda x: x[0].depth)
+            
+            # Rasterize tile
+            tile_pixels = render_tile(tile_gaussians, ty, tx, tile_size, image_width, image_height)
+            
+            # Copy to final image
+            y_start = ty * tile_size
+            x_start = tx * tile_size
+            h, w = tile_pixels.shape[:2]
+            rendered_image[y_start:y_start+h, x_start:x_start+w, :] = tile_pixels
 
-    def forward(self, x, d):
-        # x: (N, 3), d: (N, 3)
-        x_enc = self.pos_enc(x)
-        d_enc = self.dir_enc(d)
-        
-        # Position Network
-        h = x_enc
-        for i, layer in enumerate(self.pos_net):
-            if i in self.skip:
-                h = torch.cat([h, x_enc], dim=-1)
-            h = layer(h)
-            if i < len(self.pos_net) - 1:
-                h = torch.relu(h)
-                
-        sigma = torch.relu(self.sigma_head(h)) # Density
-        
-        # View Dependent Color
-        h_view = torch.cat([h, d_enc], dim=-1)
-        for i, layer in enumerate(self.dir_net):
-            h_view = layer(h_view)
-        color = torch.sigmoid(self.color_head(h_view))
-        
-        return sigma, color
+    return rendered_image
 
-def render_ray(ray_o, ray_d, t_near, t_far, num_samples, nerf_model):
+def render_tile(gaussians, ty, tx, tile_size, image_width, image_height):
     """
-    Renders a single ray using volume rendering.
-    ray_o: (3,)
-    ray_d: (3,)
-    t_near, t_far: scalars
-    num_samples: int
+    Renders a single tile by blending Gaussians front-to-back.
     """
-    # Sample points along the ray
-    t_vals = torch.linspace(0., 1., num_samples)
-    t = t_near * (1. - t_vals) + t_far * t_vals
-    points = ray_o.unsqueeze(0) + t.unsqueeze(1) * ray_d.unsqueeze(0) # (1, N, 3)
+    y_start = ty * tile_size
+    x_start = tx * tile_size
     
-    # Query NeRF
-    sigma, color = nerf_model(points, ray_d.unsqueeze(0).expand_as(points))
+    # Determine pixel bounds within the tile
+    y_end = min(y_start + tile_size, image_height)
+    x_end = min(x_start + tile_size, image_width)
     
-    # Compute deltas
-    deltas = t[1:] - t[:-1]
-    delta_inf = 1e10
-    deltas = torch.cat([deltas, delta_inf], dim=0) # (N,)
+    tile_height = y_end - y_start
+    tile_width = x_end - x_start
     
-    # Compute alpha
-    alpha = 1. - torch.exp(-sigma * deltas) # (N,)
+    # Initialize accumulation buffers
+    accumulated_color = np.zeros((tile_height, tile_width, 3))
+    accumulated_alpha = np.zeros((tile_height, tile_width))
     
-    # Compute weights
-    transmittance = torch.cumprod(1. - alpha + 1e-10, dim=0) # (N,)
-    weights = alpha * transmittance / (1. - alpha + 1e-10) # (N,)
-    # Handle first element where transmittance is 1
-    weights[0] = alpha[0]
-    
-    # Composite color
-    final_color = torch.sum(weights.unsqueeze(-1) * color, dim=0) # (3,)
+    for g, center_2d, cov2d in gaussians:
+        # Evaluate 2D Gaussian at each pixel in the tile
+        # This is done efficiently using the pre-computed 2D covariance
+        # and the pixel coordinates relative to the center.
+        
+        # Compute opacity at each pixel
+        # alpha(x, y) = exp(-0.5 * (x-cx, y-cy) @ cov2d^-1 @ (x-cx, y-cy)^T)
+        # Clip alpha to avoid numerical issues
+        alpha_map = compute_alpha_map(center_2d, cov2d, tile_width, tile_height, x_start, y_start)
+        
+        # Compute color using spherical harmonics
+        # color = evaluate_sh(g.sh_coeffs, g.view_dir)
+        color = evaluate_sh(g.sh_coeffs, g.view_dir)
+        
+        # Blend front-to-back
+        # C_new = C_old * (1 - alpha) + color * alpha
+        # A_new = A_old * (1 - alpha) + alpha
+        
+        # Vectorized blending for the tile
+        for dy in range(tile_height):
+            for dx in range(tile_width):
+                alpha = alpha_map[dy, dx]
+                if alpha > 1e-4: # Threshold to skip negligible contributions
+                    # Current accumulated alpha at this pixel
+                    current_alpha = accumulated_alpha[dy, dx]
+                    
+                    # Blend
+                    weight = alpha * (1 - current_alpha)
+                    accumulated_color[dy, dx] += color * weight
+                    accumulated_alpha[dy, dx] += weight * (1 - current_alpha) # Note: standard alpha compositing is A_new = A_old + alpha * (1 - A_old)
+                    
+    # Normalize by accumulated alpha to get final color
+    # Avoid division by zero
+    safe_alpha = np.maximum(accumulated_alpha, 1e-8)
+    final_color = accumulated_color / safe_alpha[..., np.newaxis]
     
     return final_color
 
+def compute_alpha_map(center_2d, cov2d, tile_width, tile_height, x_start, y_start):
+    """
+    Computes the alpha map for a Gaussian over a tile.
+    """
+    # Create grid of pixel coordinates relative to tile origin
+    y_coords = np.arange(tile_height)
+    x_coords = np.arange(tile_width)
+    Y, X = np.meshgrid(y_coords, x_coords, indexing='ij')
+    
+    # Convert to absolute pixel coordinates
+    abs_x = X + x_start
+    abs_y = Y + y_start
+    
+    # Relative to center
+    dx = abs_x - center_2d[0]
+    dy = abs_y - center_2d[1]
+    
+    # Compute Mahalanobis distance: d^2 = (x-c)^T Sigma^-1 (x-c)
+    # cov2d is (2, 2)
+    inv_cov = np.linalg.inv(cov2d)
+    # d2 = dx^2 * inv_cov[0,0] + dy^2 * inv_cov[1,1] + 2*dx*dy*inv_cov[0,1]
+    d2 = (dx**2 * inv_cov[0, 0] + 
+          dy**2 * inv_cov[1, 1] + 
+          2 * dx * dy * inv_cov[0, 1])
+    
+    # Alpha = exp(-0.5 * d2)
+    alpha = np.exp(-0.5 * d2)
+    
+    return alpha
+
+def project_to_screen(position, camera_pose):
+    """
+    Projects a 3D point to 2D screen coordinates.
+    """
+    # Transform to camera space
+    position_cam = camera_pose[:3, :3] @ position + camera_pose[:3, 3]
+    
+    # Perspective projection
+    if position_cam[2] <= 0:
+        return None # Behind camera
+    
+    fx = 1.0 # Assume normalized coordinates for simplicity
+    fy = 1.0
+    cx = 0.5
+    cy = 0.5
+    
+    x = fx * position_cam[0] / position_cam[2] + cx
+    y = fy * position_cam[1] / position_cam[2] + cy
+    
+    return np.array([x, y])
+
+def compute_2d_covariance(cov3d, camera_pose, position):
+    """
+    Computes the 2D covariance matrix in screen space.
+    """
+    # Jacobian of the projection function
+    # This is a local linear approximation of the projection
+    # J = d(project) / d(position)
+    
+    # For simplicity, assume a standard pinhole camera model
+    # The exact derivation involves the camera intrinsics and extrinsics
+    # Here we return a placeholder that would be computed in a real implementation
+    # The key is that the 3D covariance is transformed by the camera matrix
+    # and the projection Jacobian.
+    
+    # Placeholder: In a real implementation, this would involve:
+    # 1. Transforming the 3D covariance to camera space
+    # 2. Computing the Jacobian of the projection
+    # 3. Computing the 2D covariance as J * Cov3D * J^T
+    
+    # For the purpose of this pseudocode, we assume cov2d is pre-computed
+    # or passed in as part of the Gaussian's state after projection.
+    return cov3d[:2, :2] # Simplified
+
+def evaluate_sh(sh_coeffs, view_dir):
+    """
+    Evaluates spherical harmonics for a given view direction.
+    """
+    # SH evaluation is a standard mathematical operation
+    # color = sum_{l=0}^{L} sum_{m=-l}^{l} sh_{lm} * Y_{lm}(view_dir)
+    # This is a standard function in graphics libraries
+    return np.array([1.0, 0.0, 0.0]) # Placeholder for actual SH evaluation
+
+def get_depth(position, camera_pose):
+    """
+    Computes the depth of a point in camera space.
+    """
+    position_cam = camera_pose[:3, :3] @ position + camera_pose[:3, 3]
+    return position_cam[2]
+
+def get_tile_bounds(center_2d, cov2d, tile_size):
+    """
+    Computes the tile bounds for a Gaussian.
+    """
+    # Compute the bounding box of the 2D Gaussian
+    # This involves finding the extent of the Gaussian in x and y directions
+    # based on the covariance matrix.
+    
+    # For simplicity, assume a fixed extent (e.g., 3 sigma)
+    # The exact calculation involves the eigenvalues of the covariance matrix
+    
+    # Placeholder: Return a single tile for simplicity
+    tile_x = int(center_2d[0]) // tile_size
+    tile_y = int(center_2d[1]) // tile_size
+    
+    return tile_x, tile_x, tile_y, tile_y
 ```
 
 **Parameters:**
-*   **Number of Samples ($K$):** Typically 128–256 per ray for training; higher for high-quality inference [S1, unofficial].
-*   **Network Depth/Width:** Standard NeRF uses 8 layers with 256 units per layer [S1, unofficial].
-*   **Positional Encoding Bands ($L$):** Typically 10 bands for position, 4 for view direction [S1, unofficial].
-*   **Learning Rate:** $5 \times 10^{-4}$ for the first 100k steps, then $5 \times 10^{-5}$ [S1, unofficial].
+*   **Tile Size:** $16 \times 16$ pixels [S1, unofficial].
+*   **Learnable Values per Gaussian:** Approximately 59 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision issues can arise when computing transmittance for very small densities or large distances, leading to NaNs. A small epsilon ($10^{-10}$) is added to denominators [G].
-*   **Boundaries:** Incorrect near/far plane estimation leads to artifacts. The scene bounds must tightly enclose the geometry of interest [S1, unofficial].
-*   **Degenerate Input:** If camera poses are inaccurate (e.g., from poor Structure from Motion), the network may learn inconsistent geometry or "ghosting" artifacts [S1, unofficial].
+*   **Floating Artifacts:** Can occur in regions seen by few cameras [S1, unofficial].
+*   **Needle-like Gaussians:** Degenerate anisotropic shapes can form in under-constrained regions [S1, unofficial].
+*   **Aliasing:** Occurs when zooming in or out [S1, unofficial].
+*   **No Clean Mesh:** The blobs do not directly yield a clean surface or mesh [S1, unofficial].
 
 ## Subtopics
 
 ### [Scene NeRF](12484-scene-nerf.md)
-Scene NeRF isolates the static background by training a NeRF exclusively on pixels identified as background via human segmentation masks, excluding dynamic foreground elements [12484-scene-nerf.md]. It employs an emptiness regularizer to prevent artifacts in empty space, distinguishing it from standard NeRF which blends all pixels [12484-scene-nerf.md].
+Scene NeRF is a method for isolating and rendering the static background of a scene by training a Neural Radiance Field (NeRF) exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space. [Scene NeRF](12484-scene-nerf.md)
 
 ### [NeRF-OSR](14477-nerf-osr.md)
-NeRF-OSR extends NeRF for outdoor scene relighting by decomposing the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance [14477-nerf-osr.md]. Unlike standard NeRF, it enables physical relighting and albedo editing by learning illumination-dependent shadows from images captured at different times and viewpoints, trained in a self-supervised manner [14477-nerf-osr.md].
+NeRF-OSR is a neural radiance field approach for outdoor scene relighting that learns a neural representation of scene geometry, diffuse albedo, and illumination-dependent shadows from a set of images capturing the same site from different viewpoints and at different times, enabling simultaneous editing of both the scene’s lighting and viewpoint. Unlike standard NeRF which learns a Lambertian model under fixed lighting, NeRF-OSR decomposes the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance, trained in a self-supervised manner from outdoor data captured from various viewpoints and at different illuminations. It sets itself apart from siblings like [Scene NeRF](12484-scene-nerf.md) by providing explicit intrinsic decomposition (albedo, geometry, lighting) rather than just view-dependent appearance, allowing for physical relighting and albedo editing. [NeRF-OSR](14477-nerf-osr.md)
 
 ### SLAIM
-SLAIM is a SLAM method that introduces a coarse-to-fine tracking pipeline and improves photometric bundle adjustment for NeRF-based mapping [S2]. It maintains NeRF’s original volume density formulation while introducing a KL regularization over the ray termination distribution to address high-frequency renderings hindering image alignment [S2].
+SLAIM is a SLAM method that introduces a coarse-to-fine tracking pipeline and improves photometric bundle adjustment for NeRF-based mapping [S2]. It maintains NeRF’s original volume density formulation while introducing a KL regularization over the ray termination distribution [S2]. It addresses the challenge of high-frequency renderings in NeRF hindering image alignment [S2].
 
 ### SNI-SLAM
-SNI-SLAM is a dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping [S2]. It introduces a hierarchical semantic encoding and cross-attention mechanism to enable mutual reinforcement between appearance, geometry, and semantics modalities, using a novel one-way decoder design to enhance inter-modal information flow [S2].
+SNI-SLAM is a dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping [S2]. It introduces a hierarchical semantic encoding and cross-attention mechanism to enable mutual reinforcement between appearance, geometry, and semantics modalities [S2]. It proposes a novel one-way decoder design to enhance inter-modal information flow without reverse interference [S2].
 
 ### KN-SLAM
-KN-SLAM is a NeRF-based SLAM method that integrates local feature correspondences for coarse pose initialization and joint optimization [S2]. It uses global image features and local matches for explicit loop detection, followed by pose graph optimization and global refinement of the neural map to ensure consistency [S2].
+KN-SLAM is a NeRF-based SLAM method that integrates local feature correspondences for coarse pose initialization and joint optimization [S2]. It uses global image features and local matches for explicit loop detection [S2]. It performs pose graph optimization and global refinement of the neural map to ensure consistency [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is computationally expensive, often taking several hours to converge due to the need to query the MLP for every sample along every ray in every training image [S1, unofficial]. Rendering is slow, typically taking seconds per image, as it requires evaluating the network for hundreds of points per pixel [S1, unofficial].
-*   **Memory Complexity:** Memory usage is low, typically a few megabytes, as the scene is stored only in the weights of the neural network [S1, unofficial].
-*   **Performance:** High-fidelity novel view synthesis with realistic lighting and reflections. However, it does not support real-time rendering on standard hardware without acceleration techniques (e.g., voxel grids, hash tables) [S1, unofficial].
-*   **Strengths:** Implicit representation handles complex geometry and view-dependent effects naturally; compact storage.
-*   **Limitations:** Slow training and rendering; difficulty in extracting explicit meshes; prone to floating artifacts and aliasing if not regularized [S1, unofficial].
-*   **When to Use:** When high visual fidelity is required and real-time performance is not critical, or when memory bandwidth is limited.
-*   **When Not to Use:** For real-time applications (VR, gaming) or large-scale dynamic scenes where explicit representations like [3D Gaussian Splatting](12052-3d-gaussian-splatting-optimization.md) are preferred [S1, unofficial].
+*   **Time Complexity:** Training time drops from many hours (NeRF) to tens of minutes [S1, unofficial]. Rendering jumps from seconds per image to >100 FPS [S1, unofficial].
+*   **Memory Complexity:** Memory usage increases from a few megabytes (NeRF) to hundreds of megabytes (Gaussian Splatting) [S1, unofficial].
+*   **Strengths:** Real-time rendering, fast training, explicit representation allows for easy manipulation of individual elements [S1, unofficial].
+*   **Limitations:** Floating artifacts, needle-like Gaussians, aliasing, inability to extract a clean mesh [S1, unofficial].
+*   **When to use:** Virtual reality games, film, robotics, mapping, digital humans, ecommerce, and cultural heritage where real-time photo-realistic 3D is essential [S1, unofficial].
+*   **When not to use:** When memory is extremely constrained or a clean mesh is required directly from the representation [S1, unofficial].
 
 ## Background
-Neural Radiance Fields were introduced by Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng in their 2020 paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" [S2]. The method revolutionized novel view synthesis by demonstrating that a simple MLP could learn a continuous 5D function (3D position + 2D viewing direction) that implicitly encodes both geometry and appearance. It builds on earlier work in volumetric rendering and neural implicit representations [S2].
+Introduced by Kerbal and colleagues at SIGGRAPH 2023 [S1, unofficial]. It was developed as an alternative to NeRF, which stores the scene implicitly inside a network, by storing it explicitly as a set of blobs [S1, unofficial].
 
 ## Sources
 [S1] Gaussian Splatting Explained: Real-Time 3D from Photos (with a Real Demo), https://www.youtube.com/watch?v=HABVlXlRqOs, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,133 @@
+# Array Based Ray Casting
+
+Also called: Ray Array Architecture
+
+## Overview
+Array Based Ray Casting is an object-order ray casting architecture developed at the University of New South Wales that utilizes two parallel pipelined arrays (Warp Array and Ray Array) to rotate the volume dataset and cast rays [S1]. It solves the problem of high-performance volume rendering on PC-class hardware by implementing fully pipelined, parallel slice-by-slice processing [S1]. It differs from its parent, VolumePro, by relying on a rigid 2D array of processing elements with local communication rather than a more flexible software-defined or hybrid pipeline, and it is distinguished from sibling architectures like EM-Cube by its specific use of coordinate swapping for conflict-free memory access and shearing for rotation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset of dimension $n \times n \times n$, a view direction defined by spherical coordinates, and transfer function parameters.
+*   **Output:** A 2D image frame buffer.
+
+**Data Structures:**
+1.  **Double-Buffered Volume Memory:** Stores the dataset using orthogonal slice partitioning. It supports simultaneous loading of one dataset and visualization of another [S1].
+2.  **Warp Array:** A 2D array of size $n \times n$ processing elements [S1].
+3.  **Ray Array:** A 2D array of size $n \times 1.5n$ processing elements [S1].
+4.  **Rendering Pipelines:** A 1D array of $n$ pipelines [S1].
+5.  **Frame Buffer:** Stores the final composited image [S1].
+
+**Coordinate Swapping (Memory Organization):**
+To allow conflict-free access to beams, the dataset is stored in a view-dependent manner. View positions are classified into one of eight primary octant regions using a spherical coordinate system. During loading, coordinate swapping occurs based on the view position [S1]. This performs a partial rotation, limiting rotations about the X- and Y-axes to be handled by the Warp and Ray Arrays respectively [S1].
+
+**Step 1: Warp Array Rotation**
+Vertical beams of voxels are loaded into the Warp Array in one clock cycle [S1]. The Warp Array rotates the volume by $\pm 45^\circ$ around the X-axis by shearing slices in Y [S1].
+*   The first column of the Warp Array computes the rotated Y-coordinates for each voxel.
+*   Remaining columns perform shift-right, shift-right-up, and shift-right-down operations based on a comparison of the row coordinate and the beam's rotated Y-coordinate [S1].
+*   Rows in the Warp Array correspond to discrete Y-coordinates. Explicit Y-coordinate information is stored only in the Warp Array [S1].
+
+**Step 2: Ray Array Casting**
+Voxels from the rightmost column of the Warp Array proceed to the leftmost column of the Ray Array [S1]. The Ray Array casts parallel rays into the sheared YZ-slices [S1].
+*   Rows in the Ray Array correspond to scanlines of rays.
+*   Initializers compute X and Z coordinates for voxels during ray casting. Each ray’s initial coordinate and increment vector is shifted into place inside the Ray Array before ray casting [S1].
+*   Processing elements implement a **Compare-and-Shift-Right** function: if a voxel's coordinate matches a ray's current coordinate, a flag is set which proceeds through the remainder of the array with the voxel and coordinate data [S1].
+*   The Ray Array implements nearest neighbor or zero order interpolation [S1].
+
+**Step 3: Gradient Estimation and Shading**
+*   Each element in the Ray Array has additional registers to buffer voxel information [S1].
+*   Voxels traverse a row inside the Ray Array three times [S1].
+*   A $3 \times 3 \times 3$ box filter is used in the Rendering Pipelines to estimate gradients using a full 26-voxel neighborhood [S1].
+*   The rendering pipelines classify, shade, and composite the voxels along the discrete rays [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+N = volume_dimension
+NUM_PIPELINES = N
+RAY_ARRAY_COLS = 1.5 * N
+
+# Initialization
+# Load volume into double-buffered memory with coordinate swapping based on view octant
+volume = load_volume_with_coordinate_swapping(view_octant)
+
+# Initialize Warp Array (N x N)
+warp_array = initialize_array(N, N)
+# Initialize Ray Array (N x 1.5N)
+ray_array = initialize_array(N, RAY_ARRAY_COLS)
+# Initialize Rendering Pipelines (N)
+pipelines = initialize_pipelines(N)
+
+# Step 1: Warp Array Rotation
+# Load vertical beams into Warp Array
+for y in range(N):
+    for z in range(N):
+        # Load voxel at (x, y, z) into Warp Array column 0, row y
+        # Coordinate swapping handled during load
+        warp_array[0][y].load(volume.get_voxel_at_view_dependent(x, y, z))
+
+# Shear slices in Y to rotate volume by +/- 45 degrees around X-axis
+for col in range(1, N):
+    for row in range(N):
+        # Compute rotated Y-coordinate (handled in col 0 previously)
+        # Compare row coordinate with beam's rotated Y-coordinate
+        # Perform shift-right, shift-right-up, or shift-right-down
+        warp_array[col][row].process(warp_array[col-1][row])
+
+# Step 2: Ray Array Casting
+# Voxels move from Warp Array to Ray Array
+for col in range(1, RAY_ARRAY_COLS):
+    for row in range(N):
+        # Initializers compute X and Z coordinates for the first column
+        if col == 1:
+            ray_array[col][row].init_coordinates()
+        
+        # Compare-and-Shift-Right
+        # If voxel coordinate matches ray current coordinate, set flag
+        ray_array[col][row].compare_and_shift(ray_array[col-1][row])
+
+# Step 3: Gradient Estimation
+# Voxels traverse row three times to buffer information
+for pass_idx in range(3):
+    for col in range(RAY_ARRAY_COLS):
+        for row in range(N):
+            ray_array[col][row].buffer_voxel_info()
+
+# Step 4: Rendering Pipelines
+# Use 3x3x3 box filter for gradient estimation using 26-voxel neighborhood
+for pipe_idx in range(N):
+    # Classify, shade, and composite voxels along discrete rays
+    pipelines[pipe_idx].render(ray_array, gradient_filter="3x3x3_box")
+
+# Output to Frame Buffer
+frame_buffer.write(pipelines)
+```
+
+**Parameters:**
+*   **Array Sizes:** Warp Array is $n \times n$; Ray Array is $n \times 1.5n$ [S1].
+*   **Rendering Pipelines:** $n$ [S1].
+*   **Sample Processing Efficiency ($P_s$):** $1/m$, where $m$ is the number of times the Ray Array is re-used [S1]. Theoretically $m$ can be as large as $n$. Practical $m$ lies between 1 and $n$ [S1].
+*   **Memory Bandwidth Utilization ($U$):** 20% in the full $n \times n$ configuration [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Hardware Cost:** The hardware required scales with $O(n^2)$, making the full Ray Array size and cost prohibitive [S1].
+*   **Throughput Reduction:** Using a smaller Ray Array by time-multiplexing and stalling the Warp Array reduces throughput [S1].
+*   **Image Quality:** The architecture does not use interpolation (in its basic form), leading to lower image quality [S1].
+*   **Projection Limitations:** Does not support perspective projections [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The architecture is fully pipelined and parallel, but throughput is limited by the Ray Array size and sharing factor $m$ [S1].
+*   **Memory Complexity:** Scales with $O(n^2)$ due to the 2D array of processing elements [S1].
+*   **Performance:** For $256^3$ datasets, achieves 15 Hz [S1]. Requires approximately 212,992 processing elements [S1].
+*   **Scaling:** Memory bandwidth utilization is inversely proportional to the sharing factor $m$ [S1]. Sample processing efficiency ranges from 1 (best-case, $m=1$) to $1/n$ (worst-case) [S1].
+*   **Strengths:** High performance on PC-class hardware, fully pipelined, parallel, uses only local communication, supports real-time data input via double-buffered memory [S1].
+*   **Limitations:** Hardware scales quadratically, does not support perspective projections, lower image quality due to lack of interpolation, memory limited [S1].
+*   **When to use:** When real-time volume rendering is required on hardware with limited memory bandwidth but high parallelism potential, and perspective projection is not needed [S1].
+*   **When not to use:** When high image quality (interpolation) or perspective projection is required, or when hardware resources are constrained to a point where $O(n^2)$ scaling is prohibitive [S1].
+
+## Background
+The Array Based Ray Casting engine was developed at the University of New South Wales [S1]. It was introduced in a 1999 technical report [S1]. The architecture has undergone several changes since its publication and is now called VIZAR [S1]. It is designed to render high-resolution datasets at real-time frame rates on PC or workstation hardware [S1].
+
+## Sources
+[S1] Ray Casting Architectures for Volume Visualization, https://vcg.seas.harvard.edu/publications/19990101-ray-casting-architetures-for-volume-visualization/paper, fetched 2026-10-27

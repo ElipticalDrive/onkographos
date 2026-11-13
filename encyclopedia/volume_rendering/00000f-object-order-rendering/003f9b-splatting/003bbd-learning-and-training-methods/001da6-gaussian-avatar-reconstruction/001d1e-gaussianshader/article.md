@@ -1,104 +1,60 @@
 # GaussianShader
 
 ## Overview
-GaussianShader enriches 3D Gaussian primitives with physical material parameters—specifically diffusiveness, specularity, roughness, and normals—to enable the rendering of specular and reflective objects [S1, unofficial]. It distinguishes itself from standard Gaussian Splatting by moving beyond view-dependent color (via Spherical Harmonics) to explicit material properties, allowing for physically based appearance modeling [S1, unofficial].
+GaussianShader enriches 3D Gaussians with physical material parameters—specifically diffusiveness, specularity, roughness, and normals—to enable the rendering of specular and reflective objects [S1, unofficial]. It builds on [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md) by extending the Gaussian representation beyond simple color and opacity to support physically-based appearance, allowing for accurate novel view synthesis of complex surfaces [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of 3D Gaussians, each augmented with material parameters (diffusiveness, specularity, roughness, normals) [S1, unofficial].
-*   **Output:** A rendered image with physically accurate specular and reflective highlights [S1, unofficial].
+*   **Inputs:** A set of 3D Gaussians, each defined by position, covariance, opacity, spherical harmonics (SH) coefficients for color, and additional material parameters (diffusiveness, specularity, roughness, normals) [S1, unofficial].
+*   **Outputs:** A rendered 2D image with physically-based shading [S1, unofficial].
 
 **Data Structures:**
-*   **Gaussian Primitive:** Extends the standard Gaussian representation with fields for material properties: diffusiveness, specularity, roughness, and surface normal [S1, unofficial].
-*   **Render Buffer:** An atomic linear-append buffer storing color, opacity, projected screen-space position, and 2D covariance values for active Gaussians [S2].
+Each Gaussian stores:
+1.  Position ($\mathbf{p}$) and 3D covariance ($\Sigma$).
+2.  Opacity ($\alpha$).
+3.  SH coefficients for view-dependent color.
+4.  Material parameters: diffusiveness, specularity, roughness, and surface normal [S1, unofficial].
+5.  Projected 2D covariance and screen-space position (computed during preprocessing) [S2].
 
 **Steps:**
-1.  **Preprocessing (Culling):** Discard Gaussians whose 99% confidence interval does not intersect the view frustum after projection [S2].
-2.  **Preprocessing (Attribute Computation):** For remaining Gaussians, compute direction-dependent color using Spherical Harmonic (SH) coefficients [S2]. Store color, opacity, projected screen-space position, and 2D covariance values in an atomic linear-append buffer [S2]. The 2D covariance indicates the orientation and size of the projected 2D Gaussian [S2].
-3.  **Preprocessing (Sorting):** Depth-sort the Gaussians using the Onesweep sorting algorithm on the GPU to enable order-dependent blending [S2].
-4.  **Rendering (Rasterization):** Render Gaussians in sorted order via GPU rasterization. For each Gaussian, render one planar quad (splat) consisting of two triangles [S2].
-5.  **Vertex Shader:** Compute screen-space vertex positions of each splat from the 2D covariance information. Output the pre-computed color and 2D splat center to the pixel shader [S2].
-6.  **Pixel Shader:** Discard fragments outside the 99% confidence interval [S2]. For remaining fragments, compute exponential color and opacity falloff based on the distance to the splat center [S2]. Blend final colors into the framebuffer [S2].
+1.  **Preprocess (Culling):** Discard Gaussians whose 99% confidence interval does not intersect the view frustum after projection [S2].
+2.  **Preprocess (Color Computation):** Compute the direction-dependent color using the stored SH coefficients [S2].
+3.  **Preprocess (Buffering):** Store the computed color, opacity, projected screen-space position, and 2D covariance values in an atomic linear-append buffer [S2]. The 2D covariance indicates the orientation and size of the projected 2D Gaussian [S2].
+4.  **Preprocess (Sorting):** Depth-sort the Gaussians using the Onesweep sorting algorithm on the GPU to enable order-dependent blending [S2].
+5.  **Rendering (Rasterization):** Render the sorted Gaussians via GPU rasterization. For each Gaussian, render one planar quad (splat) consisting of two triangles [S2].
+6.  **Vertex Shader:** Compute the screen-space vertex positions of the splat from the 2D covariance information. The size of the splat is set to cover the 99% confidence interval of the projected Gaussian [S2]. Output the precomputed color and 2D splat center to the pixel shader [S2].
+7.  **Pixel Shader:** Discard fragments outside the 99% confidence interval [S2]. For remaining fragments, compute the exponential color and opacity falloff based on the distance to the splat center [S2]. Blend the final colors into the framebuffer [S2].
 
 **Parameters:**
 *   **Splat Size:** Set to cover the 99% confidence interval of the projected Gaussian [S2].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# GaussianShader Rendering Pipeline
-# Note: Material parameters (diffusiveness, specularity, roughness, normals)
-# are stored per Gaussian but the specific shading equation is not detailed in the sources [S1, unofficial].
-# The rendering pipeline relies on hardware rasterization of pre-computed attributes [S2].
-
-def render_gaussians(gaussians, camera):
-    # 1. Preprocessing: Culling
-    active_gaussians = []
-    for g in gaussians:
-        if intersects_view_frustum(g.projected_99_percent_confidence_interval, camera):
-            active_gaussians.append(g)
-    
-    # 2. Preprocessing: Attribute Computation
-    render_data = []
-    for g in active_gaussians:
-        # Compute direction-dependent color with SH coefficients
-        color = compute_sh_color(g.sh_coefficients, g.view_direction)
-        
-        # Store attributes in linear-append buffer
-        render_data.append({
-            'color': color,
-            'opacity': g.opacity,
-            'screen_pos': g.projected_screen_position,
-            'covariance': g.projected_2d_covariance
-        })
-        
-    # 3. Preprocessing: Sorting
-    # Use Onesweep sorting algorithm on GPU
-    sorted_data = onesweep_sort(render_data, key='depth')
-    
-    # 4. Rendering: Rasterization
-    framebuffer = empty_framebuffer()
-    
-    for data in sorted_data:
-        # Create splat (planar quad)
-        splat = create_splat(data['screen_pos'], data['covariance'])
-        
-        # 5. Vertex Shader: Compute vertex positions
-        vertices = compute_splat_vertices(splat)
-        
-        # 6. Pixel Shader: Rasterize and Blend
-        for fragment in rasterize(vertices):
-            if is_inside_99_percent_confidence(fragment, splat):
-                # Compute exponential falloff
-                dist = distance(fragment.pos, splat.center)
-                falloff = exp(-0.5 * dist * dist) # Standard Gaussian falloff [G]
-                
-                # Blend into framebuffer
-                # Note: Specific material shading logic is not provided in sources [S1, unofficial]
-                # Standard alpha blending is implied by order-dependent blending [S2]
-                blend_color = data['color'] * falloff
-                blend_alpha = data['opacity'] * falloff
-                
-                framebuffer.blend(fragment.pos, blend_color, blend_alpha)
-                
-    return framebuffer
-```
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on accurate projection of 3D covariance to 2D to determine splat size and falloff [S2].
+*   **Material Parameters:** The specific integration of material parameters (diffusiveness, specularity, roughness, normals) into the shading model is not detailed in the provided sources, only that they are stored and used to handle specular/reflective objects [S1, unofficial].
 
 ## Subtopics
 
 ### Novel View Rendering Pipeline
-A rendering pipeline implementation that utilizes hardware rasterization for fast novel view synthesis on low-power GPUs [S2]. It integrates the preprocessing, sorting, and rasterization steps described in the main method to enable real-time application embedding [S2].
+A pipeline variant that utilizes hardware rasterization for fast novel view synthesis, particularly on low-power GPUs. It employs the preprocessing, sorting, and rasterization steps described in the main method to achieve real-time performance [S2].
 
 ## Operating characteristics
-*   **Performance:** Utilizes hardware rasterization for speed, making it suitable for low-power GPUs and real-time applications [S2].
-*   **Sorting:** Uses the Onesweep algorithm for consistent GPU sorting performance [S2].
-*   **Complexity:** Not given in the sources.
-*   **Strengths:** Fast rendering via hardware rasterization; supports specular and reflective objects through material enrichment [S1, unofficial][S2].
-*   **Limitations:** Requires preprocessing steps (culling, sorting) on the GPU [S2].
+**Time and Memory Complexity:**
+*   **Sorting:** Uses the Onesweep algorithm, which offers consistent performance suitable for real-time applications [S2].
+*   **Memory:** Requires storage for material parameters (diffusiveness, specularity, roughness, normals) in addition to standard Gaussian attributes [S1, unofficial].
+
+**Measured Performance:**
+*   Designed for acceleration on low-power GPUs by leveraging hardware rasterization instead of software rasterization [S2].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables physically accurate rendering of specular and reflective objects; efficient real-time rendering via hardware rasterization and Onesweep sorting [S1, unofficial][S2].
+*   **Limitations:** Specific details on the shading model's complexity and computational overhead of material parameter evaluation are not provided [S1, unofficial].
+
+**When to Use:**
+*   When rendering scenes with specular or reflective objects using 3D Gaussians [S1, unofficial].
+*   When real-time performance on low-power hardware is required [S2].
 
 ## Background
-GaussianShader was proposed to address the limitation of standard Gaussian Splatting in handling specular and reflective objects [S1, unofficial]. It enriches Gaussians with material parameters to allow for physically accurate appearance modeling [S1, unofficial]. It has been used as a foundation for subsequent methods like Gaussian Splashing, which builds upon it for physical simulations using Position-Based Fluids [S1, unofficial].
+GaussianShader was introduced to address the limitation of standard 3D Gaussian Splatting in handling specular and reflective objects [S1, unofficial]. It enriches the Gaussian representation with material parameters such as diffusiveness, specularity, roughness, and normals [S1, unofficial]. The method has been used as a foundation for subsequent techniques, such as Gaussian Splashing, which builds upon it for physical simulations using Position-Based Fluids [S1, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,165 @@
+# NeRF-Art
+
+Also called: Text-Driven Neural Radiance Fields Stylization
+
+## Overview
+NeRF-Art is a text-guided method for stylizing pre-trained Neural Radiance Fields (NeRFs) that simultaneously alters both the appearance and the 3D geometry of a scene without requiring mesh guidance [S1]. It distinguishes itself from prior approaches by introducing a global-local contrastive learning strategy combined with directional constraints, addressing the insufficiency of direct CLIP similarity supervision in ensuring strong style adherence and cross-view consistency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained NeRF model $f_\theta: (\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$, where $\mathbf{x}$ is 3D position, $\mathbf{d}$ is viewing direction, $\sigma$ is volume density, and $\mathbf{c}$ is color [S1, Parent]. A target style text prompt $T_{target}$ and a set of negative style text prompts $\{T_{neg}^k\}$ [S1].
+*   **Output:** Optimized NeRF parameters $\theta'$ that render images matching the target style in both texture and geometry [S1].
+
+**Data Structures:**
+The method operates on the standard NeRF MLP representation. No additional explicit data structures (like grids or meshes) are introduced for the stylization process itself, though the method supports mesh extraction from the final $\sigma$ field for evaluation [S1].
+
+**Optimization Objective:**
+The optimization minimizes a total loss $L = L_{rec} + L_{style} + L_{reg}$ [S1].
+1.  **Reconstruction Loss ($L_{rec}$):** Standard photometric loss on unmasked pixels to preserve identity where style is not applied [S1].
+2.  **Style Loss ($L_{style}$):** A hybrid global-local contrastive loss based on CLIP embeddings [S1].
+3.  **Regularization ($L_{reg}$):** Weight regularization to suppress artifacts during geometry stylization [S1].
+
+**Step-by-Step Method:**
+
+1.  **Ray Marching:** For each camera ray $\mathbf{r}$, sample $N$ points along the ray. Compute transmittance $T_i$ and density $\sigma_i$ using the current NeRF $f_\theta$ [Parent, S1]. Render the image $\hat{C}(\mathbf{r})$ using the standard volume rendering equation [Parent].
+
+2.  **CLIP Embedding Extraction:** Pass the rendered image $\hat{C}$ and the text prompts through the CLIP image encoder $E_I$ and text encoder $E_T$ [S1].
+    *   Get target embedding: $\mathbf{e}_{target} = E_T(T_{target})$.
+    *   Get negative embeddings: $\mathbf{e}_{neg}^k = E_T(T_{neg}^k)$ for $k=1 \dots K$.
+    *   Get rendered embedding: $\mathbf{e}_{img} = E_I(\hat{C})$.
+
+3.  **Global-Local Contrastive Loss Calculation:**
+    The style loss is defined as a combination of global and local contrastive terms [S1].
+    *   **Global Contrastive Loss:** Measures similarity between the entire rendered image and the target text, while pushing away from negative texts.
+        $$ L_{global} = -\log \frac{\exp(\text{sim}(\mathbf{e}_{img}, \mathbf{e}_{target}) / \tau)}{\exp(\text{sim}(\mathbf{e}_{img}, \mathbf{e}_{target}) / \tau) + \sum_{k=1}^{K} \exp(\text{sim}(\mathbf{e}_{img}, \mathbf{e}_{neg}^k) / \tau)} $$
+        where $\text{sim}(\mathbf{a}, \mathbf{b}) = \frac{\mathbf{a} \cdot \mathbf{b}}{\|\mathbf{a}\| \|\mathbf{b}\|}$ is cosine similarity and $\tau$ is a temperature parameter [S1].
+    *   **Local Contrastive Loss:** To ensure uniformity of style over local details, the image is divided into patches. The loss is computed on patch-level embeddings similarly to the global term [S1].
+    *   **Directional Constraint:** The method introduces a directional constraint to control the trajectory and strength of the style, ensuring the style is applied consistently across views [S1].
+
+4.  **Geometry Stylization and Regularization:**
+    To allow geometry changes, the constraints on the density field $\sigma$ are relaxed [S1]. However, this can lead to cloudy artifacts and geometry noise.
+    *   **Weight Regularization:** A regularization term $L_{reg}$ is applied to the NeRF weights to suppress these artifacts. This term penalizes large variations in weights that lead to unstable density predictions [S1].
+
+5.  **Optimization Loop:**
+    Update $\theta$ using gradient descent to minimize $L$. The gradients flow through the volume rendering equation and the CLIP encoders [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerf_art_stylization(pretrained_nerf, target_text, negative_texts, images, camera_params, 
+                         num_steps, lr, temperature, lambda_rec, lambda_style, lambda_reg):
+    """
+    Stylizes a pre-trained NeRF using text-driven contrastive learning.
+    
+    Args:
+        pretrained_nerf: Initial NeRF model parameters theta.
+        target_text: String prompt for the target style.
+        negative_texts: List of string prompts for negative styles.
+        images: List of reference images (for reconstruction loss).
+        camera_params: Camera poses and intrinsics for rendering.
+        num_steps: Number of optimization steps.
+        lr: Learning rate.
+        temperature: Temperature for contrastive loss.
+        lambda_rec: Weight for reconstruction loss.
+        lambda_style: Weight for style loss.
+        lambda_reg: Weight for weight regularization.
+    """
+    # Initialize optimizer
+    optimizer = Adam(pretrained_nerf.parameters(), lr=lr)
+    
+    # Pre-compute CLIP text embeddings
+    clip_model = load_clip_model()
+    target_embedding = clip_model.encode_text(target_text)
+    negative_embeddings = [clip_model.encode_text(txt) for txt in negative_texts]
+    
+    for step in range(num_steps):
+        optimizer.zero_grad()
+        
+        total_loss = 0.0
+        
+        # 1. Render images from current NeRF
+        rendered_images = []
+        for cam in camera_params:
+            # Ray marching and volume rendering (standard NeRF)
+            # Returns rendered image C_hat and depth/alpha if needed
+            C_hat = render_neRF(pretrained_nerf, cam)
+            rendered_images.append(C_hat)
+        
+        # 2. Compute Reconstruction Loss (on unmasked/reference pixels)
+        # Note: In pure stylization, this might be zero if no reference images are used for reconstruction,
+        # but typically some identity preservation is desired.
+        if images:
+            rec_loss = compute_mse(rendered_images, images)
+            total_loss += lambda_rec * rec_loss
+        
+        # 3. Compute Style Loss (Global-Local Contrastive)
+        style_loss = 0.0
+        
+        # Global term
+        img_embeddings = [clip_model.encode_image(img) for img in rendered_images]
+        
+        for img_emb in img_embeddings:
+            # Similarity with target
+            sim_target = cosine_similarity(img_emb, target_embedding) / temperature
+            # Similarities with negatives
+            sim_negs = [cosine_similarity(img_emb, neg_emb) / temperature for neg_emb in negative_embeddings]
+            
+            # Log-sum-exp for stability
+            max_sim = max(sim_target, max(sim_negs))
+            exp_target = exp(sim_target - max_sim)
+            exp_negs = sum(exp(sim - max_sim) for sim in sim_negs)
+            
+            # Contrastive loss
+            loss = -log(exp_target / (exp_target + exp_negs))
+            style_loss += loss
+            
+        # Local term (patch-based) would be added here similarly
+        # style_loss += lambda_local * compute_local_contrastive_loss(...)
+        
+        total_loss += lambda_style * style_loss
+        
+        # 4. Compute Weight Regularization
+        # Penalize large weight variations to prevent cloudy artifacts
+        reg_loss = compute_weight_regularization(pretrained_nerf)
+        total_loss += lambda_reg * reg_loss
+        
+        # 5. Backpropagate and Update
+        total_loss.backward()
+        optimizer.step()
+        
+    return pretrained_nerf
+
+def cosine_similarity(a, b):
+    return dot(a, b) / (norm(a) * norm(b))
+
+def render_neRF(nerf, camera):
+    # Standard volume rendering implementation
+    # Returns color tensor
+    pass
+```
+
+**Parameters:**
+*   **Temperature ($\tau$):** Controls the sharpness of the contrastive loss. Not given in the sources.
+*   **Negative Prompts:** Pre-defined styles used as negative samples. Not given in the sources.
+*   **Loss Weights ($\lambda_{rec}, \lambda_{style}, \lambda_{reg}$):** Balances reconstruction, style, and regularization. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Cloudy Artifacts:** Transforming the density field for geometry stylization can easily introduce cloudy artifacts and geometry noise. This is handled by weight regularization [S1].
+*   **Insufficient Style Strength:** Direct CLIP similarity supervision is insufficient. The contrastive loss is required to strengthen the style [S1].
+*   **View Consistency:** Without proper constraints, style may vary inconsistently across views. The global-local framework and directional constraints address this [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of optimization steps, number of samples per ray, and CLIP inference time. CLIP inference is significant. Not given in the sources.
+*   **Memory Complexity:** Requires storing the NeRF MLP and CLIP model in memory. Not given in the sources.
+*   **Strengths:** Simultaneous geometry and appearance stylization; no mesh guidance required; strong style adherence via contrastive learning; cross-view consistency [S1].
+*   **Limitations:** Requires careful tuning of regularization to avoid artifacts; dependent on CLIP's style understanding; slower than non-differentiable stylization methods [S1].
+*   **When to use:** When text-driven stylization of both geometry and appearance is needed without mesh data.
+*   **When not to use:** When real-time performance is critical or when mesh-based stylization is preferred.
+
+## Background
+NeRF-Art was introduced by Can Wang, Ruixiang Jiang, Mingming He, Dongdong Chen, and Jing Liao [S1]. It addresses the challenge of text-guided NeRF stylization, which is difficult due to the need for simultaneous geometry and appearance transformation [S1]. The method builds on the use of large-scale Language-Vision models (CLIP) with NeRF [S1].
+
+## Sources
+[S1] NeRF-Art: Text-Driven Neural Radiance Fields Stylization, https://doi.org/10.1109/tvcg.2023.3283400, fetched 2026-10-26

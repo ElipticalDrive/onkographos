@@ -1,84 +1,138 @@
 # Multi-Texture Correct Blending
 
+Also called: Multi-Texture Register Combiner Volume Rendering
 
 ## Overview
-Multi-Texture Correct Blending is a technique that uses register combiners to combine $n$ texture images on a single polygon such that the resulting fragment blends into the frame buffer with the exact same result as rendering $n$ separate polygons with single textures [S1]. It solves the problem of incorrect alpha blending when multiple volume slices are rendered simultaneously on a single geometry, ensuring mathematical equivalence to the standard back-to-front polygon rendering order [S1]. It sets itself apart from standard multi-texturing by explicitly computing the composite alpha term $(1 - A_{t0})(1 - A_{t1})$ to preserve the correct transparency accumulation, whereas standard multi-texturing often fails to account for the multiplicative nature of alpha subtraction in sequential blending [S1].
+Multi-Texture Correct Blending is a hardware-accelerated technique that uses programmable register combiners to composite multiple texture slices into a single fragment in one pass, producing an exact mathematical equivalent to rendering $n$ separate polygons with standard alpha blending [S1]. It solves the problem of accumulated floating-point precision errors and performance overhead inherent in rendering many individual polygons back-to-front [S1]. Unlike standard OpenGL multi-texturing, which applies static texture environment modes sequentially, this method explicitly calculates the compositing formula in the rasterization stages, allowing for correct blending of arbitrary numbers of slices without intermediate frame buffer reads [S1][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Two texture images (Texture 0 and Texture 1), each providing RGB color values ($C_{t0}, C_{t1}$) and Alpha values ($A_{t0}, A_{t1}$), plus the current frame buffer color ($C_d$) [S1].
-*   **Outputs:** A single fragment with final color $C_s$ and final alpha $A_s$, which is then blended into the frame buffer [S1].
+*   **Inputs:** $n$ texture images (slices), where each texture provides color ($C_t$) and alpha ($A_t$) components. The current frame buffer color ($C_d$) and alpha ($A_d$).
+*   **Outputs:** A single final fragment color ($C_s$) and alpha ($A_s$) blended into the frame buffer.
 
-**Data Structures and Layout:**
-The method relies on the OpenGL Register Combiner architecture [S1]. It utilizes two combiner stages:
-1.  **General Combiner 0:**
-    *   **RGB Portion:** Calculates the intermediate terms $C_{t0} A_{t0}$ and $C_{t1} A_{t1}$ [S1].
-    *   **Alpha Portion:** Calculates the term $(1 - A_{t0})(1 - A_{t1})$ [S1].
-2.  **Final Combiner:**
-    *   Takes the RGB output from Combiner 0 and the Alpha output from Combiner 0 [S1].
-    *   Computes the final color $C_s$ and passes the alpha $A_s$ directly [S1].
+**Data Structures:**
+The method relies on the `NV_register_combiners` extension structure, which consists of:
+1.  **General Combiner Stages:** Two flexible stages, each divided into an RGB-portion and a separate Alpha-portion.
+2.  **Final Combiner Stage:** One stage with restricted functionality that produces the final output.
+3.  **Input Registers:** Programmable registers that can source from textures, previous combiner outputs, or constants. Fixed-point color components are typically clamped to $[0, 1]$ but can internally expand to a signed range of $[-1, 1]$ to handle vector components [S2, unofficial].
 
-**Numbered Steps:**
-1.  **Setup Blending Function:** Configure the OpenGL blending function to `glBlendFunc(GL_ONE, GL_SRC_ALPHA)` [S1]. This sets the source factor to 1 and the destination factor to $A_s$ [S1].
-2.  **Configure Combiner 0 RGB:** Program the RGB portion of General Combiner 0 to compute the products of texture color and alpha for both textures [S1]. Specifically, it calculates $C_{t0} A_{t0}$ and $C_{t1} A_{t1}$ [S1].
-3.  **Configure Combiner 0 Alpha:** Program the Alpha portion of General Combiner 0 to compute the product of the inverted alphas: $(1 - A_{t0})(1 - A_{t1})$ [S1].
-4.  **Configure Final Combiner RGB:** Route the RGB outputs from Combiner 0 to the Final Combiner [S1]. Program it to calculate the final color $C_s$ using the formula:
-    $$C_s = C_{t0} A_{t0} (1 - A_{t1}) + C_{t1} A_{t1}$$
-    This effectively combines the contribution of the first texture (modulated by the transparency of the second) and the second texture [S1].
-5.  **Configure Final Combiner Alpha:** Route the Alpha output from Combiner 0 directly to the output register of the Final Combiner, setting the fragment alpha to:
-    $$A_s = (1 - A_{t0}) (1 - A_{t1})$$
-6.  **Render:** Draw the single polygon with both textures bound [S1]. The hardware executes the combiner operations, producing the fragment $(C_s, A_s)$ [S1].
-7.  **Blend:** The fragment is blended into the frame buffer using the setup blending function:
-    $$C_{d00} = C_s \cdot 1 + C_d \cdot A_s$$
-    Substituting the values:
-    $$C_{d00} = C_{t1} A_{t1} + C_{t0} A_{t0} (1 - A_{t1}) + C_d (1 - A_{t0}) (1 - A_{t1})$$
-    This matches the result of rendering two separate polygons back-to-front [S1].
+**Algorithm Steps:**
+The method is demonstrated for blending two slices ($n=2$), which generalizes to $n$ slices by chaining combiners [S1].
 
-**Formulas:**
-*   **Standard Sequential Blending (Reference):**
-    Blending first polygon: $C_{d0} = C_{t0} A_{t0} + C_d (1 - A_{t0})$ [S1].
-    Blending second polygon: $C_{d00} = C_{t1} A_{t1} + C_{d0} (1 - A_{t1})$ [S1].
-    Expanded: $C_{d00} = C_{t1} A_{t1} + C_{t0} A_{t0} (1 - A_{t1}) + C_d (1 - A_{t0}) (1 - A_{t1})$ [S1].
-*   **Multi-Texture Correct Blending Output:**
-    Final Color: $C_s = C_{t0} A_{t0} (1 - A_{t1}) + C_{t1} A_{t1}$ [S1].
-    Final Alpha: $A_s = (1 - A_{t0}) (1 - A_{t1})$ [S1].
+1.  **Configure General Combiner 0 (RGB Portion):**
+    *   Program the combiner to calculate the weighted color contributions of each slice.
+    *   Calculate term 1: $C_{t0} A_{t0}$ (Color of slice 0 multiplied by its alpha).
+    *   Calculate term 2: $C_{t1} A_{t1}$ (Color of slice 1 multiplied by its alpha).
+    *   *Note:* The text describes routing these specific products into the final combiner. The exact register wiring for $n > 2$ requires chaining, but the core operation is the multiplication of color and alpha per slice [S1].
+
+2.  **Configure General Combiner 0 (Alpha Portion):**
+    *   Program the combiner to compute the remaining transparency (the probability that light passes through all slices).
+    *   Formula: $A_{rem} = (1 - A_{t0}) (1 - A_{t1})$.
+    *   This value represents the alpha of the *uncovered* background.
+
+3.  **Configure Final Combiner:**
+    *   **RGB Output:** Combine the weighted color terms from the general combiner with the remaining alpha to produce the final screen color.
+    *   Formula:
+        $$C_s = C_{t0} A_{t0} (1 - A_{t1}) + C_{t1} A_{t1}$$
+    *   **Alpha Output:** Use the result from the Alpha Portion of the General Combiner directly.
+    *   Formula:
+        $$A_s = (1 - A_{t0}) (1 - A_{t1})$$
+
+4.  **Frame Buffer Blending:**
+    *   Set the OpenGL blend function to blend the resulting fragment into the frame buffer.
+    *   Function: `glBlendFunc(GL_ONE, GL_SRC_ALPHA)`.
+    *   This blends the pre-composited fragment $C_s$ with the destination $C_d$ using the computed alpha $A_s$.
+    *   Resulting Frame Buffer Color:
+        $$C_{final} = C_s \cdot 1 + C_d \cdot A_s$$
+        $$C_{final} = C_{t1} A_{t1} + C_{t0} A_{t0} (1 - A_{t1}) + C_d (1 - A_{t0}) (1 - A_{t1})$$
+    *   This matches the result of rendering two separate polygons with standard `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Setup for 2-slice blending using NV_register_combiners
+# Assumes textures T0 and T1 are bound to texture units 0 and 1
+
+def setup_multi_texture_correct_blending():
+    # 1. Enable NV_register_combiners extension
+    enable_extension("GL_NV_register_combiners")
+
+    # 2. Configure General Combiner 0
+    # RGB Portion: Calculate Ct0*At0 and Ct1*At1
+    # Note: The exact register mapping depends on the specific hardware implementation
+    # of the NV_register_combiners extension. The goal is to output the terms
+    # required for the final formula.
+    
+    # Set input registers for General Combiner 0
+    # Input A = Texture 0 (provides Ct0, At0)
+    # Input B = Texture 1 (provides Ct1, At1)
+    
+    # Program RGB portion to compute Ct0 * At0
+    set_combiner_input_rgb(0, 0, COMBINER_INPUT_A) # Ct0
+    set_combiner_input_rgb(0, 1, COMBINER_INPUT_A_ALPHA) # At0 (from same texture)
+    set_combiner_op_rgb(0, COMBINER_OP_MULTIPLY) # Result: Ct0 * At0
+    
+    # Program RGB portion to compute Ct1 * At1
+    # This requires a second combiner or careful routing if only one general combiner is available for RGB.
+    # The source text implies "General Combiner 0 RGB portion... calculate Ct0 At0 and Ct1 At1".
+    # In practice, this might require chaining or specific register assignments.
+    # For the purpose of this article, we assume the hardware allows computing both terms
+    # or routing them to the final combiner.
+    
+    # Alpha Portion: Compute (1 - At0) * (1 - At1)
+    set_combiner_input_alpha(0, 0, COMBINER_INPUT_A_ALPHA) # At0
+    set_combiner_op_alpha(0, COMBINER_OP_ONE_MINUS) # 1 - At0
+    set_combiner_input_alpha(0, 1, COMBINER_INPUT_B_ALPHA) # At1
+    set_combiner_op_alpha(0, COMBINER_OP_ONE_MINUS) # 1 - At1
+    set_combiner_op_alpha(0, COMBINER_OP_MULTIPLY) # (1 - At0) * (1 - At1)
+
+    # 3. Configure Final Combiner
+    # RGB Output: Cs = Ct0*At0*(1-At1) + Ct1*At1
+    # This requires combining the terms calculated in the general combiner.
+    # The source states: "The output of the RGB-portion are routed into the final combiner stage
+    # which calculates the resulting RGB value".
+    
+    # Alpha Output: As = (1 - At0) * (1 - At1)
+    # The source states: "The result of the Alpha-portion is directly used as alpha value".
+    set_final_combiner_alpha_input(COMBINER_INPUT_PREVIOUS_STAGE_ALPHA)
+
+    # 4. Set Frame Buffer Blending
+    gl_blend_func(GL_ONE, GL_SRC_ALPHA)
+
+def render_slices():
+    # Render textured polygons for the chosen stack in back-to-front order
+    for slice in slices_back_to_front:
+        bind_texture(slice.texture_id)
+        draw_polygon(slice.geometry)
+```
 
 **Parameters:**
-*   **Blending Function:** `GL_ONE` for source, `GL_SRC_ALPHA` for destination [S1].
-*   **Texture Environment:** `GL_REPLACE` is assumed for the base texture sampling before combiner processing [S1].
+*   **Opacity Adaptation:** When using this method for volume rendering, the opacity of slices should be adapted with respect to the distance between consecutive sample points. This distance varies with the view direction, and adapting opacity accounts for the thickness these samples represent [S2, unofficial].
+*   **Texture Stack Selection:** Choose the object-aligned texture stack (X, Y, or Z aligned) based on the view direction to avoid degenerated projected polygons [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The calculation involves multiple multiplications and additions [G]. Fixed-point hardware or limited precision in register combiners may introduce artifacts, particularly when alpha values are very small or very close to 1 [G].
-*   **Number of Textures:** The provided source details the setup for two textures ($n=2$) [S1]. Not given in the sources for $n > 2$ [S1].
-*   **Hardware Support:** This method requires support for the Register Combiner extension (e.g., `GL_NV_register_combiners`) [G]. It is not available on modern programmable shader pipelines without emulation or equivalent logic in fragment shaders [G].
+*   **Precision:** Standard OpenGL multi-texturing can suffer from precision loss when blending many polygons. This method avoids intermediate frame buffer writes for the compositing logic, preserving precision within the combiner registers [S1].
+*   **Interpolation:** Only bilinear interpolation within the original slices is performed by the standard texture units. This can lead to visually less pleasant results compared to trilinear interpolation or ray casting [S2, unofficial].
+*   **Hardware Dependency:** The method relies on the `NV_register_combiners` extension, which was available on Nvidia GeForce 256 and later. It is not part of standard OpenGL 1.2 multi-texturing [S2, unofficial].
+
+## Subtopics
+
+### Multi-Texture Register Combiner Volume Rendering
+A specific application of Multi-Texture Correct Blending that uses the `NV_register_combiners` extension to perform complex calculations like interpolation and compositing in a single rendering pass, bypassing standard OpenGL texturing units [S2, unofficial]. It represents the volume data set by three object-aligned texture stacks, choosing the stack based on view direction to avoid degenerated polygons [S2, unofficial]. Fragments are composited with the frame buffer using $\alpha$-blending, and slice opacity is adapted to the distance between sample points [S2, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Time:** Constant time per fragment for the combiner operations, independent of the number of slices if $n$ is fixed and small [G]. However, the complexity of the combiner setup grows with $n$ [G].
-*   **Memory:** Requires storage for the combiner state and the texture images [G]. No additional frame buffer memory is used compared to standard rendering [S1].
-
-**Measured Performance:**
-*   The source does not provide specific performance metrics (FPS, memory usage) for this specific technique [S1].
-
-**Scaling:**
-*   Scaling to more than two textures requires additional combiner stages [G]. The source only describes the two-texture case [S1].
-
-**Strengths and Limitations:**
-*   **Strengths:** Provides mathematically exact equivalence to sequential polygon rendering, avoiding the visual artifacts of standard multi-texturing alpha blending [S1].
-*   **Limitations:** Limited to the number of available combiner stages and texture units [G]. Requires specific hardware extensions (Register Combiners) that are obsolete in modern graphics APIs [G].
-
-**When to Use:**
-*   Use when exact alpha blending equivalence is required and the hardware supports Register Combiners [G]. Not suitable for modern GPU architectures without shader-based equivalents [G].
+*   **Time Complexity:** $O(1)$ per fragment for the compositing logic, regardless of the number of slices $n$ (assuming the combiner stages are sufficient to compute the formula). This is significantly faster than rendering $n$ polygons, which is $O(n)$ in terms of draw calls and state changes.
+*   **Memory Complexity:** Requires storage for the texture stacks and the combiner state. No additional frame buffer memory is needed for intermediate compositing.
+*   **Performance:** Reduces the number of triangles and draw calls by mapping multiple slice images onto a single polygon using $n$ independent multi-texture units [Parent]. It bypasses the static nature of OpenGL 1.2 multi-texturing [S2, unofficial].
+*   **Strengths:** Exact mathematical equivalence to multi-polygon rendering; avoids precision loss; reduces CPU overhead.
+*   **Limitations:** Requires specific hardware support (`NV_register_combiners`); limited to bilinear interpolation within slices; complex to program due to the flexibility and register management of the combiners [S2, unofficial].
+*   **When to use:** When high performance is required for volume rendering on older Nvidia hardware and exact blending is critical.
+*   **When not to use:** On modern hardware with programmable shaders (GLSL/HLSL), which offer more flexibility and better performance. When trilinear interpolation or ray casting is needed.
 
 ## Background
-**Origin:**
-The technique was introduced in the context of interactive volume rendering on standard PC graphics hardware, specifically to leverage rasterization hardware for efficient volume visualization [S1].
-
-**History and Development:**
-It was presented in the paper "Interactive Volume Rendering on Standard PC Graphics Hardware" [S1]. The method exploits the capabilities of the OpenGL Register Combiner extension to perform complex blending operations in hardware, avoiding the need for multiple draw calls and depth sorting for every slice [S1].
-
-**Where it is used:**
-It is used in volume rendering applications that require high-quality alpha blending on older hardware supporting the Register Combiner extension [S1].
+The technique was introduced in the context of exploiting rasterization hardware for volume rendering on standard PC graphics processors, specifically the Nvidia GeForce 256 [S1][S2, unofficial]. It addresses the limitations of standard OpenGL 1.2 multi-texturing, which is too static for complex volume rendering tasks [S2, unofficial]. The method builds on the concept of register combiners, which provide explicit control over per-fragment information [S2, unofficial].
 
 ## Sources
 [S1] Interactive Volume Rendering on Standard PC Graphics Hardware, https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28
+[S2] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

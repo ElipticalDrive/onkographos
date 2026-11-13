@@ -3,46 +3,27 @@
 Also called: Pixel mapping strategies, Scene alignment strategies
 
 ## Overview
-Mapping strategies define the correspondence mechanism used to align pixels or features between two distinct 3D scenes or radiance fields, typically for tasks such as multi-scene editing, fusion, or transfer [S1]. Unlike standard SLAM mapping which aligns a current frame to a static map, these strategies address the alignment of two complete scene representations [S1]. They are distinguished from sibling methods like [Semantic-aware mapping](12053-semantic-aware-mapping.md) by their explicit focus on cross-scene pixel-to-pixel or feature-to-feature correspondence rather than intra-scene consistency [S1].
+Mapping strategies define the correspondence mechanism used to align pixels or features between two distinct scenes or views for the purpose of alignment, editing, or fusion. In the context of radiance-field optimization, these strategies solve the problem of establishing reliable spatial matching when direct geometric priors are insufficient or when transferring attributes between scenes. This method sets itself apart from sibling optimization techniques by focusing specifically on the *correspondence* phase rather than the gradient-based parameter update, serving as a prerequisite for resampling and fusion.
 
 ## How it works
-The method operates by establishing a mapping function $M$ that associates elements (pixels, features, or segments) from a source scene $S_{src}$ to a target scene $S_{tgt}$ [S1].
+The method operates by establishing a mapping function $M: \mathcal{I}_A \rightarrow \mathcal{I}_B$ between a source image/scene $A$ and a target image/scene $B$. The core input is a pair of images or radiance field representations; the output is a set of correspondences or a warped representation of $A$ in the coordinate system of $B$.
 
-**Inputs:**
-*   Source scene representation (e.g., radiance field, point cloud, or image set).
-*   Target scene representation.
-*   Camera poses for both scenes (if view-dependent).
+Three primary strategies are employed, ranging from simple geometric assumptions to semantic feature matching:
 
-**Outputs:**
-*   A correspondence map linking source elements to target elements.
-*   Aligned scene parameters for downstream tasks (e.g., resampling, editing) [S1].
+1.  **Identity Mapping**: This strategy assumes a direct pixel-to-pixel correspondence based on camera pose or grid alignment. It maps pixel $(u, v)$ in source $A$ directly to $(u, v)$ in target $B$.
+    *   *Limitation*: It lacks spatial alignment accuracy if the scenes are not perfectly registered or if there are viewpoint changes.
+2.  **Semantic Correspondence-based Mapping**: This strategy improves alignment by extracting dense semantic features. It utilizes Vision Transformers (ViT) [Dosovitskiy 2020] and DINO [Amir et al. 2021] to generate feature embeddings for each pixel. The mapping is determined by finding the nearest neighbor in feature space between pixels of $A$ and $B$.
+    *   *Benefit*: It provides robust spatial matching that is invariant to appearance changes, leveraging semantic consistency.
+3.  **Co-segmentation-based Mapping**: This strategy refines alignment by segmenting images into semantically meaningful parts. It uses DINO’s clustering capabilities to identify coherent regions. Correspondences are established at the region level or by enforcing consistency within segmented boundaries.
+    *   *Benefit*: It yields finer correspondence and maintains semantic boundaries, preventing the blending of distinct objects.
 
-**Data Structures:**
-*   Feature vectors: Dense semantic features extracted via Vision Transformers (ViT) or DINO [S1].
-*   Segmentation masks: Co-segmentation labels derived from clustering [S1].
-
-**Steps:**
-1.  **Feature Extraction:** Extract dense semantic features from the source and target scenes using a pre-trained model (e.g., DINO) [S1].
-2.  **Correspondence Computation:** Compute similarity between source and target features to establish initial matches [S1].
-3.  **Strategy Selection:** Apply one of the following three strategies based on required alignment accuracy and semantic fidelity [S1]:
-    *   **Identity Mapping:** Assumes direct pixel correspondence based on camera projection or index. This is the baseline but lacks spatial alignment accuracy if scenes are not perfectly registered [S1].
-    *   **Semantic Correspondence-Based Mapping:** Uses the dense semantic features from Step 1 to find nearest-neighbor matches in the feature space. This improves spatial alignment by matching semantically similar regions rather than just geometrically projected pixels [S1].
-    *   **Co-segmentation-Based Mapping:** Refines the alignment by first segmenting both images into semantically meaningful parts using DINO’s clustering capabilities. Correspondence is then established at the segment level, ensuring that semantic boundaries are preserved and alignment is consistent within object categories [S1].
-4.  **Resampling (Optional):** If geometry and color alignment are required, use density-based resampling along corresponding rays to align key points, adjusting sampling positions to match density peaks in both scenes [S1].
-
-**Formulas:**
-*   **Semantic Similarity:** For a pixel $p$ in source and $q$ in target, the match is determined by minimizing the distance between their feature vectors $f(p)$ and $f(q)$:
-    $$ q^* = \arg \min_q \| f(p) - f(q) \|_2 $$
-    where $f(\cdot)$ is the feature extractor (e.g., DINO) [S1].
-*   **Co-segmentation:** Images are partitioned into $K$ segments $\{S_1, ..., S_K\}$ such that semantic homogeneity is maximized within segments [S1].
-
-**Parameters:**
+**Parameters**:
 *   Feature extractor: DINO or ViT [S1].
-*   Clustering algorithm: Used for co-segmentation (specific algorithm not given in sources) [S1].
+*   Clustering method: DINO-based clustering [S1].
 
-**Edge Cases:**
-*   **Misalignment:** Identity mapping fails significantly if scenes are not pre-aligned [S1].
-*   **Semantic Ambiguity:** If objects lack distinct semantic features, semantic correspondence may fail; co-segmentation helps by enforcing structural boundaries [S1].
+**Edge Cases**:
+*   Identity mapping fails under significant misalignment or viewpoint shifts [S1].
+*   Semantic methods may struggle in textureless regions where feature descriptors are ambiguous [S1].
 
 ## Subtopics
 
@@ -50,13 +31,14 @@ The method operates by establishing a mapping function $M$ that associates eleme
 iMAP is the first NeRF-based dense online SLAM model that jointly optimizes camera pose and an implicit scene representation. It solves the problem of simultaneous localization and mapping by treating the scene as a continuous radiance field rather than a discrete mesh or point cloud. It sets itself apart from its siblings by being the foundational method that introduced the iterative two-step approach of tracking and mapping to NeRF-based SLAM, upon which NICE-SLAM and subsequent methods build.
 
 ## Operating characteristics
-*   **Identity Mapping:** Fastest computation but lowest accuracy for misaligned scenes [S1].
-*   **Semantic Correspondence:** Higher accuracy than identity mapping; requires feature extraction overhead [S1].
-*   **Co-segmentation:** Highest semantic fidelity and boundary preservation; highest computational cost due to clustering [S1].
-*   **Scaling:** Performance depends on the resolution of the feature maps and the complexity of the clustering algorithm [S1].
+*   **Identity Mapping**: $O(1)$ per pixel; fastest but least accurate. Suitable only for perfectly aligned static scenes.
+*   **Semantic Correspondence**: High computational cost due to ViT/DINO inference. Robust to appearance changes but sensitive to semantic ambiguity.
+*   **Co-segmentation**: Highest computational cost due to clustering. Provides the highest alignment fidelity for semantically rich scenes.
+*   **Strengths**: Enables view-consistent 3D editing and multi-scene fusion by ensuring structural fidelity [S1].
+*   **Limitations**: Identity mapping lacks spatial accuracy; semantic methods require significant memory for feature storage [S1].
 
 ## Background
-These strategies were introduced in the context of multi-scene radiance fields and view-consistent 3D editing, where aligning geometry and color between different scenes is critical [S1]. The progression from identity to semantic to co-segmentation mapping reflects a move towards preserving structural fidelity and semantic consistency during scene manipulation [S1].
+The concept of mapping strategies in radiance fields emerged with the need to align and edit multi-scene representations. The specific strategies of identity, semantic, and co-segmentation mapping were introduced in the context of Generalized TensoRF to enable efficient multi-scene radiance fields and view-consistent 3D editing [S1]. The approach builds on the observation that simple geometric alignment is insufficient for complex scene editing, necessitating semantic-aware correspondence.
 
 ## Sources
 [S1] Generalized TensoRF: Efficient Multi-Scene Radiance Fields and View-Consistent 3D Editing, https://doi.org/10.1145/3722564.3728385, fetched 2026-10-29

@@ -3,31 +3,28 @@
 Also called: Reflection, reflect, Refract & Reflect Utilities, Snell's Law Implementation, Vector Reflection
 
 ## Overview
-Reflected Ray Directions is a geometric method used in volume rendering and ray marching to determine the propagation direction of a ray after it interacts with a surface boundary. It solves the problem of simulating specular reflection by computing a new ray vector based on the incident direction and the surface normal. It differs from sibling methods like [Refracted Ray Directions](3915-refracted-ray-directions.md) by computing transmission (bending) rather than reflection (bouncing), and serves as the geometric foundation for energy-splitting techniques like [Fresnel Reflection/Refraction](9067-fresnel-reflection-refraction.md).
+Reflected Ray Directions is a geometric method used in volume rendering and ray marching to determine the propagation direction of a ray after it interacts with a surface boundary [S2, unofficial]. It solves the problem of simulating specular reflection by computing a new ray vector based on the incident direction and the surface normal [S2, S3, unofficial]. It differs from sibling methods like [Refracted Ray Directions](3915-refracted-ray-directions.md) by computing transmission (bending) rather than reflection (bouncing), and serves as the geometric foundation for energy-splitting techniques like [Fresnel Reflection/Refraction](9067-fresnel-reflection-refraction.md) [G].
 
 ## How it works
 **Inputs:**
-- Incident ray direction vector $\vec{v}$ (normalized).
-- Surface normal vector $\vec{n}$ at the intersection point (normalized).
-- Implicit surface function $f(\vec{p})$ and its gradient (for normal calculation).
+- Incident ray direction vector $\vec{v}$ (normalized) [S3, unofficial].
+- Surface normal vector $\vec{n}$ at the intersection point (normalized) [S3, unofficial].
 
 **Outputs:**
-- Reflected ray direction vector $\vec{v}_{out}$ (normalized).
+- Reflected ray direction vector $\vec{v}_{\text{out}}$ (normalized) [S3, unofficial].
 
 **Data Structures:**
-- Vectors are represented as 3D floating-point tuples $(x, y, z)$.
-- Normals and directions are unit vectors ($|\vec{v}| = 1$).
+- Vectors are represented as 3D floating-point tuples $(x, y, z)$ [G].
+- Normals and directions are unit vectors ($|\vec{v}| = 1$) [G].
 
 **Steps:**
-1. **Evaluate Surface Hit:** Determine if the current ray position $\vec{p}_i$ is on the surface. This is typically done by checking if the signed distance function value $f(\vec{p}_i) \approx 0$ or is below a small threshold $\epsilon$ [S2, unofficial].
-2. **Compute Normal:** If a hit is detected, compute the surface normal $\vec{n}$ at $\vec{p}_i$. For an implicit surface, $\vec{n} = \nabla f(\vec{p}_i)$, normalized [S3, unofficial].
+1. **Evaluate Surface Hit:** Determine if the current ray position $\vec{p}_i$ is on the surface by checking if $f(\vec{p}_i) \approx 0$ [S2, unofficial].
+2. **Compute Normal:** Get the surface normal $\vec{n}$ at $\vec{p}_i$ [S3, unofficial].
 3. **Calculate Reflection:** Compute the reflected direction using the vector reflection formula [S1, S2, S3, unofficial]:
-   $$ \vec{v}_{out} = \vec{v} - 2(\vec{v} \cdot \vec{n})\vec{n} $$
-   Alternatively, expressed as:
-   $$ \vec{v}_{out} = \vec{v} - \vec{a}, \quad \text{where } \vec{a} = \vec{n} \cdot (2 \cdot (\vec{v} \cdot \vec{n})) $$
-   [S1, unofficial]
-4. **Normalize:** Ensure $\vec{v}_{out}$ is normalized to unit length to prevent drift in subsequent ray marching steps [S3, unofficial].
-5. **Fallback:** If the position is not on the surface ($f(\vec{p}_i) \not\approx 0$), the direction remains unchanged: $\vec{v}_{out} = \vec{v}$ [S2, unofficial].
+   $$ \vec{v}_{\text{out}} = \vec{v} - 2(\vec{v} \cdot \vec{n})\vec{n} $$
+   Alternatively, expressed as $\vec{v}_{\text{out}} = \vec{v} - \vec{a}$, where $\vec{a} = \vec{n} \cdot (2 \cdot (\vec{v} \cdot \vec{n}))$ [S1, unofficial].
+4. **Normalize:** Ensure $\vec{v}_{\text{out}}$ is normalized to unit length to prevent drift in subsequent ray marching steps [S3, unofficial].
+5. **Fallback:** If the position is not on the surface ($f(\vec{p}_i) \not\approx 0$), the direction remains unchanged: $\vec{v}_{\text{out}} = \vec{v}$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -85,17 +82,12 @@ def compute_reflected_direction(v: tuple, p: tuple, sdf_func) -> tuple:
     Returns:
         New ray direction.
     """
-    # Check if on surface (approximate zero)
-    # Threshold epsilon depends on implementation; 1e-4 is common for SDFs
-    epsilon = 1e-4
     dist = sdf_func(p)
     
-    if abs(dist) < epsilon:
-        # Compute normal from SDF gradient or pre-computed
-        # For this example, assume normal is passed or computed externally
-        # Here we simulate getting normal N_i
-        n = compute_normal(p) # [G] Helper to compute gradient of SDF at p
-        
+    # Check if on surface (approximate zero)
+    if abs(dist) < 1e-4: # [G] Small threshold for surface proximity
+        # Compute normal N at p (e.g., via SDF gradient or precomputed) [G]
+        n = (0.0, 0.0, 1.0) # Replace with actual normal computation
         return reflect_ray(v, n)
     else:
         # Not on surface, continue straight
@@ -103,25 +95,25 @@ def compute_reflected_direction(v: tuple, p: tuple, sdf_func) -> tuple:
 ```
 
 **Parameters:**
-- $\epsilon$: Surface proximity threshold. Typical value: $10^{-4}$ to $10^{-3}$ depending on scale [S2, unofficial].
+- $\epsilon$: Surface proximity threshold. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 - **Precision Errors:** Floating-point inaccuracies can cause the reflected vector to drift from unit length. Always re-normalize [S3, unofficial].
-- **Total Internal Reflection (TIR):** While primarily a reflection method, if used in conjunction with refraction logic, TIR cases must be handled. In pure reflection, TIR is not applicable, but if the normal calculation is inverted (back-face vs front-face), the reflection will be incorrect. Ensure the normal points against the incident ray ($\vec{v} \cdot \vec{n} < 0$ for incoming rays) [S1, unofficial].
-- **Degenerate Input:** If $\vec{v}$ and $\vec{n}$ are parallel or zero, the result may be undefined. Guard against zero-length vectors [S1, G, unofficial].
+- **Total Internal Reflection (TIR):** While primarily a reflection method, if used in conjunction with refraction logic, TIR cases must be handled. In pure reflection, TIR is not applicable, but if the normal calculation is inverted (back-face vs front-face), the reflection will be incorrect. Ensure the normal points against the incident ray ($\vec{v} \cdot \vec{n} < 0$ for incoming rays) [G].
+- **Degenerate Input:** If $\vec{v}$ and $\vec{n}$ are parallel or zero, the result may be undefined. Guard against zero-length vectors [G].
 
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per reflection event. Requires one dot product, a few multiplications, and a normalization.
-- **Memory Complexity:** $O(1)$. No additional data structures required.
-- **Strengths:** Computationally cheap; geometrically exact for specular surfaces; easy to implement.
-- **Limitations:** Only models perfect specular reflection; does not account for roughness (requires microfacet models); sensitive to normal accuracy.
-- **When to use:** When simulating mirror-like surfaces in volume rendering or ray marching.
-- **When not to use:** For diffuse surfaces (use Lambertian models) or rough surfaces (use GGX/Beckmann).
+- **Time Complexity:** $O(1)$ per reflection event [G]. Requires one dot product, a few multiplications, and a normalization [G].
+- **Memory Complexity:** $O(1)$. No additional data structures required [G].
+- **Strengths:** Computationally cheap; geometrically exact for specular surfaces; easy to implement [G].
+- **Limitations:** Only models perfect specular reflection; does not account for roughness (requires microfacet models); sensitive to normal accuracy [G].
+- **When to use:** When simulating mirror-like surfaces in volume rendering or ray marching [G].
+- **When not to use:** For diffuse surfaces (use Lambertian models) or rough surfaces (use GGX/Beckmann) [G].
 
 ## Background
-The vector reflection formula is a fundamental concept in geometric optics and computer graphics, derived from the law of reflection. It is widely used in ray tracing and ray marching implementations. The specific implementation details in modern codebases often mirror the standard derivation found in graphics literature.
+The vector reflection formula is a fundamental concept in geometric optics and computer graphics, derived from the law of reflection. It is widely used in ray tracing and ray marching implementations. The specific implementation details in modern codebases often mirror the standard derivation found in graphics literature [G].
 
 ## Sources
 [S1] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)

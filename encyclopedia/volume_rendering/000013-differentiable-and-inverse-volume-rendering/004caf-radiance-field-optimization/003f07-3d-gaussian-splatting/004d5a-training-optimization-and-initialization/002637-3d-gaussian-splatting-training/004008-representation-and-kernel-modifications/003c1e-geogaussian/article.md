@@ -2,45 +2,106 @@
 
 
 ## Overview
-GeoGaussian is a training optimization and initialization strategy for 3D Gaussian Splatting that improves geometric consistency and surface reconstruction quality. It addresses the issue of noisy or inconsistent geometry in standard 3DGS by densifying Gaussians on the tangent plane of existing primitives and enforcing smoothness of geometric properties between neighboring Gaussians [S1]. It sets itself apart from siblings like Negative Gaussian Splatting by focusing on positive geometric propagation and smoothness rather than negative space representation, and from Scaffold-GS by using local tangent plane densification rather than global scaffold structures [S1].
+GeoGaussian is a training optimization and initialization strategy for 3D Gaussian Splatting that improves geometric consistency and surface reconstruction quality. It addresses the issue of noisy or inconsistent geometry in standard 3D Gaussian Splatting by densifying Gaussians on the tangent plane of existing Gaussians and encouraging smoothness of geometric properties between neighboring Gaussians [S1]. It sets itself apart from sibling methods like Negative Gaussian Splatting [9152-negative-gaussian-splatting.md] or Scaffold-GS [9186-scaffold-gs.md] by focusing specifically on local geometric regularization and tangent-space densification rather than negative primitives, scaffolding structures, or frequency-domain blur kernels.
 
 ## How it works
-GeoGaussian modifies the standard 3D Gaussian Splatting optimization process by introducing two key mechanisms: tangent plane densification and geometric smoothness regularization.
+GeoGaussian modifies the standard 3D Gaussian Splatting optimization loop to enforce geometric coherence. It operates within the differentiable rendering framework of 3D Gaussian Splatting [Parent](10145-representation-and-kernel-modifications.md).
 
 **Inputs and Outputs:**
-- **Input:** A set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ is defined by position $\mathbf{p}_i$, covariance $\boldsymbol{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and color $\mathbf{c}_i$.
-- **Output:** An updated set of Gaussians with improved geometric consistency.
+- **Input:** A set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each Gaussian $G_i$ is defined by position $\mathbf{p}_i$, covariance $\boldsymbol{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and color attributes $\mathbf{c}_i$. Ground truth images and camera poses.
+- **Output:** Optimized Gaussian parameters with improved geometric smoothness and reduced noise.
 
 **Data Structures:**
-- Each Gaussian $G_i$ retains the standard 3DGS attributes: $\mathbf{p}_i \in \mathbb{R}^3$, $\mathbf{R}_i \in SO(3)$, $\mathbf{s}_i \in \mathbb{R}^3$, $\alpha_i \in [0,1]$, $\mathbf{c}_i$.
-- Normal vectors $\mathbf{n}_i$ are derived from the covariance matrix or estimated from the local geometry.
+- **Gaussian Set:** A list of Gaussians. Each Gaussian stores $\mathbf{p}_i \in \mathbb{R}^3$, $\mathbf{R}_i \in SO(3)$, $\mathbf{s}_i \in \mathbb{R}^3$, $\alpha_i \in [0,1]$, and $\mathbf{c}_i$.
+- **Tangent Plane:** For each Gaussian, the tangent plane is defined by the normal vector $\mathbf{n}_i$ derived from the covariance or rotation.
 
-**Steps:**
-
-1. **Tangent Plane Densification:**
-   For each Gaussian $G_i$, compute its tangent plane at $\mathbf{p}_i$ using the normal $\mathbf{n}_i$. New Gaussians are spawned on this tangent plane rather than in the full 3D volume. This ensures that new primitives align with the local surface geometry, reducing noise and improving surface fidelity.
-   - Let $\mathbf{T}_i$ be the basis vectors of the tangent plane orthogonal to $\mathbf{n}_i$.
-   - New positions $\mathbf{p}_{new}$ are sampled as $\mathbf{p}_{new} = \mathbf{p}_i + u \mathbf{t}_1 + v \mathbf{t}_2$, where $\mathbf{t}_1, \mathbf{t}_2$ are tangent basis vectors and $u, v$ are small offsets.
-
-2. **Geometric Smoothness Regularization:**
-   Encourage smoothness of geometric properties (such as normals and positions) between neighboring Gaussians. This is achieved by adding a regularization term to the loss function.
-   - Let $\mathcal{N}(i)$ be the set of neighbors of Gaussian $G_i$.
-   - The smoothness loss $\mathcal{L}_{smooth}$ is defined as:
-     $$ \mathcal{L}_{smooth} = \sum_{i} \sum_{j \in \mathcal{N}(i)} w_{ij} \left( \| \mathbf{n}_i - \mathbf{n}_j \|^2 + \| \mathbf{p}_i - \mathbf{p}_j \|^2 \right) $$
-     where $w_{ij}$ is a weight based on the distance or similarity between $G_i$ and $G_j$.
-
-3. **Optimization:**
-   Update the Gaussian parameters using gradient descent, minimizing the combined loss:
-   $$ \mathcal{L}_{total} = \mathcal{L}_{render} + \lambda \mathcal{L}_{smooth} $$
-   where $\mathcal{L}_{render}$ is the standard rendering loss (e.g., L1 or SSIM) and $\lambda$ is a hyperparameter controlling the strength of the smoothness regularization.
+**Numbered Steps:**
+1. **Initialization:** Initialize Gaussians from a point cloud (e.g., SfM) as in standard 3D Gaussian Splatting [Parent](10145-representation-and-kernel-modifications.md).
+2. **Rendering:** Render images using differentiable rasterization [Parent](10145-representation-and-kernel-modifications.md).
+3. **Loss Computation:** Compute reconstruction loss (e.g., L1, SSIM) between rendered and ground truth images.
+4. **Geometric Regularization:** Encourage smoothness of geometric properties between neighboring Gaussians. This involves minimizing the difference in normals or positions of adjacent Gaussians. Let $\mathcal{N}(i)$ be the set of neighbors of Gaussian $i$. The regularization term $L_{geo}$ can be formulated as:
+   $$ L_{geo} = \sum_{i} \sum_{j \in \mathcal{N}(i)} \| \mathbf{n}_i - \mathbf{n}_j \|^2 + \| \mathbf{p}_i - \mathbf{p}_j \|^2 $$
+   where $\mathbf{n}_i$ is the normal of Gaussian $i$, derived from its covariance $\boldsymbol{\Sigma}_i$ or rotation $\mathbf{R}_i$.
+5. **Tangent Plane Densification:** When densifying Gaussians (e.g., splitting or cloning based on gradient magnitude), restrict the new Gaussians to lie on the tangent plane of the parent Gaussian. For a parent Gaussian $G_p$ with normal $\mathbf{n}_p$, the new position $\mathbf{p}_{new}$ is projected onto the tangent plane:
+   $$ \mathbf{p}_{new} = \mathbf{p}_p + (\mathbf{p}_{candidate} - \mathbf{p}_p) - ((\mathbf{p}_{candidate} - \mathbf{p}_p) \cdot \mathbf{n}_p) \mathbf{n}_p $$
+   where $\mathbf{p}_{candidate}$ is the original candidate position (e.g., from a high-gradient region).
+6. **Optimization:** Update Gaussian parameters using gradient descent, combining the reconstruction loss and the geometric regularization loss.
 
 **Parameters:**
-- $\lambda$: Weight for smoothness regularization. Typical value: Not given in the sources.
-- Tangent plane offset scale: Controls the spread of new Gaussians on the tangent plane. Typical value: Not given in the sources.
+- **Neighbor Search Radius:** Not given in the sources. Typically determined by spatial proximity in the point cloud.
+- **Regularization Weight:** Not given in the sources. Must be tuned to balance reconstruction accuracy and geometric smoothness.
 
 **Edge Cases and Pitfalls:**
-- **Degenerate Normals:** If the normal estimation is inaccurate, the tangent plane may be misaligned, leading to poor densification. [G] Ensure robust normal estimation, possibly using local PCA or neighbor averaging.
-- **Over-smoothing:** High $\lambda$ may lead to overly smooth geometry, losing fine details. [G] Tune $\lambda$ based on scene complexity.
+- **Degenerate Gaussians:** Gaussians with zero scale or singular covariance matrices may have undefined normals. Guard against this by checking covariance determinant or scale magnitude.
+- **Boundary Effects:** Neighbors near the boundary of the scene may have fewer neighbors, leading to inconsistent regularization. Handle by adjusting neighbor search or using weighted regularization.
+- **Precision:** Tangent plane projection may introduce small numerical errors. Use double precision for geometric calculations if necessary.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_geometric_regularization_loss(gaussians, neighbors):
+    """
+    Compute the geometric regularization loss encouraging smoothness between neighbors.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes p, R, s, alpha, c.
+        neighbors: Dictionary mapping Gaussian index to list of neighbor indices.
+        
+    Returns:
+        loss: Scalar tensor representing the geometric regularization loss.
+    """
+    loss = 0.0
+    for i, g_i in enumerate(gaussians):
+        # Compute normal from rotation or covariance
+        n_i = compute_normal(g_i.R, g_i.s)
+        for j in neighbors[i]:
+            g_j = gaussians[j]
+            n_j = compute_normal(g_j.R, g_j.s)
+            # Difference in normals and positions
+            diff_n = n_i - n_j
+            diff_p = g_i.p - g_j.p
+            loss += torch.sum(diff_n ** 2) + torch.sum(diff_p ** 2)
+    return loss
+
+def densify_on_tangent_plane(parent_gaussian, candidate_position, neighbors):
+    """
+    Densify a new Gaussian on the tangent plane of the parent Gaussian.
+    
+    Args:
+        parent_gaussian: The parent Gaussian object.
+        candidate_position: The candidate position for the new Gaussian.
+        neighbors: List of neighbor indices for context (not used in projection).
+        
+    Returns:
+        new_position: The projected position on the tangent plane.
+    """
+    # Compute normal from parent Gaussian
+    n_p = compute_normal(parent_gaussian.R, parent_gaussian.s)
+    # Project candidate position onto tangent plane
+    diff = candidate_position - parent_gaussian.p
+    projection = diff - torch.dot(diff, n_p) * n_p
+    new_position = parent_gaussian.p + projection
+    return new_position
+
+def compute_normal(R, s):
+    """
+    Compute the normal vector from rotation and scale.
+    For simplicity, assume the normal is the z-axis in local space transformed to world space.
+    
+    Args:
+        R: Rotation matrix (3x3).
+        s: Scale vector (3).
+        
+    Returns:
+        n: Normal vector (3).
+    """
+    # Local normal is typically (0, 0, 1)
+    local_normal = torch.tensor([0.0, 0.0, 1.0])
+    # Transform to world space
+    n = R @ local_normal
+    return n
+```
 
 ## Subtopics
 
@@ -51,15 +112,17 @@ Spatio-temporal Gaussian Tracking (SGT) is a method for modeling surface dynamic
 This method prevents rendering artifacts caused by 3D Gaussians becoming smaller than a single pixel during optimization by enforcing a minimum projected area through covariance regularization. It differs from standard 3D Gaussian Splatting by introducing a scale-dependent low-pass filter that focuses training on low-frequency details in early stages, ensuring coarse scene structure is learned efficiently before fine details are resolved.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Improves geometric consistency and surface reconstruction quality; reduces noise in the reconstructed geometry.
-- **Limitations:** May require careful tuning of the smoothness regularization parameter; computationally more expensive than standard 3DGS due to neighbor calculations and additional loss terms.
-- **When to use:** When high-quality geometric reconstruction is required, such as in architectural scenes or objects with smooth surfaces.
-- **When not to use:** When real-time performance is critical and geometric accuracy is less important than rendering speed.
+- **Time Complexity:** The geometric regularization step adds a cost proportional to the number of neighbor pairs. If $N$ is the number of Gaussians and $K$ is the average number of neighbors, the cost is $O(NK)$. This is typically small compared to the rendering cost $O(N)$ per pixel, but depends on neighbor search efficiency.
+- **Memory Complexity:** Additional memory for storing neighbor relationships and intermediate geometric terms. $O(NK)$ for neighbor lists.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of Gaussians and neighbors. Efficient neighbor search (e.g., using spatial hashing) is recommended for large scenes.
+- **Strengths:** Improves geometric smoothness and reduces noise in reconstructed surfaces. Enhances consistency between neighboring Gaussians.
+- **Limitations:** Requires neighbor search, which can be computationally expensive if not optimized. May slow down training due to additional regularization terms.
+- **When to Use:** When geometric consistency and surface smoothness are critical, such as in architectural or indoor scene reconstruction.
+- **When Not to Use:** When real-time training speed is paramount and geometric smoothness is less important.
 
 ## Background
-GeoGaussian was proposed in the paper "GeoGaussian: Geometrically Consistent Gaussian Splatting for Dynamic Scene Representation" [S1]. It is part of the broader effort to improve the geometric fidelity of 3D Gaussian Splatting, which is known for its high-quality rendering but sometimes suffers from noisy or inconsistent geometry. The method builds on the shared principles of 3D Gaussian Splatting, focusing on modifying the training process to enforce geometric smoothness.
+GeoGaussian was proposed in the context of recent advances in 3D Gaussian Splatting [S1]. It builds on the idea of improving geometric consistency in 3D Gaussian Splatting by densifying Gaussians on the tangent plane and encouraging smoothness of geometric properties between neighboring Gaussians. It is part of a broader trend of modifying the 3D Gaussian Splatting framework to address specific limitations such as noise, blur, and dynamic scene representation.
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

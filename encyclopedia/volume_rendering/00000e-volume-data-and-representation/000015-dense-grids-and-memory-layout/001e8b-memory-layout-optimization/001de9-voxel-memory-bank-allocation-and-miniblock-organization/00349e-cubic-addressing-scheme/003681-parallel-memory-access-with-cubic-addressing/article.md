@@ -1,221 +1,167 @@
 # Parallel Memory Access with Cubic Addressing
-Also called: Memory Access Buffering (FIFO)
+
+Also called: Cubic memory organization, Memory Access Buffering (FIFO)
 
 ## Overview
-Parallel Memory Access with Cubic Addressing is a hardware-aware memory layout and access strategy for interactive ray casting that distributes voxel data across eight parallel memory modules (banks) to maximize bandwidth and minimize pipeline stalls [S1]. It builds on [Cubic Addressing Scheme](7285-cubic-addressing-scheme.md) by ensuring that each trilinear interpolation neighborhood is served by distinct memory banks, allowing simultaneous access to all eight corner voxels [S1]. Unlike unbuffered approaches where frame time depends on the cumulative latency of all memory accesses, this method decouples memory retrieval from the rendering pipeline using FIFO buffers, making performance dependent only on the slowest individual SDRAM bank [S1].
+Parallel Memory Access with Cubic Addressing is a hardware-oriented memory layout and access strategy designed to accelerate trilinear interpolation in volume rendering by retrieving the eight required sample voxels in a single memory cycle. It solves the latency bottleneck of fetching scattered voxels by distributing them across eight parallel memory modules (or logical banks) and using FIFO buffers to hide cache refill stalls. It differs from standard interleaved memory layouts by grouping voxels into contiguous $s^3$ sub-cubes, which increases memory usage by approximately eightfold but enables single-cycle retrieval of interpolation neighborhoods [S2].
 
 ## How it works
-**Inputs:**
-- Ray sample coordinates $(V_z, V_y, V_x)$ in the volume grid.
-- Sub-cube size $s$ (typically a power of two, e.g., 8 or 16, though exact $s$ is "Not given in the sources" for this specific method, it is implied by the parent article).
-- Eight parallel memory modules $M_0$ through $M_7$.
-
-**Outputs:**
-- Eight voxel values retrieved from the eight memory modules for trilinear interpolation.
-- Updated memory addresses for the next sample point.
+**Inputs and Outputs:**
+*   **Input:** Ray parameters (origin, direction), volume dataset, sub-cube size $s$ (typically $s=2$ for the basic cubic addressing unit, though the method generalizes to $s^3$ blocks [S1]).
+*   **Output:** Eight voxel values for trilinear interpolation, delivered to the rendering pipeline.
 
 **Data Structures:**
-- **Memory Layout:** The volume is partitioned into $s^3$ sub-cubes. Each sub-cube is distributed across the eight memory banks. Within each bank, voxels are stored such that each bank holds every second voxel along specific axes to facilitate the addressing scheme [S1].
-- **FIFO Buffers:** For each of the eight memory modules, there are two FIFO buffers: one for addresses and one for voxel values [S1].
+*   **Memory Banks:** Eight parallel memory modules ($M_0$ to $M_7$) or logical banks within SDRAMs. Each module stores a specific subset of voxels such that any $2 \times 2 \times 2$ neighborhood is distributed across all eight modules [S1].
+*   **FIFO Buffers:** A First-In-First-Out buffer is associated with each memory module to store addresses and voxel values, decoupling the ray casting pipeline from memory access latency [S1].
+*   **Address Modification Unit:** An incrementer used to adjust base addresses when crossing sub-cube boundaries [S1].
 
-**Address Calculation:**
-The core of the method is calculating the address for each of the eight memory modules $M_i$ based on the sample point $(V_z, V_y, V_x)$. Since each memory module stores only every second voxel, the base coordinates are divided by two (implemented as a bitwise shift) [S1].
+**Layout Details:**
+Voxels are arranged in memory as continuous cubes rather than interleaved. This means that for a given $2 \times 2 \times 2$ neighborhood, each of the eight voxels resides in a different memory bank. This layout introduces duplication of voxels in memory because a single voxel may belong to multiple overlapping $2 \times 2 \times 2$ neighborhoods [S2]. The memory requirement is approximately eight times the raw dataset size [S2].
 
-Let $A$ be the address for a specific memory module. The address is calculated as:
-$$ A = s^3 AC + A_v $$
-where $AC$ is the sub-cube address and $A_v$ is the voxel address within the sub-cube [S1].
-
-The voxel address components $A_v$ depend on the memory module index $i$ and the sample coordinates. The coordinates used for address calculation are derived from $V_x, V_y, V_z$. If the sample point coordinates are divisible by two, the coordinates used are the original coordinates divided by two [S1].
-
-For a sample point $S$, the modified coordinates for each memory module are calculated as follows [S1]:
-
-$$
-\begin{aligned}
-M_0 &: (M_x, M_y, M_z) \\
-M_1 &: (M_x, M_y, M_z) \\
-M_2 &: (M_x, M_y, M_z) \\
-M_3 &: (M_x, M_y, M_z) \\
-M_4 &: (M_x, M_y, M_z) \\
-M_5 &: (M_x, M_y, M_z) \\
-M_6 &: (M_x, M_y, M_z) \\
-M_7 &: (M_x, M_y, M_z)
-\end{aligned}
-$$
-
-*Note: The source text provides a fragmented formula for $M_0$ and $M_1$ and states "where..." but does not provide the complete explicit formulas for all eight modules in the provided excerpts. It states that for $M_0$, the x-coordinate is divided by two and the modulus by two of the x-coordinate is added, and for $M_1$, only the division by two is needed [S1]. The general pattern involves an address modification unit (incrementer) when the sample point is between two neighborhoods [S1].*
-
-**Pipeline Operation:**
-1.  **Address Generation:** Calculate the eight memory addresses for the current sample point. This involves dividing the sample address by two and applying modulus operations to determine the specific voxel within the sub-cube for each bank [S1].
-2.  **FIFO Enqueue:** Push the calculated addresses into the address FIFO buffers for each of the eight memory modules [S1].
-3.  **Memory Access:** The memory controllers read from the SDRAMs. The voxel values are pushed into the voxel value FIFO buffers [S1].
-4.  **Interpolation:** The ray casting pipeline consumes voxel values from the voxel FIFO buffers to perform trilinear interpolation [S1].
-
-**Edge Cases and Pitfalls:**
--   **Cache Misses and Pipeline Stalls:** The pipeline stalls only when the voxel FIFO of a particular memory is empty at the same time that this memory requires a cache refill [S1].
--   **Sub-cube Boundary Crossing:** When a ray crosses the y-z plane of the next $s^3$ sub-cube, memories $M_0, M_2, M_4, M_6$ change coordinates and refresh their cache, while $M_1, M_3, M_5, M_7$ remain in the current sub-cube [S1]. If cache refreshes happen in separate pipeline cycles, the pipeline stalls twice [S1].
--   **Consecutive Cache Misses:** Depending on the ray direction, a particular memory can have up to 2 cache misses consecutively [S1].
+**Algorithm Steps:**
+1.  **Coordinate Normalization:** For a sample point with coordinates $(V_z, V_y, V_x)$, determine if the coordinates are divisible by two.
+    *   If $(V_z, V_y, V_x)$ are all even, the base address calculation uses the original coordinates divided by two (implemented as a bitwise shift right by 1) [S1].
+    *   Each memory module stores only every second voxel along each axis, necessitating this division [S1].
+2.  **Address Calculation:** Calculate the eight memory addresses for the trilinear neighborhood. The address for each memory module $M_i$ is derived from the normalized coordinates.
+    *   Let $A = s^3 AC + A_v$ be the address, where $AC$ is the sub-cube address and $A_v$ is the voxel address within the sub-cube [S1].
+    *   The voxel address components depend on the modulus of the coordinates. For example, for memory $M_0$ (assuming it starts at the origin), the coordinates used are:
+        $$ M_0: (V_z \mod s, V_y \mod s, V_x \mod s) $$
+        However, the source provides a more specific recurrence for calculating addresses for subsequent samples. For a new sample $S_2$ relative to $S_1$, the addresses for $M_0, M_1, M_2, M_3$ change, while $M_4, M_5, M_6, M_7$ may remain the same depending on the ray direction [S1].
+    *   Specifically, for memory $M_1$, the x-coordinate is divided by two, and the modulus of the x-coordinate is added. The general form for the new coordinates for each memory involves shifting the sample address and adding the modulus:
+        $$ \text{New Coords} = \frac{V}{2} + (V \mod 2) \cdot \text{Offset}_i $$
+        Where $\text{Offset}_i$ is specific to the memory bank $i$ [S1].
+3.  **Boundary Handling:** When the sample point lies between two neighborhoods (i.e., crossing a sub-cube boundary), the base address of the neighborhood is modified using an address modification unit (incrementer) before each memory bank. This ensures the correct sub-cube is accessed [S1].
+4.  **Buffering and Fetching:**
+    *   Addresses are pushed into the FIFO buffers of the respective memory modules.
+    *   Voxel values are fetched from the SDRAMs.
+    *   The FIFO buffers allow the ray casting pipeline to continue processing previous samples while memory refills occur.
+5.  **Interpolation:** The eight fetched voxel values are used for trilinear interpolation to compute the color and opacity at the sample point [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
-NUM_BANKS = 8
-# s is the sub-cube size, assumed to be a power of two
-# s = ... # Not given in the sources
-
-def calculate_memory_addresses(vz, vy, vx):
+def parallel_memory_access(ray_sample, memory_banks, fifo_buffers, subcube_size=2):
     """
-    Calculates the memory addresses for the 8 parallel banks
-    for a given sample point (vz, vy, vx).
+    ray_sample: tuple (Vz, Vy, Vx) - current sample coordinates
+    memory_banks: list of 8 memory bank objects
+    fifo_buffers: list of 8 FIFO buffer objects
+    subcube_size: integer, size of the sub-cube dimension (typically 2)
     """
+    Vz, Vy, Vx = ray_sample
+    
+    # Step 1: Determine base address components
+    # Each memory stores every second voxel, so we divide by 2
+    # This is implemented as a shift operation
+    base_x = Vx >> 1
+    base_y = Vy >> 1
+    base_z = Vz >> 1
+    
+    # Step 2: Calculate offsets for each of the 8 memory banks
+    # The 8 banks correspond to the 8 corners of the 2x2x2 neighborhood
+    # The offset depends on the parity of the coordinates
+    # M0 corresponds to (0,0,0) offset in the local 2x2x2 block
+    # M1 corresponds to (1,0,0) offset, etc.
+    
+    # We need to determine which sub-cube we are in and the local offset
+    # Local offset is V % 2
+    local_x = Vx % 2
+    local_y = Vy % 2
+    local_z = Vz % 2
+    
+    # The address for each bank M_i is calculated based on the base address
+    # and the specific corner of the 2x2x2 cube it holds.
+    # According to [S1], for M0, the coordinates are (Vz mod s, Vy mod s, Vx mod s)
+    # but for address calculation, we use the shifted base + offset.
+    
     addresses = []
-    
-    # Base division by 2 (shift operation)
-    # Note: The source implies integer division or bitwise shift
-    base_x = vx >> 1
-    base_y = vy >> 1
-    base_z = vz >> 1
-    
-    # Modulo operations to determine offset within the sub-cube
-    mod_x = vx % 2
-    mod_y = vy % 2
-    mod_z = vz % 2
-    
-    # The source provides specific logic for M0 and M1 and mentions
-    # an address modification unit (incrementer) for boundaries.
-    # The exact formulas for all 8 banks are not fully detailed in the source.
-    # We implement the described logic for M0 and M1 and generalize
-    # based on the "divisible by two" rule and bank distribution.
-    
-    for i in range(NUM_BANKS):
-        # Determine the specific coordinate adjustments for bank i
-        # This is a simplified representation based on the text:
-        # "for memory M0... x coordinate must be divided by two and 
-        # the modulus by two of the x coordinate added to it"
-        # "for memory M1... x coordinate only needs to be divided by two"
+    for i in range(8):
+        # Decode the corner index i into x, y, z offsets (0 or 1)
+        # i = 4*z + 2*y + x
+        x_off = (i >> 0) & 1
+        y_off = (i >> 1) & 1
+        z_off = (i >> 2) & 1
         
-        # Placeholder for bank-specific logic not fully explicit in source
-        # In practice, this involves mapping the 8 voxels of the trilinear
-        # neighborhood to the 8 banks based on their parity in x, y, z.
+        # Calculate the address for this bank
+        # The source indicates that addresses are modified when crossing boundaries.
+        # For simplicity, assuming we are within a sub-cube:
+        # Address = Base_Address + Offset
+        # The base address is derived from the shifted coordinates.
+        # The offset is determined by the specific bank's position in the 2x2x2 block.
         
-        # Example for M0 (based on source snippet):
-        if i == 0:
-            ax = base_x + mod_x
-            ay = base_y
-            az = base_z
-        # Example for M1 (based on source snippet):
-        elif i == 1:
-            ax = base_x
-            ay = base_y
-            az = base_z
-        else:
-            # General case: The source states "If (Vz, Vy, Vx) is divisible 
-            # by two, the coordinates used... are the original coordinates 
-            # divided by two."
-            # And "address modification unit... before each memory bank"
-            # for boundary cases.
-            # Without the full formula, we assume a standard parity mapping
-            # for cubic addressing where each bank corresponds to a specific
-            # (x%2, y%2, z%2) combination.
-            # This is a gap filled by [G] based on standard cubic addressing
-            # principles, as the source text is fragmented.
-            parity_x = vx % 2
-            parity_y = vy % 2
-            parity_z = vz % 2
-            
-            # Map bank index to parity (standard for 8 banks)
-            # Bank i corresponds to bits (i&1, (i>>1)&1, (i>>2)&1)
-            bx = parity_x
-            by = parity_y
-            bz = parity_z
-            
-            ax = base_x + bx
-            ay = base_y + by
-            az = base_z + bz
-            
-        # Calculate final address
+        # Note: The source [S1] mentions that for M1, only x is modified differently.
+        # A general implementation would map the 8 banks to the 8 corners.
+        # The address calculation involves:
         # A = s^3 * AC + Av
-        # AC is the sub-cube address (vz//s, vy//s, vx//s)
-        # Av is the voxel address within the sub-cube
-        # This part is generic to Cubic Addressing, not specific to Parallel Access
-        # but required for implementation.
-        subcube_z = vz // s
-        subcube_y = vy // s
-        subcube_x = vx // s
-        subcube_addr = subcube_z * s * s + subcube_y * s + subcube_x
+        # Where Av is the voxel address within the subcube.
         
-        # Voxel address within subcube depends on the specific bank's layout
-        # The source does not provide the exact Av formula for all banks.
-        # We assume a standard linear mapping within the subcube for the bank.
-        # This is a gap filled by [G].
-        voxel_addr = (az * s * s) + (ay * s) + ax
+        # For this implementation, we assume a standard mapping where
+        # each bank holds one specific corner of the 2x2x2 neighborhood.
+        # The address is computed by shifting the global coordinate and adding
+        # the bank-specific offset.
         
-        addresses.append(subcube_addr * (s*s*s) + voxel_addr)
+        # Bank-specific offset adjustment (simplified from [S1] description)
+        # M0: (0,0,0) -> base
+        # M1: (1,0,0) -> base + 1 (in x)
+        # ...
         
-    return addresses
-
-def ray_cast_pipeline(rays, volume_data):
-    """
-    Simulates the ray casting pipeline with FIFO buffering.
-    """
-    # Initialize FIFOs for each of the 8 banks
-    # Each FIFO has a capacity, e.g., 4 entries
-    address_fifos = [FIFO(capacity=4) for _ in range(NUM_BANKS)]
-    value_fifos = [FIFO(capacity=4) for _ in range(NUM_BANKS)]
-    
-    for ray in rays:
-        for sample in ray.samples:
-            vz, vy, vx = sample.coordinates
-            
-            # 1. Calculate addresses
-            mem_addrs = calculate_memory_addresses(vz, vy, vx)
-            
-            # 2. Enqueue addresses
-            for i in range(NUM_BANKS):
-                address_fifos[i].enqueue(mem_addrs[i])
-                
-            # 3. Memory Access (Simulated)
-            # In hardware, this happens in parallel.
-            # We check if FIFOs are empty and need refill.
-            for i in range(NUM_BANKS):
-                if value_fifos[i].is_empty():
-                    # Check if address FIFO has an address
-                    if not address_fifos[i].is_empty():
-                        addr = address_fifos[i].dequeue()
-                        # Read from volume data (simulating SDRAM access)
-                        voxel = volume_data.read(addr)
-                        value_fifos[i].enqueue(voxel)
-                    else:
-                        # Pipeline stall: FIFO empty and no address to fetch
-                        # This is the only stall condition described
-                        pass 
-                        
-            # 4. Interpolation
-            # Dequeue values for trilinear interpolation
-            voxels = []
-            for i in range(NUM_BANKS):
-                if not value_fifos[i].is_empty():
-                    voxels.append(value_fifos[i].dequeue())
-                else:
-                    # Should not happen if pipeline is balanced
-                    voxels.append(0.0)
-            
-            # Perform trilinear interpolation
-            color = trilinear_interpolate(voxels, sample.t)
-            
-    return color
+        # The source [S1] states: "If (Vz, Vy, Vx) is divisible by two...
+        # coordinates used... are original coordinates divided by two."
+        # And "For memory M1 the sample's x coordinate only needs to be divided by two."
+        # This implies the address calculation is:
+        # Addr_i = (Vz >> 1) * stride_z + (Vy >> 1) * stride_y + (Vx >> 1) * stride_x + bank_offset_i
+        
+        # We assume stride_x, stride_y, stride_z are known constants for the memory layout.
+        # bank_offset_i is the offset of bank i within the 2x2x2 block.
+        
+        bank_offset = x_off + (y_off << 1) + (z_off << 2) # 0 to 7
+        
+        # Calculate address (assuming contiguous memory for the subcube)
+        # This is a simplified model; actual hardware may use complex address modification units [S1]
+        addr = (base_z * stride_z) + (base_y * stride_y) + (base_x * stride_x) + bank_offset
+        
+        addresses.append(addr)
+        
+    # Step 3: Push addresses to FIFO buffers
+    for i in range(8):
+        fifo_buffers[i].push(addresses[i])
+        
+    # Step 4: Fetch voxels
+    # The pipeline stalls only if the FIFO is empty AND a cache refill is needed [S1]
+    voxels = []
+    for i in range(8):
+        if fifo_buffers[i].is_empty():
+            # Trigger cache refill / memory access
+            # This is handled by the hardware FIFO mechanism [S1]
+            pass
+        voxels.append(fifo_buffers[i].pop())
+        
+    return voxels
 ```
 
+**Edge Cases and Pitfalls:**
+*   **Sub-cube Boundary Crossing:** When a ray crosses the y-z plane of the next $s^3$ sub-cube, memories $M_0, M_2, M_4, M_6$ change coordinates and refresh their cache, while $M_1, M_3, M_5, M_7$ remain in the current sub-cube. If cache refreshes happen in separate pipeline cycles, the pipeline stalls twice [S1].
+*   **Cache Misses:** Without buffering, the frame time is dependent on the sum of the slowest SDRAM access at every read of a trilinear neighborhood. With buffering, it depends only on the performance of the slowest SDRAM [S1].
+*   **Memory Duplication:** The layout requires approximately eight times the dataset size in memory due to voxel duplication [S2].
+
+## Subtopics
+
+### Peano Addressing
+A data addressing scheme that produces a high probability that spatially close points are also close in a linear address space, resulting in contiguously addressed data points for macros. Peano addressing has good implications for cache coherence during ray casting and simplifies addressing during macro redistribution compared to non-contiguous addressing [S3, unofficial].
+
 ## Operating characteristics
--   **Time Complexity:** The frame time is dependent on the performance of the slowest SDRAM bank, rather than the sum of all access times [S1]. This is a significant improvement over unbuffered memory access [S1].
--   **Memory Complexity:** Requires eight parallel memory modules (or logical banks) and FIFO buffers for addresses and voxel values for each module [S1].
--   **Performance:** Provides optimal performance with poor feasibility in terms of board space if 64 independent addresses are calculated (as in a 64-SDRAM solution) [S1]. The 8-bank solution is more practical and fits on a PC1 board, though it may suffer from unbalanced access times if not carefully designed [S1].
--   **Strengths:** Minimizes pipeline stalling due to cache misses by buffering [S1]. Allows for high bandwidth utilization by accessing 8 voxels in parallel [S1].
--   **Limitations:** Pipeline stalls can still occur if the FIFOs are empty and a cache refill is needed [S1]. Stalls can be compounded if cache refreshes happen in separate pipeline cycles (e.g., when crossing sub-cube boundaries) [S1].
+*   **Time Complexity:** The method enables single-cycle retrieval of the eight voxels required for trilinear interpolation, provided the memory banks are parallel and the FIFO buffers are not empty [S2].
+*   **Memory Complexity:** Memory requirement is approximately eight times the dataset size due to voxel duplication [S2].
+*   **Performance:** Buffered memory access makes frame time dependent on the performance of the slowest SDRAM, whereas unbuffered memory access makes frame time dependent on the sum of the slowest SDRAM access at every read of a trilinear neighborhood [S1].
+*   **Strengths:** Fast retrieval of trilinear interpolation neighborhoods; reduced pipeline stalls due to FIFO buffering [S1, S2].
+*   **Limitations:** High memory usage (8x dataset size); pipeline stalls can still occur if cache refills are not aligned with FIFO availability [S1].
+*   **When to use:** Suitable for hardware implementations (e.g., FPGA, custom ASIC) where parallel memory banks and FIFO buffers can be implemented, and where trilinear interpolation is the dominant operation [S2].
+*   **When not to use:** Not employed for accumulative rendering mode because that mode only renders two slices and does not require the specific spatial locality of cubic memory for trilinear interpolation of a full volume [S2].
 
 ## Background
-This method was introduced in the context of low-cost memory architectures for PCI-based interactive ray casting [S1]. It addresses the limitations of traditional memory addressing and unbuffered parallel access by combining cubic addressing with parallel memory access and FIFO buffering [S1]. The work highlights the trade-off between optimal performance (requiring many memory modules) and practical feasibility (using fewer modules with banking) [S1].
+The method was introduced in the context of low-cost, PCI-based interactive ray casting systems. It builds on the Cubic Addressing Scheme to optimize memory access for trilinear interpolation. The approach was implemented on hardware such as the Celoxica RC340 FPGA Development board and deployed for clinical experiments in volume rendering of LSCEM images [S2]. The use of FIFO buffers to minimize pipeline stalling was a key innovation to handle the latency of SDRAM accesses [S1].
 
 ## Sources
 [S1] A low-cost memory architecture for PCI-based interactive ray casting, https://doi.org/10.1145/311534.311566, fetched 2026-10-27
+[S2] Online volume rendering of incrementally accumulated LSCEM images for superficial oral cancer detection, https://doi.org/10.5306/wjco.v2.i4.179, fetched 2026-10-30
+[S3] DTIC ADA236632: Taxonomy and Algorithms for Volume Rendering on Multicomputers, https://archive.org/details/DTIC_ADA236632, fetched 2026-10-26 (unofficial)

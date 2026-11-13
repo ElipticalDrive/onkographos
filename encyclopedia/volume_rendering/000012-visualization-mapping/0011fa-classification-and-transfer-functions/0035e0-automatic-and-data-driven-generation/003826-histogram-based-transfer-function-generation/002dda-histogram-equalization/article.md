@@ -71,7 +71,7 @@ def apply_equalization(volume_data, lut):
 ```
 
 **Parameters:**
-*   `num_bins`: The resolution of the histogram and LUT. Typical values are not given in the sources.
+*   `num_bins`: The resolution of the histogram and LUT. Not given in the sources. [S1, unofficial]
 
 **Edge Cases and Pitfalls:**
 *   **Continuity Breaking:** The method tends to break the continuities of the scalar range, which can lead to visual artifacts [S1, unofficial].
@@ -87,7 +87,7 @@ Range mapping is a generalization of histogram equalization that uses piecewise 
 Histogram Stretching with Percentile Clipping is a post-processing step to create a balanced RGB image by suppressing high intensity outliers caused by constructive interference phenomena inherent to diffraction [S2]. Percentile clipping is applied to suppress high intensity outliers, where the maximum intensity $I_{max}$ per color channel is determined by the maximum intensity value after clipping the higher values belonging to the high 0.15 percentile [S2]. Histogram stretching modifies the intensity range using the formula: $I(x, y) = \frac{I(x, y) - I_{min}}{I_{max} - I_{min}}$, where $I_{min}$ and $I_{max}$ are the minimum and maximum values of the intensity respectively [S2].
 
 ## Operating characteristics
-Due to its speed and simplicity, it is common to use a discrete histogram equalization and perform this mapping with a lookup table [S1, unofficial]. The time complexity is not given in the sources. The memory complexity is not given in the sources. Strengths include speed and simplicity, and it is effective at spreading out clustered regions automatically [S1, unofficial]. Limitations include a lack of user control, breaking scalar range continuity, and the automatic nature may not align with semantic features [S1, unofficial]. It should be used when automatic enhancement of HDR data is needed and user interaction is not desired [S1, unofficial]. It should not be used when continuity of the scalar range is critical or when specific regions need targeted emphasis via user control [S1, unofficial].
+Due to its speed and simplicity, it is common to use a discrete histogram equalization and perform this mapping with a lookup table [S1, unofficial]. The time complexity is not given in the sources. [S1, unofficial] The memory complexity is not given in the sources. [S1, unofficial] Strengths include speed and simplicity, and it is effective at spreading out clustered regions automatically [S1, unofficial]. Limitations include a lack of user control, breaking scalar range continuity, and the automatic nature may not align with semantic features [S1, unofficial]. It should be used when automatic enhancement of HDR data is needed and user interaction is not desired [S1, unofficial]. It should not be used when continuity of the scalar range is critical or when specific regions need targeted emphasis via user control [S1, unofficial].
 
 ## Background
 Histogram Equalization was introduced in the context of interactive transfer function specification for direct volume rendering, specifically to address the difficulties of designing transfer functions for high dynamic range (HDR) data [S1, unofficial]. It serves as the basis for the more controlled Range Mapping technique [S1, unofficial].

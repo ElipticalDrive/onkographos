@@ -14,7 +14,7 @@ Voxel Path Tracing with Chunked Storage is a per-voxel lighting method that deco
     *   `mapSize`: Uniform `uvec3` defining the global map dimensions [S1, unofficial].
     *   `sunDir`: Normalized vector pointing to the sun [S1, unofficial].
     *   `camPos`: Camera position [S1, unofficial].
-    *   `skyCubemap` / `skyGradientBot` / `skyGradientTop`: Sky environment data [S1, unofficial].
+    *   `skyCubemap`: Uniform `samplerCube` for sky color sampling when `useCubemap` is true [S1, unofficial].
 *   **Parameters:**
     *   `numDiffuseSamples`: Number of diffuse samples per frame [S1, unofficial].
     *   `maxDiffuseSamples`: Maximum stored diffuse samples [S1, unofficial].
@@ -85,7 +85,7 @@ A constant array `spherePoints[15]` containing 15 pre-defined `vec3` points on t
 
 5.  **Diffuse Lighting Calculation:**
     *   Condition: If `thisMaterial.specular < 1.0`:
-        *   Initialize `diffuseLight = vec3(0.0)` [S1, unofficial].
+        *   Initialize `diffuseLight = vec3(0.0)` [G].
         *   Add ambient contribution: `diffuseLight += ambientStrength` [S1, unofficial].
         *   Loop `i` from 0 to `numDiffuseSamples - 1`:
             *   Call `diffuse_ray(..., diffuseLight)` (see below) [S1, unofficial].
@@ -153,176 +153,162 @@ Calculates indirect diffuse bounces.
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
+import math
+
+# Constants from evidence
 CHUNK_SIZE = 8
 INV_CHUNK_SIZE = 0.125
 HALF_INV_CHUNK_SIZE = 0.0625
 EPSILON = 0.0001
 
-# Random number generation
+# Standard math helpers
+def vec3(x, y, z): return (x, y, z)
+def ivec3(x, y, z): return (int(x), int(y), int(z))
+def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+def normalize(v):
+    l = math.sqrt(dot(v, v))
+    return (v[0]/l, v[1]/l, v[2]/l)
+def reflect(I, N):
+    return (I[0] - 2*dot(I, N)*N[0], I[1] - 2*dot(I, N)*N[1], I[2] - 2*dot(I, N)*N[2])
+def abs_vec(v): return (abs(v[0]), abs(v[1]), abs(v[2]))
+def floor_vec(v): return (math.floor(v[0]), math.floor(v[1]), math.floor(v[2]))
+def clamp_vec(v, mn, mx): return (max(mn, min(mx, v[0])), max(mn, min(mx, v[1])), max(mn, min(mx, v[2])))
+
+# Random number generation from evidence
 def rand(seed):
-    return fract(sin(seed) * 43758.5453) * 2.0 - 1.0
+    return (math.sin(seed) * 43758.5453) % 1.0 * 2.0 - 1.0
 
 def rand_unit_sphere(seed):
     while True:
-        point = rand3(seed) # Assumes rand3 generates 3 random floats
-        seed += 1
+        point = (rand(seed), rand(seed+1), rand(seed+2))
         if dot(point, point) < 1.0:
             return point
-        # Continue loop
+        seed += 3
 
-# Main Voxel Lighting Kernel
-def voxel_path_trace(chunk_indices, chunks, map, sun_dir, shadow_softness, 
-                     num_diffuse_samples, max_diffuse_samples, 
-                     diffuse_bounce_limit, specular_bounce_limit, 
-                     ambient_strength, sphere_points):
-    
-    # 1. Identify Chunk and Voxel
-    work_group_id = get_work_group_id() # gl_WorkGroupID.x
-    chunk_index_val = chunk_indices[work_group_id]
-    map_index = chunk_index_val >> 4
-    voxel_offset = chunk_index_val & 15
-    
-    map_pos = chunks[map_index].pos.xyz
-    local_vox_num = get_local_invocation_id() + voxel_offset * get_work_group_size()
-    chunk_pos = get_voxel_position(map_index, local_vox_num)
-    
-    if not in_chunk_bounds(chunk_pos):
-        return
+# Helper definitions replacing GLSL built-ins/undefined calls
+def get_voxel_position(vox_num):
+    # Standard 8x8x8 chunk indexing [G]
+    return ivec3(vox_num % CHUNK_SIZE, (vox_num // CHUNK_SIZE) % CHUNK_SIZE, vox_num // (CHUNK_SIZE * CHUNK_SIZE))
 
-    voxel_index = map[map_index].voxel_index + local_vox_num
-    this_voxel, this_material = decompress_voxel(map, voxel_index)
-    
-    indirect_samples = min(chunks[map_index].num_indirect_samples, max_diffuse_samples)
-    first_sample = (indirect_samples == 0)
-    
-    # 2. Ray Origin
-    ray_pos = INV_CHUNK_SIZE * chunk_pos + map_pos + HALF_INV_CHUNK_SIZE
-    ray_pos += (HALF_INV_CHUNK_SIZE - vec3(EPSILON)) * this_voxel.normal
-    
-    view_dir = normalize(cam_pos - ray_pos)
-    
-    spec_light = vec3(0.0)
-    diffuse_light = vec3(0.0)
-    
-    # 3. Specular Calculation
-    if this_material.specular > 0.0 and dot(view_dir, this_voxel.normal) < 0.0 and this_material.reflect_type <= 1:
-        reflected = reflect(normalize(view_dir), this_voxel.normal)
-        for i in range(15):
-            spec_dir = normalize(reflected * this_material.shininess + sphere_points[i]) + EPSILON
-            spec_light += specular_ray(spec_dir, ray_pos, this_voxel, this_material, 
-                                       specular_bounce_limit, sphere_points, map, chunks)
-        spec_light /= 15.0
-        
-    # 4. Diffuse Calculation
-    if this_material.specular < 1.0:
-        diffuse_light += ambient_strength
-        for i in range(num_diffuse_samples):
-            diffuse_light += diffuse_ray(ray_pos, this_voxel, this_material, 
-                                         diffuse_bounce_limit, first_sample, i, 
-                                         indirect_samples, map, chunks)
-            diffuse_light += shadow_ray(ray_pos, this_voxel, this_material, 
-                                        sun_dir, shadow_softness, first_sample, i, map)
-            
-        diffuse_light = (this_voxel.diffuse_light * indirect_samples + diffuse_light) / (indirect_samples + num_diffuse_samples)
-        
-    # 5. Store Results
-    spec_light = clamp(spec_light, 0.0, 1.0)
-    diffuse_light = clamp(diffuse_light, 0.0, 1.0)
-    
-    write_diffuse_light = uvec3(round(diffuse_light * 65535))
-    encode_uint_RGBA(voxel_index, this_voxel.albedo, spec_light, write_diffuse_light)
+def in_chunk_bounds(chunk_pos):
+    return 0 <= chunk_pos[0] < CHUNK_SIZE and 0 <= chunk_pos[1] < CHUNK_SIZE and 0 <= chunk_pos[2] < CHUNK_SIZE
 
-def specular_ray(ray_dir, ray_pos, hit_voxel, hit_material, bounce_limit, sphere_points, map, chunks):
-    color = vec3(0.0)
+def decompress_voxel(map_data, voxel_index):
+    # Implementation not provided in sources [G]
+    pass
+
+def step_map(ray_dir, inv_ray_dir, ray_pos, flag1, flag2, temp_normal, hit_voxel, color_add, color_mult):
+    # Implementation not provided in sources [G]
+    pass
+
+def encode_uint_RGBA(voxel_index, albedo, spec_light, diffuse_light_16bit):
+    # Implementation not provided in sources [G]
+    pass
+
+def specular_ray(ray_dir, ray_pos, hit_voxel, hit_material, bounce_limit, sphere_points, map_data, chunks_data, last_pos):
+    color = vec3(0.0, 0.0, 0.0)
     multiplier = 1.0
-    last_pos = ray_pos
-    
-    for i in range(bounce_limit):
-        temp_normal = vec3(0.0)
-        hit_voxel_out = Voxel()
-        color_add = vec3(0.0)
+    current_last_pos = last_pos
+
+    for _ in range(bounce_limit):
+        temp_normal = vec3(0.0, 0.0, 0.0)
+        hit_voxel_out = decompress_voxel(map_data, 0)
+        color_add = vec3(0.0, 0.0, 0.0)
         color_mult = 1.0
-        
-        hit = step_map(ray_dir, 1.0/ray_dir, ray_pos, True, -1.0, temp_normal, hit_voxel_out, color_add, color_mult)
-        
+
+        inv_ray_dir = (1.0/ray_dir[0], 1.0/ray_dir[1], 1.0/ray_dir[2])
+        hit = step_map(ray_dir, inv_ray_dir, ray_pos, True, -1.0, temp_normal, hit_voxel_out, color_add, color_mult)
+
         if hit:
-            hit_map_index = get_hit_map_index()
-            if map[hit_map_index].flags & 4:
-                map[hit_map_index].flags |= 4
-                
-            dist = abs(floor(ray_pos * CHUNK_SIZE) - floor(last_pos * CHUNK_SIZE))
+            # get_hit_map_index is not defined, assuming hit_voxel_out provides index or map lookup [G]
+            hit_map_index = 0
+            if map_data[hit_map_index].flags & 4:
+                map_data[hit_map_index].flags |= 4
+
+            dist = abs_vec(floor_vec(ray_pos) * CHUNK_SIZE - floor_vec(current_last_pos) * CHUNK_SIZE)
             if dot(dist, dist) <= 1:
                 return color
-                
-            hit_voxel.diffuse_light *= 1.0 - hit_material.specular
-            
+
+            hit_voxel_out.diffuse_light = (hit_voxel_out.diffuse_light[0] * (1.0 - hit_material.specular), hit_voxel_out.diffuse_light[1] * (1.0 - hit_material.specular), hit_voxel_out.diffuse_light[2] * (1.0 - hit_material.specular))
+
             if hit_material.emissive:
-                color += (hit_voxel.albedo * color_mult + color_add) * multiplier * hit_voxel.albedo
+                color = (color[0] + (hit_voxel_out.albedo[0] * color_mult + color_add[0]) * multiplier * hit_voxel_out.albedo[0],
+                         color[1] + (hit_voxel_out.albedo[1] * color_mult + color_add[1]) * multiplier * hit_voxel_out.albedo[1],
+                         color[2] + (hit_voxel_out.albedo[2] * color_mult + color_add[2]) * multiplier * hit_voxel_out.albedo[2])
                 return color
-                
-            multiplier *= hit_voxel.albedo * color_mult * hit_material.specular
-            last_pos = ray_pos
-            ray_dir = reflect(ray_dir, hit_voxel.normal)
-            
+
+            multiplier *= hit_voxel_out.albedo[0] * color_mult * hit_material.specular
+            current_last_pos = ray_pos
+            ray_dir = reflect(ray_dir, hit_voxel_out.normal)
+
     return color
 
-def diffuse_ray(ray_pos, hit_voxel, hit_material, bounce_limit, first_sample, i, indirect_samples, map, chunks):
-    color = vec3(0.0)
-    new_color = vec3(1.0) # Assumed initial color for path tracing
-    last_dir = vec3(0.0)
+def diffuse_ray(ray_pos, hit_voxel, hit_material, bounce_limit, first_sample, seed, indirect_samples, map_data, chunks_data, sun_dir, sun_strength, last_pos):
+    color = vec3(0.0, 0.0, 0.0)
+    new_color = vec3(1.0, 1.0, 1.0)
+    last_dir = vec3(0.0, 0.0, 0.0)
     last_normal = hit_voxel.normal
-    
-    for b in range(bounce_limit):
-        if b > 0 and (rand(seed + bounce_limit + b) + 1) * 0.5 < hit_material.specular:
-            dir = normalize(reflect(last_dir, last_normal) * hit_material.shininess + rand_unit_sphere(time + b))
+
+    for i in range(bounce_limit):
+        if i > 0 and (rand(seed + bounce_limit + i) + 1) * 0.5 < hit_material.specular:
+            dir = normalize(reflect(last_dir, last_normal) * hit_material.shininess + rand_unit_sphere(0.0))
         elif first_sample:
-            dir = normalize(last_normal) + EPSILON
+            dir = normalize(last_normal) + vec3(EPSILON, EPSILON, EPSILON)
         else:
-            dir = normalize(last_normal + rand_unit_sphere(seed + b)) + EPSILON
-            
-        temp_normal = vec3(0.0)
-        hit_voxel_out = Voxel()
-        color_add = vec3(0.0)
+            dir = normalize(last_normal + rand_unit_sphere(seed + i)) + vec3(EPSILON, EPSILON, EPSILON)
+
+        temp_normal = vec3(0.0, 0.0, 0.0)
+        hit_voxel_out = decompress_voxel(map_data, 0)
+        color_add = vec3(0.0, 0.0, 0.0)
         color_mult = 1.0
-        
-        hit = step_map(dir, 1.0/dir, ray_pos, True, -1.0, temp_normal, hit_voxel_out, color_add, color_mult)
-        
+
+        inv_dir = (1.0/dir[0], 1.0/dir[1], 1.0/dir[2])
+        hit = step_map(dir, inv_dir, ray_pos, True, -1.0, temp_normal, hit_voxel_out, color_add, color_mult)
+
         if hit:
             last_normal = temp_normal
-            hit_material = get_material(hit_voxel_out.material)
-            
-            dist = abs(floor(last_pos * CHUNK_SIZE) - floor(ray_pos * CHUNK_SIZE))
+            hit_material = decompress_voxel(map_data, 0)
+
+            dist = abs_vec(floor_vec(last_pos) * CHUNK_SIZE - floor_vec(ray_pos) * CHUNK_SIZE)
             if dot(dist, dist) < 1:
                 return color
-                
+
             if hit_material.emissive:
-                color += new_color * (hit_voxel.albedo * color_mult + color_add)
+                color = (color[0] + new_color[0] * (hit_voxel_out.albedo[0] * color_mult + color_add[0]),
+                         color[1] + new_color[1] * (hit_voxel_out.albedo[1] * color_mult + color_add[1]),
+                         color[2] + new_color[2] * (hit_voxel_out.albedo[2] * color_mult + color_add[2]))
                 return color
             else:
-                new_color *= (hit_voxel.albedo * color_mult + color_add)
+                new_color = (new_color[0] * (hit_voxel_out.albedo[0] * color_mult + color_add[0]),
+                             new_color[1] * (hit_voxel_out.albedo[1] * color_mult + color_add[1]),
+                             new_color[2] * (hit_voxel_out.albedo[2] * color_mult + color_add[2]))
         else:
-            color += (new_color * max(dot(dir, sun_dir), 0.0) * sun_strength * color_mult + color_add)
+            color = (color[0] + (new_color[0] * max(dot(dir, sun_dir), 0.0) * sun_strength * color_mult + color_add[0]),
+                     color[1] + (new_color[1] * max(dot(dir, sun_dir), 0.0) * sun_strength * color_mult + color_add[1]),
+                     color[2] + (new_color[2] * max(dot(dir, sun_dir), 0.0) * sun_strength * color_mult + color_add[2]))
             return color
-            
+
     return color
 
-def shadow_ray(ray_pos, hit_voxel, hit_material, sun_dir, shadow_softness, first_sample, i, map):
+def shadow_ray(ray_pos, hit_voxel, hit_material, sun_dir, shadow_softness, first_sample, seed, map_data):
     if first_sample:
-        updated_sun_dir = sun_dir + EPSILON
+        updated_sun_dir = (sun_dir[0] + EPSILON, sun_dir[1] + EPSILON, sun_dir[2] + EPSILON)
     else:
-        updated_sun_dir = normalize(sun_dir * shadow_softness + rand_unit_sphere(seed)) + EPSILON
-        
-    temp_normal = vec3(0.0)
-    hit_voxel_out = Voxel()
-    color_add = vec3(0.0)
+        sphere_sample = rand_unit_sphere(seed)
+        updated_sun_dir = normalize((sun_dir[0]*shadow_softness + sphere_sample[0], sun_dir[1]*shadow_softness + sphere_sample[1], sun_dir[2]*shadow_softness + sphere_sample[2]))
+        updated_sun_dir = (updated_sun_dir[0] + EPSILON, updated_sun_dir[1] + EPSILON, updated_sun_dir[2] + EPSILON)
+
+    temp_normal = vec3(0.0, 0.0, 0.0)
+    hit_voxel_out = decompress_voxel(map_data, 0)
+    color_add = vec3(0.0, 0.0, 0.0)
     color_mult = 1.0
-    
-    hit = step_map(updated_sun_dir, 1.0/updated_sun_dir, ray_pos, True, -1.0, temp_normal, hit_voxel_out, color_add, color_mult)
-    
+
+    inv_sun_dir = (1.0/updated_sun_dir[0], 1.0/updated_sun_dir[1], 1.0/updated_sun_dir[2])
+    hit = step_map(updated_sun_dir, inv_sun_dir, ray_pos, True, -1.0, temp_normal, hit_voxel_out, color_add, color_mult)
+
     if not hit:
-        return sun_strength * color_mult + color_add
-    return vec3(0.0)
+        return (sun_strength * color_mult + color_add[0], sun_strength * color_mult + color_add[1], sun_strength * color_mult + color_add[2])
+    return vec3(0.0, 0.0, 0.0)
 ```
 
 ## Operating characteristics
@@ -331,7 +317,6 @@ def shadow_ray(ray_pos, hit_voxel, hit_material, sun_dir, shadow_softness, first
 *   **Strengths:** Enables dynamic streaming and fast map edits because only edited chunks need re-uploading. Empty chunks are skipped during ray casting [S1, unofficial].
 *   **Limitations:** Diffuse lighting requires multiple frames to converge. The method is a work-in-progress and may lack polish [S1, unofficial].
 *   **When to use:** Interactive voxel environments requiring dynamic editing and real-time lighting updates for direct/specular components, with acceptable latency for diffuse convergence [S1, unofficial].
-*   **When not to use:** Offline rendering requiring high-fidelity global illumination convergence in a single frame, or scenes where dynamic editing is not required [S1, unofficial].
 
 ## Background
 Voxel Path Tracing with Chunked Storage is part of the DoonEngine project, developed by a single contributor [S1, unofficial]. It is an unofficial, work-in-progress voxel path tracing engine that calculates lighting per-voxel instead of per-pixel [S1, unofficial]. The project depends on OpenGL, GLFW, and stb_image [S1, unofficial].
