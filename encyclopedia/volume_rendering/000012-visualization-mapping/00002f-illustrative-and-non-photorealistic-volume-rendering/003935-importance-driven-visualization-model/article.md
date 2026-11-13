@@ -3,13 +3,13 @@
 Also called: Importance-Driven Visualization
 
 ## Overview
-The Importance-Driven Visualization Model is a framework that dynamically adjusts visual representation based on computed feature importance to resolve occlusion and maximize perceptible information [S1, unofficial]. It replaces viewpoint-independent classification with a pipeline of importance specification, compositing, and sparseness representation [S1, unofficial]. It differs from standard volume rendering by decoupling the visibility of features from their scalar values, allowing less important structures to be suppressed regardless of their intensity, thereby guiding viewer attention to salient boundaries and regions [S1, unofficial].
+The Importance-Driven Visualization Model is a framework that dynamically adjusts visual representation based on computed feature importance to resolve occlusion and maximize perceptible information [S1, unofficial]. It replaces viewpoint-independent classification with a pipeline of importance specification, compositing, and sparseness representation [S1, unofficial]. It differs from siblings like [Geometric Buffers (G-buffers)](781-geometric-buffers-g-buffers.md) and [Volume Illustration](810-volume-illustration.md) by focusing on a unified pipeline of importance specification, compositing, and sparseness representation rather than specific shading or edge-detection techniques.
 
 ## Shared principles
 The framework operates on the principle that visual clarity is improved when less important features are made transparent or desaturated, while important features remain opaque and saturated [S1, unofficial]. The core mechanism involves three stages:
-1.  **Importance Specification:** Computing a scalar importance value for each voxel or region. This value drives the representation density, opacity, and color saturation [S1, unofficial].
-2.  **Compositing:** Integrating the importance values into the rendering pipeline, typically during raycasting, to modulate the contribution of samples [S1, unofficial].
-3.  **Sparseness Representation:** Adjusting the visual density of the representation (e.g., opacity, color saturation) based on the importance level. High importance results in opaque, saturated colors, while low importance results in transparent, desaturated colors [S1, unofficial].
+1.  **Importance Specification:** Computing a scalar importance value for each voxel or region [S1, unofficial].
+2.  **Compositing:** Integrating the importance values into the rendering pipeline to modulate the contribution of samples [S1, unofficial].
+3.  **Sparseness Representation:** Adjusting the visual density of the representation (e.g., opacity, color saturation) based on the importance level [S1, unofficial].
 
 The importance value is a scalar in the range $[0, \text{max}]$ [S1, unofficial]. Typical visualization levels use specific importance thresholds (e.g., 0, 0.1, 0.7, max) to define distinct layers of sparseness [S1, unofficial]. The model supports automatic specification of importance based on feature classification or user-steered assignment to segmented objects [S1, unofficial].
 
@@ -25,7 +25,7 @@ Semantic Shader Augmentation is a technique that automatically extends an input 
 A system that attempts to predict what kind of illustration a viewer would like to see by using an intent-based approach borrowing from AI knowledge bases [S2, unofficial]. It defines rules that describe communicative intent and uses stylistic decisions that reflect particular goals to generate the actual illustrations [S2, unofficial].
 
 ### Voxel Saliency
-A measure of regional importance for voxels, defined as the magnitude of the gradient of the obscurance field. It highlights edges, occlusion variations, and corners [S3]. The saliency $S(p)$ for a voxel $p$ is computed as:
+A measure of regional importance for voxels, defined as the magnitude of the gradient of the obscurance field [S3]. It highlights edges, occlusion variations, and corners [S3]. The saliency $S(p)$ for a voxel $p$ is computed as:
 $$ S(p) = \sqrt{A^2 + B^2 + C^2} $$
 where $A, B, C$ are components of the obscurance gradient estimated by 4D linear regression [S3]:
 $$ A = \sum_k w(k)O(k)x(k), \quad B = \sum_k w(k)O(k)y(k), \quad C = \sum_k w(k)O(k)z(k) $$

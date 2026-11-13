@@ -1,131 +1,134 @@
 # Evaluation Cache
-
 Also called: CachedEval, EvalCache
 
 ## Overview
-Evaluation Cache is a data structure optimization that eliminates redundant geometric evaluations by caching results for shared grid positions, primarily in manifold dual contouring and isosurface extraction. It solves the problem of computing the same vertex properties (such as position and gradient) multiple times for corners shared by adjacent voxels. It sets itself apart from siblings like [Tile-based Volume Ray Marching](1678-tile-based-volume-ray-marching.md) by focusing on spatial coherence at geometry boundaries rather than temporal coherence along a ray.
+Evaluation Cache is a spatial caching mechanism used in volume rendering and geometric processing to eliminate redundant computations for shared data points, such as voxel corners or isosurface intersection points. It solves the problem of repeatedly evaluating the same grid position or interpolating the same geometric edge across adjacent cells. It differs from [Dual Grid Traversal](1233-dual-grid-traversal.md) by explicitly storing computed values in a hash map keyed by quantized grid coordinates, ensuring that shared corners are evaluated only once regardless of how many adjacent cubes share them [S1, unofficial].
 
 ## How it works
-The method caches evaluation results keyed by quantized grid positions to ensure that each geometric edge or corner is processed only once, regardless of how many adjacent cubes share it.
-
 **Inputs and Outputs:**
-- Input: A set of voxel cells with corner masks indicating inside/outside status.
-- Output: A cache of unique evaluation results (`EvalCache`) and computed vertices for manifold dual contouring.
+- **Input:** A set of query points (e.g., cell corners or ray sample positions) and a grid definition (origin, cell size, dimensions).
+- **Output:** A cache structure containing computed values (e.g., scalar values, gradients) and their associated metadata, allowing subsequent queries for the same grid position to return cached results instantly.
 
 **Data Structures:**
-The core structure is `EvalCache`, which maps quantized grid positions to cached evaluation results.
+The method relies on two primary structures defined in the source implementation [S1, unofficial]:
 
-1.  **`CachedEval` struct**:
-    -   `value`: `f64` (scalar field value at the position).
-    -   `gradient`: `Option<[f64; 3]>` (3D vector gradient, or `None` if not computed).
-2.  **`EvalCache` struct**:
-    -   `entries`: `HashMap<GridPos, CachedEval>`.
-    -   `GridPos`: A key representing a quantized grid position.
+1.  **`CachedEval`**: A struct storing the result of an evaluation.
+    -   `value`: `f64` (64-bit float), the scalar value at the position.
+    -   `gradient`: `Option<[f64; 3]>`, an optional 3D vector representing the gradient. If `None`, the gradient is not computed or stored.
 
-**Steps:**
+2.  **`EvalCache`**: A container for the cache entries.
+    -   `entries`: A `HashMap` mapping `GridPos` (quantized integer coordinates) to `CachedEval`. The key ensures that shared corners are evaluated only once.
 
-1.  **Quantize Grid Position**: For a given cell corner, compute a unique integer key (`GridPos`) that identifies the corner's location in the global grid.
-    -   Let `cell_coords` be the integer coordinates of the cell $(x, y, z)$.
-    -   Let `corner_idx` be the bit index of the corner within the cell (0–7).
-    -   Compute `quantized_pos` by adding corner-specific bits to the cell coordinates:
-        $$ \text{quantized\_pos} = (x, y, z) + (\text{corner\_idx} \& 1, (\text{corner\_idx} \gg 1) \& 1, (\text{corner\_idx} \gg 2) \& 1) $$
-        *Note: The source [S1, unofficial] describes adding corner_idx bits (1 for X, 2 for Y, 4 for Z) to the cell's integer coordinates. This effectively maps each of the 8 corners of a cell to a unique global grid vertex.*
-2.  **Check Cache**: Look up `quantized_pos` in `EvalCache.entries`.
-    -   If present, retrieve `CachedEval`.
-    -   If absent, proceed to step 3.
-3.  **Evaluate**: Compute the field value and gradient at the world-space coordinate corresponding to `quantized_pos`.
-    -   Convert `quantized_pos` to world space:
-        $$ \text{world\_pos} = \text{origin} + \text{quantized\_pos} \times \text{cell\_size} $$
-    -   Compute `value` and `gradient` at `world_pos`.
-4.  **Store**: Insert `(quantized_pos, CachedEval{value, gradient})` into `EvalCache.entries`.
-5.  **Return**: Return the cached `CachedEval`.
+**Quantized Grid Position:**
+To serve as a unique key for the cache, continuous world-space coordinates are converted to discrete integer grid positions.
+1.  **World to Grid:** Given a world-space point $\mathbf{p} = (x, y, z)$, grid coordinates $(i, j, k)$ are computed as:
+    $$ i = \lfloor \frac{x - x_0}{\Delta x} \rfloor, \quad j = \lfloor \frac{y - y_0}{\Delta y} \rfloor, \quad k = \lfloor \frac{z - z_0}{\Delta z} \rfloor $$
+    where $(x_0, y_0, z_0)$ is the grid origin and $\Delta x, \Delta y, \Delta z$ are cell sizes [S1, unofficial].
+2.  **Corner Indexing:** For cell corners, the integer coordinates of the cell $(c_x, c_y, c_z)$ are combined with corner bits. The quantized grid position is derived by adding corner bits (1 for X, 2 for Y, 4 for Z) to the cell's integer coordinates [S1, unofficial]. This creates a unique integer key for each of the 8 corners of a voxel.
+
+**Algorithm Steps:**
+1.  **Query:** For a given query point $\mathbf{p}$, compute its quantized grid position $P_{key}$.
+2.  **Lookup:** Check if $P_{key}$ exists in `EvalCache.entries`.
+3.  **Hit:** If present, return the stored `CachedEval` (value and optional gradient).
+4.  **Miss:** If not present:
+    a. Compute the value $V$ and gradient $\nabla V$ at $\mathbf{p}$ using the underlying volume function or interpolation.
+    b. Create a `CachedEval` struct with $V$ and $\nabla V$.
+    c. Insert the entry into `EvalCache.entries` with key $P_{key}$.
+    d. Return the new `CachedEval`.
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-from typing import Optional, Tuple, Dict
 import math
+from typing import Dict, Tuple, Optional, List
 
-# Assuming these are defined elsewhere or standard
-# GridPos: Tuple[int, int, int]
-# Vec3: Tuple[float, float, float]
-
+# Data structures
 class CachedEval:
-    def __init__(self, value: float, gradient: Optional[Tuple[float, float, float]]):
+    def __init__(self, value: float, gradient: Optional[List[float]]):
         self.value = value
         self.gradient = gradient
 
 class EvalCache:
     def __init__(self):
-        self.entries: Dict[GridPos, CachedEval] = {}
+        self.entries: Dict[Tuple[int, int, int], CachedEval] = {}
 
-    def get_or_compute(self, cell_coords: Tuple[int, int, int], corner_idx: int, 
-                       origin: Vec3, cell_size: float, 
-                       evaluate_field: callable) -> CachedEval:
-        """
-        cell_coords: (x, y, z) of the current cell
-        corner_idx: 0-7, bit index of the corner
-        origin: World space origin of the grid
-        cell_size: Size of one voxel
-        evaluate_field: Function that takes world_pos and returns (value, gradient)
-        """
-        # Step 1: Quantize grid position
-        # Add corner_idx bits to cell coordinates
-        x = cell_coords[0] + (corner_idx & 1)
-        y = cell_coords[1] + ((corner_idx >> 1) & 1)
-        z = cell_coords[2] + ((corner_idx >> 2) & 1)
-        quantized_pos = (x, y, z)
+    def get_or_compute(
+        self,
+        point: Tuple[float, float, float],
+        origin: Tuple[float, float, float],
+        cell_size: Tuple[float, float, float],
+        compute_func: callable
+    ) -> CachedEval:
+        x, y, z = point
+        ox, oy, oz = origin
+        sx, sy, sz = cell_size
 
-        # Step 2: Check cache
-        if quantized_pos in self.entries:
-            return self.entries[quantized_pos]
+        # Compute quantized grid position (integer coordinates)
+        # Using floor for consistent indexing
+        ix = math.floor((x - ox) / sx)
+        iy = math.floor((y - oy) / sy)
+        iz = math.floor((z - oz) / sz)
 
-        # Step 3: Evaluate
-        # Convert to world space
-        world_x = origin[0] + x * cell_size
-        world_y = origin[1] + y * cell_size
-        world_z = origin[2] + z * cell_size
-        world_pos = (world_x, world_y, world_z)
+        key = (ix, iy, iz)
 
-        # Compute value and gradient
-        value, gradient = evaluate_field(world_pos)
+        if key in self.entries:
+            return self.entries[key]
+
+        # Compute value and gradient if not cached
+        # compute_func is a user-provided function that evaluates the volume
+        value, gradient = compute_func(point)
         
-        # Step 4: Store
         cached_eval = CachedEval(value, gradient)
-        self.entries[quantized_pos] = cached_eval
-
-        # Step 5: Return
+        self.entries[key] = cached_eval
         return cached_eval
+
+# Example usage context
+def evaluate_volume_with_cache():
+    cache = EvalCache()
+    origin = (0.0, 0.0, 0.0)
+    cell_size = (1.0, 1.0, 1.0)
+    
+    # Dummy compute function
+    def dummy_compute(p):
+        return p[0] + p[1] + p[2], [1.0, 1.0, 1.0]
+
+    point = (0.5, 0.5, 0.5)
+    result = cache.get_or_compute(point, origin, cell_size, dummy_compute)
+    return result
 ```
 
+**Parameters:**
+-   `origin`: Grid origin $(x_0, y_0, z_0)$.
+-   `cell_size`: Voxel dimensions $(\Delta x, \Delta y, \Delta z)$.
+-   `compute_func`: Function to evaluate the volume field.
+
 **Edge Cases and Pitfalls:**
--   **Precision**: Floating-point comparisons for `world_pos` should be avoided; use the integer `quantized_pos` as the key to ensure exact matching.
--   **Boundaries**: Corners on the grid boundary must be handled consistently to avoid duplicate evaluations or missing vertices.
--   **Degenerate Input**: If `corner_mask` is 0 or 0xFF, no inside corners exist, and no evaluation is needed for that cell's corners in the context of manifold dual contouring [S1, unofficial].
+-   **Precision:** Floating-point to integer conversion must be consistent. Using `floor` ensures that points within the same voxel/cell map to the same integer key. [G] Ensure that points exactly on boundaries are handled consistently with the rest of the pipeline.
+-   **Memory:** The cache grows with the number of unique query points. For dense sampling, this may consume significant memory. [G] Consider eviction policies if memory is constrained.
+-   **Degenerate Input:** If `cell_size` is zero, division by zero occurs. Validate inputs.
 
 ## Subtopics
 
 ### [Edge Point Caching](891-edge-point-caching.md)
-Edge Point Caching eliminates redundant linear interpolation calculations for isosurface intersection points on cube edges shared between adjacent voxels in the Marching Cubes algorithm. It differs from standard Marching Cubes by maintaining a lookup structure that ensures each geometric edge is interpolated only once, regardless of how many adjacent cubes share it.
+Edge Point Caching eliminates redundant linear interpolation calculations for isosurface intersection points on cube edges shared between adjacent voxels in the Marching Cubes algorithm. It differs from standard Marching Cubes by maintaining a lookup structure that ensures each geometric edge is interpolated only once, regardless of how many adjacent cubes share it. This is a specific application of the Evaluation Cache principle focused on geometric edges rather than arbitrary grid points.
 
 ### [Volume Access Caching](2125-volume-access-caching.md)
-Volume Access Caching is a technique used within Evaluation Cache frameworks to reduce redundant texture lookups during ray marching in direct volume rendering. It solves the problem of repeatedly fetching the same voxel data for adjacent integration steps by caching the result of the previous iteration's back sample. It sets itself apart from siblings like [Edge Point Caching](891-edge-point-caching.md) by focusing on temporal coherence along the ray rather than spatial coherence at geometry boundaries.
+Volume Access Caching is a technique used within the Evaluation Cache framework to reduce redundant memory bandwidth consumption during ray-marching volume rendering. It solves the problem of repeatedly fetching the same voxel data when the sampling step for the current iteration overlaps with the end point of the previous iteration. It sets itself apart from sibling methods like [Edge Point Caching](891-edge-point-caching.md) by focusing on temporal coherence between consecutive samples along a single ray, rather than spatial coherence across neighboring pixels or rays.
 
 ### Radiance Caching with Visibility
-Radiance Caching with Visibility uses the second-order Hessian error metric to determine whether the interpolation error is acceptable, thereby considering visibility [S2]. This approach addresses the issue where stored sample points are sparse, and points to be calculated may be differently occluded compared to stored points, resulting in different illumination [S2]. By considering visibility, it produces results with higher quality than those of Jarosz et al. [57] [S2].
+Radiance Caching with Visibility extends standard radiance caching by considering visibility during interpolation. It uses the second-order Hessian error metric to determine whether the interpolation error is acceptable, thereby considering visibility [S2]. This approach produces results with higher quality than those of Jarosz et al. [57], as it accounts for occlusion changes between stored sample points and points to be calculated [S2].
 
 ## Operating characteristics
--   **Time Complexity**: $O(1)$ average case for cache lookups and inserts using a hash map. Total time is proportional to the number of unique grid corners evaluated.
--   **Memory Complexity**: $O(V)$, where $V$ is the number of unique vertices (grid corners) in the domain. Each entry stores a `f64` value and an optional `Vec3` gradient.
--   **Strengths**: Eliminates redundant computations for shared geometric features; improves performance in manifold dual contouring and isosurface extraction.
--   **Limitations**: Requires additional memory for the cache; hash map overhead may be significant for very large grids if not optimized.
--   **When to Use**: When extracting isosurfaces from dense grids where many adjacent cells share corners or edges.
--   **When Not to Use**: When memory is extremely constrained, or when evaluations are inherently unique per cell (e.g., some forms of direct volume rendering without shared geometry).
+-   **Time Complexity:** Lookup is $O(1)$ on average for hash map operations. Computation is $O(1)$ per unique point. Total time is $O(N)$ where $N$ is the number of unique query points.
+-   **Memory Complexity:** $O(U)$ where $U$ is the number of unique cached points. Each entry stores a value and optionally a gradient.
+-   **Strengths:** Eliminates redundant computations for shared points (corners, edges). Improves performance in scenarios with high spatial coherence or shared geometry.
+-   **Limitations:** Requires additional memory for the cache. Hash map overhead may be significant for very large caches. Not suitable for purely random, non-repeating queries.
+-   **When to use:** When evaluating the same grid positions multiple times (e.g., Marching Cubes, shared ray samples).
+-   **When not to use:** When memory is extremely constrained or queries are entirely unique.
 
 ## Background
-Evaluation Cache originates from implementations of Manifold Dual Contouring, where it is used to ensure manifoldness by processing shared corners only once [S1, unofficial]. The concept of caching evaluations to improve performance is common in computer graphics, particularly in geometry processing and volume rendering. The specific struct layout (`CachedEval` with `value` and `gradient`) is documented in the `isomesh` repository [S1, unofficial]. The extension to radiance caching with visibility considerations is discussed in surveys on rendering homogeneous participating media [S2].
+The Evaluation Cache concept is implemented in the `isomesh` library, which focuses on manifold dual contouring and isosurface extraction [S1, unofficial]. The technique of using caching to reduce redundant evaluations in volume rendering and radiance transfer has been explored in various forms, such as radiance caching for participating media [S2]. The specific implementation details (structs, quantization) are derived from the `isomesh` source code [S1, unofficial].
 
 ## Sources
 [S1] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)

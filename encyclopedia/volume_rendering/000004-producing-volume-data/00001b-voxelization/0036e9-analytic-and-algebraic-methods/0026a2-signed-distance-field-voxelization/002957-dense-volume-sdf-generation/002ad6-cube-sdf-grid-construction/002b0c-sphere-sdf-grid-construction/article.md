@@ -2,13 +2,13 @@
 Also called: Sphere Field Generation, Torus SDF Grid Construction
 
 ## Overview
-Constructs a discrete Signed Distance Field (SDF) grid for a sphere (or torus, using a specific parameterization) centered in the grid using its analytical implicit surface equation, vectorized with PyTorch broadcasting [S1, unofficial]. It generates a signed distance field for a sphere centered in the grid, used as a test volume for Marching Tetrahedra [S2, unofficial]. It differs from its sibling [Cube SDF Grid Construction](4883-cube-sdf-grid-construction.md) by using spherical symmetry and Euclidean distance rather than box-based min/max operations.
+Constructs a discrete Signed Distance Field (SDF) grid for a sphere centered in the grid using its analytical implicit surface equation, vectorized with PyTorch broadcasting [S1, unofficial]. It generates a signed distance field for a sphere centered in the grid, used as a test volume for Marching Tetrahedra [S2, unofficial]. It differs from its sibling [Cube SDF Grid Construction](4883-cube-sdf-grid-construction.md) by using spherical symmetry and Euclidean distance rather than box-based min/max operations [G].
 
 ## How it works
 **Inputs:**
 - `grid_res`: Integer, the resolution of the grid in each dimension (assumed cubic, $N \times N \times N$).
-- `bounding_box_min`: Scalar or vector, the minimum coordinate of the bounding box. If scalar, applies to all axes.
-- `bounding_box_max`: Scalar or vector, the maximum coordinate of the bounding box. If scalar, applies to all axes.
+- `bounding_box_min`: Scalar, the minimum coordinate of the bounding box.
+- `bounding_box_max`: Scalar, the maximum coordinate of the bounding box.
 - `radius`: Scalar, the radius of the sphere. Default value is 0.6 in normalized coordinates [S2, unofficial], or specific values like 1.6 (big) or 1.0 (small) in physical coordinates [S1, unofficial].
 - `radius_big`, `radius_small`: Scalars, used for torus construction (major and minor radii) [S1, unofficial].
 
@@ -16,8 +16,8 @@ Constructs a discrete Signed Distance Field (SDF) grid for a sphere (or torus, u
 - `grid`: A 3D tensor of shape `(grid_res, grid_res, grid_res)` containing the SDF values.
 
 **Data Structures:**
-- `linear_space`: 1D array of length `grid_res` containing evenly spaced coordinates from `bounding_box_min` to `bounding_box_max`.
-- `x_dim`, `y_dim`, `z_dim`: 3D tensors of shape `(grid_res, grid_res, grid_res)` representing the physical coordinates of each voxel center, created via broadcasting.
+- `linear_space`: 1D array of length `grid_res` containing evenly spaced coordinates from `bounding_box_min` to `bounding_box_max` [S1, unofficial].
+- `x_dim`, `y_dim`, `z_dim`: 3D tensors of shape `(grid_res, grid_res, grid_res)` representing the physical coordinates of each voxel center, created via broadcasting [S1, unofficial].
 - `grid`: 3D tensor of shape `(grid_res, grid_res, grid_res)` storing the SDF values.
 
 **Steps:**
@@ -37,17 +37,15 @@ Constructs a discrete Signed Distance Field (SDF) grid for a sphere (or torus, u
     $$ y\_dim[i, j, k] = \text{linear\_space}[j] $$
     $$ z\_dim[i, j, k] = \text{linear\_space}[k] $$
     [S1, unofficial]
-    
-    *Note: The source code uses `repeat` operations to achieve this broadcasting [S1, unofficial].*
 
 3.  **Compute SDF for Sphere:**
-    Calculate the Euclidean distance from the origin (assuming the sphere is centered at the origin of the coordinate system defined by the bounding box, or normalized coordinates) and subtract the radius:
+    Calculate the Euclidean distance from the origin and subtract the radius:
     $$ \text{grid}[i, j, k] = \sqrt{x\_dim[i, j, k]^2 + y\_dim[i, j, k]^2 + z\_dim[i, j, k]^2} - \text{radius} $$
     [S1, unofficial]
     
     For specific test cases, `radius` is set to 1.6 for a "big" sphere or 1.0 for a "small" sphere [S1, unofficial]. In normalized coordinates $[-1, 1]$, the default radius is 0.6 [S2, unofficial].
 
-4.  **Compute SDF for Torus (Alternative Interpretation):**
+4.  **Compute SDF for Torus (Variant):**
     If constructing a torus, the formula differs:
     $$ \text{grid}[i, j, k] = \sqrt{(\sqrt{y\_dim[i, j, k]^2 + z\_dim[i, j, k]^2} - \text{radius\_big})^2 + x\_dim[i, j, k]^2} - \text{radius\_small} $$
     [S1, unofficial]
@@ -61,7 +59,6 @@ Constructs a discrete Signed Distance Field (SDF) grid for a sphere (or torus, u
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
 import torch
 
 def grid_construction_sphere(grid_res, bounding_box_min, bounding_box_max, radius=1.6):
@@ -77,7 +74,7 @@ def grid_construction_sphere(grid_res, bounding_box_min, bounding_box_max, radiu
     Returns:
         torch.Tensor: 3D tensor of shape (grid_res, grid_res, grid_res) with SDF values.
     """
-    # Step 1: Compute voxel size (used for normalization if needed, but vectorized approach uses direct coords)
+    # Step 1: Compute voxel size (used for normalization if needed)
     voxel_size = (bounding_box_max - bounding_box_min) / (grid_res - 1)
     
     # Step 2: Generate coordinate grid using PyTorch broadcasting
@@ -138,21 +135,20 @@ def grid_construction_torus(grid_res, bounding_box_min, bounding_box_max, radius
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The use of `torch.sqrt` and broadcasting requires sufficient memory for $N^3$ tensors. For large `grid_res`, this may lead to out-of-memory errors on GPU [S1, unofficial].
-- **Boundary Conditions:** The bounding box must be large enough to contain the sphere. If the sphere extends beyond the bounding box, the SDF values at the boundaries will be non-zero, which is correct for an SDF, but may affect downstream marching cubes if the isosurface is not fully contained [S1, unofficial].
-- **Centering:** The formulas assume the sphere is centered at the origin $(0,0,0)$ of the coordinate system. If the bounding box is not symmetric around the origin, the sphere will not be centered in the grid. The source code uses `bounding_box_min` and `bounding_box_max` directly, implying the sphere is centered at $(\text{bounding\_box\_min} + \text{bounding\_box\_max})/2$ only if the radius is adjusted accordingly [S1, unofficial].
+- **Precision:** The use of `torch.sqrt` and broadcasting requires sufficient memory for $N^3$ tensors [G].
+- **Centering:** The formulas assume the sphere is centered at the origin $(0,0,0)$ of the coordinate system [G]. If the bounding box is not symmetric around the origin, the sphere will not be centered in the grid [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N^3)$, where $N$ is `grid_res`. The vectorized approach performs the computation in parallel on the GPU, making it significantly faster than the loop-based approach for large $N$.
-- **Memory Complexity:** $O(N^3)$ for storing the coordinate grids and the SDF grid. Each voxel stores a single float value.
+- **Time Complexity:** $O(N^3)$, where $N$ is `grid_res` [G].
+- **Memory Complexity:** $O(N^3)$ for storing the coordinate grids and the SDF grid [G].
 - **Measured Performance:** Not given in the sources.
-- **Strengths:** Vectorized implementation allows for efficient computation on GPUs. Simple and analytically exact for spheres and tori.
-- **Limitations:** High memory usage for high-resolution grids. Assumes the object is centered at the origin of the coordinate system.
-- **When to use:** When generating test volumes for volume rendering algorithms like Marching Tetrahedra, or when a simple, analytically defined SDF is required.
-- **When not to use:** When the object is complex or not centered at the origin, or when memory is constrained.
+- **Strengths:** Vectorized implementation allows for efficient computation on GPUs [G]. Simple and analytically exact for spheres and tori [G].
+- **Limitations:** High memory usage for high-resolution grids [G]. Assumes the object is centered at the origin of the coordinate system [G].
+- **When to use:** When generating test volumes for volume rendering algorithms like Marching Tetrahedra, or when a simple, analytically defined SDF is required [G].
+- **When not to use:** When the object is complex or not centered at the origin, or when memory is constrained [G].
 
 ## Background
-The method originates from the `CVPR2020-SDFDiff` repository, which uses SDF grids for differentiable rendering [S1, unofficial]. It is also used in the `Marching-Tetrahedra-on-CT-headscan` repository as a test volume for the Marching Tetrahedra algorithm [S2, unofficial]. The torus construction is a variation of the sphere construction, using a different analytical formula [S1, unofficial].
+The method is implemented in the `CVPR2020-SDFDiff` repository [S1, unofficial]. It is also used in the `Marching-Tetrahedra-on-CT-headscan` repository as a test volume for Marching Tetrahedra [S2, unofficial].
 
 ## Sources
 [S1] YueJiang-nj/CVPR2020-SDFDiff, https://github.com/YueJiang-nj/CVPR2020-SDFDiff, fetched 2026-10-27 (unofficial)

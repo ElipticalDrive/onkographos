@@ -1,0 +1,467 @@
+--- v004.md
++++ v005.md
+@@ -4,251 +4,186 @@
+ 
+ ## Overview
+-Surface Point Sampling for SDFs refers to a family of techniques that generate point clouds or render images by sampling points near or on the zero-level set of a Signed Distance Function (SDF). Unlike standard volume rendering which integrates density along a ray, these methods focus on extracting geometric representations (point clouds) or computing surface-based shading by identifying the intersection $t$ where $f(\mathbf{o} + t\mathbf{d}) \approx 0$. It is distinguished from its sibling [Distance-field ray marching](21-distance-field-ray-marching.md) by its specific focus on the *sampling strategy* for surface extraction or feature aggregation rather than just the marching loop itself, and from [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by its reliance on implicit distance fields rather than explicit Gaussian primitives.
++Surface Point Sampling for SDFs generates training data or rendering samples by querying a Signed Distance Field (SDF) to locate points near the implicit surface, rather than sampling uniformly throughout the volume. It solves the problem of inefficient volumetric coverage, where most uniform samples fall in empty space or deep inside geometry, providing critical gradient information for the signed distance field values off the zero-level set [S1, S2]. It differs from uniform volume sampling by focusing density on the surface transition region, and from pure surface sampling by providing gradient information for the signed distance field (SDF) values off the zero-level set [S1].
+ 
+ ## How it works
+-The method encompasses several distinct approaches depending on the goal: extracting a point cloud for training/representation, or rendering a view using surface-adjacent samples.
++The method encompasses several strategies for generating points near the SDF surface, primarily categorized by their application in training (Neural Geometric Level of Detail) or rendering (Efficient Deformable Tissue Reconstruction).
+ 
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   SDF function $f(\mathbf{p})$ or a learned implicit representation (e.g., MLP $\theta$, grid fields $G$).
+-    *   Ray definition $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector [G].
+-    *   Bounding volume $B$ (typically $[-1, 1]^3$) [S1, S6].
+-    *   Optional: Indicator grid $G_o$ [S2], static/dynamic field levels $\{V^s_{3d}, V^d_{3d}\}_4$ [S2].
++    *   Bounding volume $B$ (typically $[-1, 1]^3$) [S1].
++    *   SDF function $f(\mathbf{p})$ [S1, S2].
++    *   Ray $r(t) = \mathbf{o} + t\mathbf{d}$ [S2].
++    *   Indicator grid $G_o$ (in deformable tissue context) [S2].
++    *   Static and dynamic fields $\{V^s_{3d}, V^d_{3d}\}_4$ [S2].
++    *   Tiny MLP $\theta$ [S2].
+ *   **Outputs**:
+-    *   Point cloud $P$ on or near the surface $S$ [S1, S6].
+-    *   Rendered color $\hat{C}$ and depth $\hat{D}$ [S2].
+-    *   Surface interaction properties (normal, frame) [S4, unofficial].
++    *   Point set $P$ distributed around the surface [S1, S2].
++    *   Expected color $\hat{C}$ and depth $\hat{D}$ [S2].
+ 
+ ### Data Structures
+-1.  **Point Set**: A list of points $P = \{\mathbf{p}_i\}$, where each $\mathbf{p}_i \in \mathbb{R}^3$. For temporal data, points may include time $\tau$ [S2].
+-2.  **Feature Vector**: For rendering, a feature vector $v(\mathbf{p}, \tau)$ initialized to 1, updated via interpolation [S2].
+-3.  **Surface Interaction**: A structure `SurfaceInteraction3f` containing:
+-    *   `si.t`: Intersection distance.
+-    *   `si.p`: Intersection position.
+-    *   `si.sh_frame.n`: Normalized gradient.
+-    *   `si.sh_frame.s`, `si.sh_frame.t`: Tangent vectors.
+-    *   `si.wi`: Incoming direction in local frame.
+-    *   `si.dp_du`, `si.dp_dv`: Partial derivatives for texture mapping [S4, unofficial].
+-
+-### Algorithms
+-
+-#### 1. Uniform Sphere Tracing for Point Cloud Extraction
+-This method generates a uniform distribution of surface points by casting rays from random origins and directions [S1].
+-
+-1.  **Initialization**: Define bounding box $B = [-1, 1]^3$ [S1].
+-2.  **Ray Casting Loop**:
+-    *   Sample a point $\mathbf{o}$ uniformly from $B$: $\mathbf{o} \sim U[B]$ [S1, S6].
+-    *   Sample a direction $\mathbf{d}$ uniformly from the unit sphere $S^2$ [S1, S6].
+-    *   Define ray $r(t) = \mathbf{o} + t\mathbf{d}$ [G].
+-3.  **Sphere Tracing**:
+-    *   Initialize $t = 0$ [S1, S3].
+-    *   While $t < t_{max}$ and $|f(r(t))| > \epsilon$:
+-        *   Evaluate $d = f(r(t))$ [S1, S3].
+-        *   Advance $t \leftarrow t + d$ [S1, S3].
+-    *   If $|f(r(t))| \le \epsilon$, add $\mathbf{p} = r(t)$ to the point cloud $P$ [S1].
+-4.  **Termination**: Repeat until sufficient points are collected [S1].
+-
+-#### 2. Explicit Sampling for Point Cloud Extraction (PDDF)
+-This method projects random points onto the surface using multiple directions to handle visibility and depth accuracy [S6].
+-
+-1.  **Input**: Probabilistic Directed Distance Field (PDDF) $d(\mathbf{p}, \mathbf{v})$ and visibility $\xi(\mathbf{p}, \mathbf{v})$ [S6].
+-2.  **Parameters**: $n_v = 128$ (directions per point), $N_H = 3$ (iterations) [S6].
+-3.  **Sampling Loop**:
+-    *   Sample $\mathbf{p} \sim U[B]$ [S6].
+-    *   For $h = 1$ to $N_H$:
+-        *   Sample $n_v$ directions $V(\mathbf{p}) = \{\mathbf{v}_i\}_{i=1}^{n_v}$ uniformly from $S^2$ [S6].
+-        *   Estimate best direction $\mathbf{v}^*_b(\mathbf{p})$ that maximizes visibility $\xi(\mathbf{p}, \mathbf{v}) = 1$ [S6].
+-        *   Compute surface point $\mathbf{q} = \mathbf{p} + d(\mathbf{p}, \mathbf{v}^*_b(\mathbf{p})) \mathbf{v}^*_b(\mathbf{p})$ [S6].
+-        *   Update $\mathbf{p} \leftarrow \mathbf{q}$ [S6].
+-    *   Add $\mathbf{p}$ to point cloud [S6].
+-
+-#### 3. Near-Surface Perturbation
+-This method generates points near the surface by perturbing existing mesh samples [S1].
+-
+-1.  **Input**: Mesh surface samples $P_{mesh}$ [S1].
+-2.  **Perturbation**: For each $\mathbf{p} \in P_{mesh}$, sample $\mathbf{n} \sim \mathcal{N}(0, \sigma^2 I)$ where $\sigma = 0.01$ [S1].
+-3.  **Output**: $\mathbf{p}' = \mathbf{p} + \mathbf{n}$ [S1].
+-
+-#### 4. Rendering via Orthogonal Neural Planes (Forplane)
+-This method samples points along the ray, aggregates features from orthogonal planes, and renders color/depth [S2].
+-
+-**Pseudocode:**
+-
++*   **Point**: Coordinates $(x, y, z)$ and optionally time $\tau$ [S2].
++*   **Feature Vector**: $v(x, y, z, \tau)$ initialized to 1, updated via interpolation [S2].
++*   **Encoded Features**: Concatenation of coordinate-time encoding $b(x, y, z, \tau)$ and interpolated features $v(x, y, z, \tau)$ [S2].
++
++### Sphere Tracing Surface Sampling (Training Data Generation)
++This variant, used in Neural Geometric Level of Detail (NGLOD), generates surface points for training implicit shapes [S1].
++
++1.  **Uniform Initialization**: Sample points uniformly distributed in the bounding volume $B = [-1, 1]^3$ [S1].
++2.  **Ray Casting**: Choose random points on a sphere to form a ray direction $\mathbf{d}$ [S1]. Define ray $r(t)$.
++3.  **Sphere Tracing**: Test if the ray hits the surface using sphere tracing (as defined in [Distance-field ray marching](21-distance-field-ray-marching.md)) [S1].
++    *   Evaluate $d = f(\mathbf{p})$ at current position.
++    *   Advance $t \leftarrow t + d$.
++    *   Terminate if $d < \epsilon$ (hit) or $t > t_{max}$ (miss) [S1].
++4.  **Collection**: Continue sampling rays until enough rays hit the surface [S1]. The hit points constitute the surface samples.
++5.  **Near-Surface Perturbation (Optional)**: To improve training convergence, perturb surface samples with Gaussian noise $\sigma = 0.01$ to generate near-surface points [S1].
++
++### Indicator Grid Sampling (Deformable Tissue Rendering)
++This variant, used in Efficient Deformable Tissue Reconstruction, samples points along a ray filtered by an indicator grid to focus on the surface region [S2].
++
++1.  **Uniform Ray Sampling**: Uniformly sample points $P_u$ along the ray $r(t)$ [S2].
++2.  **Indicator Filtering**: Pass $P_u$ through the indicator grid $G_o$ to obtain sample points $P$ distributed around the surface [S2].
++3.  **Feature Interpolation**: For each point $P(x, y, z, \tau)$ in $P$:
++    *   Initialize feature vector $v(x, y, z, \tau) = 1$ [S2].
++    *   Iterate over 4 levels of static and dynamic fields $\{V^s_{3d}, V^d_{3d}\}_4$ and dimension pairs $(xy, xz, x\tau, yz, y\tau, z\tau)$ [S2].
++    *   For each grid $G$ and dimension pair $ij$, perform bi-linear interpolation $B(G, i, j)$ [S2].
++    *   Update $v$ via element-wise multiplication: $v \leftarrow v \odot B(G, i, j)$ [S2].
++4.  **Encoding and Prediction**:
++    *   Concatenate coordinate-time encoding $b(x, y, z, \tau)$ with features $v(x, y, z, \tau)$ [S2].
++    *   Pass through tiny MLP $\theta$ to predict color $c_i$ and density $\sigma_i$ [S2].
++5.  **Volume Rendering**:
++    *   Render expected color $\hat{C}$ and depth $\hat{D}$ by integrating radiance and density along the ray [S2]:
++        $$ \hat{C} = \int_{t_n}^{t_f} w(t) \cdot c(r(t), d) \, dt $$
++        $$ \hat{D} = \int_{t_n}^{t_f} w(t) \cdot t \, dt $$
++        $$ w(t) = \exp\left(-\int_{t_n}^{t} \sigma(r(s)) \, ds\right) \sigma(r(t)) $$
++    *   Return $\hat{C}, \hat{D}$ [S2].
++
++### Explicit Sampling for Point Cloud Extraction
++This variant extracts a point cloud from a Probabilistic Directed Distance Field (PDDF) by projecting random points onto the shape surface $S$ [S5]. It does not guarantee uniform sampling over $S$ [S5].
++
++1.  **Uniform Sampling**: Sample a point $p$ uniformly from the bounding box $B$: $p \sim U[B]$ [S5].
++2.  **Direction Sampling**: For each $p$, sample $n_v$ directions $v_i$ uniformly from the unit sphere $S^2$: $V(p) = \{v_i(p) \sim U[S^2]\}_{i=1}^{n_v}$ [S5].
++3.  **Visibility Avoidance**: Compose these directions to estimate the best direction $v_b^*(p)$ to avoid visibility $\xi(p, v) = 0$ [S5].
++4.  **Projection**: Compute the surface point $q(p, v_b^*(p))$ using the PDDF depth and direction. The condition for $q$ being on $S$ is $\xi(p, v) = 1$ and $q(p, v) = p + d(p, v)v$ [S5].
++5.  **Iterative Refinement**: Repeat the process $N_H$ times, starting from the newly found point $q$ (i.e., $p \leftarrow q$), to improve accuracy for depths far from $S$ [S5].
++
++### Pseudocode: Sphere Tracing Surface Sampling
+ ```python
+-def render_forplane(ray_o, ray_d, static_fields, dynamic_fields, indicator_grid, mlp_theta, time_tau):
+-    """
+-    Renders color and depth by sampling points around the surface using orthogonal planes.
++def sample_surface_points_sdf(sdf_function, bounding_box_size=2.0, num_rays=100000, epsilon=0.001, max_steps=100):
++    """
++    Generates surface points by casting rays and sphere tracing.
++    Returns a list of 3D points on the surface.
++    """
++    surface_points = []
++    half_box = bounding_box_box_size / 2.0
+     
+-    Args:
+-        ray_o: Camera origin (3,)
+-        ray_d: Ray direction (3,)
+-        static_fields: List of 4 static 3D fields {V^s_3d}
+-        dynamic_fields: List of 4 dynamic 3D fields {V^d_3d}
+-        indicator_grid: Grid G_o to filter points near surface
+-        mlp_theta: Tiny MLP predicting color and density
+-        time_tau: Temporal coordinate
+-        
+-    Returns:
+-        color_hat: Rendered color
+-        depth_hat: Rendered depth
+-    """
+-    # 1. Uniformly sample points along the ray to form initial set P_u
+-    # Assuming a fixed number of samples or adaptive step based on parent sphere tracing
+-    # Here we assume P_u is generated by standard sphere tracing steps or uniform sampling
+-    # For implementation completeness, we generate N samples along the ray
+-    N_samples = 1000
+-    t_min = 0.0
+-    t_max = 10.0
+-    t_values = np.linspace(t_min, t_max, N_samples)
+-    P_u = ray_o + t_values[:, None] * ray_d[None, :]
++    for _ in range(num_rays):
++        # 1. Choose random point on sphere for ray origin/direction
++        # Using spherical coordinates for uniform distribution on sphere
++        theta = random.uniform(0, 2 * math.pi)
++        phi = math.acos(random.uniform(-1, 1))
++        
++        # Ray direction
++        d = [
++            math.sin(phi) * math.cos(theta),
++            math.sin(phi) * math.sin(theta),
++            math.cos(phi)
++        ]
++        
++        # Ray origin: random point in bounding box
++        o = [
++            random.uniform(-half_box, half_box),
++            random.uniform(-half_box, half_box),
++            random.uniform(-half_box, half_box)
++        ]
++        
++        # 2. Sphere Tracing
++        t = 0.0
++        hit = False
++        for _ in range(max_steps):
++            p = [o[i] + t * d[i] for i in range(3)]
++            dist = sdf_function(p)
++            
++            if dist < epsilon:
++                hit = True
++                surface_points.append(p)
++                break
++            
++            if t > bounding_box_size * 2: # Escape condition
++                break
++                
++            t += dist
++            
++    return surface_points
++```
++
++### Pseudocode: Explicit PDDF Sampling
++```python
++def sample_pddf_surface(pddf_function, bounding_box_size=2.0, nv=128, nh=3):
++    """
++    Extracts points from PDDF by projecting random points.
++    nv: Number of directions sampled per point.
++    nh: Number of iterative refinements.
++    """
++    points = []
++    half_box = bounding_box_size / 2.0
+     
+-    # 2. Pass P_u through indicator grid G_o to get sample points P around the surface
+-    # G_o acts as a mask or filter. Points with high indicator value are kept.
+-    # Simplified: Assume G_o returns a boolean mask or weights
+-    indicator_values = indicator_grid.evaluate(P_u)
+-    # Keep points where indicator is significant (e.g., > 0.5)
+-    mask = indicator_values > 0.5
+-    P = P_u[mask]
+-    
+-    if len(P) == 0:
+-        return 0.0, 0.0 # No surface hit
+-
+-    # 3. Aggregate features for each point
+-    features_list = []
+-    for p in P:
+-        x, y, z = p
+-        # Initialize feature vector v to 1
+-        v = np.ones(1) # Scalar initialization as per source, or vector if implied
+-        
+-        # 4. Iterate over 4 levels of static and dynamic fields
+-        fields = static_fields + dynamic_fields
+-        dim_pairs = [('xy', 'xz', 'x' + str(time_tau)), ('yz', 'y' + str(time_tau), 'z' + str(time_tau))]
+-        # Note: Source specifies 6 pairs for 4 levels? Source says: "Iterate over the 4 levels ... and corresponding dimension pairs (xy, xz, xτ, yz, yτ, zτ)"
+-        # This implies 6 pairs per level? Or 6 pairs total across levels?
+-        # Source code snippet: `for G, ij in zip({Vs 3d , Vd 3d } 4 , {(xy, xz, xτ, yz, yτ, zτ})`
+-        # This syntax suggests iterating over fields and pairs. Let's assume 6 pairs per field level for completeness, 
+-        # or that the source implies a specific mapping. 
+-        # Re-reading: "Iterate over the 4 levels ... and corresponding dimension pairs (xy, xz, xτ, yz, yτ, zτ)"
+-        # It lists 6 pairs. It is likely 6 pairs per level.
+-        pairs = ['xy', 'xz', 'x' + str(time_tau), 'yz', 'y' + str(time_tau), 'z' + str(time_tau)]
+-        
+-        for level_idx in range(4):
+-            G_static = static_fields[level_idx]
+-            G_dynamic = dynamic_fields[level_idx]
+-            
+-            for pair in pairs:
+-                # Bi-linear interpolation on G for the pair
+-                # B(G, i, j) extracts the 2D plane corresponding to pair from 3D field G
+-                # For 'xy', z is fixed by p.z. For 'xτ', z is fixed, y is fixed? 
+-                # Standard orthogonal plane: fix the non-pair coordinate.
+-                
+-                # Extract 2D slice
+-                if pair == 'xy':
+-                    val_s = G_static.sample_2d(x, y, z)
+-                    val_d = G_dynamic.sample_2d(x, y, z)
+-                elif pair == 'xz':
+-                    val_s = G_static.sample_2d(x, z, y) # y is fixed
+-                    val_d = G_dynamic.sample_2d(x, z, y)
+-                elif pair == 'yz':
+-                    val_s = G_static.sample_2d(y, z, x) # x is fixed
+-                    val_d = G_dynamic.sample_2d(y, z, x)
+-                elif pair.startswith('x'): # xτ
+-                    val_s = G_static.sample_2d(x, time_tau, z)
+-                    val_d = G_dynamic.sample_2d(x, time_tau, z)
+-                elif pair.startswith('y'): # yτ
+-                    val_s = G_static.sample_2d(y, time_tau, x)
+-                    val_d = G_dynamic.sample_2d(y, time_tau, x)
+-                elif pair.startswith('z'): # zτ
+-                    val_s = G_static.sample_2d(z, time_tau, x)
+-                    val_d = G_dynamic.sample_2d(z, time_tau, x)
+-                
+-                # Element-wise multiplication
+-                v = v * val_s * val_d
+-        
+-        # 5. Concatenate coordinate-time encoding b(x,y,z,τ) with features v
+-        # One-blob encoding is used for coordinates
+-        b = one_blob_encoding(np.array([x, y, z, time_tau]))
+-        features = np.concatenate([b, v])
+-        
+-        # 6. Pass through tiny MLP θ to predict color c_i and density σ_i
+-        c_i, sigma_i = mlp_theta.predict(features)
+-        features_list.append((c_i, sigma_i, p))
+-
+-    # 7. Volume Rendering Integration
+-    # Sort points by distance t
+-    points_data = sorted(features_list, key=lambda k: np.linalg.norm(k[2] - ray_o))
+-    
+-    color_hat = 0.0
+-    depth_hat = 0.0
+-    alpha_accum = 0.0
+-    
+-    for c_i, sigma_i, p in points_data:
+-        t = np.linalg.norm(p - ray_o)
+-        # Weight w(t) = exp(-∫_tn^t σ(r(s)) ds) * σ(r(t))
+-        # Discrete approximation:
+-        # alpha = 1 - exp(-sigma * delta_t)
+-        # But source uses continuous formula: w(t) = exp(-∫) * σ
+-        # Standard volume rendering: C = ∫ T(t) σ(t) c(t) dt
+-        # T(t) = exp(-∫_0^t σ(s) ds)
+-        
+-        # Approximate integral using previous points
+-        # For simplicity in this self-contained pseudocode, we assume delta_t is small or use standard alpha blending
+-        # Source formula: w(t) = exp(-∫_tn^t σ(r(s)) ds) σ(r(t))
+-        # This w(t) is the weight for the integral.
+-        
+-        # Calculate transmittance from previous steps
+-        # We need to accumulate sigma to get T(t)
+-        # Let's assume we have a list of sigmas along the ray
+-        pass 
+-
+-    # Simplified Volume Rendering Loop (Standard)
+-    T = 1.0
+-    C = np.zeros(3)
+-    D = 0.0
+-    
+-    # Re-sort and process
+-    for c_i, sigma_i, p in points_data:
+-        t_curr = np.linalg.norm(p - ray_o)
+-        # Estimate delta_t from previous point
+-        if points_data.index((c_i, sigma_i, p)) > 0:
+-            prev_p = points_data[points_data.index((c_i, sigma_i, p)) - 1][2]
+-            dt = np.linalg.norm(p - prev_p)
+-        else:
+-            dt = 0.01 # Default step
+-            
+-        alpha = 1.0 - np.exp(-sigma_i * dt)
+-        weight = T * alpha
+-        
+-        C += weight * c_i
+-        D += weight * t_curr
+-        T *= (1.0 - alpha)
+-        
+-        if T < 1e-4:
+-            break
+-            
+-    return C, D
++    for _ in range(10000): # Fixed number of initial samples
++        # 1. Uniform sample in bounding box
++        p = [
++            random.uniform(-half_box, half_box),
++            random.uniform(-half_box, half_box),
++            random.uniform(-half_box, half_box)
++        ]
++        
++        current_p = p
++        for _ in range(nh):
++            # 2. Sample nv directions
++            best_v = None
++            best_dist = float('inf')
++            
++            for _ in range(nv):
++                # Uniform direction on sphere
++                theta = random.uniform(0, 2 * math.pi)
++                phi = math.acos(random.uniform(-1, 1))
++                v = [
++                    math.sin(phi) * math.cos(theta),
++                    math.sin(phi) * math.sin(theta),
++                    math.cos(phi)
++                ]
++                
++                # 3. Estimate best direction to avoid visibility issues
++                # (Simplified: assume any direction works if PDDF is robust, 
++                # or use heuristic to pick direction with non-zero depth)
++                # Note: The source mentions composing directions to estimate vb* 
++                # without optimization. Here we pick the first valid projection.
++                
++                # 4. Compute surface point
++                # q = p + d(p, v) * v
++                # This requires PDDF to return depth d(p, v)
++                depth = pddf_function.get_depth(current_p, v)
++                
++                if depth is not None and depth > 0:
++                    q = [current_p[i] + depth * v[i] for i in range(3)]
++                    # Check if q is on surface (xi=1)
++                    # Assuming PDDF handles this internally or via threshold
++                    if pddf_function.is_on_surface(q):
++                        current_p = q
++                        break
++                        
++        points.append(current_p)
++        
++    return points
+ ```
+ 
+-### Parameters
+-*   $\epsilon$: Convergence threshold for sphere tracing. Typical value: $0.001$ [S1, S39, unofficial].
+-*   $t_{max}$: Maximum ray distance. Not given in the sources.
+-*   $\sigma$: Noise standard deviation for near-surface perturbation. Value: $0.01$ [S1].
+-*   $n_v$: Number of directions sampled per point in explicit sampling. Value: $128$ [S6].
+-*   $N_H$: Number of iterations for explicit sampling refinement. Value: $3$ [S6].
+-*   Learning rate: $0.001$ for training MLPs [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Precision**: Floating-point errors in sphere tracing can cause jitter or missed intersections. Use a small $\epsilon$ [S1, S39, unofficial].
+-*   **Visibility**: In explicit sampling, rays may intersect other geometry. The visibility term $\xi(\mathbf{p}, \mathbf{v})$ must be checked to ensure the sampled point is on the visible surface [S6].
+-*   **Uniformity**: Explicit sampling does not guarantee uniform sampling over the surface $S$ [S6].
+-*   **Complex Topology**: Baseline methods using only sampling points may exhibit topological defects and missing features in regions with high curvature or thin structures [S3].
+-
+ ## Subtopics
+ 
+ ### [Near-Surface Point Sampling](2910-near-surface-point-sampling.md)
+-Near-Surface Point Sampling generates point clouds for implicit surface representation by perturbing existing mesh surface samples with Gaussian noise ($\sigma=0.01$). It solves the problem of insufficient training data density near the surface boundary. It is distinguished from its sibling [Surfel Parameterization from Mesh Sampling](4501-surfel-parameterization-from-mesh-sampling.md) by its reliance on random perturbation rather than geometric parameterization, and from [Bidirectional Projective Sampling](8824-bidirectional-projective-sampling.md) by its simplicity and lack of view-dependent optimization.
++Near-Surface Point Sampling generates training data points in the immediate vicinity of a mesh surface by perturbing existing surface samples with Gaussian noise. It solves the problem of insufficient volumetric coverage near the geometry boundary, which is critical for training neural implicit representations to converge on the correct surface location. It differs from uniform volume sampling by focusing density on the surface transition region, and from pure surface sampling by providing gradient information for the signed distance field (SDF) values off the zero-level set.
+ 
+ ### [Surfel Parameterization from Mesh Sampling](4501-surfel-parameterization-from-mesh-sampling.md)
+-This method estimates the full parameter set (position, normal, tangent vectors, and scales) for a surfel representation starting from a triangle mesh. It solves the problem of defining local tangent frames and anisotropic kernel shapes for point clouds sampled from meshes. It differs from sibling methods by deriving tangent scales from the local point cloud neighborhood structure rather than mesh connectivity or fixed heuristics, offering two variants: isotropic scaling for performance and anisotropic scaling for quality.
++This method estimates the full parameter set (position, normal, tangent vectors, and scales) for a surfel representation starting from a triangle mesh. It solves the problem of defining local tangent frames and anisotropic kernel shapes for point clouds sampled from meshes, where positions and normals are known but geometric extent is not. It differs from sibling methods by deriving tangent scales from the local point cloud neighborhood structure rather than mesh connectivity or fixed heuristics, offering two variants: isotropic scaling for performance and anisotropic scaling for quality.
++
++### [SDF-guided Sampling](7324-sdf-guided-sampling.md)
++SDF-guided Sampling is a surface-aware sampling strategy that uses a Signed Distance Field (SDF) to estimate ray-surface intersections, followed by fine-grained sampling around the intersection point to accelerate rendering and emphasize the relationship between surface and radiance fields. It differs from standard NeRF sampling by reducing the number of required sampling points through early surface localization, and from pure mesh-based methods by retaining the flexibility of implicit field evaluation without requiring explicit mesh vertex interpolation.
+ 
+ ### [Bidirectional Projective Sampling](8824-bidirectional-projective-sampling.md)
+@@ -256,5 +191,5 @@
+ 
+ ### [Multi-view Feature Consistency via Linear Interpolation](10227-multi-view-feature-consistency-via-linear-interpolation.md)
+-A method to derive a differentiable surface point from volume rendering samples using linear interpolation of SDF zero-crossings, used to enforce multi-view feature consistency.
++This method extracts a differentiable surface point from volume rendering samples by linearly interpolating SDF zero-crossings, enabling the enforcement of multi-view feature consistency constraints. It differs from sibling methods by relying on the hierarchical sampling density near the surface to approximate the zero-crossing with a single secant step, rather than recursive root-finding or mesh-based parameterization.
+ 
+ ### Projection Point Integration
+@@ -267,26 +202,19 @@
+ **Steps**: Set `si.t = t`, `si.p = ray(t)`, `si.sh_frame.n = normalize(gradient(si.p))`, initialize sh frame, set `si.n = si.sh_frame.n`, `si.wi = to_local(-ray.d)`, `si.wavelengths = ray.wavelengths`, `si.dp_du = sh_frame.s`, `si.dp_dv = sh_frame.t` [S4, unofficial].
+ 
+-### SDF-guided Sampling
+-**Definition**: A method using an SDF field to guide surface sampling by estimating ray-surface intersections and performing fine-grained sampling around the intersection point [S5].
+-
+ ### Explicit Sampling for Point Cloud Extraction
+-**Definition**: A method to extract a point cloud (PC) from a Probabilistic Directed Distance Field (PDDF) by projecting random points onto the shape surface $S$. It does not guarantee uniform sampling over $S$ [S6].
+-**Steps**: Sample a point $p$ uniformly from the bounding box $B$. For each $p$, sample $n_v$ directions $v_i$ uniformly from the unit sphere $S^2$. Compose these directions to estimate the best direction $v_b^*(p)$ to avoid visibility $\xi(p, v) = 0$. Compute the surface point $q(p, v_b^*(p))$ using the PDDF depth and direction. Repeat the process $N_H$ times, starting from the newly found point $q$ (i.e., $p \leftarrow q$), to improve accuracy for depths far from $S$ [S6].
+-**Parameters**: $n_v$: Number of directions sampled per point. Typical value: 128 [S6].
++**Definition**: A method to extract a point cloud (PC) from a Probabilistic Directed Distance Field (PDDF) by projecting random points onto the shape surface S. It does not guarantee uniform sampling over S [S5].
++**Steps**: Sample a point p uniformly from the bounding box B: p ~ U[B]. For each p, sample nv directions vi uniformly from the unit sphere S^2: V(p) = {vi(p) ~ U[S^2]}_{i=1}^{nv}. Compose these directions to estimate the best direction vb*(p) (as in §V-A2 and §V-A3, but without optimization) to avoid visibility ξ(p, v) = 0. Compute the surface point q(p, vb*(p)) using the PDDF depth and direction. The condition for q being on S is ξ(p, v) = 1 and q(p, v) = p + d(p, v)v. Repeat the process NH times, starting from the newly found point q (i.e., p <- q), to improve accuracy for depths far from S [S5].
++**Parameters**: nv: Number of directions sampled per point. Typical value: 128 [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the number of samples and the cost of SDF evaluation. Sphere tracing is $O(N)$ where $N$ is the number of steps per ray [S1, S3]. Explicit sampling is $O(N \cdot n_v \cdot N_H)$ [S6].
+-*   **Memory Complexity**: $O(P)$ for storing the point cloud, where $P$ is the number of points [S1, S6]. For rendering methods like Forplane, additional memory is required for grid fields and MLP weights [S2].
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Scales with the resolution of the SDF or the complexity of the MLP. Adaptive methods (like Power Diagram enhancement) scale with the number of refinement iterations [S3].
+-*   **Strengths**: Provides explicit geometric representations (point clouds) suitable for downstream tasks like mesh extraction or training [S1, S6]. Can capture fine details with sufficient sampling [S3].
+-*   **Limitations**: Uniform sampling may be inefficient for complex scenes. Explicit sampling does not guarantee uniformity [S6]. Requires careful tuning of parameters like $\epsilon$, $n_v$, and $N_H$ [S6].
+-*   **When to use**: When an explicit point cloud representation is needed for training or processing [S1, S6]. When rendering dynamic scenes with orthogonal planes [S2].
+-*   **When not to use**: When uniform surface sampling is strictly required without post-processing [S6]. When computational resources are extremely limited and simple sphere tracing is insufficient [S3].
++*   **Time Complexity**: Depends on the number of rays and steps in sphere tracing. Sphere tracing is $O(N \cdot S)$ where $N$ is the number of rays and $S$ is the average number of steps to convergence [S1]. Indicator grid sampling adds overhead for grid lookups and MLP inference [S2].
++*   **Memory Complexity**: Low for sphere tracing (only storing points). Indicator grid sampling requires storing the indicator grid and field levels [S2].
++*   **Strengths**: Efficiently targets the surface region, reducing wasted samples in empty space. Provides necessary gradients for training implicit fields [S1].
++*   **Limitations**: Sphere tracing can be slow for complex SDFs with many steps. Explicit PDDF sampling does not guarantee uniform distribution [S5].
++*   **When to Use**: Training neural implicit representations (NGLOD), rendering dynamic deformable tissues, extracting point clouds from PDDFs.
++*   **When Not to Use**: When uniform volumetric coverage is required (e.g., standard NeRF without guidance), or when explicit mesh topology is available and preferred.
+ 
+ ## Background
+-*   **Origin**: The concept of using SDFs for surface sampling and rendering has been developed in various forms. Neural Geometric Level of Detail (NGLOD) introduced sphere tracing for point cloud extraction [S1]. Efficient Deformable Tissue Reconstruction via Orthogonal Neural Planes (Forplane) introduced the rendering procedure using orthogonal planes [S2]. Power Diagram Enhanced Adaptive Isosurface Extraction introduced projection points for topological accuracy [S3]. Probabilistic Directed Distance Fields (PDDF) introduced explicit sampling for point cloud extraction [S6].
+-*   **History**: Early methods relied on uniform sampling and sphere tracing [S1]. Later methods incorporated adaptive strategies and projection points to handle complex topology [S3]. Recent advances integrate learned features and orthogonal planes for dynamic rendering [S2].
+-*   **Usage**: Used in neural rendering, implicit surface reconstruction, and differentiable rendering pipelines [S1, S2, S6].
++Surface Point Sampling for SDFs originated with the Neural Geometric Level of Detail (NGLOD) paper, which introduced sphere tracing for generating surface and near-surface training points [S1]. It was further developed in Efficient Deformable Tissue Reconstruction using indicator grids for dynamic scenes [S2]. Explicit sampling methods were introduced for Probabilistic Directed Distance Fields (PDDF) to extract point clouds [S5]. Power diagram enhancements with projection points were proposed for adaptive isosurface extraction [S3].
+ 
+ ## Sources
+@@ -295,4 +223,3 @@
+ [S3] Power Diagram Enhanced Adaptive Isosurface Extraction From Signed Distance Fields., https://doi.org/10.1109/tvcg.2026.3685989, fetched 2026-10-26
+ [S4] zichenwang01/relaxed-boundary, https://github.com/zichenwang01/relaxed-boundary, fetched 2026-10-27 (unofficial)
+-[S5] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S6] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29+[S5] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29

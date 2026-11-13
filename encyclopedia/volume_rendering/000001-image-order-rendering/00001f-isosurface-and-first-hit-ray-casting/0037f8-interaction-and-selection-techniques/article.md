@@ -3,10 +3,10 @@
 Also called: Explicit Scene Exploration
 
 ## Overview
-This family provides interaction mechanisms for isosurface rendering, allowing users to explore internal structures and select specific data elements without extracting explicit geometric meshes. It solves the problem of limited visibility in dense volumetric data and the need for precise data selection for downstream tasks like segmentation. It differs from standard clipping by supporting complex concave Boolean operations directly on the GPU [3592-interactive-concave-volume-clipping-via-gpu-boolean-operatio.md] and from cropping by allowing selective exposure of deeper layers via peeling [7679-surface-peeling.md].
+This family provides interaction mechanisms for isosurface rendering, allowing users to explore internal structures and select specific data elements without extracting explicit geometric meshes [G]. It solves the problem of limited visibility in dense volumetric data and the need for precise data selection for downstream tasks like segmentation [S1, unofficial]. It differs from standard clipping by supporting complex concave Boolean operations directly on the GPU [3592-interactive-concave-volume-clipping-via-gpu-boolean-operatio.md] and from cropping by allowing selective exposure of deeper layers via peeling [7679-surface-peeling.md] [G].
 
 ## Shared principles
-The family relies on accurate ray-traversal and ray-isosurface intersection search to identify the exact intersecting voxel for each ray [S1, unofficial]. This precision enables the collection of metadata (such as voxel IDs or intersection counts) associated with the visible surface, which is then used for interaction logic. The core mechanism builds on [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md), utilizing the computed intersection positions and normals for shading and selection.
+The family relies on accurate ray-traversal and ray-isosurface intersection search to identify the exact intersecting voxel for each ray [S1, unofficial]. This precision enables the collection of metadata (such as voxel IDs or intersection counts) associated with the visible surface, which is then used for interaction logic [S1, unofficial]. The core mechanism builds on [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md), utilizing the computed intersection positions and normals for shading and selection [G].
 
 ## Subtopics
 

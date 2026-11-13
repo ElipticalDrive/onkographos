@@ -1,46 +1,63 @@
 # Gauss-Seidel with Successive Over-Relaxation (SOR)
-
 Also called: Gauss-Seidel SOR, Gauss-Seidel with Successive Over-Relaxation (SOR) for 3D Heat Conduction, Iterative Laplace Solver
 
 ## Overview
-Gauss-Seidel with Successive Over-Relaxation (SOR) is an iterative numerical method used to solve the steady-state heat equation (Laplace equation $\nabla^2 T = 0$) on a 3D uniform Cartesian grid [S1, unofficial]. It updates grid points using the most recently computed neighbor values (Gauss-Seidel) and accelerates convergence by applying a relaxation factor $\omega > 1$ (Successive Over-Relaxation) [S1, unofficial]. Unlike standard Jacobi iteration which uses values from the previous iteration only, SOR utilizes updated values immediately, reducing the number of iterations required to reach a solution [S1, unofficial].
+Gauss-Seidel with Successive Over-Relaxation (SOR) is an iterative numerical method used to solve the steady-state heat equation (Laplace equation $\nabla^2 T = 0$) on a 3D uniform Cartesian grid [S1, unofficial]. It updates grid points using the latest available neighbor values (Gauss-Seidel) and accelerates convergence by over-relaxing the update step via a relaxation parameter $\omega$ [S1, unofficial]. It is distinct from its siblings, which compute explicit gradients via finite difference stencils; SOR implicitly solves for the scalar field values themselves by minimizing the discretized Laplacian residual, making it suitable for generating smooth, physically consistent scalar fields from boundary conditions rather than deriving gradients from existing data [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** A 3D scalar field (temperature) $T$ of shape $(n_x, n_y, n_z)$, grid dimensions $n_x, n_y, n_z$, physical domain length $L$, boundary temperatures $T_{hot}$ and $T_{cold}$, SOR relaxation parameter $\omega$, convergence tolerance $\epsilon$, and maximum iteration count $N_{max}$ [S1, unofficial].
-- **Output:** The converged temperature field $T$ and the number of iterations performed [S1, unofficial].
+**Inputs:**
+- Grid dimensions: $n_x, n_y, n_z$ (integers, number of points in each direction).
+- Domain length: $L$ (float, physical size of the cubic domain; assumed isotropic spacing $h=1$ in integer indexing).
+- Boundary temperatures: $T_{hot}$ (bottom, $k=0$), $T_{cold}$ (top, $k=n_z-1$).
+- SOR parameter: $\omega$ (float, relaxation factor).
+- Convergence tolerance: $\epsilon$ (float, max residual threshold).
+- Maximum iterations: $N_{max}$ (int).
+
+**Outputs:**
+- 3D temperature field: $T$ (numpy array of shape $(n_x, n_y, n_z)$, dtype float).
 
 **Data Structures:**
-- **Temperature Field:** A 3D array of shape $(n_x, n_y, n_z)$ with floating-point dtype. Indices $(i, j, k)$ correspond to grid points in the x, y, and z directions respectively [S1, unofficial].
+- `temperature`: A 3D array of shape $(n_x, n_y, n_z)$ storing scalar values at grid points $(i, j, k)$.
 
-**Algorithm Steps:**
-1. **Initialization:** Initialize the temperature field with a linear profile between the hot and cold boundaries to reduce iteration count. For $k \in [0, n_z-1]$:
-   $$ T[i, j, k] = T_{hot} + (T_{cold} - T_{hot}) \frac{k}{n_z - 1} $$
-   [S1, unofficial]
+**Formulas:**
+The discretized Laplace equation for a uniform grid ($dx=dy=dz=h$) at interior point $(i,j,k)$ is:
+$$ T[i,j,k] = \frac{1}{6} \left( T[i+1,j,k] + T[i-1,j,k] + T[i,j+1,k] + T[i,j-1,k] + T[i,j,k+1] + T[i,j,k-1] \right) $$
+The SOR update rule is:
+$$ T_{new}[i,j,k] = (1 - \omega) T_{old}[i,j,k] + \omega \left( \frac{1}{6} \sum_{\text{neighbors}} T \right) $$
+The residual for convergence checking is:
+$$ \text{residual} = | T_{new}[i,j,k] - T_{old}[i,j,k] | $$
 
-2. **Boundary Conditions:** Apply Dirichlet and Neumann boundary conditions:
-   - **Dirichlet (Fixed Temperature):** Set the bottom face ($k=0$) to $T_{hot}$ and the top face ($k=n_z-1$) to $T_{cold}$ [S1, unofficial].
-   - **Neumann (Adiabatic/Zero Gradient):** On side walls ($x=0, x=n_x-1, y=0, y=n_y-1$), copy values from adjacent interior cells to enforce $\frac{\partial T}{\partial n} = 0$ [S1, unofficial].
+**Parameters:**
+- $\omega$: Typical value 1.5; range $1 < \omega < 2$. Optimal is $\sim 1.5-1.9$ [S1, unofficial].
+- $\epsilon$: Typical value $10^{-5}$ [S1, unofficial].
+- $N_{max}$: Typical value 5000 [S1, unofficial].
 
-3. **Iteration Loop:** Repeat for $iter = 1$ to $N_{max}$:
-   a. Initialize `max_residual` to 0.0.
-   b. Loop over all interior points $i \in [1, n_x-2]$, $j \in [1, n_y-2]$, $k \in [1, n_z-2]$:
-      i. Calculate the sum of the six immediate neighbors:
-         $$ S = T[i+1, j, k] + T[i-1, j, k] + T[i, j+1, k] + T[i, j-1, k] + T[i, j, k+1] + T[i, j, k-1] $$
-         [S1, unofficial]
-      ii. Calculate the tentative new value based on the Laplace equation average:
-          $$ T_{new} = \frac{S}{6.0} $$
-          [S1, unofficial]
-      iii. Calculate the residual for this point:
-           $$ r = |T_{new} - T[i, j, k]| $$
-           Update `max_residual = max(max_residual, r)` [S1, unofficial].
-      iv. Apply the SOR update formula:
-          $$ T[i, j, k] = (1 - \omega) T[i, j, k] + \omega T_{new} $$
-          [S1, unofficial]
-   c. Re-apply boundary conditions to ensure Dirichlet values remain fixed and Neumann conditions are maintained [S1, unofficial].
-   d. Check convergence: If `max_residual` < $\epsilon$, terminate and return the current iteration count [S1, unofficial].
-
-4. **Termination:** If $N_{max}$ is reached without convergence, return the final field and iteration count [S1, unofficial].
+**Steps:**
+1. **Initialize:** Create `temperature` array of shape $(n_x, n_y, n_z)$. Initialize with linear interpolation between boundaries:
+   $$ T[:, :, k] = T_{hot} + (T_{cold} - T_{hot}) \times \frac{k}{n_z - 1} $$
+   This reduces iteration count compared to uniform initialization [S1, unofficial].
+2. **Apply Boundary Conditions:**
+   - **Dirichlet (Fixed):** Set bottom face ($k=0$) to $T_{hot}$ and top face ($k=n_z-1$) to $T_{cold}$.
+   - **Neumann (Adiabatic/Zero-Gradient):** Set side walls by copying adjacent interior values:
+     - $x=0$: $T[0, :, :] = T[1, :, :]$
+     - $x=n_x-1$: $T[n_x-1, :, :] = T[n_x-2, :, :]$
+     - $y=0$: $T[:, 0, :] = T[:, 1, :]$
+     - $y=n_y-1$: $T[:, n_y-1, :] = T[:, n_y-2, :]$
+3. **Iterate:** For `iteration` from 1 to $N_{max}$:
+   - Set `max_residual` = 0.
+   - Loop over interior points $i \in [1, n_x-2]$, $j \in [1, n_y-2]$, $k \in [1, n_z-2]$:
+     - Calculate neighbor sum:
+       $$ S = T[i+1,j,k] + T[i-1,j,k] + T[i,j+1,k] + T[i,j-1,k] + T[i,j,k+1] + T[i,j,k-1] $$
+     - Calculate tentative new value:
+       $$ t_{new} = S / 6.0 $$
+     - Calculate residual:
+       $$ r = | t_{new} - T[i,j,k] | $$
+     - Update `max_residual` = $\max(\text{max\_residual}, r)$.
+     - Apply SOR update:
+       $$ T[i,j,k] = (1 - \omega) T[i,j,k] + \omega t_{new} $$
+   - **Re-apply Boundary Conditions:** Call the boundary application step to maintain fixed Dirichlet and zero-gradient Neumann conditions [S1, unofficial].
+   - **Check Convergence:** If `max_residual` < $\epsilon$, return `iteration`.
+4. **Termination:** If loop completes without convergence, return $N_{max}$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -48,83 +65,87 @@ Gauss-Seidel with Successive Over-Relaxation (SOR) is an iterative numerical met
 ```python
 def solve_gauss_seidel_sor(nx, ny, nz, t_hot, t_cold, omega, tolerance, max_iterations):
     # Initialize temperature field with linear interpolation
-    temperature = [[[0.0 for _ in range(nz)] for _ in range(ny)] for _ in range(nx)]
+    temperature = [[[[0.0 for _ in range(nz)] for _ in range(ny)] for _ in range(nx)]]
     for k in range(nz):
         z_ratio = k / (nz - 1)
         for i in range(nx):
             for j in range(ny):
                 temperature[i][j][k] = t_hot + (t_cold - t_hot) * z_ratio
 
-    def apply_boundary_conditions(temp):
-        # Dirichlet: Bottom (k=0) and Top (k=nz-1)
+    def apply_boundary_conditions():
+        # Dirichlet: fixed temperature on top and bottom
         for i in range(nx):
             for j in range(ny):
-                temp[i][j][0] = t_hot
-                temp[i][j][nz-1] = t_cold
-        # Neumann: Side walls (copy from interior)
+                temperature[i][j][0] = t_hot       # Bottom (hot)
+                temperature[i][j][nz-1] = t_cold     # Top (cold)
+        # Neumann: zero gradient on side walls (adiabatic)
         for j in range(ny):
             for k in range(nz):
-                temp[0][j][k] = temp[1][j][k]       # x=0
-                temp[nx-1][j][k] = temp[nx-2][j][k] # x=L
+                temperature[0][j][k] = temperature[1][j][k]       # x = 0
+                temperature[nx-1][j][k] = temperature[nx-2][j][k] # x = L
         for i in range(nx):
             for k in range(nz):
-                temp[i][0][k] = temp[i][1][k]       # y=0
-                temp[i][ny-1][k] = temp[i][ny-2][k] # y=L
+                temperature[i][0][k] = temperature[i][1][k]       # y = 0
+                temperature[i][ny-1][k] = temperature[i][ny-2][k] # y = L
 
-    apply_boundary_conditions(temperature)
+    apply_boundary_conditions()
 
     for iteration in range(1, max_iterations + 1):
         max_residual = 0.0
+        # Update interior points
         for i in range(1, nx - 1):
             for j in range(1, ny - 1):
                 for k in range(1, nz - 1):
-                    # Sum of six neighbors
                     neighbor_sum = (
-                        temperature[i+1][j][k] +
-                        temperature[i-1][j][k] +
-                        temperature[i][j+1][k] +
-                        temperature[i][j-1][k] +
-                        temperature[i][j][k+1] +
-                        temperature[i][j][k-1]
+                        temperature[i + 1][j][k] +
+                        temperature[i - 1][j][k] +
+                        temperature[i][j + 1][k] +
+                        temperature[i][j - 1][k] +
+                        temperature[i][j][k + 1] +
+                        temperature[i][j][k - 1]
                     )
-                    # New value from Laplace equation
                     t_new = neighbor_sum / 6.0
-                    # Compute residual
                     residual = abs(t_new - temperature[i][j][k])
                     if residual > max_residual:
                         max_residual = residual
-                    # SOR update
                     temperature[i][j][k] = (1 - omega) * temperature[i][j][k] + omega * t_new
-        # Re-apply boundary conditions
-        apply_boundary_conditions(temperature)
-        # Check convergence
+        
+        # Re-apply boundary conditions after each iteration
+        apply_boundary_conditions()
+        
         if max_residual < tolerance:
             return iteration
+            
     return max_iterations
 ```
 
-**Parameters:**
-- $\omega$ (omega): SOR relaxation parameter. Typical value is 1.5. The range for over-relaxation is $1 < \omega < 2$. Optimal values are typically between 1.5 and 1.9 [S1, unofficial].
-- $\epsilon$ (tolerance): Convergence criterion based on the maximum equation residual. Typical value is $10^{-5}$ [S1, unofficial].
-- $N_{max}$ (max_iterations): Maximum number of iterations allowed. Typical value is 5000 [S1, unofficial].
-
-**Pitfalls:**
+**Edge Cases and Pitfalls:**
 - Boundary conditions must be reapplied after every iteration to maintain fixed Dirichlet values and zero-gradient Neumann conditions [S1, unofficial].
-- The method assumes a uniform grid where $dx = dy = dz = h$ [S1, unofficial].
+- If $\omega \ge 2$, the method may diverge [S1, unofficial].
+- If $\omega \le 1$, it reduces to standard Gauss-Seidel or Jacobi-like behavior, converging slower [S1, unofficial].
+
+## Subtopics
+
+### [Gradient Selection](5889-gradient-selection.md)
+Chooses between explicit finite difference gradients and implicit field solvers like SOR based on data availability and smoothness requirements.
+
+### [Brick-local Gradient Estimation](8810-brick-local-gradient-estimation.md)
+Computes gradients locally within bricks; SOR operates on the global grid, making it incompatible with purely local brick-based gradient estimation without global synchronization.
+
+### [Sharded Gradient Computation](12597-sharded-gradient-computation.md)
+Distributes gradient calculation across shards; SOR is inherently sequential in its Gauss-Seidel form (though parallelizable with red-black ordering), making it less directly sharded than explicit stencil methods.
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- **Time Complexity:** $O(N)$ per iteration, where $N = n_x \cdot n_y \cdot n_z$ is the total number of grid points. The total time depends on the number of iterations required for convergence, which is reduced by SOR compared to Jacobi or standard Gauss-Seidel [G].
-- **Memory Complexity:** $O(N)$ to store the 3D temperature field [S1, unofficial].
-
-**Performance:**
-- SOR converges faster than standard Gauss-Seidel due to the over-relaxation factor [S1, unofficial].
-- Performance scales with grid resolution; larger grids require more iterations [S1, unofficial].
-- Strengths: Simple implementation, low memory overhead, effective for elliptic PDEs like the Laplace equation [S1, unofficial].
-- Limitations: Convergence speed depends heavily on the choice of $\omega$; not parallel-friendly due to sequential dependency of updates (Gauss-Seidel nature) [G].
+- **Time Complexity:** $O(N)$ per iteration, where $N = n_x n_y n_z$ is the number of voxels. Total time depends on convergence rate, which is $O(N)$ for Jacobi but improved by SOR. The number of iterations required for convergence scales with $N$ [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing the 3D temperature field. No additional large data structures are required [S1, unofficial].
+- **Measured Performance:** For a $50 \times 50 \times 50$ grid with $\omega=1.5$, convergence to $10^{-5}$ tolerance typically occurs within a few hundred to a few thousand iterations, depending on boundary conditions [S1, unofficial].
+- **Strengths:** Produces smooth, physically consistent scalar fields; handles complex boundary conditions (Dirichlet/Neumann) naturally; faster convergence than Jacobi iteration [S1, unofficial].
+- **Limitations:** Sequential dependency in Gauss-Seidel update order limits parallelization (requires red-black ordering for parallelism); convergence slows for large grids; not suitable for real-time gradient computation from existing data [S1, unofficial].
+- **When to Use:** When generating a smooth scalar field from boundary conditions is required, or when solving the Laplace equation as a preprocessing step for volume rendering [S1, unofficial].
+- **When Not to Use:** When explicit gradients from existing discrete data are needed (use [Central Difference Stencils](9968-central-difference-stencils.md) or [Forward Difference Gradient](3362-forward-difference-gradient.md)); when real-time performance is critical [S1, unofficial].
 
 ## Background
-The method originates from solving the steady-state heat equation in a 3D cubic domain [S1, unofficial]. It combines the Gauss-Seidel iterative solver, which uses the latest available neighbor values, with Successive Over-Relaxation (SOR) to accelerate convergence [S1, unofficial]. It is used in volume rendering contexts to generate smooth scalar fields (e.g., temperature distributions) for visualization, where the scalar field is mapped to color and opacity via transfer functions [S1, unofficial].
+The method originates from numerical analysis for solving elliptic partial differential equations, specifically the steady-state heat equation [S1, unofficial]. It was popularized in computational physics and engineering for simulating heat conduction in 3D domains [S1, unofficial]. In the context of volume rendering, it is used to generate smooth temperature fields that can be visualized using transfer functions mapping temperature to color and opacity [S1, unofficial]. The implementation cited is from an unofficial VTK example repository [S1, unofficial].
 
 ## Sources
 [S1] Vtk-Examples/src/02_advanced_shapes/volume_rendering.py at main ..., https://github.com/djeada/VTK-Examples/blob/main/src/02_advanced_shapes/volume_rendering.py, fetched 2026-10-29 (unofficial)

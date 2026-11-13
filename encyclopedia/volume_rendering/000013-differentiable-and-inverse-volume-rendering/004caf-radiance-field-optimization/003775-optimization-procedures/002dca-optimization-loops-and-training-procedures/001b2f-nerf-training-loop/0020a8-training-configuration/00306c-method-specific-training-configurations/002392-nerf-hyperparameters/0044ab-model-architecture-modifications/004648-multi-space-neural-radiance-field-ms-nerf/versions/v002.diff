@@ -1,0 +1,291 @@
+--- v001.md
++++ v002.md
+@@ -1,171 +1,164 @@
+ # Multi-Space Neural Radiance Field (MS-NeRF)
+-
+ Also called: MS-Mip-NeRF 360, MS-NeRFB, Multi-space NeRF
+ 
+ ## Overview
+-MS-NeRF addresses the failure of standard single-space Neural Radiance Fields (NeRF) to render reflective and refractive objects, which violate multi-view consistency in Euclidean space [S1]. Unlike standard NeRF, which treats virtual images as blurred textures on surfaces, MS-NeRF represents the scene using a group of parallel feature fields in multiple sub-spaces, allowing virtual images to be placed in specific sub-spaces visible only from certain views [S1]. This method serves as a lightweight enhancement module that can be integrated into various backbone architectures (MLP-based or grid-based) with negligible computational overhead [S1].
++MS-NeRF addresses the failure of standard single-space Neural Radiance Fields (NeRF) to render reflective and refractive objects, which cause multi-view consistency violations and blurry artifacts [S1]. It replaces the single radiance field with a group of parallel feature fields in distinct sub-spaces, allowing virtual images to be stored in sub-spaces visible only from specific viewpoints [S1]. Unlike single-space methods that often require manual labeling of reflective surfaces to avoid sub-optimal convergence, MS-NeRF automatically handles these effects without additional loss terms [S1].
+ 
+ ## How it works
+-MS-NeRF modifies the output layer of a backbone NeRF network to replace the single radiance field output with a multi-head module that outputs $K$ densities and feature vectors for each position along a ray [S1]. The method operates by rendering feature maps for each sub-space and then combining them using a learned gating mechanism [S1].
++MS-NeRF operates as an enhancement module that replaces the output layer of a backbone NeRF method (e.g., MLP-based NeRF, Mip-NeRF 360, or grid-based TensoRF) with a multi-space module [S1].
+ 
+-**Inputs and Outputs:**
+-*   **Input:** A ray $r$ defined by origin and direction, sampled at $N$ points. The backbone network provides raw features at these points.
+-*   **Output:** A final color vector $\hat{\mathbf{C}}(r)$ for the ray.
++**Inputs and Outputs**
++*   **Input:** A ray $r$ defined by origin and direction, sampled at $N$ points along the ray. The backbone network provides latent features and densities for each point.
++*   **Output:** A final rendered color $\hat{C}(r)$ for the ray.
+ 
+-**Data Structures:**
+-The method introduces the following hyperparameters and intermediate structures:
+-*   $K$: Total number of sub-spaces (hyperparameter).
+-*   $d$: Feature dimension of the neural feature field (hyperparameter).
+-*   $\sigma_{ik}$: Volume density at sample point $i$ in sub-space $k$.
+-*   $\mathbf{f}_{ik}$: Feature vector at sample point $i$ in sub-space $k$, with dimension $d$.
+-*   $\mathbf{F}^k$: Accumulated feature map for sub-space $k$ along the ray.
+-*   $\mathbf{C}^k$: Decoded color vector for sub-space $k$.
+-*   $w_k$: Gating weight for sub-space $k$.
++**Data Structures**
++The method introduces $K$ parallel sub-spaces. For each sampled point $i$ along the ray and each sub-space $k \in \{1, \dots, K\}$:
++*   $\sigma_{ik}$: Volume density for sub-space $k$ at point $i$.
++*   $f_{ik}$: Feature vector of dimension $d$ for sub-space $k$ at point $i$.
++*   $T_i$: Transmittance up to point $i$, calculated as $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_{jk} \delta_j)$ (Note: The source uses a specific accumulation formula below).
+ 
+-**Numbered Steps:**
++**Parameters**
++*   $K$: Total number of sub-spaces.
++*   $d$: Feature dimension of the neural feature field.
++*   Typical values: On Mip-NeRF 360, $K$ and $d$ are chosen to add only 0.5% extra parameters [S1]. On TensoRF, they add 0.046% extra parameters [S1].
+ 
+-1.  **Multi-Head Output Generation:**
+-    For each sample point $i$ along the ray, the modified backbone network outputs $K$ pairs of density and feature vectors: $\{\sigma_{ik}\}_{k=1}^K$ and $\{\mathbf{f}_{ik}\}_{k=1}^K$, where $\mathbf{f}_{ik} \in \mathbb{R}^d$ [S1].
++**Algorithm**
++1.  **Ray Casting and Feature Collection:** For each sub-space $k$, accumulate features along the ray. The feature map $F_k$ for sub-space $k$ is calculated as [S1]:
++    $$
++    \hat{F}_k(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_{ik} \delta_i)) f_{ik}
++    $$
++    where $\delta_i$ is the distance between sample points. $T_i$ represents the transmittance. The source notation implies $T_i$ is computed similarly to standard volumetric rendering but applied to the specific density $\sigma_{ik}$ of the sub-space.
+ 
+-2.  **Feature Accumulation per Sub-Space:**
+-    For each sub-space $k \in \{1, \dots, K\}$, accumulate the features along the ray using volumetric rendering principles. The accumulated feature $\hat{\mathbf{F}}^k(r)$ is calculated as [S1]:
+-    $$
+-    \hat{\mathbf{F}}^k(r) = \sum_{i=1}^{N} T_{ik} (1 - \exp(-\sigma_{ik} \delta_i)) \mathbf{f}_{ik}
+-    $$
+-    where:
+-    *   $\delta_i$ is the distance between sample point $i$ and $i+1$.
+-    *   $T_{ik} = \exp(-\sum_{j=1}^{i-1} \sigma_{jk} \delta_j)$ is the accumulated transmittance for sub-space $k$ up to sample point $i$.
+-    *   The term $(1 - \exp(-\sigma_{ik} \delta_i))$ represents the opacity contribution of sample $i$ in sub-space $k$.
+-
+-3.  **Decoding and Gating:**
+-    The accumulated feature vectors $\{\hat{\mathbf{F}}^k\}_{k=1}^K$ are processed by two separate Multi-Layer Perceptrons (MLPs), each with one hidden layer [S1]:
+-    *   **Decoder MLP ($\Theta_D$):** Takes $\hat{\mathbf{F}}^k$ as input and outputs the color vector $\mathbf{C}^k$ for sub-space $k$:
++2.  **Multi-Head Processing:** The collected feature maps $\{F_k\}_{k=1}^K$ are processed by two separate Multi-Layer Perceptrons (MLPs), each with one hidden layer [S1]:
++    *   **Decoder MLP ($\Theta_D$):** Takes $\{F_k\}$ as input and outputs RGB color vectors $\{C_k\}$.
+         $$
+-        \Theta_D(\hat{\mathbf{F}}^k) \rightarrow \mathbf{C}^k
++        \Theta_D(\{F_k\}) \rightarrow \{C_k\}
+         $$
+-    *   **Gate MLP ($\Theta_G$):** Takes $\hat{\mathbf{F}}^k$ as input and outputs a scalar weight $w_k$ controlling the visibility/contribution of sub-space $k$:
++    *   **Gate MLP ($\Theta_G$):** Takes $\{F_k\}$ as input and outputs scalar weights $\{w_k\}$ controlling the visibility/contribution of each sub-space.
+         $$
+-        \Theta_G(\hat{\mathbf{F}}^k) \rightarrow w_k
++        \Theta_G(\{F_k\}) \rightarrow \{w_k\}
+         $$
+ 
+-4.  **Final Color Composition:**
+-    Apply the softmax function to the gating weights $\{w_k\}_{k=1}^K$ to determine the final contribution of each sub-space. The final rendered color $\hat{\mathbf{C}}(r)$ is computed as [S1]:
++3.  **Final Rendering:** The final color $\hat{C}(r)$ is computed by applying a softmax function to the gate weights $\{w_k\}$ to form a convex combination of the sub-space colors $\{C_k\}$ [S1]:
+     $$
+-    \hat{\mathbf{C}}(r) = \sum_{k=1}^{K} \frac{\exp(w_k)}{\sum_{i=1}^{K} \exp(w_i)} \mathbf{C}^k
++    \hat{C}(r) = \sum_{k=1}^{K} \left( \frac{\exp(w_k)}{\sum_{i=1}^{K} \exp(w_i)} \right) C_k
+     $$
+-    This formulation ensures that the composition weights change dynamically according to spatial location and view direction, allowing the model to handle multi-view consistency violations by making virtual images visible only from specific views [S1].
+ 
+-**Pseudocode:**
+-
++**Pseudocode**
+ ```python
+-def ms_nerf_render(ray_samples, backbone_network, decoder_mlp, gate_mlp, K, d):
++def ms_nerf_render(ray, backbone_network, K, d):
+     """
+     Renders a ray using the Multi-Space NeRF module.
+     
+     Args:
+-        ray_samples: List of N sample points along the ray.
+-                     Each point contains position and delta distance.
+-        backbone_network: The modified NeRF backbone that outputs K densities 
+-                          and K feature vectors per sample.
+-        decoder_mlp: MLP with one hidden layer mapping feature vector -> RGB color.
+-        gate_mlp: MLP with one hidden layer mapping feature vector -> scalar weight.
++        ray: Ray origin and direction.
++        backbone_network: The underlying NeRF backbone (e.g., Mip-NeRF 360, TensoRF).
+         K: Number of sub-spaces.
+         d: Feature dimension.
+         
+     Returns:
+-        final_color: RGB color vector for the ray.
++        final_color: Rendered RGB color.
+     """
+-    # Step 1: Get K densities and K feature vectors for each sample
+-    # densities shape: (N, K)
+-    # features shape: (N, K, d)
+-    densities, features = backbone_network(ray_samples)
++    # 1. Sample points along the ray
++    # The backbone network typically handles sampling. 
++    # We assume backbone_network returns densities and features for all K sub-spaces.
++    # Let's assume the backbone is modified or wrapped to output K sets of (sigma, feature).
+     
+-    accumulated_features = []
++    # Sample points i = 1 to N
++    # For each point i and sub-space k:
++    #   sigma_ik = backbone_network.get_density(ray, point_i, sub_space=k)
++    #   f_ik = backbone_network.get_feature(ray, point_i, sub_space=k, dim=d)
+     
+-    # Step 2: Accumulate features for each sub-space k
++    # 2. Accumulate feature maps for each sub-space
++    feature_maps = []
+     for k in range(K):
+-        sigma_k = densities[:, k]       # Shape: (N,)
+-        f_k = features[:, k, :]         # Shape: (N, d)
++        accumulated_feature = 0.0
++        transmittance = 1.0
++        for i in range(N):
++            # Calculate opacity for this segment in sub-space k
++            sigma_ik = backbone_network.get_density(ray, points[i], sub_space=k)
++            f_ik = backbone_network.get_feature(ray, points[i], sub_space=k, dim=d)
++            delta_i = distance(points[i], points[i-1]) if i > 0 else distance(ray.origin, points[0])
++            
++            # Standard volumetric opacity for this segment
++            alpha_ik = 1.0 - exp(-sigma_ik * delta_i)
++            
++            # Transmittance up to this point (before this segment)
++            # Note: Source formula uses T_i * (1 - exp(...)). 
++            # T_i is typically exp(-sum_{j=1}^{i-1} sigma_j * delta_j).
++            # We must maintain transmittance state for sub-space k.
++            
++            # Contribution of this segment
++            # The source formula: sum(T_i * (1 - exp(-sigma_ik * delta_i)) * f_ik)
++            # Here T_i is the transmittance BEFORE point i.
++            segment_contribution = transmittance * alpha_ik * f_ik
++            accumulated_feature += segment_contribution
++            
++            # Update transmittance for the next point
++            transmittance *= (1.0 - alpha_ik)
++            
++        feature_maps.append(accumulated_feature)
+         
+-        # Calculate transmittance T_ik for this sub-space
+-        # T_ik = exp(-sum_{j=1}^{i-1} sigma_jk * delta_j)
+-        # We assume ray_samples contains delta distances
+-        deltas = ray_samples.deltas      # Shape: (N,)
+-        
+-        # Compute accumulated sigma for transmittance calculation
+-        # cumsum_sigma[i] = sum_{j=0}^{i-1} sigma_j * delta_j
+-        cumsum_sigma = np.cumsum(sigma_k * deltas, axis=0)
+-        
+-        # Transmittance T_i = exp(-cumsum_sigma_{i-1})
+-        # For i=0, T_0 = 1 (exp(0))
+-        # Shift cumsum to align with samples
+-        # T[i] corresponds to transmittance arriving at sample i
+-        # T[0] = 1.0
+-        # T[i] = exp(-cumsum_sigma[i-1]) for i > 0
+-        
+-        # Efficient calculation:
+-        # T[i] = exp(-sum_{j=0}^{i-1} sigma[j]*delta[j])
+-        # This is equivalent to exp(-cumsum_sigma shifted right by 1)
+-        
+-        # Initialize T with 1.0 for the first sample
+-        T = np.ones(N)
+-        if N > 1:
+-            T[1:] = np.exp(-cumsum_sigma[:-1])
+-            
+-        # Opacity contribution: alpha_i = T_i * (1 - exp(-sigma_i * delta_i))
+-        # Feature contribution: T_i * (1 - exp(-sigma_i * delta_i)) * f_i
+-        opacity = T * (1.0 - np.exp(-sigma_k * deltas))
+-        
+-        # Accumulated feature F^k
+-        # Sum over i: T_i * (1 - exp(-sigma_i * delta_i)) * f_i
+-        # opacity has shape (N,), f_k has shape (N, d)
+-        # We need to multiply opacity by each channel of f_k
+-        accumulated_f_k = np.sum(opacity[:, np.newaxis] * f_k, axis=0)
+-        
+-        accumulated_features.append(accumulated_f_k)
+-        
+-    # Stack accumulated features: Shape (K, d)
+-    accumulated_features = np.stack(accumulated_features, axis=0)
++    # 3. Process feature maps through MLPs
++    # feature_maps is a list of K feature vectors F_k
++    colors = decoder_mlp(feature_maps) # Outputs K RGB vectors C_k
++    weights = gate_mlp(feature_maps)   # Outputs K scalar weights w_k
+     
+-    # Step 3: Decode colors and gate weights
+-    # decoder_mlp takes (K, d) and outputs (K, 3)
+-    colors = decoder_mlp(accumulated_features)
++    # 4. Softmax combination
++    # Compute softmax weights
++    exp_weights = [exp(w) for w in weights]
++    sum_exp_weights = sum(exp_weights)
++    softmax_weights = [ew / sum_exp_weights for ew in exp_weights]
+     
+-    # gate_mlp takes (K, d) and outputs (K,)
+-    weights = gate_mlp(accumulated_features)
+-    
+-    # Step 4: Softmax weighting
+-    # Apply softmax to weights
+-    # exp(w_k) / sum(exp(w_i))
+-    exp_weights = np.exp(weights)
+-    softmax_weights = exp_weights / np.sum(exp_weights)
+-    
+-    # Final color: sum(softmax_weight_k * color_k)
+-    final_color = np.sum(softmax_weights[:, np.newaxis] * colors, axis=0)
++    # Combine colors
++    final_color = sum(softmax_weights[k] * colors[k] for k in range(K))
+     
+     return final_color
++
++# Helper MLPs definition (conceptual, as per source description)
++class DecoderMLP(nn.Module):
++    def __init__(self, d):
++        super().__init__()
++        # One hidden layer
++        self.fc1 = nn.Linear(d, hidden_dim)
++        self.fc2 = nn.Linear(hidden_dim, 3) # Output RGB
++        self.relu = nn.ReLU()
++        
++    def forward(self, features):
++        # features: List of K tensors of shape (d,)
++        # Output: List of K tensors of shape (3,)
++        return [self.fc2(self.relu(self.fc1(f))) for f in features]
++
++class GateMLP(nn.Module):
++    def __init__(self, d):
++        super().__init__()
++        # One hidden layer
++        self.fc1 = nn.Linear(d, hidden_dim)
++        self.fc2 = nn.Linear(hidden_dim, 1) # Output scalar
++        self.relu = nn.ReLU()
++        
++    def forward(self, features):
++        # features: List of K tensors of shape (d,)
++        # Output: List of K scalars
++        return [self.fc2(self.relu(self.fc1(f))).squeeze() for f in features]
+ ```
+ 
+-**Parameters:**
+-*   $K$: Hyperparameter for the total sub-space number. Typical values are not explicitly given in the sources, but the method is described as requiring only small computational overheads [S1].
+-*   $d$: Hyperparameter for the feature dimension of the neural feature field. Typical values are not explicitly given in the sources [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Multi-view Consistency Violation:** Standard NeRF fails on reflective surfaces because it assumes a single Euclidean space. MS-NeRF handles this by distributing virtual images across sub-spaces [S1].
+-*   **Manual Labeling:** Unlike some prior methods, MS-NeRF does not require manual labeling of reflective surfaces [S1].
+-*   **Computational Overhead:** The method adds minimal overhead, making it suitable for integration into existing pipelines [S1].
++**Edge Cases and Pitfalls**
++*   **Precision:** The softmax function is sensitive to large weight values. Numerical stability should be maintained (e.g., subtracting max weight before exp), though the source does not specify implementation details [S1].
++*   **Backbone Integration:** The method requires modifying the output layer of the backbone. For grid-based methods like TensoRF, the feature extraction must support $K$ parallel outputs [S1].
++*   **No Additional Loss:** The method does not require additional loss terms compared to vanilla NeRF, relying solely on the standard photometric loss [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method requires only small computational overheads for training and inferring the extra-space outputs compared to the backbone NeRF [S1]. The complexity scales linearly with the number of sub-spaces $K$ and the feature dimension $d$ due to the additional MLPs and accumulation steps.
+-*   **Measured Performance:**
++*   **Computational Overhead:** The method introduces only small computational overheads for training and inference [S1].
++*   **Performance:**
+     *   On Mip-NeRF 360: Improves PSNR by 4.15 dB on reflective regions with 0.5% extra parameters, without degrading rendering quality on other regions [S1].
+     *   On TensoRF: Improves PSNR by 2.71 dB on reflective regions with 0.046% extra parameters, without degrading rendering quality on other regions [S1].
+-*   **Strengths:** Automatically handles mirror-like objects in 360-degree rendering; overcomes multi-view consistency violations; lightweight enhancement module; no additional loss terms required [S1].
+-*   **Limitations:** Performance on non-reflective regions is not degraded, but the specific performance gain is limited to reflective/refractive scenarios [S1].
+-*   **When to use:** When rendering scenes with complex reflections and refractions (e.g., mirrors, glass) where multi-view consistency is violated.
+-*   **When not to use:** For simple scenes without reflective objects, the added complexity of multiple sub-spaces may be unnecessary, though the overhead is small [S1].
++*   **Strengths:** Automatically handles mirror-like objects in 360-degree rendering without manual labeling; overcomes multi-view consistency violations by placing virtual images in view-specific sub-spaces [S1].
++*   **Limitations:** Performance on non-reflective regions is not degraded, but the method is specifically designed for scenes with complex reflections and refractions [S1].
++*   **When to use:** Scenes with reflective and refractive objects where multi-view consistency is violated in Euclidean space [S1].
++*   **When not to use:** Simple scenes without reflective/refractive elements, where the overhead is unnecessary [S1].
+ 
+ ## Background
+-MS-NeRF was proposed to address the limitations of existing NeRF methods in handling reflective objects, which often result in blurry or distorted rendering [S1]. The method was developed by Z.X. Yin, P.Y. Jiao, M.M. Cheng, B. Ren, and J. Qiu from Nankai University and Horizon Robotics [S1]. A preliminary version appeared at CVPR, and the full version was published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2025 [S1]. The authors also constructed a novel dataset consisting of 33 synthetic scenes and 7 real captured scenes with complex reflection and refraction to benchmark the robustness of NeRF-based methods [S1]. The method is designed as a general enhancement module for MLP-based methods (NeRF, Mip-NeRF, Mip-NeRF 360) and grid-based methods (TensoRF, iNGP), and has been integrated with reconstruction methods like NeuS [S1].
++MS-NeRF was proposed by Z.X. Yin, P.Y. Jiao, M.M. Cheng, B. Ren, and J. Qiu [S1]. A preliminary version appeared at CVPR, with the full version published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2025 (DOI: 10.1109/tpami.2025.3540074) [S1]. The authors are affiliated with Nankai University and Horizon Robotics [S1]. The method was developed to address the limitations of existing NeRF methods in handling reflective objects, which often result in blurry or distorted rendering [S1]. The authors also constructed a novel dataset consisting of 33 synthetic scenes and 7 real captured scenes with complex reflection and refraction to benchmark the robustness of NeRF-based methods [S1].
+ 
+ ## Sources

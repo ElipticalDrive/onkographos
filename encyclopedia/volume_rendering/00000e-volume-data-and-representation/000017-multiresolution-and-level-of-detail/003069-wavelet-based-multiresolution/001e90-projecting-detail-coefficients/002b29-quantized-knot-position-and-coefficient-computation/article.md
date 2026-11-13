@@ -32,15 +32,15 @@ This method computes quantized knot positions ($\bar{t}_k$) and localized differ
     $$ \bar{a}_{kd} = \left\lceil \frac{\tau^d \mu \alpha \hat{s}_{kd}}{\varsigma \rho \zeta^{d+3}} \right\rceil $$
     Compute the symmetric coefficients using shifted evenness:
     $$ \bar{a}_{-kd} = (-1)^{d+1} \bar{a}_{kd} $$
-4.  **Handle Middle Knot (Even $K$):** If $K$ is even, there is a middle knot at index $0$. For uneven $d$, compute $\bar{a}_{0d}$ to satisfy the shifted evenness condition:
+4.  **Handle Middle Knot (Even $K$):** If $K$ is even, there is a middle knot at index $0$ [S1]. For uneven $d$, compute $\bar{a}_{0d}$ to satisfy the shifted evenness condition:
     $$ \bar{a}_{0d} = -2 \sum_{k=-\lceil K/2 \rceil}^{-1} \sum_{j=d}^D \binom{j}{d} \bar{a}_{kj} (\bar{t}_0 - \bar{t}_k)^{j-d} $$
     For even $d$, set $\bar{a}_{0d} = 0$ [S1].
-5.  **Handle Boundary Coefficients (Odd $K$):** If $K$ is odd, there is no middle knot ($\bar{a}_{0d}=0$). For uneven $d$, compute $\bar{a}_{-1d}$ in descending order of $d$:
+5.  **Handle Boundary Coefficients (Odd $K$):** If $K$ is odd, there is no middle knot ($\bar{a}_{0d}=0$) [S1]. For uneven $d$, compute $\bar{a}_{-1d}$ in descending order of $d$:
     $$ \bar{a}_{-1d} = - \sum_{k=-\lceil K/2 \rceil}^2 \bar{a}_{kd} - \sum_{j=d+1}^D \binom{j}{d} \sum_{k=-\lceil K/2 \rceil}^{-1} \bar{a}_{kj} (\bar{t}_0 - \bar{t}_k)^{j-d} $$
     Compute the symmetric counterpart:
     $$ \bar{a}_{1d} = (-1)^{d+1} \bar{a}_{-1d} $$
 6.  **Recursive Specification:** The localized coefficients $\tilde{a}_{kd}$ defining the piecewise polynomial $A_k(t)$ are recursively computed from previous coefficients with base case $\tilde{a}_{(-\lceil K/2 \rceil - 1)d} = 0$:
-    $$ \tilde{a}_{kd} = \sum_{l=-\lceil K/2 \rceil}^k \sum_{j=d}^D \binom{j}{d} \tilde{a}_{lj} (\tilde{t}_k - \tilde{t}_l)^{j-d} $$
+    $$ \tilde{a}_{kd} = \tilde{a}_{kd} + \sum_{l=-\lceil K/2 \rceil}^{k-1} \sum_{j=d}^D \binom{j}{d} \tilde{a}_{lj} (\tilde{t}_k - \tilde{t}_l)^{j-d} $$
     This recursion ensures continuity and the correct polynomial representation within each knot interval [S1].
 
 **Pseudocode:**
@@ -50,14 +50,14 @@ This method computes quantized knot positions ($\bar{t}_k$) and localized differ
 ```python
 import math
 
-def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k, Lambda, tau, varsigma, K, D, LUT):
+def compute_quantized_knots_and_coefficients(mu, rho, zeta, alpha, t_k, Lambda, tau, varsigma, K, D, LUT):
     """
     Computes quantized knot positions and coefficients for a particle.
     
     Args:
         mu: Particle mass
         rho: Particle density
-        zeta_particle: Particle scale
+        zeta: Particle scale
         alpha: Particle amplitude
         t_k: Base knot parameter
         Lambda: Normalized distance from ray closest point
@@ -72,6 +72,7 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
     Returns:
         t_bar: Dictionary of quantized knot counts {k: int}
         a_bar: Dictionary of quantized coefficients {(k, d): int}
+        a_tilde: Dictionary of recursive polynomial coefficients {(k, d): float}
     """
     
     # Step 1: Lookup
@@ -85,7 +86,7 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
     
     # Step 2: Compute Quantized Knots
     for k in range(1, half_K + 1):
-        t_bar[k] = t_bar[0] + round_nearest((zeta_particle * theta_k[k - 1]) / tau)
+        t_bar[k] = t_bar[0] + round_nearest((zeta * theta_k[k - 1]) / tau)
         t_bar[-k] = 2 * t_bar[0] - t_bar[k]
         
     a_bar = {}
@@ -99,7 +100,7 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
                 
             s_hat = s_hat_kd[k - 1][d]
             numerator = (tau ** d) * mu * alpha * s_hat
-            denominator = varsigma * rho * (zeta_particle ** (d + 3))
+            denominator = varsigma * rho * (zeta ** (d + 3))
             
             a_bar[(k, d)] = round_nearest(numerator / denominator)
             a_bar[(-k, d)] = ((-1) ** (d + 1)) * a_bar[(k, d)]
@@ -113,7 +114,7 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
                     for j in range(d, D + 1):
                         binom = math.comb(j, d)
                         diff_t = t_bar[0] - t_bar[k]
-                        sum_val += binom * a_bar[(k, j)] * (diff_t ** (j - d))
+                        sum_val += binom * a_bar.get((k, j), 0) * (diff_t ** (j - d))
                 a_bar[(0, d)] = -2 * sum_val
             else:
                 a_bar[(0, d)] = 0
@@ -126,8 +127,7 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
             # First term: sum_{k=-ceil(K/2)}^2 a_kd
             sum1 = 0.0
             for k in range(-half_K, 3):
-                if (k, d) in a_bar:
-                    sum1 += a_bar[(k, d)]
+                sum1 += a_bar.get((k, d), 0)
             
             # Second term: sum_{j=d+1}^D binom(j,d) sum_{k=-ceil(K/2)}^{-1} a_kj (t0 - tk)^(j-d)
             sum2 = 0.0
@@ -136,13 +136,25 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
                 inner_sum = 0.0
                 for k in range(-half_K, 0):
                     diff_t = t_bar[0] - t_bar[k]
-                    inner_sum += a_bar[(k, j)] * (diff_t ** (j - d))
+                    inner_sum += a_bar.get((k, j), 0) * (diff_t ** (j - d))
                 sum2 += binom * inner_sum
                 
             a_bar[(-1, d)] = -sum1 - sum2
             a_bar[(1, d)] = ((-1) ** (d + 1)) * a_bar[(-1, d)]
             
-    return t_bar, a_bar
+    # Step 6: Recursive Specification for polynomial coefficients
+    a_tilde = {k: {d: a_bar.get((k, d), 0) for d in range(D + 1)} for k in t_bar}
+    for k in range(-half_K, half_K + 1):
+        for d in range(D + 1):
+            acc = 0.0
+            for l in range(-half_K, k):
+                for j in range(d, D + 1):
+                    binom = math.comb(j, d)
+                    diff_t = t_bar[k] - t_bar[l]
+                    acc += binom * a_tilde[l][j] * (diff_t ** (j - d))
+            a_tilde[k][d] += acc
+            
+    return t_bar, a_bar, a_tilde
 ```
 
 **Edge Cases and Pitfalls:**
@@ -151,8 +163,8 @@ def compute_quantized_knots_and_coefficients(mu, rho, zeta_particle, alpha, t_k,
 *   **Exception Handling:** The formula for $\bar{a}_{kd}$ excludes $k=1$ and uneven $d$ if $K$ is uneven [S1]. These must be handled separately via the boundary coefficient formulas [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
 *   **Performance:** Allows exact integer arithmetic operations, avoiding floating-point precision issues during rendering [S1].
 *   **Limitations:** Introduces a quantization error dependent on $\tau$ and $\varsigma$ [S1].
 *   **When to use:** When integer-only arithmetic is required or preferred for performance or precision stability in volume rendering [S1].

@@ -3,14 +3,14 @@
 Also called: Gather-based reconstruction, Ray-casting approach
 
 ## Overview
-Feed-Backward Reconstruction is a method for resampling discrete input data into a continuous output signal by treating convolution as a gathering operation. It solves the problem of reconstructing a continuous signal from discrete samples by calculating each output value individually, centering a reconstruction kernel at the output position and summing the weighted contributions of neighboring input samples [S1, unofficial]. It is distinguished from its sibling [Feed-Forward Reconstruction](2513-spatial-convolution.md) by its access pattern: it accesses each output sample once and each input sample multiple times, whereas feed-forward spreads each input sample to multiple outputs [S1, unofficial]. This approach is computationally preferred for small, limited-extent kernels typical in volume rendering because it avoids the overhead of initializing and zeroing large output buffers required by feed-forward methods [S1, unofficial].
+Feed-Backward Reconstruction is a method for resampling discrete input data into a continuous output signal by treating convolution as a gathering operation [S1, unofficial]. It solves the problem of reconstructing a continuous signal from discrete samples by calculating each output value individually, centering a reconstruction kernel at the output position and summing the weighted contributions of neighboring input samples [S1, unofficial]. It is distinguished from its sibling [Feed-Forward Reconstruction](2513-spatial-convolution.md) by its access pattern: it accesses each output sample once and each input sample multiple times, whereas feed-forward spreads each input sample to multiple outputs [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A set of discrete input samples $X = \{x_j\}$, where $j$ indexes the input positions.
-- Input: A reconstruction kernel $K(u)$, defined by its support width and shape (e.g., triangular for linear interpolation).
-- Input: A set of output positions $Y = \{y_i\}$, where $i$ indexes the output positions (e.g., pixel centers or ray sample locations).
-- Output: A set of reconstructed output values $A = \{a_i\}$.
+- Input: A set of discrete input samples $X = \{x_j\}$ [S1, unofficial].
+- Input: A reconstruction kernel $K(u)$, defined by its support width and shape (e.g., triangular for linear interpolation) [S1, unofficial].
+- Input: A set of output positions $Y = \{y_i\}$ [S1, unofficial].
+- Output: A set of reconstructed output values $A = \{a_i\}$ [S1, unofficial].
 
 **Data Structures:**
 - `input_samples`: Array of values $x_j$.
@@ -19,15 +19,15 @@ Feed-Backward Reconstruction is a method for resampling discrete input data into
 - `output_samples`: Array of values $a_i$, initialized to 0.
 
 **Numbered Steps:**
-1. Initialize the output array `output_samples` with zeros for all output indices $i$.
-2. Iterate through each output sample index $i$ from $0$ to $N_{out}-1$:
-    a. Set the current output value $a_i = 0$.
-    b. Identify all input samples $x_j$ that lie within the support of the reconstruction kernel centered at $y_i$. Let this set be $J_i$.
-    c. For each input sample $j \in J_i$:
-        i. Calculate the relative distance $u = y_i - y_j$ (or the appropriate coordinate transformation depending on the kernel definition).
-        ii. Evaluate the kernel weight $w = K(u)$.
-        iii. Accumulate the contribution: $a_i \leftarrow a_i + x_j \cdot w$.
-3. The final array `output_samples` contains the reconstructed values.
+1. Initialize the output array `output_samples` with zeros for all output indices $i$ [S1, unofficial].
+2. Iterate through each output sample index $i$ [S1, unofficial]:
+    a. Set the current output value $a_i = 0$ [S1, unofficial].
+    b. Identify all input samples $x_j$ that lie within the support of the reconstruction kernel centered at $y_i$ [S1, unofficial].
+    c. For each input sample $j$ in the support:
+        i. Calculate the relative distance $u = y_i - y_j$ [S1, unofficial].
+        ii. Evaluate the kernel weight $w = K(u)$ [S1, unofficial].
+        iii. Accumulate the contribution: $a_i \leftarrow a_i + x_j \cdot w$ [S1, unofficial].
+3. The final array `output_samples` contains the reconstructed values [S1, unofficial].
 
 **Formulas:**
 The value of the $i$-th output sample $a_i$ is computed as:
@@ -35,95 +35,70 @@ $$
 a_i = \sum_{j \in J_i} x_j \cdot K(y_i - y_j)
 $$
 where:
-- $x_j$ is the value of the $j$-th input sample.
-- $K(\cdot)$ is the reconstruction kernel function.
-- $y_i$ is the position of the $i$-th output sample.
-- $y_j$ is the position of the $j$-th input sample.
-- $J_i$ is the set of input indices $j$ such that $|y_i - y_j|$ is within the support of $K$.
+- $x_j$ is the value of the $j$-th input sample [S1, unofficial].
+- $K(\cdot)$ is the reconstruction kernel function [S1, unofficial].
+- $y_i$ is the position of the $i$-th output sample [S1, unofficial].
+- $y_j$ is the position of the $j$-th input sample [S1, unofficial].
+- $J_i$ is the set of input indices $j$ such that $|y_i - y_j|$ is within the support of $K$ [S1, unofficial].
 
 **Parameters:**
-- Kernel support width: Determines the number of input samples $j$ to consider for each output $i$. For a triangular pulse (linear interpolation), the support is typically 2 units (covering immediate neighbors).
-- Output sampling rate: The density of output positions $y_i$ relative to input positions $y_j$.
+- Kernel support width: Determines the number of input samples $j$ to consider for each output $i$. For a triangular pulse (linear interpolation), the support is typically 2 units (covering immediate neighbors) [S1, unofficial].
+- Output sampling rate: The density of output positions $y_i$ relative to input positions $y_j$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Kernel Support Boundaries:** If an output sample is positioned such that no input samples fall within the kernel support, the output value will be 0. This can cause artifacts if the output grid is significantly finer than the input grid without proper padding or extrapolation [S1, unofficial].
+- **Kernel Support Boundaries:** If an output sample is positioned such that no input samples fall within the kernel support, the output value will be 0 [S1, unofficial].
 - **Precision:** Accumulating many small weights can lead to floating-point precision issues. Using double precision for the accumulator is recommended if the number of contributing samples is large [G].
-- **Degenerate Input:** If input samples are not uniformly spaced, the distance calculation $y_i - y_j$ must use the actual coordinates, not just indices [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def feed_backward_reconstruction(input_samples, input_positions, output_positions, kernel_func):
+def triangular_kernel(u):
+    """Triangular kernel K(u) = max(0, 1 - |u|) for linear interpolation."""
+    return max(0.0, 1.0 - abs(u))
+
+def feed_backward_reconstruction(input_samples, input_positions, output_positions):
     """
     Reconstructs output samples by gathering contributions from input samples.
-    
-    Args:
-        input_samples: List of float values x_j.
-        input_positions: List of float coordinates y_j corresponding to input_samples.
-        output_positions: List of float coordinates y_i for desired output samples.
-        kernel_func: Function K(u) that returns the kernel weight for distance u.
-        
-    Returns:
-        List of float values a_i for each output position.
+    Implements the feed-backward method using a triangular kernel (linear interpolation).
     """
     num_outputs = len(output_positions)
     num_inputs = len(input_samples)
     output_samples = [0.0] * num_outputs
-    
-    # Pre-calculate kernel support radius to optimize inner loop
-    # Assuming kernel is symmetric and has finite support [-R, R]
-    # This step depends on the specific kernel implementation.
-    # For a triangular kernel with support 2, R=1.0.
-    kernel_support_radius = get_kernel_support_radius(kernel_func) 
-    
+
     for i in range(num_outputs):
         y_i = output_positions[i]
         current_output = 0.0
-        
-        # Iterate over all input samples to find those within support
-        # Optimization: Use spatial indexing (e.g., grid or tree) to find neighbors
-        # instead of iterating all inputs for large datasets.
+
         for j in range(num_inputs):
             y_j = input_positions[j]
             distance = abs(y_i - y_j)
-            
-            if distance <= kernel_support_radius:
-                weight = kernel_func(distance)
-                current_output += input_samples[j] * weight
-                
-        output_samples[i] = current_output
-        
-    return output_samples
 
-def get_kernel_support_radius(kernel_func):
-    """
-    Helper to determine the radius within which the kernel is non-zero.
-    For a triangular pulse (linear interpolation), support is typically 1.0 
-    if defined on unit intervals, or 2.0 if defined on pixel widths.
-    This is a placeholder for specific kernel logic.
-    """
-    # Example for triangular kernel centered at 0 with base width 2
-    # K(u) = 1 - |u| for |u| < 1, else 0.
-    return 1.0 
+            if distance <= 1.0:  # Support radius for triangular kernel
+                weight = triangular_kernel(distance)
+                current_output += input_samples[j] * weight
+
+        output_samples[i] = current_output
+
+    return output_samples
 ```
 
 ## Subtopics
 
 ### Feed-Forward Reconstruction
-Feed-Forward Reconstruction is the dual approach where convolution is viewed as distributing contributions from each input sample to its neighboring output samples. It centers the reconstruction kernel at an input value and spreads the energy to each output lying under the kernel [S1, unofficial]. It is distinguished from feed-backward by its access pattern: it accesses each input sample once and each output sample many times [S1, unofficial]. It is chosen when the output grid is small relative to the input grid or when memory bandwidth favors writing to scattered locations over reading scattered locations. For example, with 4 input samples and 13 output samples using linear reconstruction, feed-forward results in 24 sample accesses (5 output accesses per input * 4 inputs + 4 input reads), whereas feed-backward results in 39 sample accesses (2 input accesses per output * 13 outputs + 13 output writes) [S1, unofficial].
+Feed-Forward Reconstruction is the dual approach where convolution is viewed as distributing contributions from each input sample to its neighboring output samples [S1, unofficial]. It centers the reconstruction kernel at an input value and spreads the energy to each output lying under the kernel [S1, unofficial]. It is distinguished from feed-backward by its access pattern: it accesses each input sample once and each output sample many times [S1, unofficial]. For example, with 4 input samples and 13 output samples using linear reconstruction, feed-forward results in 24 sample accesses (5 output accesses per input * 4 inputs + 4 input reads), whereas feed-backward results in 39 sample accesses (2 input accesses per output * 13 outputs + 13 output writes) [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N_{out} \cdot N_{kernel})$, where $N_{out}$ is the number of output samples and $N_{kernel}$ is the number of input samples within the kernel support for each output. In the worst case (dense sampling), $N_{kernel}$ is constant, making it linear in $N_{out}$.
-- **Memory Complexity:** $O(N_{out})$ for storing the output buffer. Input data is read multiple times.
-- **Measured Performance:** In the example of 4 input samples and 13 output samples with linear reconstruction, feed-backward requires 39 sample accesses (2 input reads per output * 13 outputs + 13 output writes) [S1, unofficial]. Feed-forward requires 24 sample accesses (5 output writes per input * 4 inputs + 4 input reads) [S1, unofficial]. Thus, feed-forward is more efficient in this specific low-resolution upsampling scenario.
-- **Strengths:** Simple implementation; no need to zero-initialize large output buffers if the output size is small; cache-friendly for the output buffer if written sequentially.
-- **Limitations:** Inefficient for high-resolution outputs where $N_{out} \gg N_{kernel}$, as it may require more total memory writes than feed-backward.
-- **When to use:** When the output resolution is low or comparable to the input resolution, or when the kernel support is large relative to the output grid density.
-- **When not to use:** When the output resolution is very high, as the number of output writes becomes prohibitive compared to the gather-based approach.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** In the example of 4 input samples and 13 output samples with linear reconstruction, feed-backward requires 39 sample accesses (2 input reads per output * 13 outputs + 13 output writes) [S1, unofficial]. Feed-forward requires 24 sample accesses (5 output writes per input * 4 inputs + 4 input reads) [S1, unofficial].
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-Feed-Backward Reconstruction is a fundamental technique in signal processing and computer graphics for resampling data. It is based on the principle of convolution, where the output is the weighted sum of input samples. The term "feed-backward" was popularized in the context of volume rendering by Feibush [S1, unofficial], who contrasted it with feed-forward methods in the context of parallel volume rendering algorithms. The method is widely used in image processing, texture mapping, and volume rendering pipelines where high-quality reconstruction is required.
+Feed-Backward Reconstruction is a fundamental technique in signal processing and computer graphics for resampling data. It is based on the principle of convolution, where the output is the weighted sum of input samples. The method is referenced in volume rendering literature as [Feibush 80] [S1, unofficial]. It is widely used in image processing, texture mapping, and volume rendering pipelines where high-quality reconstruction is required.
 
 ## Sources
 [S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)

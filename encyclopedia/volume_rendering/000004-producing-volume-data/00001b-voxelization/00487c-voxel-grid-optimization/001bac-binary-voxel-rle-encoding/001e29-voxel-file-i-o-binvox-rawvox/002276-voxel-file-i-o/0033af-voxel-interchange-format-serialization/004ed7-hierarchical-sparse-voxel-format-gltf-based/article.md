@@ -1,0 +1,149 @@
+# Hierarchical Sparse Voxel Format (glTF-based)
+
+Also called: OpenVoxelFileFormat, Voxel Chunk Format, Voxel Volume Data Format & Encoding, glTF-based Voxel Format
+
+## Overview
+A hierarchical sparse voxel data format that divides a single voxel object into volumes and primitives (chunks) to handle sparsity, modeled after glTF's mesh/primitive structure [S1, unofficial]. It differs from its sibling [Voxel Interchange Format Serialization](7065-voxel-interchange-format-serialization.md) by introducing a hierarchical structure of volumes and primitives rather than a flat 1D array, allowing for efficient storage of large, sparse 3D scenes [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D voxel scene with sparse occupancy.
+**Outputs:** A JSON structure mirroring glTF conventions containing `voxelVolumes` and a binary buffer for voxel data.
+
+**Data Structures:**
+1.  **Voxel Volume:** An object containing an array of primitives. It defines the global bounds and attributes for a set of voxels.
+    *   `voxelVolumes`: Array of volume objects.
+    *   `attributes`: Array of attribute definitions (semantic, componentType, normalized).
+    *   `primitives`: Array of primitive objects.
+2.  **Primitive:** Defines a 3D box volume within the Voxel Volume.
+    *   `position`: 3 integers representing the offset coordinates (min corner) of the box.
+    *   `size`: 3 unsigned integers representing the volume dimensions.
+    *   `material`: Integer index to a palette or single material.
+    *   `bufferView`: Reference to the underlying data buffer.
+3.  **Buffer View:** References the underlying binary data.
+    *   `buffer`: Index into the glTF buffer array.
+    *   `byteOffset`: Start of voxel data in the buffer.
+    *   `byteLength`: Size of voxel data in bytes.
+4.  **Voxel Record (Binary):** A variable-length record for a run of voxels, preceded by a Presence Bitmask.
+    *   **Presence Bitmask:** A leading bitfield specifying which attributes follow.
+    *   **Attributes:** Variable fields based on the mask.
+
+**Numbered Steps:**
+1.  **Parse Presence Bitmask:** Read the first $N$ bits of the voxel record, where $N$ is the number of defined attributes. Each bit corresponds to an attribute in the `attributes` array.
+    *   Example: For attributes `[MATERIAL_INDEX, DENSITY, RLE_LENGTH]`, bit 0 is `MATERIAL_INDEX`, bit 1 is `DENSITY`, bit 2 is `RLE_LENGTH`.
+    *   Mask `111` (binary) indicates all three attributes follow. Mask `110` indicates `MATERIAL_INDEX` and `DENSITY` follow, but `RLE_LENGTH` is omitted (implying a single voxel).
+2.  **Decode Attributes:** Based on the bitmask, read the subsequent bytes.
+    *   `MATERIAL_INDEX`: 8-bit unsigned integer.
+    *   `DENSITY`: 8-bit unsigned integer, normalized.
+    *   `RLE_LENGTH`: 8-bit unsigned integer.
+3.  **Handle RLE Length:** If `RLE_LENGTH` is present:
+    *   The value represents the number of voxels in the run minus 2.
+    *   Value 0 represents exactly 2 voxels.
+    *   Value 1 represents 3 voxels.
+    *   Note: 0-voxel runs are never stored. 1-voxel runs are encoded with the explicit length field (presence bit set) but effectively behave as a single voxel record where the length is implicit or handled via the mask logic described in step 1 (if mask is 110, it is a single voxel). *Clarification from source:* "1 voxel is encoded with the RLE_LENGTH a value of 0 in the RLE_LENGTH field can be used to represent 2 voxels." This implies if the mask includes RLE_LENGTH, the value is `count - 2`. If the mask excludes RLE_LENGTH, it is a single voxel.
+4.  **Repeat:** Continue reading voxel records until the `byteLength` of the buffer view is exhausted.
+
+**Formulas:**
+*   Voxel Count from RLE: $C = \text{RLE\_LENGTH} + 2$
+*   Total Voxels in Primitive: $\sum C_i$ for all records $i$ in the primitive's buffer view.
+
+**Parameters:**
+*   `RLE_COUNT_BIT_DEPTH`: 8-bit unsigned integer is proposed as a starting default [S1, unofficial].
+*   `MATERIAL_INDEX`: 8-bit unsigned integer [S1, unofficial].
+*   `DENSITY`: 8-bit unsigned integer, normalized [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **RLE Length 0:** Represents 2 voxels, not 0 [S1, unofficial].
+*   **JSON Integer Precision:** JSON integers use double precision, which may exceed glTF reader capabilities and cause implementation variance across readers [S1, unofficial].
+*   **Terminology:** This format uses 'DENSITY' where Roblox's voxel Disk format uses 'OCCUPANCY' for the same attribute concept [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_voxel_primitive(buffer_view, attributes):
+    """
+    Decodes a voxel primitive from a binary buffer view.
+    
+    Args:
+        buffer_view: Object with 'buffer', 'byteOffset', 'byteLength'.
+        attributes: List of dicts with 'semantic', 'bit_index'.
+        
+    Returns:
+        List of voxel records. Each record is a dict with attribute names as keys
+        and 'count' (number of voxels in the run) as a key.
+    """
+    # Access buffer data (pseudo-access)
+    data = get_buffer_data(buffer_view.buffer, buffer_view.byteOffset, buffer_view.byteLength)
+    pos = 0
+    records = []
+    
+    # Determine which attributes are present based on the bitmask size
+    num_attributes = len(attributes)
+    
+    while pos < len(data):
+        # 1. Parse Presence Bitmask
+        # Read num_attributes bits
+        mask = 0
+        for i in range(num_attributes):
+            bit = (data[pos] >> i) & 1
+            mask |= (bit << i)
+        
+        # Move past the mask byte (assuming mask fits in one byte for <=8 attributes)
+        # Note: Source implies mask is leading bits. If >8 attributes, multi-byte mask needed.
+        # Assuming <=8 attributes for this implementation based on source examples.
+        pos += 1 
+        
+        # 2. Decode Attributes
+        record = {}
+        
+        # Check for RLE_LENGTH (last attribute in example)
+        has_rle = (mask >> (num_attributes - 1)) & 1
+        
+        # Read MATERIAL_INDEX (first attribute in example)
+        has_mat = (mask >> 0) & 1
+        if has_mat:
+            record['MATERIAL_INDEX'] = data[pos]
+            pos += 1
+            
+        # Read DENSITY (second attribute in example)
+        has_dens = (mask >> 1) & 1
+        if has_dens:
+            record['DENSITY'] = data[pos]
+            pos += 1
+            
+        # Read RLE_LENGTH
+        if has_rle:
+            rle_val = data[pos]
+            pos += 1
+            # RLE value is count - 2
+            record['count'] = rle_val + 2
+        else:
+            # No RLE length means single voxel
+            record['count'] = 1
+            
+        records.append(record)
+        
+    return records
+```
+
+## Subtopics
+
+### Voxel Volume
+A container for primitives, defining the global bounds and attribute schema for a chunk of voxels. It allows grouping related voxels. [Link](7065-voxel-interchange-format-serialization.md)
+
+### Primitive
+A subset of a Voxel Volume, defining a specific 3D box region and its associated binary data. It enables independent encoding and access of sparse regions. [Link](7065-voxel-interchange-format-serialization.md)
+
+## Operating characteristics
+*   **Time Complexity:** Decoding is linear with respect to the number of bytes in the buffer view, $O(N)$, where $N$ is the byte length. Parsing the bitmask is constant time per record.
+*   **Memory Complexity:** Depends on the sparsity and the efficiency of the RLE encoding. Sparse data with long runs of identical voxels will be significantly smaller than dense data.
+*   **Strengths:** Leverages glTF infrastructure for buffer management and metadata. Variable-length records allow efficient storage of single voxels without overhead. Hierarchical structure supports large scenes.
+*   **Limitations:** JSON integer precision issues may cause portability problems. RLE is a simple compression and may not be optimal for all data types. 8-bit RLE length limits run lengths to 258 voxels (0-255 + 2).
+*   **When to use:** When storing sparse voxel data in a glTF-compatible pipeline, especially for terrain or large-scale environments where sparsity is high.
+*   **When not to use:** For dense, fully occupied volumes where the overhead of the bitmask and structure outweighs the benefits. For data requiring high-precision floating point density without normalization.
+
+## Background
+The format was proposed in a GitHub issue by dougbinks on November 28, 2025, as part of the OpenVoxelFileFormat project [S1, unofficial]. It was designed to handle sparsity in voxel data by dividing objects into volumes and primitives, mirroring the glTF mesh/primitive model. The discussion involved contributors like scallyw4g, who suggested using RLE encoding and 8-bit bit depths for counts [S1, unofficial]. The format draws inspiration from Roblox's voxel Disk format, differing primarily in terminology (Density vs. Occupancy) [S1, unofficial].
+
+## Sources
+[S1] Voxel data format, https://github.com/enkisoftware/OpenVoxelFileFormat/issues/4, fetched 2026-10-27 (unofficial)

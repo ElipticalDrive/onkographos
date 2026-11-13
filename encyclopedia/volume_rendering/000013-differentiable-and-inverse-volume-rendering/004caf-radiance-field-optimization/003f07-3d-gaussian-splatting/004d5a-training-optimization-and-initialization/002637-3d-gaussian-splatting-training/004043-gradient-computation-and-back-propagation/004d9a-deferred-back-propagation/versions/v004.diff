@@ -1,0 +1,172 @@
+--- v003.md
++++ v004.md
+@@ -4,107 +4,93 @@
+ 
+ ## Overview
+-Deferred back-propagation is a memory-efficient technique for optimizing radiance fields using image losses that require full-resolution inputs, such as VGG-based style losses or Gram-matrix losses [S1]. Unlike sparse pixel sampling, which is insufficient for CNN-based losses, this method enables full-resolution optimization by decoupling the loss computation from the differentiable rendering pass [S1]. It sets itself apart by maintaining the memory footprint of a small patch while correctly computing gradients for the entire image, avoiding the geometric inaccuracies and lack of style details associated with sparse sampling [S1].
++Deferred back-propagation is a memory-efficient technique for optimizing radiance fields using image losses that require full-resolution inputs, such as VGG-based style losses or Neural Network Feature Matching (NNFM) [S1]. Unlike sparse pixel sampling, which is insufficient for CNN-based losses, this method enables full-resolution optimization by decoupling the loss computation from the differentiable rendering pass, maintaining a GPU memory footprint equivalent to a single small patch [S1].
+ 
+ ## How it works
++The method solves the problem where standard differentiable volume rendering is too memory-intensive for full-resolution images because pixel color is composited from many samples [S1]. It allows the use of complex image losses that fail with sparse sampling by caching gradients and re-rendering only necessary regions [S1].
++
+ **Inputs:**
+-*   A radiance field representation (e.g., 3D Gaussians or volumetric grid).
+-*   Camera viewpoints for rendering.
+-*   A loss function $L$ that operates on full-resolution 2D images (e.g., VGG feature loss).
+-*   Patch size parameters (width $W_p$, height $H_p$) and stride.
++- A radiance field representation (e.g., 3D Gaussian Splatting or NeRF).
++- A full-resolution target image (e.g., style image or ground truth).
++- A loss function $L$ that operates on full-resolution images (e.g., NNFM, Gram matrix).
+ 
+ **Outputs:**
+-*   Updated scene parameters (positions, covariances, colors, opacities) via gradient accumulation.
++- Accumulated gradients for scene parameters (positions, scales, rotations, colors).
+ 
+ **Data Structures:**
+-*   **Cached Gradient Buffer:** A 2D array of shape $(H, W, C)$ matching the full-resolution image, storing $\frac{\partial L}{\partial \mathbf{C}(x,y)}$. Data type is typically `float` or `half` depending on precision requirements.
+-*   **Scene Parameter Gradients:** Accumulated in standard optimizer buffers.
++- `cached_grads`: A 2D array (image) of the same resolution as the rendered image, storing $\frac{\partial L}{\partial I(x,y)}$.
++- `scene_params`: The set of differentiable parameters for the radiance field.
++- `patch_bounds`: Coordinates defining the spatial extent of the current patch being processed.
+ 
+ **Steps:**
+-1.  **Full-Resolution Forward Pass (Non-Differentiable):**
+-    Render the full-resolution image $\mathbf{C}_{full}$ from the current viewpoint. Auto-differentiation is explicitly disabled for this pass to save memory.
+-    $$
+-    \mathbf{C}_{full}(x,y) = \text{Render}_{\text{no\_grad}}(\text{Scene}, \text{Camera})
+-    $$
+-
+-2.  **Loss and Gradient Computation:**
+-    Compute the image loss $L$ using $\mathbf{C}_{full}$ and the target style/content features. Compute the gradient of the loss with respect to the pixel colors:
+-    $$
+-    \mathbf{G}_{cached}(x,y) = \frac{\partial L}{\partial \mathbf{C}_{full}(x,y)}
+-    $$
+-    Store $\mathbf{G}_{cached}$ in the Cached Gradient Buffer.
+-
+-3.  **Patch-wise Back-propagation:**
+-    Iterate over the image in patches. For each patch $p$ defined by spatial bounds $[x_1, x_2] \times [y_1, y_2]$:
+-    a.  **Patch Forward Pass (Differentiable):**
+-        Render only the pixels within the patch bounds. Auto-differentiation is enabled.
+-        $$
+-        \mathbf{C}_{patch}(x,y) = \text{Render}_{\text{grad}}(\text{Scene}, \text{Camera}, \text{Bounds}_p)
+-        $$
+-    b.  **Gradient Accumulation:**
+-        Extract the cached gradients for the current patch: $\mathbf{G}_{patch} = \mathbf{G}_{cached}[y_1:y_2, x_1:x_2]$.
+-        Back-propagate these gradients through the differentiable render function to update scene parameters $\theta$:
+-        $$
+-        \frac{\partial L}{\partial \theta} \leftarrow \frac{\partial L}{\partial \theta} + \sum_{(x,y) \in \text{Patch}_p} \frac{\partial L}{\partial \mathbf{C}_{patch}(x,y)} \frac{\partial \mathbf{C}_{patch}(x,y)}{\partial \theta}
+-        $$
+-        Note: $\frac{\partial L}{\partial \mathbf{C}_{patch}(x,y)}$ is simply $\mathbf{G}_{cached}(x,y)$ from Step 2.
+-
+-4.  **Optimization Step:**
+-    Apply the accumulated gradients to the scene parameters using an optimizer (e.g., Adam).
++1. **Forward Render (Non-differentiable):** Render a full-resolution image $I_{full}$ from the current viewpoint using the radiance field, with auto-differentiation disabled.
++2. **Loss Computation:** Compute the image loss $L(I_{full})$ and its gradient with respect to the pixel values, $\frac{\partial L}{\partial I_{full}}$. Store this result in `cached_grads`.
++3. **Patch Iteration:** Iterate over the image in patches (e.g., $P \times P$ pixels). For each patch:
++    a. **Local Render (Differentiable):** Re-render only the pixels within the current patch bounds using the radiance field, with auto-differentiation enabled.
++    b. **Back-propagation:** Back-propagate the corresponding values from `cached_grads` for this patch through the differentiable renderer to compute gradients for the scene parameters.
++    c. **Accumulation:** Accumulate these gradients into the global gradient buffers for the scene parameters.
++4. **Optimization Step:** Update the scene parameters using the accumulated gradients.
+ 
+ **Pseudocode:**
+ ```python
+-def deferred_backprop(scene, camera, loss_fn, patch_size=(256, 256)):
+-    # Step 1: Render full image without gradients
+-    with torch.no_grad():
+-        full_image = render(scene, camera)  # Shape: (H, W, C)
++def deferred_backprop(radiance_field, target_image, loss_fn, patch_size):
++    # Step 1: Render full resolution without gradients
++    I_full = render(radiance_field, differentiable=False)
+     
+-    # Step 2: Compute loss and cached gradients
+-    loss, cached_grads = compute_loss_and_grads(loss_fn, full_image)
++    # Step 2: Compute loss and cache gradients
++    loss = loss_fn(I_full, target_image)
++    # Compute gradient of loss w.r.t. image pixels
++    cached_grads = compute_gradient(loss, I_full)
+     
+-    # Initialize scene gradients (handled by optimizer or manual accumulation)
+-    # Assuming scene parameters have .grad attributes
++    # Step 3: Iterate over patches
++    num_patches_x = I_full.width // patch_size
++    num_patches_y = I_full.height // patch_size
+     
+-    # Step 3: Patch-wise back-propagation
+-    H, W = full_image.shape[:2]
+-    for y in range(0, H, patch_size[0]):
+-        for x in range(0, W, patch_size[1]):
+-            y_end = min(y + patch_size[0], H)
+-            x_end = min(x + patch_size[1], W)
++    for py in range(num_patches_y):
++        for px in range(num_patches_x):
++            # Define patch boundaries
++            x_start = px * patch_size
++            y_start = py * patch_size
++            x_end = x_start + patch_size
++            y_end = y_start + patch_size
+             
+             # Extract cached gradients for this patch
+-            patch_grads = cached_grads[y:y_end, x:x_end]
++            patch_grads = cached_grads[y_start:y_end, x_start:x_end]
+             
+-            # Render patch with gradients enabled
+-            # The render function must support bounding box culling or masking
+-            patch_image = render(scene, camera, bounds=(x, y, x_end, y_end))
++            # Step 3a: Re-render patch with gradients enabled
++            # The renderer only computes gradients for pixels in this patch
++            I_patch = render(radiance_field, differentiable=True, 
++                             pixel_bounds=(x_start, y_start, x_end, y_end))
+             
+-            # Back-propagate cached gradients to scene parameters
+-            # This computes dL/d_theta for the current patch
+-            patch_image.backward(patch_grads)
++            # Step 3b: Back-propagate cached gradients to scene parameters
++            # The chain rule is applied: dL/dParams = dL/dI_patch * dI_patch/dParams
++            grads = compute_gradient(loss_fn(I_patch, target_image), I_patch, 
++                                     inputs=radiance_field.parameters)
+             
+-    # Step 4: Optimizer step (external)
+-    optimizer.step()
+-    optimizer.zero_grad()
++            # Scale gradients by the cached image-space gradients
++            # Note: In practice, the gradient of the loss w.r.t. I_patch 
++            # is already computed in Step 2, so we multiply or pass it directly 
++            # depending on the autodiff engine's API.
++            # Here we assume compute_gradient can take an upstream gradient.
++            grads = grads * patch_grads
++            
++            # Step 3c: Accumulate gradients
++            radiance_field.accumulate_gradients(grads)
++
++    return radiance_field
+ ```
+ 
+-**Parameters:**
+-*   **Patch Size:** Determines the trade-off between memory usage and overhead. Typical values are $256 \times 256$ or $512 \times 512$ pixels, fitting within GPU memory limits for differentiable volume rendering [S1].
+-*   **Stride:** Can be equal to patch size (non-overlapping) or smaller (overlapping) depending on implementation needs. Non-overlapping is standard for this method [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Memory Overflow:** If the patch size is too large, the differentiable render pass will OOM. The patch size must be small enough to hold the intermediate activation maps for all samples along rays within the patch [S1].
+-*   **Boundary Artifacts:** Non-overlapping patches may cause discontinuities if the loss function is sensitive to local pixel correlations (e.g., Gram matrix). However, since the loss is computed on the full image first, the gradients are consistent; the re-rendering is only for the Jacobian, so boundaries are handled correctly by the chain rule [S1].
+-*   **Precision:** Using `half` precision for cached gradients may introduce noise in style transfer tasks. `float` is preferred for the cached gradient buffer [S1].
++- **Memory Footprint:** The memory usage is dominated by the storage of `cached_grads` (full resolution) and the temporary buffer for the differentiable patch render. Ensure `cached_grads` fits in memory; if not, the patch size must be increased or the image split further [S1].
++- **Gradient Consistency:** The gradients computed in the patch-wise pass must exactly match the gradients that would have been computed in a single full-resolution differentiable pass. This relies on the linearity of the gradient accumulation with respect to independent pixels [S1].
++- **Boundary Artifacts:** If patches overlap or have boundaries, ensure that the gradient accumulation handles shared pixels correctly. The standard implementation uses non-overlapping patches [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{patches} \cdot T_{render})$, where $N_{patches}$ is the number of patches covering the image and $T_{render}$ is the time to render one patch. This is slower than a single forward pass but necessary for memory constraints.
+-*   **Memory Complexity:** $O(W \cdot H \cdot C)$ for the cached gradient buffer plus $O(W_p \cdot H_p \cdot C)$ for the differentiable render buffer. This is significantly lower than $O(W \cdot H \cdot C)$ for the differentiable render buffer required by standard full-image back-propagation [S1].
+-*   **Strengths:** Enables the use of sophisticated CNN-based losses (VGG, Gram) on full-resolution images without OOM errors. Improves stylization quality and content preservation compared to sparse sampling [S1].
+-*   **Limitations:** Increased training time due to multiple render passes. Not suitable for per-pixel losses (L1/L2) where sparse sampling is more efficient [S1].
+-*   **When to Use:** When optimizing radiance fields with style losses, perceptual losses, or any loss requiring full-image context.
+-*   **When Not to Use:** For simple photometric losses (L1/L2) where sparse pixel sampling is sufficient and faster [S1].
++- **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of patches. Since each pixel is rendered twice (once non-differentiable, once differentiable), the computational cost is approximately double that of a single non-differentiable render plus one differentiable render per patch.
++- **Memory Complexity:** $O(N + P_{render})$, where $N$ is the memory for the full-resolution cached gradients and $P_{render}$ is the memory for the differentiable rendering of a single patch. This is significantly lower than $O(N)$ for a full differentiable render of the entire image.
++- **Strengths:** Enables the use of sophisticated CNN-based losses (VGG, NNFM) on full-resolution images for radiance field optimization, which was previously impossible due to memory constraints [S1].
++- **Limitations:** Requires two rendering passes per optimization step (one non-differentiable, one differentiable per patch). Not suitable for losses that are strictly per-pixel and independent, where sparse sampling is more efficient [S1].
+ 
+ ## Background
+-Deferred back-propagation was introduced in the context of "Artistic Radiance Fields" (ARF) by Zhang et al. [S1]. The method addresses the limitation of volumetric radiance field rendering, which is memory-inefficient because pixel color is composited from many samples, making full-resolution rendering impractical for CNN-based losses [S1]. Prior methods often resorted to sparse pixel sampling, which fails for losses like NNFM or Gram matrices that require full-resolution images [S1]. The technique allows for high-quality 3D stylization by enabling the use of full-resolution style images, leading to better visual quality and consistency across viewpoints compared to previous methods [S1].
++Deferred back-propagation was introduced in the context of "Artistic Radiance Fields" (ARF) for 3D scene stylization [S1]. The authors noted that volumetric radiance field rendering consumes significant memory, often forcing training to regress only sparsely sampled pixels, which is insufficient for computing VGG features used in style losses [S1]. The method was developed to allow optimization on high-resolution images by accumulating cached gradients in a patch-wise fashion [S1].
+ 
+ ## Sources

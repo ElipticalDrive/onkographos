@@ -3,163 +3,173 @@
 Also called: Back-Projection Equation, Expected Feature Back-Projection, FBP, Feature Back-Projection
 
 ## Overview
-Gradient-Weighted Feature Back-Projection is a training-free method for rendering feature fields in 3D Gaussian Splatting by aggregating 2D feature embeddings from training views into pre-trained 3D Gaussians [S1]. It solves the problem of assigning semantic or appearance features to 3D Gaussians without the computational cost and memory overhead of training a separate feature field [S1]. Unlike training-based alternatives like Feature 3DGS, which require 20–30 minutes for optimization, this method completes the aggregation in a single pass through training views, offering a 10x speedup and high-quality 3D segmentation results [S1]. It sets itself apart by using the rendering gradient (opacity-weighted transmittance) as the back-projection weight, effectively treating the gradient as a measure of Gaussian influence on the final pixel [S1].
+Gradient-Weighted Feature Back-Projection is a training-free method for rendering feature fields in 3D Gaussian Splatting by aggregating 2D features from training views into pre-trained 3D Gaussians. It solves the problem of assigning semantic or appearance features to 3D primitives without the computational cost of training a separate feature field. Unlike training-based alternatives like Feature 3DGS, which require iterative optimization of feature attributes, this method computes features in a single pass using the rendering gradient as a weighting factor [S1].
 
 ## How it works
-The method computes the feature $\mathbf{f}_k$ for each Gaussian $k$ by back-projecting 2D features $\mathbf{F}_{2D}$ observed in multiple training views, weighted by the Gaussian's contribution to the rendered image.
+**Inputs:**
+*   A set of $N$ pre-trained 3D Gaussians with parameters $\{\mathbf{g}_k\}_{k=1}^N$ (position, scale, rotation, opacity, color).
+*   A set of $V$ training views, each providing a 2D feature map $\mathbf{F}_{2D}(x, y, v)$ and the corresponding ground truth image or rendered image. The feature maps are typically extracted from models like LSeg [S1] or DINOv2 [S1].
 
-**Inputs and Outputs:**
-*   **Inputs:**
-    *   A set of pre-trained 3D Gaussians $\{g_k\}_{k=1}^N$ with parameters (mean, covariance, opacity, color).
-    *   A set of $V$ training views, each providing a rendered 2D feature map $\mathbf{F}_{2D}(x, y, v)$ for $v \in \{1, \dots, V\}$. These features are typically extracted from a pre-trained model (e.g., LSeg [S1], DINOv2 [S1]) using the same camera poses and intrinsics as the training data.
-    *   The rasterizer parameters (resolution, near/far planes).
-*   **Outputs:**
-    *   A feature vector $\mathbf{f}_k \in \mathbb{R}^D$ for each Gaussian $k$, where $D$ is the feature dimension.
+**Outputs:**
+*   A feature vector $\mathbf{f}_k \in \mathbb{R}^D$ for each Gaussian $k$, where $D$ is the feature dimension.
 
 **Data Structures:**
-*   **Gaussian Buffer:** Stores $N$ Gaussians. Each Gaussian $k$ has a feature field $\mathbf{f}_k$ initialized to zero or a default value.
-*   **Feature Map Buffer:** For each view $v$, a 2D array of shape $(H, W, D)$ storing $\mathbf{F}_{2D}(x, y, v)$.
-*   **Accumulation Buffer:** A temporary buffer for each Gaussian to accumulate the numerator and denominator of the back-projection equation.
-
-**Numbered Steps:**
-
-1.  **Initialization:** Initialize the accumulation buffers for all $N$ Gaussians. For the expected feature variant, initialize `num_k = 0` and `den_k = 0` for each $k$. For the accumulated variant, initialize `num_k = 0`.
-2.  **Iterate over Training Views:** For each training view $v$ from $1$ to $V$:
-    a. **Render 2D Features:** Use the current Gaussian parameters to render the scene. Instead of color, render the 2D feature map $\mathbf{F}_{2D}(x, y, v)$ by treating the feature vector as the "color" in the alpha-compositing equation. Simultaneously, compute the opacity $\alpha_k(x, y, v)$ and transmittance $T_k(x, y, v)$ for each Gaussian $k$ contributing to each pixel $(x, y)$.
-    b. **Compute Weights:** For each Gaussian $k$ and each pixel $(x, y)$ it contributes to, calculate the weight $w_{k,x,y,v} = \alpha_k(x, y, v) T_k(x, y, v)$. This weight is equivalent to $\frac{\partial C(x, y)}{\partial c_k}$ [S1].
-    c. **Accumulate:** For each Gaussian $k$, update its buffers:
-       $$ \text{num}_k \leftarrow \text{num}_k + \sum_{(x,y)} \mathbf{F}_{2D}(x, y, v) \cdot w_{k,x,y,v} $$
-       $$ \text{den}_k \leftarrow \text{den}_k + \sum_{(x,y)} w_{k,x,y,v} $$
-       (Note: For the accumulated variant, skip the `den_k` update).
-3.  **Pruning:** Identify Gaussians where the numerator $\text{num}_k$ is zero (indicating no influence on any screen pixel). Prune these Gaussians from further inference to avoid division by zero or irrelevant data [S1].
-4.  **Normalization (Expected Feature Variant):** For each remaining Gaussian $k$, compute the final feature:
-    $$ \mathbf{f}_k = \frac{\text{num}_k}{\text{den}_k} $$
-    If Euclidean normalization is desired, normalize $\mathbf{f}_k$ to unit length [S1].
-5.  **Completion:** The process is complete after a single pass through all training views [S1].
+*   Gaussian attributes: Standard 3DGS representation.
+*   Feature Buffer: An array of size $N \times D$ to store $\mathbf{f}_k$.
+*   Accumulator Buffer: An array of size $N$ to store the denominator (total influence) for normalization.
 
 **Formulas:**
+The rendered color $C(x, y)$ at pixel $(x, y)$ is defined as [S1]:
+$$ C(x, y) = \sum_{n=1}^{N} c_n \alpha_n(x, y) T_n(x, y) $$
+where $c_n$ is the color of the $n$-th Gaussian, $\alpha_n(x, y)$ is its opacity at $(x, y)$, and $T_n(x, y) = \prod_{m < n} (1 - \alpha_m(x, y))$ is the transmittance up to the $n$-th Gaussian.
 
-The rendered color equation serves as the basis for the gradient weight [S1]:
-$$ C(x, y) = \sum_{n \leq N} c_n \alpha_n(x, y) T_n(x, y) $$
-where $T_n(x, y) = \prod_{m < n} (1 - \alpha_m(x, y))$ is the transmittance [S1].
-
-The gradient of the rendered color with respect to the $k$-th Gaussian's color $c_k$ is:
+The gradient of the rendered color with respect to the $k$-th Gaussian's color $c_k$ serves as the back-projection weight [S1]:
 $$ \frac{\partial C(x, y)}{\partial c_k} = \alpha_k(x, y) T_k(x, y) $$
-This gradient serves as the weight for back-projection [S1].
 
-The **Expected Feature Back-Projection** equation is:
-$$ \mathbf{f}_k = \frac{\sum_{(x,y,n)} \mathbf{F}_{2D}(x,y,n) \alpha_k(x,y,n) T_k(x,y,n)}{\sum_{(x,y,n)} \alpha_k(x,y,n) T_k(x,y,n)} $$
-where $\mathbf{F}_{2D}(x, y, n)$ is the feature at $(x, y)$ in the $n$-th viewpoint [S1].
+The **Expected Feature Back-Projection** computes the feature $\mathbf{f}_k$ as [S1]:
+$$ \mathbf{f}_k = \frac{\sum_{v=1}^{V} \sum_{(x,y) \in \text{pixels}_v} \mathbf{F}_{2D}(x, y, v) \alpha_k(x, y, v) T_k(x, y, v)}{\sum_{v=1}^{V} \sum_{(x,y) \in \text{pixels}_v} \alpha_k(x, y, v) T_k(x, y, v)} $$
+where $\mathbf{F}_{2D}(x, y, v)$ is the 2D feature vector at pixel $(x, y)$ in view $v$.
 
-The **Accumulated Back-Projection** variant removes the denominator:
-$$ \mathbf{f}_k = \sum_{(x,y,n)} \mathbf{F}_{2D}(x, y, n) \alpha_k(x, y, n) T_k(x, y, n) $$
-If Euclidean normalization is applied to $\mathbf{f}_k$ after calculation, Equations 4 and 5 become equivalent [S1].
+The **Accumulated Feature Back-Projection** variant omits the denominator [S1]:
+$$ \mathbf{f}_k = \sum_{v=1}^{V} \sum_{(x,y) \in \text{pixels}_v} \mathbf{F}_{2D}(x, y, v) \alpha_k(x, y, v) T_k(x, y, v) $$
+Note: If Euclidean normalization is applied to $\mathbf{f}_k$ after calculation, the Expected and Accumulated variants become equivalent [S1].
 
-**Parameters:**
-*   **Feature Extractor:** LSeg [S1] or DINOv2 [S1] are used for generating $\mathbf{F}_{2D}$.
-*   **Rasterizer:** gsplat [S1] is used for rendering.
-*   **Threshold ($\theta$):** Used in segmentation tasks to filter Gaussians based on similarity to a query [S1]. Not given in the sources for a default value.
-
-**Edge Cases and Pitfalls:**
-*   **Zero Numerator:** If the numerator in the back-projection equation is zero (no Gaussian influence on the screen), the Gaussian should be pruned before inference to avoid division by zero or irrelevant data [S1].
-*   **Precision:** The method relies on accurate alpha-compositing. Standard floating-point precision is assumed, but the use of `half2` buffers for accumulation is suggested by parent principles for memory/throughput alignment [S1].
+**Algorithm Steps:**
+1.  **Initialization:** Initialize $\mathbf{f}_k = \mathbf{0}$ for all $k=1 \dots N$. Initialize denominator accumulator $D_k = 0$ for all $k$.
+2.  **Iterate Views:** For each training view $v$ from $1$ to $V$:
+    a.  **Render:** Render the scene using the current Gaussian parameters to obtain the depth, alpha, and transmittance buffers for all pixels. Simultaneously, retrieve the 2D feature map $\mathbf{F}_{2D}(x, y, v)$ for the view.
+    b.  **Compute Weights:** For each pixel $(x, y)$ in the view, calculate the weight $w_{k}(x, y) = \alpha_k(x, y, v) T_k(x, y, v)$ for all Gaussians $k$ that contribute to this pixel (i.e., those with non-zero opacity).
+    c.  **Accumulate:** For each contributing Gaussian $k$:
+        i.  Add to feature accumulator: $\mathbf{f}_k \leftarrow \mathbf{f}_k + \mathbf{F}_{2D}(x, y, v) \cdot w_{k}(x, y)$.
+        ii. Add to denominator accumulator: $D_k \leftarrow D_k + w_{k}(x, y)$.
+3.  **Pruning:** Identify all Gaussians where the total accumulated weight (numerator or denominator) is zero (or below a small epsilon). These Gaussians have no influence on any rendered pixel and should be pruned to avoid division by zero or irrelevant data [S1].
+4.  **Normalization:** For each remaining Gaussian $k$, if using Expected Feature Back-Projection, compute $\mathbf{f}_k \leftarrow \mathbf{f}_k / D_k$. If using Accumulated, skip this step.
+5.  **Completion:** The process is complete in a single pass through all training views.
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def gradient_weighted_feature_back_projection(gaussians, training_views, feature_extractor, rasterizer):
+def gradient_weighted_feature_back_projection(gaussians, training_views, feature_extractor):
     """
-    gaussians: List of Gaussian objects with properties: mean, cov, opacity, color.
-    training_views: List of dicts containing 'image', 'camera_params', 'feature_map'.
-    feature_extractor: Function to extract features from an image.
-    rasterizer: Function to render Gaussians and return alpha, transmittance, and depth.
+    gaussians: List of Gaussian objects with attributes:
+               - id: int
+               - alpha(x, y, view_idx): function returning opacity at pixel
+               - T(x, y, view_idx): function returning transmittance at pixel
+               - render(): returns rendered image/buffers
+    training_views: List of view objects with attributes:
+                    - id: int
+                    - get_feature_map(): returns 2D tensor F_2D
+                    - width, height: int
+    feature_extractor: Function to extract features from images if not pre-computed.
     
     Returns:
-    features: List of feature vectors for each Gaussian.
+    features: Dict mapping gaussian_id -> feature_vector (D,)
     """
     N = len(gaussians)
-    D = feature_extractor.get_dimension() # e.g., 768 for DINOv2
+    D = None # Feature dimension, determined from first view
     
-    # Initialize accumulation buffers
-    # num_k: shape (N, D)
-    # den_k: shape (N,)
-    num_k = torch.zeros(N, D)
-    den_k = torch.zeros(N)
+    # Initialize accumulators
+    # Using float32 for precision during accumulation
+    feature_acc = [None] * N 
+    denom_acc = [0.0] * N
     
     for view in training_views:
-        # 1. Render the scene to get alpha and transmittance for each Gaussian per pixel
-        # rasterizer returns: alphas (H, W, N), transmittances (H, W, N)
-        # Note: The rasterizer must support returning per-Gaussian contribution weights
-        alphas, transmittances = rasterizer.render(gaussians, view['camera_params'])
+        # 1. Render to get alpha and transmittance buffers
+        # Note: In practice, this is done via a differentiable rasterizer like gsplat
+        # which outputs alpha and T buffers for all pixels.
+        alpha_buffer, T_buffer = view.render_alpha_and_transmittance(gaussians)
         
-        # 2. Get 2D feature map for this view
-        # If feature map is not pre-computed, extract it
-        if 'feature_map' not in view:
-            view['feature_map'] = feature_extractor(view['image'])
-        F_2D = view['feature_map'] # Shape (H, W, D)
+        # 2. Get 2D features for this view
+        # If features are not pre-computed, extract them here
+        F_2D = view.get_feature_map() 
+        if F_2D is None:
+            # Example: F_2D = feature_extractor(view.image)
+            pass
+            
+        if D is None:
+            D = F_2D.shape[-1]
+            for i in range(N):
+                feature_acc[i] = torch.zeros(D, dtype=torch.float32)
+                
+        # 3. Back-project
+        # Iterate over pixels. For efficiency, this is typically done on GPU.
+        # Here we describe the logical accumulation.
+        for y in range(view.height):
+            for x in range(view.width):
+                f_pixel = F_2D[y, x] # Shape (D,)
+                
+                # Get all Gaussians contributing to this pixel
+                # The rasterizer usually provides a list of contributing Gaussian indices
+                contributing_gaussians = view.get_contributing_gaussians(x, y)
+                
+                for g_idx in contributing_gaussians:
+                    g = gaussians[g_idx]
+                    
+                    # Calculate weight: alpha * T
+                    alpha_val = g.alpha(x, y, view.id)
+                    T_val = g.T(x, y, view.id)
+                    weight = alpha_val * T_val
+                    
+                    # Accumulate feature
+                    feature_acc[g_idx] += f_pixel * weight
+                    
+                    # Accumulate denominator
+                    denom_acc[g_idx] += weight
+
+    # 4. Pruning and Normalization
+    features = {}
+    for i in range(N):
+        if denom_acc[i] < 1e-6:
+            # Prune Gaussians with zero influence
+            continue
+            
+        # Expected Feature Back-Projection (Normalized)
+        # If using Accumulated, skip division
+        final_feature = feature_acc[i] / denom_acc[i]
         
-        # 3. Compute weights: w = alpha * transmittance
-        # alphas: (H, W, N), transmittances: (H, W, N)
-        weights = alphas * transmittances # Shape (H, W, N)
+        # Optional: Euclidean normalization to make variants equivalent
+        # final_feature = final_feature / torch.norm(final_feature)
         
-        # 4. Accumulate features
-        # We need to sum over (x, y) for each Gaussian k
-        # weights: (H, W, N), F_2D: (H, W, D)
-        # Element-wise multiply and sum over H, W
-        # Result: (N, D)
-        weighted_features = weights.unsqueeze(-1) * F_2D.unsqueeze(-2) # (H, W, N, D)
-        num_k += weighted_features.sum(dim=(0, 1)) # Sum over H, W
+        features[gaussians[i].id] = final_feature
         
-        # Denominator is sum of weights over H, W for each Gaussian
-        den_k += weights.sum(dim=(0, 1)) # Sum over H, W
-        
-    # 5. Prune Gaussians with zero numerator
-    # Avoid division by zero
-    zero_mask = (num_k == 0).all(dim=1) # Shape (N,)
-    valid_indices = torch.where(~zero_mask)[0]
-    
-    # 6. Normalize
-    # Expected Feature Back-Projection
-    features = torch.zeros(N, D)
-    # Handle division safely
-    safe_den_k = den_k.clone()
-    safe_den_k[safe_den_k == 0] = 1.0 # Prevent div by zero, though pruned Gaussians are ignored
-    
-    features[valid_indices] = num_k[valid_indices] / safe_den_k[valid_indices].unsqueeze(1)
-    
-    # Optional: Euclidean normalization
-    # features = F.normalize(features, p=2, dim=1)
-    
     return features
 ```
+
+**Parameters:**
+*   **Feature Extractor:** Models such as LSeg [S1] or DINOv2 [S1] are used to generate $\mathbf{F}_{2D}$.
+*   **Rasterizer:** `gsplat` [S1] is used for rendering alpha and transmittance buffers.
+*   **Threshold ($\theta$):** Used in segmentation (see Subtopics) to determine if a Gaussian belongs to a query. Typical values are not specified in the source but are user-defined [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Influence:** If a Gaussian has no influence on any screen pixel (numerator/denominator is zero), it must be pruned before inference to prevent division by zero or irrelevant feature assignments [S1].
+*   **Precision:** Accumulation should be performed in higher precision (e.g., float32) to avoid precision loss, especially when summing over many views.
+*   **Sorting:** The transmittance calculation $T_n$ depends on the sorting order of Gaussians. The rasterizer must maintain consistent sorting (e.g., by depth) across views to ensure correct weights [S1].
 
 ## Subtopics
 
 ### 3D Segmentation via Back-Projection
-A direct application of the back-projected features for semantic segmentation. It obtains feature vectors $\{\mathbf{f}_k\} \in \mathbb{R}^D$ for each Gaussian after back-projection, extracts a query embedding $\mathbf{q} \in \mathbb{R}^D$ from a language query or another modality, and computes similarity $sim(\mathbf{f}_k, \mathbf{q})$ (typically cosine similarity) [S1]. Segmented Gaussians $G$ are defined by thresholding similarity: $G = \{g_k \mid \text{sim}(\mathbf{f}_k, \mathbf{q}) > \theta\}$, where $\theta$ is a user-defined threshold [S1]. 2D segmentation mask $M(x, y)$ is defined as $1$ if $\text{sim}(\mathbf{f}_k, \mathbf{q}) > \theta$, else $0$ [S1].
+A direct application of the back-projected features. After obtaining $\{\mathbf{f}_k\}$, a query embedding $\mathbf{q}$ (from language or another modality) is used to compute similarity $sim(\mathbf{f}_k, \mathbf{q})$ (typically cosine similarity). Segmented Gaussians $G$ are defined by thresholding: $G = \{g_k \mid \text{sim}(\mathbf{f}_k, \mathbf{q}) > \theta\}$ [S1]. 2D masks $M(x, y)$ are derived similarly [S1]. This method achieves object segmentation in 30 ms (including text encoding), a 900x speedup compared to masked gradient methods [S1].
 
 ### Identity Encoding
-Encoding each object with a unique vector and back-projecting these vectors into the 3D scene, generalizing across the entire scene given sufficient annotated views [S1]. Two variants exist:
-*   **Orthogonal Encoding:** Assigns procedurally generated orthogonal vectors to represent each object uniquely. This maximizes separation and simplifies segmentation but is limited by the embedding dimension $D$ [S1].
-*   **Contrastive Encoding:** Uses non-orthogonal vectors made distinct through contrastive learning, which maximizes distance between different objects and minimizes distance for same objects. This allows encoding more objects than possible with strictly orthogonal vectors [S1].
-The loss function for the Identity Encoder-Decoder is $\mathcal{L} = \mathcal{L}_{\text{classification}} + \mathcal{L}_{\text{orthogonality}}$, where $\mathcal{L}_{\text{classification}} = \text{CrossEntropy}(\hat{y}, y)$ and $\mathcal{L}_{\text{orthogonality}} = \|\mathbf{E}\mathbf{E}^T - \mathbf{I}\|_F$. Here $\hat{y}$ is predicted class probability, $y$ is true label, $\mathbf{E}$ is embedding matrix of size $N \times D$ ($N$ classes, $D$ dimension), $\mathbf{I}$ is identity matrix, and $\| \cdot \|_F$ is Frobenius norm [S1].
+Encodes each object with a unique vector back-projected into the scene. Two variants exist:
+1.  **Orthogonal Encoding:** Assigns procedurally generated orthogonal vectors to objects. Maximizes separation but is limited by embedding dimension $D$ [S1].
+2.  **Contrastive Encoding:** Uses non-orthogonal vectors distinguished by contrastive learning. Scalable to more objects than orthogonal encoding [S1].
+The loss for training the identity encoder is $\mathcal{L} = \mathcal{L}_{\text{classification}} + \mathcal{L}_{\text{orthogonality}}$, where $\mathcal{L}_{\text{orthogonality}} = \|\mathbf{E}\mathbf{E}^T - \mathbf{I}\|_F$ [S1].
 
 ### Affordance Transfer
-Transferring annotated regions from source images to a target object. It transfers DINOv2 features to target scenes via feature back-projection and identifies the closest matching source annotation for each Gaussian in the target scene by performing k-nearest neighbors (kNN) classification on the feature space [S1].
+Transfers annotated regions from source images to target scenes. DINOv2 features are back-projected to the target scene, and k-nearest neighbors (kNN) classification is performed in the feature space to map source annotations to target Gaussians [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The method requires a single pass through all training views. The inference time for object segmentation (including text encoding and similarity calculation) is 30 ms [S1]. Similarity calculation takes less than 1 ms [S1]. The entire feature back-projection process, including ground truth feature map generation, takes an average of 2–3 minutes [S1].
-*   **Memory Complexity:** Memory usage is dominated by the storage of 2D feature maps for all training views and the accumulation buffers for $N$ Gaussians. The method avoids training a separate feature field, reducing memory overhead compared to Feature 3DGS [S1].
-*   **Measured Performance:** On an NVIDIA A6000 GPU using gsplat rasterizer, the method achieves a 900x speedup compared to segmentation using masked gradients [7] for the full pipeline including mask generation [S1]. It is 10x faster than Feature 3DGS (2.5 mins vs 20–30 mins for 7000 iterations) [S1].
-*   **Strengths:** Training-free, fast, scalable, high-quality 3D segmentation, no need for distillation or feature field training [S1].
-*   **Limitations:** Requires pre-trained Gaussians and training views with features. Performance depends on the quality of the 2D feature extractor (LSeg, DINOv2) [S1].
-*   **When to use:** 3D segmentation, affordance transfer, and identity encoding in 3D Gaussian Splatting [S1].
-*   **When not to use:** When no training views are available, or when real-time feature field training is required for dynamic scenes (though this method is inference-time, it assumes static pre-trained Gaussians) [S1].
+*   **Time Complexity:** The method requires a single pass through all training views. The inference time for object segmentation (including text encoding and similarity calculation) is 30 ms [S1]. Similarity calculation itself takes less than 1 ms [S1]. The full back-projection process (including ground truth feature map generation) takes 2-3 minutes [S1].
+*   **Memory Complexity:** Requires storing feature accumulators of size $N \times D$ and denominator accumulators of size $N$. No additional feature field needs to be trained or stored during the optimization phase.
+*   **Performance:** Compared to Feature 3DGS, this method is 10x faster (2.5 minutes vs 20-30 minutes for 7000 iterations) because it avoids training a feature field [S1].
+*   **Hardware:** Experiments were conducted on an NVIDIA A6000 GPU [S1].
+*   **Strengths:** Training-free, fast, scalable, high-quality 3D segmentation results compared to 2D-only methods.
+*   **Limitations:** Requires pre-trained Gaussians and access to training views with features. Performance depends on the quality of the 2D feature extractor.
 
 ## Background
-Gradient-Weighted Feature Back-Projection was introduced by Bharadwaj Amrutur and Shalabh Bhatnagar from the Indian Institute of Science [S1]. The method leverages the differentiable nature of the alpha-compositing equation in 3D Gaussian Splatting to back-project 2D features into 3D Gaussians without additional training [S1]. It addresses the limitations of training-based feature field rendering methods, which often perform poorly at 3D segmentation without post-processing [S1]. The approach is related to "vote using masked gradients" [7] but generalizes it to continuous feature embeddings [S1].
+The method was introduced by Joseph et al. from the Indian Institute of Science. It addresses the limitations of training-based feature field rendering methods, which often perform poorly at 3D segmentation without post-processing. By leveraging the gradient of the rendering equation, it provides a mathematically grounded, efficient alternative to distillation or iterative feature field training [S1].
 
 ## Sources
 [S1] Gradient-Weighted Feature Back-Projection: A Fast Alternative to Feature Distillation in 3D Gaussian Splatting, https://doi.org/10.1145/3757377.3763926, fetched 2026-10-27

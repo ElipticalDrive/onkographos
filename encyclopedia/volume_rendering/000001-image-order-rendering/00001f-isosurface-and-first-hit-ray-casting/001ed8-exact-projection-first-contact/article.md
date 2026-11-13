@@ -1,149 +1,147 @@
 # Exact Projection First Contact
 
-Also called: FHC, First Hit, First-Hit Compositing
+Also called: FHC, First Hit, First-Hit Compositing, FirstHitShader
+
 ## Overview
-Exact Projection First Contact is a volume rendering technique that identifies the first voxel along a ray whose density value falls within a specified valid range, then applies shading and occlusion to that specific point [S1, S2, unofficial]. It differs from standard volume ray casting by discarding all subsequent samples after the first valid hit, effectively treating the volume as an opaque surface defined by the threshold [S1, S2, unofficial].
+Exact Projection First Contact is a volume rendering technique that terminates ray marching at the first voxel whose scalar value exceeds a specified threshold, rendering only the surface intersection [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. It differs from standard front-to-back compositing by discarding all data behind the first hit, providing a clean isosurface visualization with local shading [S1, unofficial][S4, unofficial]. It is distinct from [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) in its specific implementation of the "first-hit" logic within a direct raycasting pipeline, and from [Robust Iso-surface Rendering via Bisection and Newton Refinement](1309-robust-iso-surface-rendering-via-bisection-and-newton-refine.md) by relying on fixed-step traversal with linear interpolation rather than iterative root-finding for the primary hit detection.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Ray origin (`startPos`), ray direction (`rayDir`), near plane (`tNear`), far plane (`tFar`), volume texture (`volumeTexture`), color map texture (`colorMap`), minimum density threshold (`minDensityThreshold`), maximum density threshold (`maxDensityThreshold`), lighting flags (`enableLighting`, `enableAO`, `enableShadow`), and volume dimensions (`volumeDimensions`) [S1, unofficial].
-*   **Outputs:** Final fragment color (`FragColor`).
+*   **Input:** A 3D scalar volume texture (typically `FloatType` with `RedFormat`), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), a density threshold $\tau$ (iso-value), and optional lighting parameters [S1, unofficial][S4, unofficial].
+*   **Output:** A fragment color (RGB) and alpha (1.0) representing the shaded surface at the first contact point [S2, unofficial][S3, unofficial].
 
 **Data Structures:**
-*   `volumeTexture`: 3D texture storing scalar density values [S1, unofficial].
-*   `colorMap`: 1D or 2D texture mapping density values to RGBA colors [S1, unofficial].
-*   `firstContactVal`: Float, stores the density value of the first hit. Initialized to `0.0` [S1, unofficial].
-*   `firstContactPos`: Vec3, stores the 3D position of the first hit. Initialized to `startPos` [S1, unofficial].
-*   `samplePos`: Vec3, current sampling position.
-*   `t`: Float, current ray parameter.
-*   `iterations`: Integer, loop counter.
-*   `MAX_ITERATIONS`: Integer, safety limit (e.g., 2000) [S1, unofficial].
+*   **Volume Texture:** A 3D texture object storing voxel values. In implementations, this is often a `Data3DTexture` with linear filtering enabled to support interpolation [S1, unofficial].
+*   **Ray Parameters:** The ray is defined as $r(t) = \mathbf{o} + t\mathbf{d}$, where $t$ is the distance along the ray [G]. The intersection with the volume bounding box (often normalized to $[0,1]^3$) is calculated using the slab method to determine entry ($t_{entry}$) and exit ($t_{exit}$) distances [S4, unofficial].
 
-**Steps:**
-1.  Normalize the ray direction: `rayDir = normalize(rayDir)` [S3, unofficial].
-2.  Initialize `firstContactVal = 0.0` and `firstContactPos = startPos` [S1, unofficial].
-3.  Set `t = tNear` and `iterations = 0` [S1, unofficial].
-4.  Loop while `t < tFar` and `iterations < MAX_ITERATIONS`:
-    a.  Calculate `samplePos = startPos + rayDir * t` [S1, unofficial].
-    b.  Check bounds: If `samplePos` is outside the unit cube `[0,1]^3`, compute step size `dt`, advance `t += dt`, increment `iterations`, and continue [S1, unofficial].
-    c.  Sample density: `val = texture(volumeTexture, samplePos).r` [S1, unofficial].
-    d.  Check range: `isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold)` [S1, unofficial].
-    e.  If `isInRange` is true: set `firstContactVal = val`, `firstContactPos = samplePos`, and break the loop [S1, unofficial].
-    f.  Compute step size `dt` using voxel traversal logic, advance `t += dt`, and increment `iterations` [S1, unofficial].
-5.  If `firstContactVal <= 0.0f`, output `FragColor = vec4(0.0f)` and return [S1, unofficial].
-6.  Map value to color: `baseColor = texture(colorMap, firstContactVal)` [S1, unofficial].
-7.  Calculate lighting: If `enableLighting` is true, compute the surface normal via gradient estimation, then compute `shadedColor` using a local lighting model; else `shadedColor = baseColor.rgb` [S1, unofficial].
-8.  Calculate ambient occlusion: `occlusion = enableAO ? calculateOcclusion(firstContactPos) : 1.0f` [S1, unofficial].
-9.  Calculate shadow: `shadow = enableShadow ? calculateShadow(firstContactPos) : 1.0f` [S1, unofficial].
-10. Output final color: `FragColor = vec4(shadedColor * occlusion * shadow, 1.0f)` [S1, unofficial].
+**Algorithm Steps:**
+
+1.  **Ray-Volume Intersection:** Calculate the intersection of the view ray with the unit cube $[0,1]^3$. If $t_{entry} > t_{exit}$, the ray misses the volume; discard the pixel [S4, unofficial]. Clamp $t_{entry}$ to $\max(0.0, t_{entry})$ to ensure the start point is in front of the camera [S4, unofficial].
+2.  **Initialization:** Set the current position $p_0 = \mathbf{o} + t_{entry}\mathbf{d}$ and sample the volume value $v_0 = \text{sample}(p_0)$ [S4, unofficial]. Initialize `firstContactVal` to $0.0$ and `firstContactPos` to $p_0$ [S2, unofficial].
+3.  **Marching Loop:** Iterate along the ray from $t_{entry}$ to $t_{exit}$ with a step size $dt$. The step size is determined by the inverse of the volume dimensions and the ray direction components to ensure consistent voxel traversal [S4, unofficial]:
+    $$ dt = \min \left( \frac{\Delta x}{|d_x|}, \frac{\Delta y}{|d_y|}, \frac{\Delta z}{|d_z|} \right) $$
+    where $\Delta x, \Delta y, \Delta z$ are the voxel sizes (or inverse dimensions if normalized) [S4, unofficial].
+4.  **Sampling and Detection:** At each step, advance to $p_1 = p_0 + \mathbf{d} \cdot dt$ and sample $v_1 = \text{sample}(p_1)$ [S4, unofficial]. Check if the isosurface condition is met: $v_1 \ge \tau$ (or $v_0 \cdot v_1 < 0$ relative to $\tau$) [S3, unofficial][S4, unofficial].
+5.  **Refinement:** If the condition is met, compute the linear interpolation factor $\alpha$ to find the exact intersection point:
+    $$ \alpha = \frac{\tau - v_0}{v_1 - v_0} $$
+    $$ p_{hit} = \text{mix}(p_0, p_1, \alpha) $$
+    $$ v_{hit} = \text{mix}(v_0, v_1, \alpha) $$
+    Store $p_{hit}$ as `firstContactPos` and $v_{hit}$ as `firstContactVal` [S4, unofficial]. Break the loop [S2, unofficial].
+6.  **Fallback:** If the loop completes without finding a hit (or if `firstContactVal` remains $\le 0.0$), output black color `vec4(0.0)` and terminate [S2, unofficial].
+7.  **Shading:**
+    *   **Color Mapping:** Map `firstContactVal` to a base color using a color map texture: $c_{base} = \text{texture}(\text{colorMap}, \text{firstContactVal})$ [S2, unofficial].
+    *   **Normal Calculation:** Compute the surface normal $\mathbf{n}$ using the gradient of the scalar field at $p_{hit}$, typically via finite differences or tri-linear/tri-cubic filtering of the volume texture [S3, unofficial][S1, unofficial].
+    *   **Lighting:** Apply a lighting model (e.g., Blinn-Phong, Phong, or Lambert) using $\mathbf{n}$, the view direction, and the light direction [S1, unofficial][S3, unofficial].
+    *   **Occlusion/Shadows:** Optionally calculate ambient occlusion and shadows at $p_{hit}$ [S2, unofficial].
+8.  **Output:** The final fragment color is $c_{final} = c_{shaded} \cdot c_{occlusion} \cdot c_{shadow}$ with alpha $1.0$ [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def exact_projection_first_contact(startPos, rayDir, tNear, tFar, volumeTexture, colorMap, minDensityThreshold, maxDensityThreshold, enableLighting, enableAO, enableShadow, volumeDimensions):
-    # Normalize ray direction [S3, unofficial]
-    rayDir = rayDir / length(rayDir)
+def exact_projection_first_contact(ray_origin, ray_direction, volume_texture, color_map, threshold, enable_lighting, enable_ao, enable_shadow):
+    # 1. Ray-Volume Intersection (Slab Method)
+    # Assuming volume is in unit cube [0,1]^3
+    t_min = 0.0
+    t_max = 1.0
     
-    firstContactVal = 0.0
-    firstContactPos = startPos
-    t = tNear
-    MAX_ITERATIONS = 2000
+    # Calculate intersection with unit cube
+    # This is a simplified representation; actual implementation uses slab method
+    t_entry, t_exit = compute_slab_intersection(ray_origin, ray_direction)
+    
+    if t_entry > t_exit:
+        return vec4(0.0, 0.0, 0.0, 1.0) # Miss
+    
+    t_entry = max(t_entry, 0.0) # Clamp to front
+    
+    # 2. Initialization
+    current_pos = ray_origin + ray_direction * t_entry
+    current_val = sample_volume(volume_texture, current_pos)
+    
+    first_contact_val = 0.0
+    first_contact_pos = current_pos
+    
+    # 3. Marching Loop
+    # Step size calculation based on voxel dimensions
+    # dt = min(dx/|dx|, dy/|dy|, dz/|dz|)
+    dt = calculate_step_size(ray_direction, volume_dimensions)
+    
+    t = t_entry
+    max_iterations = 2000
     iterations = 0
     
-    # Helper to compute step size dt for voxel traversal [S1, unofficial]
-    def compute_dt(pos, rdir, vdim):
-        voxelPos = pos * vdim
-        dt = float('inf')
-        for axis in range(3):
-            if abs(rdir[axis]) > 1e-4:
-                nextVoxel = floor(voxelPos[axis]) + 1.0 if rdir[axis] > 0 else floor(voxelPos[axis])
-                dtAxis = (nextVoxel - voxelPos[axis]) / (rdir[axis] * vdim[axis])
-                if dtAxis > 0:
-                    dt = min(dt, dtAxis)
-        return max(dt, 1e-4)
-
-    while t < tFar and iterations < MAX_ITERATIONS:
-        samplePos = startPos + rayDir * t
+    while t < t_exit and iterations < max_iterations:
+        # Advance
+        next_pos = current_pos + ray_direction * dt
+        next_val = sample_volume(volume_texture, next_pos)
         
-        # Check if inside unit cube [0,1]^3
-        if samplePos.x < 0.0 or samplePos.y < 0.0 or samplePos.z < 0.0 or \
-           samplePos.x > 1.0 or samplePos.y > 1.0 or samplePos.z > 1.0:
-            dt = compute_dt(samplePos, rayDir, volumeDimensions)
-            t += dt
-            iterations += 1
-            continue
+        # 4. Detection
+        if next_val >= threshold:
+            # 5. Refinement
+            alpha = (threshold - current_val) / (next_val - current_val)
+            first_contact_pos = mix(current_pos, next_pos, alpha)
+            first_contact_val = mix(current_val, next_val, alpha)
+            break # Found first hit
             
-        val = volumeTexture[samplePos] # [G] texture lookup
-        isInRange = (val >= minDensityThreshold and val <= maxDensityThreshold)
-        
-        if isInRange:
-            firstContactVal = val
-            firstContactPos = samplePos
-            break
-            
-        dt = compute_dt(samplePos, rayDir, volumeDimensions)
+        current_pos = next_pos
+        current_val = next_val
         t += dt
         iterations += 1
         
-    if firstContactVal <= 0.0:
+    # 6. Fallback
+    if first_contact_val <= 0.0:
         return vec4(0.0, 0.0, 0.0, 1.0)
         
-    baseColor = colorMap[firstContactVal] # [G] color map lookup
-        
-    if enableLighting:
-        # Compute normal via central finite differences [G]
-        eps = vec3(1.0 / volumeDimensions[0], 1.0 / volumeDimensions[1], 1.0 / volumeDimensions[2])
-        p1 = firstContactPos + vec3(eps[0], 0, 0)
-        p2 = firstContactPos - vec3(eps[0], 0, 0)
-        p3 = firstContactPos + vec3(0, eps[1], 0)
-        p4 = firstContactPos - vec3(0, eps[1], 0)
-        p5 = firstContactPos + vec3(0, 0, eps[2])
-        p6 = firstContactPos - vec3(0, 0, eps[2])
-        normal = normalize(vec3(
-            volumeTexture[p1] - volumeTexture[p2],
-            volumeTexture[p3] - volumeTexture[p4],
-            volumeTexture[p5] - volumeTexture[p6]
-        ))
-        # Simple Phong lighting [G]
-        viewDir = normalize(-rayDir)
-        lightDir = normalize(vec3(0.5, 1.0, 0.5))
-        diff = max(dot(normal, lightDir), 0.0)
-        spec = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 32.0)
-        shadedColor = baseColor.rgb * (0.5 + 0.5 * diff) + vec3(0.3) * spec
+    # 7. Shading
+    base_color = sample_color_map(color_map, first_contact_val)
+    
+    # Calculate Normal
+    normal = calculate_gradient(volume_texture, first_contact_pos)
+    normal = normalize(normal)
+    
+    # Lighting
+    if enable_lighting:
+        shaded_color = calculate_lighting(normal, -ray_direction, first_contact_pos, base_color.rgb)
     else:
-        shadedColor = baseColor.rgb
+        shaded_color = base_color.rgb
         
-    occlusion = 1.0 # [G] calculateOcclusion returns 1.0 if not specified
-    shadow = 1.0 # [G] calculateShadow returns 1.0 if not specified
-        
-    return vec4(shadedColor * occlusion * shadow, 1.0)
+    # Occlusion
+    occlusion = calculate_ao(first_contact_pos) if enable_ao else 1.0
+    
+    # Shadow
+    shadow = calculate_shadow(first_contact_pos) if enable_shadow else 1.0
+    
+    # 8. Output
+    final_color = shaded_color * occlusion * shadow
+    return vec4(final_color, 1.0)
 ```
 
 **Parameters:**
-*   `minDensityThreshold`, `maxDensityThreshold`: Define the valid density range. Typical values depend on the dataset normalization.
-*   `MAX_ITERATIONS`: 2000 [S1, unofficial].
-*   `stepSize`/`dt`: Determined by voxel traversal or fixed step.
+*   `threshold` ($\tau$): The density/isovalue threshold. Default values vary by dataset; e.g., $0.5$ for normalized data [S1, unofficial].
+*   `steps`: Number of ray marching steps. Default 200, can be overridden to 500 [S1, unofficial].
+*   `MAX_LAYERS`: Maximum number of iso-surface layers supported (e.g., 3) [S1, unofficial].
+*   `render_mode`: Integer flag where $0$ selects First-Hit Compositing [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **No Hit:** If no voxel in the ray path falls within the density range, the function outputs black [S1, unofficial].
-*   **Precision:** Floating-point precision in `t` advancement can cause missed voxels or double sampling. Voxel traversal logic mitigates this [S1, unofficial].
-*   **Boundaries:** Rays starting outside the volume or exiting early must be handled by the bounds check [S1, unofficial].
-*   **Ray Direction:** The ray direction may not be normalized after interpolation from the vertex shader; it must be explicitly normalized before use [S3, unofficial].
+*   **Ray Direction Normalization:** The ray direction interpolated from the vertex shader may not be normalized; it must be explicitly normalized before use [S4, unofficial].
+*   **Precision:** Linear interpolation reduces discretization artifacts but assumes linear variation between samples [S4, unofficial].
+*   **No Hit:** If no voxel exceeds the threshold, the pixel is typically rendered black or transparent [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** O(N) where N is the number of voxels traversed until the first hit or exit [G].
-*   **Memory Complexity:** O(1) auxiliary memory, plus storage for the volume and color map textures [G].
-*   **Performance:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to Use:** Not given in the sources.
-*   **When Not to Use:** Not given in the sources.
+*   **Time Complexity:** $O(N)$ where $N$ is the number of steps along the ray until the first hit. In the worst case (no hit or hit at the end), it traverses the entire volume depth.
+*   **Memory Complexity:** $O(1)$ per pixel for the raycasting logic, plus the memory for the volume texture and color map.
+*   **Performance:** Fast for surfaces that are close to the camera or have high contrast, as it terminates early. Slower than MIP if the surface is deep or absent, as it still requires traversal.
+*   **Strengths:** Provides clean surface visualization with shading; computationally cheaper than full volume compositing if hits are frequent and early.
+*   **Limitations:** No internal structure is visible; sensitive to threshold selection; artifacts if step size is too large relative to surface curvature.
+*   **When to use:** When the primary interest is the outer surface of a volume (e.g., bone rendering in CT, skin rendering in MRI) and internal details are not required [S1, unofficial].
+*   **When not to use:** When internal structures, transparency, or complex material interactions are needed [S3, unofficial].
 
 ## Background
-Exact Projection First Contact is a fundamental technique in volume rendering, often used as a baseline for more complex methods. It is closely related to the concept of "first hit" in ray tracing. The specific implementation details provided in the sources are from unofficial repositories [S1, S2, unofficial].
+Exact Projection First Contact is a fundamental technique in direct volume rendering, often implemented as a shader in interactive visualization tools. It is closely related to the concept of "first-hit" rendering used in medical imaging viewers for isolating specific tissue types (e.g., bones, skin) [S1, unofficial]. The method is implemented in various open-source projects such as `volume_vis` (using Three.js) and `VisualNifty` [S1, unofficial][S2, unofficial]. It is also featured in educational implementations of direct volume rendering, such as those found in computer graphics lecture notes [S4, unofficial]. The technique leverages standard raycasting infrastructure, adding a termination condition based on a scalar threshold.
 
 ## Sources
-[S1] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
-[S2] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
-[S3] Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, https://github.com/Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, fetched 2026-10-26 (unofficial)
+[S1] niklasgruener/volume_vis, https://github.com/niklasgruener/volume_vis, fetched 2026-10-26 (unofficial)
+[S2] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+[S3] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S4] Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, https://github.com/Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, fetched 2026-10-26 (unofficial)

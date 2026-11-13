@@ -3,123 +3,179 @@
 Also called: NeRF-based parametric head model
 
 ## Overview
-HeadNeRF is a parametric head model that integrates neural radiance fields (NeRF) into the parametric representation of the human head to render high-fidelity images in real-time [S1]. It solves the problem of computationally expensive NeRF rendering by replacing the final color accumulation with a 2D neural rendering module, reducing rendering time from 5 seconds to 25ms per frame [S1]. Unlike standard NeRF which predicts color directly, HeadNeRF predicts a high-dimensional feature vector volume, decoupling geometry (controlled by identity and expression) from appearance (controlled by albedo and illumination) [S1].
+HeadNeRF is a parametric head model that integrates neural radiance fields (NeRF) into a low-dimensional latent space to render high-fidelity, real-time head images while supporting direct control over pose and semantic attributes (identity, expression, albedo, illumination) [S1]. It distinguishes itself from standard NeRF by decoupling geometric and appearance factors into separate latent codes and accelerating the rendering pipeline through a 2D neural rendering module, reducing frame time from seconds to milliseconds [S1].
 
 ## How it works
-**Inputs:**
-*   Latent codes: $z_{id}$ (identity), $z_{exp}$ (expression), $z_{alb}$ (albedo), $z_{ill}$ (illumination).
-*   Camera parameters $P$: Extrinsic and intrinsic matrices.
-*   3D points $x \in \mathbb{R}^3$ sampled along rays $r(t)$ emitted from the camera center.
-
-**Outputs:**
-*   Final rendered image $I \in \mathbb{R}^{3 \times 256 \times 256}$.
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   Latent codes: $z_{id}$ (identity), $z_{exp}$ (expression), $z_{alb}$ (albedo), $z_{ill}$ (illumination).
+    *   Camera parameters $P$: Extrinsic and intrinsic matrices defining the ray origin and direction.
+*   **Outputs:**
+    *   Rendered image $I \in \mathbb{R}^{3 \times 256 \times 256}$.
 
 **Data Structures:**
-*   **Implicit Function $h_\theta$:** An MLP that takes concatenated inputs and outputs density $\sigma$ and an intermediate feature vector.
-*   **Feature Vector $F(x)$:** A vector in $\mathbb{R}^{256}$ predicted for each 3D point.
-*   **Low-Resolution Feature Map $I_F$:** A 2D tensor in $\mathbb{R}^{256 \times 32 \times 32}$ obtained by volume rendering the feature vector field.
-*   **2D Neural Renderer $\pi_\psi$:** A module composed of 1x1 Conv2D layers and Leaky ReLU activations, followed by upsampling layers, mapping $I_F$ to the final image.
+*   **Implicit Function $h_\theta$:** An MLP that maps encoded 3D positions and latent codes to density and feature vectors.
+*   **2D Neural Renderer $\pi_\psi$:** A CNN-based module (1x1 Conv2D, Leaky ReLU, upsampling layers) that maps a low-resolution feature map to the final image.
+*   **Positional Encoding $\gamma(\cdot)$:** Standard NeRF positional encoding applied to 3D points [S1].
 
-**Steps:**
+**Method Steps:**
 
-1.  **Positional Encoding:** Apply pre-defined positional encoding $\gamma(\cdot)$ from NeRF [S1] to the 3D point $x$.
-2.  **Implicit Function Evaluation:** Compute density $\sigma$ and intermediate features using $h_\theta$. The input to $h_\theta$ is the concatenation of $\gamma(x)$, $z_{id}$, and $z_{exp}$. The output is $\sigma$ and an intermediate feature [S1].
-3.  **Feature Vector Prediction:** Combine the intermediate feature from $h_\theta$ with $z_{alb}$ and $z_{ill}$ to predict the final high-dimensional feature vector $F(x) \in \mathbb{R}^{256}$ [S1].
-    *   *Note:* The viewing direction is removed from the input to $h_\theta$ to avoid capturing dataset bias inconsistencies [S1].
-4.  **Volume Rendering of Features:** Compute the low-resolution feature map $I_F(r)$ for each ray $r$ using the following integral:
+1.  **Ray Sampling:** For each pixel in the target image, generate a ray $r(t)$ from the camera center using camera parameters $P$. Sample points $x \in \mathbb{R}^3$ along the ray.
+2.  **Feature and Density Prediction:** For each sampled point $x$, compute the positional encoding $\gamma(x)$. Concatenate $\gamma(x)$, $z_{id}$, and $z_{exp}$. Pass this concatenation through the implicit function $h_\theta$ to predict the density $\sigma$ and an intermediate feature vector.
+    $$
+    (\sigma, \text{intermediate}) = h_\theta(\gamma(x), z_{id}, z_{exp})
+    $$
+    [S1]
+3.  **Feature Vector Construction:** Concatenate the intermediate feature from step 2 with $z_{alb}$ and $z_{ill}$. Pass this through the remainder of $h_\theta$ (or a subsequent layer) to predict the final high-dimensional feature vector $F(x) \in \mathbb{R}^{256}$.
+    $$
+    F(x) = h_\theta(\text{intermediate}, z_{alb}, z_{ill})
+    $$
+    [S1]
+    *Note:* The viewing direction is explicitly removed from the input to $h_\theta$ to avoid capturing dataset bias inconsistencies [S1].
+4.  **Volume Rendering (Feature Map):** Compute a low-resolution 2D feature map $I_F \in \mathbb{R}^{256 \times 32 \times 32}$ by volume rendering the feature vectors $F(r(t))$ along each ray $r$. The rendering uses a weighted average based on the weight function $w(t)$:
     $$
     I_F(r) = \frac{\int_0^\infty w(t) F(r(t)) dt}{\int_0^\infty w(t) dt}
     $$
-    where the weight function $w(t)$ is defined as:
+    where the weight function is defined as:
     $$
     w(t) = \exp\left(-\int_t^\infty \sigma(r(s)) ds\right) \sigma(r(t))
     $$
-    Here, $r(t)$ represents a ray emitted from the camera center [S1].
-5.  **2D Neural Rendering:** Map the low-resolution feature map $I_F \in \mathbb{R}^{256 \times 32 \times 32}$ to the final image $I \in \mathbb{R}^{3 \times 256 \times 256}$ using the 2D neural rendering module $\pi_\psi$. This module consists of 1x1 Conv2D layers and Leaky ReLU activations, followed by a series of upsampling layers to increase resolution [S1].
+    [S1]
+5.  **2D Neural Rendering:** Map the low-resolution feature map $I_F$ to the final high-resolution image $I \in \mathbb{R}^{3 \times 256 \times 256}$ using the 2D neural rendering module $\pi_\psi$. This module consists of 1x1 Conv2D layers, Leaky ReLU activations, and upsampling layers to increase resolution and alleviate multi-view inconsistent artifacts.
+    $$
+    I = \pi_\psi(I_F)
+    $$
+    [S1]
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def headnerf_render(z_id, z_exp, z_alb, z_ill, camera_params, points_3d):
-    """
-    Renders an image using HeadNeRF.
-    
-    Args:
-        z_id: Identity latent code
-        z_exp: Expression latent code
-        z_alb: Albedo latent code
-        z_ill: Illumination latent code
-        camera_params: Camera extrinsic and intrinsic matrices
-        points_3d: 3D points sampled along rays (N, 3)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class HeadNeRF:
+    def __init__(self, h_theta_params, pi_psi_params):
+        """
+        Initialize HeadNeRF model.
+        h_theta: MLP predicting density and features.
+        pi_psi: 2D CNN renderer.
+        """
+        self.h_theta = MLP(h_theta_params)
+        self.pi_psi = CNNRenderer(pi_psi_params)
+
+    def forward(self, z_id, z_exp, z_alb, z_ill, camera_params):
+        """
+        Render an image given latent codes and camera parameters.
         
-    Returns:
-        I: Final rendered image (3, 256, 256)
-    """
-    # Step 1: Positional Encoding
-    # gamma is the pre-defined positional encoding from NeRF
-    encoded_points = positional_encoding(points_3d)
-    
-    # Step 2: Implicit Function Evaluation
-    # h_theta takes concatenated [gamma(x), z_id, z_exp]
-    # Returns density sigma and intermediate feature
-    # Note: Viewing direction is NOT included
-    input_to_h = concatenate([encoded_points, z_id, z_exp])
-    sigma, intermediate_feature = h_theta(input_to_h)
-    
-    # Step 3: Feature Vector Prediction
-    # Combine intermediate feature with z_alb and z_ill
-    # F(x) is in R^256
-    feature_vector = predict_feature_vector(intermediate_feature, z_alb, z_ill)
-    
-    # Step 4: Volume Rendering of Features
-    # Compute weights w(t) based on density sigma
-    # w(t) = exp(-integral_t_inf sigma(r(s))ds) * sigma(r(t))
-    # For discrete sampling along ray:
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # w_i = T_i * sigma_i * delta_i (approximation for discrete sum)
-    # However, the formula uses continuous integral weights normalized by total weight
-    
-    # Calculate accumulated transmittance T_i for each sample i
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
-    # Weight w_i = T_i * sigma_i * delta_i
-    # Note: The formula in [S1] uses continuous integrals. 
-    # In implementation, this is typically approximated by discrete summation.
-    # I_F(r) = sum(w_i * F_i) / sum(w_i)
-    
-    transmittance = compute_transmittance(sigma)
-    weights = transmittance * sigma * delta # delta is distance between samples
-    
-    # Volume render feature vector
-    # I_F is R^(256, 32, 32)
-    I_F = sum(weights * feature_vector) / sum(weights)
-    
-    # Step 5: 2D Neural Rendering
-    # Map I_F to final image I using pi_psi
-    # pi_psi consists of 1x1 Conv2D, Leaky ReLU, and upsampling layers
-    I = pi_psi(I_F)
-    
-    return I
+        Args:
+            z_id: Identity latent code
+            z_exp: Expression latent code
+            z_alb: Albedo latent code
+            z_ill: Illumination latent code
+            camera_params: Extrinsic and intrinsic matrices
+            
+        Returns:
+            I: Rendered image tensor [3, 256, 256]
+        """
+        # 1. Generate rays from camera parameters
+        rays = generate_rays(camera_params) # Shape: [H, W, 3] for origins, [H, W, 3] for directions
+        
+        # 2. Sample points along rays
+        # Assume standard NeRF sampling strategy (e.g., stratified or uniform)
+        # t_vals: [H, W, N_samples]
+        # x_vals: [H, W, N_samples, 3]
+        t_vals, x_vals = sample_points(rays)
+        
+        # 3. Compute positional encoding for 3D points
+        gamma_x = positional_encoding(x_vals) # [H, W, N_samples, D_pos]
+        
+        # 4. Predict density and intermediate features using identity and expression
+        # Concatenate gamma_x, z_id, z_exp
+        # z_id, z_exp might be broadcasted to [H, W, N_samples, D_latent]
+        geo_input = torch.cat([gamma_x, z_id, z_exp], dim=-1)
+        
+        # h_theta outputs density (sigma) and intermediate feature
+        sigma, intermediate_feat = self.h_theta(geo_input)
+        
+        # 5. Predict final feature vector using albedo and illumination
+        # Concatenate intermediate_feat, z_alb, z_ill
+        app_input = torch.cat([intermediate_feat, z_alb, z_ill], dim=-1)
+        
+        # h_theta (or subsequent layer) outputs final feature F
+        F_feat = self.h_theta(app_input) # [H, W, N_samples, 256]
+        
+        # 6. Volume render to get low-res feature map I_F
+        # Compute weights w(t)
+        # delta = t_vals[i+1] - t_vals[i]
+        # transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+        # w_i = T_i * (1 - exp(-sigma_i * delta_i))
+        
+        deltas = t_vals[:, :, 1:] - t_vals[:, :, :-1]
+        # Add a small epsilon to avoid division by zero or log(0) if needed
+        # Note: The formula in [S1] uses integral notation, discretized as sum
+        
+        # Calculate accumulated transmittance
+        # sigma is [H, W, N_samples, 1]
+        # deltas is [H, W, N_samples-1, 1]
+        # We need to handle the last sample or assume infinite background
+        
+        # Standard discrete volume rendering weights
+        # alpha_i = 1 - exp(-sigma_i * delta_i)
+        # T_i = product_{j=1}^{i-1} (1 - alpha_j)
+        
+        # Implementation detail:
+        # alpha = 1 - torch.exp(-sigma * deltas) # [H, W, N_samples-1, 1]
+        # T = torch.cumprod(1 - alpha, dim=2) # [H, W, N_samples-1, 1]
+        # T = torch.cat([torch.ones_like(T[:, :, :1]), T], dim=2) # [H, W, N_samples, 1]
+        # weights = T * alpha # [H, W, N_samples, 1]
+        
+        # However, [S1] defines w(t) = exp(-int_t^inf sigma ds) * sigma(t)
+        # This is equivalent to the standard NeRF weight if we assume sigma=0 after last sample.
+        
+        # Let's use the standard NeRF weight calculation for clarity
+        alpha = 1.0 - torch.exp(-sigma * deltas)
+        transmittance = torch.cumprod(1.0 - alpha, dim=2)
+        transmittance = torch.cat([torch.ones_like(transmittance[:, :, :1]), transmittance], dim=2)
+        weights = transmittance * alpha
+        
+        # Render feature map I_F
+        # I_F = sum(weights * F_feat) / sum(weights)
+        # F_feat is [H, W, N_samples, 256]
+        # weights is [H, W, N_samples, 1]
+        
+        numerator = torch.sum(weights * F_feat, dim=2) # [H, W, 256]
+        denominator = torch.sum(weights, dim=2) # [H, W, 1]
+        
+        I_F = numerator / (denominator + 1e-8) # [H, W, 256]
+        I_F = I_F.permute(0, 3, 1, 2) # [256, H, W] -> [256, 32, 32] if H,W=32
+        
+        # 7. 2D Neural Rendering to final image
+        I = self.pi_psi(I_F)
+        
+        return I
 ```
 
 **Parameters:**
-*   Feature vector dimension: 256 [S1].
-*   Low-resolution feature map size: $32 \times 32$ [S1].
-*   Final image size: $256 \times 256$ [S1].
-*   Activation function: Leaky ReLU [S1].
+*   **Feature Dimension:** 256 [S1].
+*   **Low-Res Feature Map Size:** $32 \times 32$ [S1].
+*   **Output Image Size:** $256 \times 256$ [S1].
+*   **Activation:** Leaky ReLU in the 2D renderer [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Dataset Bias:** Including viewing direction in the implicit function can cause undesired inconsistencies due to dataset bias; it is explicitly removed [S1].
-*   **Multi-view Inconsistency:** The 2D neural rendering module is designed to alleviate multi-view inconsistent artifacts [S1].
+*   **Dataset Bias:** Viewing direction is removed from the input to $h_\theta$ to prevent the model from learning inconsistencies specific to the training dataset's camera distribution [S1].
+*   **Multi-view Inconsistency:** The 2D neural renderer with upsampling is specifically designed to alleviate artifacts caused by multi-view inconsistencies [S1].
 
 ## Operating characteristics
-*   **Performance:** Rendering time is reduced from 5 seconds to 25ms per frame, exceeding 40fps on modern GPUs [S1].
-*   **Accuracy:** There is a slight loss of accuracy compared to standard NeRF, but fine-level details such as gaps between teeth, wrinkles, and beards are preserved [S1].
-*   **Control:** Supports direct control over rendering pose and semantic attributes (identity, expression, albedo, illumination) [S1].
+*   **Speed:** Rendering time is reduced from 5 seconds per frame (standard NeRF) to 25 milliseconds per frame, exceeding 40fps on modern GPUs [S1].
+*   **Quality:** Maintains high fidelity, capturing fine details such as teeth gaps, wrinkles, and beards [S1].
+*   **Control:** Supports direct semantic control of identity, expression, albedo, and illumination [S1].
+*   **Limitations:** The method relies on a pre-defined parametric head model structure (3DMM-like) for the latent space definition, which may limit the diversity of head shapes compared to unconstrained NeRF [S1].
 
 ## Background
-HeadNeRF was proposed as a novel NeRF-based parametric head model that integrates neural radiance fields into the parametric representation of the human head [S1]. It addresses the limitation of traditional 3D textured meshes by using NeRF as a 3D proxy for high-fidelity image generation [S1]. The method was introduced to overcome the computational expense of original NeRF rendering, which hindered the construction of parametric NeRF models [S1].
+HeadNeRF was proposed in 2022 as a novel NeRF-based parametric head model [S1]. It addresses the computational expense of original NeRF rendering by integrating 2D neural rendering and designing novel loss terms. It builds on the principles of parametric face/head models (like 3DMM) and recent advances in differentiable rendering and NeRF [S1].
 
 ## Sources
 [S1] HeadNeRF: A Realtime NeRF-based Parametric Head Model, https://doi.org/10.1109/cvpr52688.2022.01973, fetched 2026-10-26

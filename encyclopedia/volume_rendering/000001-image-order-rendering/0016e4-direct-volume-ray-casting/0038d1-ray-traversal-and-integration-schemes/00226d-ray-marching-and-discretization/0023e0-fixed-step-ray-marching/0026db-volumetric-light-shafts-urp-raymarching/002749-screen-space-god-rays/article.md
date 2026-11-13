@@ -10,43 +10,43 @@ The method operates in three passes: an occlusion pre-pass, a radial blur accumu
 
 ### Inputs and Outputs
 *   **Inputs:**
-    *   `screenTexture`: The rendered scene color buffer (or occlusion map, depending on the variant).
-    *   `lightPositionOnScreen`: The 2D screen-space coordinates of the light source (UV space [0,1] or NDC [-1,1]).
+    *   `scene_texture`: The rendered scene color buffer or occlusion map.
+    *   `light_pos_screen`: The 2D screen-space coordinates of the light source (UV space [0,1] or NDC [-1,1]).
     *   `density`: Controls sample separation and ray spread.
     *   `decay`: Exponential falloff factor per sample.
     *   `weight`: Per-sample intensity multiplier.
     *   `exposure`: Final output brightness multiplier.
-    *   `NUM_SAMPLES`: Number of iterations for the radial accumulation loop.
+    *   `num_samples`: Number of iterations for the radial accumulation loop.
 *   **Outputs:**
-    *   `FragColor`: The final composited color with god rays added.
+    *   `final_color`: The final composited color with god rays added.
 
 ### Data Structures
-The technique uses standard 2D textures (`sampler2D`) for the scene buffer and occlusion map. Uniforms are passed to the fragment shader. No complex volumetric grids or sparse structures are used [S3, book][S4, unofficial].
+The technique uses standard 2D textures (`sampler2D`) for the scene buffer and occlusion map [S3, book][S4, unofficial]. Uniforms are passed to the fragment shader [S4, unofficial]. No complex volumetric grids or sparse structures are used [S3, book][S4, unofficial].
 
 ### Steps
 
 1.  **Light Position Projection:**
-    Project the 3D world position of the light source into screen space.
-    *   Transform the light's world position by the View-Projection matrix.
-    *   Perform perspective division by $w$ to obtain NDC coordinates.
+    Project the 3D world position of the light source into screen space [S3, book].
+    *   Transform the light's world position by the View-Projection matrix [S3, book].
+    *   Perform perspective division by $w$ to obtain NDC coordinates [S2, unofficial][S3, book].
     *   Scale and bias to the texture coordinate range [0, 1] (or [-1, 1] depending on implementation) [S1, unofficial][S3, book][S4, unofficial].
     *   *Edge Case:* If the light is behind the camera (clip $w \le 0$ or very small), clamp the screen position to the center of the screen (0.5, 0.5) and mark the light as not in front [S2, unofficial].
 
 2.  **Occlusion Pre-Pass (Optional but Recommended):**
-    To improve occlusion accuracy, render the scene geometry as solid black and the light source as a bright shape (circle/sphere) into a separate render target [S3, book][S4, unofficial]. This creates a binary-like occlusion map where bright pixels indicate direct visibility of the light and black pixels indicate occlusion by geometry. This pass reduces streaking artifacts caused by surface texture variations in the main scene buffer [S3, book].
+    To improve occlusion accuracy, render the scene geometry as solid black and the light source as a bright shape (circle/sphere) into a separate render target [S3, book][S4, unofficial]. This creates a binary-like occlusion map where bright pixels indicate direct visibility of the light and black pixels indicate occlusion by geometry [S4, unofficial]. This pass reduces streaking artifacts caused by surface texture variations in the main scene buffer [S3, book].
 
 3.  **Radial Accumulation (Fragment Shader):**
     For each pixel in the output texture:
-    *   Calculate the direction vector from the current pixel's texture coordinate ($vUv$) to the light's screen position ($uLightPos$) [S1, unofficial][S3, book].
-    *   Compute the step size ($deltaUV$) by scaling the direction vector by the density and dividing by the number of samples [S1, unofficial][S3, book][S4, unofficial].
+    *   Calculate the direction vector from the current pixel's texture coordinate ($uv$) to the light's screen position ($light\_pos$) [S1, unofficial][S3, book].
+    *   Compute the step size ($delta\_uv$) by scaling the direction vector by the density and dividing by the number of samples [S1, unofficial][S3, book][S4, unofficial].
     *   Initialize the accumulated color to zero (if using occlusion map) or the base scene color (if using direct scene buffer) [S1, unofficial][S3, book].
     *   Initialize the illumination decay factor to 1.0 [S1, unofficial][S3, book].
-    *   Iterate $NUM\_SAMPLES$ times:
-        *   Step the texture coordinate backwards along the direction vector: $uv \leftarrow uv - deltaUV$ [S1, unofficial][S3, book][S4, unofficial].
-        *   Sample the texture at the new coordinate. Clamp coordinates to [0, 1] to handle boundary conditions [S4, unofficial].
+    *   Iterate $num\_samples$ times:
+        *   Step the texture coordinate backwards along the direction vector: $uv \leftarrow uv - delta\_uv$ [S1, unofficial][S3, book][S4, unofficial].
+        *   Sample the texture at the new coordinate [S1, unofficial][S3, book]. Clamp coordinates to [0, 1] to handle boundary conditions [S4, unofficial].
         *   Multiply the sample color by the current illumination decay and the weight constant [S1, unofficial][S3, book][S4, unofficial].
         *   Add the result to the accumulated color [S1, unofficial][S3, book][S4, unofficial].
-        *   Update the illumination decay: $illuminationDecay \leftarrow illuminationDecay \times decay$ [S1, unofficial][S3, book][S4, unofficial].
+        *   Update the illumination decay: $illumination \leftarrow illumination \times decay$ [S1, unofficial][S3, book][S4, unofficial].
     *   The accumulation approximates the integral of in-scattered light, where the decay simulates absorption/scattering over distance [S3, book][S5, unofficial].
 
 4.  **Compositing:**
@@ -55,53 +55,31 @@ The technique uses standard 2D textures (`sampler2D`) for the scene buffer and o
     *   Output the result with alpha 1.0 [S1, unofficial][S3, book].
 
 ### Pseudocode
-The following is a self-contained GLSL-like implementation for the radial accumulation pass, assuming an occlusion map input [S4, unofficial].
+The following is a self-contained Python-like implementation for the radial accumulation pass, assuming an occlusion map input [S4, unofficial].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```glsl
-uniform sampler2D tOcclusion;
-uniform vec2 uLightPos;    // Light position in UV space [0,1]
-uniform float uExposure;
-uniform float uDecay;
-uniform float uDensity;
-uniform float uWeight;
-
-const int NUM_SAMPLES = 64;
-
-void main() {
-    // 1. Calculate direction and step size
-    // deltaUV points from light to current pixel, scaled by density and sample count
-    vec2 deltaUV = (vUv - uLightPos) * uDensity / float(NUM_SAMPLES);
+```python
+def compute_god_rays(uv, light_pos, density, decay, weight, exposure, num_samples, texture_sampler):
+    # Calculate step vector from current pixel to light source
+    delta_uv = (uv - light_pos) * density / num_samples
     
-    vec2 uv = vUv;
-    float illumination = 1.0;
-    vec3 color = vec3(0.0);
+    current_uv = uv
+    illumination = 1.0
+    color = vec3(0.0)  # Initialize to zero for occlusion map; use texture_sampler(uv) for direct scene buffer
 
-    // 2. Radial accumulation loop
-    for (int i = 0; i < NUM_SAMPLES; i++) {
-        // Step backwards towards the light source
-        uv -= deltaUV;
-        
-        // Sample the occlusion map, clamping to screen bounds
-        vec3 samp = texture2D(tOcclusion, clamp(uv, 0.0, 1.0)).rgb;
-        
-        // Apply weight and exponential decay
-        samp *= illumination * uWeight;
-        
-        // Accumulate
-        color += samp;
-        
-        // Update decay factor
-        illumination *= uDecay;
-    }
+    for i in range(num_samples):
+        current_uv = current_uv - delta_uv
+        # Clamp to [0, 1] to handle screen boundaries
+        samp = texture_sampler(clamp(current_uv, 0.0, 1.0))
+        samp = samp * illumination * weight
+        color = color + samp
+        illumination = illumination * decay
 
-    // 3. Final exposure and output
-    gl_FragColor = vec4(color * uExposure, 1.0);
-}
+    return color * exposure
 ```
 
-If using the direct scene buffer without an occlusion pre-pass, the initialization changes to `vec3 color = texture2D(tDiffuse, vUv).rgb;` and the accumulation adds to this base color [S1, unofficial][S3, book].
+If using the direct scene buffer without an occlusion pre-pass, the initialization changes to `color = texture_sampler(uv)` and the accumulation adds to this base color [S1, unofficial][S3, book].
 
 ### Parameters and Typical Values
 *   **NUM_SAMPLES:** Controls sampling density and smoothness. Typical value: 64 [S4, unofficial] or 100 [S1, unofficial]. Higher values increase cost.
@@ -111,11 +89,16 @@ If using the direct scene buffer without an occlusion pre-pass, the initializati
 *   **exposure:** Final color multiplier. Typical value: 0.3 [S1, unofficial][S2, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Light Behind Camera:** If the light is behind the camera, the screen position projection may be invalid. Handle by clamping to screen center and disabling the effect or returning a default value [S2, unofficial].
-*   **Off-Screen Lights:** The technique only works for visible light sources. If the light moves off-screen, the rays disappear or become distorted [S4, unofficial].
-*   **Depth Artifacts:** Since the method lacks full volumetric depth, light shafts from background objects may appear in front of foreground objects when the light source is relatively near [S3, book]. This is often perceived as a lens flare effect but can break immersion.
+*   **Light Behind Camera:** If the light is behind the camera, the screen position projection may be invalid [S2, unofficial]. Handle by clamping to screen center and disabling the effect or returning a default value.
+*   **Off-Screen Lights:** The technique only works for visible light sources [S4, unofficial]. If the light moves off-screen, the rays disappear or become distorted.
+*   **Depth Artifacts:** Since the method lacks full volumetric depth, light shafts from background objects may appear in front of foreground objects when the light source is relatively near [S3, book]. This is often perceived as a lens flare effect but can break immersion [S3, book].
 *   **Streaking:** Sampling the main scene buffer directly can cause streaks due to high-frequency surface textures. Using an occlusion pre-pass (black geometry, bright light) mitigates this [S3, book].
-*   **Single Light Source:** The method assumes single scattering from a single light source. It does not handle multiple light sources or complex multiple scattering effects [S5, unofficial].
+*   **Single Light Source:** The method assumes single scattering from a single light source [S5, unofficial]. It does not handle multiple light sources or complex multiple scattering effects.
+
+## Subtopics
+
+### GPU Gems 3 Light Shaft Approximation
+A post-processing technique that draws light sources to a separate render target, then processes this target using a post-processing shader to create light scattering, merging it with the back buffer [S6, unofficial]. Designed originally for one very strong light [S6, unofficial]. Main loop: For each pixel, get texCoord. For each light, if Type == SPOT_LIGHT: Calculate deltaTexCoord = (texCoord - projectedLightPos.xy) / (NUM_SAMPLES * Density). Initialize illuminationDecay = 1.0. Loop j from 0 to NUM_SAMPLES-1: Decrease texCoord by deltaTexCoord. Sample inputTexture at modifiedPixel. Add to color: color += sample * illuminationDecay * Weight. Update decay: illuminationDecay *= Decay. Add result to output: result += color * Exposure [S6, unofficial]. Pitfall: Applying this method to multiple lights resulted in a simple 'Blur' of the light source map rather than correct volumetric scattering [S6, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N \cdot M)$, where $N$ is the image resolution (pixels) and $M$ is the number of samples ($NUM\_SAMPLES$) [S5, unofficial].
@@ -135,3 +118,4 @@ The technique was published by Kenny Mitchell in 2007 in *GPU Gems 3* as "Volume
 [S3] Volumetric Light Scattering as a Post-Process, https://developer.nvidia.com/gpugems/gpugems3/part-ii-light-and-shadows/chapter-13-volumetric-light-scattering-post-process, fetched 2026-10-27 (book)
 [S4] Volumetric Lighting (God Rays) — How It Works - Moonjump, https://moonjump.com/game-dev-mechanics-volumetric-lighting-god-rays-how-it-works/, fetched 2026-10-28 (unofficial)
 [S5] PDF Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S6] DX12) Trying to Implement Volumetric Scattering for multiple Spot Light, but It's not going well, https://stackoverflow.com/questions/71985186/dx12-trying-to-implement-volumetric-scattering-for-multiple-spot-light-but-it, fetched 2026-10-27 (unofficial)

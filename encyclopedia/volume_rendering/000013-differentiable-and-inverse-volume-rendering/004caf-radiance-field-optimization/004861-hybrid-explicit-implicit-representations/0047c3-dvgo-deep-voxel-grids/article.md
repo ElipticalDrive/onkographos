@@ -2,55 +2,69 @@
 Also called: Deep Voxel Grids, Direct Voxel Grid Optimization
 
 ## Overview
-DVGO is a super fast radiance field method using a hybrid representation: implicit for color inference and explicit for density inference, chosen for its potential for real-time applications [S1, unofficial][S2]. It speeds up NeRF by replacing the density MLP with voxel grids, using implicit representation for color inference and explicit for density inference [S1, unofficial]. Unlike completely implicit NeRF representations, which are not fast enough for real-time applications due to the querying cost of volume rendering on a significant number of points, DVGO uses voxel grids to store density and color features, allowing for efficient trilinear interpolation and volume rendering [S1, unofficial][S2].
+DVGO is a super-fast radiance field method that uses a hybrid representation: explicit for density inference and implicit for color inference, chosen for its potential for real-time applications [S1, unofficial][S2]. It speeds up NeRF by replacing the density MLP with voxel grids, allowing for efficient trilinear interpolation and volume rendering [S1, unofficial][S2]. Unlike completely implicit NeRF representations which are not fast enough for real-time applications due to querying costs, DVGO achieves competitive results and speed by leveraging the efficiency of grid-based explicit representations for density [S1, unofficial].
 
 ## How it works
+DVGO operates in two stages: a coarse stage and a fine stage. The coarse stage uses two explicit volumes for density and color, while the fine stage refines the density grid and replaces the color volume with a feature grid and a shallow MLP for view-dependent color [S1, unofficial].
+
 **Inputs and Outputs:**
-*   **Inputs:** A set of input images with known camera poses; near and far planes defining the sampling interval for rays.
-*   **Outputs:** A rendered color image $\hat{C}(r)$ for a given ray $r$.
+*   **Inputs:** Camera parameters (ray origin $o$ and direction $d$), near and far planes, scene images (for supervision).
+*   **Outputs:** Rendered color $\hat{C}(r)$ for each ray $r$.
 
 **Data Structures:**
-DVGO uses a dual-stage design: a coarse stage and a fine stage.
-1.  **Coarse Stage:** Uses two explicit volumes (voxel grids):
-    *   $V^{(\sigma,c)}$: Stores raw density $\ddot{\sigma}^{(c)}$. Layout: $\mathbb{R}^{N_x \times N_y \times N_z}$.
-    *   $V^{(rgb,c)}$: Stores color $c^{(c)}$. Layout: $\mathbb{R}^{C \times N_x \times N_y \times N_z}$ (where $C$ is the color channel dimension, typically 3).
-2.  **Fine Stage:** Uses refined grids and a shallow MLP:
-    *   $V^{(\sigma,f)}$: Stores raw density $\ddot{\sigma}^{(f)}$. Layout: $\mathbb{R}^{N_x \times N_y \times N_z}$ (higher resolution than coarse).
-    *   $V^{(feat,f)}$: Stores color features. Layout: $\mathbb{R}^{C \times N_x \times N_y \times N_z}$.
-    *   $MLP_{\Theta_{rgb}}$: A shallow multilayer neural network parameterized by $\Theta$ for view-dependent color inference.
+1.  **Coarse Stage:**
+    *   $V^{(\sigma,c)}$: A 3D voxel grid storing raw density values $\ddot{\sigma}^{(c)}$. Dimensions: $N_x \times N_y \times N_z$. Initialized with zero raw density to prevent suboptimal geometry [S1, unofficial].
+    *   $V^{(rgb,c)}$: A 3D voxel grid storing color values $c^{(c)}$. Dimensions: $N_x \times N_y \times N_z$.
+2.  **Fine Stage:**
+    *   $V^{(\sigma,f)}$: A higher-resolution 3D voxel grid storing raw density values $\ddot{\sigma}^{(f)}$. Initialized with the optimized coarse geometry $V^{(\sigma,c)}$ [S1, unofficial].
+    *   $V^{(feat,f)}$: A 3D voxel grid storing color features. Dimensions: $N_x \times N_y \times N_z$.
+    *   $MLP_{\Theta_{rgb}}$: A shallow multi-layer perceptron for view-dependent color inference [S1, unofficial][S2].
 
-**Numbered Steps:**
+**Algorithm Steps:**
 
 1.  **Ray Sampling:** For a pixel-rendering ray $r$, sample $n$ points $x_i$ between pre-defined near and far planes [S2]. Let $\delta_i$ be the distance between adjacent sampled points [S2].
 
 2.  **Coarse Stage Query (Optional/Initial):**
-    *   Interpolate raw density: $\ddot{\sigma}^{(c)} = \text{interp}(x, V^{(\sigma,c)})$ [S1, unofficial].
-    *   Interpolate color: $c^{(c)} = \text{interp}(x, V^{(rgb,c)})$ [S1, unofficial].
-    *   *Note:* The coarse stage is primarily for fast convergence and geometry initialization [S1, unofficial].
+    *   Query density: $\ddot{\sigma}^{(c)} = \text{interp}(x, V^{(\sigma,c)})$ [S1, unofficial].
+    *   Query color: $c^{(c)} = \text{interp}(x, V^{(rgb,c)})$ [S1, unofficial].
+    *   Activate density: $\sigma^{(c)} = \text{softplus}(\ddot{\sigma}^{(c)}) = \log(1 + \exp(\ddot{\sigma}^{(c)} + b))$, where $b$ is a shift hyperparameter [S1, unofficial][S2].
+    *   *Note: The fine stage is typically used for final rendering after training.*
 
-3.  **Fine Stage Density:**
-    *   Interpolate raw density from the refined grid: $\ddot{\sigma}^{(f)} = \text{interp}(x, V^{(\sigma,f)})$ [S1, unofficial].
-    *   The density volume $V^{(\sigma,c)}$ is initialized with zero raw density to prevent suboptimal geometry [S1, unofficial]. The fine stage density grid $V^{(\sigma,f)}$ is initialized with the optimized coarse geometry $V^{(\sigma,c)}$ [S1, unofficial].
+3.  **Fine Stage Query:**
+    *   **Density Retrieval:** Interpolate raw density from the refined grid:
+        $$ \ddot{\sigma}^{(f)} = \text{interp}(x, V^{(\sigma,f)}) $$
+        where $\text{interp}$ denotes trilinear interpolation [S1, unofficial][S2].
+    *   **Density Activation:** Apply shifted softplus to obtain final density:
+        $$ \sigma = \text{softplus}(\ddot{\sigma}^{(f)}) = \log(1 + \exp(\ddot{\sigma}^{(f)} + b)) $$
+        where $b$ is a hyperparameter [S1, unofficial][S2].
+    *   **Feature Retrieval:** Interpolate color features from the feature grid:
+        $$ v = \text{interp}(x, V^{(feat,f)}) $$
+        where $v \in \mathbb{R}^C$ [S2].
+    *   **Color Decoding:** Map the color feature to a view-dependent color emission using the shallow MLP:
+        $$ c^{(rgb)} = MLP_{\Theta_{rgb}}(v, x, d) $$
+        Positional encoding is applied to encode $x$ and $d$ for the $MLP_{\Theta_{rgb}}$ [S2].
 
-4.  **Fine Stage Color:**
-    *   Interpolate features from the refined feature grid: $f_i = \text{interp}(x_i, V^{(feat,f)})$ [S1, unofficial][S2].
-    *   Map the color feature to a view-dependent color emission $c_i^{(rgb)}$ using the shallow MLP:
-        $$c_i^{(rgb)} = MLP_{\Theta_{rgb}}(f_i, x_i, d)$$
-        where $d$ is the ray direction and positional encoding is applied to $x_i$ and $d$ [S2].
+4.  **Volume Rendering:**
+    *   Calculate light termination probability (opacity) for each point:
+        $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+        where $\sigma_i$ is the density at point $i$ and $\delta_i$ is the distance to the adjacent point [S1, unofficial][S2].
+    *   Calculate accumulated transmittance:
+        $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        with $T_1 = 1$ [S1, unofficial][S2].
+    *   Accumulate results into a single color $\hat{C}(r)$:
+        $$ \hat{C}(r) = \sum_{i=1}^{n} T_i \alpha_i c_i + T_{n+1} c_{bg} $$
+        where $c_i$ is the color at point $i$, and $c_{bg}$ is a pre-defined background color [S2].
 
-5.  **Density Activation:**
-    *   Apply shifted softplus to the raw density to obtain final density $\sigma_i$:
-        $$\sigma_i = \text{softplus}(\ddot{\sigma}_i) = \log(1 + \exp(\ddot{\sigma}_i + b))$$
-        where $\ddot{\sigma}_i$ is the value stored in the density grid ($V^{(\sigma,f)}$ for fine stage) and $b$ is a shift hyperparameter [S1, unofficial][S2].
+**Parameters:**
+*   **$b$:** A shift hyperparameter in the softplus activation function for density [S1, unofficial][S2].
+*   **Grid Resolution:** $N_x, N_y, N_z$ for coarse and fine grids [S1, unofficial][S2].
+*   **MLP Architecture:** Shallow MLP for color decoding [S1, unofficial][S2].
 
-6.  **Volume Rendering Accumulation:**
-    *   Calculate the light termination probability (opacity) $\alpha_i$:
-        $$\alpha_i = 1 - \exp(-\sigma_i \delta_i)$$
-    *   Calculate the accumulated transmittance $T_i$ from the near plane to point $i$:
-        $$T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$$
-    *   Accumulate results into a single color $\hat{C}(r)$ using volume rendering quadrature:
-        $$\hat{C}(r) = \sum_{i=1}^{n} T_i \alpha_i c_i + T_{n+1} c_{bg}$$
-        where $c_{bg}$ is a pre-defined background color [S2].
+**Edge Cases and Pitfalls:**
+*   **Initialization:** $V^{(\sigma,c)}$ must be initialized with zero raw density to prevent suboptimal geometry [S1, unofficial].
+*   **Precision:** Trilinear interpolation assumes continuous variation between voxels; sharp discontinuities may require higher resolution [S1, unofficial][S2].
+*   **Boundaries:** Points outside the defined storage domain must be handled (e.g., clamping, zero-padding, or out-of-bounds flags) [G].
+*   **Degenerate Input:** Empty regions in the scene may result in sparse feature storage, requiring efficient sparse data structures or padding strategies [S1, unofficial].
 
 **Pseudocode:**
 
@@ -59,111 +73,107 @@ DVGO uses a dual-stage design: a coarse stage and a fine stage.
 ```python
 import numpy as np
 
-def softplus(x, b):
+def softplus(x, b=0.0):
     """Shifted softplus activation."""
     return np.log(1 + np.exp(x + b))
 
 def trilinear_interpolate(grid, points):
     """
-    Perform trilinear interpolation.
-    grid: numpy array of shape (Nx, Ny, Nz) or (C, Nx, Ny, Nz)
-    points: numpy array of shape (N, 3) containing 3D coordinates
-    Returns: interpolated values. If grid is 3D, returns (N,). If 4D, returns (N, C).
+    Perform trilinear interpolation for points in a 3D grid.
+    grid: np.array of shape (Nx, Ny, Nz) or (Nx, Ny, Nz, C)
+    points: np.array of shape (N, 3) with coordinates in [0, 1] relative to grid bounds
+    Returns: interpolated values. If grid has C channels, returns (N, C).
     """
-    # Implementation of trilinear interpolation is assumed standard.
-    # This function maps (R^3, R^{C x Nx x Ny x Nz}) -> R^C.
+    # Implementation details for trilinear interpolation are standard.
+    # This function assumes points are normalized to [0, 1] and grid is defined on [0, 1]^3.
+    # For a complete implementation, one would handle boundary conditions.
+    # [G] Placeholder for actual interpolation logic.
     pass
 
-def render_ray_dvgo(ray_origin, ray_direction, near_plane, far_plane, 
-                    V_sigma_f, V_feat_f, mlp_rgb, b, bg_color, 
-                    num_samples=128):
+def dvgo_render_ray(ray_origin, ray_direction, near_plane, far_plane, 
+                    V_sigma_f, V_feat_f, mlp_rgb, b, bg_color, num_samples=128):
     """
-    Render a single ray using the DVGO fine stage.
+    Render a single ray using the fine stage of DVGO.
     
     Args:
         ray_origin: (3,) array
-        ray_direction: (3,) array, normalized
+        ray_direction: (3,) array
         near_plane: float
         far_plane: float
-        V_sigma_f: (Nx, Ny, Nz) array, raw density grid
-        V_feat_f: (C, Nx, Ny, Nz) array, feature grid
+        V_sigma_f: 3D grid of raw densities
+        V_feat_f: 3D grid of color features
         mlp_rgb: function taking (features, position, direction) -> color
-        b: float, shift hyperparameter for softplus
+        b: shift hyperparameter for softplus
         bg_color: (3,) array
-        num_samples: int, number of sample points
+        num_samples: int
         
     Returns:
         color: (3,) array
     """
     # 1. Sample points along the ray
     t = np.linspace(near_plane, far_plane, num_samples)
-    points = ray_origin + t[:, np.newaxis] * ray_direction # Shape (num_samples, 3)
+    points = ray_origin + t[:, np.newaxis] * ray_direction
     
-    # 2. Interpolate raw density
-    raw_density = trilinear_interpolate(V_sigma_f, points) # Shape (num_samples,)
+    # 2. Query Density
+    # Interpolate raw density from V_sigma_f
+    raw_densities = trilinear_interpolate(V_sigma_f, points) # Shape: (num_samples,)
     
-    # 3. Activate density
-    density = softplus(raw_density, b) # Shape (num_samples,)
+    # Activate density
+    densities = softplus(raw_densities, b)
     
-    # 4. Interpolate features
-    features = trilinear_interpolate(V_feat_f, points) # Shape (num_samples, C)
+    # 3. Query Color Features and Decode
+    # Interpolate features from V_feat_f
+    features = trilinear_interpolate(V_feat_f, points) # Shape: (num_samples, C)
     
-    # 5. Compute view-dependent color
-    # Positional encoding is applied to points and direction before MLP
-    # Assuming mlp_rgb handles positional encoding internally or expects encoded inputs
-    colors = np.array([mlp_rgb(features[i], points[i], ray_direction) for i in range(num_samples)]) # Shape (num_samples, 3)
+    # Apply positional encoding to points and direction (not shown in detail)
+    # [G] Positional encoding is applied to x and d for the MLP.
     
-    # 6. Volume Rendering
+    # Decode color using MLP
+    colors = np.zeros((num_samples, 3))
+    for i in range(num_samples):
+        colors[i] = mlp_rgb(features[i], points[i], ray_direction)
+        
+    # 4. Volume Rendering
     # Calculate delta distances
-    deltas = np.diff(t, append=far_plane) # Shape (num_samples,)
+    deltas = np.diff(t, append=far_plane) # Shape: (num_samples,)
     
     # Calculate alpha
-    alpha = 1.0 - np.exp(-density * deltas) # Shape (num_samples,)
+    alphas = 1 - np.exp(-densities * deltas)
     
-    # Calculate transmittance T_i
-    # T_i = product_{j=1}^{i-1} (1 - alpha_j)
-    # T_1 = 1.0
-    transmittance = np.cumprod(1.0 - alpha)
-    transmittance = np.roll(transmittance, 1)
-    transmittance[0] = 1.0
+    # Calculate transmittance
+    transmittances = np.cumprod(1 - alphas)
+    transmittances = np.concatenate(([1.0], transmittances[:-1]))
     
     # Accumulate color
-    # C(r) = sum_{i=1}^{n} T_i * alpha_i * c_i + T_{n+1} * c_bg
-    contribution = transmittance * alpha[:, np.newaxis] * colors
-    final_color = np.sum(contribution, axis=0) + transmittance[-1] * bg_color
+    contribution = transmittances[:, np.newaxis] * alphas[:, np.newaxis] * colors
+    accumulated_color = np.sum(contribution, axis=0)
+    
+    # Add background
+    final_transmittance = transmittances[-1] * (1 - alphas[-1]) # T_{n+1}
+    final_color = accumulated_color + final_transmittance * bg_color
     
     return final_color
 ```
 
-**Parameters:**
-*   $b$: A shift hyperparameter in the softplus activation function for density [S1, unofficial][S2].
-*   $c_{bg}$: Pre-defined background color [S2].
-
-**Edge Cases and Pitfalls:**
-*   **Initialization:** $V^{(\sigma,c)}$ is initialized with zero raw density to prevent suboptimal geometry [S1, unofficial].
-*   **Precision:** The softplus activation ensures density is non-negative. Numerical stability in $\exp(-\sigma_i \delta_i)$ should be considered for very large or small values [S2].
-*   **Boundaries:** Sampling is restricted to pre-defined near and far planes [S2]. Points outside the voxel grid bounds require clamping or padding during interpolation.
-
 ## Subtopics
 
 ### Hybrid Representation
-Uses both explicit voxel grids and implicit MLPs. Explicit for density, implicit for color. Faster than fully implicit NeRF. [Hybrid Representation](7846-hybrid-representation.md)
+The general class of methods combining explicit and implicit storage. DVGO is a specific instance using voxel grids for density and MLPs for color. See [Hybrid Explicit-Implicit Representations](12240-hybrid-explicit-implicit-representations.md).
 
-### NeRF
-Neural Radiance Fields, the foundational implicit representation method. [NeRF](52-name.md)
+### Hybrid Representation (Sibling)
+A sibling method that may use different explicit storage mechanisms (e.g., hash tables) or decoder structures. See [Hybrid Representation](7846-hybrid-representation.md).
 
 ## Operating characteristics
-*   **Time and Memory Complexity:** DVGO is significantly faster than completely implicit NeRF representations because it replaces the density MLP with voxel grids, avoiding the querying cost of volume rendering on a significant number of points via MLPs [S1, unofficial]. Memory usage is determined by the resolution of the voxel grids ($N_x \times N_y \times N_z$) and the size of the shallow MLP [S2].
-*   **Measured Performance:** DVGO demonstrates "super fast" radiance fields with the potential for real-time applications [S1, unofficial]. It offers competitive results and speed when compared to other hybrid representations [S1, unofficial].
-*   **Strengths:** Efficient volumetric information gain computation; dual-stage design allows fast convergence in the coarse stage and high-quality reconstruction in the fine stage; flexibility in level of detail suits different task requirements [S1, unofficial].
-*   **Limitations:** Resolution is limited by the voxel grid size; may suffer from aliasing or blurring at high resolutions if not properly regularized (not explicitly stated in sources, but implied by grid-based nature).
-*   **When to Use:** When real-time or near real-time novel view synthesis is required, and a hybrid explicit-implicit representation is acceptable [S1, unofficial][S2].
-*   **When Not to Use:** When extremely high fidelity without resolution constraints is needed and training/inference time is not a concern (use fully implicit NeRF) [S1, unofficial].
+*   **Time Complexity:** Faster than completely implicit NeRF representations because querying density from voxel grids is efficient compared to MLP evaluation for every sample point [S1, unofficial]. The coarse stage allows fast convergence, and the fine stage provides high-quality reconstruction [S1, unofficial].
+*   **Memory Complexity:** Depends on the resolution of the voxel grids ($N_x \times N_y \times N_z$). The fine stage uses higher-resolution grids, increasing memory usage compared to the coarse stage [S1, unofficial].
+*   **Measured Performance:** DVGO demonstrates super-fast radiance field capabilities, suitable for real-time applications [S1, unofficial]. It achieves competitive results and speed when compared to other hybrid representations [S1, unofficial].
+*   **Strengths:** Real-time potential, efficient density computation, dual-stage design for flexibility in level of detail [S1, unofficial].
+*   **Limitations:** Memory usage scales with grid resolution; view-dependent color requires an MLP, which is slower than direct color lookup but faster than full NeRF [S1, unofficial].
+*   **When to Use:** When real-time or near real-time rendering is required, and the scene can be represented with sufficient resolution in voxel grids [S1, unofficial].
+*   **When Not to Use:** For scenes with extremely fine details that require very high resolution grids, leading to memory issues, or when view-dependent effects are complex and cannot be captured by a shallow MLP [S1, unofficial].
 
 ## Background
-*   **Origin:** DVGO (Direct Voxel Grid Optimization) was proposed as a method to speed up NeRF [S1, unofficial][S2]. It is cited as reference [59] in [S1, unofficial] and [35] in [S2].
-*   **History:** It is part of a recent trend of "super fast radiance fields" using hybrid representations (implicit for light field, explicit for density field) [S1, unofficial].
-*   **Usage:** Used in ActiveRMAP as the hybrid representation for the radiance field [S1, unofficial].
+DVGO (Direct Voxel Grid Optimization) was proposed as a method to speed up NeRF by replacing the density MLP with voxel grids [S1, unofficial][S2]. It is part of a family of "super fast radiance fields" that use hybrid representations (implicit for light field, explicit for density field) [S1, unofficial]. It has been used in applications such as ActiveRMAP for active mapping and planning [S1, unofficial]. The method builds on the principles of neural radiance fields but optimizes for query efficiency [S1, unofficial].
 
 ## Sources
 [S1] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)

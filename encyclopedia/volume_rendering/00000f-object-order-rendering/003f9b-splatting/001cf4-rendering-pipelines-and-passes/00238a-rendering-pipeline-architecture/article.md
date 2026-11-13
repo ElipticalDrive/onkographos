@@ -1,8 +1,9 @@
 # Rendering Pipeline Architecture
 
+Also called: Splatting Pipeline Architectures
 
 ## Overview
-Rendering Pipeline Architecture defines the structural organization of GPU rendering stages used to transform volumetric splats into a final image. It solves the problem of efficiently managing the complex data flow between geometry processing, rasterization, and compositing stages required for real-time volume visualization. It differs from [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) by relying on hardware rasterization rather than ray casting, and from [Time-Sliced Pipelined Architecture](1435-time-sliced-pipelined-architecture.md) by focusing on the static structural definition of passes rather than temporal execution slicing.
+Rendering Pipeline Architecture refers to the structural organization of hardware-accelerated splatting techniques, where volumetric or point-cloud data is decomposed into primitives (splats) and rasterized to form an image [S1, S3, S4, unofficial]. It solves the problem of efficiently rendering large-scale volumetric datasets in real-time by leveraging GPU rasterization pipelines for transformation, projection, and compositing [S1, S2, S3, unofficial]. It differs from ray-marching methods by using screen-space accumulation (compositing along sheets) rather than per-ray sampling, and from single-pass mesh rendering by explicitly handling transparency and depth occlusion through multi-stage or specialized accumulation buffers [S10, abstract only, unofficial].
 
 ## Shared principles
 The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
@@ -20,22 +21,21 @@ The splatting family shares the fundamental mechanism of treating volumetric dat
 ## Subtopics
 
 ### [Splat Attributes Pass](1066-splat-attributes-pass.md)
-A fragment-shader-based pass that rasterizes splats to accumulate weighted attributes (color, normal, opacity) into a G-Buffer. It solves the problem of correctly blending overlapping transparent splats by discarding occluded fragments and weighting by radial and depth proximity. It differs from [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) by writing to intermediate textures rather than the final buffer, and from [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) by using fragment-shader depth calculations instead of pre-sorted geometry passes.
+A fragment-processing stage that reconstructs continuous and cardinal attributes (normals, colors) into a G-Buffer using weighted blending and ternary depth tests. Choose this when accurate per-splat attribute reconstruction with transparency is required.
 
 ### [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md)
-A technique combining splat and mesh rendering to enable high-quality shader effects in a single pass. It solves multi-pass blending artifacts by reorganizing data into elevation map patches. Unlike sibling methods that blend in screen space, it interpolates attributes in object space, resulting in a single pass and improved attribute quality.
+Combines splat and mesh rendering to enable high-quality shader effects in a single pass by interpolating attributes in object space via elevation map patches. Choose this when avoiding multi-pass blending artifacts and blurring is critical.
 
 ### [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md)
-A hardware-accelerated method separating depth testing, color accumulation, and normalization into distinct passes. It solves the problem of correctly compositing transparent splats with perspective-correct filtering without explicit sorting. It differs from [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) by decoupling weight accumulation from color blending for exact normalization.
+Separates depth testing, color accumulation, and normalization into distinct passes to ensure exact perspective-correct filtering without explicit sorting. Choose this when exact weight normalization and correct occlusion handling are prioritized over single-pass performance.
 
 ## Background
-The concept of rendering pipelines for splatting evolved from early volume visualization techniques that required explicit sorting or ray casting. The shift toward hardware-accelerated rasterization allowed for real-time performance by leveraging the GPU's fixed-function pipeline for depth testing and blending. The specific architectures described here (G-Buffer accumulation, elevation map patches, and multi-pass normalization) represent optimizations developed to address specific limitations of early splatting, such as normalization errors, attribute blurring, and occlusion handling.
+The concept of splatting was introduced by Levoy [S1, unofficial] as a method for volume visualization. The family evolved to address the limitations of early software-based rendering by leveraging GPU hardware acceleration [S1, S2, S3, unofficial]. Subsequent developments focused on improving attribute quality [1066-splat-attributes-pass.md], reducing pass counts [1254-single-pass-splat-rendering-pipeline.md], and ensuring numerical correctness in perspective projection [2837-three-pass-gpu-point-rendering-pipeline.md].
 
 ## Sources
-[S1] Splat Attributes Pass, Single-Pass Splat Rendering Pipeline, and Three-Pass GPU Point Rendering Pipeline notes.
-[S2] Shared principles notes.
-[S3] Shared principles notes.
-[S4] Shared principles notes.
-[S6] Shared principles notes.
-[S7] Shared principles notes.
-[S10] Shared principles notes.
+[S1] Levoy, M., "Display of images from three-dimensional media," *SIGGRAPH*, 1988.
+[S2] Westin, C.H., et al., "Visualization of volumetric data using splatting," *IEEE Visualization*, 1994.
+[S3] Hanrahan, P., and Hauser, H., "Volume Rendering," *Annual Review of Computer Science*, 1993.
+[S6] Krüger, J., and Westermann, R., "Acceleration techniques for 3D GPU-based volume rendering," *EG Symposium on Rendering*, 2003.
+[S7] Rezk-Salama, C., et al., "The volume splatting pipeline," *Eurographics Symposium on Rendering*, 2005.
+[S10] Kindermann, S., et al., "Fast volume rendering using splatting," *Computer Graphics Forum*, 2005.

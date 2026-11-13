@@ -3,87 +3,77 @@
 Also called: Level Manager, Coarse-to-Fine Update Queue
 
 ## Overview
-Priority Queue Based Field Update is a dynamic optimization method for sparse voxel octrees that ensures volume field updates (such as sculpting or erosion) proceed from coarser to finer levels. This ordering is essential for interactive display, as it prevents visual artifacts caused by updating fine details before their coarser parents are consistent. It differs from recursive depth-first approaches, which miss this coarse-to-fine requirement, by using a priority queue sorted by cell level and tool identity to manage the update sequence [S1].
+Priority Queue Based Field Update is a scheduling mechanism for hierarchical volume data structures that ensures field modifications are applied from coarser levels to finer levels [S1]. It solves the problem of visual artifacts and inconsistency in interactive volume sculpting, where a depth-first recursive update would modify fine details before their coarser parents are adjusted, violating the hierarchical dependency required for correct resolution-adaptive rendering [S1]. Unlike sibling methods that may handle memory or texture uploads, this method specifically manages the temporal and spatial order of geometric updates using a priority queue of cell queues [S1].
 
 ## How it works
+The method replaces the standard recursive application of tools on a Sparse Voxel Octree (SVO) with an asynchronous, priority-driven workflow. It guarantees that for any given tool action, all cells at level $L$ are updated before any cells at level $L+1$ are processed, regardless of the tree's branching factor or the specific geometry of the tool's intersection.
+
 ### Inputs and Outputs
-- **Input**: A Tool/Action couple (e.g., "Erode", "Grow") applied to the volume.
-- **Output**: A modified Sparse Voxel Octree where cells intersected by the tool are updated and subdivided/simplified as needed, maintaining the coarse-to-fine consistency.
+*   **Input:** A Tool/Action couple (e.g., "Push" tool, "Sculpt" action) applied to a hierarchical volume structure (SVO).
+*   **Output:** A modified volume state where all affected cells have been updated according to the tool's effect, respecting the coarse-to-fine order.
 
 ### Data Structures
-The method relies on three primary data structures, enclosed within a **Level Manager**:
 
-1.  **ToolCopy**: A frozen snapshot of the tool at the moment of application.
-    -   **Fields**:
-        -   State information: Position, orientation, scale, color, etc.
-        -   Reference: Pointer to the original tool and the specific action involved.
-        -   Unique Identifier: An integer acting as a time-counter/timestamp to avoid redundant computations [S1].
-2.  **Cell-Queue**: A simple FIFO queue used to temporarily store cells intersected by the tool at a specific level.
-    -   **Operations**: Constant-time `pushback` and `popfront` [S1].
-    -   **Indexing**: Indexed by the `ToolCopy` and the size (level) of the cells it contains.
-    -   **Access**: Only the update thread accesses the Cell-queues it empties or fills. The draw process accesses cells directly through the hierarchy, so no locking is needed inside Cell-queues [S1].
-3.  **Level Manager Priority Queue**: The central scheduler.
-    -   **Elements**: Cell-queues (not individual ToolCopies).
-    -   **Sorting Criteria**: Sorted by **Level** (cell size, coarser first) and then by **Tool/Action** (sequential application) [S1].
-    -   **Implementation**: Typically implemented using a standard library priority queue (e.g., STL `priority_queue` relying on `vector`) [S1].
+**1. ToolCopy**
+A frozen snapshot of the tool state at the moment of application. It contains:
+*   **State Information:** Position, orientation, scale, color, and other tool-specific parameters [S1].
+*   **Reference:** A pointer to the original tool definition and the specific action type [S1].
+*   **Unique Identifier:** An integer acting as a time-counter or timestamp to distinguish between concurrent or overlapping tool applications [S1].
+
+**2. Cell-Queue**
+A simple FIFO queue with constant-time pushback and popfront operations. It temporarily stores cells intersected by a specific ToolCopy at a specific resolution level.
+*   **Indexing:** Indexed by the `ToolCopy` and the cell size (level) [S1].
+*   **Content:** A list of cell pointers or handles that need processing at the current level [S1].
+
+**3. Level Manager Priority Queue**
+The central scheduler. It is a priority queue where elements are `Cell-Queue` objects, not individual cells or tools.
+*   **Sorting Criteria:** Elements are sorted primarily by **Level** (coarser levels first, i.e., smaller cell size) and secondarily by **Tool/Action** (sequential application of tools) [S1].
+*   **Implementation:** Typically implemented using a standard library priority queue (e.g., STL `priority_queue` backed by a `vector`) [S1].
 
 ### Algorithm Steps
 
-1.  **Initialization (User Thread)**:
-    -   When a user applies a tool, the system creates a `ToolCopy` from the Tool/Action couple.
-    -   A new `Cell-Queue` is created, containing only the current root cell.
-    -   This `Cell-Queue` is inserted into the `Level Manager` priority queue [S1].
+1.  **Initialization (User Thread):**
+    When a user applies a tool, the system creates a `ToolCopy` from the current tool state. The `Level Manager` creates a new `Cell-Queue` containing only the current root cell. This `Cell-Queue` is inserted into the `Level Manager` priority queue [S1].
 
-2.  **Update Loop (Update Thread)**:
-    -   The update thread runs continuously in the background.
-    -   It extracts the highest-priority `Cell-Queue` from the `Level Manager`.
-    -   It processes cells in the queue using the modified `Apply` procedure (see below).
-    -   If the priority queue becomes empty, the thread performs a **Simplification** step (as defined in the parent method) and then suspends itself using a blocking lock mechanism to save processor resources [S1].
+2.  **Update Loop (Background Thread):**
+    An update thread runs continuously in the background. It extracts the highest-priority `Cell-Queue` from the `Level Manager` [S1].
 
-3.  **Modified Apply Procedure**:
-    -   The `Apply` procedure receives a `Cell-Queue` as an extra parameter.
-    -   It updates the internal vertices of the current cell and subdivides it if necessary (based on the tool's effect).
-    -   **Crucial Difference**: Instead of recursively calling `Apply` on existing children immediately, it identifies children that intersect the tool.
-    -   These intersecting children are appended to the `Cell-Queue` associated with the next finer level.
-    -   If the `Cell-Queue` for the next level does not exist in the manager, it is created and inserted into the `Level Manager` priority queue [S1].
+3.  **Processing a Level:**
+    The update thread processes the `Cell-Queue` for the current level $L$:
+    *   For each cell in the queue, the `Apply` procedure is executed.
+    *   The `Apply` procedure updates the cell's internal vertices and subdivides it if necessary (based on the tool's effect and density thresholds) [S1].
+    *   Instead of recursively calling `Apply` on children immediately, the procedure identifies all child cells that intersect the tool's volume.
+    *   These intersecting child cells are appended to a *new* `Cell-Queue` designated for level $L+1$ and the same `ToolCopy` [S1].
 
-4.  **Interruption Handling**:
-    -   If a coarser level is inserted into the `Level Manager` (e.g., from a new user action or undo/redo) while the update thread is processing a finer level's `Cell-Queue`, the current processing is interrupted.
-    -   The interrupted `Cell-Queue` is re-inserted into the `Level Manager` priority queue.
-    -   When the update thread returns to this queue, it resumes handling from where it was suspended [S1].
+4.  **Queue Management and Interruption:**
+    *   If the `Level Manager` receives a new `Cell-Queue` for a coarser level (or a different tool) while the update thread is processing a queue for a finer level, the current processing is interrupted [S1].
+    *   The partially processed `Cell-Queue` is re-inserted into the `Level Manager` priority queue.
+    *   The update thread resumes processing the newly inserted, higher-priority queue. When it returns to the suspended queue, it continues from where it left off [S1].
 
-5.  **Threading Synchronization**:
-    -   Two threads are used: one for user interaction/display and one for background updates [S1].
-    -   Blocking access (locking) is limited strictly to the insertion and removal of `Cell-Queues` in the `Level Manager` priority queue.
-    -   No exclusion mechanism is needed inside `Cell-Queues` or for accessing cells through the hierarchy, as the update process is the only one modifying the queue structure, and the draw process reads cells directly [S1].
+5.  **Simplification and Suspension:**
+    *   When the `Level Manager` priority queue becomes empty, the update thread performs a simplification step (removing empty or redundant nodes) as defined in the parent hierarchy's simplification logic [S1].
+    *   Once simplification is complete, the update thread suspends itself using a blocking lock mechanism to save processor resources until a new tool application inserts a new `Cell-Queue` [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import threading
-import queue
-import heapq
-
-# Constants
-LEVEL_COARSE = 0
-LEVEL_FINE = MAX_DEPTH
-
+# Data Structures
 class ToolCopy:
-    """Frozen copy of a tool at application time."""
-    def __init__(self, tool_ref, action, timestamp, state):
-        self.tool_ref = tool_ref
-        self.action = action
+    def __init__(self, tool_id, position, orientation, scale, color, timestamp):
+        self.tool_id = tool_id
+        self.position = position
+        self.orientation = orientation
+        self.scale = scale
+        self.color = color
         self.timestamp = timestamp
-        self.state = state  # position, orientation, scale, color, etc.
 
 class CellQueue:
-    """Queue of cells at a specific level for a specific ToolCopy."""
-    def __init__(self, tool_copy, level):
+    def __init__(self, tool_copy, level_size):
         self.tool_copy = tool_copy
-        self.level = level
-        self.cells = []  # List of cell references
+        self.level_size = level_size
+        self.cells = [] # List of cell references
 
     def push(self, cell):
         self.cells.append(cell)
@@ -95,165 +85,122 @@ class CellQueue:
         return len(self.cells) == 0
 
 class LevelManager:
-    """Manages the priority queue of Cell-Queues."""
     def __init__(self):
-        # Priority queue stores tuples: (level, tool_timestamp, cell_queue)
-        # Sorted by level (ascending), then by timestamp (ascending)
-        self._pq = []
-        self._lock = threading.Lock()
-        self._condition = threading.Condition(self._lock)
-        self._running = False
-        self._update_thread = None
+        # Priority queue sorted by (level_size ASC, tool_id ASC, timestamp ASC)
+        # Note: STL priority_queue is a max-heap, so we negate level_size for min-heap behavior
+        self.queue = [] 
+        self.lock = Lock()
 
-    def start(self):
-        self._running = True
-        self._update_thread = threading.Thread(target=self._update_loop)
-        self._update_thread.start()
+    def insert(self, cell_queue):
+        with self.lock:
+            # Push to priority queue. Key is (cell_queue.level_size, cell_queue.tool_id, cell_queue.tool_copy.timestamp)
+            heapq.heappush(self.queue, (-cell_queue.level_size, cell_queue.tool_id, cell_queue.tool_copy.timestamp, cell_queue))
 
-    def stop(self):
-        self._running = False
-        with self._condition:
-            self._condition.notify_all()
-        if self._update_thread:
-            self._update_thread.join()
+    def extract(self):
+        with self.lock:
+            if not self.queue:
+                return None
+            # Pop the element with the smallest level_size (largest negative value)
+            neg_level, tool_id, ts, cell_queue = heapq.heappop(self.queue)
+            return cell_queue
 
-    def insert_tool(self, tool_copy, root_cell):
-        """Called by user thread when a tool is applied."""
-        level = root_cell.level
-        cell_queue = CellQueue(tool_copy, level)
-        cell_queue.push(root_cell)
+    def is_empty(self):
+        with self.lock:
+            return len(self.queue) == 0
+
+# Global State
+level_manager = LevelManager()
+update_thread_active = True
+
+def apply_tool_on_root(root_cell, tool_copy):
+    """
+    Called by User Thread when a tool is applied.
+    """
+    cell_queue = CellQueue(tool_copy, root_cell.level_size)
+    cell_queue.push(root_cell)
+    level_manager.insert(cell_queue)
+
+def apply(cell, tool_copy, next_level_queue):
+    """
+    Called by Update Thread.
+    Updates the cell and generates work for the next level.
+    """
+    # 1. Update internal vertices based on tool_copy
+    update_cell_geometry(cell, tool_copy)
+    
+    # 2. Subdivide if needed (based on density/contrast thresholds)
+    if needs_subdivision(cell):
+        subdivide_cell(cell)
+    
+    # 3. Find children intersecting the tool
+    # This requires testing the tool's volume against child bounding boxes
+    children = get_children(cell)
+    for child in children:
+        if intersects_tool(child.bounding_box, tool_copy):
+            next_level_queue.push(child)
+
+def update_thread_loop():
+    """
+    Background thread that empties the priority queue.
+    """
+    global update_thread_active
+    
+    while update_thread_active:
+        cell_queue = level_manager.extract()
         
-        with self._condition:
-            # Push to priority queue: (level, timestamp, cell_queue)
-            heapq.heappush(self._pq, (level, tool_copy.timestamp, cell_queue))
-            self._condition.notify()
-
-    def _update_loop(self):
-        while self._running:
-            cell_queue = None
-            with self._condition:
-                # Wait until there is work or we are stopping
-                while not self._pq and self._running:
-                    self._condition.wait()
-                
-                if not self._running:
-                    break
-                
-                if self._pq:
-                    # Pop highest priority (coarsest level, earliest timestamp)
-                    level, ts, cell_queue = heapq.heappop(self._pq)
+        if cell_queue is None:
+            # Queue is empty, perform simplification
+            perform_simplification()
             
-            if cell_queue:
-                self._process_cell_queue(cell_queue)
+            # Suspend thread to save resources
+            with level_manager.lock:
+                # Wait until a new item is inserted (condition variable logic implied)
+                level_manager.wait_for_work()
+            continue
             
-            # If queue is empty, perform simplification and suspend
-            with self._condition:
-                if not self._pq:
-                    # Perform simplification step (defined in parent method)
-                    perform_simplification()
-                    # Suspend to save resources
-                    self._condition.wait()
-
-    def _process_cell_queue(self, cell_queue):
-        """Process all cells in the queue, inserting children into next level queues."""
+        current_level = cell_queue.level_size
+        next_level = current_level + 1 # Assuming uniform level increment
+        
+        # Create queue for the next level
+        next_queue = CellQueue(cell_queue.tool_copy, next_level)
+        
+        # Process all cells in the current queue
         while not cell_queue.is_empty():
             cell = cell_queue.pop()
-            self._apply_tool_to_cell(cell, cell_queue)
-
-    def _apply_tool_to_cell(self, cell, current_queue):
-        """
-        Modified Apply procedure.
-        Updates cell and subdivides if needed.
-        Inserts intersecting children into the appropriate next-level Cell-Queue.
-        """
-        # 1. Update internal vertices and check subdivision criteria
-        needs_subdivision = check_subdivision(cell)
-        apply_tool_effect(cell)
-
-        if needs_subdivision:
-            # 2. Identify children that intersect the tool
-            children = get_children(cell)
-            intersecting_children = []
-            for child in children:
-                if intersects_tool(child, current_queue.tool_copy):
-                    intersecting_children.append(child)
-
-            # 3. Insert intersecting children into the next level's Cell-Queue
-            next_level = cell.level + 1
-            tool_copy = current_queue.tool_copy
+            apply(cell, cell_queue.tool_copy, next_queue)
             
-            # Find or create the Cell-Queue for the next level
-            next_queue = find_or_create_queue(tool_copy, next_level)
-            
-            # Insert into priority queue if it's a new queue
-            if next_queue.was_just_created:
-                with self._condition:
-                    heapq.heappush(self._pq, (next_level, tool_copy.timestamp, next_queue))
-                    self._condition.notify()
-            
-            # Add children to the queue
-            for child in intersecting_children:
-                next_queue.push(child)
-
-def find_or_create_queue(tool_copy, level):
-    """Helper to find existing queue or create new one."""
-    # Implementation detail: In a real system, this might scan the PQ or use a hash map.
-    # For simplicity, we assume the Level Manager maintains a lookup or we scan.
-    # Note: The source implies direct insertion/handling inside the manager.
-    # We will assume a simple scan for the purpose of this pseudocode, 
-    # though a hash map would be more efficient.
-    # However, the source says "Cell-queues are indexed by a ToolCopy and the size".
-    # So we can look up by (tool_copy, level).
-    
-    # [G] Assuming a dictionary lookup for efficiency, as scanning PQ is O(N).
-    # The source doesn't specify the lookup mechanism, only that they are indexed.
-    if (tool_copy, level) in global_queue_registry:
-        return global_queue_registry[(tool_copy, level)]
-    else:
-        new_queue = CellQueue(tool_copy, level)
-        new_queue.was_just_created = True
-        global_queue_registry[(tool_copy, level)] = new_queue
-        return new_queue
-
-# Global registry for queue lookup [G]
-global_queue_registry = {}
+        # Insert the next level's queue into the manager
+        # This may interrupt current processing if it has higher priority
+        level_manager.insert(next_queue)
 
 def perform_simplification():
-    """Placeholder for simplification logic defined in parent method."""
-    pass
-
-def check_subdivision(cell):
-    # Returns True if cell needs to be split
-    pass
-
-def apply_tool_effect(cell):
-    # Modifies cell data
-    pass
-
-def get_children(cell):
-    # Returns list of child cells
-    pass
-
-def intersects_tool(child, tool_copy):
-    # Checks if child geometry intersects the tool's frozen state
+    """
+    Removes empty or redundant nodes from the SVO.
+    """
+    # Implementation details depend on the specific SVO simplification algorithm
     pass
 ```
 
 ### Parameters and Edge Cases
--   **Timestamps**: The unique identifier in `ToolCopy` acts as a time-counter. This ensures that if the same tool is applied multiple times, the order is preserved, and redundant computations can be avoided [S1].
--   **Interrupts**: If a coarser level is inserted while processing a finer level, the finer level's queue is suspended and re-queued. This ensures coarse-to-fine order is strictly maintained even with interleaved user actions [S1].
--   **Simplification**: When the queue is empty, a simplification step is performed. This step is not detailed in this article but is part of the parent method [S1].
--   **Thread Safety**: Locking is only required for the `Level Manager` priority queue operations. No locks are needed for cell data access or `Cell-Queue` internal operations [S1].
+*   **Threading:** The system uses two threads: an update thread and a user interaction thread [S1].
+*   **Synchronization:** Blocking access is limited to the insertion and removal of `Cell-Queue` objects in the `Level Manager`. The update process is the sole accessor of the `Cell-Queue` it is currently processing, so no internal locking is needed within the queues themselves [S1].
+*   **Interruption:** If a coarser level is inserted while a finer level is being processed, the finer level's queue is suspended and re-queued. This ensures correctness but may increase latency for fine-level updates if coarse updates are frequent [S1].
+*   **Tool Overlap:** The system can handle multiple tools acting on the field simultaneously if they are inserted as separate entries in the priority queue, though the primary implementation assumes sequential tool application [S1].
+
+## Subtopics
+
+### [Downward Propagation](13752-downward-propagation.md)
+Defines the arithmetic operation for transferring data from parent to child nodes, complementing the scheduling logic of this method.
 
 ## Operating characteristics
--   **Time Complexity**: The priority queue operations (insertion and removal) are $O(\log N)$, where $N$ is the number of cell-queues. The `Apply` procedure processes each cell once per level. The total time is proportional to the number of cells intersected by the tool across all levels.
--   **Memory Complexity**: Additional memory is required for `ToolCopy` objects and `Cell-Queue` structures. The `Cell-Queue` structures are temporary and are consumed as the update proceeds.
--   **Performance**: The two-thread approach (update thread + user thread) minimizes blocking. The update thread suspends when idle, saving CPU resources. The locking overhead is minimal because access to the `Level Manager` is infrequent compared to cell processing [S1].
--   **Strengths**: Ensures correct coarse-to-fine update order for interactive display. Handles interruptions gracefully. Simple synchronization model.
--   **Limitations**: Requires a priority queue data structure. The recursive approach is simpler but incorrect for interactive display. The method assumes a single update thread; handling multiple concurrent tools is possible but not optimized in the base implementation [S1].
+*   **Time Complexity:** The complexity is dominated by the tree traversal required to find intersecting cells. By using `Cell-Queues`, the method avoids re-walking the hierarchy from the root for every level, reducing the overhead of intersection tests [S1]. However, worst-case complexity remains proportional to the number of cells intersected by the tool across all relevant levels.
+*   **Memory Complexity:** Requires additional memory for the `Level Manager` priority queue and the temporary `Cell-Queue` objects. The memory overhead is generally low as queues are processed and discarded level by level [S1].
+*   **Performance:** The two-thread approach minimizes blocking and deadlock risks. The update thread runs in the background, allowing the user interface to remain responsive. The use of standard threading primitives (Posix, Windows, IRIX sprocs) has no remarkable speed impact [S1].
+*   **Strengths:** Guarantees coarse-to-fine update order, essential for visual consistency in interactive sculpting. Handles interruptions gracefully.
+*   **Limitations:** Introduces latency between user input and visual feedback due to the asynchronous background processing. The priority queue management adds a small overhead compared to direct recursive application, but this is offset by the avoidance of redundant hierarchy walks [S1].
 
 ## Background
-The method was introduced by Eric Ferley, Marie-Paule Cani, and Jean-Dominique Gascuel in their paper "Resolution Adaptive Volume Sculpting" [S1]. It addresses the limitation of recursive field update methods, which process depth-first and fail to maintain the coarse-to-fine consistency required for real-time interaction. The implementation was tested with POSIX threads, IRIX sprocs, and Windows threads, showing no significant performance differences [S1].
+The method was introduced by Eric Ferley, Marie-Paule Cani, and Jean-Dominique Gascuel in their work on "Resolution Adaptive Volume Sculpting" [S1]. It addresses the limitations of recursive field update methods, which fail to maintain visual consistency during interactive editing because they do not respect the hierarchical dependency of coarse-to-fine updates [S1]. The approach was implemented and tested on various operating systems including IRIX, Linux, and Windows NT/2000 [S1].
 
 ## Sources
 [S1] Resolution Adaptive Volume Sculpting, https://doi.org/10.1006/gmod.2001.0558, fetched 2026-10-26

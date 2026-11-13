@@ -1,115 +1,121 @@
 # Forward Difference Gradient
 
-Also called: Gradient Estimation for Lighting, Intermediate Difference Gradient, Numerical Derivatives, On-the-Fly Gradient Computation, Simple Forward Differencing Gradient [S2, unofficial][S3, unofficial]
+Also called: Finite Difference Derivative Estimation, Forward Difference Method, Gradient Estimation for Lighting, Intermediate Difference Gradient, Numerical Derivatives, On-the-Fly Gradient Computation, Simple Forward Differencing Gradient
 
 ## Overview
-The Forward Difference Gradient is a first-order finite difference method that approximates the spatial gradient of a scalar volume field by subtracting the value at the current voxel from the value at the immediately preceding voxel in each axis direction [S1][S2, unofficial]. It solves the problem of estimating surface normals for lighting calculations in volume rendering using minimal data access [S3, unofficial]. It is distinguished from its sibling, the [Central Difference Gradient](9968-central-difference-stencils.md), by its lower computational cost and directional bias, as it only requires one neighbor per axis rather than two [S1][S2, unofficial].
+The Forward Difference Gradient estimates the spatial derivative of a scalar volume field $V$ at a voxel center by comparing the value at that voxel to the value at the immediately adjacent voxel in the positive direction along each axis [S1, S3, S4, unofficial]. It solves the problem of approximating the gradient vector $\nabla V$ required for lighting calculations (such as Phong shading) and segmentation without precomputing derivatives [S4, unofficial][S5]. It is distinguished from Central Difference Stencils by its use of only two samples per axis (current and next) rather than three (previous, current, next), making it computationally cheaper but less accurate and asymmetric [S3, unofficial][S5].
 
 ## How it works
 **Inputs and Outputs:**
-*   The input is a 3D scalar volume grid $V$ of dimensions $W \times H \times D$, where $V_{x,y,z}$ is the scalar value at integer coordinates $(x,y,z)$ [S2, unofficial].
-*   The output is a 3D vector field $\mathbf{G}$ of the same dimensions, where each element $\mathbf{G}_{x,y,z}$ is the unnormalized gradient vector [S2, unofficial].
-*   Optionally, a normalized gradient field $\mathbf{n}$ and gradient magnitude field $M$ are derived [S3, unofficial].
+*   **Input:** A scalar volume texture $V$ with dimensions $W \times H \times D$. Coordinates are integer indices $(x, y, z)$ or continuous object-space coordinates $O$.
+*   **Output:** A gradient vector $\mathbf{N}(x,y,z) = (N_x, N_y, N_z)$ and optionally the normalized gradient $\mathbf{n}(x,y,z)$ and gradient magnitude $||\mathbf{N}||$ [S4, unofficial].
 
 **Data Structures:**
-*   $V$: Array of scalars (e.g., `float` or `int16`) [S2, unofficial].
-*   $\mathbf{G}$: Array of 3-component vectors (e.g., `vec3` or three separate arrays) [S2, unofficial].
-*   $\mathbf{n}$: Array of 3-component unit vectors [S3, unofficial].
-*   $M$: Array of scalars [S3, unofficial].
-
-**Parameters:**
-*   $h$: Voxel spacing. In standard grid indexing where coordinates are integers, $h=1$ is assumed for the difference calculation, effectively absorbing $h$ into the weights [S1][S2, unofficial]. If physical units are required, divide the result by $h$ [S1].
+*   The volume is stored as a 3D array or texture.
+*   In dynamic deformation scenarios, the volume may be sampled via a deformation function $\mathbf{u}(O)$ mapping object space to texture space [S5].
 
 **Steps:**
-1. Iterate over every voxel $(x,y,z)$ in the volume [S2, unofficial].
-2. Compute the partial derivative along the x-axis using the forward difference formula: $G_x = V_{x+1,y,z} - V_{x,y,z}$ [S2, unofficial].
-3. Compute the partial derivative along the y-axis: $G_y = V_{x,y+1,z} - V_{x,y,z}$ [S2, unofficial].
-4. Compute the partial derivative along the z-axis: $G_z = V_{x,y,z+1} - V_{x,y,z}$ [S2, unofficial].
-5. Construct the gradient vector $\mathbf{G} = (G_x, G_y, G_z)$ [S2, unofficial].
-6. (Optional) Compute the gradient magnitude (strength): $M_{x,y,z} = \|\mathbf{G}\| = \sqrt{G_x^2 + G_y^2 + G_z^2}$ [S3, unofficial].
-7. (Optional) Compute the normalized gradient for lighting models: $\mathbf{n}_{x,y,z} = \frac{\mathbf{G}}{\|\mathbf{G}\|}$ [S3, unofficial]. This normalized vector is used in the lighting model to determine reflected light from a light source [S3, unofficial].
+1.  **Sample Current Voxel:** Retrieve the scalar value $V_0 = V(x, y, z)$ [S3, S4, unofficial].
+2.  **Sample Forward Neighbors:** Retrieve the scalar values at the next voxel positions along each axis:
+    *   $V_x = V(x+1, y, z)$
+    *   $V_y = V(x, y+1, z)$
+    *   $V_z = V(x, y, z+1)$ [S3, S4, unofficial].
+3.  **Compute Partial Derivatives:** Calculate the difference between the forward neighbor and the current voxel. If the voxel spacing is $h$ (typically $h=1$ in normalized index space), the partial derivatives are:
+    $$ N_x = \frac{V(x+1, y, z) - V(x, y, z)}{h} $$
+    $$ N_y = \frac{V(x, y+1, z) - V(x, y, z)}{h} $$
+    $$ N_z = \frac{V(x, y, z+1) - V(x, y, z)}{h} $$
+    In integer indexing with $h=1$, this simplifies to [S3, S4, unofficial]:
+    $$ N_x = V_{x+1,y,z} - V_{x,y,z} $$
+    $$ N_y = V_{x,y+1,z} - V_{x,y,z} $$
+    $$ N_z = V_{x,y,z+1} - V_{x,y,z} $$
+4.  **Normalize (Optional):** Compute the unit normal vector for lighting models [S4, unofficial]:
+    $$ \mathbf{n}(x,y,z) = \frac{\mathbf{N}(x,y,z)}{||\mathbf{N}(x,y,z)||} $$
+5.  **Compute Strength (Optional):** Calculate the magnitude for opacity or segmentation thresholds [S4, unofficial]:
+    $$ \text{Strength} = ||\mathbf{N}(x,y,z)|| $$
+
+**Deformation Handling:**
+When volumes are deformed, gradients must be computed on-the-fly in the fragment shader because precomputed gradients become invalid [S5]. The gradient is estimated by sampling the deformed texture coordinates $O$ and their neighbors displaced by $\Delta O$ in object space [S5]:
+$$ \nabla v(\mathbf{u}(O)) \approx \begin{pmatrix} v(\mathbf{u}(O_x + \Delta O_x, O_y, O_z)) - v(\mathbf{u}(O)) \\ v(\mathbf{u}(O_x, O_y + \Delta O_y, O_z)) - v(\mathbf{u}(O)) \\ v(\mathbf{u}(O_x, O_y, O_z + \Delta O_z)) - v(\mathbf{u}(O)) \end{pmatrix} $$
+where $\mathbf{u}$ is the deformation function mapping object space to texture space [S5].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def compute_forward_gradient(V, W, H, D, voxel_size=1.0):
+def compute_forward_gradient(volume, x, y, z, h=1.0):
     """
-    V: 3D list of scalars indexed as V[x][y][z]
-    W, H, D: dimensions along x, y, z
-    voxel_size: physical spacing h
-    Returns: G, N, M as 3D lists of tuples
+    Computes the forward difference gradient for a voxel at (x, y, z).
+    volume: 3D array or texture lookup function V(x, y, z)
+    x, y, z: integer coordinates of the center voxel
+    h: voxel spacing (default 1.0)
     """
-    # Initialize output arrays with zeros
-    G = [[[0.0 for _ in range(D)] for _ in range(H)] for _ in range(W)]
-    N = [[[0.0 for _ in range(D)] for _ in range(H)] for _ in range(W)]
-    M = [[[0.0 for _ in range(D)] for _ in range(H)] for _ in range(W)]
-
-    for z in range(D):
-        for y in range(H):
-            for x in range(W):
-                v_curr = V[x][y][z]
-
-                # Boundary handling: clamp forward neighbor to current value at max index [G]
-                x_next = min(x + 1, W - 1)
-                y_next = min(y + 1, H - 1)
-                z_next = min(z + 1, D - 1)
-
-                v_x_next = V[x_next][y][z]
-                v_y_next = V[x][y_next][z]
-                v_z_next = V[x][y][z_next]
-
-                # Compute components, scaled by voxel spacing [S1]
-                gx = (v_x_next - v_curr) / voxel_size
-                gy = (v_y_next - v_curr) / voxel_size
-                gz = (v_z_next - v_curr) / voxel_size
-
-                G[x][y][z] = (gx, gy, gz)
-
-                # Compute magnitude [S3, unofficial]
-                mag = math.sqrt(gx*gx + gy*gy + gz*gz)
-                M[x][y][z] = mag
-
-                # Compute normalized gradient [S3, unofficial]
-                if mag > 1e-6:
-                    N[x][y][z] = (gx/mag, gy/mag, gz/mag)
-                else:
-                    N[x][y][z] = (0.0, 0.0, 0.0)
-
-    return G, N, M
+    # 1. Sample current voxel
+    v_center = volume(x, y, z)
+    
+    # 2. Sample forward neighbors
+    # Note: Boundary handling is required for x+1, y+1, z+1
+    v_x = volume(x + 1, y, z)
+    v_y = volume(x, y + 1, z)
+    v_z = volume(x, y, z + 1)
+    
+    # 3. Compute differences
+    grad_x = (v_x - v_center) / h
+    grad_y = (v_y - v_center) / h
+    grad_z = (v_z - v_center) / h
+    
+    # 4. Construct gradient vector
+    gradient = (grad_x, grad_y, grad_z)
+    
+    # 5. Compute magnitude
+    magnitude = sqrt(gradient[0]**2 + gradient[1]**2 + gradient[2]**2)
+    
+    # 6. Normalize (handle zero magnitude to avoid division by zero)
+    if magnitude > 0:
+        normal = (gradient[0]/magnitude, gradient[1]/magnitude, gradient[2]/magnitude)
+    else:
+        normal = (0.0, 0.0, 0.0)
+        
+    return gradient, normal, magnitude
 ```
 
+**Boundary Handling:**
+The stencil requires access to voxels at $x+1, y+1, z+1$. For voxels on the positive boundary of the volume, these neighbors are out-of-bounds. Common strategies include clamping to the last valid voxel value or zero-padding [S3, S4, unofficial]. The specific boundary condition is not strictly defined in the sources but is critical for correctness [G].
+
+**Parameters:**
+*   **Step Size $h$:** Typically 1.0 for integer indices. If physical units are used, $h$ is the voxel spacing [S2][S3, unofficial].
+*   **Prefiltering:** To mitigate blocky artifacts caused by the first-order approximation, the volume texture can be prefiltered using a Gaussian blur before gradient computation [S5]. This allows the use of a lower-resolution texture for gradient estimation, saving memory [S5].
+
 **Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** The forward difference requires the voxel at $i+1$. For voxels at the maximum index along any axis ($x=W-1$, etc.), the neighbor is out of bounds. Common solutions include clamping (using the value of the last voxel), zero-padding (assuming gradient is zero), or skipping the calculation [G]. The pseudocode above uses clamping to the current value, resulting in a zero gradient at the boundary [G].
-*   **Precision:** As with all finite differences, the choice of step size $h$ is critical. In discrete grids, $h=1$ is standard, but if the volume represents physical space with non-unit spacing, the result must be divided by $h$. If $h$ is too small relative to the data range, floating-point rounding errors dominate [S1].
-*   **Bias:** The forward difference is biased towards the direction of increasing index. It is less accurate than central differences for smooth fields [S1][S4]. First-order finite differences poorly estimate gradients, often leading to blocky visual artifacts [S4].
+*   **Accuracy:** This is a first-order approximation. It suffers from truncation error and poor gradient estimation, leading to blocky visual artifacts in shading [S1, unofficial][S5].
+*   **Step Size Sensitivity:** If $h$ is too small, numerical instability and rounding errors increase. If $h$ is too large, truncation error dominates [S1, unofficial][S2].
+*   **Efficiency:** Computing the full gradient requires 4 evaluations per voxel (center + 3 neighbors), which is more efficient than central differences (6 evaluations) but less accurate [S2][S3, unofficial].
 
 ## Subtopics
 
-### Central Difference Gradient
-Uses neighbors on both sides ($V_{i+1} - V_{i-1}$) to compute gradients [S2, unofficial]. More accurate (second-order) but requires 2 neighbors per axis [S1]. Choose when accuracy is prioritized over memory access patterns [S1]. [Link](9968-central-difference-stencils.md)
+### Central Difference Stencils
+Uses previous and next neighbors for a second-order accurate, symmetric gradient. Choose when visual quality is prioritized over memory bandwidth [9968-central-difference-stencils.md].
 
-### Sobel-based Gradient Estimation
-Uses a 3x3x3 kernel to estimate gradients with smoothing [S2, unofficial]. Choose when noise reduction is required [S2, unofficial]. [Link](9967-sobel-based-gradient-estimation.md)
+### Neumann Gradient
+Uses 26 neighbors for a robust gradient estimation based on linear regression. Choose for high-quality lighting in static volumes where memory access is less constrained [3342-neumann-gradient.md].
 
 ### 4th-Order Finite Difference Gradient
-Uses more distant neighbors for higher accuracy [S2, unofficial]. Choose for high-precision scientific visualization [S2, unofficial]. [Link](4889-4th-order-finite-difference-gradient.md)
+Uses a wider stencil for higher accuracy. Choose for scientific visualization requiring precise derivative values [4889-4th-order-finite-difference-gradient.md].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, requiring a constant number of memory accesses per voxel [S1]. Computing the full gradient for a function with $N$ variables requires at least $N+1$ evaluations, making it inefficient for high-dimensional multivariate functions [S1].
-*   **Memory Complexity:** $O(N)$ for storing the gradient field. If normalized gradients and magnitudes are stored, memory usage triples or quadruples [G].
-*   **Strengths:** Extremely fast; minimal memory footprint for neighbor access; simple to implement [S3, unofficial].
-*   **Limitations:** First-order accuracy (larger error than central differences); directional bias; requires careful boundary handling [S1][S4].
-*   **When to use:** Real-time rendering where performance is critical and visual artifacts from gradient bias are acceptable [S4].
-*   **When not to use:** High-precision scientific analysis where gradient accuracy is paramount [S1].
+*   **Time Complexity:** $O(1)$ per voxel, requiring 4 texture lookups (or function evaluations) [S2][S3, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel. No additional storage for gradient vectors is required if computed on-the-fly [S5].
+*   **Performance:** Highly efficient for real-time rendering due to minimal memory accesses [S5]. However, the visual quality is inferior to central differences [S5].
+*   **Strengths:** Simple implementation, low memory footprint, suitable for dynamic deformations where gradients cannot be precomputed [S5].
+*   **Limitations:** First-order accuracy leads to blocky shading artifacts. Asymmetric stencil may cause directional bias in lighting [S1, unofficial][S5].
+*   **When to Use:** Real-time volume rendering with dynamic deformations, or when memory bandwidth is a critical bottleneck and visual artifacts can be mitigated by prefiltering [S5].
+*   **When Not to Use:** High-quality static volume rendering where smooth shading is required, or when precise gradient values are needed for segmentation [S3, unofficial][S5].
 
 ## Background
-The forward difference method is a fundamental numerical analysis technique. In volume rendering, it was popularized in the early 1990s as a simple way to estimate surface normals for lighting [S3, unofficial]. Drebin et al. (1988) and Sabella (1988) are key early works in volume rendering that utilized gradient estimation for shading [S3, unofficial]. The specific formulation of using forward differences for CT data segmentation and lighting is documented in lecture notes derived from Levoy's work [S3, unofficial]. It is often referred to as the "Intermediate Difference Gradient" in some literature due to its position between backward and central differences in terms of stencil size [S2, unofficial].
+The forward difference method is a fundamental numerical technique for approximating derivatives [S1, unofficial][S2]. In volume rendering, it was popularized in early direct volume rendering (DVR) implementations for lighting calculations, such as those described by Drebin et al. (1988) and in subsequent lecture notes [S4, unofficial][S5]. It is often referred to as the "intermediate difference gradient" in some literature, distinguishing it from central differences [S3, unofficial]. The method is particularly relevant in dynamic volume visualization, where on-the-fly gradient computation is necessary due to time-varying deformations [S5].
 
 ## Sources
-[S1] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
-[S2] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
-[S3] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
-[S4] Integrating Dynamic Deformations into Interactive Volume Visualization, https://doi.org/10.2312/vissym.eurovis06.219-226, fetched 2026-10-31
+[S1] xandergos/unity-sparse-voxel-octrees, https://github.com/xandergos/unity-sparse-voxel-octrees, fetched 2026-10-26 (unofficial)
+[S2] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
+[S3] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S4] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
+[S5] Integrating Dynamic Deformations into Interactive Volume Visualization, https://doi.org/10.2312/vissym.eurovis06.219-226, fetched 2026-10-31

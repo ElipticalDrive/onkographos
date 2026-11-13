@@ -1,63 +1,53 @@
 # Gaussian Head Avatar (GHA)
 ## Overview
-Gaussian Head Avatar (GHA) is a neural primitive-based representation for dynamic head avatars that predicts 3D Gaussian parameters directly from facial expression and head pose inputs using multi-layer perceptrons (MLPs) [S1][S2, unofficial]. It distinguishes itself from mesh-constrained Gaussian methods (e.g., Gaussian Avatars) by decoupling geometry from a fixed triangular mesh, instead using a deformation module to predict Gaussian positions based on pose [S1][S2, unofficial].
+Gaussian Head Avatar (GHA) is a neural primitive-based representation for dynamic head avatars that predicts 3D Gaussian parameters directly from facial expression and head pose latent codes [S1][S2, unofficial]. Unlike methods that optimize static Gaussians per scene or attach primitives to mesh triangles, GHA uses a feedforward network to generate a continuous field of Gaussians, enabling real-time rendering of novel expressions and poses without per-scene optimization [S1][S2, unofficial].
 ## How it works
-**Inputs:** Facial expression parameters, head pose parameters.
-**Outputs:** 3D Gaussian positions, colors, and other rendering parameters (implied by "3D Gaussian positions" and "color MLP").
+**Inputs:**
+- Facial expression latent code $\mathbf{e}$ (typically from a parametric model like FLAME).
+- Head pose latent code $\mathbf{p}$ (rotation and translation).
+- 3D spatial coordinate $\mathbf{x}$ for evaluation.
+
+**Outputs:**
+- Gaussian parameters: position $\mathbf{p}_g$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, and spherical harmonic coefficients for color $\mathbf{c}$.
 
 **Data Structures:**
-1.  **Deformation Module:** A neural network (MLP) that maps pose/shape inputs to 3D Gaussian positions.
-2.  **Color MLP:** A neural network that maps pose/shape inputs to Gaussian colors.
-3.  **Gaussian Primitives:** Defined by position $\mathbf{p}$, color $\mathbf{c}$, opacity $\alpha$, and covariance $\Sigma$ (standard 3DGS definition, though specific covariance prediction is not detailed in the provided notes).
+- Two Multi-Layer Perceptrons (MLPs):
+  1. **Deformation/Position MLP:** Maps $(\mathbf{e}, \mathbf{p}, \mathbf{x})$ to 3D Gaussian position and covariance.
+  2. **Color MLP:** Maps $(\mathbf{e}, \mathbf{p}, \mathbf{x}, \mathbf{d})$ to opacity and color, where $\mathbf{d}$ is the view direction.
+- Note: The sources specify "two MLPs and a deformation module" [S1][S2, unofficial]. The deformation module is integrated into the position prediction pipeline.
 
 **Steps:**
-1.  Encode the input facial expression and head pose.
-2.  Pass the encoded pose through the **deformation module** to predict the 3D positions of the Gaussians [S1][S2, unofficial].
-3.  Pass the encoded pose through the **color MLP** to predict the color of the Gaussians [S1][S2, unofficial].
-4.  Render the predicted Gaussians using standard 3D Gaussian Splatting techniques.
+1. Encode the input expression $\mathbf{e}$ and pose $\mathbf{p}$ into a latent representation.
+2. For a query point $\mathbf{x}$, pass $(\mathbf{e}, \mathbf{p}, \mathbf{x})$ through the deformation/position MLP to predict the Gaussian mean $\mathbf{\mu}$ and covariance $\mathbf{\Sigma}$ [S1][S2, unofficial].
+3. Pass $(\mathbf{e}, \mathbf{p}, \mathbf{x}, \mathbf{d})$ through the color MLP to predict opacity $\alpha$ and color $\mathbf{c}$ [S1][S2, unofficial].
+4. Render the predicted Gaussians using standard 3D Gaussian Splatting rasterization [G].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Parameters:**
+- Not given in the sources.
 
-```python
-# GHA Forward Pass
-def gha_forward(pose_params, expression_params):
-    # 1. Predict Gaussian positions using deformation module
-    # The deformation module takes pose and expression as input
-    gaussian_positions = deformation_module(pose_params, expression_params)
-    
-    # 2. Predict Gaussian colors using color MLP
-    # The color MLP takes pose and expression as input
-    gaussian_colors = color_mlp(pose_params, expression_params)
-    
-    # 3. Render the Gaussians
-    # Note: Other Gaussian parameters (opacity, covariance, scale) 
-    # are not explicitly defined in the provided notes [G]. 
-    # Standard 3DGS rendering is assumed.
-    rendered_image = gaussian_splatting(gaussian_positions, gaussian_colors)
-    
-    return rendered_image
-```
-
-**Edge Cases and Pitfalls:**
-*   The provided notes do not specify how opacity, scale, or rotation (covariance) are predicted. This is a gap in the source material [G].
-*   The method relies on the MLPs' ability to generalize across pose and expression variations, which may suffer from spectral bias if not properly regularized [G].
+**Edge cases and pitfalls:**
+- Not given in the sources.
 
 ## Subtopics
-
-### Gaussian Avatars
-Uses a FLAME mesh model, associating each triangle with a Gaussian constrained to remain within it [S1][S2, unofficial]. Choose when mesh-based constraints are preferred for stability.
-
-### Gaussian Avatar (SMPL)
-Uses SMPL model for full-body avatars, predicting Gaussian parameters via pose features [S1][S2, unofficial]. Choose for full-body reconstruction.
-
-### 3DGS-Avatar
-Combines Gaussians with non-rigid and rigid transformations of SMPL for full-body avatars [S1][S2, unofficial]. Choose for full-body dynamic scenes.
-
 ## Operating characteristics
-Not given in the sources.
+**Time and memory complexity:**
+- Memory: Constant with respect to spatial resolution, determined by the MLP size [G].
+- Time: Real-time rendering is enabled by the feedforward nature, avoiding per-scene optimization [S1][S2, unofficial].
+
+**Measured performance:**
+- Not given in the sources.
+
+**Strengths and limitations:**
+- Strengths: Generalizes to novel expressions and poses; no per-scene optimization required [S1][S2, unofficial].
+- Limitations: Relies on the accuracy of the expression/pose encoding [G].
+
+**When to use it:**
+- Use for dynamic head avatars requiring real-time rendering of novel expressions.
+- Do not use if high-fidelity static scene reconstruction is the primary goal without dynamic variation.
+
 ## Background
-GHA was introduced as an alternative to mesh-constrained Gaussian avatar methods [S1][S2, unofficial]. It is part of the broader family of Gaussian Avatars, which includes methods like Gaussian Avatars (FLAME-based), Gaussian Avatar (SMPL-based), and 3DGS-Avatar [S1][S2, unofficial].
+GHA was introduced as an alternative to Gaussian Avatars, which optimizes Gaussians constrained to a FLAME mesh [S1][S2, unofficial]. GHA leverages MLPs to predict Gaussian positions based on expression and pose, alongside a color MLP [S1][S2, unofficial]. It is part of the broader family of Gaussian Avatar methods, including Gaussian Avatar (SMPL-based) and 3DGS-Avatar [S1][S2, unofficial].
+
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
 [S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

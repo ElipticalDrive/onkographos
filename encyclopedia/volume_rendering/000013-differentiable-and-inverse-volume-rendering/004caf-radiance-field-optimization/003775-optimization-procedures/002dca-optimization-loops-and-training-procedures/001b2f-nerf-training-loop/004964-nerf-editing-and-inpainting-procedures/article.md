@@ -3,56 +3,49 @@
 Also called: NeRF Editing, NeRF Inpainting, 3D Content Editing
 
 ## Overview
-This family of methods modifies a pre-trained Neural Radiance Field (NeRF) to remove unwanted objects, inpaint occluded regions, or alter semantic content without retraining the entire scene from scratch. They solve the problem of localized 3D editing, addressing view-dependent artifacts and geometric inconsistencies that arise when modifying specific regions. Unlike global retraining, these methods decouple editing logic from global parameter updates, using techniques such as feature field distillation, diffusion-guided pseudo-observations, or adaptive view selection to ensure multi-view consistency [S1, S2].
+This family of methods modifies a pre-trained Neural Radiance Field (NeRF) to remove, insert, or alter objects and textures without retraining the entire scene from scratch. It solves the problem of applying semantic or geometric transformations to specific regions while maintaining multi-view consistency. It differs from sibling methods like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing on post-training modification or specialized optimization loops for editing, rather than initial scene reconstruction.
 
 ## Shared principles
-All methods in this family operate on a pre-trained NeRF representation $F_\Theta$ mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to density $\sigma$ and color $c$. The core mechanism involves intercepting the standard volume rendering pipeline to apply transformations based on external guidance (semantic masks, diffusion priors, or depth consistency).
+The core mechanism involves either intercepting the volume rendering query at inference time to apply transforms or optimizing the NeRF parameters $\Theta$ using guidance derived from 2D priors (inpainting, diffusion, or semantic features).
 
-1.  **Ray Marching Interception**: During rendering, points $\mathbf{x}_k$ along rays $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ are sampled. The standard query $F_\Theta(\mathbf{x}_k, \mathbf{d})$ is modified or weighted based on an edit mask or probability map.
-2.  **Guidance Integration**: External information is integrated via:
-    *   **Feature Distillation**: Aligning NeRF features with 2D teacher network outputs (e.g., LSeg, DINO) to enable semantic decomposition [S1].
-    *   **Diffusion Priors**: Using 2D generative models (e.g., Stable Diffusion, Instruct-Pix2Pix) to generate color or depth priors for occluded or missing regions [S1, S2].
-    *   **Geometric Consistency**: Enforcing multi-view consistency through depth warping and epipolar constraints to validate inpainted regions [S1].
-3.  **Optimization Loop**: The NeRF parameters $\Theta$ are fine-tuned using a composite loss function. Common loss components include:
-    *   **Photometric Loss**: Difference between rendered and target (original or inpainted) colors.
-    *   **Depth Loss**: Consistency between rendered depth and guidance depth.
-    *   **Semantic/Feature Loss**: Alignment with distilled features or text embeddings.
-    *   **Regularization**: Transmittance and depth variance losses to prevent transparency or amorphous artifacts [S1].
+1.  **Inference-Time Interception:** The NeRF parameters $\Theta$ remain fixed. For a ray $\mathbf{r}$, points $\mathbf{x}_i$ are sampled. A selection probability $p_i$ is queried from a Distilled Feature Field (DFF) or similar semantic model. If $p_i > \tau$, an editing transform $g$ (deletion, colorization, translation) is applied to the density $\sigma$ or color $\mathbf{c}$ before volume rendering [S1, S2].
+2.  **Optimization-Based Editing:** The NeRF parameters $\Theta$ are updated by minimizing a loss function $L(\Theta)$. This loss typically combines photometric consistency with guidance from external models (e.g., 2D inpainting, depth completion, or diffusion) [S1, S2].
+3.  **Guidance Generation:** External 2D models generate "guidance" data (inpainting, depth, pseudo-observations) to supervise the 3D optimization. This includes transferring masks across views, generating pseudo-observations via diffusion, or using semantic features [S1].
 
 ## Subtopics
 
 ### [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md)
-A method for reconstructing a panoramic NeRF from a single input panorama by iteratively expanding training viewpoint coverage. It solves geometry conflicts in invisible regions by detecting and erasing inconsistent regions from supervision. It uses Instant-NGP.
+A training procedure for synthesizing a panoramic NeRF from a single input panorama. It solves the problem of incomplete geometry and texture in single-view reconstruction by iteratively generating novel views, inpainting missing regions, and erasing geometrically inconsistent areas. It differs from sibling methods by explicitly managing the conflict between visible and invisible regions through a progressive loop of view synthesis and geometric consistency masking, rather than relying solely on multi-view consistency or feature distillation.
 
 ### [Deceptive-NeRF/3DGS Pipeline](11860-deceptive-nerf-3dgs-pipeline.md)
-A sparse-view reconstruction method that enhances NeRF/3DGS by generating synthetic pseudo-observations via a diffusion model during training. It acquires uncertainty through correspondence matching and epipolar constraints, minimizing computation while enforcing consistency.
+A sparse-view reconstruction method that enhances NeRF or 3D Gaussian Splatting (3DGS) representations by continuously densifying input observations with synthetic pseudo-observations generated by a diffusion model during training. It differs from sibling methods by explicitly enforcing 3D view consistency through an uncertainty map derived from epipolar reprojection of real input views, rather than relying on ensemble learning or spatial perturbations. This allows the diffusion model to generate high-fidelity pseudo-observations that rectify artifacts while maintaining geometric coherence with the sparse input data.
 
 ### [DFF (Decomposing NeRF for Editing Via Feature Field Distillation)](12068-dff-decomposing-nerf-for-editing-via-feature-field-distillat.md)
-Enables 3D semantic segmentation and editing by distilling features from a pre-trained 2D teacher (LSeg/DINO) into a NeRF. It produces multi-view consistent feature fields for selective editing (deletion, color change) without breaking unintended areas.
+DFF enables 3D semantic segmentation and editable novel-view synthesis by distilling features from a pre-trained 2D teacher network (such as LSeg or DINO) into a neural radiance field. It solves the problem that standard NeRF feature spaces are entangled with low-level factors like color or spatial adjacency rather than semantic similarity, making naive decomposition unreliable. Unlike sibling methods that rely on optimization-based editing or inference-time interception of geometry, DFF explicitly learns a semantic feature field via distillation, allowing for multi-view consistent region selection, deletion, and extraction without requiring semantic label supervision during training.
 
 ### [Blended-NeRF](12273-blended-nerf.md)
-A framework for local 3D editing using text prompts and a 3D ROI bounding box. It trains a generator NeRF initialized with original weights and blends content volumetrically, operating on any region without learning a new feature space.
+Blended-NeRF is a framework for editing a specific region of interest (ROI) in an existing Neural Radiance Field (NeRF) scene based on text prompts and a 3D ROI box. It solves the problem of local 3D editing by initializing a generator NeRF with the original scene's weights and blending the synthesized content with the original scene using volumetric blending. Unlike methods that synthesize new objects from scratch or require semantic decomposition/2D masks for localization, Blended-NeRF operates on any region using a 3D box without learning a new feature space.
 
 ### [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md)
-Removes unwanted objects by optimizing NeRF parameters using color and depth guidance from 2D inpainted images. It combines color-guiding and depth-guiding losses to ensure visual plausibility and geometric consistency.
+NeRF-In is a framework for removing unwanted objects from a pre-trained Neural Radiance Field (NeRF) by optimizing the model parameters $\Theta$ using color and depth guidance derived from 2D images. It solves the problem of free-form object removal without requiring category-specific training data or retraining the entire scene from scratch. Unlike sibling methods that may rely on semantic segmentation networks or multi-view inpainting consistency via separate networks, NeRF-In relies on a joint optimization of color and depth losses against guidance generated from a single user-drawn mask and standard image/depth completion tools.
 
 ### [Adaptive View Selection for Inpainting](12405-adaptive-view-selection-for-inpainting.md)
-A 3D scene de-occlusion method combining 2D appearance priors (LaMa) with multi-view consistency. It dynamically selects between 2D priors and 3D consistency based on local texture richness (average gradient).
+This method addresses the inconsistency of single-view 2D inpainting in 3D scenes by introducing a training view selection mechanism that leverages multi-view correlations. It distinguishes itself from pure 2D inpainting approaches by dynamically deciding whether to rely on a pretrained 2D inpainter's appearance prior or to reconstruct the occluded area using supplementary information from other visible views, based on the texture richness of the occluded regions.
 
 ### [NeRF Editing Procedure](12491-nerf-editing-procedure.md)
-Enables localized 3D editing by integrating external semantic/geometric guidance into the volume rendering pipeline. It uses query-based selection (via DFF or masks) to selectively transform density and color during ray marching.
+This method enables 3D editing of a pre-trained NeRF representation $F_\Theta$ by intercepting the volume rendering query logic at inference time, rather than retraining the field parameters $\Theta$. It solves the problem of applying semantic or geometric transformations (deletion, colorization, translation) to specific objects without altering the background or requiring iterative optimization. It sets itself apart from optimization-based siblings like [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md) by avoiding gradient descent on $\Theta$, instead relying on a Distilled Feature Field (DFF) to determine spatial selection probabilities.
 
 ### Semantic Inpainting for Neural Fields
-**Definition**: A 3D content editing capability allowing editing of neural fields through simple interfaces like free-form sketching or language instructions [S1].
-**Steps**: Given a user-supplied edit in a single reference view, the encoding of a neural field automatically propagates this edit to all views. This propagation promotes consistency between all views thanks to the implicit geometrical and photometric priors embodied by the neural network, preserving the structure of the whole scene [S1].
-**History**: Described in reference [19] [S1].
+- **Definition:** A 3D content editing capability allowing editing of neural fields through simple interfaces like free-form sketching or language instructions [S1].
+- **Step:** Given a user-supplied edit in a single reference view, the encoding of a neural field automatically propagates this edit to all views [S1]. The propagation promotes consistency between all views thanks to the implicit geometrical and photometric priors embodied by the neural network, preserving the structure of the whole scene [S1].
+- **History:** Described in reference [19] [S1].
 
 ### Post-Refinement Strategy
-**Definition**: A strategy employed after the NeRF has been trained on updated data to enhance consistency by generating a more accurate target for each view using the modified Instruct-Pix2Pix with averaging architecture [S2].
-**Steps**: Use the rendered image as input while continuing to use the mixup image as a condition [S2].
+- **Definition:** A strategy employed after the NeRF has been trained on updated data to enhance consistency by generating a more accurate target for each view using the modified Instruct-Pix2Pix with averaging architecture [S2].
+- **Step:** Use the rendered image as input while continuing to use the mixup image as a condition [S2].
 
 ## Background
-NeRF editing and inpainting emerged as a response to the limitations of static 3D reconstructions, enabling dynamic content creation and correction. Early work focused on global retraining, but recent methods leverage 2D generative priors (e.g., DreamFusion, Stable Diffusion) and semantic feature distillation to achieve localized edits efficiently. Key developments include the use of Instant-NGP for fast training [S1], diffusion models for pseudo-observation generation [S1], and feature field distillation for semantic decomposition [S1]. The field is characterized by a shift from explicit physical modeling to data-driven inference, integrating 2D generative knowledge into 3D geometry [S1].
+NeRF editing emerged as a natural extension of the NeRF framework, which initially focused on novel view synthesis from posed images. Early methods relied on retraining the entire network, which was computationally expensive. The introduction of Distilled Feature Fields (DFF) allowed for semantic-aware editing [S1]. Subsequent works integrated 2D generative models (like Stable Diffusion and Instruct-Pix2Pix) to provide semantic priors for 3D editing, leading to methods like DreamFusion and NeRF-Art [S1, S2]. The field has since diversified into optimization-based inpainting (NeRF-In), diffusion-guided densification (Deceptive-NeRF), and inference-time interception (NeRF Editing Procedure).
 
 ## Sources
 [S1] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26

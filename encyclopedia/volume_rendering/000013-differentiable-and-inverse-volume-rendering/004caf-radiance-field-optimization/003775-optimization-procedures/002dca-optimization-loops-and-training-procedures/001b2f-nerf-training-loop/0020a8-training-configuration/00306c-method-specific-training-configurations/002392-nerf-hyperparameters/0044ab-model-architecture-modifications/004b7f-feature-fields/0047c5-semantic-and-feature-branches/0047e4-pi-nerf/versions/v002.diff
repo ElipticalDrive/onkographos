@@ -1,0 +1,477 @@
+--- v001.md
++++ v002.md
+@@ -7,273 +7,233 @@
+ 
+ ## How it works
+-PI-NeRF modifies the standard NeRF architecture to output high-dimensional features instead of RGB colors, then uses an Invertible Neural Network Module (INM) to map these ray features to pixel features. During inference, pixel features extracted from an image are inverted through the INM to recover ray representations, which are then used with a Perspective-n-Point (PnP) algorithm to calculate the camera pose [S1].
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   A single observed image $I$ with known intrinsic parameters $K$.
+-*   A pre-trained NeRF-Feat model (MLP mapping 3D points to high-dimensional features).
+-*   A pre-trained INM (Invertible Neural Network Module).
+-*   A pre-trained ResUNet encoder.
+-
+-**Outputs:**
+-*   The 6-DoF camera pose $(R, t)$, where $R$ is the rotation matrix and $t$ is the translation vector.
+-
+-### Data Structures
+-1.  **NeRF-Feat MLP:** Maps a 3D point $x$ and viewing direction $d$ to a high-dimensional feature vector $f_{ray} \in \mathbb{R}^D$.
+-2.  **INM:** Consists of two invertible neural networks (INNs) that operate in forward and reverse directions.
+-    *   Forward: $f_{pixel} = \text{INM}_{\text{forward}}(f_{ray}, r_{rep})$
+-    *   Reverse: $(f_{ray}, r_{rep}) = \text{INM}_{\text{reverse}}(f_{pixel})$
+-    *   Where $r_{rep}$ is a representation of the ray (e.g., origin and direction).
+-3.  **ResUNet:** A convolutional neural network that extracts pixel features from an image.
+-
+-### Steps
+-1.  **NeRF-Feat Construction:** Modify the standard NeRF MLP to output a high-dimensional feature vector $y_{aux}(x_k)$ at each sampled point $x_k$ along a ray $r$, instead of just density $\sigma(x_k)$ and color $c(x_k, d_k)$. Render this feature along the ray using volume rendering to obtain a ray feature $f_{ray}(r)$ [S1].
++**Inputs and Outputs:**
++*   **Input:** A single RGB image $I$ captured by a camera with known intrinsic parameters $K$.
++*   **Output:** The 6-DoF camera pose $(R, t)$, where $R$ is the rotation matrix and $t$ is the translation vector, relative to the 3D scene represented by the NeRF.
++
++**Data Structures:**
++1.  **NeRF-Feat:** A modified NeRF model. Instead of outputting RGB color and density, it outputs a high-dimensional feature vector $f \in \mathbb{R}^D$ and density $\sigma$.
++    *   **MLP:** Maps 3D position $x$ and view direction $d$ to feature $f$ and density $\sigma$.
++    *   **Volume Rendering:** Aggregates features along the ray.
++2.  **Invertible Neural Network Module (INM):** Consists of two Invertible Neural Networks (INNs) operating in forward and reverse directions.
++    *   **Forward Path:** Input: Ray feature $f_r$ and ray representation $r_{rep}$. Output: Pixel feature $f_p$.
++    *   **Reverse Path:** Input: Pixel feature $f_p$. Output: Ray feature $f_r$ and ray representation $r_{rep}$.
++3.  **ResUNet:** A convolutional neural network used to extract pixel features from the input image.
++
++**Numbered Steps:**
++
++1.  **NeRF-Feat Construction:**
++    Modify the standard NeRF architecture [S1]. Use an MLP to map each 3D point $x_i$ (sampled along a ray) to a high-dimensional feature vector $f(x_i)$ instead of RGB color. Apply the volume rendering function as a weighted feature aggregation method along the ray to obtain a high-dimensional feature $f_r$ for each ray:
+     $$
+-    f_{ray}(r) = \sum_{i=1}^{N} T_i \alpha_i y_{aux}(x_i)
++    f_r = \sum_{i=1}^{N} T_i \alpha_i f(x_i)
+     $$
+-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance [S1, S2, S3].
+-2.  **Invertible Neural Network Module (INM) Design:** Design an INM consisting of two INNs. The forward path takes the ray feature $f_{ray}$ and a ray representation $r_{rep}$ as input and outputs a pixel feature $f_{pixel}$. The reverse path takes $f_{pixel}$ and recovers $f_{ray}$ and $r_{rep}$ [S1].
+-3.  **Training with Barlow Twins Loss:**
+-    *   Use ResUNet to extract pixel features $f_{pixel}^{gt}$ from the observed image.
+-    *   Feed $f_{pixel}^{gt}$ into the reverse path of INM to recover ray features $f_{ray}^{rec}$ and ray representations $r_{rep}^{rec}$.
+-    *   Use the forward path of INM with $f_{ray}^{rec}$ and $r_{rep}^{rec}$ to generate reconstructed pixel features $f_{pixel}^{rec}$.
+-    *   Compute the Barlow Twins (BT) loss between $f_{pixel}^{gt}$ and $f_{pixel}^{rec}$ to train the ResUNet and INM [S1].
+-4.  **Inference:**
+-    *   Use ResUNet to extract a feature map from the observed image.
+-    *   Sample a set of pixel features from the feature map.
+-    *   Feed these pixel features into the reverse path of INM to obtain ray representations $r_{rep}$ [S1].
+-    *   Use the Perspective-n-Point (PnP) algorithm with the recovered ray representations and known camera intrinsics $K$ to calculate the camera pose $(R, t)$ [S1].
+-
+-### Pseudocode
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance and $\alpha_i = (1 - \exp(-\sigma_i \delta_i))$ is the opacity weight [S1]. This modified NeRF is called NeRF-Feat.
++
++2.  **Invertible Neural Network Module (INM) Design:**
++    Design an INM consisting of two INNs that can input and output in two directions [S1].
++    *   **Forward Path:** Takes the ray feature $f_r$ from NeRF-Feat and a representation of the ray $r_{rep}$ (derived from the camera pose) as input, and outputs a pixel feature $f_p$.
++    *   **Reverse Path:** If the pixel feature $f_p$ is fed in, it recovers the corresponding ray feature $f_r$ and ray representation $r_{rep}$.
++
++3.  **Training Phase:**
++    *   Use ResUNet to extract pixel features $f_p^{gt}$ for the given observed image $I$ [S1].
++    *   Feed these pixel features $f_p^{gt}$ into the reverse path of INM to recover the ray representation $r_{rep}^{rec}$ and ray feature $f_r^{rec}$.
++    *   Use the recovered ray representation $r_{rep}^{rec}$ to generate synthetic ray features via NeRF-Feat (forward pass of NeRF-Feat) to get $f_r^{syn}$.
++    *   Feed $f_r^{syn}$ into the forward path of INM to get reconstructed pixel features $f_p^{rec}$.
++    *   Compute the Barlow Twins (BT) loss between the corresponding pixel features produced by INM in the forward path ($f_p^{rec}$) and the features extracted by ResUNet ($f_p^{gt}$) [S1]. This ensures that the ResUNet learns to generate features suitable to be fed into INM in the reverse path to recover the ray representations.
++
++4.  **Inference Phase:**
++    *   Use ResUNet to extract a feature map from the observed image $I$ [S1].
++    *   Sample a set of features from the feature map and feed them into INM in the reverse path to obtain ray representations $r_{rep}$ [S1].
++    *   Based on these ray representations, directly use the Perspective-n-Point (PnP) algorithm to calculate the camera pose $(R, t)$ [S1].
++
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
+-import torch
+-import cv2
+ 
+ class PINeRF:
+-    def __init__(self, nerf_feat_mlp, inm, resunet, camera_intrinsics):
+-        """
+-        Initialize PI-NeRF.
+-        
+-        Args:
+-            nerf_feat_mlp: MLP that maps (x, d) -> (sigma, feature_vector)
+-            inm: Invertible Neural Network Module with forward and reverse methods
+-            resunet: ResUNet encoder for extracting pixel features
+-            camera_intrinsics: 3x3 matrix K
+-        """
+-        self.nerf_feat_mlp = nerf_feat_mlp
++    def __init__(self, nerf_feat, inm, resunet, camera_intrinsics):
++        """
++        Initialize PI-NeRF components.
++        :param nerf_feat: NeRF-Feat model (MLP for feature/density + volume renderer)
++        :param inm: Invertible Neural Network Module (forward and reverse paths)
++        :param resunet: ResUNet model for pixel feature extraction
++        :param camera_intrinsics: Camera intrinsic matrix K
++        """
++        self.nerf_feat = nerf_feat
+         self.inm = inm
+         self.resunet = resunet
+         self.K = camera_intrinsics
+ 
+-    def render_ray_feature(self, ray_origins, ray_directions, num_samples):
+-        """
+-        Render high-dimensional feature for a set of rays using NeRF-Feat.
+-        
+-        Args:
+-            ray_origins: (N, 3) array of ray origins
+-            ray_directions: (N, 3) array of ray directions
+-            num_samples: Number of samples per ray
++    def train_step(self, image):
++        """
++        Perform one training step.
++        :param image: Input RGB image
++        :return: Barlow Twins loss
++        """
++        # 1. Extract pixel features from image using ResUNet
++        f_p_gt = self.resunet(image)
++        
++        # 2. Feed pixel features into reverse path of INM to recover ray representation
++        # Note: The source states feeding pixel features into reverse path recovers 
++        # ray feature and ray representation. We assume the reverse path takes f_p and outputs (f_r, r_rep).
++        f_r_rec, r_rep_rec = self.inm.reverse_path(f_p_gt)
++        
++        # 3. Use recovered ray representation to generate synthetic ray features via NeRF-Feat
++        # This involves sampling rays based on r_rep_rec and rendering features
++        f_r_syn = self.nerf_feat.render_ray_features(r_rep_rec)
++        
++        # 4. Feed synthetic ray features into forward path of INM to get reconstructed pixel features
++        f_p_rec = self.inm.forward_path(f_r_syn, r_rep_rec)
++        
++        # 5. Compute Barlow Twins loss between f_p_rec and f_p_gt
++        loss = barlow_twins_loss(f_p_rec, f_p_gt)
++        
++        return loss
++
++    def infer_pose(self, image):
++        """
++        Estimate camera pose from a single image.
++        :param image: Input RGB image
++        :return: Camera pose (R, t)
++        """
++        # 1. Extract pixel features from image using ResUNet
++        f_p = self.resunet(image)
++        
++        # 2. Sample a set of features from the feature map
++        # Note: The source mentions sampling a set of features. This likely refers to 
++        # selecting specific pixel locations or aggregating features to form ray representations.
++        # For implementation, we assume we sample N pixel features corresponding to N 3D points.
++        sampled_f_p = sample_features(f_p, num_samples=1000)
++        
++        # 3. Feed sampled features into INM in reverse path to obtain ray representations
++        # This recovers the ray representations (which encode the camera pose)
++        r_rep_list = []
++        for f_p_sample in sampled_f_p:
++            _, r_rep = self.inm.reverse_path(f_p_sample)
++            r_rep_list.append(r_rep)
+             
+-        Returns:
+-            ray_features: (N, D) array of rendered ray features
+-        """
+-        # Sample points along rays
+-        t_vals = np.linspace(0.0, 1.0, num_samples)
+-        z_vals = 0.8 * t_vals + 0.2 * np.ones_like(t_vals) # Near/far bounds assumed fixed or learned
+-        points = ray_origins[:, None, :] + ray_directions[:, None, :] * z_vals[None, :, None]
+-        
+-        # Query NeRF-Feat MLP for density and feature
+-        # Note: In practice, this involves batching and GPU calls
+-        # sigma: (N, num_samples)
+-        # features: (N, num_samples, D)
+-        sigma, features = self.nerf_feat_mlp(points, ray_directions[:, None, :].repeat(num_samples, axis=1))
+-        
+-        # Compute transmittance
+-        deltas = z_vals[1:] - z_vals[:-1]
+-        deltas = np.concatenate([deltas, np.array([1e-3])], axis=0) # Last delta
+-        # Assuming batched computation
+-        transmittance = np.exp(-np.cumsum(sigma * deltas, axis=1))
+-        
+-        # Render feature
+-        # alpha_i = (1 - exp(-sigma_i * delta_i)) * T_i
+-        alpha = (1.0 - np.exp(-sigma * deltas)) * transmittance
+-        ray_features = np.sum(alpha[:, :, None] * features, axis=1)
+-        
+-        return ray_features
+-
+-    def train_step(self, image, gt_pose=None):
+-        """
+-        Training step using Barlow Twins loss.
+-        
+-        Args:
+-            image: Input image tensor
+-            gt_pose: Ground truth pose (optional, not used in loss calculation directly)
+-            
+-        Returns:
+-            loss: Barlow Twins loss
+-        """
+-        # Extract pixel features from image using ResUNet
+-        pixel_features_gt = self.resunet(image)
+-        
+-        # Reverse path: Pixel features -> Ray features and Ray representations
+-        ray_features_rec, ray_reps_rec = self.inm.reverse(pixel_features_gt)
+-        
+-        # Forward path: Ray features and Ray representations -> Reconstructed pixel features
+-        pixel_features_rec = self.inm.forward(ray_features_rec, ray_reps_rec)
+-        
+-        # Compute Barlow Twins loss
+-        loss = barlow_twins_loss(pixel_features_gt, pixel_features_rec)
+-        
+-        return loss
+-
+-    def estimate_pose(self, image):
+-        """
+-        Estimate camera pose from a single image.
+-        
+-        Args:
+-            image: Input image
+-            
+-        Returns:
+-            R: Rotation matrix (3x3)
+-            t: Translation vector (3x1)
+-        """
+-        # Extract pixel features from image using ResUNet
+-        pixel_features = self.resunet(image)
+-        
+-        # Sample a set of pixel features (e.g., from corners or grid)
+-        sampled_pixel_features = sample_features(pixel_features)
+-        
+-        # Reverse path: Sampled pixel features -> Ray representations
+-        ray_features, ray_reps = self.inm.reverse(sampled_pixel_features)
+-        
+-        # Use PnP algorithm to estimate pose
+-        # ray_reps contain 3D points and their corresponding 2D projections
+-        # Note: ray_reps might need to be converted to 3D points in camera space
+-        # and 2D points in image space for PnP
+-        
+-        # Assuming ray_reps provides 3D points and we have 2D points from the image
+-        # This step depends on the exact definition of 'ray representation'
+-        # Typically, ray representation includes origin and direction
+-        # We need to find 3D points that lie on these rays and project to the sampled 2D points
+-        
+-        # For simplicity, assume ray_reps directly provides 3D-2D correspondences
+-        # or can be easily converted
+-        object_points, image_points = convert_ray_reps_to_correspondences(ray_reps, self.K)
+-        
+-        # Solve PnP
+-        success, R, t, _ = cv2.solvePnP(object_points, image_points, self.K, None)
+-        
+-        if not success:
+-            raise ValueError("PnP failed to find a solution")
+-            
++        # 4. Use PnP algorithm to calculate camera pose based on ray representations
++        # The ray representations contain information about the 3D points and their corresponding 2D projections.
++        # We need to extract 3D-2D correspondences from r_rep_list and use PnP.
++        # Note: The exact mapping from r_rep to 3D-2D points is not detailed in the source,
++        # but PnP requires 3D points (from NeRF scene) and 2D points (from image).
++        # The ray representation likely encodes the direction or the 3D point location.
++        # Assuming r_rep allows reconstruction of 3D points and their 2D projections:
++        points_3d, points_2d = extract_3d_2d_correspondences(r_rep_list, self.nerf_feat, self.K)
++        
++        # 5. Solve PnP
++        R, t = solve_pnp(points_3d, points_2d, self.K)
++        
+         return R, t
+ 
+-def barlow_twins_loss(x, y, lambda_param=5e-3):
++def barlow_twins_loss(f_p_rec, f_p_gt):
+     """
+     Compute Barlow Twins loss.
++    :param f_p_rec: Reconstructed pixel features
++    :param f_p_gt: Ground truth pixel features from ResUNet
++    :return: Loss value
++    """
++    # Standard Barlow Twins implementation:
++    # 1. Normalize features
++    f_p_rec_norm = normalize(f_p_rec)
++    f_p_gt_norm = normalize(f_p_gt)
+     
+-    Args:
+-        x: Batch of features (N, D)
+-        y: Batch of features (N, D)
+-        lambda_param: Weight for the off-diagonal terms
+-        
+-    Returns:
+-        loss: Scalar loss value
+-    """
+-    # Normalize features
+-    x = x - torch.mean(x, dim=0)
+-    y = y - torch.mean(y, dim=0)
++    # 2. Compute cross-correlation matrix
++    batch_size = f_p_rec_norm.shape[0]
++    c = torch.mm(f_p_rec_norm.T, f_p_gt_norm) / batch_size
+     
+-    # Compute covariance matrix
+-    c = torch.mm(x.T, y)
+-    c = c / x.size(0)
+-    
+-    # Compute standard deviation
+-    std_x = torch.sqrt(torch.var(x, dim=0) + 1e-5)
+-    std_y = torch.sqrt(torch.var(y, dim=0) + 1e-5)
+-    
+-    # Normalize covariance
+-    c = c / (std_x[:, None] * std_y[None, :])
+-    
+-    # Loss: sum of squared off-diagonal elements + lambda * sum of squared deviations of diagonal from 1
+-    diagonal = torch.diag(c)
+-    off_diagonal = c - diagonal.diag()
+-    loss = torch.sum(off_diagonal ** 2) + lambda_param * torch.sum((diagonal - 1) ** 2)
+-    
++    # 3. Compute loss
++    # Diagonal elements should be 1, off-diagonal elements should be 0
++    b = torch.diag(c)
++    loss = torch.sum(b) + torch.sum((c - torch.eye(c.shape[0])) ** 2)
+     return loss
+ 
+-def sample_features(pixel_features, num_samples=100):
+-    """
+-    Sample a set of pixel features from the feature map.
+-    
+-    Args:
+-        pixel_features: (H, W, D) tensor
+-        num_samples: Number of samples to take
+-        
+-    Returns:
+-        sampled_features: (num_samples, D) tensor
+-    """
+-    H, W, D = pixel_features.shape
+-    indices = np.random.randint(0, H, num_samples)
+-    j_indices = np.random.randint(0, W, num_samples)
+-    sampled_features = pixel_features[indices, j_indices, :]
++def sample_features(feature_map, num_samples):
++    """
++    Sample a set of features from the feature map.
++    :param feature_map: Output of ResUNet
++    :param num_samples: Number of features to sample
++    :return: Sampled features
++    """
++    # Implementation detail: Sample random pixel locations or use a grid
++    # This is a placeholder for the specific sampling strategy not detailed in the source
++    # [G] Assuming random sampling of pixel locations
++    h, w, d = feature_map.shape
++    indices = np.random.randint(0, h, size=num_samples)
++    j_indices = np.random.randint(0, w, size=num_samples)
++    sampled_features = feature_map[indices, j_indices, :]
+     return sampled_features
+ 
+-def convert_ray_reps_to_correspondences(ray_reps, K):
+-    """
+-    Convert ray representations to 3D-2D correspondences for PnP.
+-    
+-    Args:
+-        ray_reps: Ray representations (e.g., origins and directions)
+-        K: Camera intrinsics
+-        
+-    Returns:
+-        object_points: (N, 3) array of 3D points
+-        image_points: (N, 2) array of 2D points
+-    """
+-    # This function's implementation depends on the exact structure of ray_reps
+-    # Assuming ray_reps contains 3D points in world space and their corresponding 2D image coordinates
+-    # For PI-NeRF, the ray representation might be the ray origin and direction
+-    # We need to find the 3D point on the ray that corresponds to the 2D point
+-    
+-    # Example: If ray_reps contains (origin, direction) and we have 2D points
+-    # We can back-project the 2D points to get rays and intersect with the NeRF volume
+-    # However, the paper states that INM recovers ray representations
+-    # It is likely that the ray representation includes the 3D point corresponding to the pixel
+-    
+-    # Placeholder for actual implementation
+-    # object_points = ray_reps['3d_points']
+-    # image_points = ray_reps['2d_points']
+-    
+-    # For the purpose of this pseudocode, we assume ray_reps directly provides the necessary data
+-    # In practice, this step requires careful handling of coordinate systems
+-    
+-    # Return dummy values for structure
+-    return np.zeros((100, 3)), np.zeros((100, 2))
++def extract_3d_2d_correspondences(r_rep_list, nerf_feat, K):
++    """
++    Extract 3D-2D correspondences from ray representations.
++    :param r_rep_list: List of ray representations
++    :param nerf_feat: NeRF-Feat model
++    :param K: Camera intrinsic matrix
++    :return: points_3d, points_2d
++    """
++    # Implementation detail: The source does not specify how r_rep maps to 3D-2D points.
++    # [G] Assuming r_rep contains the 3D point location and the 2D projection can be derived
++    # or the ray direction can be used with depth to find the 3D point.
++    # This is a placeholder for the specific mapping strategy not detailed in the source.
++    points_3d = []
++    points_2d = []
++    for r_rep in r_rep_list:
++        # Placeholder: Extract 3D point and 2D projection from r_rep
++        # 3D point might be obtained by intersecting the ray (from r_rep) with the NeRF scene
++        # 2D point is the pixel location corresponding to the feature
++        point_3d = get_3d_point_from_r_rep(r_rep, nerf_feat)
++        point_2d = get_2d_point_from_r_rep(r_rep, K)
++        points_3d.append(point_3d)
++        points_2d.append(point_2d)
++    return np.array(points_3d), np.array(points_2d)
++
++def get_3d_point_from_r_rep(r_rep, nerf_feat):
++    # Placeholder implementation
++    # [G] This function needs to be implemented based on the specific structure of r_rep
++    pass
++
++def get_2d_point_from_r_rep(r_rep, K):
++    # Placeholder implementation
++    # [G] This function needs to be implemented based on the specific structure of r_rep
++    pass
++
++def solve_pnp(points_3d, points_2d, K):
++    """
++    Solve Perspective-n-Point problem.
++    :param points_3d: 3D points
++    :param points_2d: 2D points
++    :param K: Camera intrinsic matrix
++    :return: R, t
++    """
++    # Use OpenCV's solvePnP or similar
++    # [G] Standard PnP solver
++    pass
+ ```
+ 
+-### Parameters
+-*   **Number of samples per ray:** Not given in the sources.
+-*   **Dimension of high-dimensional feature:** Not given in the sources.
+-*   **Barlow Twins lambda parameter:** $5 \times 10^{-3}$ [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **PnP Failure:** The PnP algorithm may fail if the recovered ray representations do not provide sufficient or accurate 3D-2D correspondences. This can happen if the INM inversion is inaccurate or if the sampled features are ambiguous [S1].
+-*   **Initial Pose Sensitivity:** Unlike iterative methods, PI-NeRF does not require an initial pose, but its accuracy depends on the quality of the inverted ray representations [S1].
+-*   **Precision:** The accuracy of the pose estimation is competitive with iterative methods, but may be lower in complex scenes or with poor feature extraction [S1].
++**Parameters with typical values:**
++*   **High-dimensional feature size $D$:** Not given in the sources.
++*   **Number of samples for PnP:** Not given in the sources.
++*   **ResUNet:** Used for pixel feature extraction [S1].
++
++**Edge cases and pitfalls:**
++*   **Precision:** Not given in the sources.
++*   **Boundaries:** Not given in the sources.
++*   **Degenerate input:** Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** PI-NeRF is two orders of magnitude faster than existing NeRF-based methods (e.g., pNeRF takes more than 5 seconds) [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Experiments on synthetic and real-world datasets demonstrate competitive accuracy without initial pose [S1].
+-*   **Strengths:** Direct pose estimation without iterative optimization or initial pose; fast inference time.
+-*   **Limitations:** Accuracy may be lower than iterative methods in some cases; requires a pre-trained NeRF-Feat and INM.
+-*   **When to Use:** Real-time applications requiring fast pose estimation from a single image.
+-*   **When Not to Use:** When high accuracy is required and computational time is not a constraint; when iterative optimization is preferred for robustness.
++*   **Time complexity:** PI-NeRF is two orders of magnitude faster than existing NeRF-based methods (e.g., pNeRF takes more than 5 seconds, iNeRF is slower) [S1].
++*   **Memory complexity:** Not given in the sources.
++*   **Measured performance:** Experiments conducted on both synthetic and real-world datasets demonstrate that PI-NeRF is two orders of magnitude faster than existing NeRF-based methods, while the accuracy is competitive without initial pose [S1].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Direct pose estimation without iterative optimization or initial pose; fast inference speed; competitive accuracy [S1].
++*   **Limitations:** Relies on the accuracy of the ResUNet and INM; requires a pre-trained NeRF-Feat model [S1].
++*   **When to use it:** When fast, accurate camera pose estimation is needed from a single image without prior pose knowledge [S1].
++*   **When not:** When iterative optimization is acceptable and higher accuracy is required [S1].
+ 
+ ## Background
+-PI-NeRF was proposed by Zhihao Li, Kexue Fu, Haoran Wang, and Manning Wang in 2023 [S1]. It is the first work that uses NeRF for direct pose estimation, integrating NeRF with invertible neural networks (INN) to solve the inverse problem of view synthesis [S1]. The method builds on the idea of using high-dimensional features in NeRF and inverting the rendering process to recover ray information from pixel features [S1].
++*   **Origin:** PI-NeRF was proposed by Zhihao Li, Kexue Fu, Haoran Wang, & Manning Wang in the paper "PI-NeRF: A Partial-Invertible Neural Radiance Fields for Pose Estimation" published in MM '23, October 29-November 3, 2023, Ottawa, ON, Canada [S1].
++*   **History and development:** The method builds on the idea of inverting NeRF for pose estimation, which was previously not successfully achieved without iterative optimization or initial pose [S1]. It integrates NeRF with invertible neural networks (INN), which have been used to solve many inverse problems such as image rescaling and robot localization [S1].
++*   **Where it is used:** Camera pose estimation, which is the basis of many tasks including robot manipulation and simultaneous localization and mapping [S1].
+ 
+ ## Sources
