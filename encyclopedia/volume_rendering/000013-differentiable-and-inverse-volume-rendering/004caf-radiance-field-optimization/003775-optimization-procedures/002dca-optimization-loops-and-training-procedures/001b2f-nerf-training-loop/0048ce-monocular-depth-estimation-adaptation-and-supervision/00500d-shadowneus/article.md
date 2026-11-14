@@ -3,72 +3,76 @@
 Also called: Neural SDF Reconstruction by Shadow Ray Supervision
 
 ## Overview
-ShadowNeuS reconstructs a neural Signed Distance Field (SDF) of a scene from single-view images under multiple lighting conditions by supervising shadow rays rather than relying solely on camera rays [S1]. It solves the problem that standard NeRF does not model rays from the scene to the light source, missing shadow information which contains critical geometry cues via light visibility [S1]. Unlike NeRF which uses multi-view cameras as ray sensors, this method uses a single-view camera and shadow rays to provide supervision, making it applicable to real capture setups with limited views [S1].
+ShadowNeuS reconstructs a neural Signed Distance Field (SDF) of a scene from single-view images under multiple lighting conditions by supervising shadow rays (rays between the light source and the scene) rather than just camera rays [S1]. It solves the problem that standard NeRF does not model rays from the scene to the light source, missing shadow information which contains geometry cues via light visibility [S1]. Unlike NeRF which uses multi-view cameras as ray sensors, this method uses a single-view camera and shadow rays to provide supervision, making it applicable to real capture setups with limited views [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Single-view images (either binary shadow images or RGB images) captured under multiple known light directions. For RGB inputs, the method also requires a camera calibration. For bounded scenes, the ground plane position and orientation are assumed known to resolve scale ambiguity [S1].
-*   **Outputs:** A neural SDF network $f(\mathbf{u})$ that regresses the signed distance at input 3D position $\mathbf{u}$, representing the scene as the zero level set $S = \{\mathbf{u} \in \mathbb{R}^3 | f(\mathbf{u}) = 0\}$ [S1].
+*   **Inputs:** Single-view images (either binary shadow images or RGB images) captured under multiple known light directions. For RGB inputs, the method assumes non-Lambertian materials. For binary inputs, material modeling is optional.
+*   **Outputs:** A neural SDF network $f(\mathbf{x})$ representing the scene geometry, and optionally a material network for RGB inputs.
 
 **Data Structures:**
-*   **SDF Network:** A Multi-Layer Perceptron (MLP) similar to NeuS [S1]. For RGB inputs, it outputs an extra 256-dimensional feature vector concatenated with 3D position and surface normal to regress material properties [S1].
-*   **Material Network:** An MLP network $g$ that regresses material properties (diffuse $\rho_d$ and specular coefficients $\mathbf{y}$) at surface location $\mathbf{x}$ [S1].
-*   **Light Source:** Defined by direction $\mathbf{l}$ and intensity $L$. Supports directional lights (uniform $L, \mathbf{l}$) and point lights (position $\mathbf{q}$, scalar intensity $L_p$) [S1].
+*   **SDF Network:** A Multi-Layer Perceptron (MLP) $f: \mathbb{R}^3 \rightarrow \mathbb{R}$ that regresses the signed distance at input 3D position $\mathbf{x}$. The scene is represented as the zero level set $\{ \mathbf{u} \in \mathbb{R}^3 \mid f(\mathbf{u}) = 0 \}$ [S1].
+*   **Material Network (RGB only):** An MLP $g$ that regresses material properties (diffuse albedo $\rho_d$ and specular coefficients $\mathbf{y}$) given the surface location $\mathbf{x}$ [S1].
+*   **Light Source:** Defined by intensity $L_p$ and location $\mathbf{q}$ for point lights, or direction $\mathbf{l}$ and intensity $L$ for directional lights [S1].
 
 **Parameters:**
-*   **Training Iterations:** 150,000 [S1].
-*   **Samples per Image:** 256 pixel positions sampled as supervision signals [S1].
-*   **Batch Size:** 4 images randomly selected in each batch [S1].
-*   **Light Sampling:** 100 directional lights and 100 point lights selected randomly on the upper hemisphere [S1].
-*   **Input Resolution:** 800x800 for synthetic datasets [S1].
-*   **Hardware:** Single RTX 2080Ti (training takes ~24 hours) [S1].
-*   **Learnable Scalar:** $s$ controls the transition between volume and surface rendering [S1].
+*   **Samples per image:** 256 pixel positions are sampled as supervision signals [S1].
+*   **Batch size:** 4 images randomly selected in each batch [S1].
+*   **Training iterations:** 150k [S1].
+*   **Light sampling:** 100 directional lights and 100 point lights selected randomly on the upper hemisphere [S1].
+*   **Input resolution:** 800x800 for synthetic datasets [S1].
+*   **Hardware:** Single RTX 2080Ti [S1].
+*   **SDF Sigmoid Scalar:** A learnable scalar $s$ controlling the transition between volume and surface rendering [S1].
 
 **Step-by-Step Method:**
 
-1.  **Scene Illumination:** Illuminate the scene multiple times using different light directions (e.g., 100 directional and 100 point lights) to obtain sufficient observations of light visibility (shadows) at the scene surface [S1].
+1.  **Scene Representation:** Initialize the SDF network $f$. The scene is opaque. Camera rays that do not intersect with the SDF are set to intersect with a known ground plane to bound the scene [S1].
 
-2.  **Camera Ray Intersection:** For each camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{v}$, use ray marching to compute the intersection point $\mathbf{x}$ at the current SDF [S1].
-    *   To make the intersection point differentiable for backpropagation, use implicit differentiation [S1]:
-        $$ \tilde{\mathbf{x}} = \mathbf{x} - \frac{\mathbf{v}}{\mathbf{n} \cdot \mathbf{v}} f(\mathbf{x}) $$
-        where $\mathbf{v}$ is the camera ray direction and $\mathbf{n} = \nabla_{\mathbf{x}} f(\mathbf{x})$ is the surface normal derived from the SDF network [S1].
-    *   If a camera ray does not intersect the SDF, set it to intersect with the known ground plane to bound the scene [S1].
+2.  **Camera Ray Intersection:** For each camera ray $\mathbf{o} + t\mathbf{v}$ (where $\mathbf{o}$ is the camera center and $\mathbf{v}$ is the direction), use ray marching to compute the intersection point $\mathbf{x}$ at the current SDF [S1]. To make this intersection point differentiable for backpropagation, use implicit differentiation [S1]:
+    $$ \hat{\mathbf{x}} = \mathbf{x} - \frac{\mathbf{v}}{\mathbf{n} \cdot \mathbf{v}} f(\mathbf{x}) $$
+    where $\mathbf{n} = \nabla_{\mathbf{x}} f(\mathbf{x})$ is the surface normal derived from the SDF network [S1].
 
-3.  **Boundary Detection:** Identify boundary pixels using a surface walk procedure [S1] to obtain a pixel subset $\Omega$ (surface boundaries) and a differentiable area ratio $w$ for each boundary pixel [S1].
+3.  **Boundary Detection:** Identify boundary pixels using a surface walk procedure [S1] to obtain a pixel subset $\Omega$ (boundary pixels) and a differentiable area ratio $w$ for each boundary pixel. At surface boundaries, a pixel spans disconnected regions at different depths [S1].
 
-4.  **Shadow Ray Sampling:** Use an iterative updating strategy to determine shadow ray positions: sample shadow rays starting at the current surface estimation $\tilde{\mathbf{x}}$. The sampled locations are differentiable to the geometry representation to optimize the starting positions [S1].
+4.  **Shadow Ray Sampling:** Illuminate the scene with a light source (directional or point) in direction $\mathbf{l}$. Shadow rays start at the surface intersection point $\hat{\mathbf{x}}$ (or boundary intersections) and travel towards the light source [S1].
+    *   For non-boundary pixels ($\mathbf{p} \notin \Omega$), use the single intersection $\hat{\mathbf{x}}$.
+    *   For boundary pixels ($\mathbf{p} \in \Omega$), locate two intersections $\mathbf{x}_n$ (near) and $\mathbf{x}_f$ (far) at different depths within the pixel. Compute their differentiable positions $\hat{\mathbf{x}}_n$ and $\hat{\mathbf{x}}_f$ using the implicit differentiation formula [S1].
 
-5.  **Incoming Radiance Computation:**
-    *   **For non-boundary pixels ($\mathbf{p} \notin \Omega$):** Compute the incoming irradiance at the differentiable intersection $\tilde{\mathbf{x}}$:
-        $$ \text{irradiance}(\tilde{\mathbf{x}}, \mathbf{l}) = L \prod_{i=1}^{N} (1 - \alpha_i) $$
-        where $L$ is the light intensity and $\alpha_i$ is the opacity derived from the SDF [S1].
-    *   **For boundary pixels ($\mathbf{p} \in \Omega$):** Locate two intersections $\mathbf{x}_n$ (near) and $\mathbf{x}_f$ (far) at different depths within the pixel. Compute their incoming radiance and average them weighted by the area ratio $w$:
-        $$ \text{irradiance}_{\mathbf{p}} = w \cdot \text{irradiance}(\tilde{\mathbf{x}}_n, \mathbf{l}) + (1 - w) \cdot \text{irradiance}(\tilde{\mathbf{x}}_f, \mathbf{l}) $$
-        This handles the issue where a pixel spans disconnected regions at different depths, preventing incorrect gradients [S1].
+5.  **Shadow Ray Rendering (Incoming Irradiance):** Compute the incoming irradiance at the shadow ray start point.
+    *   **Volume Rendering:** Sample $N$ points along the shadow ray from the surface to the light source. Compute opacity $\alpha_i$ from the SDF values at adjacent samples $t_i$ and $t_{i+1}$:
+        $$ \alpha_i = \max \left( 1 - \frac{\Phi_s(f(\mathbf{p}(t_{i+1})))}{\Phi_s(f(\mathbf{p}(t_i)))}, 0 \right) $$
+        where $\Phi_s(x) = (1 + e^{-sx})^{-1}$ is the sigmoid function and $s$ is a learnable scalar [S1].
+    *   **Irradiance Calculation:** The estimated incoming irradiance at a point $\mathbf{x}$ in light direction $\mathbf{l}$ is:
+        $$ I_{in}(\mathbf{x}, \mathbf{l}) = L \prod_{i=1}^{N} (1 - \alpha_i) $$
+        where $L$ is the light intensity [S1].
+    *   **Light Modeling:**
+        *   For directional light, $\mathbf{l}$ and $L$ are uniform.
+        *   For point light at location $\mathbf{q}$ with scalar intensity $L_p$, calculate intensity and direction at $\mathbf{x}$:
+            $$ L = \frac{L_p}{\|\mathbf{q} - \mathbf{x}\|_2^2}, \quad \mathbf{l} = \frac{\mathbf{q} - \mathbf{x}}{\|\mathbf{q} - \mathbf{x}\|_2} $$
+            [S1].
+    *   **Pixel Irradiance:** For a pixel $\mathbf{p}$, the computed incoming irradiance $\hat{I}_{in}$ is:
+        $$ \hat{I}_{in} = \begin{cases} I_{in}(\hat{\mathbf{x}}, \mathbf{l}) & \mathbf{p} \notin \Omega \\ w I_{in}(\hat{\mathbf{x}}_n, \mathbf{l}) + (1-w) I_{in}(\hat{\mathbf{x}}_f, \mathbf{l}) & \mathbf{p} \in \Omega \end{cases} $$
+        [S1].
 
-6.  **Outgoing Radiance Modeling (RGB Inputs Only):**
-    *   For RGB inputs, decompose the incoming radiance using inverse rendering. Model the non-Lambertian BRDF as a diffuse component $\rho_d$ and a specular component $\rho_s$ [S1].
-    *   Regress material properties $(\rho_d, \mathbf{y})$ using the MLP network $g$ at surface location $\mathbf{x}$ [S1].
-    *   Model the specular component $\rho_s$ using spherical Gaussian basis: $\rho_s = \mathbf{y}^T D(\mathbf{h}, \mathbf{n})$, where $\mathbf{h} = \frac{\mathbf{l} - \mathbf{v}}{\|\mathbf{l} - \mathbf{v}\|}$ is the half-vector between light direction $\mathbf{l}$ and view direction $-\mathbf{v}$, and $D$ is the specular basis [S1].
-    *   The outgoing radiance at point $\mathbf{x}$ is:
-        $$ C(\mathbf{x}, -\mathbf{v}) = (\rho_d + \rho_s) \cdot \text{irradiance}(\mathbf{x}, \mathbf{l}) \cdot (\mathbf{l} \cdot \mathbf{n}) $$
-        where $\mathbf{l} \cdot \mathbf{n}$ is the cosine of the angle between light and normal [S1].
-    *   For point lights, calculate light direction and intensity at point $\mathbf{x}$:
-        $$ L = \frac{L_p}{\|\mathbf{q} - \mathbf{x}\|_2^2}, \quad \mathbf{l} = \frac{\mathbf{q} - \mathbf{x}}{\|\mathbf{q} - \mathbf{x}\|_2} $$
-        where $L_p$ is the scalar point light intensity and $\mathbf{q}$ is the light location [S1].
+6.  **Outgoing Radiance (RGB Only):** If inputs are RGB, decompose the outgoing radiance using inverse rendering. Model the non-Lambertian BRDF as a diffuse component $\rho_d$ and a specular component $\rho_s$.
+    *   Regress material properties $(\rho_d, \mathbf{y}) = g(\mathbf{x})$ using the material network $g$ at surface location $\mathbf{x}$ [S1].
+    *   The specular component is modeled using spherical Gaussian basis: $\rho_s = \mathbf{y}^T D(\mathbf{h}, \mathbf{n})$, where $\mathbf{h} = \frac{\mathbf{l} - \mathbf{v}}{\|\mathbf{l} - \mathbf{v}\|_2}$ is the half-vector between light direction $\mathbf{l}$ and view direction $-\mathbf{v}$, and $D$ is the specular basis [S1].
+    *   The outgoing radiance $\hat{C}$ at point $\mathbf{x}$ in view direction $-\mathbf{v}$ is:
+        $$ \hat{C}(\mathbf{x}, -\mathbf{v}) = (\rho_d + \rho_s) I_{in}(\mathbf{x}, \mathbf{l}) (\mathbf{l} \cdot \mathbf{n}) $$
+        [S1].
 
 7.  **Loss Computation:**
-    *   **Eikonal Loss:** Regularize the network to output valid SDF:
+    *   **Eikonal Loss:** Regularize the SDF to output valid distances:
         $$ \mathcal{L}_{\mathrm{eik}} = \frac{1}{M} \sum_{i}^{M} (\|\nabla f(\mathbf{x}_i)\|_2 - 1)^2 $$
         [S1].
-    *   **Shadow Loss (Binary Inputs):**
-        $$ \mathcal{L}_{\mathrm{shadow}} = \| \text{irradiance}_{\mathbf{p}} - I_{\mathrm{shadow}} \|_1 $$
-        where $I_{\mathrm{shadow}}$ is the binary shadow pixel value [S1].
-    *   **RGB Loss (RGB Inputs):**
-        $$ \mathcal{L}_{\mathrm{rgb}} = \| \widehat{C} - I_{\mathrm{rgb}} \|_1 $$
-        where $\widehat{C}$ is the computed outgoing radiance and $I_{\mathrm{rgb}}$ is the RGB pixel value [S1].
+    *   **Shadow Loss (Binary Inputs):** Compare computed incoming irradiance with binary shadow image $\mathbf{I}_{shadow}$:
+        $$ \mathcal{L}_{\mathrm{shadow}} = \| \hat{I}_{in} - \mathbf{I}_{shadow} \|_1 $$
+        [S1].
+    *   **RGB Loss (RGB Inputs):** Compare computed outgoing radiance with RGB image $\mathbf{I}_{rgb}$:
+        $$ \mathcal{L}_{\mathrm{rgb}} = \| \hat{C} - \mathbf{I}_{rgb} \|_1 $$
+        [S1].
 
-8.  **Optimization:** Minimize the total loss (Eikonal + Shadow/RGB) to optimize the SDF network and material network parameters [S1].
+8.  **Optimization:** Minimize the total loss ($\mathcal{L}_{\mathrm{eik}} + \mathcal{L}_{\mathrm{shadow}}$ or $\mathcal{L}_{\mathrm{eik}} + \mathcal{L}_{\mathrm{rgb}}$) using gradient descent. The iterative updating strategy optimizes both the SDF network parameters and the starting positions of the shadow rays (via $\hat{\mathbf{x}}$) [S1].
 
 **Pseudocode:**
 
@@ -77,329 +81,280 @@ ShadowNeuS reconstructs a neural Signed Distance Field (SDF) of a scene from sin
 ```python
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
 
 class ShadowNeuS:
-    def __init__(self, sdf_mlp, material_mlp, ground_plane, light_sources):
-        self.sdf_mlp = sdf_mlp
-        self.material_mlp = material_mlp
-        self.ground_plane = ground_plane # Defined by normal n_g and distance d_g
-        self.light_sources = light_sources # List of (type, params)
-        self.s = nn.Parameter(torch.tensor(1.0)) # Learnable scalar for opacity transition
+    def __init__(self, sdf_net, mat_net=None, s_init=1.0):
+        """
+        Initialize ShadowNeuS.
+        :param sdf_net: Neural network f(x) returning SDF values.
+        :param mat_net: Optional neural network g(x) returning material properties for RGB.
+        :param s_init: Initial value for learnable scalar s.
+        """
+        self.sdf_net = sdf_net
+        self.mat_net = mat_net
+        self.s = nn.Parameter(torch.tensor(s_init))
+        self.ground_plane_normal = torch.tensor([0.0, 1.0, 0.0]) # Example: horizontal ground
+        self.ground_plane_d = 0.0 # Example: ground at y=0
 
-    def sigmoid_cdf(self, x):
-        """Phi_s(x) = (1 + exp(-s*x))^-1"""
-        return 1.0 / (1.0 + torch.exp(-self.s * x))
+    def sigmoid_cdf(self, sdf_val):
+        """
+        Compute the CDF of the SDF values using the sigmoid function.
+        Phi_s(x) = (1 + exp(-s*x))^-1
+        """
+        return 1.0 / (1.0 + torch.exp(-self.s * sdf_val))
 
     def compute_opacity(self, sdf_near, sdf_far):
         """
         Compute opacity alpha_i from SDF values at adjacent samples.
-        alpha_i = max(1 - CDF(sdf(t_{i+1})) / CDF(sdf(t_i)), 0)
+        alpha_i = max(1 - Phi_s(f(t_{i+1})) / Phi_s(f(t_i)), 0)
         """
         cdf_near = self.sigmoid_cdf(sdf_near)
         cdf_far = self.sigmoid_cdf(sdf_far)
-        # Avoid division by zero
-        cdf_near = torch.clamp(cdf_near, min=1e-6)
         alpha = 1.0 - (cdf_far / cdf_near)
         return torch.clamp(alpha, min=0.0)
 
-    def get_light_params(self, point_x, light_source):
-        """Get direction l and intensity L for a light source at point x."""
-        if light_source['type'] == 'directional':
-            return light_source['direction'], light_source['intensity']
-        elif light_source['type'] == 'point':
-            q = light_source['position']
-            L_p = light_source['intensity']
-            diff = q - point_x
-            dist_sq = torch.sum(diff**2, dim=-1, keepdim=True)
-            L = L_p / (dist_sq + 1e-6)
-            l = diff / (torch.sqrt(dist_sq) + 1e-6)
-            return l, L
-        else:
-            raise ValueError("Unknown light type")
+    def implicit_differentiation(self, x, ray_dir, sdf_val, grad_sdf):
+        """
+        Compute differentiable intersection point using implicit differentiation.
+        x_hat = x - (v / (n . v)) * f(x)
+        """
+        n = grad_sdf # Surface normal
+        dot_prod = torch.sum(n * ray_dir, dim=-1, keepdim=True)
+        # Avoid division by zero
+        dot_prod = torch.clamp(dot_prod, min=1e-8)
+        x_hat = x - (ray_dir / dot_prod) * sdf_val
+        return x_hat
 
-    def implicit_differentiation(self, ray_o, ray_d, sdf_val, normal):
+    def ray_march_sdf(self, ray_o, ray_d, num_samples=256):
         """
-        Compute differentiable intersection point.
-        x_tilde = x - (v / (n . v)) * f(x)
+        Ray march along camera ray to find intersection with SDF.
+        Returns: intersection point x, sdf_val, grad_sdf, t_values
         """
-        dot_nv = torch.sum(normal * ray_d, dim=-1, keepdim=True)
-        # Avoid division by zero if ray is parallel to surface
-        dot_nv = torch.clamp(dot_nv, min=1e-6)
-        x_tilde = ray_o - (ray_d / dot_nv) * sdf_val
-        return x_tilde
-
-    def surface_walk(self, ray_o, ray_d, sdf_mlp, num_steps=10):
-        """
-        Simplified surface walk to find boundary pixels and area ratio w.
-        In practice, this involves marching along the ray and checking SDF sign changes.
-        Returns: is_boundary (bool), w (float), x_near, x_far
-        """
-        # Placeholder for the specific surface walk algorithm from [56]
-        # For implementation, one would sample points along the ray,
-        # detect sign changes in SDF, and estimate the fraction of the pixel
-        # covered by the near vs far surface.
-        # Here we assume a helper function exists that returns these values.
-        # If no boundary, w=0, x_near=x_far=intersection.
-        pass 
-
-    def render_shadow_ray(self, start_point, light_source, num_samples=64):
-        """
-        Compute incoming irradiance along a shadow ray starting at start_point.
-        irradiance = L * product(1 - alpha_i)
-        """
-        l, L = self.get_light_params(start_point, light_source)
-        # Define shadow ray direction as light direction
-        # Note: Shadow rays go from surface to light.
-        # We sample points along the vector from start_point towards light.
-        shadow_dir = l
-        # Sample points along the shadow ray
-        # Assuming we march towards the light source
-        # For simplicity, assume we march a fixed distance or until light is reached
-        # In the paper, they march the scene. Here we assume the light is far enough.
+        # Simplified ray marching: assume we have t values or sample uniformly
+        # In practice, this involves finding the zero-crossing or marching until close to 0
+        # Here we assume we have sampled points along the ray
+        t = torch.linspace(0.1, 10.0, num_samples) # Placeholder for actual sampling strategy
+        points = ray_o.unsqueeze(1) + t.unsqueeze(0).unsqueeze(-1) * ray_d.unsqueeze(0)
         
-        # Generate sample points along the shadow ray
-        # t goes from 0 to 1 (or max distance)
-        t_vals = torch.linspace(0, 1.0, num_samples)
-        # Assuming light is at distance D_light from start_point in direction l
-        # We need to know the distance to the light to sample correctly.
-        # For point lights, distance varies. For directional, it's effectively infinite.
-        # The paper uses product(1-alpha). 
-        # Let's assume we sample points p_i = start_point + t_i * l
-        # We need to handle the varying distance for point lights in opacity calculation?
-        # The opacity formula depends on SDF, not distance to light.
-        
-        # Sample SDF values
-        points = start_point.unsqueeze(0) + (t_vals.unsqueeze(1) * shadow_dir.unsqueeze(0))
-        # points shape: (num_samples, 3)
         # Get SDF values
-        sdf_vals = self.sdf_mlp(points) # Returns (num_samples, 1)
+        sdf_vals = self.sdf_net(points)
         
-        # Compute opacity for each segment
-        # alpha_i corresponds to segment between t_i and t_{i+1}
-        # We need to align alpha with the transmittance calculation
-        # T_i = product(1 - alpha_j) for j < i
-        # The formula is irradiance = L * product(1 - alpha_i)
-        # This implies we are computing the transmittance from the surface to the light.
+        # Find closest point to zero (simplified)
+        # In real implementation, use root finding or marching
+        # For pseudocode, assume we pick the point with min |sdf|
+        min_idx = torch.argmin(torch.abs(sdf_vals), dim=1)
+        x = points[torch.arange(points.size(0)), min_idx]
+        sdf_val = sdf_vals[torch.arange(sdf_vals.size(0)), min_idx]
         
-        alphas = []
-        for i in range(num_samples - 1):
-            alpha = self.compute_opacity(sdf_vals[i], sdf_vals[i+1])
-            alphas.append(alpha)
+        # Compute gradient of SDF at x
+        x.requires_grad_(True)
+        sdf_at_x = self.sdf_net(x)
+        grad_sdf = torch.autograd.grad(sdf_at_x.sum(), x, create_graph=True)[0]
         
-        alphas = torch.cat(alphas, dim=0)
-        # Product of (1 - alpha)
-        transmittance = torch.prod(1.0 - alphas)
+        return x, sdf_val, grad_sdf, t
+
+    def compute_shadow_irradiance(self, start_point, light_dir, light_intensity, num_samples=100):
+        """
+        Compute incoming irradiance along shadow ray from start_point to light.
+        """
+        # Sample points along shadow ray
+        t = torch.linspace(0.0, 1.0, num_samples)
+        # Direction towards light
+        shadow_dir = light_dir / torch.norm(light_dir, dim=-1, keepdim=True)
+        shadow_points = start_point.unsqueeze(1) + t.unsqueeze(0).unsqueeze(-1) * shadow_dir.unsqueeze(0)
         
-        irradiance = L * transmittance
+        # Get SDF values
+        sdf_vals = self.sdf_net(shadow_points)
+        
+        # Compute opacity
+        # alpha_i depends on adjacent samples
+        # Using the formula: alpha_i = max(1 - Phi_s(f(t_{i+1})) / Phi_s(f(t_i)), 0)
+        # We need to handle the product (1 - alpha_i)
+        
+        cdf_vals = self.sigmoid_cdf(sdf_vals)
+        # Avoid division by zero
+        cdf_vals = torch.clamp(cdf_vals, min=1e-8)
+        
+        # Compute alpha for each segment
+        # Note: indices might need adjustment based on sampling direction
+        alpha = 1.0 - (cdf_vals[:, 1:] / cdf_vals[:, :-1])
+        alpha = torch.clamp(alpha, min=0.0)
+        
+        # Transmittance T = product(1 - alpha)
+        # Using log-sum-exp for stability
+        log_transmittance = torch.sum(torch.log(torch.clamp(1.0 - alpha, min=1e-8)), dim=1)
+        transmittance = torch.exp(log_transmittance)
+        
+        irradiance = light_intensity * transmittance
         return irradiance
 
-    def compute_outgoing_radiance(self, x, normal, ray_d, irradiance_in):
+    def compute_outgoing_radiance_rgb(self, x, grad_sdf, shadow_irradiance, ray_dir, light_dir):
         """
         Compute outgoing radiance for RGB inputs.
-        C = (rho_d + rho_s) * irradiance_in * (l . n)
+        C = (rho_d + rho_s) * I_in * (l . n)
         """
+        n = grad_sdf
         # Regress material properties
-        # Concatenate position, normal, and potentially other features
-        # The paper says: MLP g regresses (rho_d, y) at x
-        material_out = self.material_mlp(torch.cat([x, normal], dim=-1))
-        rho_d = material_out[:, :1] # Assuming first dim is diffuse
-        y = material_out[:, 1:]     # Specular coefficients
+        # Concatenate position and normal for material network input
+        mat_input = torch.cat([x, n], dim=-1)
+        rho_d, y = self.mat_net(mat_input).chunk(2, dim=-1)
         
-        # Compute half vector h = (l - v) / ||l - v||
-        # Note: ray_d is the view direction from camera to surface.
-        # The outgoing radiance is in direction -ray_d (from surface to camera).
-        # The light direction l is from surface to light.
-        # The view direction for BRDF is from surface to camera, which is -ray_d.
-        # However, the paper uses l and v (camera ray direction).
-        # h = (l - v) / ||l - v|| ? 
-        # Let's check the paper: h = (l - v) / ||l - v|| where v is camera ray direction.
-        # Wait, usually half vector is (l + v_view) / ||...||.
-        # If v is camera ray direction (o to x), then view direction is -v.
-        # So h = (l - v) / ||l - v|| is correct if v is camera ray direction.
+        # Compute half vector
+        # View direction is -ray_dir
+        view_dir = -ray_dir
+        half_vec = (light_dir + view_dir) / (torch.norm(light_dir + view_dir, dim=-1, keepdim=True) + 1e-8)
         
-        l, _ = self.get_light_params(x, self.current_light_source) # Get l for the current light
-        v = ray_d
-        h = (l - v) / (torch.norm(l - v, dim=-1, keepdim=True) + 1e-6)
-        
-        # Compute specular basis D(h, n)
-        # Simplified: assume D is a known function or precomputed basis
-        # For implementation, D might be a lookup or a simple function like (h.n)^k
-        # The paper mentions "spherical Gaussian basis".
-        # We will assume a helper function or precomputed tensor for D.
-        # D = compute_specular_basis(h, n) 
-        # For the sake of the pseudocode, we assume D is computed.
-        # Since we don't have the exact basis definition, we'll note it.
-        # [G] Assuming D is a function that returns the specular weight given h and n.
-        # In a real implementation, this would use the specific basis functions from the paper.
-        # Here we approximate with a simple Blinn-Phong term for structure, 
-        # but the paper uses a specific basis.
-        # Let's assume D is passed or computed.
-        # D = torch.pow(torch.clamp(torch.sum(h * normal, dim=-1, keepdim=True), min=0.0), 32.0) # Approximation
-        # Actually, the paper says "spherical Gaussian basis".
-        # We will leave D as a placeholder for the specific basis evaluation.
+        # Specular component (simplified spherical Gaussian)
+        # D(h, n) is the specular basis. Assuming D is pre-defined or identity for simplicity in pseudocode
+        # In real code, D depends on roughness etc.
         # rho_s = y^T D(h, n)
+        # For pseudocode, assume a simple dot product or precomputed D
+        rho_s = torch.sum(y * half_vec, dim=-1) # Placeholder for actual D function
         
-        # To make the pseudocode valid, we need to define D.
-        # Since the exact basis is not fully detailed in the notes, 
-        # we will use a standard Blinn-Phong approximation as a placeholder 
-        # but mark it as [G] if it deviates.
-        # However, the prompt says "Never use [G] for the method's core definition".
-        # The core definition is the structure. The specific basis is a detail.
-        # We will assume D is a precomputed tensor or function.
-        # Let's assume D is a function `compute_D(h, n)`
+        # Diffuse term
+        diffuse_term = rho_d
         
-        # For the sake of completeness, we will assume a simple implementation
-        # of the specular term as a placeholder for the complex basis.
-        # [G] The exact spherical Gaussian basis D is not fully specified in the notes.
-        # A common approximation is the Blinn-Phong model.
-        spec_term = torch.clamp(torch.sum(h * normal, dim=-1, keepdim=True), min=0.0)
-        # Assuming y is a coefficient for this term
-        rho_s = y * spec_term 
+        # Specular term
+        specular_term = rho_s
         
-        # Cosine term
-        cos_theta = torch.clamp(torch.sum(l * normal, dim=-1, keepdim=True), min=0.0)
+        # Dot product of light and normal
+        light_dot_normal = torch.sum(light_dir * n, dim=-1, keepdim=True)
+        light_dot_normal = torch.clamp(light_dot_normal, min=0.0)
         
-        outgoing_radiance = (rho_d + rho_s) * irradiance_in * cos_theta
+        outgoing_radiance = (diffuse_term + specular_term) * shadow_irradiance * light_dot_normal
         return outgoing_radiance
 
-    def forward(self, camera_rays_o, camera_rays_d, images, light_sources):
+    def surface_walk_boundary_detection(self, ray_o, ray_d, num_samples=256):
         """
-        Main training step.
-        camera_rays_o: (B, N, 3) ray origins
-        camera_rays_d: (B, N, 3) ray directions
-        images: (B, N, 3) or (B, N, 1) pixel values
-        light_sources: list of light source dicts
+        Identify boundary pixels and area ratios using surface walk procedure.
+        Returns: boundary_mask, area_ratio_w, near_intersection, far_intersection
         """
-        B, N, _ = camera_rays_o.shape
-        total_loss = 0.0
+        # This is a complex procedure described in reference [56].
+        # For pseudocode, we assume a simplified detection:
+        # 1. Ray march to find initial intersection x.
+        # 2. Check SDF gradient magnitude or curvature to detect edges.
+        # 3. If edge, sample multiple depths to find near and far intersections.
         
-        # Sample 256 pixels per image
+        # Placeholder logic
+        boundary_mask = torch.zeros(ray_o.size(0), dtype=torch.bool)
+        area_ratio_w = torch.ones(ray_o.size(0))
+        
+        # Simplified: assume we have pre-computed boundaries
+        # In reality, this involves walking along the surface from the intersection point
+        # and detecting depth discontinuities.
+        
+        return boundary_mask, area_ratio_w
+
+    def forward(self, camera_data, light_data, is_binary=False):
+        """
+        Forward pass for training.
+        :param camera_data: Dict with 'o' (ray origins), 'd' (ray directions), 'images' (ground truth)
+        :param light_data: Dict with 'q' (light positions), 'Lp' (light intensities), 'l' (light directions)
+        :param is_binary: True if input is binary shadow, False if RGB
+        :return: loss
+        """
+        ray_o = camera_data['o']
+        ray_d = camera_data['d']
+        gt_image = camera_data['images']
+        
+        # Sample 256 pixels
         num_samples = 256
-        indices = torch.randint(0, N, (B, num_samples))
+        indices = torch.randint(0, ray_o.size(0), (num_samples,))
+        ray_o_s = ray_o[indices]
+        ray_d_s = ray_d[indices]
+        gt_image_s = gt_image[indices]
         
-        for b in range(B):
-            # Select sampled rays
-            ray_o = camera_rays_o[b, indices[b]]
-            ray_d = camera_rays_d[b, indices[b]]
-            pixel_val = images[b, indices[b]]
+        # 1. Camera Ray Intersection
+        x, sdf_val, grad_sdf, t = self.ray_march_sdf(ray_o_s, ray_d_s)
+        
+        # Handle non-intersecting rays (ground plane)
+        # If sdf_val is large, intersect with ground plane
+        # Simplified: assume all rays intersect or are handled by ground plane logic
+        # In practice, check if |sdf| > threshold
+        
+        # Differentiable intersection
+        x_hat = self.implicit_differentiation(x, ray_d_s, sdf_val, grad_sdf)
+        
+        # 2. Boundary Detection
+        boundary_mask, w = self.surface_walk_boundary_detection(ray_o_s, ray_d_s)
+        
+        # 3. Shadow Ray Irradiance
+        # Get light parameters
+        if light_data['type'] == 'point':
+            light_q = light_data['q']
+            light_Lp = light_data['Lp']
+            # Compute light direction and intensity at x_hat
+            vec_to_light = light_q - x_hat
+            dist = torch.norm(vec_to_light, dim=-1, keepdim=True)
+            light_dir = vec_to_light / dist
+            light_intensity = light_Lp / (dist ** 2)
+        else:
+            light_dir = light_data['l']
+            light_intensity = light_data['L']
             
-            # Get SDF values at ray origins (or along ray for marching)
-            # Ray marching to find intersection
-            # [G] Standard ray marching loop to find t where SDF(t) ~ 0
-            # This is non-differentiable, so we use implicit differentiation later
-            # We assume we have a function `ray_march` that returns x, sdf_val, normal
-            # But since we need differentiability, we start with a coarse march
-            # and then refine with implicit differentiation.
+        # Compute irradiance at x_hat
+        I_in_main = self.compute_shadow_irradiance(x_hat, light_dir, light_intensity)
+        
+        # Handle boundaries
+        if boundary_mask.any():
+            # Locate near and far intersections
+            # Simplified: assume we have xn and xf from surface walk
+            # In real implementation, this requires additional ray marching or sampling
+            # For pseudocode, we assume xn and xf are available
+            # x_n, x_f = ...
+            # I_in_near = self.compute_shadow_irradiance(x_n, light_dir, light_intensity)
+            # I_in_far = self.compute_shadow_irradiance(x_f, light_dir, light_intensity)
+            # I_in = w * I_in_near + (1-w) * I_in_far
+            # Placeholder: use main irradiance for non-boundary, weighted for boundary
+            I_in = I_in_main
+        else:
+            I_in = I_in_main
             
-            # Coarse intersection
-            # Assume we have a function `find_intersection` that returns x, sdf, normal
-            # This function is not differentiable, but we use it to initialize
-            # Then we apply implicit differentiation to make it differentiable.
+        # 4. Loss Computation
+        if is_binary:
+            # Shadow Loss
+            # I_in is the predicted shadow intensity (0 or 1)
+            # gt_image_s is the binary shadow image
+            loss_shadow = torch.mean(torch.abs(I_in - gt_image_s))
+            loss = loss_shadow
+        else:
+            # RGB Loss
+            # Compute outgoing radiance
+            outgoing_radiance = self.compute_outgoing_radiance_rgb(x_hat, grad_sdf, I_in, ray_d_s, light_dir)
+            loss_rgb = torch.mean(torch.abs(outgoing_radiance - gt_image_s))
+            loss = loss_rgb
             
-            # For the pseudocode, we assume `find_intersection` returns:
-            # x: (num_samples, 3)
-            # sdf_val: (num_samples, 1)
-            # normal: (num_samples, 3)
-            x, sdf_val, normal = find_intersection(ray_o, ray_d, self.sdf_mlp)
-            
-            # Apply implicit differentiation to make x differentiable
-            x_tilde = self.implicit_differentiation(ray_o, ray_d, sdf_val, normal)
-            
-            # Check for boundary pixels
-            is_boundary, w, x_near, x_far = self.surface_walk(ray_o, ray_d, self.sdf_mlp)
-            
-            # Use x_tilde for non-boundary, x_near/x_far for boundary
-            # Actually, the paper says:
-            # For non-boundary: use irradiance(x_tilde)
-            # For boundary: use w * irradiance(x_near) + (1-w) * irradiance(x_far)
-            # x_near and x_far are intersections at different depths.
-            # We need to compute their normals and SDF values.
-            
-            # Compute normals for x_near and x_far
-            sdf_near, normal_near = self.sdf_mlp(x_near), compute_normal(self.sdf_mlp, x_near)
-            sdf_far, normal_far = self.sdf_mlp(x_far), compute_normal(self.sdf_mlp, x_far)
-            
-            # Apply implicit differentiation to x_near and x_far
-            x_near_tilde = self.implicit_differentiation(ray_o, ray_d, sdf_near, normal_near)
-            x_far_tilde = self.implicit_differentiation(ray_o, ray_d, sdf_far, normal_far)
-            
-            # Compute incoming irradiance for each light source
-            # The paper uses multiple light sources. We sum the losses or average?
-            # The paper says "illuminate the scene multiple times".
-            # In training, we likely select one light source per batch or image.
-            # Let's assume we iterate over light sources for the current image.
-            
-            # For simplicity, assume we pick one light source for this step
-            # In practice, the dataset provides images for specific light conditions.
-            current_light = light_sources[b] # Assume light source index matches image index
-            
-            # Compute irradiance
-            if not is_boundary:
-                irradiance = self.render_shadow_ray(x_tilde, current_light)
-            else:
-                irradiance_near = self.render_shadow_ray(x_near_tilde, current_light)
-                irradiance_far = self.render_shadow_ray(x_far_tilde, current_light)
-                irradiance = w * irradiance_near + (1 - w) * irradiance_far
-            
-            # Compute Loss
-            if pixel_val.shape[-1] == 1: # Binary shadow
-                loss = torch.abs(irradiance - pixel_val)
-            else: # RGB
-                # Compute outgoing radiance
-                # We need the normal at x_tilde for the outgoing radiance calculation
-                # We already have normal from the intersection step
-                outgoing = self.compute_outgoing_radiance(x_tilde, normal, ray_d, irradiance)
-                loss = torch.abs(outgoing - pixel_val)
-            
-            total_loss += loss.mean()
-            
-            # Eikonal loss
-            # Sample random points in space
-            random_points = torch.rand(num_samples, 3) * 2.0 - 1.0 # Assuming bounded space
-            sdf_random = self.sdf_mlp(random_points)
-            grad_random = torch.autograd.grad(sdf_random.sum(), random_points, create_graph=True)[0]
-            eikonal = torch.mean((torch.norm(grad_random, dim=-1) - 1.0)**2)
-            total_loss += eikonal
-
-        return total_loss / B
-
-def find_intersection(ray_o, ray_d, sdf_mlp):
-    """
-    Non-differentiable ray marching to find initial intersection.
-    Returns x, sdf_val, normal.
-    """
-    # Simplified: assume we have a function that returns the first intersection
-    # This is a placeholder for the actual ray marching logic
-    pass
-
-def compute_normal(sdf_mlp, x):
-    """
-    Compute surface normal as gradient of SDF.
-    """
-    x.requires_grad_(True)
-    sdf = sdf_mlp(x)
-    grad = torch.autograd.grad(sdf.sum(), x, create_graph=True)[0]
-    return grad / (torch.norm(grad, dim=-1, keepdim=True) + 1e-6)
+        # 5. Eikonal Loss
+        # Sample random points in space
+        random_points = torch.rand(num_samples, 3) * 10.0 # Bounded scene
+        random_points.requires_grad_(True)
+        sdf_random = self.sdf_net(random_points)
+        grad_random = torch.autograd.grad(sdf_random.sum(), random_points, create_graph=True)[0]
+        grad_norm = torch.norm(grad_random, dim=-1)
+        loss_eik = torch.mean((grad_norm - 1.0) ** 2)
+        
+        total_loss = loss + loss_eik
+        return total_loss
 ```
 
 ## Operating characteristics
 *   **Time Complexity:** Training takes approximately 24 hours on a single RTX 2080Ti for 150k iterations [S1].
 *   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** Evaluated on synthetic datasets (800x800 resolution) and real capture setups [S1].
+*   **Scaling:** The method is designed for single-view inputs, making it scalable to scenarios with limited camera views, unlike multi-view NeRF [S1].
 *   **Strengths:**
     *   Reconstructs complete 3D shape from scratch using shadows, not limited by the camera's line of sight [S1].
-    *   Fully differentiable shadow ray supervision, optimizing both shadow ray samples and surface points, unlike concurrent works that use non-differentiable root finding [S1].
-    *   Handles both binary shadow images and RGB inputs [S1].
+    *   Fully differentiable shadow ray supervision, optimizing both shadow ray samples and surface points [S1].
+    *   Handles both binary shadow images and RGB images [S1].
 *   **Limitations:**
-    *   Requires multiple lighting conditions (multiple images with different light directions) [S1].
-    *   Assumes a bounded scene with a known ground plane to resolve scale ambiguity [S1].
-    *   Transparency and inter-reflections are disabled as they are beyond the method's assumptions [S1].
-*   **When to use:** Single-view reconstruction where multi-view stereo is not available, and shadow information is present.
-*   **When not to use:** Scenes with transparent objects, inter-reflections, or unknown ground plane geometry.
+    *   Requires multiple lighting conditions to obtain sufficient observations of light visibility [S1].
+    *   Assumes opaque scenes; transparency and inter-reflections are disabled [S1].
+    *   Requires known ground plane position and orientation to resolve scale ambiguity from single-view inputs [S1].
+    *   Iterative updating strategy is insufficient to derive correct gradients at surface boundaries with abrupt depth changes without the boundary handling mechanism [S1].
 
 ## Background
-ShadowNeuS was proposed in the paper "ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision" [S1]. It addresses the limitation of NeRF, which models camera rays but not shadow rays (rays from the scene to the light source) [S1]. The method draws inspiration from NeuS [43] for SDF representation and differentiable rendering techniques [2, 21, 24, 42, 56] for handling surface boundaries [S1]. It was evaluated on synthetic and real datasets, demonstrating significant improvements in shape reconstruction from single-view binary shadow or RGB images compared to previous works [S1].
+ShadowNeuS was proposed in the paper "ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision" [S1]. It addresses the limitation of NeRF, which models camera rays but not shadow rays (rays from the scene to the light source) [S1]. The method draws inspiration from NeuS [43] for SDF representation and differentiable rendering techniques [2, 21, 24, 42, 56] for handling surface boundaries [S1]. It is used for single-view 3D reconstruction from binary shadow images or RGB images under multiple lighting conditions [S1].
 
 ## Sources
 [S1] ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision, https://doi.org/10.1109/cvpr52729.2023.00025, fetched 2026-10-26

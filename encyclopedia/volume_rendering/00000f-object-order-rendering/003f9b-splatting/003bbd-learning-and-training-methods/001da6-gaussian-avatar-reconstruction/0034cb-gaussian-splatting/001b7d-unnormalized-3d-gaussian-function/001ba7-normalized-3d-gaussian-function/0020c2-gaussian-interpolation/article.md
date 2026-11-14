@@ -3,53 +3,60 @@
 Also called: Gaussian Filter, Gaussian Kernel Interpolation
 
 ## Overview
-Gaussian Interpolation uses a Gaussian function as an interpolation kernel to reconstruct continuous signals from discrete samples [S1, unofficial]. It is distinguished from other filters by being the only one that is both separable and rotationally symmetric, a property that allows it to integrate one dimension out of the kernel to perform 2D reconstruction instead of 3D, making it suitable for point-tossing approaches like splatting [S1, unofficial].
+Gaussian interpolation is a volumetric reconstruction method that uses a Gaussian function as an interpolation kernel to estimate field values at arbitrary points from discrete samples [S1, unofficial][S2, unofficial]. It solves the problem of reconstructing a continuous volume from a grid or point set while providing smooth, band-limited results [S1, unofficial]. It is distinguished from its parent, the [Normalized 3D Gaussian Function](1064-normalized-3d-gaussian-function.md), by its specific role as a separable, rotationally symmetric interpolation filter rather than a primitive shape definition [S2, unofficial]. Unlike the [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probensity-standard.md), it is explicitly designed for multi-dimensional spatial reconstruction in volume rendering contexts [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Sample positions and values; a width parameter $\sigma$.
-*   **Output:** Interpolated value at a query point.
+- Input: A set of discrete sample values $V$ at grid points or positions, and a query position $\mathbf{x} = (x, y, z)$.
+- Output: The interpolated scalar value $f(\mathbf{x})$.
 
 **Data Structures:**
-Not given in the sources.
+- The kernel is defined by a width parameter $\sigma$ (or $a$) and a scale factor $b$.
+- In 3D, the kernel is often implemented via separability, storing 1D kernel weights or computing them on the fly.
 
-**Steps:**
-1.  Calculate the distance $z$ between the query point and the sample point [G].
-2.  Compute the weight using the Gaussian function:
-    $$f_{\text{Gaussian}}(z) = e^{-\frac{z^2}{2\sigma^2}}$$
-    where $\sigma$ controls the width of the Gaussian [S1, unofficial].
-3.  Aggregate the weighted sample values to produce the interpolated result [G].
+**Formulas:**
+The 1D Gaussian kernel is defined as [S2, unofficial]:
+$$f_{\text{Gaussian}}(z) = e^{-\frac{z^2}{2\sigma^2}}$$
+where $\sigma$ controls the width of the filter [S2, unofficial].
+
+In the context of grid-based interpolation described in [S1, unofficial], the kernel is parameterized by $a$ (width) and $b$ (scale factor). The text cites a formula for the Gaussian function as [S1, unofficial]:
+$$h(u, v, w) = b \cdot e^{-a^2(u^2 + v^2 + w^2)}$$
+where $u, v, w$ are the distances of the sample point from the lower, left, rear voxel in the containing cell [S1, unofficial]. Note: The text also erroneously cites a linear interpolation formula $f(x,y,z) = (1-w)f(u,v,0) + wf(u,v,1)$ as Gaussian in the same paragraph, but explicitly identifies the exponential form above as the Gaussian [S1, unofficial].
 
 **Parameters:**
-*   $\sigma$: Controls the width of the Gaussian [S1, unofficial].
+- $\sigma$ (or $a$): Determines the width of the filter. Larger values result in more smoothing [S1, unofficial][S2, unofficial].
+- $b$: A scale factor [S1, unofficial].
 
-**Pitfalls:**
-*   The kernel has infinite extent in both spatial and frequency domains [S1, unofficial].
-*   It asymptotically falls toward zero quickly, allowing truncation without significant ringing, but this truncation requires careful handling of the near-zero area [S1, unofficial].
-*   The filter distorts the passband by attenuating high-frequency components of the main replica, causing blurring in the output [S1, unofficial].
+**Steps:**
+1. For a query point $\mathbf{x}$, identify the surrounding grid cells or sample points.
+2. Compute the distance $d$ from $\mathbf{x}$ to each sample point.
+3. Evaluate the Gaussian kernel weight $w = e^{-\frac{d^2}{2\sigma^2}}$ for each sample [S2, unofficial].
+4. Sum the weighted sample values and normalize if necessary (depending on whether the kernel is normalized to integrate to one or used as a raw filter) [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Ripple Artifact:** The Gaussian introduces a slight ripple (about 0.1%) into an interpolated uniform function [S1, unofficial].
+- **Blurring:** The filter distorts the passband by attenuating high frequencies, causing blurring in the output [S2, unofficial].
+- **Infinite Support:** The Gaussian has infinite extent in spatial and frequency domains. It must be truncated for practical implementation, though it falls to zero quickly, minimizing ringing [S2, unofficial].
+- **Uniform Signal Interpolation:** A Gaussian filter does not yield $f(x,y,z) = V(x,y,z)$ at grid points and does not interpolate a uniform $f(x,y,z)$ everywhere for uniform grid signals [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def gaussian_interpolation(samples, query_point, sigma):
+def gaussian_interpolate_1d(samples, query_pos, sigma):
     """
-    Interpolate value at query_point using Gaussian kernel.
+    Interpolate a value at query_pos using 1D Gaussian kernel.
     samples: list of (position, value) tuples.
-    query_point: scalar or array-like query coordinate.
-    sigma: width parameter.
+    query_pos: float, the position to interpolate at.
+    sigma: float, the width parameter.
     """
     total_weight = 0.0
     total_value = 0.0
     
     for pos, val in samples:
-        # Calculate distance z (supports scalar or 1D/2D/3D arrays)
-        z = math.sqrt(sum((p - q) ** 2 for p, q in zip(pos, query_point)))
-        
-        # Compute Gaussian weight
-        weight = math.exp(-(z ** 2) / (2 * sigma ** 2))
+        dist = query_pos - pos
+        # Gaussian kernel: e^(-z^2 / (2*sigma^2))
+        weight = math.exp(-(dist ** 2) / (2 * sigma ** 2))
         
         total_weight += weight
         total_value += val * weight
@@ -58,32 +65,62 @@ def gaussian_interpolation(samples, query_point, sigma):
         return 0.0
         
     return total_value / total_weight
+
+def gaussian_interpolate_3d_separable(samples, query_pos, sigma):
+    """
+    Interpolate using separable 1D Gaussians along x, y, z axes.
+    This assumes samples are on a regular grid or can be projected.
+    Note: Full 3D Gaussian interpolation from unstructured points 
+    typically requires summing over all neighbors, not just separable axes.
+    Separability is primarily used for computational savings in 
+    specific reconstruction contexts like splatting [S2, unofficial].
+    """
+    # For a regular grid, one might compute 1D weights for each axis
+    # and multiply them. For unstructured points, the full 3D distance
+    # is used in the exponent.
+    # This function is a placeholder for the separable case on a grid.
+    pass
 ```
 
 ## Subtopics
 
+### [Gaussian Reconstruction Filter](2852-gaussian-reconstruction-filter.md)
+The Gaussian Reconstruction Filter is a spatial weighting function applied to jittered samples to improve edge quality and stability in volumetric rendering, specifically replacing box filters in froxel-based temporal anti-aliasing. It is also used in A-buffer methods to compute data weights based on distance from a node. It sets itself apart from its sibling, the [Gaussian Kernel Volumetric Primitive](4010-gaussian-kernel-volumetric-primitive.md), by acting as a post-sampling reconstruction filter for discrete jittered points rather than defining the primitive's shape itself.
+
 ### [Gaussian Kernel Volumetric Primitive](4010-gaussian-kernel-volumetric-primitive.md)
 A method for volumetric rendering that represents a scene as a set of 3D Gaussian distributions, parameterized by mean (position), covariance (shape/direction), and color, allowing for efficient simulation of 3D structure details without meshing. It differs from traditional mesh-based reconstruction by avoiding meshing processes and from NeRF by offering faster training and rendering speeds while maintaining comparable quality. Unlike other kernel methods like Epanechnikov, Gaussian kernels have infinite support, which requires clipping to maintain efficiency.
 
-### [Gaussian Reconstruction Filter](2852-gaussian-reconstruction-filter.md)
-A weighting filter applied to jittered sub-froxel samples to improve edge quality and stability compared to a box filter, based on distance from the froxel center.
-
 ### Gaussian Perturbation Kernel
-Used in differentiable path tracing to compute the Cumulative Distribution Function (CDF) by integrating the Probability Density Function (PDF), treating each halfspace separately and normalizing the PDF on the positive halfspace to integrate to 0.5 [S2]. The derivative of the kernel with respect to parameters is given by:
-$$\frac{\partial \kernel}{\partial \parameters}(\offset) = \frac{-\offset}{\bandwidth^3\sqrt{2\pi}}\exp\left(\frac{-\offset^2}{2\bandwidth^2}\right)$$
-[S2].
+A variant used in differentiable path tracing to handle shadow boundaries and reduce plateau artifacts. It involves computing the CDF by integrating the PDF, treating each halfspace separately and normalizing the PDF on the positive halfspace to integrate to 0.5 [S3]. The kernel derivative with respect to parameters is given by $\frac{\partial \kernel}{\partial \parameters}(\offset) = \frac{-\offset}{\bandwidth^3\sqrt{2\pi}}\exp\left(\frac{-\offset^2}{2\bandwidth^2}\right)$, which is a translated version of the main text's Eq. 11, simplified by treating offset relative to parameters [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources. [G]
-*   **Memory Complexity:** Not given in the sources. [G]
-*   **Strengths:** Separability and rotational symmetry allow for computational savings by reducing 3D reconstruction to 2D reconstruction in splatting methods [S1, unofficial]. Truncation is possible without significant ringing due to rapid asymptotic decay [S1, unofficial].
-*   **Limitations:** Infinite extent requires clipping or truncation. Attenuation of high frequencies causes blurring [S1, unofficial].
-*   **When to use:** Point-tossing approaches like splatting where separability and rotational symmetry are beneficial [S1, unofficial].
-*   **When not to use:** When high-frequency preservation is critical due to blurring artifacts [S1, unofficial].
+**Time and Memory Complexity:**
+- The Gaussian kernel has infinite support, requiring truncation for practical implementation. The number of samples contributing to a query depends on the truncation radius and $\sigma$ [S2, unofficial].
+- Separability allows 3D reconstruction to be performed as three 1D passes, reducing computational complexity compared to full 3D convolution [S2, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Performance scales with the number of samples within the truncation radius.
+
+**Strengths and Limitations:**
+- **Strengths:** It is the only filter that is both separable and rotationally symmetric [S2, unofficial]. It provides smooth interpolation with infinite continuity in the derivative [S1, unofficial]. It is widely used in point-tossing approaches like splatting because it allows integrating one dimension out, performing 2D reconstruction instead of 3D [S2, unofficial].
+- **Limitations:** It introduces a slight ripple (0.1%) in uniform functions [S1, unofficial]. It attenuates high frequencies, causing blurring [S2, unofficial]. It does not preserve uniform values exactly [S1, unofficial]. Interpolation cannot restore sharp edges that existed in the original function prior to sampling [S1, unofficial].
+
+**When to Use:**
+- When a radially symmetric interpolation kernel is needed [S1, unofficial].
+- For grids that assume the frequency spectrum is radially bandlimited [S1, unofficial].
+- In splatting methods where separability and rotational symmetry are beneficial [S2, unofficial].
+
+**When Not to Use:**
+- When sharp edge preservation is critical without additional non-linear filtering [S1, unofficial].
+- When exact interpolation of uniform data is required [S1, unofficial].
 
 ## Background
-Gaussian interpolation has been used in research for volume rendering, particularly in parallel, feed-forward algorithms [S1, unofficial]. It is applied in point-tossing approaches such as splatting [S1, unofficial]. In differentiable path tracing, Gaussian kernels are used for plateau reduction [S2].
+Gaussian interpolation is a well-established technique in volume rendering and image processing. It is cited in the context of volume rendering overviews [S1, unofficial] and parallel volume rendering algorithms [S2, unofficial]. It is also used in modern differentiable rendering techniques, such as plateau-reduced differentiable path tracing [S3]. The method is often compared with box, linear, cubic, and cardinal spline filters [S1, unofficial].
 
 ## Sources
-[S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
-[S2] Plateau-Reduced Differentiable Path Tracing, https://doi.org/10.1109/cvpr52729.2023.00417, fetched 2026-10-26
+[S1] Overview of Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S3] Plateau-Reduced Differentiable Path Tracing, https://doi.org/10.1109/cvpr52729.2023.00417, fetched 2026-10-26

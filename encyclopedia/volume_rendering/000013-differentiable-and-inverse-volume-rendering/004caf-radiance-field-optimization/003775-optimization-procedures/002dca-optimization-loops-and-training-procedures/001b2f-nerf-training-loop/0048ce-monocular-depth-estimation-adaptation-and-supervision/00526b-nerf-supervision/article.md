@@ -3,105 +3,163 @@
 Also called: RGB-sensor-only self-supervised pipeline for dense descriptors
 
 ## Overview
-NeRF-Supervision is a method for generating dense correspondence datasets to train object-centric visual descriptors using only RGB images and a trained Neural Radiance Field (NeRF) [S1]. It solves the problem of acquiring ground-truth dense matches for thin or reflective objects, which are difficult for standard RGB-D sensors or Multi-View Stereo (MVS) [S1]. Unlike MVS, which relies on patch-based photometric consistency, NeRF-Supervision handles ambiguity by sampling the NeRF's density field probabilistically, reformulating correspondence via a distribution-of-depths formulation rather than relying on a single depth map [S1].
+NeRF-Supervision is a method for generating dense correspondence datasets to train object-centric visual descriptors using only RGB images and Neural Radiance Fields (NeRFs). It solves the problem of acquiring ground-truth dense matches for thin, reflective, or ambiguous objects that fail standard RGB-D or Multi-View Stereo (MVS) pipelines. Unlike MVS, which relies on patch-based photometric consistency, NeRF-Supervision uses the NeRF’s density field to probabilistically sample correspondences, handling ambiguity via a "distribution-of-depths" formulation rather than a single depth map.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of RGB images $I$ of an object, captured from various viewpoints.
-*   **Output:** A dataset of dense correspondence tuples $(I_s, u_s, I_t, u_t)$ used to train a descriptor network [S1].
+The method operates in three distinct stages: NeRF optimization, dataset generation via density sampling, and descriptor model training.
 
-**Data Structures:**
-*   **NeRF Model $\mathcal{N}$:** A neural network parameterized by $\theta$ that maps a 3D position $\mathbf{x}$ and view direction $\mathbf{d}$ to color $\mathbf{c}$ and density $\sigma$ [S1].
-*   **Training Tuple:** $(I_s, u_s, I_t, u_t)$ where $I_s, I_t \in \mathbb{R}^{w \times h \times 3}$ are RGB images and $u_s, u_t \in \mathbb{R}^2$ are pixel coordinates [S1].
-*   **Descriptor Model:** A neural network $f_\theta$ that maps an input RGB image $I$ to a dense descriptor map [S1].
+**Inputs and Outputs**
+*   **Inputs:** A set of $N$ RGB images $\{I_i\}$ of a single object, captured from various viewpoints.
+*   **Outputs:** A trained descriptor model $f_\theta$ capable of mapping an input RGB image $I \in \mathbb{R}^{w \times h \times 3}$ to a dense descriptor map $D \in \mathbb{R}^{w \times h \times d}$, where $d$ is the descriptor dimensionality.
 
-**Steps:**
-1.  **NeRF Optimization:** Collect RGB images of the object and optimize a NeRF $\mathcal{N}$ to fit the observed views [S1].
-2.  **Dataset Generation:** Use the recovered NeRF's density field to automatically generate a dataset of dense correspondences. This involves sampling rays that intersect the same 3D point in space [S1].
-3.  **Descriptor Training:** Train a model to estimate dense object descriptors using the generated dataset [S1].
-
-**Formulas:**
-The fundamental unit of training data is a tuple:
+**Data Structures**
+The fundamental unit of training data is a correspondence tuple:
 $$ (I_s, u_s, I_t, u_t) $$
-where $I_s, I_t \in \mathbb{R}^{w \times h \times 3}$ are RGB images, and $u_s, u_t \in \mathbb{R}^2$ are pixel coordinates whose image-forming rays intersect the same point in 3D space [S1].
+*   $I_s, I_t \in \mathbb{R}^{w \times h \times 3}$: Source and target RGB images.
+*   $u_s, u_t \in \mathbb{R}^2$: Pixel coordinates in the source and target images.
+*   Constraint: The camera rays defined by $(I_s, u_s)$ and $(I_t, u_t)$ must intersect the same 3D point in space.
 
-**Parameters:**
-*   $w, h$: Image width and height [S1].
-*   $d$: Descriptor dimensionality [S1].
+**Steps**
 
-**Pseudocode:**
+1.  **NeRF Optimization:**
+    Collect RGB images of the object. Optimize a NeRF to fit these images. The NeRF predicts volume density $\sigma(\mathbf{x})$ and view-dependent color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ for any 3D point $\mathbf{x}$ and view direction $\mathbf{d}$. The view direction input allows the model to handle reflective surfaces, which is a key advantage over depth-sensor approaches [S1].
+
+2.  **Dense Correspondence Generation:**
+    Use the trained NeRF’s density field to automatically generate the dataset of dense correspondences. Instead of rendering a single depth map, the method reformulates correspondence via a distribution-of-depths formulation.
+    *   For a pair of images $(I_s, I_t)$, rays are cast from pixels $u_s$ and $u_t$.
+    *   The NeRF density field is used to sample points along these rays.
+    *   A correspondence is established if the sampled points from both rays intersect at the same 3D location within the density field. This probabilistic sampling handles ambiguity better than deterministic MVS patch matching [S1].
+
+3.  **Descriptor Training:**
+    Train a neural network $f_\theta$ to estimate dense object descriptors using the generated dataset. The network maps an input image to a dense descriptor map. The model is evaluated on previously unobserved real images of the object [S1].
+
+**Pseudocode**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_nerf_supervision_dataset(nerf_model, images, camera_poses):
+def nerf_supervision_pipeline(rgb_images, camera_poses):
     """
-    Generates dense correspondence tuples from a trained NeRF.
+    Generates dense correspondence data and trains a descriptor model.
     
     Args:
-        nerf_model: Trained NeRF model.
-        images: List of RGB images.
-        camera_poses: Camera poses corresponding to images.
+        rgb_images: List of RGB images of the object.
+        camera_poses: Camera poses corresponding to the images.
         
     Returns:
-        dataset: List of tuples (I_s, u_s, I_t, u_t).
+        trained_descriptor_model: A neural network f_theta.
     """
-    dataset = []
+    # Step 1: Optimize NeRF
+    # The NeRF predicts density sigma(x) and color c(x, d)
+    nerf_model = optimize_nerf(rgb_images, camera_poses)
     
-    # Step 1: Sample 3D points from the NeRF's density field
-    # The density field allows probabilistic sampling of points in 3D space.
-    # This handles ambiguity better than single depth maps.
-    sampled_3d_points = sample_points_from_density_field(nerf_model)
+    # Step 2: Generate Correspondence Dataset
+    dataset_tuples = []
     
-    for point in sampled_3d_points:
-        # Step 2: Find which images (views) see this point
-        # Project the 3D point into the image plane of each camera
-        visible_views = []
-        for i, (image, pose) in enumerate(zip(images, camera_poses)):
-            u, v = project_3d_to_2d(point, pose)
-            if is_valid_pixel(u, v, image.shape):
-                visible_views.append((i, u, v))
-        
-        # Step 3: Form correspondence tuples from pairs of visible views
-        # For each pair of views that see the same 3D point, create a tuple
-        for idx_s, u_s, v_s in visible_views:
-            for idx_t, u_t, v_t in visible_views:
-                if idx_s != idx_t:
-                    I_s = images[idx_s]
-                    I_t = images[idx_t]
-                    dataset.append((I_s, (u_s, v_s), I_t, (u_t, v_t)))
-                    
-    return dataset
+    # Iterate over pairs of images to generate tuples (Is, us, It, ut)
+    for i in range(len(rgb_images)):
+        for j in range(i + 1, len(rgb_images)):
+            Is = rgb_images[i]
+            It = rgb_images[j]
+            
+            # Get image dimensions
+            h, w = Is.shape[0], Is.shape[1]
+            
+            # Sample pixel coordinates us and ut
+            # In practice, this involves casting rays and finding intersections
+            # using the NeRF density field to handle ambiguity
+            correspondences = sample_correspondences_from_nerf(
+                Is, It, camera_poses[i], camera_poses[j], nerf_model
+            )
+            
+            for (us, ut) in correspondences:
+                dataset_tuples.append((Is, us, It, ut))
+                
+    # Step 3: Train Descriptor Model
+    # f_theta maps an input RGB image I to a dense descriptor map D
+    # D is in R^(w x h x d) where d is descriptor dimensionality
+    descriptor_model = train_descriptor_model(
+        dataset_tuples, 
+        descriptor_dimensionality=128 # Example value, not specified in source
+    )
+    
+    return descriptor_model
 
-def train_descriptor_model(dataset, descriptor_network):
+def sample_correspondences_from_nerf(Is, It, pose_s, pose_t, nerf):
     """
-    Trains a dense descriptor model using the generated dataset.
+    Uses the NeRF density field to find pixel pairs (us, ut) whose rays
+    intersect the same 3D point.
+    """
+    correspondences = []
     
-    Args:
-        dataset: List of tuples (I_s, u_s, I_t, u_t).
-        descriptor_network: Neural network f_theta.
-    """
-    # Standard supervised learning loop
-    # The network learns to map image patches around u_s and u_t
-    # to similar descriptor vectors.
-    for batch in dataset:
-        I_s, u_s, I_t, u_t = batch
-        desc_s = descriptor_network(I_s, u_s)
-        desc_t = descriptor_network(I_t, u_t)
-        loss = compute_correspondence_loss(desc_s, desc_t)
-        update_weights(descriptor_network, loss)
+    # Iterate over pixels in source image
+    for u_s in all_pixel_coordinates(Is):
+        ray_s = cast_ray(u_s, pose_s)
+        
+        # Sample points along ray_s using NeRF density
+        # The density field provides a probability distribution of depth
+        # rather than a single depth value
+        points_s = sample_points_along_ray(ray_s, nerf)
+        
+        # For each point, check if it corresponds to a point in target image
+        for point in points_s:
+            # Project point to target image to find u_t
+            u_t = project_to_image(point, pose_t)
+            
+            # Verify that the ray from u_t in target image also passes through point
+            # This ensures mutual consistency
+            if is_consistent(point, u_t, pose_t, nerf):
+                correspondences.append((u_s, u_t))
+                
+    return correspondences
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Reflective Objects:** Standard RGB-D sensors and MVS fail on reflective objects. NeRF-Supervision handles this because the NeRF takes view direction as input for color prediction, allowing it to model view-dependent appearance [S1].
-*   **Ambiguity:** The method handles ambiguity via density field sampling rather than patch-based photometric consistency, which can be unreliable for thin structures [S1].
+**Parameters**
+*   $w, h$: Image width and height.
+*   $d$: Descriptor dimensionality.
+*   Typical values for performance metrics are not provided in the sources for the descriptor model architecture itself, but the method is evaluated on 8 challenging objects [S1].
+
+**Edge Cases and Pitfalls**
+*   **Reflective Objects:** Standard RGB-D and MVS fail on reflective objects. NeRF-Supervision handles this because view direction is an input to the color prediction network, allowing it to model specularities [S1].
+*   **Ambiguity:** Thin structures (e.g., forks, whisks) create ambiguity in depth. The density field sampling approach handles this by treating correspondence as a distribution-of-depths problem rather than a single depth map [S1].
+
+## Subtopics
+
+### NerfingMVS
+Combines NeRF with MVS for improved geometry. [NerfingMVS](9518-nerfingmvs.md)
+
+### Depth-Guided NeRF Training via Earth Mover’s Distance
+Uses EMD to align ray termination distances with depth priors. [Depth-Guided NeRF Training via Earth Mover’s Distance](11911-depth-guided-nerf-training-via-earth-mover-s-distance.md)
+
+### Monocular Depth Regularization on Seen Views
+Regularizes NeRF using monocular depth estimates on training views. [Monocular Depth Regularization on Seen Views](12330-monocular-depth-regularization-on-seen-views.md)
+
+### DäRF
+Uses depth-aware features for NeRF. [DäRF](12331-d-rf.md)
+
+### NeRF-guided MDE Adaptation
+Adapts Monocular Depth Estimation using NeRF. [NeRF-guided MDE Adaptation](12333-nerf-guided-mde-adaptation.md)
+
+### Model Variants
+General variants of NeRF models. [Model Variants](13153-model-variants.md)
+
+### ShadowNeuS
+Handles shadows in NeuS. [ShadowNeuS](14132-shadowneus.md)
 
 ## Operating characteristics
-*   **Performance:** Dense correspondence models trained with this method outperform off-the-shelf learned descriptors by 106% (PCK@3px metric) and outperform a multi-view stereo (MVS) supervised baseline by 29% [S1].
-*   **Strengths:** Enables robots to perform accurate 6-DoF pick and place of thin and reflective objects (e.g., forks, whisks, strainers) [S1]. It is an RGB-only, self-supervised pipeline, avoiding the need for depth sensors [S1].
-*   **Limitations:** Requires a trained NeRF, which can be computationally expensive to optimize for complex scenes. The method is designed for object-centric descriptors, not general scene understanding.
+*   **Performance:** Dense correspondence models trained with NeRF-Supervision outperform off-the-shelf learned descriptors by 106% (measured by PCK@3px metric) and outperform a baseline supervised with multi-view stereo by 29% [S1].
+*   **Strengths:**
+    *   Handles thin and reflective objects (e.g., forks, whisks, strainers) which are challenging for commodity RGB-D cameras or MVS [S1].
+    *   Self-supervised: Does not require manual annotation or depth sensors.
+    *   Enables robots to perform accurate 6-DoF pick and place of challenging objects [S1].
+*   **Limitations:**
+    *   Requires optimizing a NeRF for each object, which can be computationally intensive compared to single-shot methods.
+    *   Relies on the quality of the NeRF reconstruction; poor NeRF optimization leads to poor correspondence data.
+*   **When to use:** When dealing with thin, reflective, or ambiguous objects where standard MVS or RGB-D sensors fail, and when the goal is to train a robust descriptor for robotic manipulation.
+*   **When not to use:** When real-time performance is critical and NeRF optimization is too slow, or when the object is large and static with sufficient texture for standard MVS.
 
 ## Background
-NeRF-Supervision was introduced by Lin Yen-Chen, Tsung-Yi Lin, Pete Florence, Jonathan T. Barron, Alberto Rodriguez, and Phillip Isola in 2022 [S1]. It addresses the long-standing problem of designing robust visual descriptors invariant to scale, illumination, and pose, specifically targeting the challenges posed by thin and reflective objects that are common in daily life but difficult for robot perception [S1]. The method builds on the principles of differentiable volume rendering and NeRF optimization [Parent].
+NeRF-Supervision was introduced by Lin Yen-Chen, Tsung-Yi Lin, Pete Florence, Jonathan T. Barron, Alberto Rodriguez, and Phillip Isola from MIT, Google, and Nvidia. It was published in April 2022 (arXiv:2203.01913v2) [S1]. The method addresses the long-standing problem of designing robust visual descriptors invariant to scale, illumination, and pose, specifically targeting the difficulty of generating ground-truth dense correspondence data for challenging objects. It builds on the principles of differentiable volume rendering and NeRF optimization [S1].
 
 ## Sources
 [S1] NeRF-Supervision: Learning Dense Object Descriptors from Neural Radiance Fields, https://arxiv.org/abs/2203.01913v2, fetched 2026-10-26
