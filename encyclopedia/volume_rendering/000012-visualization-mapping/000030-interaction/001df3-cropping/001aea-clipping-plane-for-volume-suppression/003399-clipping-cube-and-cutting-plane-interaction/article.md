@@ -3,97 +3,87 @@
 Also called: Focus-plus-context clipping
 
 ## Overview
-This method provides interactive, selective suppression of volume data using two complementary geometric primitives: an axis-aligned **Clipping Cube** and an arbitrary **Cutting Plane**. It solves the problem of isolating specific anatomical or structural regions (focus) while maintaining spatial context of the surrounding volume. It is distinguished from standard clipping by its support for non-uniform resizing of the cube via corner widgets and its integration with Non-Photorealistic Rendering (NPR) to render the "context" region as contours rather than transparent geometry, thereby reducing visual clutter [S1, unofficial].
+This method enables interactive, selective suppression of volume datasets using an axis-aligned Clipping Cube and an arbitrary Cutting Plane, implemented via client-side widgets controlling server-side RTVR clipping capabilities [S1, unofficial]. It distinguishes itself from standard polygon clipping by supporting non-uniform cube resizing via corner spheres and rendering the context region outside the cube as non-photorealistic contours rather than transparent geometry [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A volume dataset, a 3D input device (pen and PIP pad), and a rendering engine supporting hardware-accelerated axis-aligned and oblique clipping planes (e.g., OpenGL) [S1, unofficial].
-*   **Output:** A rendered view where the interior of the clipping cube is rendered as a solid surface (focus) and the exterior is rendered as transparent or NPR contours (context), or where a single cutting plane isolates a specific slice [S1, unofficial].
+*   **Input:** A volume dataset, a 3D input device (pen and PIP pad), and a rendering engine supporting RTVR axis-aligned and oblique clipping planes [S1, unofficial].
+*   **Output:** A rendered view where the interior of the clipping cube (or correct side of the cutting plane) is rendered as a solid surface (focus) and the exterior is rendered as invisible, transparent, or NPR contours (context), or where a single cutting plane isolates a specific slice [S1, unofficial].
 
 **Data Structures:**
-1.  **Clipping Cube Widget:** Represented as a wireframe cube with eight spheres at its corners. The cube remains axis-aligned. The spheres serve as interaction handles [S1, unofficial].
-2.  **Cutting Plane:** Defined by a normal vector and a distance from the origin, or by two points in space. It is rendered as a visual indicator (e.g., a black rectangle) during placement [S1, unofficial].
+1.  **Clipping Cube Widget:** Represented as a wireframe cube with spheres at its corners, remaining axis-aligned, with spheres serving as interaction handles [S1, unofficial].
+2.  **Cutting Plane:** Defined by an arbitrary alignment, acting like a single face of the clipping cube, rendered as a visual indicator during placement [S1, unofficial].
 
 **Parameters:**
-*   **Clipping Mode:** Determines the behavior of the volume outside the clipping cube. Options include "invisible" (hard clip) or "transparent/NPR" (focus-plus-context) [S1, unofficial].
-*   **Interaction Mode:** Switches between "moving object," "cutting plane," and "clipping cube" modes on the PIP pad [S1, unofficial].
+*   **Clipping Mode:** Determines the behavior of the volume outside the clipping cube, supporting "invisible" (hard clip), "transparent", or "NPR" (focus-plus-context) [S1, unofficial].
+*   **Interaction Mode:** Switches the PIP pad between "moving object", "cutting plane", and "clipping cube" modes [S1, unofficial].
 
 **Steps:**
-1.  **Initialize Clipping Cube:** The system renders a wireframe cube with spheres at the corners. The cube defines six axis-aligned clipping planes [S1, unofficial].
-2.  **Resize Clipping Cube:**
-    *   The user moves the pen into the vicinity of a corner sphere.
-    *   The sphere "lights up" (visual feedback) when the pen enters its trigger volume [S1, unofficial].
-    *   The user drags the lit sphere. The cube resizes non-uniformly, maintaining its axis-aligned orientation. The faces of the cube update to reflect the new clipping plane positions [S1, unofficial].
-3.  **Place Cutting Plane:**
-    *   The user switches the PIP pad to "cutting" mode [S1, unofficial].
-    *   The PIP pad itself acts as the cutting plane. The user moves the pad to position the plane through the volume [S1, unofficial].
-    *   The user presses the **second pen button** to freeze the plane in place. This button is reserved for this action to allow two-handed interaction (one hand moves the plane via the pad, the other moves the volume object via the primary pen button) [S1, unofficial].
-4.  **Render Focus and Context:**
-    *   **Focus:** The region inside the clipping cube (or on the correct side of the cutting plane) is rendered using standard surface shading [S1, unofficial].
-    *   **Context:** The region outside the clipping cube is rendered using Non-Photorealistic Rendering (NPR) contours. This highlights the structure of the clipped data without the visual noise of full volume rendering [S1, unofficial].
-    *   **Exclusion:** Selected segmented objects (e.g., kidneys) can be excluded from the clipping effect, remaining shaded even if they intersect the clipping boundaries [S1, unofficial].
+1.  **Initialize Clipping Cube:** The system renders a wireframe cube with spheres at the corners, which light up when the pen enters their trigger volume [S1, unofficial].
+2.  **Resize Clipping Cube:** The user drags a lit sphere, causing the cube to resize non-uniformly while maintaining its axis-aligned orientation, updating the six face planes [S1, unofficial].
+3.  **Place Cutting Plane:** The user switches the PIP pad to "cutting" mode, where the pad itself acts as the cutting plane, moves the pad to position the plane through the volume, and presses the second pen button to freeze the plane in place [S1, unofficial]. The primary pen button is reserved for moving the volume object, enabling two-handed interaction (one hand moves the plane via the pad, the other moves the object via the pen) [S1, unofficial].
+4.  **Render Focus and Context:** The region inside the clipping cube (or on the correct side of the cutting plane) is rendered using standard surface shading, while the region outside is rendered using Non-Photorealistic Rendering (NPR) contours or other specified modes [S1, unofficial]. Selected segmented objects can be excluded from the clipping effect, remaining shaded even when intersected by the clipping boundaries [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def handle_interaction(pen_state, pad_state, volume_data, clipping_cube, cutting_plane):
-    # Check for clipping cube interaction
-    if clipping_cube.mode == "active":
-        for corner_sphere in clipping_cube.spheres:
-            if pen_state.is_inside(corner_sphere.trigger_volume):
-                corner_sphere.highlight = True
-                if pen_state.is_dragging():
-                    # Resize cube non-uniformly, keeping it axis-aligned
-                    clipping_cube.resize(corner_sphere, pen_state.position)
-                    # Update the six axis-aligned clipping planes based on new cube bounds
-                    update_clipping_planes(clipping_cube)
-                else:
-                    corner_sphere.highlight = False
+def update_interaction(pen, pad, cube, plane, mode):
+    if mode == "CLIPPING_CUBE":
+        for i, sphere in enumerate(cube.spheres):
+            if distance(pen.position, sphere.center) <= sphere.radius:
+                sphere.highlight = True
+                if pen.is_dragging():
+                    cube.spheres[i].center = pen.position
+                    cube.update_axis_aligned_bounds()
+            else:
+                sphere.highlight = False
+    elif mode == "CUTTING_PLANE":
+        plane.position = pad.position
+        plane.normal = pad.normal
+        if pen.second_button_pressed:
+            mode = "CLIPPING_CUBE"
+    return mode
 
-    # Check for cutting plane interaction
-    elif clipping_cube.mode == "cutting":
-        # Pad acts as the cutting plane
-        cutting_plane.position = pad_state.position
-        cutting_plane.normal = pad_state.normal
-        
-        if pen_state.second_button_pressed:
-            # Freeze the plane
-            clipping_cube.mode = "active" # Or return to neutral
-            # The plane is now fixed in the rendering pipeline
+def compute_clipping_planes(cube, plane):
+    planes = []
+    for i in range(6):
+        planes.append(cube.get_face_plane(i))
+    planes.append(plane)
+    return planes
 
-    # Render volume
-    # 1. Apply clipping planes (cube faces + cutting plane) to the volume renderer
-    volume_renderer.set_clipping_planes(clipping_cube.planes + [cutting_plane])
-    
-    # 2. Render focus region (inside cube/plane) as surface
-    volume_renderer.set_render_mode("surface", region="inside")
-    volume_renderer.render(volume_data)
-    
-    # 3. Render context region (outside cube/plane) as NPR contours
-    # Note: This may require a second pass or a specific shader switch
-    volume_renderer.set_render_mode("npr_contours", region="outside")
-    volume_renderer.render(volume_data)
+def render_volume(clipping_planes, outside_mode):
+    # Apply clipping planes to volume data
+    clipped_data = apply_planes_to_volume(clipping_planes)
+    # Render inside region as surface
+    render_surface(clipped_data, region="inside")
+    # Render outside region according to mode
+    if outside_mode == "NPR_CONTOURS":
+        render_npr_contours(clipped_data, region="outside")
+    elif outside_mode == "INVISIBLE":
+        pass
+    elif outside_mode == "TRANSPARENT":
+        render_transparent(clipped_data, region="outside")
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Occlusion:** Image-based rendering combined with polygon-based interaction widgets can cause occlusion issues, particularly in stereoscopic views where stereoscopic cues may fail if widgets are not properly depth-cued [S1, unofficial].
-*   **Convoluted Objects:** For complex structures like vessels, distinguishing the cut parts from the context can be difficult, making the NPR context rendering particularly valuable for clarity [S1, unofficial].
+*   **Occlusion:** The combination of image-based rendering with polygon-based interaction widgets yields occlusion problems [S1, unofficial].
+*   **Convoluted Objects:** For complex structures like vessels, distinguishing cut parts from the context can be difficult, making the NPR context rendering particularly valuable for clarity [S1, unofficial].
 
 ## Subtopics
 
 ### Clipping Cube Focus+Context with NPR Context
-This variant specifically utilizes Non-Photorealistic Rendering (NPR) for the context region. It isolates a focus region using a clipping cube widget (rendered as a surface) while rendering the context outside the cube as non-photorealistic contours. This approach is chosen when the user needs to see the structural outline of the clipped volume without the visual clutter of full volume rendering. The clipping cube widget is resizable via corner dragging and defines the bounded region for clipping. Selected segmented objects can be excluded from the clipping effect, remaining shaded even when covered by the clipping planes [S1, unofficial].
+This variant specifically utilizes Non-Photorealistic Rendering (NPR) for the context region [S1, unofficial]. It isolates a focus region using a clipping cube widget (rendered as a surface) while rendering the context outside the cube as non-photorealistic contours [S1, unofficial]. This approach is chosen when the user needs to see the structural outline of the clipped volume without the visual clutter of full volume rendering [S1, unofficial]. The clipping cube widget is resizable via corner dragging and defines the bounded region for clipping [S1, unofficial]. Selected segmented objects can be excluded from clipping, remaining shaded even when covered by the clipping planes [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time depends on the volume rendering algorithm (e.g., ray casting). The clipping operation itself is $O(1)$ per pixel as it is handled by hardware-accelerated OpenGL clipping planes. The NPR context rendering may add overhead depending on the complexity of the contour shader [S1, unofficial].
-*   **Memory Complexity:** The clipping cube and cutting plane data structures are constant size ($O(1)$). The volume data size is independent of the interaction method [S1, unofficial].
-*   **Strengths:** Allows intuitive, direct manipulation of the clipping region. The focus-plus-context approach with NPR provides clear structural context. Two-handed interaction improves efficiency [S1, unofficial].
-*   **Limitations:** The clipping cube is axis-aligned, limiting its orientation flexibility. The cutting plane is single-sided. Stereoscopic occlusion can be problematic [S1, unofficial].
-*   **When to use:** When exploring internal structures of a volume while needing to see the surrounding context's shape. Ideal for medical visualization (e.g., viewing organs within a torso) [S1, unofficial].
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Strengths:** Allows intuitive, direct manipulation of the clipping region [S1, unofficial]. Two-handed interaction (pad for plane, pen for object) improves workflow [S1, unofficial]. NPR context reduces visual clutter [S1, unofficial].
+*   **Limitations:** The clipping cube is axis-aligned, limiting its orientation flexibility [S1, unofficial]. The cutting plane is single-sided [S1, unofficial]. Stereoscopic occlusion can be problematic with image-based rendering and polygon widgets [S1, unofficial].
+*   **When to use:** When exploring internal structures of a volume while needing to see the surrounding context's shape [S1, unofficial].
 
 ## Background
-This method was developed for distributed software-based volume visualization in a virtual environment. It builds on earlier work in focus-plus-context visualization [FG98] and integrates with existing RTVR (Real-Time Volume Rendering) capabilities for axis-aligned and oblique clipping. The approach was presented at the Eurographics conference in 2005 [S1, unofficial].
+This method was developed for distributed software-based volume visualization in a virtual environment [S1, unofficial]. It builds on earlier focus-plus-context work [FG98] and integrates with RTVR capabilities for axis-aligned and oblique clipping [S1, unofficial]. The approach was presented at the Eurographics conference in 2005 [S1, unofficial].
 
 ## Sources
 [S1] Distributed Software-Based Volume Visualization in a Virtual Environment, https://doi.org/10.2312/egve/ipt_egve2005/129-140, fetched 2026-10-26 (unofficial)

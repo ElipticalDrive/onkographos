@@ -7,11 +7,11 @@ Point-Tessellated Voxelization is a GPU-based framework for real-time multi-valu
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A triangle mesh (vertices $P_i$) and a 3D texture grid of resolution $N^3$ with cell side length $l_{cell}$.
+*   **Input:** A triangle mesh (vertices $P_i$) and a 3D texture grid of resolution $N^3$ with cell side length $l_{cell}$ [S1, unofficial].
 *   **Output:** A 3D texture where each texel stores occupancy (binary) or scalar/vector data (multi-valued) [S1, unofficial].
 
 **Data Structures:**
-*   **3D Texture Grid:** Stores occupancy or compressed scalar/vector data per texel. The size is limited only by video memory [S1, unofficial].
+*   **3D Texture Grid:** Stores occupancy or compressed scalar/vector data per texel [S1, unofficial]. The grid size is limited only by video memory [S1, unofficial].
 *   **Surfel:** A point primitive placed at the centroid of a subdivided triangle [S1, unofficial].
 
 **Parameters:**
@@ -23,7 +23,7 @@ Point-Tessellated Voxelization is a GPU-based framework for real-time multi-valu
 **Numbered Steps:**
 
 1.  **Triangle Subdivision (Hull Shader & Tessellator):**
-    Calculate tessellation factors for the input mesh using hardware tessellation support (Direct3D 11 or OpenGL 4.0).
+    Calculate tessellation factors for the input mesh using hardware tessellation support (Direct3D 11 or OpenGL 4.0) [S1, unofficial].
     *   Calculate edge factors $E_{ij}$ for each edge $(i,j)$ of the triangle:
         $$ E_{ij} = \frac{\gamma |P_i - P_j|}{l_{cell}} $$
         where $P_i, P_j$ are vertex positions and $l_{cell}$ is the voxel grid cell side length [S1, unofficial].
@@ -35,18 +35,18 @@ Point-Tessellated Voxelization is a GPU-based framework for real-time multi-valu
 
 2.  **Point Generation (Domain Shader & Geometry Shader):**
     *   The domain shader generates new vertices based on barycentric coordinates and control points [S1, unofficial].
-    *   The geometry shader receives the tessellated triangle soup.
-    *   Replace each subdivided triangle with a single point primitive (surfel) placed at its centroid.
+    *   The geometry shader receives the tessellated triangle soup [S1, unofficial].
+    *   Replace each subdivided triangle with a single point primitive (surfel) placed at its centroid [S1, unofficial].
     *   Calculate the centroid position in world space:
         $$ P_{centroid} = (P_{vert1} + P_{vert2} + P_{vert3})/3 $$
     *   This point is empirically chosen as the balance between performance and accuracy compared to vertices or incenter [S1, unofficial].
 
 3.  **Point Injection/Voxelization (Geometry Shader & Pixel Shader):**
-    *   Transform the point cloud into the coordinate space of the 3D texture grid within the geometry shader.
-    *   For each surfel, calculate the position of the corresponding texel in the 3D texture.
+    *   Transform the point cloud into the coordinate space of the 3D texture grid within the geometry shader [S1, unofficial].
+    *   For each surfel, calculate the position of the corresponding texel in the 3D texture [S1, unofficial].
     *   Output a value into the calculated texel in the pixel shader [S1, unofficial].
     *   **Binary Voxelization:** Output a constant value to indicate occupancy [S1, unofficial].
-    *   **Multi-valued Voxelization:** Store scalars or vectors (colors, normals) from triangles into voxels.
+    *   **Multi-valued Voxelization:** Store scalars or vectors (colors, normals) from triangles into voxels [S1, unofficial].
         *   For average values across multiple triangles, use additive blending [S1, unofficial].
         *   To preserve all point cloud values, compress them using spherical harmonics [S1, unofficial].
 
@@ -55,7 +55,6 @@ Point-Tessellated Voxelization is a GPU-based framework for real-time multi-valu
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Stage 1: Hull Shader / Tessellator
 def calculate_tessellation_factors(vertices, gamma, l_cell):
     # vertices: list of 3 vectors [P1, P2, P3]
     # gamma: safety factor (default 1.0)
@@ -67,16 +66,6 @@ def calculate_tessellation_factors(vertices, gamma, l_cell):
     e13 = length(vertices[2] - vertices[0])
     
     # Calculate edge factors
-    # Note: max_{x,y,z} implies taking the maximum projection along axes.
-    # In implementation, this usually means ceil(max(|dx|, |dy|, |dz|) / l_cell)
-    # However, the source formula uses max over axes of the factor itself.
-    # We interpret E_ij as a scalar factor derived from length.
-    # The source says T1 = max_{x,y,z} E_12. This likely refers to the 
-    # tessellation pattern's requirement to cover the bounding box projection.
-    # For simplicity in pseudocode, we use the scalar length-based factor 
-    # as the primary driver, assuming the hardware tessellator handles 
-    # the 2D/3D projection constraints.
-    
     E12 = gamma * e12 / l_cell
     E23 = gamma * e23 / l_cell
     E13 = gamma * e13 / l_cell
@@ -96,7 +85,6 @@ def calculate_tessellation_factors(vertices, gamma, l_cell):
     
     return T_C
 
-# Stage 2: Geometry Shader
 def generate_surfels(tessellated_triangles):
     surfels = []
     for tri in tessellated_triangles:
@@ -105,14 +93,13 @@ def generate_surfels(tessellated_triangles):
         surfels.append(centroid)
     return surfels
 
-# Stage 3: Pixel Shader / Voxelization
 def voxelize_surfels(surfels, grid_resolution, grid_origin, grid_scale):
     # grid_resolution: N (N^3 grid)
     # grid_origin: world space origin of the grid
     # grid_scale: world space size of the grid (or l_cell)
     
     # Initialize 3D texture (volume)
-    volume = zeros((grid_resolution, grid_resolution, grid_resolution))
+    volume = [[[0.0 for _ in range(grid_resolution)] for _ in range(grid_resolution)] for _ in range(grid_resolution)]
     
     for p in surfels:
         # Transform point to grid coordinates
@@ -136,7 +123,7 @@ def voxelize_surfels(surfels, grid_resolution, grid_origin, grid_scale):
            0 <= idx_z < grid_resolution:
             
             # Binary voxelization: mark as occupied
-            volume[idx_x, idx_y, idx_z] = 1.0
+            volume[idx_x][idx_y][idx_z] = 1.0
             
             # Multi-valued voxelization would store additional data here
             # e.g., using additive blending or spherical harmonics compression
@@ -154,33 +141,33 @@ def voxelize_surfels(surfels, grid_resolution, grid_origin, grid_scale):
 *   **Multi-Pass Subdivision:** If the mesh has very few triangles (e.g., a tetrahedron) and the grid is large, multiple subdivision passes may be needed because hardware tessellation factors are limited (up to 63) [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The method is efficient, requiring only one rendering pass. Performance scales with the number of triangles and grid resolution.
+*   **Time Complexity:** The method is efficient, requiring only one rendering pass [S1, unofficial]. Performance scales with the number of triangles and grid resolution [S1, unofficial].
 *   **Memory Complexity:** Limited only by video memory for the 3D texture grid [S1, unofficial].
 *   **Measured Performance (GTX480, Core-i7 920):**
-    *   Stanford Dragon (871k tris): 0.4 ms ($128^3$), 2.3 ms ($512^3$), 12.8 ms ($1024^3$) [S1, unofficial].
-    *   Asian Dragon (7.2M tris): 0.4 ms ($128^3$), 2.7 ms ($512^3$), 9.7 ms ($1024^3$) [S1, unofficial].
-    *   Hairball (2.88M tris): 5.9 ms ($128^3$), 7.5 ms ($512^3$), 56.8 ms ($1024^3$) [S1, unofficial].
-    *   Turbine Blade (1.76M tris): 0.5 ms ($128^3$), 5.3 ms ($512^3$), 7.3 ms ($1024^3$) [S1, unofficial].
+    *   871k tris: 0.4 ms ($128^3$), 2.3 ms ($512^3$), 12.8 ms ($1024^3$) [S1, unofficial].
+    *   7.2M tris: 0.4 ms ($128^3$), 2.7 ms ($512^3$), 9.7 ms ($1024^3$) [S1, unofficial].
+    *   2.88M tris: 5.9 ms ($128^3$), 7.5 ms ($512^3$), 56.8 ms ($1024^3$) [S1, unofficial].
+    *   1.76M tris: 0.5 ms ($128^3$), 5.3 ms ($512^3$), 7.3 ms ($1024^3$) [S1, unofficial].
     *   General framework cost: 0.46 ms ($128^3$), 9.10 ms ($512^3$) for 22.1k triangles [S1, unofficial].
-*   **Scaling:** Tessellation cost increases sharply with grid size on older hardware (GTX480), but tessellation is not the most costly stage on newer hardware (GTX560Ti) [S1, unofficial].
+*   **Scaling:** Tessellation cost increases sharply with grid size on older hardware (GTX480) [S1, unofficial].
 *   **Strengths:**
-    *   Real-time performance.
-    *   Simple shader programming implementation.
-    *   Supports multi-valued voxelization.
-    *   Handles arbitrary deformation (recomputable per frame).
+    *   Real-time performance [S1, unofficial].
+    *   Simple shader programming implementation [S1, unofficial].
+    *   Supports multi-valued voxelization [S1, unofficial].
+    *   Handles arbitrary deformation (recomputable per frame) [S1, unofficial].
     *   Faster than directly voxelizing high-detail meshes (4x speedup with displacement mapping) [S1, unofficial].
 *   **Limitations:**
-    *   Not conservative (may miss voxels).
-    *   Accuracy degrades with very low triangle counts and high grid resolutions.
-    *   Tessellation performance bottleneck on older hardware at high resolutions.
+    *   Not conservative (may miss voxels) [S1, unofficial].
+    *   Accuracy degrades with very low triangle counts and high grid resolutions [S1, unofficial].
+    *   Tessellation performance bottleneck on older hardware at high resolutions [S1, unofficial].
     *   Not suitable for applications requiring perfect accuracy (e.g., collision detection) [S1, unofficial].
 *   **When to Use:** Real-time applications like video games, VR, and Hybrid Ambient Occlusion (HAO) where visual quality is acceptable with minor artifacts [S1, unofficial].
 *   **When Not to Use:** Applications requiring conservative voxelization (e.g., precise collision detection) or volumetric/solid voxelization [S1, unofficial].
 
 ## Background
-*   **Origin:** Proposed by Yun et al. in 2012 [S1, unofficial].
+*   **Origin:** Proposed by Yun et al. [S1, unofficial].
 *   **History:** The method integrates hardware-based triangle subdivision (Direct3D 11/OpenGL 4.0) and point-based rendering into a framework for surface voxelization. It was designed to address the need for real-time voxelization in applications like shape matching, visibility processing, and rapid manufacturing [S1, unofficial].
-*   **Usage:** Used for Hybrid Ambient Occlusion (HAO), achieving 16.2 ms on the Sibenik Cathedral scene [S1, unofficial].
+*   **Usage:** Used for Hybrid Ambient Occlusion (HAO) by substituting the voxelization process for ray marching [S1, unofficial].
 
 ## Sources
 [S1] Point-Tessellated Voxelization, http://www.cs.columbia.edu/cg/raymond/gi12/paper100.pdf, fetched 2026-10-26 (unofficial)

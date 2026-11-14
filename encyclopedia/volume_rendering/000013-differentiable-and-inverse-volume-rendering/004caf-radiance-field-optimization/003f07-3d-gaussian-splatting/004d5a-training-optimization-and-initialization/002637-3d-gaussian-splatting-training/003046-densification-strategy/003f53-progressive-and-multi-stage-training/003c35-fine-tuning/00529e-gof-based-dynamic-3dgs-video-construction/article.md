@@ -1,0 +1,136 @@
+# GoF-based Dynamic 3DGS Video Construction
+
+Also called: Group of Frames modeling, Temporal segmentation with deformation fields
+
+## Overview
+This method constructs dynamic 3D Gaussian Splatting (3DGS) video by temporally segmenting input sequences into Groups of Frames (GoFs) and independently training Gaussian deformation fields within each segment [S1]. It solves the problem of motion drift and geometric inconsistencies that occur when modeling long-range temporal dependencies with a single global deformation field [S1]. By limiting the motion degree within short segments, it prevents the deformation field from struggling to adapt to complex, long-sequence dynamics [S1]. It sets itself apart from global optimization approaches by decoupling static and dynamic components via weighted MLP parameters and separating foreground/background content to reduce training complexity [S1].
+
+## How it works
+**Inputs:** A dynamic video sequence; camera poses and intrinsics for each frame.
+**Outputs:** A set of 3D Gaussian primitives with static attributes (position, base scale, base rotation, base opacity, base color) and dynamic attributes (deformation fields per GoF); a segmentation mask distinguishing foreground from background.
+
+**Data Structures:**
+1.  **Static Scene Model:** A global set of Gaussians $\mathcal{G}_{static}$ capturing long-sequence static information.
+2.  **GoF Segments:** The input sequence is divided into $N$ non-overlapping temporal segments $G_1, G_2, ..., G_N$.
+3.  **Deformation Field MLP:** A Multi-Layer Perceptron $f_{\theta}(t, \mathbf{x})$ for each GoF, parameterized by $\theta$.
+4.  **Tuning Parameters:** A set of scalar weights $\alpha$ applied to MLP parameters to modulate focus on dynamic elements [S1].
+5.  **Foreground/Background Mask:** A binary or probabilistic mask $M_{fg}$ identifying dynamic regions (e.g., humans, objects) versus static background [S1].
+
+**Steps:**
+1.  **Temporal Segmentation:** Divide the input video sequence into multiple GoFs $G_i$. The duration of each GoF is short enough to limit the degree of motion within the segment [S1].
+2.  **Initial Static Modeling:** Construct an initial scene model $\mathcal{G}_{init}$ that captures overall information across the entire long sequence. This serves as the baseline for all GoFs [S1].
+3.  **Foreground/Background Separation:** Analyze the video content to differentiate between foreground (dynamic elements like human bodies, interacting objects, animals) and background (static environment) [S1]. This separation reduces the complexity of the deformation field training [S1].
+4.  **GoF-Specific Initialization:** For each GoF $G_i$:
+    *   Preserve the extensive static regions from $\mathcal{G}_{init}$.
+    *   Identify dynamic areas within $G_i$ based on the foreground mask.
+    *   Initialize a GoF-specific model by exclusively fine-tuning the dynamic areas while keeping static regions fixed or lightly regularized [S1].
+5.  **Dynamic MLP Construction:** Construct a dynamic Multi-Layer Perceptron (MLP) for each GoF. The MLP takes time $t$ (normalized within the GoF) and spatial coordinates $\mathbf{x}$ as input to predict deformation offsets [S1].
+6.  **Weighted Training:** During training, apply tuning parameters (weights) to the MLP parameters. These weights direct the optimization focus toward dynamic elements, effectively decoupling static and dynamic Gaussian components in a smoothly weighted fashion [S1].
+7.  **Deformation Field Derivation:** Train the MLP for each GoF to derive the corresponding deformation field. The deformation field maps the static Gaussian positions to their dynamic positions at time $t$ within the GoF [S1].
+8.  **Streaming Optimization (Optional):** For transmission, selectively stream only the foreground model (deformation fields and dynamic Gaussians) based on user interaction, while transmitting the static background model once or less frequently [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gof_based_dynamic_3dgs(video_sequence, camera_poses):
+    # Step 1: Temporal Segmentation
+    gofs = segment_temporal_sequence(video_sequence, segment_duration=SHORT_DURATION)
+    
+    # Step 2: Initial Static Modeling
+    # Construct a global static model capturing long-sequence info
+    static_model = initialize_global_3dgs(video_sequence, camera_poses)
+    
+    # Step 3: Foreground/Background Separation
+    # Identify dynamic regions (foreground) vs static regions (background)
+    fg_bg_masks = compute_foreground_background_masks(video_sequence)
+    
+    # Step 4 & 5 & 6 & 7: Per-GoF Processing
+    gof_deformation_fields = {}
+    gof_gaussian_updates = {}
+    
+    for i, gof in enumerate(gofs):
+        # Extract frames and poses for this GoF
+        gof_frames = get_frames(gof)
+        gof_poses = get_poses(gof)
+        
+        # Initialize GoF model from static model
+        gof_model = copy_static_model(static_model)
+        
+        # Identify dynamic Gaussians in this GoF
+        dynamic_gaussians = filter_gaussians(gof_model, fg_bg_masks[i], region='foreground')
+        static_gaussians = filter_gaussians(gof_model, fg_bg_masks[i], region='background')
+        
+        # Construct Dynamic MLP for this GoF
+        # Input: time t (normalized 0-1 within GoF), spatial coordinate x
+        # Output: deformation offset delta_x
+        mlp = DynamicMLP(input_dim=4, hidden_dims=[64, 64, 32])
+        
+        # Define Tuning Parameters for weighted training
+        # These weights modulate MLP parameters to focus on dynamic elements
+        tuning_weights = initialize_tuning_weights(mlp)
+        
+        # Training Loop for Deformation Field
+        for epoch in range(MAX_EPOCHS):
+            for frame_idx, frame in enumerate(gof_frames):
+                t = frame_idx / len(gof_frames)  # Normalized time
+                pose = gof_poses[frame_idx]
+                
+                # Forward pass through MLP for dynamic Gaussians
+                # Get current positions of dynamic Gaussians
+                dynamic_positions = get_positions(dynamic_gaussians)
+                
+                # Predict deformation offsets
+                # Input to MLP: [t, t, t, x, y, z] or similar encoding
+                deformation_offsets = mlp.forward(t, dynamic_positions)
+                
+                # Apply deformation
+                deformed_positions = dynamic_positions + deformation_offsets
+                
+                # Render image using deformed positions and static positions
+                rendered_image = render_3dgs(
+                    static_gaussians, 
+                    dynamic_gaussians, 
+                    deformed_positions, 
+                    pose
+                )
+                
+                # Compute loss against ground truth frame
+                loss = compute_loss(rendered_image, frame)
+                
+                # Backpropagate with tuning weights
+                # Weights direct focus to dynamic elements
+                loss.backward()
+                apply_weights(mlp.parameters(), tuning_weights)
+                optimizer.step(mlp)
+        
+        # Store derived deformation field and updates
+        gof_deformation_fields[i] = mlp
+        gof_gaussian_updates[i] = dynamic_gaussians
+        
+    return static_model, gof_deformation_fields, gof_gaussian_updates
+```
+
+**Parameters:**
+*   `SHORT_DURATION`: The duration of each GoF. Not given in the sources.
+*   `MAX_EPOCHS`: Number of training epochs per GoF. Not given in the sources.
+*   `tuning_weights`: Weights for MLP parameters. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Motion Drift:** If GoFs are too long, the deformation field may still suffer from long-range temporal dependencies and motion drift [S1].
+*   **Static Region Corruption:** If static regions are not preserved during GoF-specific fine-tuning, geometric inconsistencies may arise across GoF boundaries [S1].
+*   **Foreground/Background Boundary:** Errors in segmentation may lead to incorrect deformation of static background elements or lack of deformation for dynamic foreground elements [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is proportional to the number of GoFs and the complexity of the MLP per GoF. It is generally faster than global optimization for long sequences because each GoF is optimized independently with limited motion [S1].
+*   **Memory Complexity:** Requires storing a static model and multiple deformation fields (MLPs) and dynamic Gaussian updates. Memory usage scales with the number of GoFs and the size of the dynamic foreground [S1].
+*   **Strengths:** Prevents long-range temporal drift; handles complex motion variations better than global fields; reduces training complexity via foreground/background separation; enables efficient streaming by transmitting only dynamic foreground [S1].
+*   **Limitations:** Requires accurate temporal segmentation and foreground/background separation; may introduce discontinuities at GoF boundaries if not handled carefully; not given in the sources for specific performance metrics.
+*   **When to Use:** Dynamic video scenes with significant motion, especially where long-sequence modeling fails; scenarios requiring efficient streaming of dynamic content [S1].
+*   **When Not to Use:** Static scenes; scenes with very short, simple motions where global optimization suffices; scenes where foreground/background separation is ambiguous [S1].
+
+## Background
+This method was proposed to address limitations in capturing long-range temporal dependencies in 3DGS video, which often cause motion drift and geometric inconsistencies [S1]. It builds on the idea of using deformation fields to model dynamic scenes but introduces temporal segmentation to limit the motion degree within each segment [S1]. The approach is detailed in "Adaptive 3-D Gaussian Splatting Video Streaming" [S1].
+
+## Sources
+[S1] Adaptive 3-D Gaussian Splatting Video Streaming, https://doi.org/10.1109/MNET.2025.3638049, fetched 2026-11-03

@@ -1,214 +1,83 @@
 # SWAG (Splatting in the Wild images with Appearance-conditioned Gaussians)
 
-
 ## Overview
-SWAG is an extension of 3D Gaussian Splatting (3DGS) designed to handle unstructured, in-the-wild image collections by modeling appearance variations and handling transient objects (occluders) without supervision [S1]. It differs from standard 3DGS by decoupling static geometry from dynamic appearance and transient occlusions, using per-image embeddings and an MLP to predict color and opacity variations [S1]. Unlike [3iGS](13977-3igs-factorised-tensorial-illumination-for-3d-gaussian-splat.md) which focuses on factorized tensorial illumination, SWAG explicitly isolates transient objects to prevent them from causing "floaters" or blurry elongated Gaussians in the static reconstruction [S1].
+SWAG is an extension of 3D Gaussian Splatting (3DGS) designed to reconstruct 3D scenes from unstructured, in-the-wild image collections that exhibit significant photometric variations and contain transient occluders (e.g., tourists, clouds) [S1]. It distinguishes itself from standard 3DGS and its sibling [3iGS](13977-3igs-factorised-tensorial-illumination-for-3d-gaussian-splat.md) by explicitly modeling appearance variations via per-image embeddings and disentangling static scene geometry from transient objects through adaptive opacity modulation [S1]. While 3DGS averages appearance across views leading to color shifts and floaters in unstructured data, SWAG learns a latent appearance space and isolates transient Gaussians to prevent them from corrupting the static reconstruction [S1].
 
 ## How it works
-SWAG adapts the 3DGS representation to in-the-wild scenarios by introducing appearance conditioning and adaptive opacity modulation [S1]. The method optimizes standard 3DGS parameters alongside a Hash Grid encoding, per-image embeddings, and a neural network [S1].
-
-### Inputs and Outputs
-*   **Inputs:** A set of unstructured images $\{I_i\}$ with known camera poses.
-*   **Outputs:** A set of 3D Gaussians representing the static scene, with parameters allowing for view-dependent appearance and transient object removal.
+SWAG augments the standard 3DGS Gaussian attributes with a conditional appearance model and a transient detection mechanism. The method optimizes a set of Gaussians where each Gaussian $i$ retains standard attributes: centroid $\mathbf{x}_i$, scale $S_i$, rotation $R_i$, base opacity $\alpha_i$, and base color $\mathbf{c}_i$ (encoded in spherical harmonic coefficients) [S1]. Additionally, it optimizes three new components: a Hash Grid encoding for the Gaussian centers $\text{emb}(\mathbf{x}_i)$, a per-image embedding vector $\mathbf{l}_I$ for each training image $I$, and a Multi-Layer Perceptron (MLP) $F_\theta$ [S1].
 
 ### Data Structures and Layout
-For each Gaussian $i$, the following parameters are optimized:
-1.  **Centroid:** $\mathbf{x}_i \in \mathbb{R}^3$
-2.  **Scale:** $\mathbf{S}_i \in \mathbb{R}^3$
-3.  **Rotation:** $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$ (or quaternion)
-4.  **Base Opacity:** $\alpha_i \in \mathbb{R}$
-5.  **Base Color:** $\mathbf{c}_i$ encoded in spherical harmonic (SH) coefficients [S1].
-6.  **Hash Grid Encoding:** $\text{emb}(\mathbf{x}_i)$, a feature vector derived from a Hash Grid encoding of the Gaussian center [S1].
+1.  **Gaussian Attributes**: For each Gaussian $i$:
+    *   $\mathbf{x}_i \in \mathbb{R}^3$: Centroid.
+    *   $S_i \in \mathbb{R}^3$: Scale (log-space optimization).
+    *   $R_i \in \mathbb{R}^4$: Rotation (quaternion).
+    *   $\alpha_i \in \mathbb{R}$: Base opacity.
+    *   $\mathbf{c}_i$: Base color (SH coefficients).
+2.  **Hash Grid Encoding**: A hash table of size $T = 2^{19}$ maps 3D positions to feature vectors. It uses $L=12$ levels, with finest resolution $N_{\max}=2048$ and coarsest resolution $N_{\min}=16$ [S1]. The output is $\text{emb}(\mathbf{x}_i)$.
+3.  **Image Embeddings**: A learnable vector $\mathbf{l}_I \in \mathbb{R}^{24}$ for each training image $I$ [S1].
+4.  **MLP $F_\theta$**: An 8-layer network with input dimension 3 (concatenated features), hidden layer size 51, and output dimension 64 [S1].
 
-Additionally, the following global or per-image parameters are optimized:
-1.  **Per-Image Embedding:** $\mathbf{l}_{I_j} \in \mathbb{R}^{24}$ for each training image $j$ [S1].
-2.  **MLP Parameters:** $\theta$ for the appearance network $f_\theta$ [S1].
-3.  **Hash Grid:** A hash table of size $T = 2^{19}$ [S1].
+### Rendering Equation
+The final color $\hat{\mathbf{C}}$ for a pixel is computed via standard alpha blending [S1]:
+$$ \hat{\mathbf{C}} = \sum_{i \in N} T_i g_i(\mathbf{u} | \boldsymbol{\mu}', \boldsymbol{\Sigma}') \alpha_i \mathbf{c}_i $$
+where $T_i$ is the accumulated transmittance, $g_i$ is the projected Gaussian density, and $\mathbf{c}_i$ is the final color predicted by the appearance model [S1].
 
-### Neural Field Mapping
-The core of SWAG is a Multi-Layer Perceptron (MLP) $f_\theta$ that predicts appearance and opacity variations based on the Gaussian's base properties and the current image's context [S1].
+### Appearance and Transient Modeling
+For a Gaussian $i$ rendered from image $I$, the appearance model $F_\theta$ takes three inputs:
+1.  The Gaussian's base color $\mathbf{c}_i$.
+2.  The associated image embedding $\mathbf{l}_I$.
+3.  The encoded center $\text{emb}(\mathbf{x}_i)$ from the Hash Grid [S1].
 
-**MLP Architecture ($f_\theta$):**
-*   **Input Dimension:** 3 (This likely refers to the concatenation of specific features, though the text specifies inputs as base color $\mathbf{c}$, image embedding $\mathbf{l}_I$, and encoded center $\text{emb}(\mathbf{x})$. The "Input dimension: 3" in the notes likely refers to a specific channel count or a simplification; however, the text explicitly states the inputs are $\mathbf{c}$, $\mathbf{l}_I$, and $\text{emb}(\mathbf{x})$. Given the output is a scalar variation and a color vector, we define the input as the concatenation of these features. *Note: The source lists "Input dimension: 3" for the MLP. This is ambiguous. It may refer to the number of layers or a specific feature subset. However, standard MLPs take vectors. We will assume the input is the concatenation of the relevant features described: base color, image embedding, and position encoding. If "3" refers to layers, the note says "Number of layer: 8". If "3" refers to input size, it contradicts the multi-vector input. We will follow the textual description of inputs: $\mathbf{c}$, $\mathbf{l}_I$, $\text{emb}(\mathbf{x})$ [S1].*)
-*   **Hidden Layers:** 8 layers, each with size 51 [S1].
-*   **Output:** Two values:
-    1.  Image-dependent color variation $\mathbf{c}_I$ [S1].
-    2.  Image-dependent opacity variation parameter $\Delta \alpha_I$ [S1].
+The MLP $F_\theta$ outputs two values:
+1.  An image-dependent color correction $\Delta \mathbf{c}_I$.
+2.  An image-dependent opacity variation parameter $\Delta \alpha_I$ [S1].
 
-**Hash Grid Encoding:**
-The position $\mathbf{x}$ is encoded using a Hash Grid with the following parameters [S1]:
-*   Hash table size $T = 2^{19}$
-*   Finest resolution $N_{max} = 2048$
-*   Coarsest resolution $N_{min} = 16$
-*   Number of levels $L = 12$
+The final color $\mathbf{c}_i$ used in the rendering equation is derived from $\mathbf{c}_i$ and $\Delta \mathbf{c}_I$ (implementation detail: typically additive or multiplicative modulation, though the source specifies the output is $\mathbf{c}_I$ and $\Delta \alpha_I$; we assume $\mathbf{c}_i$ is modulated to produce the final radiance contribution). The opacity variation $\Delta \alpha_I$ is treated as the location variable of a concrete distribution (Gumbel-Softmax or similar reparameterization trick) to allow differentiable sampling of the opacity variation $\widetilde{\Delta \alpha}_I$ [S1]. The effective opacity for the Gaussian in image $I$ is modulated by this sampled variation [S1].
 
-### Numbered Steps
+### Optimization Steps
+1.  **Initialization**: Initialize Gaussians using SfM points from the unstructured image collection [S1].
+2.  **Forward Pass**:
+    *   For each training image $I$, render the scene.
+    *   For each visible Gaussian $i$, compute $\text{emb}(\mathbf{x}_i)$ using the Hash Grid.
+    *   Concatenate $\mathbf{c}_i$, $\mathbf{l}_I$, and $\text{emb}(\mathbf{x}_i)$.
+    *   Pass through $F_\theta$ to get $\Delta \mathbf{c}_I$ and $\Delta \alpha_I$.
+    *   Sample $\widetilde{\Delta \alpha}_I$ from the concrete distribution defined by $\Delta \alpha_I$.
+    *   Compute final color and effective opacity.
+3.  **Loss Calculation**: Minimize a combination of L1 loss and D-SSIM loss between the rendered image $\hat{\mathbf{C}}$ and the ground truth $\mathbf{C}_{gt}$ [S1].
+4.  **Backpropagation**: Update Gaussian attributes, Hash Grid features, image embeddings $\mathbf{l}_I$, and MLP weights $\theta$ [S1].
+5.  **Densification**: Apply 3DGS densification (splitting/pruning) every 2000 iterations until iteration 30,000 [S1].
 
-1.  **Initialization:** Initialize 3D Gaussians using sparse points from Structure-from-Motion (SfM) [S1]. Initialize per-image embeddings $\mathbf{l}_{I_j}$, Hash Grid, and MLP $f_\theta$ [S1].
-2.  **Feature Extraction:** For each Gaussian $i$ and training image $j$:
-    *   Compute the Hash Grid encoding $\text{emb}(\mathbf{x}_i)$ of the Gaussian center [S1].
-    *   Retrieve the per-image embedding $\mathbf{l}_{I_j}$ for the current image [S1].
-3.  **Appearance and Opacity Prediction:** Pass the Gaussian's base color $\mathbf{c}_i$, the image embedding $\mathbf{l}_{I_j}$, and the position encoding $\text{emb}(\mathbf{x}_i)$ into the MLP $f_\theta$ [S1]:
-    $$
-    [\mathbf{c}_I, \Delta \alpha_I] = f_\theta(\mathbf{c}_i, \mathbf{l}_{I_j}, \text{emb}(\mathbf{x}_i))
-    $$
-    *   $\mathbf{c}_I$ is the predicted color variation [S1].
-    *   $\Delta \alpha_I$ is the predicted opacity variation parameter [S1].
-4.  **Opacity Modulation:** Sample the actual opacity variation $\Delta \tilde{\alpha}_I$ from a concrete distribution (Gumbel-Softmax) using $\Delta \alpha_I$ as the location variable [S1]. This allows differentiable sampling for transient object detection [S1].
-5.  **Final Radiance Computation:** Compute the final color $\mathbf{c}_{final}$ and opacity $\alpha_{final}$ for the Gaussian in the context of image $j$:
-    *   $\mathbf{c}_{final} = \mathbf{c}_i + \mathbf{c}_I$ (Modulation of base color by predicted variation) [S1].
-    *   $\alpha_{final} = \alpha_i \cdot \Delta \tilde{\alpha}_I$ (Modulation of base opacity by sampled variation) [S1].
-    *   *Note: The exact combination formula (additive vs multiplicative) for color is not explicitly detailed in the text beyond "outputs an image-dependent color $c_I$". Standard practice implies addition or modulation. We assume additive variation based on "variation parameter".*
-6.  **Rendering:** Render the image using standard 3D Gaussian Splatting rasterization with the modulated colors and opacities [S1].
-7.  **Optimization:** Minimize the reconstruction loss (e.g., L1 + SSIM) between the rendered image and the ground truth image $I_j$ [S1].
-    *   Update Gaussians parameters ($\mathbf{x}, \mathbf{S}, \mathbf{R}, \alpha, \mathbf{c}$) [S1].
-    *   Update per-image embeddings $\mathbf{l}_{I_j}$ [S1].
-    *   Update Hash Grid and MLP parameters $\theta$ [S1].
-8.  **Densification:** Perform 3DGS densification every 2000 iterations, ending at iteration 30,000 [S1].
-
-### Pseudocode
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class SWAG:
-    def __init__(self, num_images, hash_table_size=2**19, n_max=2048, n_min=16, num_levels=12, 
-                 mlp_hidden_size=51, mlp_layers=8, embedding_dim=24):
-        """
-        Initialize SWAG model components.
-        """
-        # Hash Grid Encoder (Simplified representation)
-        self.hash_grid = HashGridEncoder(
-            num_levels=num_levels,
-            n_min=n_min,
-            n_max=n_max,
-            hash_table_size=hash_table_size
-        )
-        
-        # Per-image embeddings
-        self.image_embeddings = nn.Embedding(num_images, embedding_dim)
-        
-        # MLP for appearance and opacity prediction
-        # Input: Concatenation of base_color (SH_dim), image_embedding (24), pos_encoding (hash_dim)
-        # Note: Exact input dimension depends on SH degree and Hash Grid output dim.
-        # The source notes "Input dimension: 3" which is ambiguous. 
-        # We assume the MLP takes the concatenated features.
-        self.mlp = nn.Sequential(
-            nn.Linear(?, mlp_hidden_size), # Input dim depends on SH + Embed + Hash
-            *[nn.Sequential(nn.Linear(mlp_hidden_size, mlp_hidden_size), nn.ReLU()) for _ in range(mlp_layers - 1)],
-            nn.Linear(mlp_hidden_size, 3) # Output: 1 for delta_alpha, 2 for delta_color (RGB) or similar
-        )
-        
-        # 3DGS Gaussians parameters
-        self.gaussians = Gaussians()
-
-    def forward(self, gaussian_indices, image_index, camera_params):
-        """
-        Render a single view.
-        """
-        # 1. Get Gaussian features
-        gaussians = self.gaussians[gaussian_indices]
-        base_color = gaussians.color # SH coefficients
-        base_opacity = gaussians.opacity
-        centers = gaussians.centroids
-        
-        # 2. Encode positions
-        pos_encoding = self.hash_grid(centers)
-        
-        # 3. Get image embedding
-        img_embedding = self.image_embeddings(torch.tensor(image_index))
-        
-        # 4. Prepare MLP input
-        # Concatenate base_color features, pos_encoding, and img_embedding
-        # Note: base_color needs to be projected or sampled to a vector if SH is high degree
-        mlp_input = torch.cat([base_color_features, pos_encoding, img_embedding], dim=-1)
-        
-        # 5. Predict variations
-        mlp_output = self.mlp(mlp_input)
-        delta_alpha_raw = mlp_output[:, 0]
-        delta_color = mlp_output[:, 1:]
-        
-        # 6. Sample opacity variation using Concrete Distribution (Gumbel-Softmax)
-        # This allows backpropagation through the selection of transient/static
-        delta_alpha_sampled = concrete_sample(delta_alpha_raw)
-        
-        # 7. Compute final color and opacity
-        final_color = base_color + delta_color # Additive modulation
-        final_opacity = base_opacity * delta_alpha_sampled
-        
-        # 8. Render
-        rendered_image = rasterize(gaussians, final_color, final_opacity, camera_params)
-        
-        return rendered_image
-
-    def compute_loss(self, rendered_image, ground_truth_image):
-        """
-        Compute reconstruction loss.
-        """
-        l1_loss = F.l1_loss(rendered_image, ground_truth_image)
-        ssim_loss = 1 - ssim(rendered_image, ground_truth_image)
-        return l1_loss + ssim_loss
-
-class HashGridEncoder:
-    def __init__(self, num_levels, n_min, n_max, hash_table_size):
-        self.num_levels = num_levels
-        self.n_min = n_min
-        self.n_max = n_max
-        self.hash_table_size = hash_table_size
-        # Implementation of Hash Grid encoding as per mip-NeRF 360 contraction
-        pass
-
-def concrete_sample(logits):
-    """
-    Sample from Concrete distribution for differentiable opacity modulation.
-    """
-    # Gumbel-Softmax sampling
-    u = torch.rand_like(logits)
-    g = -torch.log(-torch.log(u + 1e-10) + 1e-10)
-    # Sigmoid with temperature
-    return torch.sigmoid((g + logits) / 0.1) # Temperature is a hyperparameter
-```
-
-### Parameters and Typical Values
-*   **Iterations:** 60,000 [S1].
-*   **Densification Interval:** 2,000 [S1].
-*   **Densification End:** 30,000 [S1].
-*   **Image Embedding Dimension:** 24 [S1].
-*   **Learning Rate (Image Embeddings):** 0.0025 [S1].
-*   **Hash Table Size ($T$):** $2^{19}$ [S1].
-*   **Hash Grid Finest Resolution ($N_{max}$):** 2048 [S1].
-*   **Hash Grid Coarsest Resolution ($N_{min}$):** 16 [S1].
-*   **Hash Grid Levels ($L$):** 12 [S1].
-*   **Learning Rate (Hash Grid):** 0.0025 [S1].
-*   **MLP Layers:** 8 [S1].
-*   **MLP Hidden Size:** 51 [S1].
-*   **MLP Learning Rate:** 0.0025 [S1].
+### Parameters and Hyperparameters
+*   **Iterations**: 60,000 [S1].
+*   **Densification Interval**: 2,000 [S1].
+*   **Densification End**: 30,000 [S1].
+*   **Image Embedding Dimension**: 24 [S1].
+*   **Learning Rate (Image Embeddings)**: 0.0025 [S1].
+*   **Hash Grid Size ($T$)**: $2^{19}$ [S1].
+*   **Hash Grid Resolutions**: $N_{\max}=2048$, $N_{\min}=16$ [S1].
+*   **Hash Grid Levels ($L$)**: 12 [S1].
+*   **Learning Rate (Hash Grid)**: 0.0025 [S1].
+*   **MLP Layers**: 8 [S1].
+*   **MLP Input Dimension**: 3 (concatenated features) [S1].
+*   **MLP Hidden Size**: 51 [S1].
+*   **MLP Output Dimension**: 64 [S1].
+*   **MLP Learning Rate**: 0.0025 [S1].
 
 ### Edge Cases and Pitfalls
-*   **Transient Object Holes:** Parts of the scene with frequent transient objects (e.g., clouds, tourists) may be incorrectly detected as transient. Eliminating all transient Gaussians can leave holes (black spots) in the reconstruction [S1].
-*   **Mitigation:** To solve the hole issue, Gaussians can be removed based on an adaptive threshold $\lambda$ rather than considering only Gaussians with zero variance ($\text{Var}(\Delta \tilde{\alpha}_I) < \lambda$). However, this requires manual tuning of $\lambda$ [S1].
-*   **Transient Percentage:** On average, less than 20% of Gaussians capture transient objects in trained scenes [S1].
+*   **Transient Detection Threshold**: Transient Gaussians are identified by low variance in their sampled opacity variations ($\text{Var}(\widetilde{\Delta \alpha}_I)$) across images [S1]. However, frequent transient regions (e.g., clouds, crowds) may be incorrectly classified as transient, leading to holes (black spots) if all such Gaussians are removed [S1].
+*   **Hole Mitigation**: To avoid holes, Gaussians can be removed based on an adaptive threshold $\lambda$ rather than requiring zero variance ($\text{Var}(\widetilde{\Delta \alpha}_I) < \lambda$), but this requires manual tuning of $\lambda$ [S1].
+*   **Performance**: Training time almost doubles compared to 3DGS, and inference time per frame is 10 times longer [S1].
 
 ## Operating characteristics
-*   **Training Time:** Almost doubles compared to standard 3DGS [S1].
-*   **Inference Time:** 10 times longer per frame than 3DGS [S1].
-*   **Comparison to Baselines:** Despite the increase in time, SWAG requires significantly less training time than previous in-the-wild baselines and achieves real-time rendering [S1].
-*   **Strengths:**
-    *   Handles unstructured in-the-wild data with photometric variations [S1].
-    *   Disentangles static and dynamic Gaussians, preventing blurry elongated Gaussians caused by view-dependent appearances in standard 3DGS [S1].
-    *   Enables controllable appearance via interpolation of learned image embeddings [S1].
-*   **Limitations:**
-    *   Requires manual tuning of threshold $\lambda$ for transient object removal to avoid holes [S1].
-    *   Higher computational cost for training and inference compared to vanilla 3DGS [S1].
-*   **When to Use:** When reconstructing scenes from unstructured, in-the-wild photo collections (e.g., tourist landmarks) where lighting varies and transient occluders (people, clouds) are present [S1].
-*   **When Not to Use:** For controlled studio environments or static scenes without transient objects, where standard 3DGS is more efficient [S1].
+*   **Time Complexity**: Training time is approximately 2x that of 3DGS due to the MLP and Hash Grid computations [S1]. Inference time per frame is 10x slower than 3DGS [S1].
+*   **Memory Complexity**: Increased memory usage due to the Hash Grid ($2^{19}$ entries), image embeddings (24 dimensions per image), and MLP weights [S1].
+*   **Strengths**: Handles unstructured in-the-wild data with lighting variations and transient occluders without supervision. Disentangles static and dynamic Gaussians, preventing blurry elongated Gaussians common in view-dependent 3DGS [S1]. Enables controllable appearance via interpolation of image embeddings [S1].
+*   **Limitations**: Sensitive to the threshold $\lambda$ for transient removal; improper tuning leads to holes. Slower training and inference than standard 3DGS.
+*   **When to Use**: Reconstruction of outdoor landmarks or tourist sites from internet photo collections where lighting changes and transient objects are present [S1].
+*   **When Not to Use**: Structured studio datasets with controlled lighting and no transient objects, where standard 3DGS is faster and sufficient [S1].
 
 ## Background
-SWAG was introduced by H. Dahmani et al. in the paper "SWAG: Splatting in the Wild images with Appearance-conditioned Gaussians" [S1]. It addresses the poor performance of 3DGS on unstructured in-the-wild data by incorporating appearance modeling and unsupervised transient object handling [S1]. The method was evaluated on the Phototourism Dataset (Brandenburg Gate, Sacré Cœur, Trevi Fountain) and the NeRF-OSR Dataset [S1].
+SWAG was introduced by H. Dahmani et al. in 2024 [S1]. It addresses the limitations of 3D Gaussian Splatting when applied to unstructured in-the-wild image collections, which often suffer from poor performance due to photometric variations and transient occluders [S1]. The method builds on the principles of differentiable volume rendering and 3DGS, extending them with appearance conditioning and transient detection mechanisms [S1]. It has been evaluated on the Phototourism Dataset (Brandenburg Gate, Sacré Cœur, Trevi Fountain) and the NeRF-OSR Dataset [S1].
 
 ## Sources
 [S1] SWAG: Splatting in the Wild images with Appearance-conditioned Gaussians, https://doi.org/10.48550/arXiv.2403.10427, fetched 2026-10-29

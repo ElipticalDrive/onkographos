@@ -1,0 +1,202 @@
+# Neus SDF Volume Rendering
+
+Also called: Neus rendering, SRDF Volume Rendering, Volume Rendering of SRDF
+
+## Overview
+Neus SDF Volume Rendering is a technique that renders 3D scenes represented as Signed Distance Functions (SDF) or Signed Ray Distance Functions (SRDF) by accumulating color and depth along rays using alpha compositing [S1, S2]. It solves the problem of precisely extracting geometric surfaces from implicit representations by replacing the standard NeRF density field with an SDF-based weighting scheme [S2]. It differs from standard NeRF rendering by using a trainable S-density function to concentrate weight at the zero-level set of the SDF, ensuring the surface contributes most to the image [S2], and adapts this theory to SRDF by treating surface normals as irrelevant to the value distribution [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Ray origin $o$ and direction $v$.
+*   SDF field $f(x)$ or SRDF field.
+*   Color field $c(p(t), v)$ sampled at points along the ray.
+*   Number of sampled points $M$ (sum of coarse $N_{coarse}$ and fine $N_{fine}$ samples) [S1].
+*   Trainable hyperparameter $b$ [S2].
+
+**Outputs:**
+*   Rendered color $\hat{C}$ [S1].
+*   Rendered depth $\hat{D}$ [S1].
+
+### Data Structures
+*   **Ray Samples:** A sequence of $M$ points $t_j$ along the ray $p(t) = o + tv$, sorted from near to far [S1].
+*   **SDF Values:** $f(p(t_j))$ for each sample point [S2].
+*   **Color Values:** $\hat{c}_j$ for each sample point [S1].
+
+### Formulas and Definitions
+
+**1. S-Density Function**
+The S-density $\phi_b(f(x))$ is defined as [S2]:
+$$
+\phi_b(f(x)) = \frac{b e^{-b f(x)}}{(1 + e^{-b f(x)})^2}
+$$
+where $b$ is a trainable hyperparameter that gradually increases to a large number as network training converges [S2].
+
+**2. Surface Extraction**
+The surface $S$ is extracted by finding the zero-level set of the SDF [S2]:
+$$
+S = \{x \in \mathbb{R}^3 \mid f(x) = 0\}
+$$
+
+**3. Continuous Volume Rendering**
+The continuous color $C(o, v)$ is accumulated along the ray [S2]:
+$$
+C(o, v) = \int_0^{+\infty} w(t)c(p(t), v)dt
+$$
+where the weight $w(t)$ is rebuilt using the S-density to guarantee surface contribution [S2]:
+$$
+w(t) = \frac{\phi_s(f(p(t)))}{\int_0^{+\infty} \phi_s(f(p(u)))du}
+$$
+Here, $\phi_s$ is the S-density function used for weighting [S1, S2].
+
+**4. Discrete Opacity**
+The discrete opacity $\alpha_j$ at sample $j$ is defined by integrating the opaque density $\rho(t)$ over the interval $[t_j, t_{j+1}]$ [S1]:
+$$
+\alpha_j = 1 - \exp\left(-\int_{t_j}^{t_{j+1}} \rho(t) dt\right)
+$$
+For SRDF, $\rho(t)$ uses the SRDF value instead of SDF, but the distribution is treated as equivalent to SDF where surfaces are perpendicular to the ray [S1].
+
+**5. Discrete Accumulative Transmittance**
+$$
+T_j = \prod_{k=1}^{j-1} (1 - \alpha_k)
+$$
+with $T_1 = 1$ [S1].
+
+**6. Rendered Color**
+$$
+\hat{C} = \sum_{j=1}^{M} T_j \alpha_j \hat{c}_j
+$$
+where $\hat{c}_j$ is the color at sample $j$ [S1].
+
+**7. Rendered Depth**
+$$
+\hat{D} = \sum_{j=1}^{M} T_j \alpha_j t_j
+$$
+where $t_j$ is the distance of sample $j$ from the origin [S1].
+
+### Parameters
+*   $b$: Trainable hyperparameter for S-density sharpness [S2].
+*   $M$: Total number of sampled points ($N_{coarse} + N_{fine}$) [S1]. Typical values: $N_{coarse}=64, N_{fine}=64$ [S1].
+*   $\delta$: Threshold for image space consistency in geometric consistency filtering. Default: 1 [S1].
+*   $\varepsilon$: Threshold for depth consistency in geometric consistency filtering. Default: 0.01 [S1].
+
+### Steps
+1.  **Emit Ray:** Define ray $p(t) = o + tv$ from pixel origin $o$ and direction $v$ [S2].
+2.  **Sample Points:** Uniformly sample $N_{coarse}$ points and importance sample $N_{fine}$ points to get $M$ total points $t_j$ along the ray [S1].
+3.  **Evaluate SDF/SRDF:** Query the neural network for $f(p(t_j))$ at each sample point [S2].
+4.  **Compute S-Density:** Calculate $\phi_b(f(p(t_j)))$ using the current value of $b$ [S2].
+5.  **Compute Opacity:** Calculate $\alpha_j$ based on the integral of the density derived from $\phi_b$ [S1, S2]. Note: For SRDF, the method assumes the distribution of SRDF values along the ray is the same as SDF with surfaces perpendicular to the ray, allowing the use of the same SDF volume rendering theory [S1].
+6.  **Compute Transmittance:** Calculate $T_j$ using the product of $(1-\alpha_k)$ for previous samples [S1].
+7.  **Accumulate Color:** Compute $\hat{C} = \sum_{j=1}^{M} T_j \alpha_j \hat{c}_j$ [S1].
+8.  **Accumulate Depth:** Compute $\hat{D} = \sum_{j=1}^{M} T_j \alpha_j t_j$ [S1].
+
+### Edge Cases and Pitfalls
+*   **SRDF vs SDF Normals:** For SRDF, surface normal vectors are set to be random at intersection points because the distribution of SRDF is irrelevant to the surface normal. For SDF, surfaces are assumed perpendicular to the ray. The method adopts SDF rendering for SRDF based on the equivalence of their distributions under this assumption [S1].
+*   **Hyperparameter $b$:** $b$ must be trained and gradually increased to ensure the surface contribution is sharp and accurate [S2].
+*   **Geometric Consistency:** When using multi-view aggregation, depth estimates should be filtered using geometric consistency with thresholds $\delta=1$ and $\varepsilon=0.01$ to reject unreliable views [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def neus_sdf_volume_rendering(ray_origin, ray_direction, sdf_network, color_network, b, num_coarse=64, num_fine=64):
+    """
+    Renders color and depth using NeuS SDF volume rendering.
+    
+    Args:
+        ray_origin: 3D vector, origin of the ray.
+        ray_direction: 3D vector, direction of the ray.
+        sdf_network: Function returning SDF/SRDF value f(x) for point x.
+        color_network: Function returning color c(x, v) for point x and direction v.
+        b: Trainable hyperparameter for S-density.
+        num_coarse: Number of coarse samples.
+        num_fine: Number of fine samples.
+        
+    Returns:
+        rendered_color: Scalar, accumulated color.
+        rendered_depth: Scalar, accumulated depth.
+    """
+    
+    # 1. Sample points along the ray
+    # Hierarchical sampling: uniform coarse, then importance fine
+    t_coarse = uniform_sample(num_coarse, t_min=0.0, t_max=ray_length)
+    # Importance sampling based on coarse SDF values would go here [S1]
+    t_fine = importance_sample(num_fine, sdf_network, ray_origin, ray_direction, t_coarse)
+    
+    # Combine and sort
+    t_samples = sort(concatenate(t_coarse, t_fine))
+    M = len(t_samples)
+    
+    # 2. Evaluate SDF and Color at each sample
+    points = [ray_origin + t * ray_direction for t in t_samples]
+    sdf_values = [sdf_network(p) for p in points]
+    colors = [color_network(p, ray_direction) for p in points]
+    
+    # 3. Compute S-Density and Opacity
+    # S-density: phi_b(f(x)) = b * exp(-b * f(x)) / (1 + exp(-b * f(x)))^2
+    s_densities = []
+    for f_val in sdf_values:
+        exp_neg_bf = exp(-b * f_val)
+        phi = (b * exp_neg_bf) / ((1 + exp_neg_bf) ** 2)
+        s_densities.append(phi)
+        
+    # Compute opacity alpha_j
+    # alpha_j = 1 - exp(- integral_{t_j}^{t_{j+1}} rho(t) dt)
+    # rho(t) is derived from S-density. 
+    # Note: In discrete implementation, often alpha_j is approximated directly from phi or integrated density.
+    # Based on NeuS [S2], the weight w(t) is rebuilt by S-density.
+    # The discrete opacity formula [S1] uses opaque density rho(t).
+    # We approximate the integral of rho(t) over the interval.
+    # A common approximation in NeRF/Neus is: alpha_j = 1 - exp(-sigma_j * delta_j)
+    # where sigma_j is the density at t_j and delta_j is the distance to next point.
+    # Here, sigma_j is related to phi_b.
+    
+    alphas = []
+    for j in range(M):
+        t_j = t_samples[j]
+        t_next = t_samples[j+1] if j < M-1 else t_j + 0.01 # Handle last point
+        delta_t = t_next - t_j
+        
+        # Approximate integral of rho(t) as phi_b * delta_t
+        # This is a simplification; exact integration depends on the specific density formulation
+        # NeuS uses the S-density directly in the weight formulation for continuous rendering,
+        # but discrete alpha compositing requires opacity.
+        # We use the S-density as the density proxy.
+        rho_integral = s_densities[j] * delta_t
+        alpha = 1.0 - exp(-rho_integral)
+        alphas.append(alpha)
+        
+    # 4. Compute Transmittance
+    transmittances = [1.0] * M
+    for j in range(1, M):
+        transmittances[j] = transmittances[j-1] * (1.0 - alphas[j-1])
+        
+    # 5. Accumulate Color and Depth
+    rendered_color = 0.0
+    rendered_depth = 0.0
+    
+    for j in range(M):
+        weight = transmittances[j] * alphas[j]
+        rendered_color += weight * colors[j]
+        rendered_depth += weight * t_samples[j]
+        
+    return rendered_color, rendered_depth
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of samples $M$ per ray [S1].
+*   **Memory Complexity:** Linear in $M$ for storing sample values [S1].
+*   **Performance:** Depends on the resolution of the global feature volume and the number of samples. In experiments, $N_{coarse}=64, N_{fine}=64$ were used [S1].
+*   **Strengths:** Precisely extracts geometric surfaces via the zero-level set of the SDF [S2]. Handles SRDF by leveraging the equivalence of value distributions with perpendicular SDF surfaces [S1].
+*   **Limitations:** Not suitable for very large-scale scenes due to the low resolution of the global feature volume [S1]. Requires careful tuning of the hyperparameter $b$ [S2].
+
+## Background
+*   **Origin:** The method is based on the NeuS paper [49] (Sitzmann et al., or similar, cited as [49] in S1, [38] in S2) which introduced SDF-based volume rendering for NeRF [S1, S2].
+*   **Development:** It was adapted for Signed Ray Distance Functions (SRDF) in VolRecon [S1] to handle multi-view reconstruction where surface normals are not explicitly defined or reliable. It is also used in Instant-NSR [S2] for accelerated training with Hash encoding.
+*   **Usage:** Used in multi-view stereo reconstruction (DTU, ETH3D datasets) for high-fidelity 3D reconstruction [S1, S2].
+
+## Sources
+[S1] VolRecon: Volume Rendering of Signed Ray Distance Functions for Generalizable Multi-View Reconstruction, https://doi.org/10.1109/cvpr52729.2023.01601, fetched 2026-10-26
+[S2] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27

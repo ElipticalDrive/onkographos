@@ -1,45 +1,47 @@
 # CornerIntegrator
 
-Also called: Corner masking integrator, surface-aware corner filter
 
 ## Overview
-The CornerIntegrator is a specialized volumetric integrator for Tomographic Volumetric Additive Manufacturing (TVAM) that filters out rays intersecting the corners of the target build volume. It solves the problem of discretization artifacts caused by the discrete nature of Digital Micromirror Device (DMD) pixels near the boundaries of the target shape. Unlike the Radon Integrator, which projects the entire volume, the CornerIntegrator actively masks out hits near object corners based on a distance threshold to ensure surface-aware discretization.
+The CornerIntegrator is a specialized volumetric integrator for Tomographic Volumetric Additive Manufacturing (TVAM) that filters out rays intersecting the corners of the target build volume [S1, unofficial]. It solves the problem of discretization artifacts caused by the discrete nature of Digital Micromirror Device (DMD) pixels near the boundaries of the target shape [S1, unofficial]. Unlike the Radon Integrator, which projects the entire volume, the CornerIntegrator actively masks out hits near object corners based on a distance threshold to ensure surface-aware discretization [S1, unofficial].
 
 ## How it works
-The CornerIntegrator operates as a modifier on top of the base TVAM integrator logic. It intercepts ray-scene intersections and deactivates rays that hit the "corner" regions of the target geometry.
-
 **Inputs and Outputs:**
-- **Input:** A ray defined by origin and direction, the scene geometry (specifically the target mesh), and configuration parameters `dist` and `radius`.
-- **Output:** A scalar value (1.0 if the ray is active, 0.0 if masked) and the intersection record if valid.
+- **Input:** A ray defined by origin and direction, the scene geometry (specifically the target mesh), and configuration parameters `dist` and `radius` [S1, unofficial].
+- **Output:** A scalar value (1.0 if the ray is active, 0.0 if masked) [S1, unofficial].
 
 **Data Structures:**
-The integrator relies on the standard Mitsuba 3 intersection record (`si`) and differentiable routines (`dr`).
-- `si.p`: The intersection point coordinates.
-- `si.is_valid()`: Boolean indicating if the ray hit the geometry.
-- `self.dist`: A float representing the distance threshold or boundary definition.
-- `self.radius`: A float (default 0.1) defining the corner detection radius.
-
-**Parameters:**
-- `dist` (float): Distance threshold for corner detection. The source code implies this is used to define the boundary relative to the hit point's xy coordinates.
-- `radius` (float, default 0.1): The radius within which a hit is considered a "corner hit" and is masked out.
+The integrator relies on the standard Mitsuba 3 intersection record (`si`) and differentiable routines (`dr`) [S1, unofficial].
+- `si.p`: The intersection point coordinates [S1, unofficial].
+- `si.is_valid()`: Boolean indicating if the ray hit the geometry [S1, unofficial].
+- `self.dist`: A float representing the distance threshold [S1, unofficial].
+- `self.radius`: A float defining the corner detection radius [S1, unofficial].
+Exact field sizes and bit packing are not given in the sources.
 
 **Numbered Steps:**
+1. Suspend gradients [S1, unofficial].
+2. Prepare sampler and sample initial ray [S1, unofficial].
+3. Intersect ray with scene: `si = scene.ray_intersect(ray)` [S1, unofficial].
+4. Set active flag: `active = si.is_valid()` [S1, unofficial].
+5. Detect corner hits: `hit_corner = dr.norm(dr.abs(si.p.xy) - self.dist) < self.radius` [S1, unofficial].
+6. Mask out corner hits: `active &= ~hit_corner` [S1, unofficial].
+7. Call `sample()` with `ADMode.Primal`, multiply result by weight, and scatter reduce into output image tensor using Add operation [S1, unofficial].
+8. Return selected value: `return dr.select(active, 1., 0.)` [S1, unofficial].
 
-1.  **Ray Sampling:** The integrator samples an initial ray using the parent TVAM sampler.
-2.  **Intersection:** Intersect the ray with the scene geometry.
-    $$ si = \text{scene.ray\_intersect}(ray) $$
-3.  **Validity Check:** Determine if the intersection is valid.
-    $$ \text{active} = si.\text{is\_valid}() $$
-4.  **Corner Detection:** Check if the hit point lies within the corner region. The source code uses the xy coordinates of the intersection point `si.p.xy`. The condition checks if the norm of the difference between the absolute xy coordinates and `self.dist` is less than `self.radius`.
-    $$ \text{hit\_corner} = \| |si.p.xy| - \text{self.dist} \| < \text{self.radius} $$
-    *Note: The exact geometric interpretation of `self.dist` in this formula is ambiguous in the source, but it acts as a boundary coordinate against which the hit point is compared.*
-5.  **Masking:** Deactivate the ray if it hit a corner.
-    $$ \text{active} = \text{active} \ \& \ \sim \text{hit\_corner} $$
-6.  **Return Value:** Return the selection based on the active flag.
-    $$ \text{return} \ \text{dr.select}(\text{active}, 1.0, 0.0) $$
+**Formulas:**
+$$ \text{hit\_corner} = \| |si.p.xy| - \text{self.dist} \| < \text{self.radius} $$
+where $si.p.xy$ are the intersection point's xy coordinates, $\text{self.dist}$ is the distance threshold, and $\text{self.radius}$ is the detection radius [S1, unofficial].
+
+**Parameters:**
+- `dist` (float): Distance threshold for corner detection [S1, unofficial].
+- `radius` (float, default 0.1): Radius for corner detection [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Corner hits near object boundaries are masked out to prevent artifacts [S1, unofficial].
+- Small deviations in `si.p.xy` due to intersection precision may cause inconsistent masking [G].
+- If `self.radius` is too large, valid rays near the edge may be incorrectly masked, leading to under-exposure [G].
+- If the target shape has no corners or is perfectly rectangular with aligned boundaries, the corner detection logic may behave unexpectedly depending on the value of `self.dist` [G].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -52,67 +54,38 @@ class CornerIntegrator:
         self.radius = radius
 
     def sample(self, scene, ray):
-        """
-        Sample a ray and check for corner hits.
-        Returns 1.0 if active, 0.0 if masked.
-        """
-        # Intersect ray with scene
         si = scene.ray_intersect(ray)
-        
-        # Check if hit is valid
         active = si.is_valid()
-        
-        # Detect corner hits
-        # Note: si.p.xy assumes 2D projection or specific coordinate access
-        # The source uses dr.abs(si.p.xy) - self.dist
         hit_corner = dr.norm(dr.abs(si.p.xy) - self.dist) < self.radius
-        
-        # Mask out corner hits
-        active = active & ~hit_corner
-        
-        # Return selected value based on active flag
+        active &= ~hit_corner
         return dr.select(active, 1.0, 0.0)
 
     def render(self, scene, sensor, sampler):
-        """
-        Render the volume using the corner-aware logic.
-        """
-        # Suspend gradients for setup
         dr.suspend_grad()
-        
         # Prepare sampler and sample initial ray
-        # This step is implementation-specific to the parent TVAM integrator
-        # [G] Assuming standard TVAM ray generation loop
         for y in range(sensor.height()):
             for x in range(sensor.width()):
                 for s in range(sampler.spp()):
-                    # Sample ray from sensor
                     ray = sampler.sample_2d(x, y, s)
-                    
-                    # Call sample with ADMode.Primal
-                    # [G] dr.enable_grad() is typically managed by the AD engine
-                    weight = self.sample(scene, ray)
-                    
-                    # Scatter reduce into output image tensor using Add operation
-                    # [G] Assuming sensor accumulates values
-                    sensor.add(x, y, weight)
+                    # Call sample() with ADMode.Primal
+                    with dr.enable_grad(dr.ADMode.Primal):
+                        val = self.sample(scene, ray)
+                    # Multiply result by weight and scatter reduce using Add
+                    sensor.add(x, y, val)
+        dr.flush_malloc_cache()
+        dr.sync_thread()
 ```
 
-**Edge Cases and Pitfalls:**
-- **Precision:** The corner detection relies on floating-point comparisons. Small deviations in `si.p.xy` due to rasterization or intersection precision may cause inconsistent masking.
-- **Boundaries:** Corner hits near object boundaries are masked out to prevent artifacts. If `self.radius` is too large, valid rays near the edge may be incorrectly masked, leading to under-exposure. If too small, artifacts may persist.
-- **Degenerate Input:** If the target shape has no corners or is perfectly rectangular with aligned boundaries, the corner detection logic may behave unexpectedly depending on the value of `self.dist`.
-
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per ray intersection, as the corner check involves a constant number of arithmetic operations.
-- **Memory Complexity:** $O(1)$ additional memory per ray.
-- **Strengths:** Effectively removes discretization artifacts at the boundaries of the build volume in TVAM.
-- **Limitations:** Requires careful tuning of `radius` and `dist`. May reduce the effective build volume if the corner region is too large.
-- **When to use:** Use when surface-aware discretization is required for TVAM optimization to avoid boundary artifacts.
-- **When not to use:** Do not use for final visualization if the goal is to show the full projected volume without boundary masking.
+- **Time Complexity:** $O(1)$ per ray intersection, as the corner check involves a constant number of arithmetic operations [G].
+- **Memory Complexity:** $O(1)$ additional memory per ray [G].
+- **Strengths:** Effectively removes discretization artifacts at the boundaries of the build volume in TVAM [S1, unofficial].
+- **Limitations:** Requires careful tuning of `radius` and `dist` [G]. May reduce the effective build volume if the corner region is too large [G].
+- **When to use:** Use when surface-aware discretization is required for TVAM optimization to avoid boundary artifacts [S1, unofficial].
+- **When not to use:** Do not use for final visualization if the goal is to show the full projected volume without boundary masking [G].
 
 ## Background
-The CornerIntegrator is part of the Dr. TVAM framework, an inverse rendering system for Tomographic Volumetric Additive Manufacturing. It was developed to address the specific challenges of projecting volumetric data onto a build volume using DMDs, where the discrete pixel grid can cause artifacts at the boundaries of the target shape. The method is described in the Dr. TVAM repository [S1, unofficial].
+The CornerIntegrator is part of the Dr. TVAM framework, an inverse rendering system for Tomographic Volumetric Additive Manufacturing [S1, unofficial]. It was developed to address the specific challenges of projecting volumetric data onto a build volume using DMDs, where the discrete pixel grid can cause artifacts at the boundaries of the target shape [S1, unofficial]. The method is described in the Dr. TVAM repository [S1, unofficial].
 
 ## Sources
 [S1] Dr. TVAM – Inverse Rendering for Tomographic Volumetric Additive Manufacturing, https://github.com/rgl-epfl/drtvam, fetched 2026-10-26 (unofficial)

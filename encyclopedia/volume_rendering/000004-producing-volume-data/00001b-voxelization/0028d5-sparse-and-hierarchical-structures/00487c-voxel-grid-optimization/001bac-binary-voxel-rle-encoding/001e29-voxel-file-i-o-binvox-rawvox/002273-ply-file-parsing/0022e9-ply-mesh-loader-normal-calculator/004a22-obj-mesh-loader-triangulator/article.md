@@ -1,0 +1,118 @@
+# OBJ Mesh Loader & Triangulator
+
+Also called: OBJ Mesh Loading and Triangulation, tinyobj OBJ Loader
+
+## Overview
+Reads an Wavefront OBJ file, extracts vertex coordinates and face indices, and ensures all polygons are triangulated. It differs from its parent [PLY Mesh Loader & Normal Calculator](2859-ply-mesh-loader-normal-calculator.md) by parsing a different file format (ASCII text with specific token-based structure) and explicitly handling polygon-to-triangle conversion as a core requirement for volume rendering pipelines.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Path to an `.obj` file.
+- Output: A list of 3D vertex coordinates (floats) and a list of triangle faces (indices).
+
+**Data Structures:**
+- `vertices`: List of tuples or arrays `(x, y, z)`.
+- `faces`: List of tuples or arrays `(i, j, k)` representing triangle indices.
+
+**Steps:**
+1. Initialize a reader configuration object. Set the `triangulate` flag to `true` to automatically convert quads and N-gons into triangles [S1, unofficial].
+2. Instantiate the OBJ reader.
+3. Call the parse method with the file path and configuration.
+4. Extract the vertex positions from the reader's internal storage.
+5. Extract the face indices from the reader's internal storage.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Using tinyobj library as per [S1, unofficial]
+import tinyobj
+
+def load_obj(filepath):
+    # 1. Configure reader to triangulate
+    config = tinyobj.ObjReaderConfig()
+    config.triangulate = True
+    
+    # 2. Instantiate reader
+    reader = tinyobj.ObjReader()
+    
+    # 3. Parse file
+    # Note: tinyobj::ObjReader::ParseFromFile returns a boolean success status
+    success = reader.ParseFromFile(filepath, config)
+    
+    if not success:
+        raise ValueError(f"Failed to parse OBJ file: {filepath}")
+        
+    # 4. Extract vertices
+    # tinyobj stores vertices in a list of (x, y, z) floats
+    vertices = []
+    for v in reader.GetVertices():
+        vertices.append((v[0], v[1], v[2]))
+        
+    # 5. Extract faces
+    # tinyobj stores faces as a list of indices. 
+    # With triangulate=True, all faces are guaranteed to be triangles (3 indices).
+    faces = []
+    for f in reader.GetFaces():
+        # f is typically a list of indices [i, j, k]
+        faces.append((f[0], f[1], f[2]))
+        
+    return vertices, faces
+```
+
+**Parameters:**
+- `triangulate`: Boolean. If `true`, polygons are split into triangles. Default is often `false` in generic parsers, but `true` is required for this method [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-manifold geometry:** OBJ files may contain non-manifold edges or vertices. The loader does not inherently fix topology; it only ensures triangulation.
+- **Indexing:** OBJ files use 1-based indexing. The `tinyobj` library typically returns 0-based indices internally or handles the conversion. If using raw parsing, indices must be adjusted by subtracting 1.
+- **Missing normals/texcoords:** The loader extracts positions and faces. Normals and texture coordinates are optional in OBJ and may not be present.
+
+## Subtopics
+
+### OBJ Mesh Export
+Writes a 3D mesh to an OBJ file, supporting optional per-vertex RGB colors. It outputs vertex positions and triangle faces in the standard OBJ format [S2, unofficial].
+
+**Steps:**
+1. Open the file for writing.
+2. Iterate through each vertex. If RGB colors are not provided, write `v x y z\n`. If colors are provided, write `v x y z r g b\n` [S2, unofficial].
+3. Iterate through each triangle face. Write `f i+1 j+1 k+1\n` using 1-based indexing [S2, unofficial].
+4. Close the file.
+
+**Layout:**
+- Vertex line: `v` followed by 3 floats (position) and optionally 3 floats (RGB color) [S2, unofficial].
+- Face line: `f` followed by 3 integers (1-indexed vertex indices) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def export_obj(filepath, vertices, triangles, vert_rgb=None):
+    with open(filepath, 'w') as file:
+        # Write vertices
+        for v in vertices:
+            if vert_rgb is None:
+                file.write("v %.4f %.4f %.4f\n" % (v[0], v[1], v[2]))
+            else:
+                c = vert_rgb[vertices.index(v)] # Assuming vert_rgb aligns with vertices
+                file.write("v %.4f %.4f %.4f %.4f %.4f %.4f\n" % (v[0], v[1], v[2], c[0], c[1], c[2]))
+        
+        # Write faces
+        for f in triangles:
+            # Convert 0-based indices to 1-based
+            f_plus = [i + 1 for i in f]
+            file.write("f %d %d %d\n" % (f_plus[0], f_plus[1], f_plus[2]))
+```
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of vertices and faces $O(V + F)$ for parsing. Triangulation adds overhead proportional to the number of non-triangle faces.
+- **Memory Complexity:** Linear $O(V + F)$ to store the mesh data.
+- **Strengths:** Simple ASCII format, human-readable, widely supported. Automatic triangulation simplifies downstream volume rendering.
+- **Limitations:** No support for complex geometry types (nurbs, etc.) beyond polygons. No compression. Parsing speed depends on the implementation; `tinyobj` is efficient but not the fastest possible for massive files.
+
+## Background
+Originated from the Wavefront Technologies .obj file format, widely used in 3D modeling. The `tinyobj` library is a popular C++ implementation used in various graphics projects, including the Mesh2Volume pipeline [S1, unofficial]. The export functionality is found in various Python-based rendering pipelines like pixel-nerf [S2, unofficial].
+
+## Sources
+[S1] zzilch/Mesh2Volume, https://github.com/zzilch/Mesh2Volume, fetched 2026-10-26 (unofficial)
+[S2] sxyu/pixel-nerf, https://github.com/sxyu/pixel-nerf, fetched 2026-10-26 (unofficial)

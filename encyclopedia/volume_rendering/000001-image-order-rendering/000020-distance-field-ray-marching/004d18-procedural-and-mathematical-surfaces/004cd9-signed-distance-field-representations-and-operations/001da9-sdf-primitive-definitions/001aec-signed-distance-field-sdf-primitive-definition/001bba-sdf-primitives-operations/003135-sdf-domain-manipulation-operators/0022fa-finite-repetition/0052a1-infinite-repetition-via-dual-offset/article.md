@@ -1,0 +1,149 @@
+# Infinite Repetition via Dual Offset
+
+Also called: Hexagonal Honeycomb Repetition, Hexagonal Honeycomb Repetition via Dual Offset Repetition, OR-Composite Honeycomb, Two-Cell Honeycomb
+
+## Overview
+Infinite Repetition via Dual Offset creates a perfect, interlocking hexagonal honeycomb pattern by combining two separate rectangular repetition grids that are offset from each other. Unlike the skew method, which applies a single coordinate transformation, this method uses a boolean OR operation (minimum of distances) on two distinct distance functions to ensure that the "interlocking" parts of adjacent hexagons are correctly rendered without clipping. It is computationally more expensive than skew-based approaches but allows for different shape functions or properties (such as color) per column.
+
+## How it works
+**Inputs:**
+- Point $p$ in 3D space (or 2D for the tiling plane).
+- Side length $s$ of the regular hexagon.
+
+**Outputs:**
+- Signed distance $d$ to the nearest hexagon boundary.
+
+**Data Structures:**
+- No complex structures required. The method relies on standard vector arithmetic and two calls to a rectangular repetition function.
+
+**Steps:**
+1.  **Define the two repetition patterns:**
+    The honeycomb is formed by two interleaved rectangular grids. Let the vertical repetition step be $h_y$ and the horizontal step be $h_x$.
+    For a regular hexagon with side length $s$:
+    -   The horizontal period is $h_x = 2s$.
+    -   The vertical period is $h_y = 2\sqrt{3}s$. This is derived from the height of an equilateral triangle with side $s$ ($\frac{\sqrt{3}}{2}s$) multiplied by 4, as stated in the source: "The vertical repetition width is 4 times the height of an equilateral triangle with side length 1" [S1, unofficial].
+    
+    The two grids are offset. Typically, one grid is aligned with the origin, and the other is shifted by half the horizontal period and half the vertical period, or specifically arranged such that their cells interlock. A common implementation places the centers of the two rectangular cells at:
+    -   Grid 1: $(0, 0)$
+    -   Grid 2: $(s, \frac{\sqrt{3}}{2}s)$ or equivalent offset that ensures the hexagons from Grid 1 and Grid 2 touch at their edges to form the honeycomb. The source notes that focusing on one grid (e.g., blue circles in the reference image) reveals a simple xy-axis repetition [S1, unofficial].
+
+2.  **Calculate the distance function for the first pattern ($d_1$):**
+    Apply the rectangular repetition operator to point $p$ using periods $(h_x, h_y)$ centered at the origin. Let $p_1$ be the wrapped point. Calculate the signed distance from $p_1$ to the hexagon shape defined within this cell. Let this be $d_1$.
+
+3.  **Calculate the distance function for the second pattern ($d_2$):**
+    Apply the rectangular repetition operator to point $p$ using the same periods $(h_x, h_y)$ but with the offset center for the second grid. Let $p_2$ be the wrapped point relative to this second grid's origin. Calculate the signed distance from $p_2$ to the hexagon shape. Let this be $d_2$.
+
+4.  **Combine using minimum operation:**
+    The final distance is the minimum of the two distances:
+    $$ d = \min(d_1, d_2) $$
+    This corresponds to the boolean OR operation for signed distance fields, ensuring that if a point is inside or near a hexagon from either grid, the distance reflects the nearest boundary [S1, unofficial].
+
+**Parameters:**
+-   $s$: Side length of the hexagon. Typical value: $1.0$.
+-   $h_x = 2s$.
+-   $h_y = 2\sqrt{3}s \approx 3.464s$.
+
+**Edge Cases and Pitfalls:**
+-   **Clipping in Single-Grid Approaches:** If one attempts to create a honeycomb by simply shifting every other row by half the cell width (brick-like layout) using a *single* distance function per cell, the interlocking parts of tightly packed hexagons will extend outside the defined rectangular repetition cell. Since a single distance function defines the shape within one cell, these protruding parts are clipped/cut off at the cell boundaries [S1, unofficial]. The Dual Offset method avoids this by ensuring the "missing" parts of one cell are covered by the adjacent cell from the other grid.
+-   **Precision:** Standard floating-point precision is sufficient for typical scene scales.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def repeat_rect(p, period_x, period_y):
+    """
+    Wraps point p into the fundamental domain of a rectangular grid.
+    Returns the point relative to the center of the cell.
+    """
+    # Wrap coordinates to the period
+    x = p.x % period_x
+    y = p.y % period_y
+    
+    # Center the cell around (0,0)
+    if x > period_x / 2:
+        x -= period_x
+    if y > period_y / 2:
+        y -= period_y
+        
+    return Vector2(x, y)
+
+def hexagon_distance(p):
+    """
+    Signed distance to a regular hexagon centered at origin with side length s.
+    Assumes p is already wrapped to the fundamental domain.
+    """
+    s = 1.0 # Side length
+    # Distance to a regular hexagon can be computed by projecting to the nearest edge
+    # For a hexagon with flat top/bottom or pointy top/bottom, specific formulas apply.
+    # Assuming pointy-top hexagon for standard honeycomb alignment.
+    # A robust SDF for a regular hexagon:
+    # q = abs(p)
+    # if q.x > q.y:
+    #     d = dot(q, Vector2(0.5, sqrt(3)/2)) - s * sqrt(3)/2
+    # else:
+    #     d = q.y - s
+    # This is a simplified approximation; exact SDF requires careful handling of corners.
+    # For the purpose of this article, we assume a generic hexagon SDF function exists.
+    return hexagon_sdf_generic(p, s)
+
+def hexagon_sdf_generic(p, s):
+    """
+    Placeholder for the specific SDF of a regular hexagon.
+    In practice, this is a standard GLSL/Shader function.
+    """
+    # Example for pointy-top hexagon with circumradius R = s
+    # Actually, side length s implies circumradius R = s.
+    # Distance to hexagon with circumradius R:
+    # q = abs(p)
+    # if q.x > q.y:
+    #     d = dot(q, Vector2(0.5, sqrt(3)/2)) - R * sqrt(3)/2
+    # else:
+    #     d = q.y - R
+    # Note: The source does not provide the internal hexagon SDF formula, only the repetition logic.
+    # [G] Standard hexagon SDF implementation required here.
+    pass
+
+def infinite_repetition_dual_offset(p, side_length):
+    """
+    Computes the distance to an infinite honeycomb pattern using dual offset repetition.
+    """
+    s = side_length
+    h_x = 2 * s
+    h_y = 2 * math.sqrt(3) * s
+    
+    # Grid 1: Centered at (0,0)
+    p1 = repeat_rect(p, h_x, h_y)
+    d1 = hexagon_distance(p1)
+    
+    # Grid 2: Offset by (s, sqrt(3)/2 * s) to interlock
+    # The offset ensures that the hexagons from Grid 2 fill the gaps of Grid 1
+    offset_x = s
+    offset_y = math.sqrt(3) / 2 * s
+    
+    p2 = repeat_rect(p - Vector2(offset_x, offset_y), h_x, h_y)
+    d2 = hexagon_distance(p2)
+    
+    return min(d1, d2)
+```
+
+## Subtopics
+
+### Hexagonal Honeycomb Repetition via Offset Rows
+A variant that creates a honeycomb pattern by shifting every other row of a rectangular grid by half the cell width, creating a brick-like layout. It is simpler to conceptualize but suffers from a critical pitfall: when using convex shapes like hexagons that are tightly packed, the 'interlocking' parts of the shape may extend outside the defined rectangular repetition cell. Since a single distance function defines the shape within one cell, these protruding parts are clipped/cut off at the cell boundaries, resulting in incorrect geometry [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Requires calculating two distance functions and combining them with a minimum operation. This is approximately twice the cost of a single repetition pattern.
+-   **Memory Complexity:** Minimal additional memory; only requires storing the offset parameters.
+-   **Strengths:** Produces a perfect, interlocking honeycomb without clipping artifacts. Allows different shape functions or properties (e.g., color, material) to be applied to each column/grid independently.
+-   **Limitations:** More computationally expensive than the skew method. Requires careful tuning of the offset to ensure proper interlocking.
+-   **When to use:** When perfect interlocking is required and different properties per column are desired.
+-   **When not to use:** When performance is critical and the skew method suffices for the visual requirement.
+
+## Background
+Originated from practical shader art and procedural geometry techniques, specifically discussed in the context of Sphere Tracing and domain operations. The method is highlighted as a solution to the clipping issues inherent in simple row-offsetting methods for hexagonal tiling. It leverages the property that the union of two offset rectangular grids can form a hexagonal lattice.
+
+## Sources
+[S1] SphereTracing:領域操作関数]ハニカム構造, https://qiita.com/keim_at_si/items/856f995418192118bedc, fetched 2026-10-26 (unofficial)

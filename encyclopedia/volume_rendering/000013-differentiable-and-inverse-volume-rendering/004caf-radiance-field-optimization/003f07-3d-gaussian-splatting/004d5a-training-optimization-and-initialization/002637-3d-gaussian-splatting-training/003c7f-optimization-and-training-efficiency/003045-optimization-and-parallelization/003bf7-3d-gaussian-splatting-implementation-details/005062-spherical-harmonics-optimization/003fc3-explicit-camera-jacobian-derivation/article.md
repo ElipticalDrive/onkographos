@@ -3,107 +3,64 @@
 Also called: Analytical Jacobians for 3DGS, Camera Pose Jacobian Derivation (Lie Group), Lie Algebra Jacobian for 3DGS
 
 ## Overview
-This method provides analytical derivatives of the 3D Gaussian Splatting (3DGS) rendering pipeline with respect to the camera pose $T_{CW} \in SE(3)$, enabling efficient gradient-based camera tracking in Simultaneous Localization and Mapping (SLAM) systems [S1, unofficial]. Unlike automatic differentiation, which incurs significant overhead in performance-critical rasterization loops, this approach computes minimal Jacobians on the Lie group manifold, ensuring the derivative dimensionality matches the six degrees of freedom of the camera [S1, unofficial]. It distinguishes itself from prior ray-intersection-based pose optimization methods by being applicable to the dense, EWA-splatting-based rasterization used in standard 3DGS [S1, unofficial].
+This method derives analytical Jacobians of the SE(3) camera pose with respect to 3D Gaussian Splatting (3DGS) primitives to enable efficient, differentiable camera tracking without the overhead of automatic differentiation [S1, unofficial]. It solves the problem of computationally expensive gradient computation in SLAM systems by providing minimal parameterization on the Lie group, ensuring the Jacobian dimensionality matches the degrees of freedom [S1, unofficial]. Unlike prior ray-intersection methods that assume fewer Gaussians, this approach is specifically tailored for EWA splatting and 3DGS [S1, unofficial].
 
 ## How it works
-The method computes the gradient of the rendered image (or depth) with respect to the camera pose $T_{CW}$ by applying the chain rule through the Gaussian mean $\mu_C$ and covariance $\Sigma_I$ in camera coordinates. It utilizes Lie algebra to derive minimal parameterizations, avoiding redundant computations associated with non-minimal representations like rotation matrices [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** Camera pose $T_{CW} \in SE(3)$, Gaussian mean in world coordinates $\mu_W$, Gaussian covariance in world coordinates $\Sigma_W$, projection matrix $P$, and rotation component $W$ of the camera pose.
+*   **Output:** Jacobians $\frac{\partial \mu_I}{\partial T_{CW}}$ and $\frac{\partial \Sigma_I}{\partial T_{CW}}$ required for gradient descent optimization of the camera pose.
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   $T_{CW} \in SE(3)$: The current camera-to-world pose, represented as a $4 \times 4$ transformation matrix.
-    *   $\mu_W \in \mathbb{R}^3$: The Gaussian mean in world coordinates.
-    *   $\Sigma_W \in \mathbb{R}^{3 \times 3}$: The Gaussian covariance in world coordinates.
-    *   $\mathcal{G}$: The set of 3D Gaussians to be rendered.
-    *   $\bar{I}$: The observed image (for photometric tracking).
-    *   $\bar{D}$: The observed depth map (for geometric tracking).
-*   **Outputs**:
-    *   $\frac{\partial \text{Loss}}{\partial T_{CW}}$: The $1 \times 6$ gradient vector in the Lie algebra $se(3)$ space, corresponding to the 6 degrees of freedom (3 translation, 3 rotation).
+**Data Structures:**
+*   $T_{CW}$: $4 \times 4$ homogeneous transformation matrix representing camera-to-world pose.
+*   $\mu_C$: $3 \times 1$ vector representing Gaussian mean in camera coordinates.
+*   $\Sigma_I$: $2 \times 2$ matrix representing the 2D covariance in image space.
+*   $W$: $3 \times 3$ rotation matrix component of $T_{CW}$.
+*   $\tau$: $6 \times 1$ vector in Lie algebra $se(3)$.
 
-### Data Structures
-The implementation requires standard 3DGS data structures:
-*   **Gaussian Attributes**: Stored in contiguous arrays or structures of arrays (SoA) for performance:
-    *   `mu_W`: Array of shape $(N, 3)$, world-space means.
-    *   `cov_W`: Array of shape $(N, 6)$, lower-triangular elements of the $3 \times 3$ covariance matrices (or $3 \times 3$ if full storage is used, but typically 6 values are optimized).
-    *   `opacity`: Array of shape $(N, 1)$.
-    *   `sh_coeffs`: Array of shape $(N, C, K)$, where $C$ is color channels and $K$ is SH basis size.
-*   **Camera Pose**: $T_{CW}$ is a $4 \times 4$ matrix. Internally, for optimization, it is often represented as a 6D vector $\xi \in \mathbb{R}^6$ (Lie algebra) which is mapped to $SE(3)$ via the exponential map.
+**Mathematical Definitions:**
+The derivative on the manifold is defined as [S1, unofficial]:
+$$
+\frac{\mathcal{D}(f(\mathbf{T}))}{\mathcal{D}\mathbf{T}} \triangleq \lim_{\tau \rightarrow 0} \frac{\text{Log}(f(\text{Exp}(\tau) \circ \mathbf{T}) \circ f(\mathbf{T})^{-1})}{\tau}
+$$
+where $\circ$ is group composition, and Exp/Log are exponential/logarithmic mappings between Lie algebra and Lie Group [S1, unofficial].
 
-### Numbered Steps
+The hat operator $\times$ maps a 3D vector $\mathbf{v} = [v_x, v_y, v_z]^T$ to a skew-symmetric matrix:
+$$
+\mathbf{v}^\times = \begin{bmatrix} 0 & -v_z & v_y \\ v_z & 0 & -v_x \\ -v_y & v_x & 0 \end{bmatrix}
+$$
 
-1.  **Transform Gaussians to Camera Space**:
-    For each Gaussian $i$, transform its mean and covariance from world to camera coordinates using the current pose $T_{CW}$:
-    $$ \mu_C = R_{CW} \mu_W + t_{CW} $$
-    $$ \Sigma_C = R_{CW} \Sigma_W R_{CW}^T $$
-    where $R_{CW}$ is the $3 \times 3$ rotation matrix and $t_{CW}$ is the translation vector from $T_{CW}$.
+**Step-by-Step Derivation:**
 
-2.  **Project to 2D**:
-    Compute the 2D mean $\mu_I$ and the projected 2D covariance $\Sigma_I$ in the image plane. This involves the projection Jacobian $J$ (derivative of the projection function with respect to $\mu_C$) and the view-space covariance:
-    $$ \mu_I = \begin{bmatrix} f_x \frac{\mu_{C,x}}{\mu_{C,z}} + c_x \\ f_y \frac{\mu_{C,y}}{\mu_{C,z}} + c_y \end{bmatrix} $$
-    $$ \Sigma_I = J \Sigma_C J^T + \epsilon I $$
-    where $f_x, f_y$ are focal lengths, $c_x, c_y$ are principal points, and $\epsilon$ is a small regularization term.
+1.  **Compute Camera Coordinate Mean Jacobian:**
+    The mean in camera coordinates is $\mu_C = W^T (\mu_W - t)$, where $t$ is the translation part of $T_{CW}$. Using the chain rule [S1, unofficial]:
+    $$
+    \frac{\partial \mu_I}{\partial T_{CW}} = \frac{\partial \mu_I}{\partial \mu_C} \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}}
+    $$
+    The manifold derivative $\frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}}$ is derived as [S1, unofficial]:
+    $$
+    \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} = [I \quad -\mu_C^\times]
+    $$
+    where $I$ is the $3 \times 3$ identity matrix and $\mu_C^\times$ is the skew-symmetric matrix of $\mu_C$ [S1, unofficial].
 
-3.  **Render Image/Depth**:
-    Perform alpha-blending rasterization to compute the rendered image $I(\mathcal{G}, T_{CW})$ and/or depth $D(\mathcal{G}, T_{CW})$.
-    *   **Image**: $C_p = \sum_{i \in N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)$
-    *   **Depth**: $\mathcal{D}_p = \sum_{i \in N} z_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)$, where $z_i$ is the distance to the mean $\mu_W$ along the camera ray.
+2.  **Compute 2D Covariance Jacobian:**
+    The 2D covariance $\Sigma_I$ depends on the projection Jacobian $J$ and the rotation component $W$. The chain rule yields [S1, unofficial]:
+    $$
+    \frac{\partial \Sigma_I}{\partial T_{CW}} = \frac{\partial \Sigma_I}{\partial J} \frac{\partial J}{\partial \mu_C} \frac{D\mu_C}{DT_{CW}} + \frac{\partial \Sigma_I}{\partial W} \frac{DW}{DT_{CW}}
+    $$
+    The term $\frac{DW}{DT_{CW}}$ is derived by considering the rotation vector $\theta$. The derivative of the rotation matrix component $W$ with respect to the rotation vector $\theta$ is [S1, unofficial]:
+    $$
+    \frac{\partial W}{\partial \theta} = \begin{bmatrix} -W_{:,1}^\times & -W_{:,2}^\times & -W_{:,3}^\times \end{bmatrix}
+    $$
+    where $W_{:,i}$ is the $i$-th column of $W$ [S1, unofficial]. This results in the manifold derivative [S1, unofficial]:
+    $$
+    \frac{\mathcal{D}W}{\mathcal{D}T_{CW}} = \begin{bmatrix} 0 & -W_{,1}^\times \\ 0 & -W_{,2}^\times \\ 0 & -W_{,3}^\times \end{bmatrix}
+    $$
+    Note: The source notation $\frac{\mathcal{D}W}{\mathcal{D}T_{CW}}$ in Eq. 6 appears to represent the block structure relative to the 6-DOF Lie algebra vector, where the first 3 elements (translation) do not affect $W$ directly in this specific decomposition, hence the zero blocks [S1, unofficial].
 
-4.  **Compute Loss**:
-    Calculate the photometric or geometric residual:
-    *   Photometric: $E_{pho} = \| I(\mathcal{G}, T_{CW}) - \bar{I} \|_1$
-    *   Geometric: $E_{geo} = \| D(\mathcal{G}, T_{CW}) - \bar{D} \|_1$
-    *   Combined: $E = \lambda_{pho} E_{pho} + (1 - \lambda_{pho}) E_{geo}$
+3.  **Optimization Loop:**
+    For tracking, minimize photometric or geometric residuals using gradient descent. At least 50 iterations per frame are required for accurate tracking [S1, unofficial].
 
-5.  **Derive Analytical Jacobians**:
-    Compute the derivatives of the intermediate variables with respect to the camera pose $T_{CW}$ using Lie algebra derivatives. The total derivative is obtained via the chain rule.
-
-    **Step 5a: Derivative of Camera-Space Mean**
-    The derivative of the camera-space mean $\mu_C$ with respect to the camera pose $T_{CW}$ on the manifold is:
-    $$ \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} = [I \quad -\mu_C^\times] $$
-    where $I$ is the $3 \times 3$ identity matrix, and $\mu_C^\times$ is the skew-symmetric matrix of $\mu_C$:
-    $$ \mu_C^\times = \begin{bmatrix} 0 & -\mu_{C,z} & \mu_{C,y} \\ \mu_{C,z} & 0 & -\mu_{C,x} \\ -\mu_{C,y} & \mu_{C,x} & 0 \end{bmatrix} $$
-    This results in a $3 \times 6$ matrix.
-
-    **Step 5b: Derivative of Rotation Component**
-    The derivative of the rotation matrix component $W$ (part of the transformation) with respect to $T_{CW}$ is required for the covariance derivative. Let $W$ be the rotation part. The derivative is:
-    $$ \frac{\mathcal{D}W}{\mathcal{D}T_{CW}} = \begin{bmatrix} 0 & -W_{:,1}^\times \\ 0 & -W_{:,2}^\times \\ 0 & -W_{:,3}^\times \end{bmatrix} $$
-    where $W_{:,i}$ is the $i$-th column of the rotation matrix $W$, and $W_{:,i}^\times$ is its skew-symmetric form. This results in a $9 \times 6$ matrix (flattened rotation).
-
-    **Step 5c: Derivative of 2D Covariance**
-    The derivative of the 2D covariance $\Sigma_I$ with respect to $T_{CW}$ is:
-    $$ \frac{\partial \Sigma_I}{\partial T_{CW}} = \frac{\partial \Sigma_I}{\partial J} \frac{\partial J}{\partial \mu_C} \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} + \frac{\partial \Sigma_I}{\partial W} \frac{\mathcal{D}W}{\mathcal{D}T_{CW}} $$
-    Note: The term $\frac{\partial \Sigma_I}{\partial W}$ accounts for the change in $\Sigma_C$ due to rotation changes. The term $\frac{\partial \Sigma_I}{\partial J} \frac{\partial J}{\partial \mu_C}$ accounts for the change in projection due to the shift in mean.
-
-    **Step 5d: Chain Rule for Final Gradient**
-    Combine the derivatives to get the gradient of the loss with respect to $T_{CW}$:
-    $$ \frac{\partial E}{\partial T_{CW}} = \frac{\partial E}{\partial \mu_I} \frac{\partial \mu_I}{\partial T_{CW}} + \frac{\partial E}{\partial \Sigma_I} \frac{\partial \Sigma_I}{\partial T_{CW}} $$
-    Substitute the analytical Jacobians from Steps 5a and 5c.
-
-### Formulas
-*   **Manifold Derivative Definition**:
-    $$ \frac{\mathcal{D}(f(\mathbf{T}))}{\mathcal{D}\mathbf{T}} \triangleq \lim_{\tau \rightarrow 0} \frac{\text{Log}(f(\text{Exp}(\tau) \circ \mathbf{T}) \circ f(\mathbf{T})^{-1})}{\tau} $$
-    where $\mathbf{T} \in SE(3)$, $\tau \in se(3)$, $\circ$ is group composition, and Exp/Log are exponential/logarithmic mappings [S1, unofficial].
-
-*   **Skew-Symmetric Matrix**:
-    For a vector $v = [v_x, v_y, v_z]^T$:
-    $$ v^\times = \begin{bmatrix} 0 & -v_z & v_y \\ v_z & 0 & -v_x \\ -v_y & v_x & 0 \end{bmatrix} $$
-
-*   **Depth Rasterization**:
-    $$ \mathcal{D}_p = \sum_{i \in \mathcal{N}} z_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
-    where $z_i$ is the distance to the mean $\mu_W$ of Gaussian $i$ along the camera ray [S1, unofficial].
-
-### Parameters
-*   **Iterations**: At least 50 iterations of gradient descent per frame are required for accurate tracking [S1, unofficial].
-*   **Hyperparameters**:
-    *   $\lambda_{pho}$: Weight for photometric loss (default not specified, but typically balanced with geometric loss).
-    *   Exposure parameters: Affine brightness parameters are optimized to handle varying exposure [S1, unofficial].
-    *   Pixel masking: Non-edge or low-opacity pixels are penalized or masked to improve robustness [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Precision**: The use of Lie algebra ensures minimal parameterization, avoiding singularities associated with Euler angles or redundant computations from full rotation matrices [S1, unofficial].
-*   **Boundaries**: The method assumes the Gaussians are visible in the current frame. Occluded or out-of-view Gaussians should be excluded from the gradient computation.
-*   **Degenerate Input**: If the camera is stationary or the scene has no texture (low gradient), the optimization may fail. The method penalizes low-opacity pixels to mitigate this [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -111,151 +68,152 @@ The implementation requires standard 3DGS data structures:
 import numpy as np
 
 def skew_symmetric(v):
-    """Compute the skew-symmetric matrix of a 3D vector."""
+    """Converts a 3D vector to a skew-symmetric matrix."""
     return np.array([
         [0, -v[2], v[1]],
         [v[2], 0, -v[0]],
         [-v[1], v[0], 0]
     ])
 
-def exp_se3(xi):
-    """Exponential map from se3 (6D vector) to SE3 (4x4 matrix)."""
-    # Implementation of Lie group exponential map
-    # xi = [rho, theta] where rho is translation, theta is rotation vector
-    theta = xi[3:]
-    theta_norm = np.linalg.norm(theta)
-    if theta_norm < 1e-6:
-        R = np.eye(3)
-        J = np.eye(3)
-    else:
-        u = theta / theta_norm
-        R = np.eye(3) + np.sin(theta_norm) * skew_symmetric(u) + \
-            (1 - np.cos(theta_norm)) * skew_symmetric(u) @ skew_symmetric(u)
-        # Approximation of J for small theta, or full formula for large
-        # For simplicity in this context, we assume small perturbations
-        J = np.eye(3) # Placeholder for full J matrix calculation
-    t = J @ xi[:3]
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = t
-    return T, R, t
-
-def compute_camera_jacobian(mu_W, cov_W, T_CW, fx, fy, cx, cy):
+def compute_camera_mean_jacobian(mu_C):
     """
-    Compute the analytical Jacobian of the 2D Gaussian parameters w.r.t. camera pose.
-    
-    Args:
-        mu_W: (3,) World space mean
-        cov_W: (3,3) World space covariance
-        T_CW: (4,4) Camera to World pose
-        fx, fy, cx, cy: Camera intrinsics
-        
-    Returns:
-        d_mu_I_d_T: (2, 6) Jacobian of 2D mean w.r.t. camera pose
-        d_Sigma_I_d_T: (3, 6) Jacobian of 2D covariance w.r.t. camera pose (flattened)
+    Computes D(mu_C) / D(T_CW).
+    mu_C: 3D vector, Gaussian mean in camera coordinates.
+    Returns: 3x6 matrix.
     """
-    R_CW = T_CW[:3, :3]
-    t_CW = T_CW[:3, 3]
-    
-    # 1. Transform to camera space
-    mu_C = R_CW @ mu_W + t_CW
-    
-    # 2. Compute Jacobian of projection w.r.t mu_C
-    # mu_I = [fx * mu_Cx / mu_Cz + cx, fy * mu_Cy / mu_Cz + cy]
-    z = mu_C[2]
-    if abs(z) < 1e-6:
-        return None, None # Degenerate case
-    
-    d_mu_I_d_mu_C = np.array([
-        [fx / z, 0, -fx * mu_C[0] / (z**2)],
-        [0, fy / z, -fy * mu_C[1] / (z**2)]
-    ])
-    
-    # 3. Compute derivative of mu_C w.r.t T_CW (Lie algebra)
-    # D_mu_C / D_T_CW = [I, -mu_C^x]
     I_3 = np.eye(3)
     mu_C_skew = skew_symmetric(mu_C)
-    D_mu_C_d_T = np.hstack([I_3, -mu_C_skew]) # (3, 6)
-    
-    # 4. Compute derivative of mu_I w.r.t T_CW
-    d_mu_I_d_T = d_mu_I_d_mu_C @ D_mu_C_d_T # (2, 6)
-    
-    # 5. Compute derivative of Sigma_I w.r.t T_CW
-    # Sigma_I = J * Sigma_C * J^T
-    # Sigma_C = R_CW * Sigma_W * R_CW^T
-    
-    # Derivative of Sigma_C w.r.t T_CW involves derivative of R_CW
-    # D_W / D_T_CW = [[0, -W_1^x], [0, -W_2^x], [0, -W_3^x]]
-    # This is complex to implement fully without tensor libraries.
-    # For a minimal implementation, we approximate or use numerical differentiation
-    # for the covariance part if analytical is too complex, but the source claims analytical.
-    
-    # Simplified: Return only mean Jacobian for demonstration
-    # In practice, one must compute d_Sigma_I_d_T using chain rule through R_CW
-    
-    return d_mu_I_d_T, None
+    # [I | -mu_C^x]
+    return np.hstack([I_3, -mu_C_skew])
 
-def optimize_camera_pose(Gaussians, T_CW, observed_image, observed_depth, fx, fy, cx, cy, lambda_pho=0.5):
+def compute_rotation_jacobian(W):
     """
-    Optimize camera pose using analytical Jacobians.
+    Computes D(W) / D(T_CW) with respect to the Lie algebra.
+    W: 3x3 rotation matrix.
+    Returns: 3x3x6 tensor or flattened structure depending on implementation.
+    Here we return the block matrix form as described in Eq. 6.
     """
-    # Initialize optimizer (e.g., Gauss-Newton or Levenberg-Marquardt)
-    # xi is the 6D Lie algebra vector representing the perturbation to T_CW
+    # W columns
+    w1 = W[:, 0]
+    w2 = W[:, 1]
+    w3 = W[:, 2]
     
-    for i in range(50): # At least 50 iterations
-        # 1. Render current frame
-        rendered_image, rendered_depth = render_3dgs(Gaussians, T_CW, fx, fy, cx, cy)
-        
-        # 2. Compute Loss
-        loss_pho = np.sum(np.abs(rendered_image - observed_image))
-        loss_geo = np.sum(np.abs(rendered_depth - observed_depth))
-        loss = lambda_pho * loss_pho + (1 - lambda_pho) * loss_geo
-        
-        # 3. Compute Jacobian
-        # For each pixel, compute gradient w.r.t. T_CW
-        # J_total = d_Loss / d_T_CW
-        J_total = np.zeros(6)
-        
-        for pixel in pixels:
-            # Get relevant Gaussians for this pixel
-            relevant_gaussians = get_gaussians_for_pixel(pixel, Gaussians)
-            
-            for g in relevant_gaussians:
-                d_mu_I_d_T, d_Sigma_I_d_T = compute_camera_jacobian(
-                    g.mu_W, g.cov_W, T_CW, fx, fy, cx, cy
-                )
-                
-                # Compute gradient of loss w.r.t. mu_I and Sigma_I
-                # d_Loss / d_mu_I and d_Loss / d_Sigma_I depend on the rendering equation
-                
-                # Chain rule
-                grad_mu = d_mu_I_d_T.T @ d_Loss_d_mu_I
-                grad_Sigma = d_Sigma_I_d_T.T @ d_Loss_d_Sigma_I
-                
-                J_total += grad_mu + grad_Sigma
-        
-        # 4. Update T_CW
-        # T_CW_new = T_CW * Exp(J_total)
-        # Use a solver to update xi
-        pass
-        
-    return T_CW
+    # Skew symmetric matrices of columns
+    w1_skew = skew_symmetric(w1)
+    w2_skew = skew_symmetric(w2)
+    w3_skew = skew_symmetric(w3)
+    
+    # Construct the 9x6 matrix (flattened W)
+    # The structure is [0, -W_{:,1}^x; 0, -W_{:,2}^x; 0, -W_{:,3}^x]
+    # This implies the first 3 columns (translation part of Lie algebra) are 0.
+    # The last 3 columns (rotation part) are -W_{:,i}^x.
+    
+    zero_block = np.zeros((3, 3))
+    rot_block_1 = -w1_skew
+    rot_block_2 = -w2_skew
+    rot_block_3 = -w3_skew
+    
+    # Stack vertically: 3 rows of blocks
+    # Row 1: [0, rot_block_1]
+    # Row 2: [0, rot_block_2]
+    # Row 3: [0, rot_block_3]
+    # Wait, Eq 6 shows a 3x3 block structure where each block is 3x3?
+    # "where W:,i refers to the ith column of the matrix."
+    # The matrix is 3x3. The derivative is w.r.t 6D vector.
+    # The result in Eq 6 is:
+    # [ 0    -W_{:,1}^x ]
+    # [ 0    -W_{:,2}^x ]
+    # [ 0    -W_{:,3}^x ]
+    # This looks like a 9x6 matrix if we consider W as a vector of 9 elements?
+    # Or is it 3x6? 
+    # Let's look at Eq 31: dW/d_theta_x = e1^x W. This is 3x3.
+    # The derivative of the 3x3 matrix W w.r.t 3D rotation vector is a 3x3x3 tensor.
+    # Flattened, it is 9x3.
+    # The Eq 6 format suggests a specific layout for the 6-DOF Jacobian.
+    # Let's implement the 9x6 matrix as implied by the block structure.
+    
+    # Block 1 (top 3 rows of W): [0, -w1_skew] -> 3x6
+    # Block 2 (middle 3 rows of W): [0, -w2_skew] -> 3x6
+    # Block 3 (bottom 3 rows of W): [0, -w3_skew] -> 3x6
+    
+    block1 = np.hstack([np.zeros((3,3)), -w1_skew])
+    block2 = np.hstack([np.zeros((3,3)), -w2_skew])
+    block3 = np.hstack([np.zeros((3,3)), -w3_skew])
+    
+    return np.vstack([block1, block2, block3])
+
+def compute_covariance_jacobian(J, mu_C, W, dSigma_dJ, dSigma_dW):
+    """
+    Computes dSigma_I / dT_CW.
+    J: 2x3 projection Jacobian.
+    mu_C: 3D vector.
+    W: 3x3 rotation matrix.
+    dSigma_dJ: Gradient of Sigma w.r.t J.
+    dSigma_dW: Gradient of Sigma w.r.t W.
+    """
+    # Term 1: dSigma/dJ * dJ/dmu_C * D(mu_C)/D(T_CW)
+    # Note: dJ/dmu_C is not explicitly given in the notes, but J is the Jacobian of projection.
+    # In 3DGS, J is usually computed as the derivative of the projection function.
+    # We assume dSigma_dJ is provided by the upstream gradient.
+    # dJ/dmu_C is part of the projection geometry. 
+    # For implementation, this term is often computed via chain rule in the rasterizer.
+    # Here we focus on the explicit camera Jacobian parts derived in the notes.
+    
+    # Term 2: dSigma/dW * DW/D(T_CW)
+    # dSigma_dW is 3x3 gradient. DW/D(T_CW) is 9x6.
+    # We need to contract these.
+    
+    # Since the exact contraction of dSigma/dW (3x3) with DW/D(T_CW) (9x6) 
+    # requires vectorization of W, we note that:
+    # dSigma/dT_CW_term2 = reshape(dSigma_dW, (9,1)) @ DW_D_TCW
+    
+    # The first term involves dJ/dmu_C. 
+    # J = P * [I | -mu_C^x] ? No, J is 2x3.
+    # The notes state: dSigma_I/dT_CW = dSigma_I/dJ * dJ/dmu_C * Dmu_C/DTCW + ...
+    # We implement the second term explicitly as derived.
+    
+    DW_DT = compute_rotation_jacobian(W)
+    
+    # Vectorize dSigma_dW (3x3) to 9x1
+    dSigma_dW_vec = dSigma_dW.flatten()
+    
+    # Contract: (1x9) @ (9x6) = 1x6
+    term2 = dSigma_dW_vec @ DW_DT
+    
+    # Term 1 is handled by the standard 3DGS rasterizer gradients for J.
+    # The explicit contribution from camera pose to Sigma via W is term2.
+    # The contribution via mu_C is in the first part.
+    
+    return term2 # Simplified return for the explicit W-dependent part
 ```
+
+**Parameters:**
+*   **Iterations:** At least 50 iterations of gradient descent per frame are required for accurate tracking [S1, unofficial].
+*   **Hyperparameters:** $\lambda_{pho}$ balances photometric and geometric residuals in SLAM tracking [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of Lie algebra ensures minimal parameterization, avoiding redundant computations and potential singularities associated with Euler angles [S1, unofficial].
+*   **Boundaries:** The method assumes the Gaussians are visible and the projection is valid. Degenerate cases (e.g., Gaussian at camera center) may require numerical stabilization [G].
 
 ## Subtopics
 
 ### Photometric and Geometric Tracking
-This variant focuses on optimizing only the current camera pose without updating the map representation (Gaussians). It minimizes photometric residuals (image difference) and/or geometric residuals (depth difference) [S1, unofficial]. It is chosen when the scene structure is already known and only camera motion needs to be estimated. It optimizes affine brightness parameters to handle exposure changes and penalizes non-edge or low-opacity pixels to improve robustness [S1, unofficial].
+Optimizes only the current camera pose without updating the map representation, minimizing photometric and/or geometric residuals [S1, unofficial].
+*   **Photometric Residual:** $E_{pho} = \| I(\mathcal{G}, \mathbf{T}_{CW}) - \bar{I} \|_1$, where $I(\mathcal{G}, \mathbf{T}_{CW})$ renders Gaussians $\mathcal{G}$ from pose $\mathbf{T}_{CW}$ and $\bar{I}$ is the observed image [S1, unofficial].
+*   **Geometric Residual:** $E_{geo} = \| D(\mathcal{G}, \mathbf{T}_{CW}) - \bar{D} \|_1$, where $D(\mathcal{G}, \mathbf{T}_{CW})$ is depth rasterization and $\bar{D}$ is observed depth [S1, unofficial].
+*   **Depth Rasterization:** $\mathcal{D}_p = \sum_{i \in \mathcal{N}} z_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)$, where $z_i$ is the distance to the mean $\mu_W$ of Gaussian $i$ along the camera ray [S1, unofficial].
+*   **Optimization:** Minimizes $\lambda_{pho} E_{pho} + (1-\lambda_{pho}) E_{geo}$. Affine brightness parameters are optimized for varying exposure, and non-edge or low-opacity pixels are penalized [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: The analytical derivation eliminates the overhead of automatic differentiation, making the gradient computation significantly faster than AD-based methods. However, it still requires rasterization for each iteration. The method requires at least 50 iterations per frame for accurate tracking [S1, unofficial].
-*   **Memory Complexity**: Similar to standard 3DGS, as it stores Gaussian attributes. The Jacobian computation adds minimal overhead compared to the rasterization cost.
-*   **Performance**: The system operates at 3.2 FPS with monocular input and 2.5 FPS with depth input on the Replica dataset [S1, unofficial].
-*   **Strengths**: Enables real-time or near-real-time SLAM with 3DGS. Provides minimal parameterization, avoiding redundant computations.
-*   **Limitations**: Requires at least 50 iterations per frame, which can be computationally expensive for high-resolution images. Assumes the Gaussians are already initialized and reasonably accurate.
+*   **Time Complexity:** The explicit derivation avoids the overhead of automatic differentiation, which is critical for performance-critical rasterization [S1, unofficial]. The system operates at 3.2 FPS with monocular input and 2.5 FPS with depth on the Replica dataset [S1, unofficial].
+*   **Memory Complexity:** Minimal parameterization reduces the size of the Jacobian matrices, eliminating redundant computations [S1, unofficial].
+*   **Strengths:** Enables accurate tracking with at least 50 iterations per frame; unifies SLAM components (tracking, mapping, keyframe management) using 3D Gaussians [S1, unofficial].
+*   **Limitations:** Requires at least 50 iterations per frame, which can be computationally intensive for real-time applications without hardware acceleration [S1, unofficial]. Assumes offline application for dynamic tracking and 4D scene representation if accurate camera position is not provided [S1, unofficial].
+*   **When to Use:** When integrating 3DGS into a SLAM system requiring efficient camera pose optimization.
+*   **When Not to Use:** When the number of Gaussians is very small and ray-intersection methods are sufficient, or when automatic differentiation overhead is acceptable for offline processing [S1, unofficial].
 
 ## Background
-This method was introduced in the "Gaussian Splatting SLAM" paper [S1, unofficial]. It addresses the need for efficient camera pose optimization in 3DGS-based SLAM systems. Prior methods assumed fewer Gaussians and used ray-intersection, which is not applicable to the dense splatting of 3DGS. This work provides the first analytical Jacobian of SE(3) camera pose with respect to 3D Gaussians used in EWA splatting and 3DGS, enabling new applications in dynamic tracking and 4D scene representation [S1, unofficial].
+The method was introduced in "Gaussian Splatting SLAM" [S1, unofficial]. It addresses the limitation of prior camera pose Jacobian methods that assumed a smaller number of Gaussians and were based on ray-intersection rather than splatting, making them inapplicable to 3DGS [S1, unofficial]. The derivation uses Lie algebra to ensure minimal parameterization, matching the degrees of freedom of the SE(3) group [S1, unofficial].
 
 ## Sources
 [S1] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)

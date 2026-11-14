@@ -2,23 +2,23 @@
 Also called: Splatv vertex shader, VideoRenderProgram
 
 ## Overview
-Animated 3D Gaussian Splatting is a GPU-accelerated rendering method for time-varying 3D Gaussian splats that computes time-dependent position, rotation, and scale deltas from packed texture data to enable smooth animation without per-frame CPU updates [S1, unofficial]. It differs from static 3D Gaussian Splatting by evaluating polynomial motion deltas and applying temporal opacity decay in the vertex and fragment shaders, building on the screen-space quad rendering of [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md).
+Animated 3D Gaussian Splatting (Splatv rendering) is a GPU-accelerated rendering method for time-varying 3D Gaussian splats that computes time-dependent position, rotation, and scale deltas from packed texture data to enable smooth animation without per-frame CPU updates [S1, unofficial]. It differs from static 3D Gaussian Splatting by evaluating polynomial motion deltas and applying temporal opacity decay in the vertex and fragment shaders, building on the screen-space quad rendering of [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A packed 2D texture (`u_texture`) containing static and motion data for $N$ splats; camera matrices (View $V$, Projection $P$); camera intrinsics (`focal` vector $(f_x, f_y)$); current animation timestamp (`time`); viewport dimensions (`viewport` $(W, H)$); and the splat index `i`.
-*   **Outputs:** Screen-space quad vertices for each splat; final color and alpha per fragment.
+*   **Inputs:** A packed 2D texture (`u_texture`) containing static and motion data for $N$ splats; camera matrices (View $V$, Projection $P$); camera intrinsics (`focal` vector $(f_x, f_y)$); current animation timestamp (`time`); viewport dimensions (`viewport` $(W, H)$); and the splat index `i` [S1, unofficial].
+*   **Outputs:** Screen-space quad vertices for each splat; final color and alpha per fragment [S1, unofficial].
 
 **Data Structures:**
 Splat data is packed into a 2D texture where each splat index `i` occupies 4 consecutive texels [S1, unofficial].
 *   **Row Index:** `row = uint(i) >> 10`
-*   **Column Index:** `col = ((uint(i) & 0x3ffu) << 2) | k`, where $k \in \{0, 1, 2, 3\}$ is the texel offset within the splat's block.
+*   **Column Index:** `col = ((uint(i) & 0x3ffu) << 2)`, where $k \in \{0, 1, 2, 3\}$ is the texel offset within the splat's block [S1, unofficial].
 *   **Texel Layout:**
     *   `.x`: `motion0.x`
     *   `.y`: `motion0.y`
     *   `.z`: `motion0.z`
-    *   `.w`: `motion1.w`
-*   **Static Data:** `static0` and `static1` are fetched at offsets relative to the base index (specifically `| 0` and `| 1` respectively in the source context, implying adjacent blocks or specific packing offsets not fully detailed beyond the motion block) [S1, unofficial].
+    *   `.w`: `motion1.w` (packed half-float pair)
+*   **Static Data:** `static0` and `static1` are fetched at offsets `| 0` and `| 1` respectively from the base index [S1, unofficial].
 
 **Numbered Steps:**
 
@@ -38,7 +38,7 @@ Splat data is packed into a 2D texture where each splat index `i` occupies 4 con
 6.  **Reconstruct Rotation:** Compute the normalized quaternion $q$ by adding the rotation delta to the static quaternion components and normalizing:
     $$ q = \text{normalize}(q_{static} + \Delta q) $$
     [S1, unofficial].
-7.  **Compute World Covariance:** Construct the scale matrix $S = \text{diag}(s_x, s_y, s_z)$ and rotation matrix $R$ from $q$. Compute the transformation matrix $M = S R$ and the world covariance matrix:
+7.  **Compute World Covariance:** Construct the scale matrix $S = \text{diag}(s_x, s_y, s_z)$ and rotation matrix $R$ from $q$ [S1, unofficial]. Compute the transformation matrix $M = S R$ and the world covariance matrix:
     $$ \Sigma_{world} = 4 M^T M $$
     [S1, unofficial].
 8.  **Compute 2D Covariance:** Calculate the 2D covariance matrix $\Sigma_{2D}$ using the Jacobian $J$ of the projection and the view rotation $V_{rot}$ (upper-left 3x3 of $V$) [S1, unofficial]:
@@ -65,64 +65,83 @@ Splat data is packed into a 2D texture where each splat index `i` occupies 4 con
     Discard if $A < -4$ [S1, unofficial].
 13. **Compute Final Color:** Calculate the time-decayed opacity $\alpha_{time}$ and final color [S1, unofficial]:
     $$ \alpha_{time} = \exp\left(-\left(\frac{dt}{\tau}\right)^2\right) $$
-    where $\tau$ is unpacked from `motion1.w` as the y-component of a half-float pair.
+    where $\tau$ is unpacked from `motion1.w` as the y-component of a half-float pair [S1, unofficial].
     $$ C = \exp(A) \alpha_{time} C_{base} $$
-    Apply depth fog factor $\min(\frac{z}{w}+1, 1)$ if required by the specific implementation context [S1, unofficial].
+    Apply depth fog factor $\min(\frac{z}{w}+1, 1)$ [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Vertex Shader Core
-def render_splat_vertex(splat_index, view_matrix, projection_matrix, focal, time, viewport):
+# Standard math/vector operations assumed available: vec2, vec3, vec4, mat3, dot, normalize, sqrt, min, exp, abs, transpose, mat3 constructor
+class Discard(Exception): pass
+
+def unpack_half2(half_val):
+    # Converts a packed half-float representation to a float vec2
+    return vec2(float(half_val.x), float(half_val.y))
+
+def quaternion_to_matrix(q):
+    x, y, z, w = q.x, q.y, q.z, q.w
+    return mat3(
+        1.0 - 2.0*(y*y + z*z), 2.0*(x*y - z*w), 2.0*(x*z + y*w),
+        2.0*(x*y + z*w), 1.0 - 2.0*(x*x + z*z), 2.0*(y*z - x*w),
+        2.0*(x*z - y*w), 2.0*(y*z + x*w), 1.0 - 2.0*(x*x + y*y)
+    )
+
+def render_splat_vertex(splat_index, view_matrix, projection_matrix, focal, time, viewport, u, v):
     # 1. Fetch Data
     row = splat_index >> 10
-    col = ((splat_index & 0x3ff) << 2)
-    
-    # Unpack motion data (assuming half-float unpacking helper exists)
-    motion0 = unpack_half4(texture_2d(u_texture, row, col))
-    motion1 = unpack_half4(texture_2d(u_texture, row, col + 1)) # Assuming adjacent or specific layout
-    
-    # Static data fetch (offsets implied by source)
-    static0 = unpack_half4(texture_2d(u_texture, row, col)) # Placeholder for static0 fetch logic
-    static1 = unpack_half4(texture_2d(u_texture, row, col + 1)) # Placeholder for static1 fetch logic
-    
+    col = (splat_index & 0x3ff) << 2
+
+    # Fetch 4 consecutive texels for motion data
+    texels = [texture_2d(u_texture, row, col + k) for k in range(4)]
+    motion0_x = texels[0].x
+    motion0_y = texels[0].y
+    motion0_z = texels[0].z
+    motion1_w = texels[0].w
+
+    # Static data fetch at offsets | 0 and | 1
+    static0 = texture_2d(u_texture, row, col)
+    static1 = texture_2d(u_texture, row, col + 1)
+
     # 2. Time Delta
-    t_start = motion1.w.x # x-component of half-float pair in motion1.w
-    tau = motion1.w.y     # y-component of half-float pair in motion1.w
+    motion1_pair = unpack_half2(motion1_w)
+    t_start = motion1_pair.x
+    tau = motion1_pair.y
     dt = time - t_start
-    
+
     # 3. Motion Deltas
-    # Coefficients unpacked from motion0/motion1
-    cp1, cp2, cp3 = unpack_motion_coeffs(motion0)
-    cq1 = unpack_rotation_coeff(motion1)
-    
+    # Coefficients unpacked as vectors for each axis
+    cp1, cp2, cp3 = vec3(motion0_x), vec3(motion0_y), vec3(motion0_z)
+    cq1 = motion1_pair.y # Reused from motion1.w per source layout
+
     delta_p = cp1 * dt + cp2 * (dt ** 2) + cp3 * (dt ** 3)
-    delta_q = cq1 * dt
-    
+    delta_q = vec4(cq1 * dt, 0.0, 0.0, 0.0)
+
     # 4. Transform Position
-    p_static = vec4(unpack_static_pos(static0), 1.0)
+    p_static = vec4(unpack_half2(static0.x), unpack_half2(static0.y), unpack_half2(static0.z), 1.0)
     p_cam = view_matrix * (p_static + vec4(delta_p, 0.0))
     p_clip = projection_matrix * p_cam
-    
+
     # 5. Clip
     if abs(p_clip.x) > 1.2 * p_clip.w or abs(p_clip.y) > 1.2 * p_clip.w or p_clip.z < -1.2 * p_clip.w:
-        return discard
-    
+        raise Discard()
+
     # 6. Reconstruct Rotation
-    q_static = unpack_quaternion(static1)
-    q = normalize(q_static + vec4(delta_q, 0.0)) # Assuming delta_q is axis-angle or similar vector
+    q_static = vec4(unpack_half2(static1.x), unpack_half2(static1.y), unpack_half2(static1.z), unpack_half2(static1.w))
+    q = normalize(q_static + delta_q)
     R = quaternion_to_matrix(q)
-    
+
     # 7. World Covariance
-    S = diag(unpack_scale(static0)) # Assuming scale in static0 or similar
+    sx, sy, sz = unpack_half2(static0.w), unpack_half2(static1.x), unpack_half2(static1.y)
+    S = mat3(sx, 0, 0, 0, sy, 0, 0, 0, sz)
     M = S @ R
     Sigma_world = 4.0 * (M.transpose() @ M)
-    
+
     # 8. 2D Covariance
     fx, fy = focal
-    x, y, z = p_cam.xyz
+    x, y, z = p_cam.x, p_cam.y, p_cam.z
     J = mat3(
         fx / z, 0.0, -(fx * x) / (z ** 2),
         0.0, -fy / z, (fy * y) / (z ** 2),
@@ -131,39 +150,38 @@ def render_splat_vertex(splat_index, view_matrix, projection_matrix, focal, time
     V_rot = view_matrix[0:3, 0:3]
     T = V_rot.transpose() @ J
     Sigma_2D = T.transpose() @ Sigma_world @ T
-    
+
     # 9. Eigenvalues
     mu = (Sigma_2D[0][0] + Sigma_2D[1][1]) / 2.0
     r = sqrt(((Sigma_2D[0][0] - Sigma_2D[1][1]) / 2.0) ** 2 + Sigma_2D[0][1] ** 2)
     lambda_1 = mu + r
     lambda_2 = mu - r
-    
+
     if lambda_2 < 0:
-        return discard
-        
+        raise Discard()
+
     # 10. Axes
-    v = normalize(vec2(Sigma_2D[0][1], lambda_1 - Sigma_2D[0][0]))
-    a = min(sqrt(2 * lambda_1), 1024.0) * v
-    b = min(sqrt(2 * lambda_2), 1024.0) * vec2(v.y, -v.x)
-    
-    # 11. Screen Position (for each quad vertex u,v)
+    v_vec = normalize(vec2(Sigma_2D[0][1], lambda_1 - Sigma_2D[0][0]))
+    a = min(sqrt(2 * lambda_1), 1024.0) * v_vec
+    b = min(sqrt(2 * lambda_2), 1024.0) * vec2(v_vec.y, -v_vec.x)
+
+    # 11. Screen Position
     W, H = viewport
     p_screen = p_clip / p_clip.w + u * (a / W) + v * (b / H)
-    
+
     return p_screen, v_color, v_position_local
 
-# Fragment Shader Core
 def render_splat_fragment(v_position_local, v_color, time, t_start, tau):
     A = -dot(v_position_local, v_position_local)
     if A < -4.0:
-        return discard
-    
+        raise Discard()
+
     dt = time - t_start
     alpha_time = exp(-((dt / tau) ** 2))
-    
-    B = exp(A) * v_color.a * alpha_time
-    frag_color = vec4(B * v_color.rgb, B)
-    
+
+    B = exp(A) * alpha_time
+    frag_color = vec4(B * v_color.rgb, B * v_color.a)
+
     return frag_color
 ```
 
@@ -173,21 +191,20 @@ def render_splat_fragment(v_position_local, v_color, time, t_start, tau):
 *   `viewport`: Canvas dimensions $(W, H)$ in pixels. Used to scale ellipse axes to screen space [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Negative Eigenvalue:** $\lambda_2 < 0$ indicates a degenerate or flipped covariance matrix, often caused by extreme perspective or invalid transforms. The shader discards the splat to prevent rendering artifacts [S1, unofficial].
+*   **Negative Eigenvalue:** $\lambda_2 < 0$ indicates a degenerate or flipped covariance matrix, often caused by extreme perspective or invalid transforms [S1, unofficial]. The shader discards the splat to prevent rendering artifacts [S1, unofficial].
 *   **Axis Clamping:** Axis lengths are clamped to a maximum of 1024 pixels to prevent overdraw and performance degradation from excessively large splats [S1, unofficial].
-*   **Precision:** Coefficients are stored as half-floats, which may limit the precision of high-frequency motion or very small $dt$ values [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ for $N$ splats, performed entirely on the GPU in the vertex and fragment shaders. No CPU sorting or per-frame update overhead for motion [S1, unofficial].
-*   **Memory Complexity:** $O(N)$ for the packed texture storing static and motion data. The motion data adds overhead to the static splat representation [S1, unofficial].
-*   **Measured Performance:** Not given in the sources.
+*   **Time Complexity:** $O(N)$ for $N$ splats, performed entirely on the GPU in the vertex and fragment shaders [S1, unofficial]. No CPU sorting or per-frame update overhead for motion [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for the packed texture storing static and motion data [S1, unofficial].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
 *   **Strengths:** Enables smooth, real-time animation of Gaussian splats without CPU-side interpolation or sorting updates per frame [S1, unofficial].
-*   **Limitations:** Relies on pre-computed polynomial coefficients, limiting the complexity of motion to cubic polynomials for position and linear for rotation [S1, unofficial]. Precision is limited by half-float storage [S1, unofficial].
+*   **Limitations:** Relies on pre-computed polynomial coefficients, limiting the complexity of motion to cubic polynomials for position and linear for rotation [S1, unofficial].
 *   **When to Use:** When rendering animated 3D Gaussian Avatars or dynamic scenes where motion is smooth and can be approximated by low-order polynomials [S1, unofficial].
-*   **When Not to Use:** For highly discontinuous or complex non-polynomial motion, or when higher precision is required than half-floats allow [S1, unofficial].
+*   **When Not to Use:** For highly discontinuous or complex non-polynomial motion [S1, unofficial].
 
 ## Background
-Animated 3D Gaussian Splatting (Splatv rendering) is an extension of 3D Gaussian Splatting designed for time-varying scenes. It was introduced in the context of GPU-accelerated web-based Gaussian Splatting implementations, specifically within the `gsplat.js` project [S1, unofficial]. The method allows for the rendering of animated Gaussian splats by embedding motion parameters directly into the texture data and evaluating them in the shader pipeline [S1, unofficial].
+Animated 3D Gaussian Splatting (Splatv rendering) is an extension of 3D Gaussian Splatting designed for time-varying scenes [S1, unofficial]. It was introduced in the context of GPU-accelerated web-based Gaussian Splatting implementations, specifically within the `gsplat.js` project [S1, unofficial]. The method allows for the rendering of animated Gaussian splats by embedding motion parameters directly into the texture data and evaluating them in the shader pipeline [S1, unofficial].
 
 ## Sources
 [S1] huggingface/gsplat.js, https://github.com/huggingface/gsplat.js, fetched 2026-10-27 (unofficial)

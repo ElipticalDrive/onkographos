@@ -3,114 +3,129 @@
 Also called: Global Scale Alignment, Metric Scale Correction
 
 ## Overview
-Monocular Depth Scale Alignment is a post-optimization step in 3D Gaussian Splatting (3DGS) that resolves the inherent up-to-scale ambiguity of scenes reconstructed from multi-view images by aligning the optimized Gaussian geometry with metric-scale monocular depth estimates [S1, unofficial]. Unlike sibling methods that may prune initial points or use different depth priors, this method fixes the optimized Gaussian parameters $\Theta$ and optimizes a single global scene scale factor $a$ to minimize the difference between rendered inverse depth and metric inverse depth, ensuring fair comparison with other studies that do not prune initial COLMAP points [S1, unofficial].
+Monocular Depth Scale Alignment is a post-optimization step in 3D Gaussian Splatting that resolves the inherent up-to-scale ambiguity of scenes reconstructed from multi-view images by aligning the optimized Gaussian representation with metric-scale monocular depth estimates [S1, unofficial]. Unlike sibling methods that may prune initial points or use inverse depth normalization, this approach fixes the optimized Gaussian parameters and optimizes a single global scene scale factor to match the metric depth provided by off-the-shelf estimators like DepthAnythingV2 [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** The set of optimized 3D Gaussians $\mathcal{G} = \{\mathbf{c}_i, \mathbf{s}_i, \mathbf{r}_i, \mathbf{o}_i, \mathbf{q}_i\}_{i=1}^N$ (means, scales, rotations, opacities, colors) from the standard 3DGS optimization; a set of $N_{\mathcal{I}}$ monocular depth maps $D^{\text{mono}}_i$ estimated by a metric estimator (e.g., DepthAnythingV2) for each training view $i$; and the camera parameters for each view.
-*   **Outputs:** A global scale factor $a \in \mathbb{R}$ and the updated Gaussian means $\mathbf{c}'_i = a \cdot \mathbf{c}_i$. Note that only the mean and scale attributes of the Gaussians are effectively changed by this alignment; the rotation, opacity, and color remain unchanged [S1, unofficial].
+*   **Inputs:** Optimized 3D Gaussian parameters $\Theta = \{\mathbf{c}_i, \mathbf{s}_i, \mathbf{r}_i, \mathbf{o}_i, \alpha_i\}_{i=1}^N$ (means, scales, rotations, opacities, colors), metric monocular depth maps $D^{\text{mono}}_i$ for each known image $i$, and camera poses.
+*   **Outputs:** Updated Gaussian means $\mathbf{c}'_i$ and scales $\mathbf{s}'_i$ scaled by the global factor $a$; other parameters remain unchanged [S1, unofficial].
 
 **Data Structures:**
-*   **Gaussians:** Stored as a list or array of structures containing position $\mathbf{c}_i \in \mathbb{R}^3$, scale $\mathbf{s}_i \in \mathbb{R}^3$, rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$, opacity $\alpha_i \in \mathbb{R}$, and spherical harmonics coefficients.
-*   **Depth Maps:** $D^{\text{mono}}_i$ is a 2D array of float values representing metric depth. These are converted to inverse depth maps $D^{\text{mono}}_{\text{inv}, i} = 1 / D^{\text{mono}}_i$ [S1, unofficial].
+*   **Gaussians:** Array of $N$ Gaussians. Each Gaussian $i$ has mean $\mathbf{c}_i \in \mathbb{R}^3$, scale $\mathbf{s}_i \in \mathbb{R}^3$, rotation quaternion $\mathbf{r}_i$, opacity $\alpha_i$, and spherical harmonic coefficients.
+*   **Depth Maps:** 2D arrays $D^{\text{mono}}_i$ of size $H_i \times W_i$. The source specifies using the "metric" variant of DepthAnythingV2, which outputs metric depth directly, rather than relative depth [S1, unofficial].
 
 **Steps:**
-1.  **Render Inverse Depth:** For each training view $i$, render an inverse depth map $D^{\text{rendered}}_i$ using the current optimized Gaussians $\mathcal{G}$. This is done by projecting each Gaussian onto the image plane, computing its contribution to the depth buffer using alpha compositing, and taking the reciprocal of the resulting depth value. Specifically, if $D^{\text{rendered}}_i[\mathbf{p}]$ is the rendered depth at pixel $\mathbf{p}$, then the target value is $1 / D^{\text{rendered}}_i[\mathbf{p}]$ [S1, unofficial].
-2.  **Define Loss:** Compute the $L_1$ loss between the metric inverse depth from the monocular estimator and the scaled rendered inverse depth. The objective is to find the global scale $a$ that minimizes:
-    $$ \arg \min_{a} \frac{1}{N_{\mathcal{I}}} \sum_{i=1}^{N_{\mathcal{I}}} \left\| D^{\text{mono}}_{\text{inv}, i} - a \cdot D^{\text{rendered}}_{\text{inv}, i} \right\|_1 $$
-    where $N_{\mathcal{I}}$ is the number of training images, $D^{\text{mono}}_{\text{inv}, i}$ is the inverse depth map from the metric estimator, and $D^{\text{rendered}}_{\text{inv}, i}$ is the rendered inverse depth map [S1, unofficial].
-3.  **Optimize Scale:** Solve for the optimal global scale $a^*$. This is a 1D optimization problem. A simple gradient descent or analytical solution (if differentiable) can be used. In practice, since the rendered depth is differentiable with respect to the Gaussian positions, and the positions are scaled by $a$, the gradient $\frac{\partial \mathcal{L}}{\partial a}$ can be computed and $a$ updated iteratively until convergence [S1, unofficial].
-4.  **Update Gaussians:** Once $a^*$ is found, update the mean position of every Gaussian: $\mathbf{c}'_i = a^* \cdot \mathbf{c}_i$. The scale parameters $\mathbf{s}_i$ are also scaled by $a^*$ to maintain the relative size of the Gaussians in the new metric space [S1, unofficial].
+1.  **Render Inverse Depth:** Render the inverse depth map $\text{inv}D^{\text{rendered}}_i$ for each known image $i$ using the current optimized Gaussians $\Theta$. This is done by rendering the depth of the Gaussian centers weighted by opacity [S1, unofficial].
+2.  **Prepare Metric Inverse Depth:** Compute the inverse of the metric monocular depth maps: $\text{inv}D^{\text{mono}}_i = 1 / D^{\text{mono}}_i$. Note that the source explicitly states that instead of normalizing estimated depth maps, their reciprocal is taken directly [S1, unofficial].
+3.  **Optimize Global Scale:** Fix $\Theta$ and optimize a single global scalar $a \in \mathbb{R}$ to minimize the $L_1$ difference between the rendered inverse depth and the metric inverse depth across all known images:
+    $$ a^* = \arg \min_a \sum_{i=1}^{N_{\mathcal{I}}} \| \text{inv}D^{\text{mono}}_i - a \cdot \text{inv}D^{\text{rendered}}_i \|_1 $$
+    where $N_{\mathcal{I}}$ is the number of known images [S1, unofficial].
+4.  **Update Gaussians:** Apply the optimal scale $a^*$ to the mean positions and scales of all Gaussians:
+    $$ \mathbf{c}'_i = a^* \cdot \mathbf{c}_i $$
+    $$ \mathbf{s}'_i = a^* \cdot \mathbf{s}_i $$
+    The rotation, opacity, and color parameters remain unchanged [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def monocular_depth_scale_alignment(gaussians, training_views, mono_depth_maps, num_iterations=100, lr=0.01):
+def monocular_depth_scale_alignment(gaussians, camera_poses, metric_depth_maps):
     """
-    Aligns 3D Gaussian Splatting geometry with metric monocular depth.
+    Aligns 3D Gaussian Splatting scale to metric monocular depth.
     
     Args:
-        gaussians: List of Gaussian objects with attributes .mean, .scale, .rotation, .opacity, .sh.
-        training_views: List of camera objects with .extrinsics, .intrinsics, .image_shape.
-        mono_depth_maps: List of 2D numpy arrays (metric depth) corresponding to training_views.
-        num_iterations: Number of optimization steps for scale 'a'.
-        lr: Learning rate for scale optimization.
-        
+        gaussians: Object containing arrays for means (N,3), scales (N,3), 
+                   rotations (N,4), opacities (N), colors (N, C).
+        camera_poses: List of camera pose matrices for known views.
+        metric_depth_maps: List of 2D arrays (H, W) containing metric depth 
+                           from a monocular estimator (e.g., DepthAnythingV2-metric).
+                           
     Returns:
-        updated_gaussians: List of Gaussians with updated .mean and .scale.
-        scale_factor: The optimized global scale 'a'.
+        Updated gaussians object with scaled means and scales.
     """
-    # Convert metric depth to inverse depth
-    mono_inv_depth_maps = [1.0 / d for d in mono_depth_maps]
+    N_views = len(camera_poses)
+    N_gaussians = gaussians.means.shape[0]
     
-    # Initialize global scale factor
-    a = torch.tensor(1.0, requires_grad=True)
-    optimizer = torch.optim.Adam([a], lr=lr)
+    # Step 1 & 2: Render inverse depth and prepare metric inverse depth
+    rendered_inv_depths = []
+    metric_inv_depths = []
+    
+    for i in range(N_views):
+        # Render inverse depth using current Gaussians
+        # This involves projecting Gaussians to 2D and accumulating depth contributions
+        # weighted by opacity. The exact rendering routine is assumed to be available.
+        inv_depth_rendered = render_inverse_depth(gaussians, camera_poses[i])
+        rendered_inv_depths.append(inv_depth_rendered)
+        
+        # Compute inverse of metric depth
+        # Avoid division by zero by adding a small epsilon if necessary, 
+        # though metric depth should be positive.
+        metric_inv_depth = 1.0 / metric_depth_maps[i]
+        metric_inv_depths.append(metric_inv_depth)
+        
+    # Step 3: Optimize global scale 'a'
+    # Minimize L1 loss between metric inverse depth and scaled rendered inverse depth
+    # We use a simple gradient descent or analytical solution if applicable.
+    # Since it's a scalar optimization, we can use scipy.optimize or manual gradient descent.
+    
+    def loss_function(a):
+        total_loss = 0.0
+        for i in range(N_views):
+            # Compute L1 norm
+            diff = metric_inv_depths[i] - a * rendered_inv_depths[i]
+            total_loss += np.sum(np.abs(diff))
+        return total_loss
+
+    # Initial guess for scale (e.g., 1.0)
+    a_opt = 1.0
+    learning_rate = 0.01
+    num_iterations = 100
     
     for _ in range(num_iterations):
-        optimizer.zero_grad()
-        total_loss = 0.0
+        # Compute gradient of loss w.r.t a
+        grad = 0.0
+        for i in range(N_views):
+            diff = metric_inv_depths[i] - a_opt * rendered_inv_depths[i]
+            # Gradient of |x| is sign(x)
+            # Gradient of loss w.r.t a is sum(sign(diff) * -rendered_inv_depth)
+            grad += np.sum(np.sign(diff) * (-rendered_inv_depths[i]))
+            
+        # Update scale
+        a_opt -= learning_rate * grad
         
-        # Render inverse depth for each view using current Gaussians and scale 'a'
-        for i, view in enumerate(training_views):
-            # Create scaled Gaussians for rendering
-            # Note: In a real implementation, this requires a differentiable renderer
-            # that accepts a global scale factor or scaled positions.
-            scaled_means = [g.mean * a for g in gaussians]
-            
-            # Render inverse depth map
-            # rendered_inv_depth is a 2D tensor of shape (H, W)
-            rendered_inv_depth = render_inverse_depth(scaled_means, gaussians, view)
-            
-            # Get corresponding mono inverse depth
-            target_inv_depth = mono_inv_depth_maps[i]
-            
-            # Compute L1 loss (only over valid pixels, e.g., where mono depth is finite)
-            valid_mask = torch.isfinite(target_inv_depth)
-            loss = torch.mean(torch.abs(target_inv_depth[valid_mask] - rendered_inv_depth[valid_mask]))
-            total_loss += loss
-            
-        # Backpropagate and update 'a'
-        total_loss.backward()
-        optimizer.step()
-        
-    # Apply the optimal scale to the original Gaussians
-    updated_gaussians = []
-    for g in gaussians:
-        new_g = Gaussian()
-        new_g.mean = g.mean * a.item()
-        new_g.scale = g.scale * a.item() # Scale attributes also need to be metric
-        new_g.rotation = g.rotation
-        new_g.opacity = g.opacity
-        new_g.sh = g.sh
-        updated_gaussians.append(new_g)
-        
-    return updated_gaussians, a.item()
+    # Step 4: Update Gaussian parameters
+    gaussians.means = a_opt * gaussians.means
+    gaussians.scales = a_opt * gaussians.scales
+    
+    return gaussians
 ```
 
+**Parameters:**
+*   **Learning Rate:** Not specified in sources [G]. A small value (e.g., 0.01) is typical for scalar optimization.
+*   **Iterations:** Not specified in sources [G]. Convergence is typically fast for a single scalar.
+*   **Depth Estimator:** DepthAnythingV2 metric variant is recommended [S1, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Pruning:** Unlike original 3DGS implementations that might prune initial COLMAP points, this method avoids pruning to preserve the distribution of optimized Gaussian parameters, ensuring fair comparison with other studies [S1, unofficial].
-*   **Depth Estimator Choice:** The method relies on a metric depth estimator. Using a relative depth estimator without proper scaling will fail. The source uses 'depth-anything-v2-metric-hypersim-vitl.pth' [S1, unofficial].
-*   **Inverse Depth:** The loss is computed on inverse depth maps, not linear depth, to handle infinite depth values and improve numerical stability [S1, unofficial].
+*   **Pruning:** Unlike original 3DGS, this method avoids pruning initial COLMAP points to prevent affecting the distribution of optimized Gaussian parameters, ensuring fair comparison with other studies [S1, unofficial].
+*   **Depth Type:** The method relies on *metric* depth. Using relative depth estimators without proper scaling will fail to produce metrically correct results [S1, unofficial].
+*   **Inverse Depth:** The optimization is performed in inverse depth space to handle the unbounded nature of depth and improve numerical stability [S1, unofficial].
 
 ## Subtopics
 
 ### Coarse Alignment with Optical Flow
-A preprocessing step used in CoherentGS to align monocular depth estimates across views before Gaussian initialization, mitigating misalignments caused by relative depth scales [S2]. It optimizes per-view scale $s_i$ and offset $o_i$ parameters to minimize the $L_1$ difference between warped depth maps from different views, using optical flow masks $M_{i \rightarrow j}$ to ensure alignment only occurs where flow is accurate [S2]. The objective is:
+A preprocessing step used in CoherentGS to align monocular depth estimates across views before Gaussian initialization, mitigating misalignments caused by relative depth scales [S2]. It optimizes per-view scale $s_i$ and offset $o_i$ parameters to minimize the $L_1$ difference between warped depth maps using optical flow correspondences [S2]. The objective is:
 $$ \mathbf{s}^*, \mathbf{o}^* = \arg \min_{\mathbf{s}, \mathbf{o}} \sum_{(i,j)}\sum_{\mathbf{p}} \left\| M_{i \rightarrow j} \odot \left( g(s_i \cdot D^m_i[\mathbf{p}] + o_i, \mathbf{p}) - g(s_j \cdot D^m_j[\mathbf{q}] + o_j, \mathbf{q}) \right) \right\|_1 $$
-where $D^m$ is monocular depth, $g$ is the depth warping function, and $\mathbf{q}$ is the corresponding pixel in view $j$ [S2]. This ensures multi-view consistency of the initialized Gaussians [S2].
+where $D^m$ is monocular depth, $M_{i \rightarrow j}$ is the flow mask, and $g$ is the depth warping function [S2]. This ensures multi-view consistency of the initialized Gaussians [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The optimization of the global scale $a$ is a 1D problem, making it computationally inexpensive compared to full 3DGS training. However, it requires rendering inverse depth maps for all training views in each iteration, which is proportional to the number of Gaussians and training views.
-*   **Memory Complexity:** Requires storing the monocular depth maps and the rendered inverse depth maps. No additional large data structures are needed.
-*   **Strengths:** Simple to implement; effectively resolves the scale ambiguity; uses off-the-shelf metric depth estimators; preserves the original Gaussian distribution by avoiding pruning.
-*   **Limitations:** Relies on the accuracy of the monocular depth estimator; assumes a single global scale factor, which may not be sufficient for scenes with significant depth variations or non-rigid deformations; does not correct for local scale inconsistencies.
-*   **When to use:** When metric scale is required for downstream tasks (e.g., measurement, fusion with other metric data) and the scene is static.
-*   **When not to use:** When the monocular depth estimator is unreliable or when local scale variations are significant.
+*   **Time Complexity:** The optimization step involves rendering inverse depth maps for all known images and optimizing a single scalar. Rendering is $O(N \cdot V)$ where $N$ is the number of Gaussians and $V$ is the number of views. The scalar optimization is $O(V \cdot H \cdot W \cdot I)$ where $I$ is the number of iterations. This is negligible compared to the main training loop [S1, unofficial].
+*   **Memory Complexity:** Requires storing rendered inverse depth maps for all views, $O(V \cdot H \cdot W)$ [S1, unofficial].
+*   **Strengths:** Simple to implement; leverages state-of-the-art monocular depth estimators; resolves the up-to-scale problem without modifying the core Gaussian optimization loop [S1, unofficial].
+*   **Limitations:** Relies on the accuracy of the monocular depth estimator; assumes a single global scale factor is sufficient (may not handle scenes with varying depth scales or significant parallax errors well); does not correct for local geometric inaccuracies [S1, unofficial][S2].
+*   **When to use:** When metric scale is required for downstream tasks (e.g., robotics, measurement) and the scene is captured from multiple views with sufficient overlap [S1, unofficial].
 
 ## Background
-The up-to-scale problem in multi-view reconstruction from images is a well-known issue. Monocular Depth Scale Alignment was introduced as a post-processing step in recent 3DGS variants to enable metric reconstruction. It builds on the use of metric monocular depth estimators like DepthAnythingV2 [S1, unofficial]. The method was proposed in the context of "Quantile Rendering" [S1, unofficial] and is distinct from methods that use SDF consistency or normal alignment [S1, unofficial]. It addresses the limitation that standard 3DGS does not inherently produce metric-scale results [S1, unofficial].
+The up-to-scale problem is inherent in structure-from-motion and multi-view stereo pipelines that rely on uncalibrated or partially calibrated cameras [S1, unofficial]. While 3D Gaussian Splatting [Kerbl et al., 2023] introduced a scale-alignment method, this specific approach using DepthAnythingV2 metric depth was proposed in [S1, unofficial] to provide a more robust metric scale correction. CoherentGS [S2] introduced the coarse alignment with optical flow to handle relative depth inconsistencies before initialization.
 
 ## Sources
 [S1] Quantile Rendering: Efficiently Embedding High-dimensional Feature on 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2512.20927, fetched 2026-10-26 (unofficial)

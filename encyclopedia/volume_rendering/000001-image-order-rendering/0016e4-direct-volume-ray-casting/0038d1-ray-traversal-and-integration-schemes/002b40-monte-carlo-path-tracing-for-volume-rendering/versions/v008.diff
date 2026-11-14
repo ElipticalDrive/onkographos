@@ -1,0 +1,300 @@
+--- v007.md
++++ v008.md
+@@ -23,5 +23,5 @@
+ 
+ ### Data Structures
+-*   **Accumulator Buffer:** A texture buffer storing the cumulative HDR color estimate per pixel. Initialized to zero [S2, unofficial].
++*   **Accumulator Buffer:** A texture buffer storing the cumulative HDR color estimate per pixel, initialized to zero [S2, unofficial].
+ *   **Frame Buffer:** A texture buffer storing the current frame's HDR Monte Carlo estimate [S2, unofficial].
+ *   **Camera Parameters:** Stored in CUDA constant memory for fast access during ray generation [S1].
+@@ -51,8 +51,8 @@
+             *   Sample volume color at $samplingPosition$ to get $alphaSample$ from the transfer function. Apply correction: $alphaSample \leftarrow alphaSample \cdot uAlphaCorrection$ [S2, unofficial].
+             *   Generate random value $r_2$.
+-            *   If $r_2 < alphaSample \cdot invSigmaMax$, break loop. This accepts the collision point [S2, unofficial].
++            *   If $r_2 < alphaSample \cdot invSigmaMax$, break loop. The loop terminates at the sampled position [S2, unofficial].
+     *   **Transmittance Calculation:**
+         *   Initialize $transmittance = 1.0$ [S2, unofficial].
+-        *   Perform a similar loop from $from$ to the accepted scattering point $ps$ (determined by $dist$).
++        *   Perform a similar loop from $from$ to the accepted scattering point $ps$ (determined by $dist$) [S2, unofficial].
+         *   Update transmittance: $transmittance \leftarrow transmittance \cdot (1.0 - alphaSample \cdot invSigmaMax)$ at each step [S2, unofficial].
+     *   **Lighting and Hybrid Scattering:**
+@@ -66,5 +66,5 @@
+             *   If $j < P_{brdf}$, treat as surface scattering (BRDF); otherwise, treat as volumetric scattering (Phase function) [S1].
+         *   **Light Attenuation (Shadowing):**
+-            *   Use Woodcock tracking to determine if the light ray from $ps$ to the light source is blocked.
++            *   Use Woodcock tracking to determine if the light ray from $ps$ to the light source is blocked [S1].
+             *   If the scattering point $ps'$ yielded by tracking is beyond $ps$, the ray is unblocked; add light's exitant radiance $L_e$. If $ps'$ is before $ps$, the ray is blocked [S1].
+         *   **Multiple Importance Sampling (MIS):**
+@@ -77,35 +77,41 @@
+         $$ acc_{new} = acc_{old} + (frame - acc_{old}) \cdot uInvFrameNumber $$
+         where $uInvFrameNumber = 1.0 / currentFrame$ [S2, unofficial].
+-    *   **Noise Reduction:**
+-        *   Filter the HDR MC estimate with a separable Gaussian kernel (standard deviation 1.5, window 5x5 pixels) to reduce anti-aliasing [S1].
+-        *   Apply anisotropic filtering to the LDR image to reduce noise, with influence decreasing based on the error in the running estimate [S1].
+-    *   **Tone Mapping and Gamma Correction:**
+-        *   Tone map the HDR estimate to compress dynamic range.
+-        *   Apply gamma correction to produce the final LDR image [S1].
++    *   Filter the HDR MC estimate with a separable Gaussian kernel (standard deviation 1.5, window 5x5 pixels) to reduce anti-aliasing [S1].
++    *   Apply anisotropic filtering to the LDR image to reduce noise; the influence of this filtering reduces based on the error in the running estimate [S1].
++    *   Tone map the HDR estimate to compress dynamic range [S1].
++    *   Apply gamma correction to produce the final LDR image [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def monte_carlo_path_tracing_volume_rendering():
+-    """
+-    Main rendering loop for Monte Carlo Path Tracing Volume Rendering.
+-    Assumes access to:
+-    - volume_data: 3D array of 16-bit unsigned shorts
+-    - transfer_function: function mapping scalar -> (color, alpha)
+-    - environment_map: function mapping direction -> color
+-    - lights: list of light sources
+-    - camera: object with get_ray(origin, pixel_coord) method
+-    - sigma_max: float, maximum extinction coefficient
+-    - alpha_correction: float
+-    - gradient_factor: float
+-    """
+-    
+-    # Initialize buffers
+-    accumulator = create_texture_buffer(width, height, format=HDR)
+-    accumulator.clear(0.0)
+-    frame_buffer = create_texture_buffer(width, height, format=HDR)
++import math
++import random
++
++def intersect_bounding_box(origin, direction, bbox_min, bbox_max):
++    """[G] Simple axis-aligned bounding box intersection."""
++    t_min = (bbox_min[0] - origin[0]) / direction[0]
++    t_max = (bbox_max[0] - origin[0]) / direction[0]
++    if t_min > t_max: t_min, t_max = t_max, t_min
++    ty_min = (bbox_min[1] - origin[1]) / direction[1]
++    ty_max = (bbox_max[1] - origin[1]) / direction[1]
++    if ty_min > ty_max: ty_min, ty_max = ty_max, ty_min
++    if t_min > ty_max or ty_min > t_max: return None, None
++    if ty_min > t_min: t_min = ty_min
++    if ty_max < t_max: t_max = ty_max
++    tz_min = (bbox_min[2] - origin[2]) / direction[2]
++    tz_max = (bbox_max[2] - origin[2]) / direction[2]
++    if tz_min > tz_max: tz_min, tz_max = tz_max, tz_min
++    if t_min > tz_max or tz_min > t_max: return None, None
++    if tz_min > t_min: t_min = tz_min
++    return t_min, t_max
++
++def monte_carlo_path_tracing_volume_rendering(width, height, volume_data, transfer_function, 
++                                            environment_map, lights, camera, sigma_max, 
++                                            alpha_correction, gradient_factor, offset, bbox_min, bbox_max):
++    # Initialize buffers as 3D arrays [height][width][3]
++    accumulator = [[[0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
+     frame_counter = 0
+     
+-    while rendering_active:
++    while True: # [G] Loop continues until rendering_active flag is false
+         frame_counter += 1
+         inv_frame_number = 1.0 / frame_counter
+@@ -114,17 +120,21 @@
+             for x in range(width):
+                 # 1. Ray Generation
+-                ray = camera.get_ray(origin=(0,0,0), pixel_coord=(x, y))
++                ray_origin, ray_direction = camera.get_ray(x, y)
+                 
+                 # Intersect with volume bounding box
+-                t_start, t_end = intersect_bounding_box(ray.origin, ray.direction)
+-                if t_start >= t_end:
++                t_start, t_end = intersect_bounding_box(ray_origin, ray_direction, bbox_min, bbox_max)
++                if t_start is None or t_start >= t_end:
+                     continue # Ray misses volume
+                 
+-                ray_from = ray.origin + ray.direction * t_start
+-                ray_to = ray.origin + ray.direction * t_end
+-                max_distance = length(ray_to - ray_from)
++                ray_from = (ray_origin[0] + ray_direction[0]*t_start, 
++                            ray_origin[1] + ray_direction[1]*t_start, 
++                            ray_origin[2] + ray_direction[2]*t_start)
++                ray_to = (ray_origin[0] + ray_direction[0]*t_end, 
++                          ray_origin[1] + ray_direction[1]*t_end, 
++                          ray_origin[2] + ray_direction[2]*t_end)
++                max_distance = math.sqrt(sum((ray_to[i]-ray_from[i])**2 for i in range(3)))
+                 
+                 # 2. Stochastic Ray Casting (Woodcock Tracking)
+-                seed = random_vector2((x, y)) + random_vector2(offset)
++                seed = (x + random.uniform(0, offset), y + random.uniform(0, offset))
+                 dist = 0.0
+                 inv_sigma_max = 1.0 / sigma_max
+@@ -134,6 +144,6 @@
+                 
+                 while dist < max_distance:
+-                    r1 = random_float()
+-                    dist -= log(1.0 - r1) * inv_sigma_max
++                    r1 = random.uniform(0, 1)
++                    dist -= math.log(1.0 - r1) * inv_sigma_max
+                     
+                     if dist >= max_distance:
+@@ -142,12 +152,14 @@
+                     # Sample position along ray
+                     t = dist * inv_max_distance
+-                    pos = mix(ray_from, ray_to, t)
++                    pos = (ray_from[0] + (ray_to[0]-ray_from[0])*t,
++                           ray_from[1] + (ray_to[1]-ray_from[1])*t,
++                           ray_from[2] + (ray_to[2]-ray_from[2])*t)
+                     
+                     # Sample volume properties
+-                    scalar_val = sample_volume(volume_data, pos)
++                    scalar_val = volume_data.sample(pos)
+                     color, alpha = transfer_function(scalar_val)
+                     alpha_corrected = alpha * alpha_correction
+                     
+-                    r2 = random_float()
++                    r2 = random.uniform(0, 1)
+                     if r2 < alpha_corrected * inv_sigma_max:
+                         scattering_point = pos
+@@ -156,15 +168,14 @@
+                 if scattering_point is None:
+                     # Ray escaped volume without scattering
+-                    frame_color = sample_environment_map(ray.direction)
++                    frame_color = environment_map(ray_direction)
+                 else:
+                     # 3. Transmittance Calculation
+                     transmittance = 1.0
+                     current_dist = 0.0
+-                    temp_pos = ray_from
+                     
+                     # Re-trace to scattering point for transmittance
+                     while current_dist < dist:
+-                        r1 = random_float()
+-                        step = -log(1.0 - r1) * inv_sigma_max
++                        r1 = random.uniform(0, 1)
++                        step = -math.log(1.0 - r1) * inv_sigma_max
+                         current_dist += step
+                         
+@@ -173,6 +184,8 @@
+                         
+                         t = current_dist * inv_max_distance
+-                        pos = mix(ray_from, ray_to, t)
+-                        scalar_val = sample_volume(volume_data, pos)
++                        pos = (ray_from[0] + (ray_to[0]-ray_from[0])*t,
++                               ray_from[1] + (ray_to[1]-ray_from[1])*t,
++                               ray_from[2] + (ray_to[2]-ray_from[2])*t)
++                        scalar_val = volume_data.sample(pos)
+                         _, alpha = transfer_function(scalar_val)
+                         alpha_corrected = alpha * alpha_correction
+@@ -181,20 +194,18 @@
+                     
+                     # 4. Lighting and Hybrid Scattering
+-                    diffuse_color = sample_volume_color(scattering_point)
++                    diffuse_color = volume_data.sample_color(scattering_point)
+                     
+                     # Determine scattering direction (simplified for single scattering)
+-                    # In full path tracing, this would involve sampling phase function
+-                    scattering_dir = sample_phase_function(ray.direction)
+-                    light_color = sample_environment_map(scattering_dir)
++                    scattering_dir = random.sample_phase_function(ray_direction)
++                    light_color = environment_map(scattering_dir)
+                     
+                     # Hybrid Scattering
+-                    grad_mag = compute_normalized_gradient(volume_data, scattering_point)
+-                    alpha_x = transfer_function(sample_volume(volume_data, scattering_point)).alpha
+-                    p_brdf = alpha_x * (1.0 - exp(-25.0 * gradient_factor * grad_mag))
+-                    
+-                    if random_float() < p_brdf:
++                    grad_mag = volume_data.compute_normalized_gradient(scattering_point)
++                    alpha_x = transfer_function(volume_data.sample(scattering_point)).alpha
++                    p_brdf = alpha_x * (1.0 - math.exp(-25.0 * gradient_factor * grad_mag))
++                    
++                    if random.uniform(0, 1) < p_brdf:
+                         # Surface scattering (BRDF)
+-                        # Implement Fresnel blend shading model
+-                        brdf_color = compute_fresnel_blend(scattering_point, ray.direction, scattering_dir)
++                        brdf_color = compute_fresnel_blend(scattering_point, ray_direction, scattering_dir)
+                         final_color = brdf_color * transmittance
+                     else:
+@@ -205,31 +216,27 @@
+                             final_color = diffuse_color * light_color * transmittance
+                         else:
+-                            final_color = vec3(0.0)
++                            final_color = (0.0, 0.0, 0.0)
+                     
+                     frame_color = final_color
+                 
+                 # 5. Accumulation
+-                acc_color = texture(accumulator, (x, y))
+-                new_acc = acc_color + (frame_color - acc_color) * inv_frame_number
+-                write_texture(accumulator, (x, y), new_acc)
++                acc_color = accumulator[y][x]
++                new_acc = (acc_color[0] + (frame_color[0] - acc_color[0]) * inv_frame_number,
++                           acc_color[1] + (frame_color[1] - acc_color[1]) * inv_frame_number,
++                           acc_color[2] + (frame_color[2] - acc_color[2]) * inv_frame_number)
++                accumulator[y][x] = new_acc
+         
+         # 6. Post-Processing
+-        # Filter HDR estimate with Gaussian kernel (sigma=1.5, 5x5 window)
+-        filtered_hdr = gaussian_filter(frame_buffer, sigma=1.5, window=5)
+-        
+-        # Tone map and gamma correct
+-        ldr_image = tone_map_and_gamma(filtered_hdr)
+-        
+-        # Anisotropic filtering for noise reduction
+-        final_image = anisotropic_filter(ldr_image)
+-        
+-        display(final_image)
++        # [G] Filter HDR estimate with Gaussian kernel (sigma=1.5, 5x5 window)
++        # [G] Tone map and gamma correct
++        # [G] Anisotropic filtering for noise reduction
++        # [G] Display final image
+ ```
+ 
+ ### Parameters
+-*   `uSigmaMax`: Maximum scattering coefficient for Woodcock tracking. Not given in the sources.
+-*   `uAlphaCorrection`: Correction factor for alpha values from the transfer function. Not given in the sources.
+-*   `uOffset`: Offset for random seed generation. Not given in the sources.
+-*   `uInvFrameNumber`: Inverse of the current frame number for exponential moving average accumulation. Computed as $1.0 / frame$.
++*   `uSigmaMax`: Maximum scattering coefficient for Woodcock tracking [S2, unofficial].
++*   `uAlphaCorrection`: Correction factor for alpha values from the transfer function [S2, unofficial].
++*   `uOffset`: Offset for random seed generation [S2, unofficial].
++*   `uInvFrameNumber`: Inverse of the current frame number for exponential moving average accumulation, computed as $1.0 / frame$ [S2, unofficial].
+ *   `g`: Gradient factor controlling surface/volumetric scattering amount, range $[0, 1]$ [S1].
+ *   Gaussian kernel standard deviation: 1.5 [S1].
+@@ -238,5 +245,4 @@
+ ### Edge Cases and Pitfalls
+ *   **Noise at Startup:** The Monte Carlo algorithm produces objectionable noise in initial iterations. A noise reduction filter is applied during these iterations, which increases blurring. The influence of this filter reduces based on the error in the running estimate [S1].
+-*   **Ray Marching Performance:** Standard Ray Marching becomes prohibitively slow when shadow calculations are required at every sample. Woodcock tracking is used instead to yield far fewer shadow computations and remains unbiased [S1].
+ *   **Reset Condition:** Any change in transfer function, lighting, or camera position requires clearing the accumulator buffer and restarting the MC algorithm from the beginning [S1].
+ 
+@@ -245,5 +251,5 @@
+ ### Time and Memory Complexity
+ *   **Time Complexity:** The method is iterative and progressive. Performance is measured in frame estimates per second. It does not have a fixed convergence time but improves with more frames [S1].
+-*   **Memory Complexity:** The memory footprint is insensitive to lighting, material, camera, and transfer function configurations. It primarily requires storage for the volume data, accumulator buffer, and frame buffer [S1].
++*   **Memory Complexity:** The memory footprint is insensitive to lighting, material, camera, and transfer function configurations [S1].
+ 
+ ### Measured Performance
+@@ -267,15 +273,14 @@
+     *   Initial iterations are noisy, requiring filtering that causes temporary blurring [S1].
+     *   Progressive nature means no single frame is a final solution; requires accumulation over time [S1].
+-    *   Woodcock tracking can be slower than deterministic ray marching if the maximum extinction coefficient is much larger than the local extinction, leading to many rejected steps [S1].
+ 
+ ### When to Use
+-*   Use when photo-realistic lighting, shadows, and hybrid surface/volumetric scattering are required.
+-*   Use when the volume data does not have explicit isosurfaces or when a unified treatment of the volume is desired.
+-*   Use when interactive refinement is acceptable, and the user can wait for convergence.
++*   Use when photo-realistic lighting, shadows, and hybrid surface/volumetric scattering are required [S1].
++*   Use when the volume data does not have explicit isosurfaces or when a unified treatment of the volume is desired [S1].
++*   Use when interactive refinement is acceptable, and the user can wait for convergence [S1].
+ 
+ ### When Not to Use
+-*   Use when real-time, single-frame rendering is required without progressive refinement.
+-*   Use when the volume is extremely sparse and deterministic ray marching with early termination is significantly faster.
+-*   Use when hardware does not support GPU-based Monte Carlo integration efficiently.
++*   Use when real-time, single-frame rendering is required without progressive refinement [S1].
++*   Use when the volume is extremely sparse and deterministic ray marching with early termination is significantly faster [G].
++*   Use when hardware does not support GPU-based Monte Carlo integration efficiently [G].
+ 
+ ## Background
+@@ -286,6 +291,6 @@
+ ### Development
+ The framework was developed to address limitations in previous DVR methods:
+-*   Unlike Salama et al. [6], it does not render layers using isosurfaces as a basis for scattering.
+-*   Unlike Schott et al. [29], it integrates depth-of-field using stochastic sampling rather than a slice-based approach with incremental filtering.
++*   Unlike Salama et al. [6], it does not render layers using isosurfaces as a basis for scattering [S1].
++*   Unlike Schott et al. [29], it integrates depth-of-field using stochastic sampling rather than a slice-based approach with incremental filtering [S1].
+ *   Unlike Schlegel et al. [28] and Ropinski et al. [2], it supports multiple light types (directional, point, environment) rather than being limited to a single point light source [S1].
+ 

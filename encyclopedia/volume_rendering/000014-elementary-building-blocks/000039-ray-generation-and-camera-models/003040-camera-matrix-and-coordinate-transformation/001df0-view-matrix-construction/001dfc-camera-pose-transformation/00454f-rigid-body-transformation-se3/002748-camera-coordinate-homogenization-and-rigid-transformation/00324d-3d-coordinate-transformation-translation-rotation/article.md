@@ -1,50 +1,53 @@
 # 3D Coordinate Transformation (Translation + Rotation)
-Also called: Row-vector 3D Transformation, Sequential Translation and Rotation
+Also called: 4D coordinate system, Homogeneous Coordinates for 3D Transformations, Matrix multiplication for translation, Row-vector 3D Transformation, Sequential Translation and Rotation
 
 ## Overview
-This method applies a rigid body transformation (rotation and translation) to a set of 3D points using sequential matrix multiplications and vector addition, treating input points as row vectors [S1, S2, unofficial]. It differs from homogeneous coordinate approaches by explicitly separating translation as a vector addition step and applying rotations in a specific sequential order (Z-translation, Y-translation, X-translation, then Z-rotation, Y-rotation, X-rotation) rather than combining them into a single $4 \times 4$ matrix multiplication [S1, unofficial]. This approach is used in voxel rendering engines to transform relative voxel positions to absolute world coordinates [S1, unofficial].
+This method applies a rigid body transformation to 3D points by sequentially multiplying row vectors by $3 \times 3$ rotation matrices and adding a translation vector, explicitly avoiding $4 \times 4$ homogeneous matrices [S2, unofficial]. It solves the problem of combining rotation and translation into a single linear operation while preserving explicit control over the transformation order [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `points`: An $N \times 3$ array of 3D points, where each row is a point $\mathbf{p} = [x, y, z]$ [S2, unofficial].
-- `rotation_angles`: A tuple or array of three angles $(\theta_x, \theta_y, \theta_z)$ in radians for the final rotation sequence [S1, unofficial].
-- `translation_angles`: A tuple or array of three angles $(\theta_{x,t}, \theta_{y,t}, \theta_{z,t})$ in radians for the intermediate translation-related rotation sequence [S1, unofficial].
-- `absolute_position`: A 3D vector $\mathbf{p}_{\text{abs}}$ representing the absolute offset added after the relative transformation [S1, unofficial].
+- `rel_point`: A 1D array or $N \times 3$ batch of relative 3D points $\mathbf{p}_{\text{rel}} = [x, y, z]$ [S2, unofficial].
+- `trans_angles`: A tuple or array of three angles $(\theta_{x,t}, \theta_{y,t}, \theta_{z,t})$ in radians for the intermediate rotation sequence [S2, unofficial].
+- `abs_pos`: A 3D vector $\mathbf{p}_{\text{abs}} = [x, y, z]$ representing the absolute offset [S2, unofficial].
+- `rot_angles`: A tuple or array of three angles $(\theta_x, \theta_y, \theta_z)$ in radians for the final rotation sequence [S2, unofficial].
 
 **Outputs:**
-- `transformed_points`: An $N \times 3$ array of the transformed 3D points [S1, S2, unofficial].
+- `transformed_point`: A 1D array or $N \times 3$ batch of transformed 3D points $\mathbf{p}'$ [S2, unofficial].
 
 **Data Structures:**
-- Rotation matrices $R_x(\theta)$, $R_y(\theta)$, $R_z(\theta)$ are $3 \times 3$ matrices [S1, unofficial].
-- Points are stored as row vectors (shape $(N, 3)$) [S1, S2, unofficial].
+- Rotation matrices $R_x(\theta)$, $R_y(\theta)$, $R_z(\theta)$ are $3 \times 3$ matrices [S2, unofficial].
+- Points are stored as row vectors (shape $(3,)$ or $(N, 3)$) [S2, unofficial].
+
+**Steps:**
+1. Multiply `rel_point` by $R_z(\theta_{z,t})$.
+2. Multiply the result by $R_y(\theta_{y,t})$.
+3. Multiply the result by $R_x(\theta_{x,t})$.
+4. Add `abs_pos` to the transformed vector.
+5. Multiply the result by $R_z(\theta_z)$.
+6. Multiply the result by $R_y(\theta_y)$.
+7. Multiply the result by $R_x(\theta_x)$.
+8. Return the final vector [S2, unofficial].
 
 **Formulas:**
-The rotation matrices are defined as [S1, unofficial]:
+The elementary rotation matrices are defined as [S2, unofficial]:
 $$
-R_z(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta & 0 \\ \sin\theta & \cos\theta & 0 \\ 0 & 0 & 1 \end{bmatrix}
-$$
-$$
-R_y(\theta) = \begin{bmatrix} \cos\theta & 0 & \sin\theta \\ 0 & 1 & 0 \\ -\sin\theta & 0 & \cos\theta \end{bmatrix}
-$$
-$$
+R_z(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta & 0 \\ \sin\theta & \cos\theta & 0 \\ 0 & 0 & 1 \end{bmatrix}, \quad
+R_y(\theta) = \begin{bmatrix} \cos\theta & 0 & \sin\theta \\ 0 & 1 & 0 \\ -\sin\theta & 0 & \cos\theta \end{bmatrix}, \quad
 R_x(\theta) = \begin{bmatrix} 1 & 0 & 0 \\ 0 & \cos\theta & -\sin\theta \\ 0 & \sin\theta & \cos\theta \end{bmatrix}
 $$
-
-The transformation for a single point $\mathbf{p}_{\text{rel}}$ is given by [S1, unofficial]:
+Following the row-vector convention ($\mathbf{p}' = \mathbf{p} M$), the step-by-step transformation is:
 $$
-\mathbf{p}' = R_x(\theta_x) R_y(\theta_y) R_z(\theta_z) \left( R_x(\theta_{x,t}) R_y(\theta_{y,t}) R_z(\theta_{z,t}) \mathbf{p}_{\text{rel}} + \mathbf{p}_{\text{abs}} \right)
+\begin{aligned}
+\mathbf{p}_1 &= \mathbf{p}_{\text{rel}} R_z(\theta_{z,t}) \\
+\mathbf{p}_2 &= \mathbf{p}_1 R_y(\theta_{y,t}) \\
+\mathbf{p}_3 &= \mathbf{p}_2 R_x(\theta_{x,t}) \\
+\mathbf{p}_4 &= \mathbf{p}_3 + \mathbf{p}_{\text{abs}} \\
+\mathbf{p}_5 &= \mathbf{p}_4 R_z(\theta_z) \\
+\mathbf{p}_6 &= \mathbf{p}_5 R_y(\theta_y) \\
+\mathbf{p}_7 &= \mathbf{p}_6 R_x(\theta_x)
+\end{aligned}
 $$
-Note: The source [S1, unofficial] formula notation $R_x(\text{x\_rad}) R_y(\text{y\_rad}) R_z(\text{z\_rad}) (\dots)$ implies left-multiplication of row vectors, i.e., $\mathbf{p}' = \mathbf{p}_{\text{rel}} M_{\text{trans}} + \mathbf{p}_{\text{abs}} M_{\text{rot}}$? No, the source explicitly states "Multiply relative point by ... matrix" and "Multiply result by ... matrix". In row-vector convention $\mathbf{p}' = \mathbf{p} M$, the order of multiplication in the formula $\mathbf{p}' = R_x R_y R_z \mathbf{p}$ usually implies column vectors $\mathbf{p}' = R \mathbf{p}$. However, the pitfall section [S1, unofficial] clarifies: "multiplies a 1D array on the left (`np.matmul(rel_point, matrix)`), which works in NumPy but is mathematically a row-vector transformation ($\mathbf{p}^T M$)." This implies the code implements $\mathbf{p}' = \mathbf{p} R_z R_y R_x$ if the matrices are applied sequentially from right to left in standard matrix algebra, or the source formula's order of operations needs careful interpretation. Let's look at the steps [S1, unofficial]:
-1. Multiply relative point by Z-translation rotation matrix.
-2. Multiply result by Y-translation rotation matrix.
-3. Multiply result by X-translation rotation matrix.
-4. Add absolute point coordinates.
-5. Multiply by Z-rotation matrix.
-6. Multiply by Y-rotation matrix.
-7. Multiply by X-rotation matrix.
-
-If $\mathbf{p}$ is a row vector, step 1 is $\mathbf{p}_1 = \mathbf{p} R_z(\theta_{z,t})$. Step 2 is $\mathbf{p}_2 = \mathbf{p}_1 R_y(\theta_{y,t})$. Step 3 is $\mathbf{p}_3 = \mathbf{p}_2 R_x(\theta_{x,t})$. Step 4 is $\mathbf{p}_4 = \mathbf{p}_3 + \mathbf{p}_{\text{abs}}$. Step 5 is $\mathbf{p}_5 = \mathbf{p}_4 R_z(\theta_z)$. Step 6 is $\mathbf{p}_6 = \mathbf{p}_5 R_y(\theta_y)$. Step 7 is $\mathbf{p}_7 = \mathbf{p}_6 R_x(\theta_x)$.
-Thus, the combined rotation matrix for the first part is $M_{\text{trans}} = R_z(\theta_{z,t}) R_y(\theta_{y,t}) R_x(\theta_{x,t})$? No, if $\mathbf{p}_1 = \mathbf{p} R_z$, then the total transformation is $\mathbf{p} R_z R_y R_x$. The formula in [S1, unofficial] writes $R_x R_y R_z \mathbf{p}$, which is standard column-vector notation. The code uses row vectors. We must implement the row-vector version consistent with the steps.
+The compact form is $\mathbf{p}' = ((\mathbf{p}_{\text{rel}} R_z(\theta_{z,t}) R_y(\theta_{y,t}) R_x(\theta_{x,t})) + \mathbf{p}_{\text{abs}}) R_z(\theta_z) R_y(\theta_y) R_x(\theta_x)$ [S2, unofficial]. Note that the source formula notation $R_x R_y R_z (\dots) \mathbf{p}$ uses column-vector convention; the implementation uses row-vector left-multiplication [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -71,21 +74,16 @@ def rotation_matrix_x(theta):
                      [0,  c, -s],
                      [0,  s,  c]])
 
-def transform_3d(points, rot_angles, trans_angles, abs_pos):
+def transform_3d(rel_point, trans_angles, abs_pos, rot_angles):
     """
-    points: (N, 3) array of row vectors
-    rot_angles: (x_rad, y_rad, z_rad)
+    rel_point: (3,) or (N, 3) array of row vectors
     trans_angles: (x_rad_translate, y_rad_translate, z_rad_translate)
     abs_pos: (3,) array
+    rot_angles: (x_rad, y_rad, z_rad)
     """
-    # Validate inputs [S2, unofficial]
-    if points.ndim != 2 or points.shape[1] != 3:
-        raise ValueError("Points must be Nx3 array")
-    
-    x_r, y_r, z_r = rot_angles
     x_t, y_t, z_t = trans_angles
+    x_r, y_r, z_r = rot_angles
     
-    # Precompute rotation matrices
     Rz_t = rotation_matrix_z(z_t)
     Ry_t = rotation_matrix_y(y_t)
     Rx_t = rotation_matrix_x(x_t)
@@ -94,16 +92,12 @@ def transform_3d(points, rot_angles, trans_angles, abs_pos):
     Ry_r = rotation_matrix_y(y_r)
     Rx_r = rotation_matrix_x(x_r)
     
-    # Step 1-3: Sequential translation rotations (row-vector multiplication)
-    # p_rel is (N, 3)
-    p_temp = np.matmul(points, Rz_t)
+    p_temp = np.matmul(rel_point, Rz_t)
     p_temp = np.matmul(p_temp, Ry_t)
     p_temp = np.matmul(p_temp, Rx_t)
     
-    # Step 4: Add absolute point coordinates
     p_temp = p_temp + abs_pos
     
-    # Step 5-7: Sequential final rotations
     p_temp = np.matmul(p_temp, Rz_r)
     p_temp = np.matmul(p_temp, Ry_r)
     p_temp = np.matmul(p_temp, Rx_r)
@@ -112,31 +106,27 @@ def transform_3d(points, rot_angles, trans_angles, abs_pos):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Row vs Column Vectors:** The method uses row-vector multiplication ($\mathbf{p} M$). If the input points are column vectors, the matrix multiplication order must be reversed or matrices transposed [S1, unofficial]. The pitfall in [S1, unofficial] notes that using `np.matmul(rel_point, matrix)` with a 1D array works in NumPy but requires careful handling of dimensions for batched operations.
-- **Precision:** Floating-point precision errors can accumulate with multiple matrix multiplications.
-- **Degenerate Input:** If rotation angles are not provided or are zero, the identity matrix should be used implicitly. The source [S1, unofficial] does not specify handling for missing angles, so defaulting to 0 (identity) is assumed [G].
-- **Homogeneous Coordinates:** This method does not use $4 \times 4$ homogeneous matrices. Translation is added as a vector addition, which is computationally cheaper but less general than homogeneous transformations [S1, unofficial].
+- **Row vs Column Vectors:** The method requires row-vector multiplication (`p @ M`). Using column-vector convention requires transposing the matrices or reversing the multiplication order [S2, unofficial].
+- **Precision:** Floating-point errors accumulate across the seven matrix multiplications; re-normalization is not applicable to rigid transformations but precision loss may occur in extreme scale ranges [G].
+- **Homogeneous Coordinates:** Translation is manually added as vector addition rather than embedded in a $4 \times 4$ matrix, which avoids homogeneous division but requires explicit offset handling [S2, unofficial].
 
 ## Subtopics
 
-### Homogeneous Coordinate Transformation
-Uses $4 \times 4$ matrices to combine rotation and translation into a single multiplication. More general, supports perspective projection. Choose when integrating with standard graphics pipelines. [Homogeneous Coordinate Transformation](4006-homogeneous-coordinate-transformation.md)
-
-### Quaternion-based Rotation
-Uses quaternions to represent rotation, avoiding gimbal lock and providing smoother interpolation. Choose when interpolating rotations or handling complex orientation sequences. [Quaternion Rotation](4007-quaternion-rotation.md)
+### SE(3) Point Transformation
+Applies an SE(3) transformation to a set of 3D points using a single $4 \times 4$ matrix [S3, unofficial]. Inputs are validated as a $4 \times 4$ matrix and an $N \times 3$ point array [S3, unofficial]. Computation is `points @ matrix[:3, :3].T + matrix[:3, 3]` [S3, unofficial]. Choose when a unified rigid transformation matrix is already available or when integrating with standard linear algebra pipelines [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for $N$ points, with a constant number of $3 \times 3$ matrix multiplications (6 multiplications and 3 additions per point).
-- **Memory Complexity:** $O(N)$ to store the output points.
-- **Performance:** Efficient for small to medium datasets. Avoids the overhead of $4 \times 4$ matrix operations and homogeneous coordinate division.
-- **Strengths:** Simple implementation, no need for homogeneous coordinate management, explicit control over rotation order.
-- **Limitations:** Not directly compatible with standard graphics APIs that expect homogeneous coordinates. Rotation order is fixed and must be carefully managed to avoid gimbal lock issues if not handled by quaternions.
-- **When to use:** When implementing a custom voxel rendering engine where explicit control over transformation steps is needed and homogeneous coordinates are not required. [S1, unofficial]
-- **When not to use:** When integrating with standard OpenGL/DirectX pipelines or when complex rotation interpolation is needed.
+- **Time Complexity:** $O(N)$ for $N$ points, requiring exactly 6 matrix multiplications and 1 vector addition per point [S2, unofficial].
+- **Memory Complexity:** $O(N)$ to store the output points; $O(1)$ auxiliary space for rotation matrices [G].
+- **Strengths:** Avoids $4 \times 4$ overhead and homogeneous coordinate division; provides explicit control over rotation order [S2, unofficial].
+- **Limitations:** Fixed Euler angle order; not directly compatible with standard graphics APIs that expect homogeneous coordinates [G].
+- **When to use:** Custom renderers or educational implementations requiring step-by-step transformation control [S2, unofficial].
+- **When not to use:** Standard OpenGL/DirectX pipelines or when perspective projection is required [G].
 
 ## Background
-This method is derived from implementations in Python-based voxel rendering engines [S1, unofficial]. It reflects a common approach in computer graphics where row-vector conventions are used, and transformations are decomposed into sequential steps for clarity or specific rendering requirements. The use of sequential Z-Y-X rotations is a standard Euler angle convention. The separation of translation from rotation is a simplification that avoids the overhead of homogeneous coordinates.
+Originates from standard computer graphics techniques for decomposing rigid body motions [G]. The row-vector convention with sequential $3 \times 3$ rotations and manual translation addition is documented in custom voxel rendering implementations [S2, unofficial]. The approach leverages the mathematical property that translation can be added after rotation when points are treated as vectors in Euclidean space [S1, unofficial].
 
 ## Sources
-[S1] anb2473/Python-Voxel-Rendering-Engine, https://github.com/anb2473/Python-Voxel-Rendering-Engine, fetched 2026-10-27 (unofficial)
-[S2] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)
+[S1] WebGL for Numerical PDEs (Session 11): Volume Ray Casting, https://www.youtube.com/watch?v=X095f9QzSBo, fetched 2026-10-27 (unofficial)
+[S2] anb2473/Python-Voxel-Rendering-Engine, https://github.com/anb2473/Python-Voxel-Rendering-Engine, fetched 2026-10-27 (unofficial)
+[S3] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)
