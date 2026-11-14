@@ -1,0 +1,118 @@
+# Instant-NGP
+Also called: Instant Neural Graphics Primitives, Multiresolution Hash Encoding
+
+## Overview
+Instant-NGP is a method that accelerates neural radiance field training and rendering by replacing positional encoding with a multiresolution hash grid encoding [S1][S2, unofficial]. It offloads the representational burden from a deep multi-layer perceptron (MLP) to efficient hash-table lookups and trilinear interpolation, achieving training speeds three orders of magnitude faster than vanilla NeRF [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D query point $\mathbf{x} \in \mathbb{R}^3$ (and optionally other attributes like normal or view direction).
+*   **Output:** A feature vector or predicted value (e.g., color, density) $m(\mathbf{y}; \theta)$.
+
+**Data Structures:**
+*   **Hash Grids:** A set of $L$ distinct resolution levels.
+*   **Hash Table:** At each level $l \in \{0, \dots, L-1\}$, there is a hash table with $T$ entries. Each entry stores a feature vector of dimension $F$.
+*   **Voxel Size:** The spatial domain is partitioned into voxels. The resolution increases with level $l$.
+
+**Parameters:**
+*   $L$: Number of resolution levels.
+*   $T$: Number of entries (hash buckets) per table.
+*   $F$: Dimensionality of the feature vector per entry.
+*   Scaling factors: $(1/N_a, 1/N_b)$ used in the hash function mapping [S1].
+
+**Algorithm Steps:**
+1.  **Partitioning:** Partition the spatial domain into $L$ distinct resolution levels [S1].
+2.  **Voxel Identification:** For a given 3D query point $\mathbf{x}$, identify the enclosing voxel at each resolution level $l$ [S1].
+3.  **Vertex Hashing:** Identify the eight vertices of the enclosing voxel at level $l$. Map each vertex coordinate to a discrete hash bucket index using a hash function based on the input hash table size $(l,b)$ and scaling factors $(1/N_a, 1/N_b)$ [S1].
+4.  **Feature Lookup (Lockup):** Perform a lookup operation to extract the corresponding feature vector $T$ from the pre-allocated hash table at level $l$ based on the generated index [S1].
+5.  **Trilinear Interpolation:** Use trilinear interpolation to smoothly transition the extracted discrete features based on the exact continuous positions of the vertices within the voxel to obtain the continuous interpolated feature $F_l$ for level $l$ [S1][S2, unofficial].
+6.  **Concatenation:** Concatenate the interpolated features $F_l$ from all $L$ levels to form a joint feature vector [S1][S2, unofficial].
+7.  **MLP Regression:** Feed the joint feature vector (concatenated with other input attributes if present) into a shallow multi-layer perceptron (MLP), typically comprising 1–2 layers, for nonlinear regression to output the prediction $m(\mathbf{y}; \theta)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def instant_ngp_query(x, hash_tables, levels, feature_dim, mlp):
+    """
+    Query the Instant-NGP representation for a 3D point x.
+    
+    Args:
+        x: numpy array of shape (3,), the 3D query point.
+        hash_tables: list of L numpy arrays, each of shape (T, F).
+                     hash_tables[l] is the feature grid at level l.
+        levels: list of L integers, representing the resolution or scaling 
+                for each level.
+        feature_dim: int, F, the dimension of each feature vector.
+        mlp: callable, a shallow MLP (1-2 layers) taking the concatenated 
+             features and returning the prediction.
+             
+    Returns:
+        prediction: float or vector, the output of the MLP.
+    """
+    concatenated_features = []
+    
+    for l in range(len(levels)):
+        # 1. Identify voxel and vertices
+        # Determine the voxel size for this level. 
+        # Note: Exact scaling factor formula (1/Na, 1/Nb) is not fully specified 
+        # in sources beyond mentioning it in the hash function [S1].
+        # We assume a standard grid scaling based on level index.
+        voxel_size = get_voxel_size(levels[l])
+        
+        # Find the 8 vertices of the voxel containing x
+        # This involves floor/ceil operations on x / voxel_size
+        vertices = get_voxel_vertices(x, voxel_size)
+        
+        # 2. Hash each vertex to get indices
+        indices = []
+        for v in vertices:
+            # Hash function uses table size T and scaling factors
+            # Hash function details: hash(v, table_size=T, scale_factors=(1/Na, 1/Nb))
+            # Implementation note: Standard hash function (e.g., splitmix64) 
+            # followed by modulo T is typical, but exact hash function 
+            # is not specified in sources [S1].
+            idx = hash_vertex(v, T=len(hash_tables[l]))
+            indices.append(idx)
+            
+        # 3. Lookup features
+        features = []
+        for idx in indices:
+            # Lockup operation: extract feature vector from hash table
+            feat = hash_tables[l][idx]
+            features.append(feat)
+            
+        # 4. Trilinear interpolation
+        # Interpolate the 8 features based on x's position within the voxel
+        # Weights are determined by the relative distance of x to the vertices
+        interpolated_feat = trilinear_interpolate(vertices, features, x)
+        
+        concatenated_features.append(interpolated_feat)
+        
+    # 5. Concatenate features from all levels
+    joint_feature = np.concatenate(concatenated_features)
+    
+    # 6. MLP prediction
+    prediction = mlp(joint_feature)
+    
+    return prediction
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** Multiple vertices may map to the same hash bucket. The sources do not specify the collision resolution strategy (e.g., chaining, open addressing) [S1].
+*   **Precision:** Trilinear interpolation requires precise calculation of barycentric coordinates or relative distances within the voxel [S1].
+*   **Boundary Conditions:** Handling points outside the defined spatial domain is not specified [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training is extremely fast, typically 5–30 seconds for typical scenes [S2, unofficial]. Rendering is in milliseconds [S2, unofficial].
+*   **Memory Complexity:** Depends on $L \times T \times F$. The sources do not specify exact memory usage values, but note that it offloads burden from MLP to hash tables [S1].
+*   **Strengths:** Three orders of magnitude acceleration in training throughput compared to vanilla NeRF [S1]. First practical NeRF for production use [S2, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When fast training and rendering of neural radiance fields are required [S2, unofficial].
+
+## Background
+Instant-NGP was introduced by Müller et al. in 2022 [S2, unofficial]. It was designed to make NeRF practical for production by drastically reducing training time from hours/days to seconds [S2, unofficial].
+
+## Sources
+[S1] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26
+[S2] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

@@ -2,7 +2,7 @@
 Also called: Proximity Clouds
 
 ## Overview
-Distance Transformation, also known as Proximity Clouds, is a method to accelerate ray traversal in a regular grid filled with empty zones by pre-calculating distance information to the nearest full element in the grid [S1, unofficial]. It differs from hierarchical structures by storing distance data in a flat 3D volume aligned with the original voxel indices, allowing for $O(1)$ lookup during traversal without tree navigation overhead [S2, unofficial].
+Distance Transformation, also known as Proximity Clouds, accelerates ray traversal in regular grids filled with empty zones by pre-calculating distance information to the nearest full element in the grid [S1, unofficial]. It differs from hierarchical structures by storing distance data in a flat 3D volume aligned with the original voxel indices, allowing for $O(1)$ lookup during traversal without tree navigation overhead [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -10,18 +10,15 @@ Distance Transformation, also known as Proximity Clouds, is a method to accelera
 *   **Output:** A distance volume (distance map) where each cell contains the distance to the nearest non-empty cell [S2, unofficial].
 
 **Data Structures**
-*   **Distance Volume:** A 3D grid with the same dimensions as the input binary volume. Each cell stores a scalar value representing the Euclidean distance between the center of the current cell and the center of the nearest non-empty cell [S2, unofficial].
+*   **Distance Volume:** A 3D grid with the same dimensions as the input binary volume, where each cell stores a scalar value representing the Euclidean distance between the center of the current cell and the center of the nearest non-empty cell [S2, unofficial].
 
 **Algorithm Steps**
 1.  **Generate Input Binary Volume:** Encode the scene geometry into a binary volume, marking cells as transparent or opaque [S2, unofficial].
-2.  **Compute Distance Map:** Calculate the distance from every cell to the nearest non-empty cell. This can be done using exact metrics (City Block, Euclidean, Chessboard) or approximate methods like Chamfering [S2, unofficial].
-    *   *Chamfering:* Uses a mask of local distances propagated through the volume. Larger masks yield higher accuracy but increase preprocessing time [S2, unofficial].
+2.  **Compute Distance Map:** Calculate the distance from every cell to the nearest non-empty cell using exact metrics (City Block, Euclidean, Chessboard) or approximate methods like Chamfering [S2, unofficial]. Chamfering uses a mask of local distances propagated through the volume, where larger masks yield higher accuracy but increase preprocessing time [S2, unofficial].
 3.  **Ray Casting with Adaptive Traversal:** For each ray, determine the current cell index using fixed-point arithmetic and integer division [S2, unofficial].
-    *   **Case A (Vicinity of Object):** If the current sample is near an object (typically implied by a small distance value or specific threshold), perform simple incremental ray traversal (step-by-step sampling) [S2, unofficial].
+    *   **Case A (Vicinity of Object):** If the current sample is near an object, perform simple incremental ray traversal (step-by-step sampling) [S2, unofficial].
     *   **Case B (Empty Space):** If the current sample is in empty space, use the distance value $d$ stored in the current cell to skip the empty region [S2, unofficial].
-4.  **Skip Calculation:** Calculate the new sample location to jump to the edge of the empty zone.
-    *   Formula: $$ \text{New Sample} = \text{Current Sample} + \text{Unit Ray Direction} \times (d - 1) $$
-    *   The stepping distance is $d-1$ (not $d$) to avoid skipping beyond the free zone, because the distance is calculated from the center of the current cell [S2, unofficial].
+4.  **Skip Calculation:** Calculate the new sample location to jump to the edge of the empty zone using the formula $\text{New Sample} = \text{Current Sample} + \text{Unit Ray Direction} \times (d - 1)$ [S2, unofficial]. The stepping distance is $d-1$ (not $d$) to avoid skipping beyond the free zone, because the distance is calculated from the center of the current cell [S2, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -37,10 +34,9 @@ def compute_distance_map(binary_volume):
     """
     # The sources do not specify the exact distance map generation algorithm. [G]
     # A standard Chamfering mask pass or BFS would be used here.
-    # For implementation completeness, we return a zero-filled array.
-    return [[[0.0 for _ in range(len(binary_volume[0][0]))] 
-             for _ in range(len(binary_volume[0]))] 
-            for _ in range(len(binary_volume))]
+    # Stub implementation for structural completeness.
+    dims = (len(binary_volume), len(binary_volume[0]), len(binary_volume[0][0]))
+    return [[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
 
 def get_cell_index(pos, ray_origin, voxel_size):
     """
@@ -79,7 +75,7 @@ def ray_cast_proximity_clouds(ray_origin, ray_direction, distance_volume, voxel_
         else:
             # Skip empty region
             # Formula: New sample = Current + direction * (d - 1)
-            skip_distance = d - 1.0
+            skip_distance = max(d - 1.0, 1e-6)  # Guard against zero/negative steps [G]
             
             # Update position
             current_pos = [current_pos[i] + ray_direction[i] * skip_distance for i in range(3)]
@@ -97,7 +93,7 @@ def ray_cast_proximity_clouds(ray_origin, ray_direction, distance_volume, voxel_
 ```
 
 **Parameters**
-*   **Distance Metric:** Choice between City Block, Euclidean, Chessboard, or Chamfering approximation. A compromise between preprocessing time and rendering accuracy is required [S2, unofficial].
+*   **Distance Metric:** Choice between City Block, Euclidean, Chessboard, or Chamfering approximation, where the applied metric is a compromise between preprocessing and rendering times [S2, unofficial].
 *   **Threshold:** The value distinguishing "vicinity of an object" from "empty space" is not explicitly defined in the sources [G].
 
 **Edge Cases and Pitfalls**
@@ -105,15 +101,15 @@ def ray_cast_proximity_clouds(ray_origin, ray_direction, distance_volume, voxel_
 *   **Dynamic Scenes:** The method is too costly for dynamic scenes because the distance map must be recomputed for every frame [S1, unofficial].
 
 ## Operating characteristics
-*   **Preprocessing Time:** Depends on the distance metric. Chamfering is efficient, but higher accuracy requires larger masks and longer preprocessing [S2, unofficial].
-*   **Rendering Speed:** Fast for scenes with large empty regions due to skipping. The source notes it is considered the optimal structure on GPU for scenes with uniform data distribution [S1, unofficial].
+*   **Preprocessing Time:** Depends on the distance metric, where Chamfering is efficient but higher accuracy requires larger masks and longer preprocessing [S2, unofficial].
+*   **Rendering Speed:** Fast for scenes with large empty regions due to skipping, and the structure is considered optimal on GPUs for scenes with uniform data distribution [S1, unofficial].
 *   **Memory:** Requires storing an additional 3D volume for distances, in addition to the binary volume [S2, unofficial].
-*   **Limitations:** Not suitable for dynamic scenes due to high preprocessing cost [S1, unofficial]. Hierarchical structures may have additional traversal costs for cells at different levels, which this method avoids [S2, unofficial].
+*   **Limitations:** Not suitable for dynamic scenes due to high preprocessing cost [S1, unofficial], and avoids the additional computational cost required for traversing cells at different hierarchy levels found in other methods [S2, unofficial].
 
 ## Background
 *   **Origin:** Presented by Cohen and Sheffer in 1994 [S1, unofficial].
-*   **History:** The technique was introduced to accelerate ray traversal in regular grids with empty zones. It is particularly effective for static scenes [S1, unofficial].
-*   **Usage:** Used in medical volume rendering and other domains where static scenes with significant empty space are common [S2, unofficial].
+*   **History:** The technique was introduced to accelerate ray traversal in regular grids with empty zones, proving effective for static scenes [S1, unofficial].
+*   **Usage:** Applied in medical volume rendering and other domains where static scenes with significant empty space are common [S2, unofficial].
 
 ## Sources
 [S1] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

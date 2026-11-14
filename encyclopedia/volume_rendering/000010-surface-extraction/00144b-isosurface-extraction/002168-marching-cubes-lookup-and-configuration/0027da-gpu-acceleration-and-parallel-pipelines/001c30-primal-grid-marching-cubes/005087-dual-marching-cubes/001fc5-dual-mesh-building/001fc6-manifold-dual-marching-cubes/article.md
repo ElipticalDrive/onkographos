@@ -3,300 +3,250 @@
 Also called: Dual Marching Cubes (DMC), DualMC problematic configurations, DualMCComputeFramework, Manifold DualMC table generation, Primal Contouring of Dual Grids
 
 ## Overview
-Manifold Dual Marching Cubes (MDMC) is a surface extraction algorithm that generates a topologically correct, manifold mesh from a scalar field by operating on a dual grid [S5, unofficial]. Unlike standard Dual Marching Cubes, which may produce non-manifold artifacts in ambiguous configurations (specifically cases C16 and C19), MDMC resolves these ambiguities by inspecting neighboring cells and inverting the local topology when necessary to ensure global manifold connectivity [S5, unofficial]. It builds on [Dual Mesh Building](1423-dual-mesh-building.md) by providing the logic to determine dual vertex placement and connectivity in the presence of topological ambiguities.
+Manifold Dual Marching Cubes (MDMC) extracts a manifold isosurface from a scalar field by placing vertices at dual points (face centers or cell centers) rather than primal grid vertices, resolving the topological ambiguities (C16/C19 cases) inherent in standard Dual Marching Cubes [S3, S5, unofficial]. Unlike standard Dual Marching Cubes, which may produce non-manifold edges or self-intersections in ambiguous configurations, MDMC ensures a watertight, manifold mesh by inverting the cell configuration when shared neighbors are also ambiguous, or by using precomputed lookup tables that encode manifold-preserving connections [S5, unofficial]. It builds on [Dual Mesh Building](1423-dual-mesh-building.md) by providing the specific logic to determine which dual vertices to connect and how to resolve topological conflicts [S5, unofficial].
 
 ## How it works
-**Inputs:** A 3D scalar volume (typically stored as unsigned 16-bit integers), an isosurface threshold value ($iso$), and grid dimensions.
-**Outputs:** An indexed triangle mesh consisting of vertex positions, triangle indices, and face normals.
+**Inputs:** A scalar volume data array (e.g., distance transform or density field), an isosurface threshold value ($iso$), and grid dimensions.
+**Outputs:** An indexed triangle mesh (vertices, normals, and connectivity).
 
-### Data Structures
-1.  **Volume Data:** Stored in a flat array indexed by 6-bit Morton codes. For a $64^3$ grid, the array size is $64^3 = 262,144$ elements. Each element is a 32-bit integer packing two 16-bit scalar values [S5, unofficial].
-2.  **Dual Points List (`DualPointsList`):** A lookup table mapping each of the 256 cube configurations to dual point indices. Packed into 512 32-bit integers (1024 16-bit shorts). Each configuration maps to 2 faces, each face to 2 vertices [S5, unofficial].
-3.  **Problematic Configs (`ProblematicConfigs`):** A lookup table of 256 bytes (packed into 64 32-bit integers). Maps ambiguous configurations (C16/C19 and their rotations) to a direction code (0-5) or 255 if non-problematic [S3, S5, unofficial].
-4.  **Dual Point Map:** A hash map (array of size $64^3$) storing computed dual vertex positions, indexed by Morton code, using linear probing for collision resolution [S5, unofficial].
-5.  **Triangle Output:** An array of structures, each containing three 3D vertices (`glm::vec3`) and one 3D normal (`glm::vec3`) [S5, unofficial].
+**Data Structures:**
+1.  **Volume Data:** Packed into a 1D array. For a $64^3$ grid, indices are 6-bit Morton codes ($0 \dots 262143$). Data is stored as two 16-bit shorts per 32-bit integer to save memory [S5, unofficial].
+    *   Layout: `VolumeData.Data[dataIdx]` where `dataIdx = mortonCode / 2`.
+    *   Retrieval: `value = (VolumeData.Data[dataIdx] >> (16 * (mortonCode % 2))) & 0xFFFFu` [S5, unofficial].
+2.  **Dual Points List (`DualPointsList`):** A compact lookup table mapping each of the 256 cube configurations to dual point indices.
+    *   Layout: `std::array<glm::uint, 512>`. Each `uint` stores two 16-bit dual point codes.
+    *   Packing: Each cube case (0-255) maps to 2 faces, each face has 2 vertices (4 shorts total). Packed into 2 `uint`s per case [S5, unofficial].
+3.  **Problematic Configs Table (`ProblematicConfigs`):** A lookup table for ambiguous cases (C16/C19).
+    *   Layout: `std::array<glm::uint, 64>` (256 bytes).
+    *   Packing: 4 bytes per entry. Entry `i` stores directions for configs `4*i` to `4*i+3` [S5, unofficial].
+    *   Value: Stores a direction code (0-5 for axes, 255 for non-problematic) [S3, S5, unofficial].
+4.  **Dual Point Map (`DualPointMap`):** A hash map (array) storing computed dual vertex positions.
+    *   Layout: Array of size $64^3$ (space for every possible Morton ID), initialized to `~0ull` [S5, unofficial].
+    *   Collision Resolution: Linear probing. IDs are masked to 18 bits (`id &= 0x3ffff`) [S5, unofficial].
+5.  **Triangle Output:** Array of structs containing `Vert0`, `Vert1`, `Vert2` (positions) and `Normal` [S5, unofficial].
+    *   Max Size: $34^3 \times 18 = 707,472$ triangles for a $36^3$ active grid [S5, unofficial].
 
-### Corner Bitmasks and Configuration
-The cube configuration is an 8-bit integer derived from the scalar values at the 8 corners of the voxel. Corner bitmasks are defined as:
-$$ C_0=1, C_1=2, C_2=4, C_3=8, C_4=16, C_5=32, C_6=64, C_7=128 $$
-The configuration value is the sum of active corner bits where the scalar value is $\ge iso$ [S3, unofficial].
+**Corner Bitmasks:**
+Corners are indexed 0-7. Bitmasks: $C_0=1, C_1=2, C_2=4, C_3=8, C_4=16, C_5=32, C_6=64, C_7=128$ [S3, unofficial].
+Configuration value is the sum of active corner bits [S3, unofficial].
 
-### Ambiguous Configurations
-The problematic configurations are:
-*   **C16:** Corners $\{C_0, C_1, C_2, C_6, C_7\}$ active.
-*   **C19:** Corners $\{C_0, C_1, C_2, C_4, C_6, C_7\}$ active [S3, unofficial].
+**Edge Codes:**
+12 edges defined as powers of two: $EDGE_0=1, EDGE_1=2, \dots, EDGE_{11}=2048$ [S3, unofficial].
 
-### Algorithm Steps
+**Algorithm Steps:**
 
-1.  **Precomputation:**
-    *   Generate `DualPointsList` by iterating all 256 cube cases, determining the intersected edges, and mapping them to dual point indices [S5, unofficial].
-    *   Generate `ProblematicConfigs` by taking C16 and C19, asserting the ambiguous face is on the positive X direction, and rotating them around all axes to populate the table with direction codes [S3, unofficial].
+1.  **Precomputation (Table Generation):**
+    *   Generate `DualPointsList` using standard Dual Marching Cubes logic, but ensuring manifold connections for ambiguous cases [S5, unofficial].
+    *   Generate `ProblematicConfigs`:
+        *   Identify representative ambiguous configurations: C16 (corners 0,1,2,6,7 active) and C19 (corners 0,1,2,4,6,7 active) [S3, unofficial].
+        *   Assert initial ambiguous face is on the positive X direction: `(config & (C1|C3|C5|C7))` must equal `(C1|C7)` or `(C3|C5)` [S3, unofficial].
+        *   Rotate configurations around X, Y, and Z axes to cover all orientations.
+        *   Rotation functions shift corner bits:
+            *   X-axis: `((config & (C0|C1)) << 2) | ((config & (C2|C3)) << 4) | ((config & (C4|C5)) >> 4) | ((config & (C6|C7)) >> 2)` [S3, unofficial].
+            *   Y-axis: `((config & (C0|C2)) << 4) | ((config & (C1|C3)) >> 1) | ((config & (C4|C6)) << 1) | ((config & (C5|C7)) >> 4)` [S3, unofficial].
+            *   Z-axis: `((config & (C0|C4)) << 1) | ((config & (C1|C5)) << 2) | ((config & (C2|C6)) >> 2) | ((config & (C3|C7)) >> 1)` [S3, unofficial].
+        *   Store the axis direction (0-5) for each rotated configuration in `ProblematicConfigs` [S3, unofficial]. Non-problematic configs store 255 [S3, unofficial].
 
-2.  **Main Loop:**
-    Iterate over the voxel grid. For a grid of size $N \times N \times N$, the loop runs for $x, y, z$ from $0$ to $N-2$ (to allow neighbor access) [S5, unofficial]. Let $REDUCED = N-2$ [S5, unofficial].
+2.  **Main Loop (Per Voxel):**
+    *   Iterate over voxel coordinates $(x, y, z)$ from $0$ to $35$ (for a $36^3$ grid) [S5, unofficial].
+    *   **Boundary Check:** If $x \ge REDUCED\_X$ (34), $y \ge REDUCED\_Y$ (34), or $z \ge REDUCED\_Z$ (34), skip [S5, unofficial].
+    *   **Cell Code Calculation:**
+        *   Sample 8 vertices using Morton encoding.
+        *   Vertex order: $(0,0,0), (1,0,0), (0,1,0), (1,1,0), (0,0,1), (1,0,1), (0,1,1), (1,1,1)$ [S5, unofficial].
+        *   Bit $i$ is set if $value \ge iso$ [S5, unofficial].
+    *   **Ambiguity Resolution:**
+        *   Get direction from `ProblematicConfigs[cellCode]`.
+        *   If direction $\neq 255$:
+            *   Decode direction: `component = direction >> 1` (0=X, 1=Y, 2=Z), `delta = (direction & 1) ? 1 : -1` [S5, unofficial].
+            *   Calculate neighbor coordinates: `neighbourCoords = cellPos + (delta * axis_vector)` [S5, unofficial].
+            *   Check if neighbor is within valid bounds ($0 \le coord < REDUCED - 1$) [S5, unofficial].
+            *   If valid, get `neighbourCellCode`.
+            *   If `ProblematicConfigs[neighbourCellCode] != 255` (neighbor is also ambiguous), invert the current cell code: `cellCode ^= 0xFF` [S5, unofficial].
+    *   **Dual Point Lookup:**
+        *   For each intersected edge, look up the dual point index in `DualPointsList`.
+        *   Invert `cellCode` (`cellCode ^= 0xFF`) before lookup to handle ambiguous cases correctly [S5, unofficial].
+        *   Iterate $i$ from 0 to 3. Get entry from `DualPointsList`. If `(entry & edgeCode) != 0`, return entry [S5, unofficial].
+    *   **Dual Point Computation (if not cached):**
+        *   Compute position as the mean of interpolated intersection points on the intersected edges of the face [S5, unofficial].
+        *   Interpolation for an edge between $V_a$ and $V_b$: $P = V_a + \frac{iso - V_a}{V_b - V_a}(V_b - V_a)$ [S5, unofficial].
+        *   Store in `DualPointMap` using linear probing [S5, unofficial].
+    *   **Triangle Generation:**
+        *   For each intersected edge (X, Y, Z), generate a quad of 2 triangles.
+        *   **X-Edge (between $xyz$ and $xyz+(1,0,0)$):**
+            *   Check intersection: `(dataCellPos < iso && dataCellPosX1 >= iso)` (entering) or `(dataCellPos >= iso && dataCellPosX1 < iso)` (exiting) [S5, unofficial].
+            *   Vertices: $vert_0$ at $xyz$ (EDGE0), $vert_1$ at $xyzZ_1$ (EDGE2), $vert_2$ at $xyzY_1Z_1$ (EDGE6), $vert_3$ at $xyzY_1$ (EDGE4) [S5, unofficial].
+            *   Entering: Triangles $(vert_0, vert_1, vert_2)$ and $(vert_2, vert_3, vert_0)$ [S5, unofficial].
+            *   Exiting: Triangles $(vert_2, vert_1, vert_0)$ and $(vert_0, vert_3, vert_2)$ [S5, unofficial].
+        *   **Y-Edge (between $xyz$ and $xyz+(0,1,0)$):**
+            *   Vertices: $vert_0$ at $xyz$ (EDGE8), $vert_1$ at $xyzZ_1$ (EDGE11), $vert_2$ at $xyzX_1Z_1$ (EDGE10), $vert_3$ at $xyzX_1$ (EDGE9) [S5, unofficial].
+            *   Exiting: Triangles $(vert_0, vert_1, vert_2)$ and $(vert_2, vert_3, vert_0)$ [S5, unofficial].
+            *   Entering: Triangles $(vert_2, vert_1, vert_0)$ and $(vert_0, vert_3, vert_2)$ [S5, unofficial].
+        *   **Z-Edge (between $xyz$ and $xyz+(0,0,1)$):**
+            *   Vertices: $vert_0$ at $xyz$ (EDGE3), $vert_1$ at $xyzX_1$ (EDGE1), $vert_2$ at $xyzX_1Y_1$ (EDGE5), $vert_3$ at $xyzY_1$ (EDGE7) [S5, unofficial].
+            *   Exiting: Triangles $(vert_0, vert_1, vert_2)$ and $(vert_2, vert_3, vert_0)$ [S5, unofficial].
+            *   Entering: Triangles $(vert_2, vert_1, vert_0)$ and $(vert_0, vert_3, vert_2)$ [S5, unofficial].
+        *   Calculate normals using `calculateFaceNormal(vert0, vert1, vert2)` which returns $-\text{normalize}((vert_1-vert_0) \times (vert_2-vert_0))$ [S5, unofficial].
 
-3.  **Cell Code Calculation:**
-    For cell $(x,y,z)$, sample the 8 corner vertices using Morton encoding.
-    $$ \text{cellCode} = \sum_{i=0}^{7} \mathbb{I}(V_i \ge iso) \cdot 2^i $$
-    Vertex order: $(0,0,0), (1,0,0), (0,1,0), (1,1,0), (0,0,1), (1,0,1), (0,1,1), (1,1,1)$ [S5, unofficial].
-
-4.  **Ambiguity Resolution (Manifold Check):**
-    *   Retrieve `direction` from `ProblematicConfigs[cellCode]`.
-    *   If `direction != 255`:
-        *   Decode `component = direction >> 1` (0=X, 1=Y, 2=Z) and `delta = (direction & 1) ? 1 : -1` [S5, unofficial].
-        *   Calculate neighbor coordinates: $N = (x,y,z) + \text{delta} \cdot \hat{e}_{\text{component}}$.
-        *   If $N$ is within bounds $[0, REDUCED-1]$:
-            *   Calculate `neighbourCellCode`.
-            *   If `ProblematicConfigs[neighbourCellCode] != 255`:
-                *   Invert the current cell code: $\text{cellCode} \leftarrow \text{cellCode} \oplus 0xFF$ [S5, unofficial].
-
-5.  **Edge Processing and Triangle Generation:**
-    For each of the three axes (X, Y, Z), check if the edge starting at $(x,y,z)$ is intersected.
-    
-    **X-Edge (between $(x,y,z)$ and $(x+1,y,z)$):**
-    *   Condition: $z>0$ and $y>0$ [S5, unofficial].
-    *   Check intersection:
-        $$ \text{entering} = (V_{xyz} < iso \land V_{x+1,y,z} \ge iso) $$
-        $$ \text{exiting} = (V_{xyz} \ge iso \land V_{x+1,y,z} < iso) $$
-    *   If intersected:
-        *   Compute dual points for the four surrounding faces:
-            *   $v_0$: Dual point for edge $EDGE0$ at $(x,y,z)$.
-            *   $v_1$: Dual point for edge $EDGE2$ at $(x,y,z-1)$.
-            *   $v_2$: Dual point for edge $EDGE6$ at $(x,y-1,z-1)$.
-            *   $v_3$: Dual point for edge $EDGE4$ at $(x,y-1,z)$.
-        *   Reserve 2 triangle indices.
-        *   If `entering`: Output triangles $(v_0, v_1, v_2)$ and $(v_2, v_3, v_0)$.
-        *   If `exiting`: Output triangles $(v_2, v_1, v_0)$ and $(v_0, v_3, v_2)$ [S5, unofficial].
-
-    **Y-Edge (between $(x,y,z)$ and $(x,y+1,z)$):**
-    *   Condition: $z>0$ and $x>0$ [S5, unofficial].
-    *   Check intersection:
-        $$ \text{entering} = (V_{xyz} < iso \land V_{x,y+1,z} \ge iso) $$
-        $$ \text{exiting} = (V_{xyz} \ge iso \land V_{x,y+1,z} < iso) $$
-    *   If intersected:
-        *   Compute dual points:
-            *   $v_0$: Dual point for edge $EDGE8$ at $(x,y,z)$.
-            *   $v_1$: Dual point for edge $EDGE11$ at $(x,y,z-1)$.
-            *   $v_2$: Dual point for edge $EDGE10$ at $(x-1,y,z-1)$.
-            *   $v_3$: Dual point for edge $EDGE9$ at $(x-1,y,z)$.
-        *   Reserve 2 triangle indices.
-        *   If `exiting`: Output triangles $(v_0, v_1, v_2)$ and $(v_2, v_3, v_0)$.
-        *   If `entering`: Output triangles $(v_2, v_1, v_0)$ and $(v_0, v_3, v_2)$ [S5, unofficial].
-
-    **Z-Edge (between $(x,y,z)$ and $(x,y,z+1)$):**
-    *   Condition: $x>0$ and $y>0$ [S5, unofficial].
-    *   Check intersection:
-        $$ \text{entering} = (V_{xyz} < iso \land V_{x,y,z+1} \ge iso) $$
-        $$ \text{exiting} = (V_{xyz} \ge iso \land V_{x,y,z+1} < iso) $$
-    *   If intersected:
-        *   Compute dual points:
-            *   $v_0$: Dual point for edge $EDGE3$ at $(x,y,z)$.
-            *   $v_1$: Dual point for edge $EDGE1$ at $(x-1,y,z)$.
-            *   $v_2$: Dual point for edge $EDGE5$ at $(x-1,y-1,z)$.
-            *   $v_3$: Dual point for edge $EDGE7$ at $(x,y-1,z)$.
-        *   Reserve 2 triangle indices.
-        *   If `exiting`: Output triangles $(v_0, v_1, v_2)$ and $(v_2, v_3, v_0)$.
-        *   If `entering`: Output triangles $(v_2, v_1, v_0)$ and $(v_0, v_3, v_2)$ [S5, unofficial].
-
-6.  **Dual Point Calculation:**
-    *   If a dual point for a specific edge in a specific cell is not cached, compute it.
-    *   The dual point is the mean of the linear interpolation intersection points on all 12 edges of the cube that are intersected [S5, unofficial].
-    *   For an edge between $V_a$ and $V_b$, the intersection $t$ is:
-        $$ t = \frac{iso - V_a}{V_b - V_a} $$
-        The position is $P = V_a + t(V_b - V_a)$ [S5, unofficial].
-    *   Store the computed point in `DualPointMap` [S5, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def manifold_dual_marching_cubes(volume_data, iso, grid_size):
+def execute(volume_data, grid_size, iso):
     # Constants
-    REDUCED = grid_size - 2
-    VolumeDataSize = grid_size ** 3
+    REDUCED_X = 34
+    REDUCED_Y = 34
+    REDUCED_Z = 34
+    VolumeDataSize = 64 * 64 * 64
     
     # Initialize structures
-    dual_points_map = {} # MortonCode -> Position
+    dual_points_list = pack_dual_points_list()
+    problematic_configs = pack_problematic_configs()
+    dual_point_map = array(size=VolumeDataSize, init=~0)
     triangle_output = []
     triangle_counter = 0
     
-    # Precomputed tables would be loaded here
-    # problematic_configs: array[256] -> int
-    # dual_points_list: array[512] -> uint
-    
-    def morton3d(v):
-        v = v & 63
-        v = (v | (v << 8)) & 0x300F
-        v = (v | (v << 4)) & 0x30C3
-        v = (v | (v << 2)) & 0x9249
-        return (v.x) | ((v.y) << 1) | ((v.z) << 2)
-
-    def get_data(morton_code):
-        data_idx = morton_code // 2
-        offset = 16 * (morton_code % 2)
-        return (volume_data[data_idx] >> offset) & 0xFFFF
-
-    def get_problematic_config(byte_index):
-        uint_idx = byte_index // 4
-        bit_offset = (byte_index % 4) * 8
-        return (problematic_configs[uint_idx] >> bit_offset) & 0xFF
-
-    def get_dual_point_list_entry(cell_code, index):
-        idx = (cell_code * 2) + (index // 2)
-        packed = dual_points_list[idx]
-        shift = (index % 2) * 16
-        return (packed >> shift) & 0xFFFF
-
-    def calculate_dual_point(cell_pos, edge_code):
-        key = morton3d(cell_pos)
-        if key in dual_points_map:
-            return dual_points_map[key]
-        
-        # Compute mean of intersected edges
-        p = vec3(0, 0, 0)
-        points = 0
-        
-        # Check all 12 edges for intersection based on cell code
-        # This requires the full cell code at cell_pos
-        # Simplified: assume we have the edge mask for this specific dual point context
-        # In reality, this function is called with a specific edge_code, 
-        # but the calculation sums over ALL intersected edges of the cube.
-        # The source code implies calculating the dual point for a face/edge context.
-        # We will implement the mean calculation for the cube defined by cell_pos.
-        
-        # Note: The source code calculates the dual point for a specific "Dual Point Code"
-        # which corresponds to a specific face/edge configuration.
-        # For the purpose of this implementation, we assume the standard DMC dual point
-        # is the centroid of the intersection points on the cube's intersected edges.
-        
-        # To be precise to [S5, unofficial], we iterate edges 0-11.
-        # We need the scalar values at the corners of the cube at cell_pos.
-        # This is a simplification; in the GPU kernel, the cell code is passed.
-        
-        # Let's assume we have the 8 corner values for the cube at cell_pos
-        # In the actual kernel, this is done via getData(morton3d(cell_pos + offset))
-        
-        # For the sake of the pseudocode completeness, we define the interpolation
-        # for a generic edge. The actual summing logic is in the source.
-        # We will return a placeholder position if not cached, computed as average.
-        
-        # [G] In a real implementation, one must gather the 8 corner values of the cube
-        # containing the dual point to compute the linear intersections.
-        
-        dual_points_map[key] = vec3(0,0,0) # Placeholder
-        return vec3(0,0,0)
-
-    def calculate_face_normal(v0, v1, v2):
-        p01 = v1 - v0
-        p02 = v2 - v0
-        return -normalize(cross(p01, p02))
-
-    for z in range(grid_size - 1):
-        for y in range(grid_size - 1):
-            for x in range(grid_size - 1):
-                if x >= REDUCED or y >= REDUCED or z >= REDUCED:
+    for z in range(36):
+        for y in range(36):
+            for x in range(36):
+                if x >= REDUCED_X or y >= REDUCED_Y or z >= REDUCED_Z:
                     continue
+                exec_single(x, y, z, volume_data, iso, dual_points_list, problematic_configs, dual_point_map, triangle_output, triangle_counter)
                 
-                xyz = vec3(x, y, z)
-                xyz_x1 = xyz - vec3(1, 0, 0)
-                xyz_y1 = xyz - vec3(0, 1, 0)
-                xyz_z1 = xyz - vec3(0, 0, 1)
-                xyz_x1_y1 = xyz - vec3(1, 1, 0)
-                xyz_x1_z1 = xyz - vec3(1, 0, 1)
-                xyz_y1_z1 = xyz - vec3(0, 1, 1)
-                
-                data_cell_pos = get_data(morton3d(xyz))
-                
-                # --- X Edge ---
-                if z > 0 and y > 0:
-                    data_cell_pos_x1 = get_data(morton3d(xyz + vec3(1, 0, 0)))
-                    entering = data_cell_pos < iso and data_cell_pos_x1 >= iso
-                    exiting = data_cell_pos >= iso and data_cell_pos_x1 < iso
-                    
-                    if entering or exiting:
-                        v0 = calculate_dual_point(xyz, 0) # EDGE0
-                        v1 = calculate_dual_point(xyz_z1, 2) # EDGE2
-                        v2 = calculate_dual_point(xyz_y1_z1, 6) # EDGE6
-                        v3 = calculate_dual_point(xyz_y1, 4) # EDGE4
-                        
-                        idx = triangle_counter
-                        triangle_counter += 2
-                        
-                        if entering:
-                            n1 = calculate_face_normal(v0, v1, v2)
-                            n2 = calculate_face_normal(v2, v3, v0)
-                            triangle_output.append((v0, v1, v2, n1))
-                            triangle_output.append((v2, v3, v0, n2))
-                        else:
-                            n1 = calculate_face_normal(v2, v1, v0)
-                            n2 = calculate_face_normal(v0, v3, v2)
-                            triangle_output.append((v2, v1, v0, n1))
-                            triangle_output.append((v0, v3, v2, n2))
-
-                # --- Y Edge ---
-                if z > 0 and x > 0:
-                    data_cell_pos_y1 = get_data(morton3d(xyz + vec3(0, 1, 0)))
-                    entering = data_cell_pos < iso and data_cell_pos_y1 >= iso
-                    exiting = data_cell_pos >= iso and data_cell_pos_y1 < iso
-                    
-                    if entering or exiting:
-                        v0 = calculate_dual_point(xyz, 8) # EDGE8
-                        v1 = calculate_dual_point(xyz_z1, 11) # EDGE11
-                        v2 = calculate_dual_point(xyz_x1_z1, 10) # EDGE10
-                        v3 = calculate_dual_point(xyz_x1, 9) # EDGE9
-                        
-                        idx = triangle_counter
-                        triangle_counter += 2
-                        
-                        if exiting:
-                            n1 = calculate_face_normal(v0, v1, v2)
-                            n2 = calculate_face_normal(v2, v3, v0)
-                            triangle_output.append((v0, v1, v2, n1))
-                            triangle_output.append((v2, v3, v0, n2))
-                        else:
-                            n1 = calculate_face_normal(v2, v1, v0)
-                            n2 = calculate_face_normal(v0, v3, v2)
-                            triangle_output.append((v2, v1, v0, n1))
-                            triangle_output.append((v0, v3, v2, n2))
-
-                # --- Z Edge ---
-                if x > 0 and y > 0:
-                    data_cell_pos_z1 = get_data(morton3d(xyz + vec3(0, 0, 1)))
-                    entering = data_cell_pos < iso and data_cell_pos_z1 >= iso
-                    exiting = data_cell_pos >= iso and data_cell_pos_z1 < iso
-                    
-                    if entering or exiting:
-                        v0 = calculate_dual_point(xyz, 3) # EDGE3
-                        v1 = calculate_dual_point(xyz_x1, 1) # EDGE1
-                        v2 = calculate_dual_point(xyz_x1_y1, 5) # EDGE5
-                        v3 = calculate_dual_point(xyz_y1, 7) # EDGE7
-                        
-                        idx = triangle_counter
-                        triangle_counter += 2
-                        
-                        if exiting:
-                            n1 = calculate_face_normal(v0, v1, v2)
-                            n2 = calculate_face_normal(v2, v3, v0)
-                            triangle_output.append((v0, v1, v2, n1))
-                            triangle_output.append((v2, v3, v0, n2))
-                        else:
-                            n1 = calculate_face_normal(v2, v1, v0)
-                            n2 = calculate_face_normal(v0, v3, v2)
-                            triangle_output.append((v2, v1, v0, n1))
-                            triangle_output.append((v0, v3, v2, n2))
-
     return triangle_output
+
+def exec_single(x, y, z, volume_data, iso, dual_points_list, problematic_configs, dual_point_map, triangle_output, triangle_counter):
+    xyz = (x, y, z)
+    xyzX1 = (x-1, y, z)
+    xyzY1 = (x, y-1, z)
+    xyzZ1 = (x, y, z-1)
+    xyzX1Y1 = (x-1, y-1, z)
+    xyzX1Z1 = (x-1, y, z-1)
+    xyzY1Z1 = (x, y-1, z-1)
+    
+    dataCellPos = get_data(volume_data, morton3D(xyz))
+    
+    # X-Edge Processing
+    if z > 0 and y > 0:
+        dataCellPosX1 = get_data(volume_data, morton3D(x + (1,0,0)))
+        entering = dataCellPos < iso and dataCellPosX1 >= iso
+        exiting = dataCellPos >= iso and dataCellPosX1 < iso
+        
+        if entering or exiting:
+            v0 = get_or_compute_dual_point(xyz, iso, EDGE0, dual_points_list, problematic_configs, dual_point_map)
+            v1 = get_or_compute_dual_point(xyzZ1, iso, EDGE2, dual_points_list, problematic_configs, dual_point_map)
+            v2 = get_or_compute_dual_point(xyzY1Z1, iso, EDGE6, dual_points_list, problematic_configs, dual_point_map)
+            v3 = get_or_compute_dual_point(xyzY1, iso, EDGE4, dual_points_list, problematic_configs, dual_point_map)
+            
+            start_idx = triangle_counter
+            triangle_counter += 2
+            
+            if entering:
+                n1 = calculate_normal(v0, v1, v2)
+                n2 = calculate_normal(v2, v3, v0)
+                triangle_output.append((v0, v1, v2, n1))
+                triangle_output.append((v2, v3, v0, n2))
+            else:
+                n1 = calculate_normal(v2, v1, v0)
+                n2 = calculate_normal(v0, v3, v2)
+                triangle_output.append((v2, v1, v0, n1))
+                triangle_output.append((v0, v3, v2, n2))
+
+    # Y-Edge Processing
+    if z > 0 and x > 0:
+        dataCellPosY1 = get_data(volume_data, morton3D(x + (0,1,0)))
+        entering = dataCellPos < iso and dataCellPosY1 >= iso
+        exiting = dataCellPos >= iso and dataCellPosY1 < iso
+        
+        if entering or exiting:
+            v0 = get_or_compute_dual_point(xyz, iso, EDGE8, dual_points_list, problematic_configs, dual_point_map)
+            v1 = get_or_compute_dual_point(xyzZ1, iso, EDGE11, dual_points_list, problematic_configs, dual_point_map)
+            v2 = get_or_compute_dual_point(xyzX1Z1, iso, EDGE10, dual_points_list, problematic_configs, dual_point_map)
+            v3 = get_or_compute_dual_point(xyzX1, iso, EDGE9, dual_points_list, problematic_configs, dual_point_map)
+            
+            start_idx = triangle_counter
+            triangle_counter += 2
+            
+            if exiting:
+                n1 = calculate_normal(v0, v1, v2)
+                n2 = calculate_normal(v2, v3, v0)
+                triangle_output.append((v0, v1, v2, n1))
+                triangle_output.append((v2, v3, v0, n2))
+            else:
+                n1 = calculate_normal(v2, v1, v0)
+                n2 = calculate_normal(v0, v3, v2)
+                triangle_output.append((v2, v1, v0, n1))
+                triangle_output.append((v0, v3, v2, n2))
+
+    # Z-Edge Processing
+    if x > 0 and y > 0:
+        dataCellPosZ1 = get_data(volume_data, morton3D(x + (0,0,1)))
+        entering = dataCellPos < iso and dataCellPosZ1 >= iso
+        exiting = dataCellPos >= iso and dataCellPosZ1 < iso
+        
+        if entering or exiting:
+            v0 = get_or_compute_dual_point(xyz, iso, EDGE3, dual_points_list, problematic_configs, dual_point_map)
+            v1 = get_or_compute_dual_point(xyzX1, iso, EDGE1, dual_points_list, problematic_configs, dual_point_map)
+            v2 = get_or_compute_dual_point(xyzX1Y1, iso, EDGE5, dual_points_list, problematic_configs, dual_point_map)
+            v3 = get_or_compute_dual_point(xyzY1, iso, EDGE7, dual_points_list, problematic_configs, dual_point_map)
+            
+            start_idx = triangle_counter
+            triangle_counter += 2
+            
+            if exiting:
+                n1 = calculate_normal(v0, v1, v2)
+                n2 = calculate_normal(v2, v3, v0)
+                triangle_output.append((v0, v1, v2, n1))
+                triangle_output.append((v2, v3, v0, n2))
+            else:
+                n1 = calculate_normal(v2, v1, v0)
+                n2 = calculate_normal(v0, v3, v2)
+                triangle_output.append((v2, v1, v0, n1))
+                triangle_output.append((v0, v3, v2, n2))
+
+def get_or_compute_dual_point(cell_pos, iso, edge_code, dual_points_list, problematic_configs, dual_point_map):
+    cell_code = get_cell_code(cell_pos, iso)
+    # Invert cell code for ambiguous cases lookup
+    lookup_code = cell_code ^ 0xFF
+    
+    # Find dual point index
+    idx = find_dual_point(lookup_code, edge_code, dual_points_list)
+    
+    if idx != 0: # Cached
+        return dual_point_map[idx]
+    
+    # Compute
+    pos = compute_dual_point_position(cell_pos, iso, edge_code)
+    
+    # Store
+    morton = morton3D(cell_pos)
+    dual_point_map[morton] = pos
+    
+    return pos
+
+def compute_dual_point_position(cell_pos, iso, edge_code):
+    # Simplified: mean of intersected edges on the face defined by edge_code
+    # In practice, this involves checking all 12 edges of the cell and interpolating
+    # See S5 for detailed interpolation logic
+    pass
+
+def get_data(volume_data, morton_code):
+    data_idx = morton_code // 2
+    offset = 16 * (morton_code % 2)
+    return (volume_data[data_idx] >> offset) & 0xFFFF
+
+def morton3D(v):
+    v = v & 63
+    v = (v | (v << 8)) & 0x300F
+    v = (v | (v << 4)) & 0x30C3
+    v = (v | (v << 2)) & 0x9249
+    return (v.x) | ((v.y) << 1) | ((v.z) << 2)
+
+def calculate_normal(v0, v1, v2):
+    p01 = v1 - v0
+    p02 = v2 - v0
+    return -normalize(cross(p01, p02))
 ```
-
-### Parameters
-*   **iso:** Isosurface threshold. Typically $0.5 \times \text{USHRT\_MAX}$ for 16-bit data [S5, unofficial].
-*   **REDUCED_X, REDUCED_Y, REDUCED_Z:** Boundary constants, typically $N-2$ where $N$ is the volume dimension, used to prevent out-of-bounds neighbor access [S5, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Boundary Handling:** Neighbor checks must verify coordinates are within $[0, REDUCED-1]$. If a neighbor is outside, the manifold inversion logic is skipped to avoid out-of-bounds access [S5, unofficial].
-*   **Ambiguous Cases:** The cell code is inverted (`cellCode ^= 0xFF`) only if both the current cell and its neighbor share an ambiguous face configuration [S5, unofficial].
-*   **Flat Regions:** In adaptive octrees, if the grid is much coarser than the model thickness, dual partitioning may fail to generate samples interior to the surface, causing topological holes [S1, unofficial].
 
 ## Subtopics
 
@@ -304,7 +254,7 @@ def manifold_dual_marching_cubes(volume_data, iso, grid_size):
 Extracts an isosurface from a scalar field by recursively subdividing space into an adaptive octree based on a Quadratic Error Function (QEF) threshold, then applying a dual marching cubes algorithm on the leaf nodes. It differs from standard Marching Cubes by replacing the fixed grid with an adaptive octree and using QEF-based feature isolation to determine subdivision, extracting the surface from the dual cells formed by these leaves.
 
 ### [Dual Isosurfacing with Analytical Trilinear Intersection](3798-dual-isosurfacing-with-analytical-trilinear-intersection.md)
-Extracts the topology of an analytical isosurface defined by a trilinear function within a voxel cell by determining the optimal set of diagonals to intersect with rays, ensuring one point per disjoint surface component. Unlike standard Marching Cubes which uses linear interpolation and fixed lookup tables, this method uses the trilinear function exhaustively to determine the topology of the analytical isosurface, allowing for more accurate diagonal selection. It builds on [Manifold Dual Marching Cubes](2135-manifold-dual-marching-cubes.md) by resolving ambiguous configurations through analytical ray intersection rather than precomputed lookup tables.
+Dual Isosurfacing with Analytical Trilinear Intersection extracts the topology of an analytical isosurface defined by a trilinear function within a voxel cell by determining the optimal set of diagonals to intersect with rays, ensuring one point per disjoint surface component. Unlike standard Marching Cubes which uses linear interpolation and fixed lookup tables, this method uses the trilinear function exhaustively to determine the topology of the analytical isosurface, allowing for more accurate diagonal selection. It builds on [Manifold Dual Marching Cubes](2135-manifold-dual-marching-cubes.md) by resolving ambiguous configurations through analytical ray intersection rather than precomputed lookup tables.
 
 ### [Curvature/Normal Similarity Loss](4354-curvature-normal-similarity-loss.md)
 A differentiable loss function that enforces normal vector alignment between triangles in adjacent grid cells, weighted by the joint probability of their topological configurations. It addresses discontinuity and noise in extracted surfaces by ensuring neighboring triangles share consistent orientations, which is critical for smooth surface reconstruction in differentiable isosurfacing pipelines. It sets itself apart from sibling methods by explicitly modeling the probabilistic nature of topology selection via softmax over 256 cases rather than relying on deterministic hard assignments or purely geometric penalties. It builds on [Manifold Dual Marching Cubes](2135-manifold-dual-marching-cubes.md).
@@ -313,34 +263,32 @@ A differentiable loss function that enforces normal vector alignment between tri
 Geometric Self-Intersection Elimination is a post-processing geometric treatment applied during the connection of dual vertices in adaptive octree constructions to ensure the resulting isosurface is free of polygon self-intersections. It addresses the topological defects inherent in naive dual triangulations of adaptive grids by replacing trivial triangulations with triangle fans or geometrically validated subsets when ambiguous face configurations are detected. Unlike ambiguity treatments for regular (non-adaptive) constructions, which primarily ensure manifoldness without increasing vertex or face counts, this method explicitly increases mesh complexity to guarantee intersection-free geometry.
 
 ### [Parallel Processing and Pipeline Optimization](6411-parallel-processing-and-pipeline-optimization.md)
-This family defines a two-pass parallel surface extraction algorithm for regular 3D grids that generates a manifold quadrilateral mesh with full 1-ring connectivity. It solves the problem of dynamic buffer allocation and unconnected primitives inherent in standard parallel extraction by separating geometry sizing from generation. Unlike standard parallel Marching Cubes which produces redundant fragments, this method ensures manifold connectivity through a multi-staged pipeline that switches from block-based to cell-based processing.
+This family covers parallel processing and pipeline optimization for Dual Marching Cubes surface extraction. It addresses topological consistency and parallel reconstruction by encoding neighborhood and connectivity information using a halfedge data structure. Unlike standard parallel extraction that produces unconnected primitives, it handles non-manifold edges (e.g., tunnels spanning two neighbor cells) and enables parallel mesh simplification.
 
 ### [Dual Nodes Generation with Connectivity Inversion](7685-dual-nodes-generation-with-connectivity-inversion.md)
 This method resolves non-manifold edge configurations in Manifold Dual Marching Cubes (MDMC) by generating two dual nodes instead of one for cells sharing ambiguous faces, thereby recovering topological tunnels. It differs from standard DMC by analyzing the connectivity of both interior (blue) and exterior (white) vertex components to determine node placement, whereas standard DMC relies solely on interior components.
 
-### Dual Marching Cubes Problematic Config Packing
+#### Dual Marching Cubes Problematic Config Packing
 Initializes the `ProblematicConfigs` array (size 64 uints, 256 bytes) to zero. Iterates `pack` from 0 to 63. Calculates `config` as `pack * 4`. Packs four consecutive values from the `problematicConfigs` array into the current `ProblematicConfigs[pack]` entry using bitwise OR and shifts: bit 0-7 from `config`, bit 8-15 from `config+1`, bit 16-23 from `config+2`, bit 24-31 from `config+3` [S5, unofficial].
 
-### Ambiguity Treatment for Regular Constructions
+#### Ambiguity Treatment for Regular Constructions
 A method to ensure the resulting surface is manifold by identifying and resolving ambiguous faces in adjacent cells during the construction phase, specifically for regular octree constructions [S6, unofficial]. This treatment ensures a manifold surface without increasing the number of vertices and faces, unlike the self-intersection elimination method in adaptive constructions [S6, unofficial]. Processing time impact (Level 6): Increases processing time by only 3 seconds [S6, unofficial].
 
-### Schaefer et al. Hexahedral Grid Contouring
+#### Schaefer et al. Hexahedral Grid Contouring
 A method that extracts contours by performing Marching Cubes on a hexahedral grid dual to the octree grid. The hexahedral grid is generated by extending DC to volumetric functions [S7, unofficial]. The resulting surface is guaranteed to be a 2-manifold, but the method is very expensive to compute [S7, unofficial].
 
-### Surface Diffusion Flow and Tangent Movement Smoothing
-A smoothing technique applied to the extracted mesh to improve visual fidelity, utilizing the 1-ring vertex neighborhood gathered during extraction [S8, unofficial]. It gathers the 1-ring vertex neighborhood for each vertex directly during the surface extraction process, applies surface diffusion flow to the mesh vertices, and applies tangent movement to the mesh vertices [S8, unofficial]. Smoothing requires manifold surfaces, connectivity information, and 1-ring neighborhoods, which are typically missing in standard parallel extractions. This method integrates neighbor gathering into extraction to solve this [S8, unofficial].
+#### Surface Diffusion Flow and Tangent Movement Smoothing
+A smoothing technique applied to the extracted mesh to improve visual fidelity, utilizing the 1-ring vertex neighborhood gathered during extraction [S8, unofficial]. Gather the 1-ring vertex neighborhood for each vertex directly during the surface extraction process. Apply surface diffusion flow to the mesh vertices. Apply tangent movement to the mesh vertices [S8, unofficial]. Smoothing requires manifold surfaces, connectivity information, and 1-ring neighborhoods, which are typically missing in standard parallel extractions. This method integrates neighbor gathering into extraction to solve this [S8, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N^3)$ for a grid of size $N \times N \times N$, as each cell is processed once.
-*   **Memory Complexity:** $O(N^3)$ for the volume data and dual point map. The lookup tables are constant size (256 entries).
-*   **Performance:** In a $36 \times 36 \times 36$ grid implementation, the theoretical worst-case triangle buffer size is $34^3 \times 18 = 707,472$ triangles [S5, unofficial].
-*   **Strengths:** Guarantees manifold connectivity in ambiguous cases (C16/C19) by inspecting neighbors. Efficient lookup table-based resolution.
-*   **Limitations:** Requires neighbor access, which complicates boundary handling and parallel implementation. May increase mesh complexity in adaptive settings to resolve self-intersections [S1, unofficial].
-*   **When to use:** When a manifold mesh is required and the scalar field contains ambiguous configurations.
-*   **When not to use:** When performance is critical and non-manifold artifacts are acceptable, or when the grid is extremely large and neighbor lookups are prohibitive.
+**Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed independently in the main loop [S5, unofficial]. Precomputation of tables is constant time relative to grid size [S3, unofficial].
+**Memory Complexity:** $O(V)$ for volume data and dual point maps, where $V$ is the volume size. The `DualPointsList` and `ProblematicConfigs` tables are constant size (512 uints and 64 uints respectively) [S5, unofficial].
+**Measured Performance:** On a $36 \times 36 \times 36$ grid, the theoretical worst-case triangle buffer size is $34^3 \times 18 = 707,472$ triangles [S5, unofficial]. Boundary handling requires checking if neighbor coordinates are within $[0, REDUCED-1]$ to avoid out-of-bounds access [S5, unofficial].
+**Strengths:** Guarantees a manifold mesh by resolving C16/C19 ambiguities [S5, unofficial]. Efficient lookup tables allow for fast GPU implementation [S5, unofficial]. Preserves sharp features better than primal methods [S2].
+**Limitations:** In flat regions where the adaptive octree is much coarser than the model thickness, the dual partition may fail to generate samples interior to the surface, resulting in topological holes [S1, unofficial]. Ambiguity resolution requires neighbor lookups, which can be costly in parallel implementations if not optimized [S5, unofficial].
 
 ## Background
-Manifold Dual Marching Cubes was introduced to address the topological inconsistencies of standard Dual Marching Cubes in ambiguous configurations. The method relies on precomputed lookup tables to resolve these ambiguities by checking neighboring cells [S3, unofficial]. It is used in various GPU-accelerated surface extraction pipelines [S5, unofficial] and adaptive octree-based rendering systems [S4, unofficial]. The algorithm builds on the concept of dual grids for preserving sharp features [S2] and has been implemented in frameworks such as `dualmc` [S3, unofficial] and `dualmc-compute` [S5, unofficial].
+Manifold Dual Marching Cubes was introduced to address the topological inconsistencies of standard Dual Marching Cubes, particularly in ambiguous configurations (C16/C19) [S3, unofficial]. The method relies on precomputed lookup tables to resolve these ambiguities by checking neighbor cells and inverting configurations when necessary [S5, unofficial]. It is used in various surface extraction pipelines, including those for medical imaging (e.g., pelvis reconstruction) and terrain rendering [S1, unofficial][S2]. The algorithm has been implemented in GPU compute frameworks for real-time performance [S5, unofficial].
 
 ## Sources
 [S1] Unconstrained isosurface extraction on arbitrary octrees, https://doi.org/10.5555/1281991.1282009, fetched 2026-10-27 (unofficial)

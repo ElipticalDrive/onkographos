@@ -7,21 +7,21 @@ Variance Shadow Mapping (VSM) is a shadow mapping technique that smoothens depth
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A depth texture (shadow map) generated from the light's perspective, containing depth values $z$.
-*   **Outputs:** A shadow map texture storing the first and second moments of depth ($E[z]$ and $E[z^2]$) per texel, and a final shadow factor $S$ for a given query point.
+*   **Inputs:** A depth texture (shadow map) generated from the light's perspective, containing depth values $z$ [S1].
+*   **Outputs:** A shadow map texture storing the first and second moments of depth ($E[z]$ and $E[z^2]$) per texel, and a final shadow factor $S$ for a given query point [S1].
 
 **Data Structures:**
 The shadow map stores two floating-point values per texel:
-1.  $m_1 = E[z]$: The mean depth.
-2.  $m_2 = E[z^2]$: The mean of the squared depth.
+1.  $m_1 = E[z]$: The mean depth [S1].
+2.  $m_2 = E[z^2]$: The mean of the squared depth [S1].
 
 **Steps:**
-1.  **Depth Pass:** Render the scene from the light's perspective. For each fragment, store the depth $z$ in the first channel and $z^2$ in the second channel of the shadow map.
-2.  **Filtering:** Apply a separable box filter (or other low-pass filter) to the $m_1$ and $m_2$ textures. This smoothing step is crucial for generating soft shadows. Let the filtered values be $\mu = E[z]$ and $\mu_2 = E[z^2]$.
+1.  **Depth Pass:** Render the scene from the light's perspective [S1]. For each fragment, store the depth $z$ in the first channel and $z^2$ in the second channel of the shadow map [S1].
+2.  **Filtering:** Apply a separable box filter (or other low-pass filter) to the $m_1$ and $m_2$ textures [G]. This smoothing step is crucial for generating soft shadows [S1]. Let the filtered values be $\mu = E[z]$ and $\mu_2 = E[z^2]$ [G].
 3.  **Variance Calculation:** Compute the variance $\sigma^2$ of the depth distribution at the filtered texel:
     $$ \sigma^2 = \mu_2 - \mu^2 $$
     [G] If $\sigma^2 < 0$ due to floating-point precision errors during filtering, clamp it to 0.
-4.  **Shadow Factor Calculation:** For a query point with depth $z_q$, calculate the probability that the point is in shadow using one-sided Chebyshev's inequality. Define the bias $b$ to handle depth precision errors. The shadow factor $S$ is:
+4.  **Shadow Factor Calculation:** For a query point with depth $z_q$, calculate the probability that the point is in shadow using one-sided Chebyshev's inequality [S1]. Define the bias $b$ to handle depth precision errors [G]. The shadow factor $S$ is:
     $$ S = \begin{cases} 
     \frac{\sigma^2}{\sigma^2 + (z_q - \mu - b)^2} & \text{if } z_q > \mu + b \\
     1 & \text{otherwise}
@@ -29,28 +29,28 @@ The shadow map stores two floating-point values per texel:
     [S1] This formula provides the probability that the depth $z_q$ is occluded.
 
 **Parameters:**
-*   **Bias ($b$):** A small positive value to prevent self-shadowing artifacts. Typical values depend on depth precision and scene scale. Not given in the sources.
-*   **Filter Size:** The kernel size for the box filter. Larger sizes produce softer shadows but increase blur. Not given in the sources.
+*   **Bias ($b$):** A small positive value to prevent self-shadowing artifacts. Typical values depend on depth precision and scene scale. Not given in the sources. [G]
+*   **Filter Size:** The kernel size for the box filter. Larger sizes produce softer shadows but increase blur. Not given in the sources. [G]
 
 **Edge Cases and Pitfalls:**
 *   **Light Leaking:** VSM can suffer from light leaking, where shadow boundaries appear too bright or transparent because the variance estimate is loose [S2].
 *   **Precision:** Floating-point errors in variance calculation ($\sigma^2 < 0$) must be handled [G].
-*   **Depth Precision:** Standard shadow mapping depth precision issues still apply; bias is required.
+*   **Depth Precision:** Standard shadow mapping depth precision issues still apply; bias is required [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def variance_shadow_mapping(shadow_map, query_depth, bias):
+def variance_shadow_mapping(shadow_map, query_depth, bias, uv):
     """
     shadow_map: tuple (mean_texture, second_moment_texture)
     query_depth: float, depth of the point being shaded
     bias: float, depth bias to prevent self-shadowing
+    uv: tuple, screen/texture coordinates for sampling
     """
-    # 1. Sample filtered moments from the shadow map
-    # Assuming shadow_map is pre-filtered
-    mu = shadow_map.mean_texture.sample(query_depth)
-    mu2 = shadow_map.second_moment_texture.sample(query_depth)
+    # 1. Sample filtered moments from the shadow map at the fragment's UV
+    mu = shadow_map.mean_texture.sample(uv)
+    mu2 = shadow_map.second_moment_texture.sample(uv)
     
     # 2. Calculate variance
     variance = mu2 - mu * mu
@@ -59,12 +59,8 @@ def variance_shadow_mapping(shadow_map, query_depth, bias):
     if variance < 0.0:
         variance = 0.0
         
-    # 3. Calculate shadow factor using Chebyshev's inequality
-    # If the query depth is behind the mean depth + bias, it is in shadow
+    # 3. Calculate shadow factor using one-sided Chebyshev's inequality
     if query_depth > mu + bias:
-        # One-sided Chebyshev inequality
-        # P(z >= query_depth) <= variance / (variance + (query_depth - mu - bias)^2)
-        # This gives the probability of being in shadow
         shadow_factor = variance / (variance + (query_depth - mu - bias) ** 2)
     else:
         shadow_factor = 1.0
@@ -84,7 +80,6 @@ Moment Shadow Mapping (MSM) is a differentiable shadow mapping technique that us
 *   **Strengths:** Efficient soft shadows, differentiable (in MSM variant), minimal overhead [S1, S2].
 *   **Limitations:** Light leaking (VSM), potential for singular matrices in MSM [S2].
 *   **When to use:** When soft shadows are needed with low computational cost [S1]. When differentiable rendering requires accurate visibility bounds [S2].
-*   **When not to use:** When light leaking artifacts are unacceptable and MSM is not feasible [S2].
 
 ## Background
 Variance Shadow Mapping was introduced as a method to smooth depth values and calculate shadow probabilities using Chebyshev's inequality [S1]. It was selected as the shadow generation method in a pipeline for relighting scenes with object insertions in Neural Radiance Fields due to its ability to produce soft shadows with minimal overhead [S1]. Moment Shadow Mapping is a later development in the context of differentiable rendering, aiming to improve upon VSM's visibility bounds [S2].

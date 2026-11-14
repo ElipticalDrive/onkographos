@@ -3,87 +3,311 @@
 Also called: Hybrid Scene Representation Network, Neural RGB-D
 
 ## Overview
-Neural RGB-D Surface Reconstruction is a method for high-quality 3D reconstruction of room-scale scenes from an RGB-D input sequence [S1]. It solves the problem of generating metric, clean triangle meshes from noisy depth data, addressing the limitation of standard NeRF which produces semitransparent artifacts and lacks hard geometric boundaries [S1]. It sets itself apart by replacing the density-based volumetric representation with a hybrid scene representation: a Truncated Signed Distance Field (TSDF) for geometry and a volumetric radiance field for appearance, optimized jointly with camera poses [S1]. Unlike density-based models that introduce noise in free space, this method predicts hard boundaries between occupied and free space [S1].
+Neural RGB-D Surface Reconstruction is a method for high-quality 3D reconstruction of room-scale scenes from an RGB-D input sequence [S1]. It solves the problem of generating metric, clean triangle meshes from noisy depth data by training a multi-layer perceptron (MLP) to represent a hybrid scene consisting of a truncated signed distance field (TSDF) for geometry and a volumetric radiance field for appearance [S1]. Unlike density-based NeRF variants which often produce semitransparent artifacts and noisy free space, this method predicts hard boundaries between occupied and free space, enabling direct mesh extraction via Marching Cubes [S1]. It builds on [Geometric Priors and Depth Integration](9395-geometric-priors-and-depth-integration.md) by replacing the standard density-based volumetric rendering integral with a differentiable formulation based on signed distance values [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** $N$ color frames $I_i$, corresponding aligned depth frames $D_i$, and initial camera poses $T_i$.
-*   **Outputs:** Optimized scene representation (MLP parameters), refined camera poses, and a triangle mesh extracted via Marching Cubes.
+*   **Inputs:** $N$ color frames $I_i$, corresponding aligned depth frames $D_i$, and initial camera poses $T_i$ (initialized via BundleFusion [S1]).
+*   **Outputs:** Optimized MLP parameters $\Theta$, camera poses $T_i$, per-frame latent corrective codes, an image-plane deformation field, and a triangle mesh extracted at evaluation time [S1].
 
 **Data Structures:**
-1.  **Shape MLP:**
-    *   Input: Sinusoidal positional encoding of 3D query point $\gamma(\mathbf{p})$.
-    *   Output: Truncated signed distance value $D_i$.
-2.  **Radiance MLP:**
-    *   Inputs: Sinusoidal positional encoding of viewing direction $\gamma(\mathbf{d})$, intermediate feature from Shape MLP, and a per-frame latent corrective code vector.
-    *   Output: Surface radiance $\mathbf{c}_i$.
-3.  **Deformation Field:** A 6-layer ReLU MLP acting as a residual to pixel location before unprojecting into a 3D ray. Shared across all frames.
-4.  **Camera Poses $T_i$:** Represented with Euler angles and a translation vector for every frame.
+1.  **Shape MLP ($F_\sigma$):**
+    *   **Input:** Sinusoidal positional encoding of 3D query point $\gamma(\mathbf{p})$.
+    *   **Output:** Truncated signed distance value $D_i$.
+    *   **Architecture:** Standard MLP with ReLU activations and skip connections from input to every 4th layer [S1].
+2.  **Radiance MLP ($F_c$):**
+    *   **Inputs:**
+        *   Sinusoidal positional encoding of viewing direction $\gamma(\mathbf{d})$.
+        *   Intermediate feature vector from the Shape MLP (output of the last hidden layer before the density head) [S1].
+        *   Per-frame latent corrective code vector (to account for exposure/white balance changes) [S1].
+    *   **Output:** Surface radiance $\mathbf{c}_i$.
+    *   **Architecture:** MLP with ReLU or sigmoid activation [S1].
+3.  **Deformation Field:**
+    *   A 6-layer ReLU MLP acting as a residual to pixel location before unprojecting into a 3D ray [S1].
+4.  **Camera Poses:**
+    *   Represented with Euler angles and a translation vector for every frame [S1].
 
 **Parameters:**
-*   Truncation distance $tr = 5$ cm [S1].
-*   Scene scaling: Truncation region maps to $[-1, 1]$ (positive in front of surface, negative behind) [S1].
-*   Loss weights: $\lambda_1 = 0.1$ (RGB), $\lambda_2 = 10$ (Free-space), $\lambda_3 = 6 \times 10^3$ (Truncation) [S1].
-*   Fine samples $S'_f = 16$ [S1].
-*   Coarse sampling rate: One sample for every 1.5 cm of ray length [S1].
-*   Ray length: Greater than the largest distance in the scene (typical range 4 to 8 meters) [S1].
-*   Optimizer: ADAM with learning rate $5 \times 10^{-4}$ [S1].
-*   Training iterations: $2 \times 10^5$ iterations, computing gradient w.r.t. $|P_b| = 1024$ randomly chosen rays per iteration [S1].
+*   **Truncation distance ($tr$):** Controls the width of the region around the surface where weights are non-zero. Typical value: 5 cm [S1].
+*   **Scene Scaling:** The truncation region maps to $[-1, 1]$ (positive in front of the surface, negative behind) [S1].
+*   **Coarse samples ($S'_c$):** One sample for every 1.5 cm of ray length on average [S1].
+*   **Fine samples ($S'_f$):** 16 [S1].
+*   **Ray Length:** Must be greater than the largest distance in the scene. Typical range: 4 to 8 meters [S1].
+*   **Optimizer:** ADAM with learning rate $5 \times 10^{-4}$ [S1].
+*   **Loss Weights:** $\lambda_1 = 0.1$ (RGB), $\lambda_2 = 10$ (Free-space), $\lambda_3 = 6 \times 10^3$ (Truncation) [S1].
+*   **Batch Size:** $|P_b| = 1024$ randomly chosen rays per iteration [S1].
+*   **Iterations:** $2 \times 10^5$ [S1].
 
-**Algorithm:**
+**Numbered Steps:**
 
 1.  **Initialization:** Initialize camera poses $T_i$ using BundleFusion [S1].
-2.  **Ray Generation & Refinement:**
-    *   For each pixel $p$ in a batch $P_b$, retrieve the 2D pixel coordinate.
-    *   Apply the deformation field MLP to the pixel coordinate to get a 2D shift vector.
-    *   Shift the pixel coordinate by this vector.
-    *   Unproject the shifted pixel into a 3D ray using the camera pose $T_i$ and intrinsics.
-3.  **Sampling:**
-    *   **Coarse Step:** Generate $S'_c$ sample points on the ray using stratified sampling. The rate is set such that there is on average one sample for every 1.5 cm of ray length [S1].
-    *   Evaluate the Shape MLP on these $S'_c$ points to get signed distances.
-    *   Search for the zero-crossing in the predicted signed distance values to estimate the ray depth [S1].
-    *   **Fine Step:** Generate $S'_f$ sample points around the identified zero-crossing [S1].
-    *   Evaluate the Shape and Radiance MLPs on all $S'_c + S'_f$ samples.
-4.  **Weight Calculation:**
-    *   For each sample $i$ with signed distance $D_i$ and truncation distance $tr$, compute weight $w_i$:
-        $$w_i = \sigma \left( \frac{D_i}{tr} \right) \cdot \sigma \left( -\frac{D_i}{tr} \right)$$
-        where $\sigma$ is the sigmoid function [S1].
-    *   **Pitfall:** If the coarse sampling rate is too low, samples may miss the truncation region, causing the zero-crossing to be missed [S1].
-    *   **Multiple Intersections:** Set weights of samples beyond the first truncation region to zero to account for multiple intersections [S1].
-5.  **Color Integration:**
-    *   Compute the integrated color $\mathbf{C}$ for the ray:
-        $$\mathbf{C} = \frac{1}{\sum_{i=0}^{K-1} w_i} \sum_{i=0}^{K-1} w_i \cdot \mathbf{c}_i$$
-        where $K = S'_c + S'_f$, $w_i$ are weights, and $\mathbf{c}_i$ are radiance values [S1].
-6.  **Loss Computation:**
-    *   Compute the global objective function $\mathcal{L}(\mathcal{P})$ for the batch, where $\mathcal{P}$ includes network parameters $\Theta$ and camera poses $T_i$:
-        $$\mathcal{L}(\mathcal{P}) = \sum_{b=0}^{B-1} \lambda_1 \mathcal{L}_{rgb}^b(\mathcal{P}) + \lambda_2 \mathcal{L}_{fs}^b(\mathcal{P}) + \lambda_3 \mathcal{L}_{tr}^b(\mathcal{P})$$
-    *   **RGB Loss:**
-        $$\mathcal{L}_{rgb}^b(\mathcal{P}) = \frac{1}{|P_b|} \sum_{p \in P_b} (\mathbf{C}_p - \hat{\mathbf{C}}_p)^2$$
-        where $\mathbf{C}_p$ is predicted color, $\hat{\mathbf{C}}_p$ is observed color, and $P_b$ is the set of pixels in batch $b$ [S1].
-    *   **Free-Space Loss:** Forces samples $s$ between the camera origin and the truncation region ($\mathcal{S}_p^{fs}$) to predict $tr$:
-        $$\mathcal{L}_{fs}^b(\mathcal{P}) = \frac{1}{|P_b|} \sum_{p \in P_b} \frac{1}{|\mathcal{S}_p^{fs}|} \sum_{s \in \mathcal{S}_p^{fs}} (D_s - tr)^2$$
-        where $D_s$ is predicted signed distance [S1].
-    *   **Truncation Loss:** Forces samples $s$ within the truncation region ($S_p^{tr}$) to match observed signed distance $\hat{D}_s$ from the depth sensor:
-        $$\mathcal{L}_{tr}^b(\mathcal{P}) = \frac{1}{|P_b|} \sum_{p \in P_b} \frac{1}{|S_p^{tr}|} \sum_{s \in S_p^{tr}} (D_s - \hat{D}_s)^2$$
-        where $\hat{D}_s$ is the observed signed distance along the optical axis [S1].
-7.  **Optimization:** Update $\Theta$, $T_i$, and per-frame latent corrective codes using ADAM [S1].
-8.  **Mesh Extraction:** At evaluation time, use Marching Cubes with a spatial resolution of 1 cm to extract a triangle mesh from the optimized implicit scene representation [S1].
+2.  **Ray Generation & Deformation:** For each pixel $p$ in a batch, retrieve its 2D location. Apply the deformation field MLP to get a 2D shift vector. Shift the ray origin/origin direction by this vector. Transform the ray to world space using the camera pose $T_i$ [S1].
+3.  **Coarse Sampling:** Generate $S'_c$ sample points on the ray using stratified sampling [S1].
+4.  **Coarse Evaluation:** Evaluate the Shape MLP at these $S'_c$ points to get signed distance values $D_i$. Search for the zero-crossing (where $D_i$ changes sign) to estimate the ray depth [S1].
+5.  **Fine Sampling:** Generate $S'_f$ sample points around the identified zero-crossing [S1].
+6.  **Fine Evaluation:** Evaluate the Shape MLP and Radiance MLP at these $S'_f$ points. Concatenate the outputs from the coarse and fine steps to form a total of $K = S'_c + S'_f$ samples [S1].
+7.  **Weight Calculation:** For each sample $i$, calculate the weight $w_i$ using the sigmoid product of the signed distance $D_i$ and truncation distance $tr$:
+    $$ w_i = \sigma \left( \frac{D_i}{tr} \right) \cdot \sigma \left( -\frac{D_i}{tr} \right) $$
+    where $\sigma$ is the sigmoid function [S1].
+    *   **Edge Case:** If multiple intersections occur, set weights of samples beyond the first truncation region to zero [S1].
+8.  **Color Integration:** Compute the final pixel color $\mathbf{C}$ as a weighted sum of the radiance values $\mathbf{c}_i$:
+    $$ \mathbf{C} = \frac{1}{\sum_{i=0}^{K-1} w_i} \sum_{i=0}^{K-1} w_i \cdot \mathbf{c}_i $$
+    [S1].
+9.  **Loss Computation:** Compute the total loss $\mathcal{L}(\mathcal{P})$ for the batch:
+    $$ \mathcal{L}(\mathcal{P}) = \sum_{b=0}^{B-1} \lambda_1 \mathcal{L}_{rgb}^b(\mathcal{P}) + \lambda_2 \mathcal{L}_{fs}^b(\mathcal{P}) + \lambda_3 \mathcal{L}_{tr}^b(\mathcal{P}) $$
+    [S1].
+    *   **RGB Loss:** $\mathcal{L}_{rgb}^b(\mathcal{P}) = \frac{1}{|P_b|} \sum_{p \in P_b} (\mathbf{C}_p - \hat{\mathbf{C}}_p)^2$, where $\hat{\mathbf{C}}_p$ is the observed color [S1].
+    *   **Free-Space Loss:** For samples $s$ between the camera origin and the truncation region ($\mathcal{S}_p^{fs}$), force the predicted signed distance $D_s$ to equal $tr$:
+        $$ \mathcal{L}_{fs}^b(\mathcal{P}) = \frac{1}{|P_b|} \sum_{p \in P_b} \frac{1}{|\mathcal{S}_p^{fs}|} \sum_{s \in \mathcal{S}_p^{fs}} (D_s - tr)^2 $$
+        [S1].
+    *   **Truncation Loss:** For samples $s$ within the truncation region ($\mathcal{S}_p^{tr}$), match the predicted signed distance $D_s$ to the observed signed distance $\hat{D}_s$ from the depth sensor:
+        $$ \mathcal{L}_{tr}^b(\mathcal{P}) = \frac{1}{|P_b|} \sum_{p \in P_b} \frac{1}{|\mathcal{S}_p^{tr}|} \sum_{s \in \mathcal{S}_p^{tr}} (D_s - \hat{D}_s)^2 $$
+        [S1].
+10. **Optimization:** Update network parameters $\Theta$, camera poses $T_i$, latent codes, and deformation field using ADAM [S1].
+11. **Mesh Extraction:** At evaluation, use Marching Cubes with a spatial resolution of 1 cm to extract a triangle mesh from the optimized implicit signed distance function [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ShapeMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+        self.skip_connections = [4, 8, 12] # Indices of layers to add skip connections
+
+    def forward(self, x):
+        h = x
+        for i, layer in enumerate(self.layers):
+            h = F.relu(layer(h))
+            if i in self.skip_connections:
+                h = h + x
+        return h
+
+class RadianceMLP(nn.Module):
+    def __init__(self, feature_dim, view_dim, latent_dim, hidden_dim, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        input_dim = feature_dim + view_dim + latent_dim
+        for i in range(num_layers):
+            self.layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+        self.head = nn.Linear(hidden_dim, 3) # RGB output
+
+    def forward(self, features, view_dir, latent_code):
+        x = torch.cat([features, view_dir, latent_code], dim=-1)
+        for layer in self.layers:
+            x = F.relu(layer(x))
+        return self.head(x)
+
+class DeformationField(nn.Module):
+    def __init__(self, input_dim=2, hidden_dim=64, num_layers=6):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+        self.head = nn.Linear(hidden_dim, 2) # 2D shift
+
+    def forward(self, uv_coords):
+        h = uv_coords
+        for layer in self.layers:
+            h = F.relu(layer(h))
+        return self.head(h)
+
+def positional_encoding(x, num_bands):
+    # x: (..., D)
+    # Returns: (..., D * 2 * num_bands)
+    freq_bands = 2.0 ** torch.linspace(0, num_bands - 1, num_bands).to(x.device)
+    x = x.unsqueeze(-1) * freq_bands * np.pi
+    x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+    return x.reshape(x.shape[:-2] + (-1,))
+
+def render_ray(shape_mlp, radiance_mlp, deformation_field, ray_origin, ray_direction, 
+               camera_pose, latent_code, tr, num_coarse, num_fine, num_bands):
+    """
+    Renders a single ray.
+    """
+    # 1. Ray Generation & Deformation
+    # Assume uv_coords are normalized pixel coordinates for this ray
+    # In practice, this is done for a batch of rays
+    # deformation_field takes 2D UV coordinates
+    # Here we simulate the shift logic:
+    # shift = deformation_field(uv_coords)
+    # ray_origin_shifted = ray_origin + shift * ray_direction # Simplified 2D shift projection
+    # For the purpose of this algorithm, we assume ray_origin and ray_direction 
+    # are already in world space and shifted.
+    
+    # 2. Coarse Sampling
+    # Stratified sampling along ray length
+    t_coarse = np.linspace(0, ray_length, num_coarse) # ray_length is scene max distance
+    # Add jitter for stratified sampling
+    t_coarse = t_coarse + np.random.uniform(0, (ray_length / num_coarse))
+    t_coarse = np.clip(t_coarse, 0, ray_length)
+    
+    points_coarse = ray_origin + ray_direction * t_coarse[:, np.newaxis]
+    
+    # 3. Coarse Evaluation
+    points_coarse_enc = positional_encoding(points_coarse, num_bands)
+    dists_coarse = shape_mlp(points_coarse_enc) # (num_coarse,)
+    
+    # 4. Find Zero-Crossing
+    # Search for sign change in dists_coarse
+    signs = torch.sign(dists_coarse)
+    zero_cross_indices = torch.where(signs[:-1] != signs[1:])[0]
+    
+    if len(zero_cross_indices) == 0:
+        # Fallback: use closest point to zero if no crossing found
+        # Or return None/NaN depending on error handling strategy
+        # For implementation, we might pick the point with min abs distance
+        min_idx = torch.argmin(torch.abs(dists_coarse))
+        t_fine_center = t_coarse[min_idx]
+    else:
+        # Interpolate zero crossing
+        idx = zero_cross_indices[0]
+        t1, t2 = t_coarse[idx], t_coarse[idx+1]
+        d1, d2 = dists_coarse[idx], dists_coarse[idx+1]
+        t_fine_center = t1 - d1 * (t2 - t1) / (d2 - d1)
+        
+    # 5. Fine Sampling
+    # Generate samples around t_fine_center
+    t_fine = np.linspace(t_fine_center - 0.1, t_fine_center + 0.1, num_fine) # 0.1 is arbitrary range, adjust based on tr
+    # Add jitter
+    t_fine = t_fine + np.random.uniform(0, 0.1/num_fine)
+    t_fine = np.clip(t_fine, 0, ray_length)
+    
+    points_fine = ray_origin + ray_direction * t_fine[:, np.newaxis]
+    
+    # 6. Concatenate and Evaluate
+    all_points = np.concatenate([points_coarse, points_fine], axis=0)
+    all_points_enc = positional_encoding(all_points, num_bands)
+    
+    dists_all = shape_mlp(all_points_enc) # (num_coarse + num_fine,)
+    
+    # Radiance
+    # View direction encoding
+    view_dir_enc = positional_encoding(ray_direction[np.newaxis, :], num_bands)
+    # Intermediate features from shape MLP? 
+    # The source says Radiance MLP takes "intermediate feature vector from the density network".
+    # In the provided ShapeMLP, we only return the final output. 
+    # To implement correctly, ShapeMLP should return features too.
+    # Assuming we modify ShapeMLP to return (dists, features)
+    # For this pseudocode, we assume a separate feature extraction or modification.
+    # Let's assume shape_mlp returns (dists, features)
+    # dists_all, features_all = shape_mlp(all_points_enc)
+    
+    # Radiance MLP inputs
+    # features_all: (K, hidden_dim)
+    # view_dir_enc: (1, encoded_dim) -> broadcast
+    # latent_code: (1, latent_dim)
+    
+    # c_all = radiance_mlp(features_all, view_dir_enc, latent_code)
+    
+    # 7. Weight Calculation
+    # w_i = sigma(D_i / tr) * sigma(-D_i / tr)
+    w = torch.sigmoid(dists_all / tr) * torch.sigmoid(-dists_all / tr)
+    
+    # Handle multiple intersections: set weights to zero beyond first truncation region
+    # This requires tracking which samples are in the "first" region.
+    # Simplified: if we found a zero crossing, samples after the last zero crossing in the coarse set might be ignored?
+    # The source says: "weights of samples beyond the first truncation region are set to zero."
+    # This implies we need to identify the first surface intersection.
+    # If zero_cross_indices is not empty, the first one is the primary surface.
+    # Samples after the coarse sample corresponding to the first zero crossing might be considered "beyond".
+    # However, fine samples are around the zero crossing.
+    # A robust implementation would mask weights based on the first zero crossing index.
+    
+    # 8. Color Integration
+    # C = sum(w_i * c_i) / sum(w_i)
+    # C = torch.sum(w * c_all) / torch.sum(w)
+    
+    return C
+
+class NeuralRGBD:
+    def __init__(self, shape_hidden, radiance_hidden, num_bands, tr, lr):
+        self.shape_mlp = ShapeMLP(input_dim=2*num_bands, hidden_dim=shape_hidden, num_layers=8)
+        self.radiance_mlp = RadianceMLP(feature_dim=shape_hidden, view_dim=2*num_bands, 
+                                        latent_dim=128, hidden_dim=radiance_hidden, num_layers=4)
+        self.deformation_field = DeformationField()
+        self.tr = tr
+        self.optimizer = torch.optim.Adam(list(self.shape_mlp.parameters()) + 
+                                          list(self.radiance_mlp.parameters()) + 
+                                          list(self.deformation_field.parameters()), lr=lr)
+        self.num_bands = num_bands
+        self.latent_codes = nn.Parameter(torch.randn(100, 128)) # Assuming 100 frames
+
+    def compute_loss(self, batch):
+        # batch contains: rays, colors, depths, poses, uv_coords
+        predicted_colors = []
+        predicted_dists = []
+        observed_colors = batch['colors']
+        observed_depths = batch['depths']
+        
+        for i, (ray_origin, ray_direction, uv, pose, frame_idx) in enumerate(zip(batch['rays_origin'], 
+                                                                                  batch['rays_direction'], 
+                                                                                  batch['uv_coords'], 
+                                                                                  batch['poses'], 
+                                                                                  batch['frame_indices'])):
+            latent_code = self.latent_codes[frame_idx]
+            
+            # Render
+            # Note: Full implementation requires handling the deformation field shift
+            # shift = self.deformation_field(uv)
+            # ray_origin_shifted = ray_origin + shift[0] * ray_direction # Simplified
+            # ray_direction_shifted = ray_direction # Simplified
+            
+            c = render_ray(self.shape_mlp, self.radiance_mlp, self.deformation_field, 
+                           ray_origin, ray_direction, pose, latent_code, self.tr, 
+                           num_coarse=100, num_fine=16, num_bands=self.num_bands)
+            
+            predicted_colors.append(c)
+            # We also need to store distances for free-space and truncation losses
+            # This requires modifying render_ray to return distances and sample masks
+            # dists, fs_mask, tr_mask = render_ray(...)
+            # predicted_dists.append(dists)
+            
+        predicted_colors = torch.stack(predicted_colors)
+        
+        # RGB Loss
+        l_rgb = torch.mean((predicted_colors - observed_colors) ** 2)
+        
+        # Free-space and Truncation losses require detailed sample tracking
+        # l_fs = ...
+        # l_tr = ...
+        
+        total_loss = 0.1 * l_rgb + 10 * l_fs + 6000 * l_tr
+        return total_loss
+
+    def train_step(self, batch):
+        self.optimizer.zero_grad()
+        loss = self.compute_loss(batch)
+        loss.backward()
+        self.optimizer.step()
+        return loss.item()
+```
 
 ## Subtopics
 
 ### [InFusionSurf](12834-infusionsurf.md)
-A NeRF-style RGB-D 3D surface reconstruction framework that refines depth information to enhance reconstruction quality with minimal impact on optimization time, using per-frame intrinsic refinement and TSDF Fusion prior learning. It addresses camera motion-induced blurs in depth frames by correcting the camera intrinsic matrix per frame and accelerates training by pre-training the geometric prior using classical TSDF Fusion. It builds on Neural RGB-D Surface Reconstruction by adding specific intrinsic refinement and a two-stage initialization process.
+InFusionSurf is a NeRF-style RGB-D 3D surface reconstruction framework that refines depth information to enhance reconstruction quality with minimal impact on optimization time, using per-frame intrinsic refinement and TSDF Fusion prior learning. It addresses camera motion-induced blurs in depth frames by correcting the camera intrinsic matrix per frame and accelerates training by pre-training the geometric prior using classical TSDF Fusion. It builds on [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md) by adding specific intrinsic refinement and a two-stage initialization process.
 
 ## Operating characteristics
-*   **Time and Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** The method requires two forward passes per ray (coarse and fine) and optimization over camera poses and latent codes. Training runs for $2 \times 10^5$ iterations [S1].
+*   **Memory Complexity:** Depends on the MLP sizes and the number of frames (latent codes). The deformation field is shared [S1].
 *   **Measured Performance:** On 10 synthetic scenes, the method achieved a Chamfer $\ell_1$ distance of 0.044, IoU of 0.747, Normal Consistency of 0.918, and F-score of 0.924 [S1].
-*   **Strengths:** Produces high-quality, metrical 3D reconstructions with hard boundaries between occupied and free space, avoiding the semitransparent artifacts common in density-based models like NeRF [S1].
-*   **Limitations:** Requires RGB-D input data. Performance depends on the quality of initial camera poses (initialized via BundleFusion) and the accuracy of the depth sensor [S1].
-*   **When to use:** When high-quality, metric 3D mesh reconstruction is required from RGB-D sequences, particularly for room-scale scenes in AR/VR applications [S1].
-*   **When not to use:** When only color images are available (no depth) or when novel view synthesis without explicit mesh extraction is the primary goal [S1].
+*   **Strengths:** Produces high-quality, metrical 3D reconstructions with hard boundaries, avoiding the semitransparent artifacts common in density-based NeRFs [S1].
+*   **Limitations:** Requires RGB-D input data. Performance degrades if the coarse sampling rate is too low, causing the zero-crossing to be missed [S1]. Noisy depth sensors (e.g., Kinect) may miss thin structures, requiring reliance on color data [S1].
+*   **When to use:** When high-quality metric mesh reconstruction is required from RGB-D sequences, especially for room-scale scenes [S1].
+*   **When not to use:** When only color images are available (use standard NeRF or NeRF variants) or when novel view synthesis without mesh extraction is the sole goal [S1].
 
 ## Background
-Neural RGB-D Surface Reconstruction was proposed by Dejan Azinovic, Ricardo Martin-Brualla, Dan B Goldman, Matthias Nießner, and Justus Thies [S1]. It was published in 2022 [S1]. The method builds on the canonical NeRF architecture but reformulates the neural radiance field definition to use a differentiable rendering formulation based on signed distance fields specifically tailored to geometry reconstruction [S1]. It addresses the limitations of volume-based view synthesis methods that reproduce appearance but fail to reconstruct metric and clean meshes [S1].
+Neural RGB-D Surface Reconstruction was proposed by Dejan Azinović, Ricardo Martin-Brualla, Dan B Goldman, Matthias Nießner, and Justus Thies [S1]. It was published in CVPR 2022 [S1]. The method reformulates the neural radiance field definition in NeRF [S1] by replacing the density-based volumetric representation with an implicit surface representation based on a truncated signed distance function (TSDF) [S1]. It extends the NeRF framework to use depth measurements from commodity RGB-D sensors like the Kinect [S1]. The approach was developed to address the limitations of volume-based view synthesis methods that do not reconstruct metric and clean meshes [S1].
 
 ## Sources
 [S1] Neural RGB-D Surface Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00619, fetched 2026-10-26

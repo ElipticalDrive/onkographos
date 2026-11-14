@@ -7,20 +7,20 @@ The Gaussian Normal Field Definition derives an explicit normal field on a stoch
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A Gaussian Splatting representation consisting of $N$ oriented Gaussians. Each Gaussian $i$ is defined by its mean position $\mu_i$, normal direction $n_i$, and a scalar field contribution $G_i(x)$.
-*   **Output:** A normal field $\mathcal{N}: \mathbb{R}^3 \rightarrow S^2$ (or $\mathbb{R}^3$ where $\|\mathcal{N}\|=1$ or $0$).
+*   **Input:** A Gaussian Splatting representation consisting of $N$ oriented Gaussians [S1]. Each Gaussian $i$ is defined by its mean position $\mu_i$, normal direction $n_i$, and a scalar field contribution $G_i(x)$ [S1].
+*   **Output:** A normal field $\mathcal{N}: \mathbb{R}^3 \rightarrow S^2$ [S1].
 
 **Data Structures:**
-The method assumes access to the parameters of $N$ Gaussians. For each Gaussian $i \in \{1, \dots, N\}$:
+The method assumes access to the parameters of $N$ Gaussians [S1]. For each Gaussian $i \in \{1, \dots, N\}$:
 *   $\mu_i \in \mathbb{R}^3$: Mean position.
 *   $n_i \in S^2$: Normal vector (unit length).
-*   $G_i(x)$: The Gaussian function value at $x$. The specific functional form of $G_i(x)$ is not detailed in the provided notes, but it is assumed to be the standard Gaussian kernel associated with the splatting representation [S1].
+*   $G_i(x)$: The Gaussian function value at $x$ [S1].
 
 **Formulas:**
 1.  **Vacancy Gradient (Gaussian Vector Field):**
     The Gaussian vector field $V(x)$ is defined as the gradient of the log-vacancy $\nabla \log v(x)$ [S1]:
     $$ V(x) = \sum_{i=1}^N \mathbb{1}_{n_i^T(x-\mu_i) \geq 0} \nabla \log(1 - G_i(x)) $$
-    where $\mathbb{1}_{condition}$ is the indicator function, equal to 1 if the condition is true and 0 otherwise [S1].
+    where $\mathbb{1}_{condition}$ is the indicator function, equal to $1$ if the condition is true and $0$ otherwise [S1].
 
 2.  **Gaussian Normal Field:**
     The normal field $\mathcal{N}(x)$ is the normalized version of $V(x)$ [S1]:
@@ -31,61 +31,63 @@ The derivation relies on the assumption that locally, each term in the sum has t
 $$ |\mathbf{w} \cdot \nabla \log v(\mathbf{x})| = \sum_i \mathbb{1}_{n_i^T(\mathbf{x}-\mu_i) \geq 0} |\mathbf{w} \cdot \nabla \log(1 - G_i(\mathbf{x}))| $$
 to the vector equation:
 $$ \mathbf{w} \cdot \nabla \log v(\mathbf{x}) = \sum_i \mathbf{w} \cdot \mathbb{1}_{n_i^T(\mathbf{x}-\mu_i) \geq 0} \nabla \log(1 - G_i(\mathbf{x})) $$
-Since this holds for arbitrary direction $\mathbf{w} \in S^2$, the vector form (Eq. 34) follows [S1].
+Since this holds for arbitrary direction $\mathbf{w} \in S^2$, the vector form follows [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_gaussian_normal_field(x, gaussians):
+import math
+
+def gaussian_value(x, mu, sigma_sq):
+    """Standard isotropic Gaussian kernel [G]."""
+    diff = [x[i] - mu[i] for i in range(3)]
+    exponent = -0.5 * sum(d*d for d in diff) / sigma_sq
+    return math.exp(exponent)
+
+def gaussian_gradient(x, mu, sigma_sq, g_val):
+    """Gradient of standard isotropic Gaussian kernel [G]."""
+    diff = [x[i] - mu[i] for i in range(3)]
+    return [-d * g_val / sigma_sq for d in diff]
+
+def compute_gaussian_normal_field(x, gaussians, sigma_sq=1.0):
     """
     Computes the Gaussian Normal Field N(x) at position x.
-    
     Args:
-        x: numpy array, shape (3,), the query point.
-        gaussians: list of dicts or objects, each containing:
-            - 'mu': numpy array, shape (3,), mean position.
-            - 'n': numpy array, shape (3,), normal vector.
-            - 'G': callable or value, G_i(x). Note: The source does not provide 
-              the explicit formula for G_i(x) or its gradient. 
-              Implementation requires the specific Gaussian definition used in the 
-              Gaussian Splatting representation [S1].
-            - 'grad_G': callable or value, gradient of G_i(x) w.r.t x.
-              [G] Standard Gaussian gradient: d/dx exp(-0.5 * (x-mu)^T Sigma^-1 (x-mu))
-              is -Sigma^-1 (x-mu) * G_i(x). If isotropic with variance sigma^2:
-              grad_G = -((x - mu) / sigma^2) * G_i(x).
-    
+        x: list of 3 floats, the query point.
+        gaussians: list of dicts, each containing 'mu' (list of 3 floats) and 'n' (list of 3 floats).
+        sigma_sq: float, variance of the isotropic Gaussian [G].
     Returns:
-        numpy array, shape (3,), the normal vector N(x).
+        list of 3 floats, the normal vector N(x).
     """
-    V = np.zeros(3)
-    
+    V = [0.0, 0.0, 0.0]
+
     for g in gaussians:
         mu = g['mu']
         n = g['n']
-        
+
         # Check indicator condition: n^T (x - mu) >= 0
-        diff = x - mu
-        if np.dot(n, diff) >= 0:
-            # Get G_i(x) and its gradient
-            # Note: Source [S1] uses log(1 - G_i(x)).
-            # We need grad(log(1 - G)) = (1 / (1 - G)) * (-grad(G))
-            G_val = g['G'](x)
-            grad_G = g['grad_G'](x)
-            
-            # Avoid division by zero if G_i(x) == 1
-            if abs(1.0 - G_val) < 1e-9:
+        diff = [x[i] - mu[i] for i in range(3)]
+        dot_prod = sum(n[i] * diff[i] for i in range(3))
+        if dot_prod >= 0:
+            G_val = gaussian_value(x, mu, sigma_sq)
+            grad_G = gaussian_gradient(x, mu, sigma_sq, G_val)
+
+            # Compute gradient of log(1 - G_i(x))
+            # d/dx log(1 - G) = -grad(G) / (1 - G)
+            denom = 1.0 - G_val
+            if abs(denom) < 1e-9:
                 continue
-                
-            term = (-grad_G) / (1.0 - G_val)
-            V += term
-            
-    norm_V = np.linalg.norm(V)
-    
+
+            term = [-grad_G[i] / denom for i in range(3)]
+            V = [V[i] + term[i] for i in range(3)]
+
+    norm_V = math.sqrt(sum(v*v for v in V))
+
     if norm_V > 0:
-        return V / norm_V
+        return [V[i] / norm_V for i in range(3)]
     else:
-        return np.zeros(3)
+        return [0.0, 0.0, 0.0]
 ```
 
 **Parameters:**
@@ -94,17 +96,15 @@ def compute_gaussian_normal_field(x, gaussians):
 *   $G_i(x)$: The Gaussian function. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Zero Vector Field:** If $\|V(x)\| = 0$, the normal is defined as the zero vector [S1]. This occurs in regions far from any Gaussian or where gradients cancel out exactly.
-*   **Singularity:** If $G_i(x) = 1$, the term $\nabla \log(1 - G_i(x))$ is undefined. In practice, $G_i(x)$ approaches 1 at the mean, so numerical stability checks are required [G].
-*   **Wrapping Assumption:** The derivation assumes that the Gaussians properly wrap the scene geometry [S1]. If this assumption fails, the sign disambiguation may be incorrect.
+*   **Zero Vector Field:** If $\|V(x)\| = 0$, the normal is defined as the zero vector [S1].
+*   **Singularity:** If $G_i(x) = 1$, the term $\nabla \log(1 - G_i(x))$ is undefined. In practice, $G_i(x)$ approaches $1$ at the mean, so numerical stability checks are required [G].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per query point, where $N$ is the number of Gaussians.
-*   **Memory Complexity:** $O(N)$ to store the Gaussian parameters.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Strengths:** Provides an analytic normal field from the Gaussian Splatting representation, useful for supervision and mesh extraction [S1].
 *   **Limitations:** Requires the gradient of the Gaussian function, which depends on the specific parameterization of the Gaussians (covariance matrix) [G]. The method is sensitive to the "wrapping assumption" [S1].
 *   **When to use:** When working with Oriented Gaussian Splatting representations and needing explicit surface normals for training or reconstruction [S1].
-*   **When not to use:** When the Gaussians do not properly wrap the surface or when a simpler normal estimation method is sufficient.
 
 ## Background
 The Gaussian Normal Field Definition was introduced in "From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians" [S1]. It builds on the Objects as Volumes (OaV) framework, which provides an explicit expression for the gradient of the log-vacancy [S1]. The method is used to supervise oriented Gaussians during training to enforce proper surface wrapping and to extract meshes from the trained representation [S1].

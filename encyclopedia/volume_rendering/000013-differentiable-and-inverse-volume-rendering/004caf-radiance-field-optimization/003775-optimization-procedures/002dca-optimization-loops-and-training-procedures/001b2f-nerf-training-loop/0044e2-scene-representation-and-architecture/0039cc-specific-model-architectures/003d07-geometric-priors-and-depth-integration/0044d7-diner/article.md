@@ -3,283 +3,278 @@
 Also called: DINER (Depth-aware Image-based NEural Radiance fields), Depth-aware Image-based NEural Radiance fields
 
 ## Overview
-DINER is a method for novel view synthesis from sparse input views that leverages estimated dense depth maps to guide the reconstruction of a volumetric scene representation [S1]. Unlike standard image-based NeRFs that rely on implicit correspondence search or sparse landmarks, DINER uses a state-of-the-art depth estimator to provide dense geometric priors, enabling the processing of input views with high relative distances [S1]. It sets itself apart by conditioning the neural radiance field on the deviation between sample locations and estimated depth, and by employing depth-guided sampling to concentrate samples near surfaces, thereby improving sampling efficiency and synthesis quality [S1].
+DINER is a method for novel view synthesis from a sparse set of input images (typically four) that leverages estimated dense depth maps to guide the reconstruction of a volumetric scene representation [S1]. Unlike standard image-based NeRFs that rely on implicit correspondence search, which fails when the distance between source cameras is large, DINER uses depth information to condition the neural radiance field and focus sampling near the estimated surface [S1]. This allows for higher synthesis quality and larger viewpoint changes compared to methods using sparse landmarks or no depth guidance [S1].
 
 ## How it works
-**Inputs:** A set of $N$ source RGB images $\{I^{(i)}\}_{i=1}^N$ with known camera extrinsics $P^{(i)}$ and intrinsics $K^{(i)}$.
-**Outputs:** A rendered color $\hat{C}(\mathbf{r})$ for a target ray $\mathbf{r}(t) = \mathbf{o} + t \cdot \mathbf{d}$.
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ source RGB images $\{I^{(i)}\}_{i=1}^N$ with known camera intrinsics $K^{(i)}$ and extrinsics $P^{(i)}$ (typically $N=4$) [S1].
+*   **Outputs:** A differentiable neural radiance field that predicts density $\sigma$ and color $\mathbf{c}$ for any 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$, enabling the rendering of novel views [S1].
 
 **Data Structures:**
-*   **Feature Maps:** $W^{(i)} \in \mathbb{R}^{H \times W \times C_{feat}}$, where $C_{feat}=512$ [S1].
-*   **Depth Maps:** $D^{(i)} \in \mathbb{R}^{H \times W}$, estimated for each source view [S1].
-*   **Normal Maps:** $N^{(i)} \in \mathbb{R}^{H \times W \times 3}$, derived from depth maps for backface culling [S1].
-*   **MLP $f_1$:** Takes concatenated input of dimension $D_{in} = D_{pos} + D_{dir} + D_{feat} + D_{depth}$. $D_{pos}=13$ (positional encoding of depth deviation), $D_{dir}=3$ (view direction), $D_{feat}=512$, $D_{depth}=1$ (depth deviation) [S1]. Output dimension is $C_{feat}=512$.
-*   **MLP $f_2$:** Takes input of dimension $C_{feat}=512$. Outputs color $\mathbf{c} \in \mathbb{R}^3$ and opacity $\sigma \in \mathbb{R}$ [S1].
+1.  **Feature Maps:** For each source view $i$, a 2D feature map $W^{(i)}$ of size $H \times W \times C_{feat}$ (where $C_{feat}=512$) [S1].
+2.  **Depth Maps:** For each source view $i$, a depth map $D^{(i)}$ of size $H \times W$ [S1].
+3.  **Neural Networks:**
+    *   **Image Encoder $E$:** A 2D convolutional network [S1].
+    *   **NeRF MLP $f$:** Split into two parts, $f_1$ and $f_2$ [S1].
+        *   $f_1$: Takes per-view inputs and outputs intermediate feature vectors $V^{(i)}$ [S1].
+        *   $f_2$: Takes the mean of $V^{(i)}$ and outputs $\mathbf{c}$ and $\sigma$ [S1].
 
-**Steps:**
+**Preprocessing (Source Feature Extrapolation):**
+To handle extrapolation beyond the source image frustums, input images are padded by 64 pixels by repeating border values [S1]. The pixel $uv$ coordinates are normalized to $[-1, +1]$ and positionally encoded with 4 exponentially increasing frequencies starting with 0.5, resulting in an 18-channel map [S1]. This positional encoding is set to 0 for unpadded regions [S1]. The padded image is concatenated with the positional encoding map before being passed to the image encoder $E$ [S1].
 
-1.  **Depth Estimation:** Estimate depth maps $D^{(i)}$ for each source view $i$ using a pre-trained depth estimation network [S1].
-2.  **Feature Extraction Preparation:**
-    *   Pad each input image $I^{(i)}$ by 64 pixels by repeating border values [S1].
-    *   Compute positional encoding for normalized pixel coordinates $\mathbf{uv} \in [-1, +1]^2$. Use 4 exponentially increasing frequencies starting with 0.5, resulting in an 18-channel map [S1]. Set this map to 0 for unpadded regions [S1].
-    *   Concatenate the positional encoding map with the padded image to form the input for the feature extractor [S1].
-    *   Extract per-view feature maps $W^{(i)}$ using a 2D-convolutional encoder network $E$: $W^{(i)} = E(I^{(i)}_{padded+pe})$ [S1].
-3.  **Ray Sampling (Depth-Guided):**
-    *   Generate 1000 candidate samples along the ray $\mathbf{r}(t)$ within $[t_{near}, t_{far}]$ [S1].
-    *   Project these samples to source views to estimate depth deviations.
-    *   Shortlist 25 samples based on proximity to estimated depth [S1].
-    *   Apply Gaussian boosting to add 15 additional samples near the shortlisted points [S1].
-    *   Total samples contributing to final color: 40 [S1].
-    *   *Note:* Normal maps are used for point cloud backface culling. Normals are calculated via central difference on depth maps using $3 \times 3$ convolutional kernels. Foreground-background edges are filtered out [S1].
-4.  **Feature Aggregation and Rendering:**
-    *   For each sample point $\mathbf{x}_j$ and view direction $\mathbf{d}$:
-        *   Transform to source view coordinates: $\mathbf{x}^{(i)} = P^{(i)} \circ \mathbf{x}_j$, $\mathbf{d}^{(i)} = R^{(i)} \circ \mathbf{d}$ [S1].
-        *   Project $\mathbf{x}^{(i)}$ onto feature map $W^{(i)}$ to interpolate feature vector $\boldsymbol{\omega}^{(i)}$ via bilinear interpolation: $\boldsymbol{\omega}^{(i)} = W^{(i)}[K^{(i)} \circ \mathbf{x}^{(i)}]$ [S1].
-        *   Compute depth deviation $\Delta z^{(i)} = |z^{(i)}_{sample} - D^{(i)}[u^{(i)}, v^{(i)}]|$, where $z^{(i)}_{sample}$ is the z-coordinate in camera space [S1].
-        *   Compute positional encoding $\phi(\Delta z^{(i)})$ for the depth deviation. Use 6 frequency channels with a base frequency of 1 meter, resulting in a 13-dimensional vector [S1].
-        *   Concatenate $\phi(\Delta z^{(i)})$ with $\boldsymbol{\omega}^{(i)}$ [S1].
-        *   Process through $f_1$: $\mathbf{V}^{(i)} = f_1(\mathbf{x}^{(i)}, \mathbf{d}^{(i)}, \boldsymbol{\omega}^{(i)}, \Delta z^{(i)})$ [S1].
-    *   Average pool intermediate features across all $N$ views: $\bar{\mathbf{V}} = \frac{1}{N} \sum_{i=1}^N \mathbf{V}^{(i)}$ [S1].
-    *   Regress color and opacity: $(\mathbf{c}_j, \sigma_j) = f_2(\bar{\mathbf{V}})$ [S1].
-    *   Render final color using standard volumetric rendering:
-        $$ \hat{C}(\mathbf{r}) = \sum_{j=1}^{M} T_j (1 - \exp(-\sigma_j \delta_j)) \mathbf{c}_j $$
-        where $T_j = \exp(-\sum_{k=1}^{j-1} \sigma_k \delta_k)$ and $\delta_j = t_{j+1} - t_j$ [S1].
+**Algorithm Steps:**
 
-**Loss Function:**
-The objective function consists of three terms:
-$$ L = w_l L_l + w_{vgg} L_{vgg} + w_{ab} L_{ab} $$
-*   $L_l$: Pixel-wise L1 distance [S1].
-*   $L_{vgg}$: Perceptual loss [S1].
-*   $L_{ab}$: Anti-bias term [S1].
-*   Weights: $w_l = 1.0$, $w_{vgg} = 0.1$, $w_{ab} = 5.0$ (or $w_{ab} = 1.0$ for DTU dataset) [S1].
-*   Loss evaluation is performed on patches of size $64 \times 64$ pixels. For the Lab dataset, patches are downsampled to $8 \times 8$ pixels via average pooling before evaluating $L_l$ [S1].
+1.  **Depth Estimation:** Estimate depth maps $D^{(i)}$ for each source view $I^{(i)}$ using a state-of-the-art depth estimation network [S1].
+2.  **Feature Extraction:** Extract per-view feature maps $W^{(i)}$ using the 2D convolutional encoder $E$:
+    $$ W^{(i)} = E(I^{(i)}) $$
+    [S1]
+3.  **Ray Sampling:** For a target ray $\mathbf{r}(t) = \mathbf{o} + t \cdot \mathbf{d}$, sample 3D points. DINER uses **Depth-Guided Sampling**:
+    *   Generate 1000 candidate samples per ray [S1].
+    *   Shortlist 25 samples [S1].
+    *   Add 15 samples during Gaussian boosting [S1].
+    *   Total samples contributing to final ray color: 40 [S1].
+    *   *Note:* Normal maps for point cloud backface culling are obtained by calculating central differences on depth maps via convolutional kernels of size 3, filtering out foreground-background edges [S1].
+4.  **Coordinate Transformation:** For each sample point $\mathbf{x}$ and viewing direction $\mathbf{d}$, transform them into the coordinate system of each source view $i$:
+    $$ \mathbf{x}^{(i)} = P^{(i)} \circ \mathbf{x} $$
+    $$ \mathbf{d}^{(i)} = R^{(i)} \circ \mathbf{d} $$
+    [S1]
+5.  **Feature Interpolation:** Project $\mathbf{x}^{(i)}$ onto the feature map $W^{(i)}$ to interpolate the feature vector $\boldsymbol{\omega}^{(i)}$:
+    $$ \boldsymbol{\omega}^{(i)} = W^{(i)}[K^{(i)} \circ \mathbf{x}^{(i)}] $$
+    [S1]
+6.  **Depth Deviation Calculation:** Compute the deviation $\Delta z$ between the sample location's z-coordinate in camera coordinates and the estimated depth $D^{(i)}$ at the projected pixel location [S1].
+7.  **Positional Encoding of Depth:** Encode $\Delta z$ using 6 frequency channels with a base frequency of 1 meter, resulting in a 13-dimensional vector [S1].
+8.  **Per-View Feature Processing:** Concatenate the 13-dimensional depth deviation vector with the 512-dimensional feature vector $\boldsymbol{\omega}^{(i)}$ [S1]. Process $\mathbf{x}^{(i)}$, $\mathbf{d}^{(i)}$, $\boldsymbol{\omega}^{(i)}$, and the encoded $\Delta z$ through the first MLP part $f_1$ to generate intermediate feature vectors $V^{(i)}$ for each view independently:
+    $$ V^{(i)} = f_1(\mathbf{x}^{(i)}, \mathbf{d}^{(i)}, \boldsymbol{\omega}^{(i)}, \Delta z) $$
+    [S1]
+9.  **Feature Aggregation:** Average pool the intermediate feature vectors across all $N$ views:
+    $$ \bar{V} = \text{mean}_i V^{(i)} $$
+    [S1]
+10. **Density and Color Regression:** Process the averaged features through the second MLP part $f_2$ to regress the final color $\mathbf{c}$ and opacity $\sigma$:
+    $$ (\mathbf{c}, \sigma) = f_2(\bar{V}) $$
+    [S1]
+11. **Volumetric Rendering:** Render the final color $\hat{C}(\mathbf{r})$ using standard volumetric rendering integration:
+    $$ \hat{C}(\mathbf{r}) = \sum_{j=1}^{M} T_j (1 - \exp(-\sigma_j \delta_j)) \mathbf{c}_j $$
+    where $T_j = \exp\left(-\sum_{k=1}^{j-1} \sigma_k \delta_k\right)$, $\delta_j$ is the distance between adjacent samples, and $M=40$ is the number of samples [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
 
-def positional_encoding_depth(deviation, num_freq_bands=6, freq_base=1.0):
+def diner_render(rays_o, rays_d, source_images, source_intrinsics, source_extrinsics, 
+                 depth_estimator, image_encoder, nerf_mlp_f1, nerf_mlp_f2, 
+                 num_source_views=4):
     """
-    Computes positional encoding for depth deviation.
-    Uses 6 frequency channels with base frequency 1 meter.
-    Returns 13-dimensional vector.
+    Renders a single ray using the DINER method.
+    
+    Args:
+        rays_o: Origin of the target ray (3,)
+        rays_d: Direction of the target ray (3,)
+        source_images: List of N source RGB images (H, W, 3)
+        source_intrinsics: List of N camera intrinsic matrices (3, 3)
+        source_extrinsics: List of N camera extrinsic matrices (4, 4)
+        depth_estimator: Function to predict depth from image
+        image_encoder: 2D ConvNet to extract features
+        nerf_mlp_f1: First part of NeRF MLP
+        nerf_mlp_f2: Second part of NeRF MLP
+        
+    Returns:
+        color: Rendered color (3,)
+        sigma: Density (scalar)
     """
-    # deviation shape: (batch, 1)
-    # freq_bands = [1, 2, 4, 8, 16, 32] * base_freq
-    freq_bands = freq_base * (2 ** torch.arange(num_freq_bands, device=deviation.device).float())
-    # sin(2 * pi * freq * x) and cos(2 * pi * freq * x)
-    # deviation is scalar distance, so we encode it directly
-    scaled_dev = deviation * freq_bands.view(1, -1)
-    pe = torch.cat([torch.sin(scaled_dev), torch.cos(scaled_dev)], dim=-1)
-    return pe
+    
+    # 1. Preprocess Source Images for Feature Extraction
+    # Pad images by 64 pixels by repeating border values
+    padded_images = [pad_image(img, 64) for img in source_images]
+    
+    # Generate positional encoding for uv coordinates
+    # Normalize uv to [-1, 1], apply 4 frequencies starting at 0.5
+    # Result is 18 channels. Set to 0 for unpadded regions.
+    pe_maps = [generate_pe_map(img.shape) for img in padded_images]
+    
+    # Concatenate padded image and PE map
+    input_to_encoder = [np.concatenate([padded_images[i], pe_maps[i]], axis=-1) 
+                        for i in range(num_source_views)]
+    
+    # 2. Extract Feature Maps and Depth Maps
+    feature_maps = []
+    depth_maps = []
+    for i in range(num_source_views):
+        # W^(i) = E(I^(i))
+        W_i = image_encoder(input_to_encoder[i])
+        feature_maps.append(W_i)
+        
+        # Estimate depth D^(i)
+        D_i = depth_estimator(source_images[i])
+        depth_maps.append(D_i)
+        
+    # 3. Depth-Guided Sampling
+    # Generate 1000 candidate samples along the ray
+    t_candidates = np.linspace(t_near, t_far, 1000)
+    candidates_3d = rays_o + t_candidates[:, np.newaxis] * rays_d
+    
+    # Shortlist 25 samples based on depth guidance (implementation detail omitted, 
+    # assumes shortlist_indices are determined by proximity to depth estimates)
+    # Add 15 samples via Gaussian boosting
+    # Total 40 samples
+    selected_indices = get_depth_guided_indices(candidates_3d, depth_maps, 
+                                                source_intrinsics, source_extrinsics)
+    t_samples = t_candidates[selected_indices]
+    samples_3d = rays_o + t_samples[:, np.newaxis] * rays_d
+    
+    # 4. Process Samples
+    N_samples = len(t_samples)
+    all_V = []
+    
+    for i in range(num_source_views):
+        # Transform coordinates to source view i
+        # x^(i) = P^(i) o x
+        # d^(i) = R^(i) o d
+        # Note: P^(i) is extrinsic matrix, R^(i) is rotation part
+        x_i = transform_to_view(samples_3d, source_extrinsics[i])
+        d_i = transform_direction_to_view(rays_d, source_extrinsics[i])
+        
+        # Project x^(i) to feature map coordinates
+        # omega^(i) = W^(i)[K^(i) o x^(i)]
+        # K^(i) is intrinsic matrix
+        uv_coords = project_to_uv(x_i, source_intrinsics[i])
+        omega_i = interpolate_feature_map(feature_maps[i], uv_coords)
+        
+        # Compute depth deviation Delta z
+        # z_coord is z-coordinate of x^(i) in camera frame
+        z_coord = x_i[:, 2]
+        # Get depth value at projected pixel location
+        depth_val = get_depth_at_uv(depth_maps[i], uv_coords)
+        delta_z = z_coord - depth_val
+        
+        # Positional encoding of Delta z
+        # 6 frequencies, base 1 meter -> 13-dim vector
+        pe_delta_z = positional_encoding(delta_z, num_freqs=6, base_freq=1.0)
+        
+        # Concatenate PE (13) and Feature (512)
+        # Input to f1: x^(i), d^(i), omega^(i), encoded delta_z
+        # Note: x^(i) and d^(i) might also be encoded depending on specific implementation
+        # Based on notes, f1 takes x^(i), d^(i), omega^(i), Delta_z. 
+        # The PE is applied to Delta_z before concatenation with omega.
+        # The combined vector is 512 + 13 = 525 dims.
+        # x^(i) and d^(i) are likely also encoded or passed directly. 
+        # Assuming standard NeRF encoding for coordinates if not specified otherwise,
+        # but notes emphasize PE for Delta z and uv. 
+        # We assume x^(i) and d^(i) are processed by f1 directly or with standard PE.
+        # For strict adherence to notes: f1 takes x^(i), d^(i), omega^(i), Delta_z.
+        # The PE is used to condition the NeRF on Delta z.
+        
+        # Construct input for f1
+        # Let's assume x^(i) and d^(i) are passed as is or with standard PE.
+        # The notes say: "The resulting 13-dimensional vector is concatenated with 
+        # the 512-dimensional feature vector ... and then used to condition the NeRF MLP."
+        # This implies the conditioning vector is (omega || pe_delta_z).
+        # x^(i) and d^(i) are also inputs to f1.
+        
+        conditioning_vector = np.concatenate([omega_i, pe_delta_z], axis=-1)
+        
+        # V^(i) = f1(x^(i), d^(i), omega^(i), Delta_z)
+        # In practice, f1 takes the concatenated conditioning vector and coordinates.
+        V_i = nerf_mlp_f1(x_i, d_i, conditioning_vector)
+        all_V.append(V_i)
+        
+    # 5. Aggregate and Regress
+    # Mean pool across views
+    # V shape: (N_samples, N_views, Feature_Dim)
+    # Mean over axis 1 (views)
+    mean_V = np.mean(all_V, axis=0) # Shape: (N_samples, Feature_Dim)
+    
+    # (c, sigma) = f2(mean_i V^(i))
+    colors, sigmas = nerf_mlp_f2(mean_V)
+    
+    # 6. Volumetric Rendering
+    # Compute alpha and T
+    deltas = np.diff(np.concatenate([t_samples, [t_far]])) # Distance between samples
+    # Handle last sample
+    deltas = np.append(deltas, t_far - t_samples[-1])
+    
+    alphas = 1.0 - np.exp(-sigmas * deltas)
+    Ts = np.cumprod(1.0 - alphas, axis=0)
+    Ts = np.concatenate([[1.0], Ts[:-1]])
+    
+    # Color = sum(T_j * alpha_j * c_j)
+    weights = Ts * alphas
+    color = np.sum(weights[:, np.newaxis] * colors, axis=0)
+    
+    return color, sigmas
 
-def extract_features(images, encoder, pad_size=64):
-    """
-    Extracts feature maps from source images with padding and positional encoding.
-    images: (N, 3, H, W)
-    Returns: (N, C_feat, H_pad, W_pad)
-    """
-    N, C, H, W = images.shape
-    # Pad by repeating border values
-    padded_images = F.pad(images, (pad_size, pad_size, pad_size, pad_size), mode='replicate')
+def pad_image(img, pad_size):
+    return np.pad(img, ((pad_size, pad_size), (pad_size, pad_size), (0, 0)), mode='edge')
+
+def generate_pe_map(shape):
+    # Generate uv coordinates normalized to [-1, 1]
+    h, w = shape[:2]
+    y, x = np.meshgrid(np.linspace(-1, 1, h), np.linspace(-1, 1, w), indexing='ij')
+    coords = np.stack([x, y], axis=-1) # (H, W, 2)
     
-    # Compute positional encoding for UV coordinates
-    # Normalized to [-1, 1]
-    h_pad, w_pad = padded_images.shape[2], padded_images.shape[3]
-    y, x = torch.meshgrid(torch.linspace(-1, 1, h_pad), torch.linspace(-1, 1, w_pad), indexing='ij')
-    uv = torch.stack([x, y], dim=-1).unsqueeze(0).expand(N, -1, -1, -1, 2).to(images.device) # (N, H, W, 2)
-    
-    # 4 exponentially increasing frequencies starting with 0.5
-    freqs = 0.5 * (2 ** torch.arange(4, device=images.device).float())
-    # PE shape: (N, H, W, 18)
+    # 4 frequencies starting at 0.5
+    freqs = 0.5 * (2 ** np.arange(4))
+    # Sin/Cos for each freq and each coord dim -> 4 * 2 * 2 = 16? 
+    # Notes say 18 channels. 
+    # Standard PE: sin(2^l pi x), cos(2^l pi x). 
+    # If base is 0.5, maybe it's different.
+    # Let's assume standard PE structure but with specific base.
+    # 4 freqs * 2 coords * 2 (sin/cos) = 16. 
+    # Notes say 18. Maybe includes original coords? Or different freq count.
+    # "4 exponentially increasing frequencies starting with 0.5"
+    # If it includes the original 2 channels, 16+2=18.
     pe = []
-    for freq in freqs:
-        pe.append(torch.sin(2 * torch.pi * freq * uv[..., 0:1]))
-        pe.append(torch.cos(2 * torch.pi * freq * uv[..., 0:1]))
-        pe.append(torch.sin(2 * torch.pi * freq * uv[..., 1:2]))
-        pe.append(torch.cos(2 * torch.pi * freq * uv[..., 1:2]))
-    pe = torch.cat(pe, dim=-1)
+    for f in freqs:
+        for coord in coords:
+            pe.append(np.sin(f * np.pi * coord))
+            pe.append(np.cos(f * np.pi * coord))
+    pe_map = np.stack(pe, axis=-1)
     
-    # Set PE to 0 for unpadded regions (original image area)
-    # Assuming original image is centered, unpadded region is roughly [pad_size:-pad_size, pad_size:-pad_size]
-    # Create mask for padded region
-    mask = torch.zeros(N, h_pad, w_pad, 1, device=images.device)
-    mask[:, pad_size:-pad_size, pad_size:-pad_size, :] = 1.0
+    # Create mask for padded region (center part)
+    # Original image size is shape[:2]. Padded is shape[:2] + 2*pad.
+    # Assuming input shape is padded.
+    # Mask is 1 in center, 0 in borders.
+    mask = np.ones((shape[0], shape[1]))
+    mask[:pad_size, :] = 0
+    mask[-pad_size:, :] = 0
+    mask[:, :pad_size] = 0
+    mask[:, -pad_size:] = 0
     
-    pe = pe * mask
-    
-    # Concatenate PE with padded images
-    # images need to be expanded to match spatial dims
-    padded_images_exp = padded_images.unsqueeze(-1).expand(-1, -1, -1, -1, 3) # (N, 3, H, W, 3) -> wait, images is (N,3,H,W)
-    # Reshape images to (N, H, W, 3)
-    padded_images_hwc = padded_images.permute(0, 2, 3, 1)
-    input_to_encoder = torch.cat([padded_images_hwc, pe], dim=-1) # (N, H, W, 3+18=21)
-    
-    # Encoder expects (N, C, H, W)
-    input_to_encoder = input_to_encoder.permute(0, 3, 1, 2)
-    
-    features = encoder(input_to_encoder)
-    return features
+    pe_map = pe_map * mask[:, :, np.newaxis]
+    return pe_map
 
-def depth_guided_sampling(ray_o, ray_d, depth_maps, intrinsics, extrinsics, num_candidates=1000, num_shortlist=25, num_boost=15):
-    """
-    Performs depth-guided sampling.
-    Returns sampled points and depths.
-    """
-    # 1. Generate candidate samples along ray
-    # Assume t_near, t_far are known or estimated
-    t_candidates = torch.linspace(t_near, t_far, num_candidates)
-    x_candidates = ray_o.unsqueeze(1) + t_candidates.unsqueeze(0) * ray_d.unsqueeze(1) # (N_rays, N_cand, 3)
-    
-    # 2. Project to source views and get depth deviation
-    # For each source view i:
-    # x_cam = R * x + t
-    # z_cam = x_cam[:, 2]
-    # depth_est = depth_map[u, v]
-    # deviation = |z_cam - depth_est|
-    
-    deviations = []
-    for i in range(N_views):
-        # Transform x_candidates to source view i
-        # P_inv = [R|t] inverse
-        # x_cam = P_inv @ x_homogeneous
-        # This part depends on specific coordinate system conventions.
-        # Assuming standard pinhole: x_cam = R * (x - t)
-        # Let's assume helper function get_depth_deviation exists
-        dev = get_depth_deviation(x_candidates, depth_maps[i], intrinsics[i], extrinsics[i])
-        deviations.append(dev)
-    
-    # Combine deviations from all views (e.g., min or mean)
-    all_devs = torch.stack(deviations, dim=0) # (N_views, N_rays, N_cand)
-    min_dev = torch.min(all_devs, dim=0).values # (N_rays, N_cand)
-    
-    # 3. Shortlist top-k samples with smallest deviation
-    _, indices = torch.topk(min_dev, num_shortlist, dim=-1, largest=False)
-    shortlisted_t = torch.gather(t_candidates, 1, indices) # (N_rays, num_shortlist)
-    
-    # 4. Gaussian boosting
-    # Add noise to shortlisted t values
-    noise = torch.randn_like(shortlisted_t) * sigma_boost
-    boosted_t = shortlisted_t + noise
-    final_t = torch.cat([shortlisted_t, boosted_t], dim=-1) # (N_rays, 40)
-    
-    # 5. Backface culling using normal maps
-    # Calculate normals from depth maps
-    normals = calculate_normals(depth_maps)
-    # Filter samples where ray direction is opposite to normal
-    # This requires projecting samples to image space and checking visibility
-    # Simplified: assume visibility mask is precomputed or handled in get_depth_deviation
-    # For implementation, one would filter out samples that are occluded or backfacing
-    
-    return final_t
-
-def render_diner(ray_o, ray_d, features, depth_maps, intrinsics, extrinsics, f1, f2, num_samples=40):
-    """
-    Renders a single ray using DINER.
-    """
-    # Sample points
-    t_samples = depth_guided_sampling(ray_o, ray_d, depth_maps, intrinsics, extrinsics, num_candidates=1000, num_shortlist=25, num_boost=15)
-    
-    # Expand to (N_rays, num_samples, 3)
-    x_samples = ray_o.unsqueeze(1) + t_samples.unsqueeze(2) * ray_d.unsqueeze(1)
-    
-    # Initialize accumulated color and transmittance
-    C_acc = torch.zeros_like(ray_o)
-    T_acc = torch.ones(ray_o.shape[0], device=ray_o.device)
-    
-    for i in range(N_views):
-        # Transform x_samples to view i
-        x_cam = transform_to_view(x_samples, extrinsics[i])
-        d_cam = transform_direction(ray_d, extrinsics[i])
-        
-        # Project to image coordinates
-        uv = project_to_uv(x_cam, intrinsics[i])
-        
-        # Interpolate features
-        omega = interpolate_features(features[i], uv) # (N_rays, num_samples, 512)
-        
-        # Compute depth deviation
-        z_cam = x_cam[:, :, 2]
-        depth_est = interpolate_depth(depth_maps[i], uv) # (N_rays, num_samples)
-        delta_z = torch.abs(z_cam - depth_est)
-        
-        # Positional encoding of depth deviation
-        pe_delta_z = positional_encoding_depth(delta_z) # (N_rays, num_samples, 13)
-        
-        # Concatenate features and PE
-        # Note: f1 input also includes view direction and position?
-        # According to notes: f1 takes x^(i), d^(i), omega^(i), delta_z
-        # x^(i) is 3D, d^(i) is 3D, omega is 512, delta_z is 1 (or 13 after PE)
-        # The notes say: "concatenated with the 512-dimensional feature vector... and then used to condition the NeRF MLP"
-        # And "input layer weight dimensions... adjusted accordingly"
-        # Let's assume f1 takes: [x_cam, d_cam, omega, pe_delta_z]
-        # x_cam: 3, d_cam: 3, omega: 512, pe_delta_z: 13 -> Total 531?
-        # Wait, notes say: "13-dimensional vector is concatenated with the 512-dimensional feature vector"
-        # It doesn't explicitly say x and d are concatenated into f1 input in the same way.
-        # However, standard pixelNeRF f1 takes [x, d, omega].
-        # DINER adds depth conditioning.
-        # Let's assume f1 input is [x_cam, d_cam, omega, pe_delta_z]
-        
-        input_f1 = torch.cat([x_cam, d_cam, omega, pe_delta_z], dim=-1)
-        
-        # Process through f1
-        V_i = f1(input_f1) # (N_rays, num_samples, 512)
-        
-        # Average pool across views
-        # We need to aggregate V_i from all views
-        # But f2 takes mean(V_i). So we should aggregate before f2.
-        # However, f1 is per-view.
-        # So we collect V_i for all views, then average.
-        
-        # Store V_i
-        if i == 0:
-            V_all = V_i.unsqueeze(0)
-        else:
-            V_all = torch.cat([V_all, V_i.unsqueeze(0)], dim=0) # (N_views, N_rays, num_samples, 512)
-            
-    # Average pool across views
-    V_mean = torch.mean(V_all, dim=0) # (N_rays, num_samples, 512)
-    
-    # Process through f2
-    sigma_c = f2(V_mean) # (N_rays, num_samples, 4) -> c (3), sigma (1)
-    c = sigma_c[:, :, :3]
-    sigma = sigma_c[:, :, 3:]
-    
-    # Volumetric rendering
-    # Compute delta_t
-    t_sorted, _ = torch.sort(t_samples, dim=-1)
-    delta_t = torch.diff(t_sorted, dim=-1, prepend=torch.zeros_like(t_samples[:, :1]))
-    
-    # Alpha
-    alpha = 1 - torch.exp(-sigma * delta_t)
-    
-    # Transmittance
-    T = torch.cumprod(1 - alpha, dim=-1)
-    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=-1)
-    
-    # Color
-    weight = alpha * T
-    C = torch.sum(weight.unsqueeze(-1) * c, dim=-2)
-    
-    return C
+def positional_encoding(values, num_freqs, base_freq):
+    # 6 frequencies, base 1 meter
+    # Result 13-dim. 
+    # Standard PE: sin/cos for each freq. 6*2=12. 
+    # 13 implies including original value.
+    pe = []
+    for i in range(num_freqs):
+        freq = base_freq * (2 ** i)
+        pe.append(np.sin(freq * np.pi * values))
+        pe.append(np.cos(freq * np.pi * values))
+    pe.append(values) # Original value
+    return np.stack(pe, axis=-1)
 ```
 
 ## Operating characteristics
 *   **Time Complexity:** Rendering a $256 \times 256$ image takes approximately two seconds [S1]. This is considered slow compared to real-time methods, though sampling efficiency is improved by depth guidance [S1].
-*   **Memory Complexity:** Depends on the number of source views $N$ (typically 4) and the resolution of feature maps and depth maps [S1].
-*   **Performance:** Depth-guided sampling reduces median Chamfer distance by 33% and maximum Chamfer distance by a factor of 4 compared to coarse-to-fine sampling with the same number of points [S1].
-*   **Strengths:** Handles input views with high relative distances; improves extrapolation beyond source frustums; dense depth guidance is not restricted to specific object categories [S1].
-*   **Limitations:** Synthesis speed is slow; quality is bound by the accuracy of the depth estimation network [S1].
-*   **When to use:** When sparse input views with large disparities are available and high-quality novel view synthesis is required, especially for objects where sparse landmarks are insufficient [S1].
-*   **When not to use:** When real-time rendering is required or when depth estimation is unreliable [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** DINER achieves higher synthesis quality than previous state-of-the-art methods, particularly with input views having high relative distances [S1].
+*   **Scaling:** Synthesis quality improves with depth accuracy up to a standard deviation of 1mm noise; higher accuracy yields no further improvement [S1].
+*   **Strengths:**
+    *   Handles sparse input views with large disparities [S1].
+    *   Dense depth guidance avoids the limitations of sparse landmarks [S1].
+    *   Depth-guided sampling reduces median Chamfer distance by 33% and maximum Chamfer distance by a factor of 4 compared to coarse-to-fine sampling with the same number of points [S1].
+*   **Limitations:**
+    *   Relies on the accuracy of the depth estimation network [S1].
+    *   Slow rendering speed (2 seconds per 256x256 image) [S1].
+    *   Requires known camera intrinsics and extrinsics for source views [S1].
 
 ## Background
-DINER was introduced by Malte Prinzler, Justus Thies, and Otmar Hilliges in 2023 [S1]. It builds on the pixelNeRF pipeline and addresses the limitations of implicit correspondence search in image-based NeRFs when source camera distances are large [S1]. The method was evaluated on the FaceScape dataset for human heads and the DTU dataset for general objects [S1].
+DINER (Depth-aware Image-based NEural Radiance fields) was proposed by Malte Prinzler, Justus Thies, and Otmar Hilliges [S1]. It was published in CVPR 2023 [S1]. The method builds upon the pixelNeRF pipeline [S1]. It addresses the failure of implicit correspondence search in image-based NeRFs when the distance between source cameras is large, a problem that limits the ability to capture scenes completely with high synthesis quality [S1]. By leveraging dense depth maps, DINER provides a more robust geometry prior than methods using sparse landmarks [S1].
 
 ## Sources
 [S1] DINER: Depth-aware Image-based NEural Radiance fields, https://doi.org/10.1109/cvpr52729.2023.01198, fetched 2026-10-29

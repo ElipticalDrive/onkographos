@@ -1,0 +1,207 @@
+# Voxel Child Address Calculation
+
+Also called: Voxel Index Calculation (getIdx), Voxel address_of, getIdx
+
+## Overview
+Voxel Child Address Calculation determines the storage index of a child voxel within a parent's child array, given a query point and the parent's spatial bounds. It solves the problem of mapping a 3D geometric position to a specific slot in a potentially sparse or compacted child payload array. Unlike [Point Location](2076-point-location.md), which finds the leaf node containing a point, this method operates at the internal node level to identify which of the 8 octants contains the ray intersection or sample point. It differs from [Ordered Child Traversal](3008-ordered-child-traversal.md) by focusing on the arithmetic mapping of coordinates to indices rather than the sequence of traversal.
+
+## How it works
+The method consists of two distinct phases depending on the storage layout: calculating the logical octant index from coordinates, and mapping that logical index to the physical storage index in a compacted array.
+
+### Inputs and Outputs
+- **Inputs**:
+  - `point`: A 3D vector $(x, y, z)$ representing the query location.
+  - `parent_pos`: A 3D vector representing the minimum corner (origin) of the parent voxel.
+  - `parent_size`: A scalar representing the side length of the parent voxel.
+  - `valid_mask`: An 8-bit integer bitmask where bit $i$ is set if child octant $i$ exists.
+- **Outputs**:
+  - `child_index`: The integer index into the child payload array. Returns $-1$ if the point is outside the parent voxel.
+
+### Data Structures
+- **`convertIndex`**: A lookup table of 8 integers mapping the internal bit-based octant index to the traversal order index.
+  - Layout: `int convertIndex[8] = {0, 1, 3, 2, 4, 5, 7, 6}` [S1, unofficial].
+- **`valid_mask`**: An 8-bit unsigned integer. Bit $k$ corresponds to octant $k$.
+
+### Steps
+
+1. **Boundary Check**:
+   Determine if the point lies within the parent voxel. The parent voxel spans from `parent_pos` to `parent_pos + parent_size`.
+   $$ \text{if } (point.x < parent\_pos.x \lor point.x \ge parent\_pos.x + parent\_size \lor \dots) \text{ return } -1 $$
+   Note: Source [S1, unofficial] uses a slightly different check involving `size*2` and modifying `pos`, but the standard geometric containment is implied by the context of "child voxel containing a given point relative to a parent voxel's position and size" [S1, unofficial]. The specific implementation in [S1, unofficial] checks:
+   $$ \text{if } (point.x < parent\_pos.x \lor point.x \ge parent\_pos.x + parent\_size \dots) $$
+   Actually, [S1, unofficial] states: "Check if point is in the parent voxel (size*2)". This phrasing is ambiguous. However, the subsequent bit calculation assumes the point is relative to the parent's center or origin. Let us follow the explicit bit-calculation logic from [S1, unofficial] which modifies `pos`.
+
+   *Revised Step 1 based on [S1, unofficial] logic:*
+   Initialize `index = 0`.
+   Let `half_size = parent_size / 2`.
+   Let `center = parent_pos + half_size`.
+   Check if point is within bounds. If not, return -1.
+
+2. **Logical Octant Index Calculation**:
+   Determine the octant bits based on the point's position relative to the parent's center.
+   According to [S1, unofficial]:
+   - If $(point.x > center.x)$, set bit corresponding to X+?
+   The source [S1, unofficial] provides specific conditional logic:
+   ```python
+   # Logic from [S1, unofficial]
+   # pos is likely the center or origin. 
+   # The condition (pos->x + size - point.x) < 0 implies point.x > pos->x + size
+   # But this is for boundary check? 
+   # Let's look at the index calculation:
+   if (point.x > center.x): index |= 1 # Or 2?
+   ```
+   The source [S1, unofficial] explicitly lists:
+   - `if (pos->x + size - point.x) < 0`: This means `point.x > pos->x + size`. This seems to be a boundary check or a specific coordinate system assumption.
+   - `index += 2` if X condition met.
+   - `index += 4` if Y condition met.
+   - `index += 1` if Z condition met.
+   
+   This mapping (Z=1, X=2, Y=4) is non-standard. Standard Morton/Z-order often uses X=1, Y=2, Z=4 or similar. The source [S1, unofficial] uses:
+   - Z bit: 1
+   - X bit: 2
+   - Y bit: 4
+   
+   Let's define the logical index `idx` based on [S1, unofficial]:
+   $$ idx = 0 $$
+   $$ \text{if } point.x > center.x: idx += 2 $$
+   $$ \text{if } point.y > center.y: idx += 4 $$
+   $$ \text{if } point.z > center.z: idx += 1 $$
+   
+   *Correction*: The source [S1, unofficial] says:
+   `if (pos->x + size - point.x) < 0, index += 2`
+   `if (pos->y + size - point.y) < 0, index += 4`
+   `if (pos->z + size - point.z) < 0, index += 1`
+   
+   Assuming `pos` is the minimum corner and `size` is the full side length, `pos + size` is the maximum corner.
+   So:
+   - If `point.x > max_x`, index += 2. (This implies the point is in the "high" X octant).
+   - If `point.y > max_y`, index += 4. (High Y).
+   - If `point.z > max_z`, index += 1. (High Z).
+   
+   This results in a logical index `idx` in range [0, 7].
+
+3. **Mapping to Traversal Order**:
+   Apply the `convertIndex` lookup table to map the logical bit-index to the storage/traversal index.
+   $$ \text{traversal\_idx} = convertIndex[idx] $$
+   Where `convertIndex = [0, 1, 3, 2, 4, 5, 7, 6]` [S1, unofficial].
+
+4. **Compact Address Calculation (if sparse)**:
+   If the children are stored in a compacted array based on a validity mask [S2, unofficial]:
+   - Create a mask isolating the target octant: `mask = ~(0xFF << traversal_idx)`.
+   - Calculate the final address by counting the number of valid children preceding the target octant in the mask.
+   $$ \text{final\_index} = \text{popcount}(valid\_mask \ \& \ mask) $$
+   Here, `popcount` counts the number of set bits in the result of the bitwise AND. This effectively returns the rank of the octant among the valid children [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_child_address_calculation(point, parent_pos, parent_size, valid_mask):
+    """
+    Calculates the index of the child voxel containing the point.
+    
+    Args:
+        point: tuple (x, y, z)
+        parent_pos: tuple (x, y, z) minimum corner of parent
+        parent_size: float side length of parent
+        valid_mask: int 8-bit mask of valid children
+        
+    Returns:
+        int: Index in the compacted child array, or -1 if outside.
+    """
+    # 1. Boundary Check
+    min_x, min_y, min_z = parent_pos
+    max_x = min_x + parent_size
+    max_y = min_y + parent_size
+    max_z = min_z + parent_size
+    
+    if not (min_x <= point[0] < max_x and 
+            min_y <= point[1] < max_y and 
+            min_z <= point[2] < max_z):
+        return -1
+
+    # 2. Logical Octant Index Calculation (based on [S1, unofficial])
+    # Mapping: Z=1, X=2, Y=4
+    idx = 0
+    if point[0] >= max_x: # Note: Source uses < 0 check on (pos+size - point), equivalent to point > pos+size
+        # However, standard half-open intervals [min, max) are used. 
+        # If point is exactly on boundary, it belongs to the lower octant usually.
+        # The source condition `pos->x + size - point.x < 0` means `point.x > pos->x + size`.
+        # Since we already checked < max_x, this branch is technically unreachable for valid points 
+        # unless the boundary check in source was inclusive or different.
+        # Assuming standard half-open [min, max):
+        pass 
+    
+    # Re-evaluating [S1, unofficial] logic:
+    # It seems to assume the point is strictly inside or the check is loose.
+    # Let's implement the bit setting as described:
+    # "if (pos->x + size - point.x) < 0" -> point.x > pos->x + size.
+    # This suggests the source might be using a different coordinate system or the boundary check is separate.
+    # Given the ambiguity, we stick to the bit logic for the octant determination relative to center.
+    
+    # Standard Center-based logic is more robust for "containing point":
+    center_x = min_x + parent_size / 2.0
+    center_y = min_y + parent_size / 2.0
+    center_z = min_z + parent_size / 2.0
+    
+    # Using the bit weights from [S1, unofficial]: Z=1, X=2, Y=4
+    logical_idx = 0
+    if point[0] >= center_x:
+        logical_idx += 2
+    if point[1] >= center_y:
+        logical_idx += 4
+    if point[2] >= center_z:
+        logical_idx += 1
+        
+    # 3. Map to Traversal Order
+    convertIndex = [0, 1, 3, 2, 4, 5, 7, 6]
+    traversal_idx = convertIndex[logical_idx]
+    
+    # 4. Compact Address Calculation (if valid_mask is used)
+    # If the array is compacted, we need the rank of this octant among valid ones.
+    # Mask for all octants <= traversal_idx
+    # Note: [S2, unofficial] uses `mask = ~(0xff << octant)`. 
+    # This creates a mask with bits 0 to octant-1 set? No.
+    # ~(0xFF << 3) = ~(11111111000) = ...111111000. 
+    # This mask has bits 0,1,2 set. 
+    # popcount(mask & valid) counts valid children with index < octant.
+    
+    # Create mask for indices strictly less than traversal_idx
+    # If traversal_idx is 0, mask is 0.
+    if traversal_idx == 0:
+        preceding_mask = 0
+    else:
+        preceding_mask = (1 << traversal_idx) - 1
+        
+    # Count valid children preceding this one
+    final_index = bin(valid_mask & preceding_mask).count("1")
+    
+    return final_index
+```
+
+### Parameters
+- `convertIndex`: Fixed array `[0, 1, 3, 2, 4, 5, 7, 6]` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Boundary Precision**: Floating point comparisons at voxel boundaries can lead to inconsistent parent/child assignments. Use consistent half-open intervals $[min, max)$ [G].
+- **Invalid Mask**: If `valid_mask` does not have the bit at `traversal_idx` set, the point is not in a valid child. The method should check `if not (valid_mask & (1 << traversal_idx)): return -1` [G].
+- **Coordinate System**: The bit weights (Z=1, X=2, Y=4) are specific to the implementation in [S1, unofficial]. Other implementations may use standard Morton order (X=1, Y=2, Z=4) or different permutations.
+
+## Subtopics
+
+### [Prefix Rank for Compact Child Indexing](5129-prefix-rank-for-compact-child-indexing.md)
+Maps a child's logical index to its compact position in a payload array by counting active children preceding it in a bitmask. Chosen when storage must be compacted to skip empty octants.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ arithmetic operations and bitwise logic.
+- **Memory Complexity**: $O(1)$ auxiliary space.
+- **Strengths**: Fast, branch-minimized (if implemented with bitwise ops), works with compacted storage.
+- **Limitations**: Requires knowledge of the specific `convertIndex` mapping used by the parent node. Assumes a specific bit-weighting scheme.
+
+## Background
+The method originates from implementations of sparse voxel octrees in real-time volumetric rendering, specifically those optimizing for GPU traversal and compact memory layouts. The specific indexing scheme and `convertIndex` table are documented in student projects and unofficial repositories focusing on OpenGL-based volumetric rendering [S1, unofficial]. The compact address calculation using popcount is a standard technique in sparse data structures [S2, unofficial].
+
+## Sources
+[S1] Dean904/Senior-Project-Volumetric-Rendering, https://github.com/Dean904/Senior-Project-Volumetric-Rendering, fetched 2026-10-26 (unofficial)
+[S2] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)

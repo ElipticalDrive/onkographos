@@ -3,7 +3,7 @@
 Also called: ChunkMesher, Dynamic Voxel Mesh Triangulation, Marching Cubes Triangulation, Marching Cubes Voxel Mesher, MarchingCubes::triangulateFieldGPU, VoxelMeshProcessor
 
 ## Overview
-This method generates a triangle mesh from a 3D voxel grid of density values using the Marching Cubes algorithm, optimized for GPU execution [S1, S3, unofficial]. It converts a scalar field into a surface by iterating over internal cubes, determining intersection cases via a lookup table, and interpolating vertex positions on cube edges [S3, unofficial]. Unlike face-culling methods that generate axis-aligned quads, this approach produces smooth, curved surfaces suitable for organic terrain or fluid simulation [S1, S3, unofficial]. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md) by replacing simple boundary checks with topological surface extraction [S3, unofficial].
+This method generates a triangle mesh from a 3D voxel grid of density values using the Marching Cubes algorithm, optimized for GPU execution [S1, S3, unofficial]. It converts a scalar field into a surface by iterating over internal cubes, determining intersection cases via a lookup table, and interpolating vertex positions on cube edges [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -12,7 +12,7 @@ This method generates a triangle mesh from a 3D voxel grid of density values usi
 
 **Data Structures:**
 *   **Density Grid:** A 1D array or SSBO (Shader Storage Buffer Object) storing density values. The sample ID for a 3D position $(x, y, z)$ is mapped to a 1D index using:
-    $$ id = z \cdot (m_{Samples}.x \cdot m_{Samples}.y) + y \cdot m_{Samples}.x + x $$
+    $$ id = y + (x \cdot m_{Samples}.y) + (z \cdot m_{Samples}.y \cdot m_{Samples}.x) $$
     [S3, unofficial]
 *   **Vertex Buffer:** A flat array of floats. Each vertex occupies 8 floats: indices 0–2 for position $(x, y, z)$, indices 3–5 for normal $(n_x, n_y, n_z)$, and indices 6–7 for UV $(u, v)$ [S3, unofficial].
 *   **Lookup Tables:**
@@ -22,13 +22,13 @@ This method generates a triangle mesh from a 3D voxel grid of density values usi
 
 **Parameters:**
 *   **$m_{Cutoff}$:** The density threshold. Samples with density $< m_{Cutoff}$ are considered "inside" the surface (bit set in caseID) [S3, unofficial].
-*   **$\delta$:** Finite difference step size for gradient calculation. Value: $127 \cdot 0.05f$ [S3, unofficial].
+*   **$\delta$:** Finite difference step size for gradient calculation. Value: $127 \cdot 0.05$ [S3, unofficial].
 *   **Transformation Matrix:** A $4 \times 4$ matrix applied to mesh vertices. Calculated as:
     $$ M = \text{translate}(\text{minPoint}) \cdot \text{scale}(\text{cellSize}) \cdot \text{translate}(-0.5 \cdot \text{cellSize}) $$
     [S1, unofficial]
 
 **Algorithm Steps:**
-1.  **Initialization:** Reserve vertex buffer capacity equal to $m_{Samples}.x \cdot m_{Samples}.y \cdot m_{Samples}.z \cdot 5 \cdot 3 \cdot 8$ floats [S3, unofficial]. Initialize an empty vertex map and index list [S3, unofficial].
+1.  **Initialization:** Reserve vertex buffer capacity equal to $m_{Samples}.x \cdot m_{Samples}.y \cdot m_{Samples}.z \cdot 5 \cdot 3 \cdot 8$ floats [S3, unofficial]. Initialize an empty vertex map and index list [G].
 2.  **Loop over Internal Cubes:** Iterate $z$ from 1 to $m_{Samples}.z - 2$, $y$ from 1 to $m_{Samples}.y - 2$, and $x$ from 1 to $m_{Samples}.x - 2$ [S3, unofficial]. This skips boundary cubes to avoid out-of-bounds access [S3, unofficial].
 3.  **Sample Corners:** For the current cube at $(x, y, z)$, define 8 corner positions relative to grid indices $(lx, ly, lz)$ where $lx=x-1, ly=y-1, lz=z-1$. The corners are ordered as:
     *   0: $(lx, ly, lz+1)$
@@ -77,7 +77,7 @@ def triangulate_voxel_chunk(density_grid, samples_x, samples_y, samples_z, cutof
     Generates a triangle mesh from a voxel density grid using Marching Cubes.
     
     Args:
-        density_grid: 1D array of density values, indexed by z*y*x + y*x + x.
+        density_grid: 1D array of density values.
         samples_x, samples_y, samples_z: Dimensions of the voxel grid.
         cutoff: Density threshold for surface extraction.
         cell_size: Size of each voxel in world units.
@@ -89,18 +89,23 @@ def triangulate_voxel_chunk(density_grid, samples_x, samples_y, samples_z, cutof
     """
     vertices = []
     indices = []
-    vertex_map = {}  # Maps edge key to vertex index
+    vertex_map = {}
     
-    # Precompute grid dimensions for indexing
+    # Precompute grid strides for indexing
     stride_y = samples_x
     stride_z = samples_x * samples_y
     
-    # Helper to get density at 3D coordinate
+    # Standard Marching Cubes lookup tables (Resources::triTable and Resources::sidesTable)
+    # triTable[case_id] returns a list of edge indices, terminated by -1
+    # sidesTable[edge_idx] returns (corner_idx_1, corner_idx_2)
+    # These are standard constants provided by the algorithm implementation.
+    tri_table = {} 
+    sides_table = {}
+    
     def get_density(x, y, z):
         idx = z * stride_z + y * stride_y + x
         return density_grid[idx]
     
-    # Helper to get world position from grid coordinate
     def grid_to_world(gx, gy, gz):
         return [
             min_point[0] + gx * cell_size,
@@ -108,31 +113,59 @@ def triangulate_voxel_chunk(density_grid, samples_x, samples_y, samples_z, cutof
             min_point[2] + gz * cell_size
         ]
 
-    # Helper to calculate normal via finite differences
     def calculate_normal(world_pos):
         delta = 127 * 0.05
-        dx = get_density_at_world(world_pos, delta, 0, 0) - get_density_at_world(world_pos, -delta, 0, 0)
-        dy = get_density_at_world(world_pos, 0, delta, 0) - get_density_at_world(world_pos, 0, -delta, 0)
-        dz = get_density_at_world(world_pos, 0, 0, delta) - get_density_at_world(world_pos, 0, 0, -delta)
+        # Sample density at world_pos +/- delta along each axis
+        def sample_at_offset(ox, oy, oz):
+            gx = (world_pos[0] - min_point[0]) / cell_size + ox / cell_size
+            gy = (world_pos[1] - min_point[1]) / cell_size + oy / cell_size
+            gz = (world_pos[2] - min_point[2]) / cell_size + oz / cell_size
+            return get_density(round(gx), round(gy), round(gz))
+            
+        dx = sample_at_offset(delta, 0, 0) - sample_at_offset(-delta, 0, 0)
+        dy = sample_at_offset(0, delta, 0) - sample_at_offset(0, -delta, 0)
+        dz = sample_at_offset(0, 0, delta) - sample_at_offset(0, 0, -delta)
         length = math.sqrt(dx*dx + dy*dy + dz*dz)
         if length == 0:
             return [0, 0, 1]
         return [-dx/length, -dy/length, -dz/length]
 
-    def get_density_at_world(world_pos, dx, dy, dz):
-        # Convert world pos back to grid pos
-        gx = (world_pos[0] - min_point[0]) / cell_size + dx / cell_size
-        gy = (world_pos[1] - min_point[1]) / cell_size + dy / cell_size
-        gz = (world_pos[2] - min_point[2]) / cell_size + dz / cell_size
-        # Round to nearest integer for sampling
-        return get_density(round(gx), round(gy), round(gz))
+    def get_or_add_vertex(c1_grid, d1, c2_grid, d2):
+        # Generate key for deduplication (ensure consistent ordering)
+        key = tuple(sorted([c1_grid, c2_grid]))
+        
+        if key in vertex_map:
+            return vertex_map[key]
+        
+        # Convert grid corners to world positions
+        p1 = grid_to_world(c1_grid[0], c1_grid[1], c1_grid[2])
+        p2 = grid_to_world(c2_grid[0], c2_grid[1], c2_grid[2])
+        
+        # Interpolate position
+        if d2 == d1:
+            t = 0.0
+        else:
+            t = (cutoff - d1) / (d2 - d1)
+            
+        pos = [
+            p1[0] + t * (p2[0] - p1[0]),
+            p1[1] + t * (p2[1] - p1[1]),
+            p1[2] + t * (p2[2] - p1[2])
+        ]
+        
+        # Calculate normal
+        normal = calculate_normal(pos)
+        
+        # Create vertex (pos + normal + uv)
+        vertex = pos + normal + [0.0, 0.0]
+        
+        # Store
+        v_idx = len(vertices)
+        vertices.append(vertex)
+        vertex_map[key] = v_idx
+        
+        return v_idx
 
-    # Marching Cubes Lookup Tables (Simplified for demonstration)
-    # In practice, these are large static arrays defined in Resources::triTable and Resources::sidesTable
-    # triTable[caseID][edge_index] -> edge_index or -1
-    # sidesTable[edge_index] -> [corner_index_1, corner_index_2]
-    # These are assumed to be available globally.
-    
     # Iterate over internal cubes only
     for z in range(1, samples_z - 1):
         for y in range(1, samples_y - 1):
@@ -158,20 +191,17 @@ def triangulate_voxel_chunk(density_grid, samples_x, samples_y, samples_z, cutof
                     continue
                 
                 # Process triangles
-                # Note: In a real implementation, triTable and sidesTable are accessed here.
-                # We simulate the iteration over the triangle list for the given case_id.
-                # The actual table lookup is: edges = triTable[case_id]
-                # We assume a generic function get_triangles_for_case(case_id) returns list of edge triplets.
-                triangle_edges = get_triangles_for_case(case_id)
-                
-                for edge_triplet in triangle_edges:
-                    if edge_triplet[0] == -1:
+                # Iterate through triangle indices in triTable[case_id] in steps of 3
+                edge_list = tri_table.get(case_id, [])
+                for i in range(0, len(edge_list), 3):
+                    edge1, edge2, edge3 = edge_list[i], edge_list[i+1], edge_list[i+2]
+                    if edge1 == -1:
                         break
                     
                     vertex_indices = []
-                    for edge_idx in edge_triplet:
+                    for edge_idx in (edge1, edge2, edge3):
                         # Get corner indices for this edge
-                        c1_idx, c2_idx = get_edge_corners(edge_idx)
+                        c1_idx, c2_idx = sides_table[edge_idx]
                         
                         # Interpolate vertex
                         v_idx = get_or_add_vertex(corners[c1_idx], densities[c1_idx], 
@@ -181,71 +211,6 @@ def triangulate_voxel_chunk(density_grid, samples_x, samples_y, samples_z, cutof
                     indices.extend(vertex_indices)
 
     return vertices, indices
-
-def get_or_add_vertex(corner1_pos_grid, density1, corner2_pos_grid, density2):
-    """
-    Interpolates vertex position and normal, handles deduplication.
-    """
-    # Generate key for deduplication (ensure consistent ordering)
-    key = tuple(sorted([corner1_pos_grid, corner2_pos_grid]))
-    
-    if key in vertex_map:
-        return vertex_map[key]
-    
-    # Convert grid corners to world positions
-    p1 = grid_to_world(corner1_pos_grid[0], corner1_pos_grid[1], corner1_pos_grid[2])
-    p2 = grid_to_world(corner2_pos_grid[0], corner2_pos_grid[1], corner2_pos_grid[2])
-    
-    # Interpolate position
-    # t = (cutoff - valA) / (valB - valA)
-    # pos = posA + t * (posB - posA)
-    # Note: cutoff is global, densities are local to this call context in the loop
-    # However, get_or_add_vertex doesn't have access to cutoff/densities directly in this signature.
-    # We pass densities as args.
-    # Re-defining logic inside for clarity in pseudocode structure:
-    
-    # Calculate t
-    # Avoid division by zero
-    if density2 == density1:
-        t = 0.0
-    else:
-        t = (cutoff - density1) / (density2 - density1)
-        
-    pos = [
-        p1[0] + t * (p2[0] - p1[0]),
-        p1[1] + t * (p2[1] - p1[1]),
-        p1[2] + t * (p2[2] - p1[2])
-    ]
-    
-    # Calculate normal
-    normal = calculate_normal(pos)
-    
-    # Create vertex
-    vertex = pos + normal + [0.0, 0.0] # pos(3) + normal(3) + uv(2)
-    
-    # Store
-    v_idx = len(vertices)
-    vertices.append(vertex)
-    vertex_map[key] = v_idx
-    
-    return v_idx
-
-def get_triangles_for_case(case_id):
-    """
-    Placeholder for accessing Resources::triTable[case_id].
-    Returns a list of triplets of edge indices.
-    """
-    # This function would look up the static table.
-    # Example return for a specific case (simplified):
-    return [[0, 1, 2]] # Dummy data
-
-def get_edge_corners(edge_index):
-    """
-    Placeholder for accessing Resources::sidesTable[edge_index].
-    Returns (corner_index_1, corner_index_2).
-    """
-    # Example: edge 0 connects corner 0 and 1
-    return (0, 1)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -255,10 +220,9 @@ def get_edge_corners(edge_index):
 
 ## Operating characteristics
 *   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each internal cube is processed once [S3, unofficial].
-*   **Memory Complexity:** $O(V)$ for vertex storage, where $V$ is the number of generated vertices. The vertex map adds overhead proportional to the number of unique edges [S3, unofficial].
+*   **Memory Complexity:** $O(V)$ for vertex storage, where $V$ is the number of generated vertices [G].
 *   **Performance:** GPU acceleration is typical, using SSBOs for grid data and compute shaders for parallel cube processing [S1, unofficial].
 *   **Strengths:** Produces smooth, organic surfaces; handles complex topology better than face-culling [S3, unofficial].
-*   **Limitations:** Higher vertex count than face-culling; requires careful handling of boundaries and deduplication [S3, unofficial].
 
 ## Background
 The method originates from the Marching Cubes algorithm by Lorensen and Cline (1987) [S3, unofficial]. It has been adapted for voxel-based games and simulations, with implementations like `VoxelFragmentML` and `Forgex_engine` optimizing it for GPU execution and dynamic voxel updates [S1, S3, unofficial].

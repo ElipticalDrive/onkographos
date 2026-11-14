@@ -3,7 +3,7 @@
 Also called: Pseudo Iso Surface, Pseudo IsoSurface Rendering using Ray Casting, Shader Type 3: Iso Surface with RAY CASTING Method
 
 ## Overview
-IsoSurface Ray Marching is a ray casting technique that renders an isosurface by sampling a 3D volume scalar field and detecting zero crossings relative to a threshold value [S1, unofficial]. It avoids explicit polygon extraction by refining intersection positions via bisection and shading with Phong lighting [S1, unofficial]. Unlike its sibling [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md), which approximates position by iteratively halving an interval, this method integrates the marching process directly into the ray traversal loop with a fixed step size, refining only upon crossing detection [S1, unofficial].
+IsoSurface Ray Marching is a ray casting technique that renders an isosurface by sampling a 3D volume scalar field and comparing values against a threshold [S1, unofficial]. It avoids explicit polygon extraction by detecting zero crossings during ray traversal, refining hit positions via bisection, and shading with Phong lighting [S1, unofficial]. Unlike [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md), which approximates position by iteratively halving an interval, this method integrates the marching process directly into the ray traversal loop with a fixed step size, refining only upon crossing detection [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -23,14 +23,14 @@ IsoSurface Ray Marching is a ray casting technique that renders an isosurface by
     *   `DELTA`: 0.01 (used for gradient calculation) [S1, unofficial].
 
 **Numbered Steps**
-1.  **Initialization:** Compile and link vertex and fragment shaders. Bind attribute `aPosition`. Retrieve uniform locations for `u_MVPMatrix`, `u_Volume3DSampler`, `u_cameraPosition`, and `u_stepSize` [S1, unofficial].
+1.  **Initialization:** Compile and link vertex and fragment shaders from `.glsl` files. Bind attribute `aPosition`. Retrieve uniform locations for `u_MVPMatrix`, `u_Volume3DSampler`, `u_cameraPosition`, and `u_stepSize` [S1, unofficial].
 2.  **Rendering Setup:** Enable blending. Set the shader program. Pass the Model-View-Projection matrix, camera position, step size, and isovalue. Bind the 3D volume texture to unit 0. Draw a unit cube using 36 unsigned short indices [S1, unofficial].
-3.  **Ray Initialization:** Calculate ray origin `dataPosition` from interpolated 3D texture coordinates `oTexCoords` [S1, unofficial].
+3.  **Ray Initialization:** Initialize ray origin `dataPosition` from interpolated 3D texture coordinates `oTexCoords` [S1, unofficial].
 4.  **Ray Direction:** Calculate `geometryDirection` by subtracting 0.5 from `oTexCoords`, subtracting `u_cameraPosition`, and normalizing the result [S1, unofficial].
 5.  **Step Vector:** Calculate `directionStep` by multiplying `geometryDirection` with `u_stepSize` [S1, unofficial].
 6.  **Ray Marching Loop:** Loop `i` from 0 to `MAX_SAMPLES` (300):
     a.  Advance `dataPosition` by `directionStep` [S1, unofficial].
-    b.  **Boundary Check:** If `dot(sign(dataPosition - texMin), sign(texMax - dataPosition)) < 3.0`, break the loop. This condition triggers if any component of `dataPosition` is outside the [0, 1] bounds [S1, unofficial].
+    b.  **Boundary Check:** If `dot(sign(dataPosition - texMin), sign(texMax - dataPosition)) < 3.0`, break the loop. This condition triggers if any component of `dataPosition` falls outside the [0, 1] bounds [S1, unofficial].
     c.  **Sampling:** Sample the volume at current `dataPosition` (`fSample`) and next position `dataPosition + directionStep` (`fSample2`) [S1, unofficial].
     d.  **Zero Crossing Detection:** If `(fSample - isoValue) < 0` AND `(fSample2 - isoValue) >= 0.0`, refine the intersection [S1, unofficial].
     e.  **Refinement:** Call `Bisection(xN, xF, isoValue)` where `xN` is `dataPosition` and `xF` is `dataPosition + directionStep`. The bisection loop runs 4 times, halving the interval `[left, right]` based on the sample value relative to `iso` [S1, unofficial].
@@ -82,13 +82,13 @@ def fragment_shader(oTexCoords, u_Volume3DSampler, u_cameraPosition, u_stepSize,
             break
 
         # Sampling
-        fSample = texture(u_Volume3DSampler, dataPosition).r
-        fSample2 = texture(u_Volume3DSampler, dataPosition + directionStep).r
+        fSample = sample_volume(u_Volume3DSampler, dataPosition)
+        fSample2 = sample_volume(u_Volume3DSampler, dataPosition + directionStep)
 
         # Zero Crossing Detection
         if (fSample - iso) < 0 and (fSample2 - iso) >= 0.0:
             # Refine Intersection
-            tc = bisection(dataPosition, dataPosition + directionStep, iso)
+            tc = bisection(dataPosition, dataPosition + directionStep, iso, u_Volume3DSampler)
 
             # Calculate Normal
             N = get_gradient(tc, DELTA, u_Volume3DSampler)
@@ -108,12 +108,12 @@ def fragment_shader(oTexCoords, u_Volume3DSampler, u_cameraPosition, u_stepSize,
     FragColor = vec4(0.0, 0.0, 0.0, 1.0)
     return FragColor
 
-def bisection(xN, xF, iso):
+def bisection(xN, xF, iso, u_Volume3DSampler):
     left = xN
     right = xF
     for _ in range(4):
         mid = (left + right) / 2.0
-        sample = texture(u_Volume3DSampler, mid).r
+        sample = sample_volume(u_Volume3DSampler, mid)
         if sample < iso:
             left = mid
         else:
@@ -125,12 +125,16 @@ def get_gradient(tc, DELTA, u_Volume3DSampler):
     # Assuming tc is vec3
     grad = vec3(0.0)
     # X axis
-    grad.x = texture(u_Volume3DSampler, tc + vec3(DELTA, 0.0, 0.0)).r - texture(u_Volume3DSampler, tc - vec3(DELTA, 0.0, 0.0)).r
+    grad.x = sample_volume(u_Volume3DSampler, tc + vec3(DELTA, 0.0, 0.0)) - sample_volume(u_Volume3DSampler, tc - vec3(DELTA, 0.0, 0.0))
     # Y axis
-    grad.y = texture(u_Volume3DSampler, tc + vec3(0.0, DELTA, 0.0)).r - texture(u_Volume3DSampler, tc - vec3(0.0, DELTA, 0.0)).r
+    grad.y = sample_volume(u_Volume3DSampler, tc + vec3(0.0, DELTA, 0.0)) - sample_volume(u_Volume3DSampler, tc - vec3(0.0, DELTA, 0.0))
     # Z axis
-    grad.z = texture(u_Volume3DSampler, tc + vec3(0.0, 0.0, DELTA)).r - texture(u_Volume3DSampler, tc - vec3(0.0, 0.0, DELTA)).r
+    grad.z = sample_volume(u_Volume3DSampler, tc + vec3(0.0, 0.0, DELTA)) - sample_volume(u_Volume3DSampler, tc - vec3(0.0, 0.0, DELTA))
     return normalize(grad / 2.0)
+
+def sample_volume(sampler, pos):
+    # Standard 3D texture sampling returning a scalar value
+    return texture(sampler, pos).r
 ```
 
 **Parameters**
@@ -171,3 +175,4 @@ Uses multiple rasterization passes for shading. Choose when complex shading effe
 
 ## Sources
 [S1] Volumetric Render Engine - GitHub, https://github.com/mikejernil/volumetric-render-engine, fetched 2026-10-27 (unofficial)
+[S2] Interactive Visual data analysis | Daniel Suttor, https://dasutt.github.io/stories/interactive-visual-data-analysis/, fetched 2026-10-28 (unofficial)

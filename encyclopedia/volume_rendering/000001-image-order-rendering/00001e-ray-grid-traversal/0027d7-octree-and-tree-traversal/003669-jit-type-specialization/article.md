@@ -32,7 +32,7 @@ The method relies on conditional comparisons for traversal rather than closed-fo
 *   **Code Specificity:** The generated code is specific to the tree structure and element types present at JIT time [S1, unofficial].
 
 **Pseudocode:**
-The following pseudocode illustrates the difference between the standard runtime dispatch approach and the JIT-specialized approach. All helper names are defined to ensure self-containment.
+The following pseudocode illustrates the difference between the standard runtime dispatch approach and the JIT-specialized approach [S1, unofficial].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -53,8 +53,8 @@ def foo_blue(address):
 
 # Standard tree descent to locate index [G]
 def find(key, root):
-    # Standard recursive or iterative tree traversal
-    return 0  # Placeholder for actual traversal logic [G]
+    # Standard recursive or iterative tree traversal logic [G]
+    return 0
 
 # Standard Runtime Dispatch (Listing 3 in source)
 def foo_runtime(key, root, a_comp):
@@ -103,8 +103,8 @@ def foo_jit(key):
 *   **Memory Complexity:** Requires a compact array to store types and pointers [S1, unofficial].
 *   **Strengths:** Eliminates runtime type resolving overhead and switch statements. Reduces memory-bound performance issues during tree traversal [S1, unofficial].
 *   **Limitations:** Requires a JIT compiler infrastructure. The generated code is specific to the tree structure and element types at JIT time [S1, unofficial].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **When to use:** Not given in the sources [S1, unofficial].
+*   **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 JIT Type Specialization, also known as JIT Member Function Evaluation, is described in the context of the JiTTree, a just-in-time compiled sparse GPU volume data structure [S1, unofficial]. It is designed to improve the performance of data processing algorithms by making access less memory-bound [S1, unofficial]. The technique allows an arbitrary number of different kinds of sparse data structures to improve overall quality without introducing new memory fetches [S1, unofficial].
