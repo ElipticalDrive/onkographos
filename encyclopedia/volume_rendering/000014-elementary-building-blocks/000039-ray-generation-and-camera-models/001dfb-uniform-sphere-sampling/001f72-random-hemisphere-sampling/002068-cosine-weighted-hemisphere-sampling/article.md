@@ -1,130 +1,207 @@
 # Cosine-Weighted Hemisphere Sampling
 
-Also called: Cosine Hemisphere Sampling, Cosine-Weighted Hemisphere Sampling for GI, Cosine-Weighted Solid Angle Sampling, Indirect Radiance with Cosine-Weighted Hemisphere Sampling, Lambertian Sampling, cosineSampleHemisphere, getSampleCosineWeighted
+Also called: Cosine Hemisphere Sampling, Lambertian Sampling
 
 ## Overview
-Cosine-Weighted Hemisphere Sampling generates a random direction on a hemisphere oriented around a normal vector $\mathbf{n}$, weighted by the cosine of the polar angle [S3, S4, S5, unofficial]. It is used to compute the indirect lighting contribution at a surface point by sampling the hemisphere above the surface normal and recursively tracing rays [S2, unofficial]. It sets itself apart from its parent [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md) by biasing samples toward the normal, which matches the cosine lobe of a Lambertian BRDF [S2, S4, S5, unofficial].
+Cosine-weighted hemisphere sampling generates random directions on a hemisphere oriented around a surface normal, weighted by the cosine of the polar angle relative to that normal [S3, S5, S6, unofficial]. It is primarily used to compute indirect lighting contributions for diffuse surfaces by integrating the rendering equation, where the cosine term cancels with the BRDF's cosine factor, simplifying the estimator [S2, S5, unofficial]. Unlike uniform hemisphere sampling, this method concentrates samples near the normal, reducing variance for diffuse shading [S5, unofficial]. It builds on [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md) by applying a specific probability density function (PDF) to the generated directions.
 
 ## How it works
+
+### Inputs and Outputs
 **Inputs:**
-- Surface normal $\mathbf{n}$ (unit vector) [S2, S3, S4, S5, unofficial].
-- Two uniform random numbers $r_1, r_2 \in [0, 1)$ [S2, S3, S5, unofficial].
+- Two independent uniform random numbers $r_1, r_2 \in [0, 1)$ [S1, S2, S3, S6, unofficial].
+- A surface normal vector $\mathbf{n}$ (unit length) [S3, S5, S6, unofficial].
 
 **Outputs:**
-- A unit direction vector $\mathbf{w}_i$ in the hemisphere defined by $\mathbf{n}$ [S1, S2, S3, S4, S5, unofficial].
-- The probability density function (PDF) value for the sampled direction [S2, unofficial].
+- A unit direction vector $\mathbf{d}$ in the local hemisphere defined by $\mathbf{n}$ [S3, S5, S6, unofficial].
+- The probability density function (PDF) value for the generated direction [S2, unofficial].
 
-**Data Structures:**
-- No specific complex data structures are required [S2, S3, S4, S5, unofficial].
+### Data Structures
+No complex data structures are required. The method operates on scalar random numbers and 3D vectors. If using quasi-random sequences (e.g., Halton), a sequence generator state is maintained [S4, unofficial].
 
-**Steps:**
-1. Generate two decorrelated random numbers $r_1$ and $r_2$ using a hash function on pixel position, seed, and sample index [S1, unofficial].
-2. Compute local spherical coordinates: $\phi = 2\pi r_1$, $\cos\theta = \sqrt{1 - r_2}$, $\sin\theta = \sqrt{r_2}$ [S2, unofficial]. Alternatively, compute Cartesian components directly: $x = \cos(\phi)\sqrt{r_1}$, $y = \sin(\phi)\sqrt{r_1}$, $z = \sqrt{1 - r_1}$ [S3, S5, unofficial].
-3. Construct a local orthonormal basis $(\mathbf{t}, \mathbf{b}, \mathbf{n})$ from $\mathbf{n}$. If $\mathbf{n}.x \neq 0.0$, set $\mathbf{t} = \text{normalize}(\mathbf{n}.y, -\mathbf{n}.x, 0.0)$, else set $\mathbf{t} = \text{normalize}(0.0, -\mathbf{n}.z, \mathbf{n}.y)$ [S2, S4, unofficial]. Compute $\mathbf{b} = \text{cross}(\mathbf{t}, \mathbf{n})$ [S2, S4, unofficial].
-4. Transform to world space: $\mathbf{w}_i = \mathbf{t} \cdot x + \mathbf{b} \cdot y + \mathbf{n} \cdot z$ [S2, S4, unofficial]. Normalize the result to ensure it is a unit vector [S3, unofficial].
-5. Compute PDF: $p(\mathbf{w}_i) = \frac{\cos\theta}{\pi}$ [S2, unofficial].
+### Steps
 
-**Formulas:**
-- $\phi = 2\pi r_1$ [S2, unofficial]
-- $\cos\theta = \sqrt{1 - r_2}$ [S2, unofficial]
-- $\sin\theta = \sqrt{r_2}$ [S2, unofficial]
-- $x = \cos(\phi)\sqrt{r_1}$, $y = \sin(\phi)\sqrt{r_1}$, $z = \sqrt{1 - r_1}$ [S3, S5, unofficial]
-- $p(\mathbf{w}_i) = \frac{\cos\theta}{\pi}$ [S2, unofficial]
-- $\mathbf{w}_i = \mathbf{t} \cdot x + \mathbf{b} \cdot y + \mathbf{n} \cdot z$ [S2, S4, unofficial]
+1.  **Generate Uniform Random Numbers**: Obtain two independent uniform random numbers $r_1, r_2 \in [0, 1)$ [S1, S2, S3, S6, unofficial]. If using quasi-random sampling, generate the next 2D sample from the sequence and map it to $[0, 1)^2$ [S4, unofficial].
 
-**Parameters:**
-- $r_1, r_2$: Uniform random numbers in $[0, 1)$ [S2, S3, S5, unofficial].
-- $\pi$: Mathematical constant, approximately $3.14159265$ [S2, S3, unofficial].
+2.  **Compute Local Coordinates**:
+    Calculate the radial distance $r$ and azimuthal angle $\phi$ in the local tangent plane:
+    $$
+    r = \sqrt{r_1}
+    $$
+    $$
+    \phi = 2\pi r_2
+    $$
+    [S2, S3, S6, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Degenerate Basis:** If the normal is parallel to the world up vector, the cross product used to generate the tangent may result in a zero vector [S2, S4, unofficial]. The conditional branch in step 3 avoids this by checking the absolute components of $\mathbf{n}$ and selecting an appropriate reference axis [S2, S4, unofficial].
-- **Precision:** Ensure $1 - r_2$ (or $1 - r_1$ in the Cartesian variant) is non-negative before taking the square root to avoid NaNs due to floating-point errors [S5, unofficial].
+3.  **Construct Local Direction**:
+    Compute the components of the direction vector $\mathbf{d}_{local}$ in the local coordinate system where the $z$-axis aligns with the normal $\mathbf{n}$:
+    $$
+    x = r \cos(\phi)
+    $$
+    $$
+    y = r \sin(\phi)
+    $$
+    $$
+    z = \sqrt{\max(0.0, 1.0 - r_1)}
+    $$
+    [S5, S6, unofficial].
+    Thus, $\mathbf{d}_{local} = (x, y, z)$ [S6, unofficial].
+    *Note: Some implementations compute $z$ as $\sqrt{1 - x^2 - y^2}$, which is mathematically equivalent to $\sqrt{1 - r_1}$ since $x^2 + y^2 = r_1$ [S5, unofficial].*
 
-**Pseudocode:**
+4.  **Construct Local Basis**:
+    Create an orthonormal basis $(\mathbf{e}_1, \mathbf{e}_2, \mathbf{e}_3)$ where $\mathbf{e}_3 = \mathbf{n}$ [S3, S5, unofficial].
+    To avoid degeneracy when $\mathbf{n}$ is parallel to a world axis (e.g., the world up vector), choose $\mathbf{e}_1$ and $\mathbf{e}_2$ carefully [S2, S5, unofficial]:
+    - If $|n_x| < \epsilon$ (or specifically if $n_x \approx 0$), set $\mathbf{e}_1 = \text{normalize}((0, -n_z, n_y))$ [S5, unofficial].
+    - Otherwise, set $\mathbf{e}_1 = \text{normalize}((n_y, -n_x, 0))$ [S5, unofficial].
+    - Compute $\mathbf{e}_2 = \mathbf{n} \times \mathbf{e}_1$ [S5, unofficial].
+    *Alternative basis construction:* Some sources define the basis using tangent $\mathbf{t}$ and bitangent $\mathbf{b}$ derived from $\mathbf{n}$ [S1, S2, unofficial].
+
+5.  **Transform to World Space**:
+    Combine the local components with the basis vectors:
+    $$
+    \mathbf{d} = x \mathbf{e}_1 + y \mathbf{e}_2 + z \mathbf{n}
+    $$
+    [S3, S5, unofficial].
+    Ensure $\mathbf{d}$ is normalized (though theoretically it should be unit length, numerical precision may require normalization) [S3, S5, unofficial].
+
+6.  **Compute PDF**:
+    The probability density function for the generated direction $\mathbf{d}$ is:
+    $$
+    p(\mathbf{d}) = \frac{\cos \theta}{\pi} = \frac{z}{\pi}
+    $$
+    [S2, unofficial]. Here, $\theta$ is the angle between $\mathbf{d}$ and $\mathbf{n}$, so $\cos \theta = z$ [S2, unofficial].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
-def cosine_weighted_hemisphere_sampling(normal, r1, r2):
+def cosine_weighted_hemisphere_sampling(r1: float, r2: float, normal: tuple) -> tuple:
     """
-    Generates a cosine-weighted direction in the hemisphere defined by normal.
+    Generates a cosine-weighted random direction on the hemisphere defined by normal.
     
     Args:
-        normal (tuple): (nx, ny, nz) unit normal vector.
-        r1 (float): Uniform random number in [0, 1).
-        r2 (float): Uniform random number in [0, 1).
+        r1: Uniform random number in [0, 1).
+        r2: Uniform random number in [0, 1).
+        normal: Unit normal vector (nx, ny, nz).
         
     Returns:
-        tuple: (direction, pdf)
-            direction (tuple): (dx, dy, dz) unit direction vector.
-            pdf (float): Probability density value.
+        direction: Unit direction vector (dx, dy, dz).
+        pdf: Probability density function value.
     """
-    # Step 1: Compute local spherical coordinates [S2, unofficial]
-    phi = 2.0 * math.pi * r1
-    cos_theta = math.sqrt(max(0.0, 1.0 - r2))
-    sin_theta = math.sqrt(max(0.0, r2))
+    # Step 2: Compute local coordinates
+    r = math.sqrt(r1)
+    phi = 2.0 * math.pi * r2
     
-    # Step 2: Compute local Cartesian components [S3, S5, unofficial]
-    x_local = math.cos(phi) * sin_theta
-    y_local = math.sin(phi) * sin_theta
-    z_local = cos_theta
+    # Step 3: Construct local direction components
+    x = r * math.cos(phi)
+    y = r * math.sin(phi)
+    z = math.sqrt(max(0.0, 1.0 - r1))
     
-    # Step 3: Construct local basis [S2, S4, unofficial]
+    # Step 4: Construct local basis
     nx, ny, nz = normal
-    if abs(nx) > 1e-6:
-        # Normal is not parallel to X axis
-        tx, ty, tz = ny, -nx, 0.0
+    
+    # Avoid degeneracy when normal is parallel to world up (e.g., Z-axis)
+    # If |nx| is small, use a different reference axis
+    if abs(nx) < 1e-6:
+        # Use Y and Z components to create a perpendicular vector
+        e1 = normalize((0.0, -nz, ny))
     else:
-        # Normal is parallel to X axis, use alternative axis
-        tx, ty, tz = 0.0, -nz, ny
+        # Use X and Y components
+        e1 = normalize((ny, -nx, 0.0))
         
-    len_t = math.sqrt(tx*tx + ty*ty + tz*tz)
-    if len_t == 0:
-        # Fallback for exact degeneracy [G]
-        tx, ty, tz = 1.0, 0.0, 0.0
-        len_t = 1.0
-    tangent = (tx/len_t, ty/len_t, tz/len_t)
+    # e2 is the cross product of normal and e1
+    e2 = cross(normal, e1)
     
-    # Bitangent = cross(tangent, normal) [S2, S4, unofficial]
-    bx = tangent[1] * nz - tangent[2] * ny
-    by = tangent[2] * nx - tangent[0] * nz
-    bz = tangent[0] * ny - tangent[1] * nx
-    bitangent = (bx, by, bz)
+    # Step 5: Transform to world space
+    dx = x * e1[0] + y * e2[0] + z * nx
+    dy = x * e1[1] + y * e2[1] + z * ny
+    dz = x * e1[2] + y * e2[2] + z * nz
     
-    # Step 4: Transform to world space [S2, S4, unofficial]
-    dx = tangent[0] * x_local + bitangent[0] * y_local + normal[0] * z_local
-    dy = tangent[1] * x_local + bitangent[1] * y_local + normal[1] * z_local
-    dz = tangent[2] * x_local + bitangent[2] * y_local + normal[2] * z_local
-    
-    # Normalize [S3, unofficial]
-    len_d = math.sqrt(dx*dx + dy*dy + dz*dz)
-    if len_d > 0:
-        dx /= len_d
-        dy /= len_d
-        dz /= len_d
     direction = (dx, dy, dz)
     
-    # Step 5: Compute PDF [S2, unofficial]
-    pdf = cos_theta / math.pi
+    # Step 6: Compute PDF
+    pdf = z / math.pi
     
     return direction, pdf
+
+def normalize(v: tuple) -> tuple:
+    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if length == 0:
+        return (0.0, 0.0, 1.0) # Fallback
+    return (v[0]/length, v[1]/length, v[2]/length)
+
+def cross(a: tuple, b: tuple) -> tuple:
+    return (
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    )
 ```
 
+### Parameters
+- $r_1, r_2$: Uniform random numbers. Typical values depend on the random number generator used [S4, unofficial].
+- $n$: Number of samples. Typical values depend on the application (e.g., ambient occlusion, shadow rays) [S4, unofficial].
+
+### Edge Cases and Pitfalls
+- **Degenerate Normal**: If the normal is parallel to the world up vector (e.g., $(0,0,1)$), the standard basis construction (e.g., using cross product with $(0,1,0)$) can fail or produce non-orthogonal vectors. A conditional branch based on the normal's components (e.g., checking if $n_x \approx 0$) is required to select an appropriate reference axis [S2, S5, unofficial].
+- **Precision**: Ensure $z$ is computed as $\sqrt{\max(0.0, 1.0 - r_1)}$ to avoid negative values due to floating-point errors when $r_1$ is very close to 1 [S5, S6, unofficial].
+- **PDF Calculation**: The PDF must be calculated using the $z$ component (cosine of the polar angle) in the local frame, not the world-space components, to ensure correct importance sampling [S2, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Suitable for diffuse shading and lighting integration [S4, S5, unofficial].
-- **Limitations:** Not given in the sources.
-- **When to Use:** Not given in the sources.
-- **When Not to Use:** Not given in the sources.
+
+### Time and Memory Complexity
+- **Time**: $O(1)$ per sample. Requires a few trigonometric functions, square roots, and vector operations [S2, S5, S6, unofficial].
+- **Memory**: $O(1)$ auxiliary space. No large data structures are needed [S2, S5, S6, unofficial].
+
+### Measured Performance
+- Performance depends on the efficiency of the random number generator and trigonometric functions. Using quasi-random sequences (e.g., Halton) may have slightly higher overhead per sample but can reduce variance faster [S4, unofficial].
+- Specific hardware performance metrics are not provided in the sources.
+
+### Scaling
+- Scales linearly with the number of samples [S4, unofficial].
+- Suitable for real-time applications due to its low computational cost [S5, S6, unofficial].
+
+### Strengths and Limitations
+- **Strengths**:
+    - Reduces variance for diffuse shading by concentrating samples near the normal [S5, unofficial].
+    - Simple to implement [S2, S5, S6, unofficial].
+    - Efficient [S2, S5, S6, unofficial].
+- **Limitations**:
+    - Not optimal for non-diffuse materials (e.g., glossy or specular) [S5, unofficial].
+    - Requires careful handling of the local basis to avoid degeneracy [S2, S5, unofficial].
+
+### When to Use
+- Use for diffuse shading in path tracing or ray tracing [S2, S5, S6, unofficial].
+- Use when computing indirect lighting for Lambertian surfaces [S2, unofficial].
+
+### When Not to Use
+- Do not use for glossy or specular materials [S5, unofficial].
+- Do not use when uniform sampling is required for other reasons (e.g., certain Monte Carlo integration techniques) [S2, unofficial].
 
 ## Background
-Not given in the sources.
+
+### Origin
+- The method is a standard technique in computer graphics for importance sampling the diffuse BRDF [S2, S5, S6, unofficial].
+- It is often referred to as "Lambertian Sampling" due to its application to Lambertian surfaces [S2, S5, unofficial].
+
+### History and Development
+- The technique has been widely used in offline and real-time renderers for decades [S2, S5, S6, unofficial].
+- Variations using quasi-random sequences (e.g., Halton) have been implemented in various projects [S4, unofficial].
+
+### Where It Is Used
+- Path tracing [S2, S5, unofficial].
+- Ray marching [S5, unofficial].
+- Voxel rendering [S6, unofficial].
+- Ambient occlusion [S4, unofficial].
 
 ## Sources
+
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
 [S2] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
 [S3] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
-[S4] ollituohenmaa/raymarching-pathtracer, https://github.com/ollituohenmaa/raymarching-pathtracer, fetched 2026-10-26 (unofficial)
-[S5] TTFH/Voxel-Render, https://github.com/TTFH/Voxel-Render, fetched 2026-10-27 (unofficial)
+[S4] RvanderLaan/SVDAG-Compression, https://github.com/RvanderLaan/SVDAG-Compression, fetched 2026-10-26 (unofficial)
+[S5] ollituohenmaa/raymarching-pathtracer, https://github.com/ollituohenmaa/raymarching-pathtracer, fetched 2026-10-26 (unofficial)
+[S6] TTFH/Voxel-Render, https://github.com/TTFH/Voxel-Render, fetched 2026-10-27 (unofficial)

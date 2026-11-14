@@ -7,54 +7,35 @@ Velocity Voxelization computes the instantaneous velocity of an obstacle at each
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A watertight triangle mesh with vertex positions from the previous frame ($\mathbf{p}^{n-1}$) and current frame ($\mathbf{p}^n$), and a 3D grid domain with resolution $(N_x, N_y, N_z)$ and slice planes.
-- **Output:** A 3D texture (or volume buffer) where each cell stores a velocity vector $\mathbf{v}$ if it intersects the mesh boundary.
+- **Input:** A watertight triangle mesh with vertex positions from the previous frame ($\mathbf{p}^{n-1}$) and current frame ($\mathbf{p}^n$), and a 3D grid domain with resolution $(N_x, N_y, N_z)$ and slice planes [S1, unofficial].
+- **Output:** A 3D texture (or volume buffer) where each cell stores a velocity vector $\mathbf{v}$ if it intersects the mesh boundary [S1, unofficial].
 
 **Data Structures:**
-- **Vertex Buffer:** Stores pairs of positions $(\mathbf{p}_i^{n-1}, \mathbf{p}_i^n)$ for each vertex $i$.
-- **3D Texture:** A volumetric buffer of size $N_x \times N_y \times N_z$, initialized to zero. Access is performed via rasterization into specific 2D slices.
+- **Vertex Buffer:** Stores pairs of positions $(\mathbf{p}_i^{n-1}, \mathbf{p}_i^n)$ for each vertex $i$ [S1, unofficial].
+- **3D Texture:** A volumetric buffer of size $N_x \times N_y \times N_z$, initialized to zero [G]. Access is performed via rasterization into specific 2D slices [S1, unofficial].
+
+**Numbered Steps:**
+1. Compute per-vertex velocities by storing vertex positions from the previous frame ($\mathbf{p}^{n-1}$) and current frame ($\mathbf{p}^n$) in a vertex buffer [S1, unofficial].
+2. Render the mesh once for each slice of the grid to determine the intersection of each triangle with the current slice [S1, unofficial].
+3. Compute triangle-slice intersection by intersecting each triangle edge with the slice. If exactly two edge-slice intersections are found, use them as end points [S1, unofficial].
+4. Determine velocity values at each end point of the segment via interpolation along the triangle edges and assign them to the quad vertices [S1, unofficial].
+5. Generate quads using a geometry shader that operates on mesh triangles, producing four vertices if the intersection is a segment and zero vertices otherwise [S1, unofficial]. Since geometry shaders cannot output quads, use a two-triangle strip [S1, unofficial].
+
+**Formulas:**
+- Per-vertex instantaneous velocity (forward difference):
+  $$ \mathbf{v}_i = \frac{\mathbf{p}_i^n - \mathbf{p}_i^{n-1}}{\Delta t} $$
+  where $\mathbf{p}_i^n$ and $\mathbf{p}_i^{n-1}$ are the current and previous frame positions of vertex $i$, and $\Delta t$ is the time step [S1, unofficial].
+- Offset points: $\mathbf{p}_{A+} = \mathbf{p}_A + w \cdot \mathbf{d}$ and $\mathbf{p}_{B+} = \mathbf{p}_B + w \cdot \mathbf{d}$, where $\mathbf{p}_A, \mathbf{p}_B$ are segment endpoints, $w$ is the offset distance, and $\mathbf{d}$ is the normalized offset direction [S1, unofficial].
 
 **Parameters:**
-- **Time Step ($\Delta t$):** The time difference between frames $n-1$ and $n$.
-- **Offset Distance ($w$):** Equal to the diagonal length of one texel in a slice of the 3D texture. $w = \sqrt{2} \cdot \text{texel\_size}$ if the slice is square, or generally the Euclidean distance across the texel dimensions in the slice plane.
-- **Offset Direction:** The projection of the triangle's normal $\mathbf{n}$ onto the slice plane.
-
-**Steps:**
-1. **Compute Per-Vertex Velocity:** For each vertex $i$, compute the instantaneous velocity $\mathbf{v}_i$ using the forward difference approximation:
-   $$ \mathbf{v}_i = \frac{\mathbf{p}_i^n - \mathbf{p}_i^{n-1}}{\Delta t} $$
-   This is typically done in a vertex shader or precomputed.
-
-2. **Iterate Grid Slices:** For each slice $k$ of the 3D grid (along the chosen axis, e.g., $z$):
-   a. Set the camera's near plane to the slice's $z$-coordinate.
-   b. Render the mesh using a geometry shader that processes each triangle.
-
-3. **Geometry Shader Processing (GS_GEN_BOUNDARY_VELOCITY):**
-   For each input triangle with vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ and corresponding velocities $\mathbf{u}_0, \mathbf{u}_1, \mathbf{u}_2$:
-   a. **Intersect Edges with Slice:** Intersect each of the three triangle edges with the current slice plane. An edge between $\mathbf{v}_a$ and $\mathbf{v}_b$ intersects the plane $z=z_k$ if $(\mathbf{v}_a.z - z_k)(\mathbf{v}_b.z - z_k) \le 0$.
-   b. **Determine Intersection Type:**
-      - If exactly two edges intersect the slice, the intersection is a segment. Let the intersection points be $\mathbf{p}_A$ and $\mathbf{p}_B$.
-      - If zero, one, or three edges intersect, the intersection is empty, a point, or a triangle (degenerate for velocity field purposes in this method). Output nothing.
-   c. **Interpolate Velocities:** For intersection points $\mathbf{p}_A$ and $\mathbf{p}_B$, compute their velocities $\mathbf{v}_A$ and $\mathbf{v}_B$ by linearly interpolating the vertex velocities along the respective triangle edges.
-   d. **Compute Offset Points:**
-      - Calculate the triangle normal $\mathbf{n} = (\mathbf{v}_1 - \mathbf{v}_0) \times (\mathbf{v}_2 - \mathbf{v}_0)$.
-      - Project $\mathbf{n}$ onto the slice plane to get the offset direction $\mathbf{d}$. If the slice is $xy$-plane, $\mathbf{d} = (n_x, n_y, 0)$. Normalize $\mathbf{d}$.
-      - Compute offset points: $\mathbf{p}_{A+} = \mathbf{p}_A + w \cdot \mathbf{d}$ and $\mathbf{p}_{B+} = \mathbf{p}_B + w \cdot \mathbf{d}$.
-   e. **Output Quad:** Emit a two-triangle strip (4 vertices) representing the thickened segment:
-      - Vertex 1: $\mathbf{p}_A$, Velocity $\mathbf{v}_A$
-      - Vertex 2: $\mathbf{p}_B$, Velocity $\mathbf{v}_B$
-      - Vertex 3: $\mathbf{p}_{A+}$, Velocity $\mathbf{v}_A$ (interpolated from $\mathbf{v}_A$ and $\mathbf{v}_{A+}$, but since $\mathbf{v}_{A+}$ is not defined, the velocity is constant across the width for simplicity, or interpolated from the segment's velocity gradient. The source states "assign them to the corresponding vertices of the quad", implying the end-point velocities are assigned to the end vertices, and the offset vertices inherit the nearest end-point velocity or are interpolated. Given the quad is thin, assigning $\mathbf{v}_A$ to $\mathbf{p}_A$ and $\mathbf{p}_{A+}$, and $\mathbf{v}_B$ to $\mathbf{p}_B$ and $\mathbf{p}_{B+}$ is the standard interpretation for "assign them to the corresponding vertices").
-      - Vertex 4: $\mathbf{p}_{B+}$, Velocity $\mathbf{v}_B$
-      *(Note: The source specifies "assign them to the corresponding vertices of the quad". The quad vertices correspond to the segment endpoints and their offsets. The velocity at the offset points is not explicitly defined by interpolation along the triangle, so it is assumed to be the same as the nearest segment endpoint or interpolated linearly across the quad width. The most robust implementation assigns $\mathbf{v}_A$ to $\mathbf{p}_A$ and $\mathbf{p}_{A+}$, and $\mathbf{v}_B$ to $\mathbf{p}_B$ and $\mathbf{p}_{B+}$.)*
-
-4. **Rasterization and Accumulation:**
-   - Rasterize the emitted triangles into the 2D slice of the 3D texture.
-   - Use additive blending to accumulate velocity values. If multiple triangles intersect the same cell, their velocities are summed.
-   - Alternatively, use a stencil buffer to mark cells, then write velocities only to marked cells.
+- **Time Step ($\Delta t$):** The time difference between frames $n-1$ and $n$ [S1, unofficial].
+- **Offset Distance ($w$):** Equal to the diagonal length of one texel in a slice of the 3D texture [S1, unofficial].
+- **Offset Direction:** The projection of the triangle's normal $\mathbf{n}$ onto the slice plane [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Non-Watertight Meshes:** The method assumes front and back faces are distinct. Non-watertight meshes may produce incorrect velocity fields due to missing faces [S1, unofficial].
-- **Degenerate Intersections:** Triangles parallel to the slice or lying exactly on the slice plane may produce zero or infinite intersections. Robust intersection tests are required.
-- **Precision:** Floating-point precision in edge-slice intersection calculations can lead to gaps or overlaps in the velocity field.
+- **Non-Watertight Meshes:** The method depends on having one back face for every front face. Non-watertight meshes may produce incorrect velocity fields due to missing faces [S1, unofficial].
+- **Degenerate Intersections:** Triangles parallel to the slice or lying exactly on the slice plane may produce zero or infinite intersections. Robust intersection tests are required [G].
+- **Precision:** Floating-point precision in edge-slice intersection calculations can lead to gaps or overlaps in the velocity field [G].
 - **Offset Direction Ambiguity:** If the triangle normal is perpendicular to the slice plane, the projection is zero. In this case, the offset direction is undefined. A fallback (e.g., using the slice normal or a default direction) is needed [G].
 
 ## Subtopics

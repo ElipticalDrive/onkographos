@@ -3,59 +3,70 @@
 Also called: Density Clipping, Volume Thresholding
 
 ## Overview
-Density Range Windowing restricts rendering to voxels whose density falls within a specified $[min, max]$ range, allowing selective visualization of specific structures within a volume [S1, unofficial]. It sets itself apart from its parent method, Grid Visualization with Thresholding, by operating on a continuous density interval rather than a single binary opacity threshold or gradient magnitude, enabling finer control over semi-transparent vs. dense core separation [S1, unofficial].
+Density Range Windowing restricts volume rendering to voxels whose scalar density falls within a specified $[min, max]$ interval, enabling the selective visualization of specific anatomical or material structures [S1, unofficial]. It distinguishes itself from its parent [Grid Visualization with Thresholding](1515-grid-visualization-with-thresholding.md) by operating on the continuous density value directly during ray casting or slicing, rather than filtering grid cells for a 3D scatter plot, and from [Glyph Lines](8934-glyph-lines.md) by preserving volumetric opacity integration rather than geometric abstraction.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D scalar grid (volume data) where each voxel has a normalized density value $d \in [0, 1]$.
-- Output: A 2D image where voxels outside the window are transparent (opacity 0) and those inside are rendered according to the transfer function.
+- Input: A 3D scalar grid $V$ of density values, typically normalized to $[0, 1]$ or physical units (e.g., Hounsfield Units).
+- Parameters: $m\_densityMin$ (default $0.0f$) and $m\_densityMax$ (default $1.0f$) defining the visible interval [S1, unofficial].
+- Output: A 2D image where voxels outside $[m\_densityMin, m\_densityMax]$ contribute zero opacity.
 
 **Data Structures:**
-The method relies on two scalar parameters defining the window:
-- $m\_densityMin$: The lower bound of the visible density interval.
-- $m\_densityMax$: The upper bound of the visible density interval.
-
-**Parameters:**
-- $m\_densityMin$: Default $0.0f$.
-- $m\_densityMax$: Default $1.0f$ [S1, unofficial].
+The method relies on the transfer function evaluation context. In the referenced implementation, a `window` vector stores the bounds:
+- `window.x`: Window low ($min$)
+- `window.y`: Window high ($max$)
+- `window.z`: Shade strength (illumination factor, not part of the core windowing logic but often co-located)
+- `window.w`: Opacity correction factor [S1, unofficial]
 
 **Steps:**
-1. For each voxel in the volume grid, retrieve its scalar density value $d$.
-2. Check if $d$ satisfies the condition:
-   $$m\_densityMin \le d \le m\_densityMax$$
-3. If the condition is true, the voxel is included in the rendering pipeline (opacity is determined by the transfer function). If false, the voxel's opacity is set to 0.0, effectively clipping it from view [S1, unofficial].
+1. For each sample point $p$ along the ray, retrieve the scalar density value $d = V(p)$.
+2. Compare $d$ against the window bounds:
+   $$
+   \text{if } d < m\_densityMin \text{ or } d > m\_densityMax, \text{ then opacity } \alpha = 0.
+   $$
+3. If $m\_densityMin \le d \le m\_densityMax$, compute opacity $\alpha$ using the standard transfer function (e.g., linear interpolation between stops) [S1, unofficial].
+4. Composite the sample using front-to-back or back-to-front accumulation.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_density_window(density: float, min_val: float, max_val: float) -> float:
+    """
+    Returns opacity contribution based on density range windowing.
+    Assumes a base transfer function tf(density) returns alpha in [0, 1].
+    """
+    # Clamp density to window range; if outside, alpha is zero
+    if density < min_val or density > max_val:
+        return 0.0
+    
+    # Evaluate standard transfer function for values within the window
+    # Note: In some implementations, the transfer function is defined over [0,1]
+    # and the window acts as a mask. Here we assume tf handles the mapping.
+    alpha = transfer_function(density)
+    return alpha
+```
 
 **Edge Cases and Pitfalls:**
-- If $m\_densityMin > m\_densityMax$, the window is invalid, and no voxels are rendered [G].
-- Raising $m\_densityMin$ drops semi-transparent structures (e.g., skin, foliage) while retaining dense cores (e.g., bone) [S1, unofficial].
-- Lowering $m\_densityMax$ peels off the densest structures [S1, unofficial].
+- **Precision:** If $min > max$, the interval is invalid and no voxels render [G].
+- **Boundaries:** Voxels exactly on the boundary ($min$ or $max$) are included (inclusive interval) [S1, unofficial].
+- **Degenerate Input:** If the entire volume density range lies outside $[min, max]$, the result is a black screen.
 
 ## Subtopics
 
-### MIDA Visualization
-A visualization mode that works with a settable range of visualized values, allowing different parts of the volume (inside/outside envelopes) to have different visible value ranges [S2, unofficial]. It enables "carving" or "peeling" by specifying an empty range (where minimum and maximum visualized values are identical) to examine the outline or shape of internal structures [S2, unofficial]. It uses visible range sliders to control the min/max visualized values for specific regions [S2, unofficial].
+### [MIDA Visualization](11215-mida-visualization.md)
+MIDA Visualization is a density range windowing technique that allows users to define settable ranges of visualized values, enabling selective visibility of specific structures within a volume. It distinguishes itself from standard thresholding by supporting multiple, independent visible ranges (envelopes) for different parts of the volume, facilitating complex exploration tasks such as carving and peeling.
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- Time: $O(N)$ where $N$ is the number of voxels, as each voxel requires a single comparison against the window bounds.
-- Memory: $O(1)$ additional memory for the window parameters, assuming the volume data is already in memory.
-
-**Measured Performance:**
-Not given in the sources.
-
-**Strengths and Limitations:**
-- Strengths: Simple to implement; effective for isolating specific tissue types or density ranges in medical imaging (e.g., CT scans) [S1, unofficial].
-- Limitations: Cannot handle complex, non-contiguous density distributions without multiple windows; loses context of clipped structures [S1, unofficial].
-
-**When to use it:**
-Use when the goal is to isolate specific density ranges (e.g., bone vs. soft tissue) in a scalar volume.
-
-**When not to use it:**
-Not suitable when the volume requires complex, multi-range opacity mapping or gradient-based shading alone.
+- **Time Complexity:** $O(1)$ per sample, as it involves a simple comparison and potential transfer function lookup. No additional memory allocation.
+- **Memory Complexity:** $O(1)$ auxiliary memory for window parameters.
+- **Strengths:** Immediate visual isolation of structures (e.g., bone vs. soft tissue); computationally inexpensive; intuitive for radiological inspection (Window Level/Width).
+- **Limitations:** Cannot visualize structures with overlapping density ranges simultaneously without multiple passes or advanced techniques like MIDA; abrupt cutoffs at boundaries may cause aliasing if not smoothed [G].
+- **When to use:** When the goal is to isolate specific tissue types or materials with distinct density values.
+- **When not to use:** When multiple overlapping structures need simultaneous visualization with different opacities (use MIDA or multi-range transfer functions).
 
 ## Background
-Originated in the context of GPU-based volume rendering applications, specifically within the GPUGemsVolumeRendering repository [S1, unofficial]. It is commonly used in radiology-style volume rendering presets (e.g., CT Bone, CT Soft Tissue) where window level/width (WL/WW) acts as a live contrast tweak [S1, unofficial]. MIDA Visualization, a variant, was developed in the context of context-preserving volume image exploration using a 3D painting metaphor [S2, unofficial].
+Originating from radiological imaging practices, "Windowing" (or Window Level/Width) is a standard technique for displaying CT scans where the dynamic range of Hounsfield Units exceeds display capabilities. The implementation in [S1, unofficial] adapts this concept to general GPU volume rendering, allowing real-time adjustment of the visible density interval. It is commonly used in medical visualization tools for bone, soft tissue, and angiography presets.
 
 ## Sources
 [S1] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
-[S2] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)

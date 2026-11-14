@@ -3,13 +3,13 @@
 Also called: BT Volume Rendering, Basis Tensor Volume Rendering, Cell Projection with GPGPU, DiffTetVR Tetrahedral Volume Rendering, Differentiable Tetrahedral Volume Rendering, GPU-Accelerated Cell Projection (Tetrahedral), Isosurface rendering using BT volumes, PTINT
 
 ## Overview
-Tetrahedral Volume Rendering (Tetrahedral VR) is a cell-projection technique that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen and compositing them in depth order [S3]. It solves the problem of visualizing complex, non-convex, or disconnected unstructured data (such as finite element meshes) with high geometric fidelity, avoiding the stair-stepping artifacts of voxel-based methods [S2]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which generates triangles for hardware rasterization, this method often employs a two-pass GPGPU pipeline or differentiable rasterization to compute ray-tetrahedron intersections and optical depth explicitly, supporting both direct volume rendering and isosurface extraction [S3][S1, unofficial].
+Tetrahedral Volume Rendering (Tetrahedral VR) is a cell-projection technique that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen and compositing them in depth order [S3]. It solves the problem of visualizing complex, non-convex, or disconnected unstructured data (such as finite element meshes) with high geometric fidelity, avoiding the stair-stepping artifacts of voxel-based methods [S2]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which generates triangles for hardware rasterization, this method typically follows a two-pass GPU pipeline or a differentiable rasterization approach [S3][S1, unofficial]. The core logic involves projecting tetrahedra, determining their screen-space geometry, computing ray intersections, and accumulating color/opacity [S3][S1, unofficial].
 
 ## How it works
 The method typically follows a two-pass GPU pipeline or a differentiable rasterization approach. The core logic involves projecting tetrahedra, determining their screen-space geometry, computing ray intersections, and accumulating color/opacity.
 
 ### Inputs and Outputs
-*   **Inputs:** Unstructured tetrahedral mesh (vertices, connectivity), scalar field data (vertex-centered or cell-centered), transfer function (color/opacity mapping), camera parameters (view/projection matrices).
+*   **Inputs:** Unstructured tetrahedral mesh (vertices, connectivity), scalar field data (vertex-centered or cell-centered), transfer function (color/opacity mapping), camera parameters (view/projection matrices) [S3][S1, unofficial].
 *   **Outputs:** 2D image (color and opacity buffers).
 
 ### Data Structures
@@ -18,21 +18,21 @@ The method typically follows a two-pass GPU pipeline or a differentiable rasteri
 3.  **Gradient Texture:** RGB texture, 32 bits per component. Stores precomputed gradient vectors at vertices. Same size and indexing as Vertex Texture [S3].
 4.  **Classification Texture:** 1D texture containing a Ternary Truth Table. Maps combined cross-product test results to projection class indices [S3].
 5.  **MRT (Multiple Render Targets):** Four 2D RGBA textures (32 bits per component) used in the first pass to store intermediate data [S3]:
-    *   Texture 1: Intersection coordinates $(x_{vi}, y_{vi})$, centroid $c_z$, Truth Table index $id_{TTT}$.
-    *   Texture 2: Front/back scalars $(s_f, s_b)$, thickness $l$, triangle count.
-    *   Texture 3: Front gradient vector $g_f$.
-    *   Texture 4: Back gradient vector $g_b$.
+    *   Texture 1: Intersection coordinates $(x_{vi}, y_{vi})$, centroid $c_z$, Truth Table index $id_{TTT}$ [S3].
+    *   Texture 2: Front/back scalars $(s_f, s_b)$, thickness $l$, triangle count [S3].
+    *   Texture 3: Front gradient vector $g_f$ [S3].
+    *   Texture 4: Back gradient vector $g_b$ [S3].
 6.  **Global Arrays (CPU-side, for second pass):**
-    *   Vertex Array: $\{x, y, z\}$ coordinates.
-    *   Color Array: $\{s_f, s_b, l\}$ values.
-    *   Gradient Arrays: Stored in normal/secondary color arrays.
-    *   Indices Array: Groups of 6 integers defining vertex order for triangle fans.
+    *   Vertex Array: $\{x, y, z\}$ coordinates [S3].
+    *   Color Array: $\{s_f, s_b, l\}$ values [S3].
+    *   Gradient Arrays: Stored in normal/secondary color arrays [S3].
+    *   Indices Array: Groups of 6 integers defining vertex order for triangle fans [S3].
     *   Count Array: Number of vertices in each fan (max 6) [S3].
 
 ### Steps
 
 1.  **Preprocessing (CPU):**
-    *   For each tetrahedron, determine if it contributes to the visualization.
+    *   For each tetrahedron, determine if it contributes to the visualization [S2][S3].
     *   **Culling:** If using BT Volumes, check if the minimum and maximum weights (extrema) are on the same side of the interesting density range. If so, discard the tetrahedron [S2].
     *   **Zero Opacity Discard:** If using transfer functions, discard tetrahedra where ALL vertices map to zero opacity [S3].
     *   Transform surviving tetrahedra into the required indexing form [S2].
@@ -41,7 +41,7 @@ The method typically follows a two-pass GPU pipeline or a differentiable rasteri
     *   **Setup:** Render the Tetrahedral Texture as a quadrilateral with screen-space size. This ensures one fragment shader invocation per tetrahedron [S3].
     *   **Data Retrieval:** For each tetrahedron, perform 4 texture lookups using indices from the Tetrahedral Texture to get vertex positions, scalars, and gradients from Vertex and Gradient Textures [S3].
     *   **Projection Classification:**
-        *   Project the 4 vertices to screen space: $v_{proj}$.
+        *   Project the 4 vertices to screen space: $v_{proj}$ [S3].
         *   Compute 4 cross-product tests to determine the projection class and vertex ordering [S3]:
             ```python
             vec1 = v_proj1 - v_proj0
@@ -49,10 +49,10 @@ The method typically follows a two-pass GPU pipeline or a differentiable rasteri
             vec3 = v_proj3 - v_proj0
             vec4 = v_proj1 - v_proj2
             vec5 = v_proj1 - v_proj3
-            t1 = sign((vec1 x vec2).z) + 1
-            t2 = sign((vec2 x vec3).z) + 1
-            t3 = sign((vec3 x vec4).z) + 1
-            t4 = sign((vec4 x vec5).z) + 1
+            t1 = sign(cross(vec1, vec2)[2]) + 1
+            t2 = sign(cross(vec2, vec3)[2]) + 1
+            t3 = sign(cross(vec3, vec4)[2]) + 1
+            t4 = sign(cross(vec4, vec5)[2]) + 1
             ```
         *   Combine $(t1, t2, t3, t4)$ to form an index for the Classification Texture lookup. This retrieves the correct order to compute intersection parameters [S3].
         *   **Degeneracy Handling:** If one test result is 1, project as two triangles (Class 3). If two results are 1, project as one triangle (Class 4). If three or four tests yield 1, discard the tetrahedron [S3].
@@ -114,7 +114,7 @@ $$ c_{acc}(t, c_0, c_1, \alpha) = (1 - e^{-\alpha t}) c_0 + \left( \left( t + \f
 *   **N_sub:** Number of subdivision steps for the ray segment within a tetrahedron. Used to approximate constant opacity. Value not specified, but critical for accuracy [S1, unofficial].
 *   **Projection Type:** Orthogonal projection is required for the specific screen-space triangle computation optimization in some variants (e.g., BT Volumes). Other variants support perspective [S2][S3].
 *   **$\beta$:** Regularization parameter for tetrahedron quality. Value $\beta = 10$ is mentioned [S1, unofficial].
-*   **Graphics API:** DirectX 10 (Shader Model 4.0) or OpenGL 2.0/GLSL [S2][S3].
+*   **Graphics API:** DirectX 10 (Shader Model 4.0) [S2] or OpenGL 2.0/GLSL [S3].
 
 ### Edge Cases and Pitfalls
 *   **Numerical Instability:** The general solution for linearly varying opacity involves the imaginary error function (erfi), which is numerically unstable on GPUs. The method handles this by assuming constant opacity within sub-intervals [S1, unofficial].

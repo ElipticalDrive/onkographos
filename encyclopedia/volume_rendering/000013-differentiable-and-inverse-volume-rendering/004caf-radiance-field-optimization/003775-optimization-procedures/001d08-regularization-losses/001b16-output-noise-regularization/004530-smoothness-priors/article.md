@@ -1,19 +1,45 @@
 # Smoothness Priors
-Also called: Geometric Smoothness Regularization, Gradient Smoothness Loss, SDF Total Variation Loss
-## Overview
-Smoothness priors are regularization terms applied during training and inference to reduce surface noise and improve geometric smoothness in neural surface reconstruction [S1, unofficial]. They distinguish themselves from sibling methods by targeting the geometric consistency of the signed distance field (SDF) and its gradients, rather than just radiance or color consistency.
-## Shared principles
-The family relies on two primary mechanisms to enforce smoothness:
-1.  **3D Gaussian Convolution:** Applying a 3D convolution with a Gaussian kernel to the geometry features or SDF grid. This is typically used during the coarse training stage and/or as a post-processing step [S1, unofficial].
-2.  **Gradient and SDF Regularization:** Applying a gradient smoothness loss during fine training and an SDF total variation (TV) loss on the SDF voxel grid [S1, unofficial].
 
-The effectiveness of these priors is critical; removing the Gaussian kernel during coarse training has been shown to increase Chamfer Distance (CD) error from 0.72 to 0.74 [S1, unofficial]. Conversely, removing it during post-processing slightly reduces CD from 0.720 to 0.715, suggesting a nuanced role in final refinement [S1, unofficial].
+Also called: Geometric Smoothness Regularization, Gradient Smoothness Loss, SDF Total Variation Loss, Scene flow smoothness loss, Spatial and temporal smoothness priors
+
+## Overview
+Smoothness priors are regularization terms applied during training and inference to reduce surface noise and improve geometric smoothness in neural radiance fields [S1, unofficial]. They address the problem of high-frequency artifacts and unstable geometry by enforcing continuity in the output fields, whether static (SDF/gradient) or dynamic (scene flow) [S1, unofficial][S2]. What sets this family apart from sibling methods like [Output Noise Regularization](928-output-noise-regularization.md) is the explicit enforcement of spatial or temporal coherence constraints on the learned representations, rather than just suppressing noise in the final rendered image.
+
+## Shared principles
+The core mechanism involves adding a loss term to the optimization objective that penalizes large variations between neighboring points in the representation space. The specific implementation depends on the type of field being regularized:
+
+1.  **Spatial/Geometric Smoothness:** Applied to static fields such as Signed Distance Functions (SDF) or gradients. Common techniques include Total Variation (TV) loss on voxel grids and gradient smoothness losses [S1, unofficial].
+2.  **Scene Flow Smoothness:** Applied to dynamic representations to ensure temporal and spatial consistency of motion fields [S2].
+
+For scene flow, the smoothness loss $L_{sm}$ is computed along camera rays. Let $x$ and $x_0$ be neighboring points along a camera ray $r$, and $t$ index the time step. The loss is defined as [S2]:
+
+$$
+L_{sm}(r) = \sum_t \sum_x \exp\left(-2 \frac{|x - x_0|}{\sigma}\right) \left(s_t^0(x, t) - s_t^0(x_0, t)\right)^2
+$$
+
+where $s_t^0(x, t)$ denotes the scene flow value at point $x$ and time $t$, and $\sigma$ is a scaling factor (often implicit or set to 1 if not specified, though the source formula explicitly includes it in the denominator) [S2]. The exponential term $\exp\left(-2 \frac{|x - x_0|}{\sigma}\right)$ acts as a distance-weighted penalty, giving higher weight to closer neighbors [S2].
+
 ## Subtopics
 
-### [Voxurf Smoothness](929-voxurf-smoothness.md)
-The specific implementation in Voxurf, combining 3D Gaussian convolution for the coarse stage with gradient smoothness and SDF TV losses for the fine stage.
+### SDF Total Variation and Gradient Smoothness
+This approach targets static geometry reconstruction. It applies Total Variation (TV) loss directly on the SDF voxel grid and a gradient smoothness prior on the field's gradients [S1, unofficial].
+*   **What sets it apart:** It operates on the implicit geometric representation (SDF) rather than the radiance or flow fields.
+*   **When to choose:** Use when reconstructing static surfaces where sharp edges must be preserved but high-frequency noise is undesirable.
+*   **Link:** See [Voxurf](52-voxurf.md) for implementation details.
+
+### Spatial and Temporal Smoothness Priors
+This approach targets dynamic scene representations, specifically regularizing the scene flow field [S2].
+*   **What sets it apart:** It enforces consistency across both space (neighboring points along rays) and time (consecutive frames), using a distance-weighted squared difference of flow values [S2].
+*   **When to choose:** Use for dynamic scene reconstruction where motion fields are learned and prone to jitter or inconsistency.
+*   **Link:** See [SUDS](52-suds.md) for implementation details.
 
 ## Background
-The concept originates from the need to stabilize neural surface reconstruction, particularly in voxel-based methods like Voxurf [S1, unofficial]. The specific ablation studies regarding the impact of Gaussian kernels and gradient losses were detailed in the supplementary materials of the Voxurf paper [S1, unofficial].
+The concept of smoothness priors in neural rendering has evolved to address the inherent noise in high-frequency neural field optimizations.
+
+*   **Static Geometry:** In voxel-based methods like Voxurf, smoothness priors were introduced to boost reconstruction smoothness. The method employs 3D convolution with a Gaussian kernel during the coarse training stage and post-processing, alongside gradient smoothness loss and SDF TV loss during fine training [S1, unofficial]. Ablation studies showed that removing the Gaussian kernel during coarse training increased the Chamfer Distance (CD) error from 0.72 to 0.74, while removing it in post-processing slightly reduced CD from 0.720 to 0.715 [S1, unofficial].
+*   **Dynamic Scenes:** In scalable urban dynamic scene representations like SUDS, spatial and temporal smoothness priors were adopted from NSFF to regularize scene flow [S2]. This ensures that the predicted motion between frames is physically plausible and spatially coherent [S2].
+
 ## Sources
+
 [S1] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)
+[S2] SUDS: Scalable Urban Dynamic Scenes, https://doi.org/10.1109/cvpr52729.2023.01191, fetched 2026-10-26

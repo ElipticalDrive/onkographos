@@ -3,130 +3,130 @@
 Also called: Sparse OG via VDB, VDB + DDA, VDB + HDDA, VDB OG, VDB-based Occupancy Grid Ray Sampling
 
 ## Overview
-This method replaces the dense binary Occupancy Grid (OG) used in trained NeRF models with a VDB (Volume Data Base) grid to reduce spatial redundancy caused by empty voxels, thereby accelerating ray-sampling without re-training the model [S1, S1, unofficial]. It sets itself apart from sibling methods like Octree-based pruning by fixing the tree depth to save traversal costs and leveraging hierarchical structures for ray-tracing, whereas siblings like PlenVDB use VDB only for memory efficiency without hierarchical ray traversal [S1, S1, unofficial].
+This method replaces the dense binary Occupancy Grid (OG) used in trained NeRF models with a VDB (Volume Data Base) grid to reduce spatial redundancy and accelerate ray-sampling without re-training the model [S1, unofficial]. It differs from standard OG implementations by utilizing a fixed-depth tree structure and hierarchical ray traversal (DDA or HDDA) to skip empty regions more efficiently than linear dense array access [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A trained NeRF model with its associated dense binary Occupancy Grid (OG). Typical grid sizes are 256 KiB for NeRF-Synthetic and 1024 KiB for Mip-NeRF 360 [S1, S1, unofficial].
-*   **Output:** A read-only VDB grid on the GPU and a ray-sampling kernel using DDA or HDDA analyzers [S1, S1, unofficial].
+**Inputs:** A trained NeRF model with an associated dense binary Occupancy Grid (OG).
+**Outputs:** A set of sample points along a ray, ready for MLP evaluation, derived from a VDB-based traversal.
 
 **Data Structures:**
-*   **VDB Grid:** A tree-like data structure that fixes the depth of its tree to save computational cost during traversal [S1, S1, unofficial]. It provides a caching mechanism to accelerate accessing neighboring voxels [S1, S1, unofficial].
-*   **Tiles:** Large occupied or unoccupied regions are managed as tiles, where a tile contains multiple voxels sharing the same values [S1, S1, unofficial].
+*   **VDB Grid:** A tree-like data structure where the tree depth is fixed to save computational cost during traversal [S1, unofficial]. It includes a caching mechanism to accelerate accessing neighboring voxels [S1, unofficial].
+*   **Tiles:** Large occupied or unoccupied regions are managed as tiles, where a tile contains multiple voxels sharing the same values [S1, unofficial].
+*   **NanoVDB:** The GPU-compatible format used to transfer the VDB grid [S1, unofficial].
 
 **Steps:**
-1.  **Conversion:** Convert the dense OG of the trained NeRF model into a VDB grid structure using OpenVDB [S1, S1, unofficial]. This conversion takes approximately 60 msec in the worst case [S1, S1, unofficial].
-2.  **Transfer:** Transfer the VDB grid to the GPU using NanoVDB [S1, S1, unofficial]. The grid is read-only on the GPU [S1, S1, unofficial].
-3.  **Pruning:** Prune redundancies in the VDB grid by managing large occupied or unoccupied regions as tiles [S1, S1, unofficial].
-4.  **Ray Sampling:** Execute ray sampling using either DDA or HDDA analyzers on the VDB grid [S1, S1, unofficial].
-    *   When an occupied voxel or a fully occupied tile is found, sample points along the ray at specified intervals [S1, S1, unofficial].
-    *   Use a constant step size for NeRF-Synthetic dataset [S1, S1, unofficial].
-    *   Use a linearly increasing step size for Mip-NeRF 360 dataset [S1, S1, unofficial].
-    *   Each thread is assigned to each ray [S1, S1, unofficial].
+1.  **Conversion:** Convert the dense OG of the trained NeRF model into a VDB grid structure using OpenVDB [S1, unofficial].
+2.  **Pruning:** Prune redundancies in the VDB grid by merging empty or occupied voxels into tiles [S1, unofficial].
+3.  **Transfer:** Transfer the pruned VDB grid to the GPU using NanoVDB [S1, unofficial]. The grid is read-only on the GPU [S1, unofficial].
+4.  **Ray Sampling:** Execute ray sampling using either Digital Differential Analyzer (DDA) or Hierarchical Digital Differential Analyzer (HDDA) analyzers on the VDB grid [S1, unofficial].
+5.  **Point Collection:** When an occupied voxel or a fully occupied tile is found, sample points along the ray at specified intervals [S1, unofficial].
+
+**Parameters:**
+*   **Step Size:** Constant step size (e.g., 0.05) for NeRF-Synthetic dataset [S1, unofficial]. Linearly increasing step size for Mip-NeRF 360 dataset [S1, unofficial].
+*   **Conversion Time:** Approximately 60 msec in the worst case to convert dense grids to VDB [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for VDB-based Ray Sampling Kernel
-# Assumes VDB grid is loaded on GPU and accessible via NanoVDB interface
-
-def sample_ray_vdb(ray_origin, ray_direction, vdb_grid, step_mode):
+def sample_ray_vdb_dda(ray_origin, ray_direction, vdb_grid, step_size_func, ray_length):
     """
-    Samples a NeRF ray using VDB grid traversal.
-    
-    Args:
-        ray_origin: float3, origin of the ray.
-        ray_direction: float3, normalized direction of the ray.
-        vdb_grid: VDBGrid, read-only VDB structure on GPU.
-        step_mode: str, 'constant' for NeRF-Synthetic, 'linear' for Mip-NeRF 360.
-        
-    Returns:
-        list of (position, color, alpha) tuples for the ray.
+    Samples a NeRF ray using VDB grid traversal with DDA.
+    vdb_grid: NanoVDB grid object on GPU.
+    step_size_func: Function returning step size for current t.
     """
     samples = []
-    t = 0.0  # Distance along ray
-    step_size = 0.0
+    t = 0.0
     
-    # Initialize step size based on mode
-    # Note: Exact initialization values for step_mode are not given in sources [G]
-    if step_mode == 'constant':
-        step_size = 0.05  # Placeholder typical value [G]
-    elif step_mode == 'linear':
-        step_size = 0.01  # Placeholder typical value [G]
-        
-    max_steps = 1000  # Safety limit [G]
+    # Safety limit [G]
+    max_steps = 1000 
     
     for _ in range(max_steps):
-        # Calculate current position
+        if t >= ray_length:
+            break
+            
         pos = ray_origin + ray_direction * t
+        step_size = step_size_func(t)
         
-        # Query VDB grid for occupancy at pos
-        # VDB traversal uses DDA or HDDA analyzers
-        # Returns: status (EMPTY, OCCUPIED, TILE_OCCUPIED, TILE_EMPTY)
-        status = vdb_grid.query(pos)
+        # Query VDB grid for status at current position
+        # Returns: 'EMPTY', 'OCCUPIED', 'TILE_EMPTY', 'TILE_OCCUPIED'
+        # and bounds for tiles [G]
+        status, tile_bounds = vdb_grid.query(pos)
         
         if status == 'EMPTY':
-            # Skip empty space
-            # If using HDDA, this skip is handled efficiently by the analyzer
-            # If using DDA, step forward
             t += step_size
         elif status == 'OCCUPIED':
-            # Sample point
-            color, alpha = sample_nerf_at(pos) # Placeholder for MLP evaluation
-            samples.append((pos, color, alpha))
+            # Evaluate MLP at pos [G]
+            samples.append((pos, 0.0, 0.0))
             t += step_size
-        elif status == 'TILE_OCCUPIED':
-            # Fully occupied tile: sample points within the tile
-            # Determine tile bounds and sample multiple points
-            tile_bounds = vdb_grid.get_tile_bounds()
-            # Sample points within tile bounds along ray
-            # This reduces number of operations compared to voxel-by-voxel [S1, S1, unofficial]
-            while t < tile_bounds.max_t:
-                pos = ray_origin + ray_direction * t
-                color, alpha = sample_nerf_at(pos)
-                samples.append((pos, color, alpha))
-                t += step_size
         elif status == 'TILE_EMPTY':
             # Skip entire tile
             t = tile_bounds.max_t
+        elif status == 'TILE_OCCUPIED':
+            # Traverse inside the tile
+            while t < tile_bounds.max_t and t < ray_length:
+                pos = ray_origin + ray_direction * t
+                # Evaluate MLP at pos [G]
+                samples.append((pos, 0.0, 0.0))
+                t += step_size
         else:
-            # End of ray or out of bounds
             break
             
-        # Update step size for linear mode
-        if step_mode == 'linear':
-            step_size *= 1.1  # Placeholder linear increase factor [G]
+    return samples
+
+def sample_ray_vdb_hdda(ray_origin, ray_direction, vdb_grid, step_size_func, ray_length):
+    """
+    Samples a NeRF ray using VDB grid traversal with HDDA.
+    HDDA efficiently skips merged empty voxels at one operation [S1, unofficial].
+    """
+    samples = []
+    t = 0.0
+    
+    # Safety limit [G]
+    max_steps = 1000 
+    
+    for _ in range(max_steps):
+        if t >= ray_length:
+            break
+            
+        step_size = step_size_func(t)
+        
+        # HDDA analyzer traversal
+        # Returns next t and status
+        next_t, status = vdb_grid.hdda_traverse(t, ray_direction)
+        
+        if status == 'EMPTY':
+            t = next_t
+        elif status == 'OCCUPIED':
+            # Sample at the occupied location
+            pos = ray_origin + ray_direction * t
+            # Evaluate MLP at pos [G]
+            samples.append((pos, 0.0, 0.0))
+            t += step_size
+        elif status == 'TILE_EMPTY':
+            t = next_t
+        elif status == 'TILE_OCCUPIED':
+            # Handle tile occupancy
+            # HDDA may return the tile boundary or specific points
+            # Implementation detail: traverse within tile or sample at tile center
+            # depending on HDDA implementation specifics [G]
+            pos = ray_origin + ray_direction * t
+            # Evaluate MLP at pos [G]
+            samples.append((pos, 0.0, 0.0))
+            t += step_size
+        else:
+            break
             
     return samples
 ```
 
-**Parameters:**
-*   **Conversion Time:** Approximately 60 msec in the worst case [S1, S1, unofficial].
-*   **Step Size:** Constant for NeRF-Synthetic; linearly increasing for Mip-NeRF 360 [S1, S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Floating-Point Errors:** Replacing the ray-sampler with VDB causes floating-point errors, resulting in rendered images that are not entirely identical to the original ray-sampler's output [S1, S1, unofficial].
-*   **Training Updates:** The method is not suitable for frequent updates during training because VDB grids on GPU are read-only; pruning on CPU requires re-transferring the grid to GPU, creating high overhead [S1, S1, unofficial].
-*   **DDA Skip:** DDA skip, skipping leading empty cells in advance, did not work well with DDA, as shown in experimental results [S1, S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** Accelerates rendering by reducing the number of operations to traverse voxels on a ray [S1, S1, unofficial].
-*   **Memory Complexity:** Reduces spatial redundancy by merging blocks of empty voxels [S1, S1, unofficial].
-*   **Measured Performance:**
-    *   On NeRF-Synthetic dataset, the method improves rendering FPS in all cases. The ray-sampler using VDB and HDDA with DDA skip kernel records the fastest FPS, accelerating rendering by 12% on average. In the best case (hotdog scene), it gets faster by 16% [S1, S1, unofficial].
-    *   On Mip-NeRF 360 dataset, the method improves rendering FPS by 4-5% on average [S1, S1, unofficial].
-    *   No scene got significantly worse PSNR than the baseline [S1, S1, unofficial].
-*   **Scaling:** The method is effective for both small (NeRF-Synthetic) and large (Mip-NeRF 360) scenes [S1, S1, unofficial].
-*   **Strengths:** Reduces spatial redundancy, accelerates ray-sampling without re-training, and leverages hierarchical structures for efficient traversal [S1, S1, unofficial].
-*   **Limitations:** Not suitable for frequent updates during training due to read-only GPU VDB grids and high overhead of re-transfer [S1, S1, unofficial]. Floating-point errors may cause slight image differences [S1, S1, unofficial].
-*   **When to Use:** When rendering speed is critical and the NeRF model is already trained, and frequent updates are not required [S1, S1, unofficial].
-*   **When Not to Use:** During training when frequent pruning and updates are necessary [S1, S1, unofficial].
+*   **Performance:** On the NeRF-Synthetic dataset, the method improves rendering FPS in all cases, with VDB + HDDA + DDA skip kernel recording the fastest FPS on average (12% acceleration) [S1, unofficial]. On Mip-NeRF 360, it improves FPS by 4-5% on average [S1, unofficial].
+*   **Memory:** The VDB grid size varies by scene. For NeRF-Synthetic, sizes range from ~316 KiB to ~410 KiB (avg 352.4 KiB) [S1, unofficial]. For Mip-NeRF 360, sizes range from ~1999 KiB to ~2279 KiB (avg 2145.5 KiB) [S1, unofficial].
+*   **Limitations:** Replacing the ray-sampler causes floating-point errors, resulting in rendered images that are not entirely identical to the original ray-sampler's output [S1, unofficial]. The method is not suitable for frequent updates during training because VDB grids on GPU are read-only; pruning on CPU requires re-transferring the grid to GPU, creating high overhead [S1, unofficial]. DDA skip (skipping leading empty cells) did not work well with DDA alone, but HDDA reduced operations effectively [S1, unofficial].
 
 ## Background
-*   **Origin:** The method was proposed in "Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray Traversal" [S1, S1, unofficial].
-*   **History:** It is the first paper to utilize hierarchical digital differential analyzer (HDDA) for ray-tracing with VDB grids in the context of NeRF [S1, S1, unofficial].
-*   **Usage:** It is used to accelerate rendering of trained NeRF models, particularly in scenarios with large empty spaces [S1, S1, unofficial].
+This technique was proposed to address the spatial redundancy in dense binary Occupancy Grids (OG) used in NeRF models like Instant-NGP [S1, unofficial]. While Instant-NGP uses an Octree-like structure, it performs no pruning [S1, unofficial]. PlenVDB adopted VDB for radiance field representation but did not utilize its hierarchical structure for ray-tracing [S1, unofficial]. This work is the first to fully exploit VDB's hierarchical structure for OG ray-tracing using HDDA [S1, unofficial]. It was implemented as a fork of NerfAcc [S1, unofficial].
 
 ## Sources
 [S1] Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray Traversal, https://doi.org/10.48550/arxiv.2404.10272, fetched 2026-10-24 (unofficial)

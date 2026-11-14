@@ -1,0 +1,86 @@
+# Fast Shaded Isosurfaces
+
+
+## Overview
+Fast Shaded Isosurfaces is an efficient algorithm for displaying shaded isosurfaces by exploiting standard rasterization hardware to evaluate a local illumination equation [S1]. It is distinguished from its siblings by its specific two-pass technique that encodes surface normals in RGB texture components and uses the OpenGL color matrix for lighting, restricted to single light sources and monochrome display [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset (scalar field).
+*   **Output:** A shaded 2D image of the isosurface.
+
+**Data Structures:**
+*   **3D Texture:** Stores voxel data.
+    *   **RGB Components:** Store the three components of the voxel gradient vector ($\nabla V$).
+    *   **Alpha Component:** Stores the scalar intensity value of the voxel.
+
+**Steps:**
+1.  **Gradient and Intensity Encoding:** Compute the gradient vector for each voxel. Store the gradient components ($n_x, n_y, n_z$) in the RGB channels of a 3D texture. Store the scalar intensity value in the Alpha channel [S1].
+2.  **First Pass (Isosurface Selection):** Render the 3D texture into the frame buffer. Use the OpenGL alpha-test to discard fragments where the alpha value (intensity) does not match the specified isovalue. This results in a frame buffer containing only the fragments belonging to the isosurface, with their RGB values representing the surface normals [S1].
+3.  **Second Pass (Shading):** Reinsert the resulting frame buffer (from Step 2) into the rasterization pipeline as a texture or color source. Configure the OpenGL color matrix to compute the dot-product between the stored normal (RGB) and the light direction vector [S1]. This applies the local illumination model [S1].
+
+**Formula:**
+The local illumination equation evaluated is:
+$$ I = I_a + I_d \times (\tilde{n} \cdot \tilde{l}) $$
+Where:
+*   $I$ is the final intensity.
+*   $I_a$ is the ambient intensity.
+*   $I_d$ is the diffuse intensity.
+*   $\tilde{n}$ is the normal of the isosurface, which coincides with the volume gradient [S1].
+*   $\tilde{l}$ is the direction of the light [S1].
+
+**Parameters:**
+*   **Isovalue:** The threshold value for surface extraction.
+*   **Light Direction:** Defined by $\tilde{l}$.
+*   **Light Intensities:** $I_a$ and $I_d$.
+
+**Edge Cases and Pitfalls:**
+*   **Single Light Source:** The method is restricted to a single light source [S1].
+*   **Monochrome Display:** The method is restricted to monochrome display only [S1].
+*   **Precision:** The reliance on the color matrix for dot-product computation may introduce precision limitations depending on the hardware's color matrix implementation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Step 1: Prepare 3D Texture
+# Compute gradient for each voxel (gx, gy, gz) and intensity (v)
+texture_3d = create_3d_texture()
+for each voxel (x, y, z):
+    gx, gy, gz = compute_gradient(volume, x, y, z)
+    v = volume[x, y, z]
+    texture_3d.set_rgb(x, y, z, gx, gy, gz)
+    texture_3d.set_alpha(x, y, z, v)
+
+# Step 2: First Pass - Render Isosurface
+frame_buffer = render_to_frame_buffer(texture_3d)
+# Use OpenGL alpha-test to keep only fragments where alpha == isovalue
+# The resulting frame buffer contains normals in RGB
+
+# Step 3: Second Pass - Apply Shading
+# Reinsert frame_buffer into pipeline
+# Configure OpenGL color matrix to compute dot product with light vector l
+# This effectively computes I = Ia + Id * (n . l)
+shaded_image = apply_color_matrix_shading(frame_buffer, light_vector, Ia, Id)
+```
+
+## Subtopics
+
+### Multi-pass shaded isosurfaces
+A fast multi-pass approach to display shaded isosurfaces [S2, unofficial]. This variant is attributed to Westermann and Ertl [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Allows efficient rendering of shaded isosurfaces at interactive frame rate [S1].
+*   **Strengths:** Exploits rasterization hardware efficiently; simple two-pass technique [S1].
+*   **Limitations:** Restricted to a single light source and monochrome display only [S1].
+*   **When to use:** When interactive frame rates are required for shaded isosurfaces on standard PC graphics hardware and single-light monochrome visualization is sufficient [S1].
+*   **When not to use:** When multiple light sources or color shading are required [S1].
+
+## Background
+The method was introduced by Westermann and Ertl [S1]. It was developed to address the performance loss associated with rasterization hardware in earlier volume rendering approaches, leveraging the capabilities of standard PC graphics hardware [S1]. It is cited in the context of efficient algorithms for displaying shaded isosurfaces [S1].
+
+## Sources
+[S1] Interactive Volume Rendering on Standard PC Graphics ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

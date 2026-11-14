@@ -1,0 +1,210 @@
+# Augmented Features (Avg, Var, Color)
+
+Also called: Mean, Variance, and Color Feature Augmentation in Cost Volumes
+
+## Overview
+Augmented Features (Avg, Var, Color) is a method for enhancing volumetric scene representations by enriching the feature space within cost volumes or latent fields with statistical and low-level appearance cues. It solves the problem of ambiguous geometry estimation in multi-view 3D detection and novel view synthesis by providing explicit priors for surface boundaries and texture. It sets itself apart from standard NeRF architectures [Model Architecture Modifications](11313-model-architecture-modifications.md) by explicitly computing and injecting mean, variance, and color aggregates into the optimization loop, rather than relying solely on implicit MLP mappings from positional encodings.
+
+## How it works
+The method augments the standard volumetric representation by introducing three specific feature channels: mean volume, variance volume, and color volume. These features serve as geometry priors and appearance cues for the neural network.
+
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images, camera poses, and the base volumetric representation (e.g., a cost volume or latent feature grid).
+*   **Outputs:** Enhanced feature vectors containing mean, variance, and color information, which are fed into the subsequent MLP or detection head.
+
+**Data Structures:**
+The augmented features are typically stored as 3D volumes or feature grids aligned with the spatial domain of the scene.
+*   **Mean Volume:** A 3D tensor storing the average appearance or feature value for each voxel/cell.
+*   **Variance Volume:** A 3D tensor storing the variance of appearance or feature values across views or samples for each voxel/cell.
+*   **Color Volume:** A 3D tensor storing low-level color information (e.g., RGB) aggregated for each voxel/cell.
+
+**Numbered Steps:**
+1.  **Feature Aggregation:** For each voxel or spatial location in the volume, compute the mean ($\mu$) and variance ($\sigma^2$) of the input features (e.g., from multi-view projections or samples).
+2.  **Color Aggregation:** Compute the mean color value for each voxel/cell from the input images.
+3.  **Feature Concatenation:** Concatenate the mean, variance, and color features to the existing latent feature vector $\mathbf{h}$ or cost volume representation.
+4.  **Network Input:** Pass the augmented feature vector into the neural network (MLP or detection head) to predict density, opacity, or semantic labels.
+
+**Formulas:**
+Let $F_i$ be the feature vector at voxel $i$ from different views or samples.
+*   Mean: $\mu_i = \frac{1}{N} \sum_{j=1}^{N} F_{i,j}$
+*   Variance: $\sigma^2_i = \frac{1}{N} \sum_{j=1}^{N} (F_{i,j} - \mu_i)^2$
+*   Color: $C_i = \text{Mean}(Color_{i,j})$
+
+The augmented feature vector $\mathbf{h}'_i$ is:
+$$ \mathbf{h}'_i = [\mathbf{h}_i, \mu_i, \sigma_i, C_i] $$
+where $\mathbf{h}_i$ is the original latent feature.
+
+**Parameters:**
+*   **Number of views/samples ($N$):** Not given in the sources.
+*   **Feature dimension:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Variance computation can be sensitive to numerical precision, especially for small variances. [G] Use Welford's online algorithm or double precision for variance calculation to avoid numerical instability.
+*   **Boundaries:** Voxels at the boundary of the scene or outside the camera frustum may have insufficient samples for mean/variance calculation. [G] Handle empty or sparse voxels by initializing with zeros or a small epsilon value.
+*   **Degenerate Input:** If all views have identical features for a voxel, variance will be zero, potentially providing no gradient signal. [G] Add a small constant to the variance to ensure non-zero gradients.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_augmented_features(features, colors, num_views):
+    """
+    Computes mean, variance, and color features for each voxel.
+    
+    Args:
+        features: Tensor of shape (num_voxels, num_views, feature_dim)
+        colors: Tensor of shape (num_voxels, num_views, 3)
+        num_views: Integer, number of views
+        
+    Returns:
+        augmented_features: Tensor of shape (num_voxels, feature_dim + 1 + 1 + 3)
+    """
+    # Compute mean of features
+    mean_features = torch.mean(features, dim=1)  # Shape: (num_voxels, feature_dim)
+    
+    # Compute variance of features
+    # Variance = E[X^2] - (E[X])^2
+    mean_sq_features = torch.mean(features ** 2, dim=1)
+    variance_features = mean_sq_features - mean_features ** 2
+    # Ensure non-negative variance due to numerical errors
+    variance_features = torch.clamp(variance_features, min=0.0)
+    # Use standard deviation for scale invariance? The source says "variance features".
+    # We will use variance directly as per source description.
+    
+    # Compute mean color
+    mean_color = torch.mean(colors, dim=1)  # Shape: (num_voxels, 3)
+    
+    # Concatenate features
+    # Note: The source mentions "variance features" and "color volume".
+    # It is unclear if variance is std or var. We use variance as stated.
+    # Also, the source mentions "mean volume and color volume" augmenting "variance in the cost volume".
+    # This implies the base might be variance, or all three are added.
+    # We concatenate all three to the original features.
+    
+    augmented_features = torch.cat([mean_features, variance_features.unsqueeze(-1), mean_color], dim=-1)
+    
+    return augmented_features
+```
+
+## Subtopics
+
+### DoF-NeRF
+Focuses on depth-of-field effects. [DoF-NeRF](9432-dof-nerf.md)
+
+### NeRF-VPT
+Uses view-point transformers. [NeRF-VPT](11770-nerf-vpt.md)
+
+### MixRT
+Combines ray tracing and neural rendering. [MixRT](12401-mixrt.md)
+
+### Activation Feature Density Approximation
+Uses activation features for density. [Activation Feature Density Approximation](12492-activation-feature-density-approximation.md)
+
+### Signed Distance Function (SDF) Representations
+Uses SDFs for geometry. [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md)
+
+### SDF-based Neural Fields
+Neural fields based on SDFs. [SDF-based Neural Fields](12947-sdf-based-neural-fields.md)
+
+### Volume-Augmented NeRF
+Augments NeRF with volume information. [Volume-Augmented NeRF](12973-volume-augmented-nerf.md)
+
+### Neural-PIL Decomposition Architecture
+Decomposes appearance and illumination. [Neural-PIL Decomposition Architecture](12975-neural-pil-decomposition-architecture.md)
+
+### Feature Fields
+Uses feature fields for representation. [Feature Fields](12995-feature-fields.md)
+
+### SAID-NeRF
+Semantic-aware implicit neural representation. [SAID-NeRF](13619-said-nerf.md)
+
+### Differentiable Primitive Assembly
+Assembles primitives differently. [Differentiable Primitive Assembly](13657-differentiable-primitive-assembly.md)
+
+### MINE
+Multi-scale implicit neural representation. [MINE](13661-mine.md)
+
+### IE-NeRF
+Implicit encoding NeRF. [IE-NeRF](13737-ie-nerf.md)
+
+### Voxel and Sparse Grid Representations
+Uses voxel grids. [Voxel and Sparse Grid Representations](13738-voxel-and-sparse-grid-representations.md)
+
+### Aleth-NeRF
+Aleth-NeRF method. [Aleth-NeRF](13764-aleth-nerf.md)
+
+### Unified Volumetric Avatar (UVA)
+For avatars. [Unified Volumetric Avatar (UVA)](13784-unified-volumetric-avatar-uva.md)
+
+### Gear-NeRF
+Gear-NeRF method. [Gear-NeRF](13848-gear-nerf.md)
+
+### Transformer and Vision Model Integration
+Integrates transformers. [Transformer and Vision Model Integration](13911-transformer-and-vision-model-integration.md)
+
+### Human and Specific Subject Modeling
+For humans. [Human and Specific Subject Modeling](13997-human-and-specific-subject-modeling.md)
+
+### OPONeRF
+OPONeRF method. [OPONeRF](14014-oponerf.md)
+
+### Mixer-NeRF
+Mixer-NeRF method. [Mixer-NeRF](14073-mixer-nerf.md)
+
+### Lightning NeRF
+Lightning NeRF method. [Lightning NeRF](14134-lightning-nerf.md)
+
+### SCALAR-NeRF
+SCALAR-NeRF method. [SCALAR-NeRF](14267-scalar-nerf.md)
+
+### Viewing Direction Gaussian Splatting
+Gaussian splatting with view direction. [Viewing Direction Gaussian Splatting](14273-viewing-direction-gaussian-splatting.md)
+
+### Sparse View and Few-Shot Optimization
+For sparse views. [Sparse View and Few-Shot Optimization](14428-sparse-view-and-few-shot-optimization.md)
+
+### Mixture-of-Experts and Modular Architectures
+MoE architectures. [Mixture-of-Experts and Modular Architectures](14429-mixture-of-experts-and-modular-architectures.md)
+
+### Uncertainty and Reliability
+Uncertainty estimation. [Uncertainty and Reliability](14487-uncertainty-and-reliability.md)
+
+### Object Decomposition and Composition
+Decomposes objects. [Object Decomposition and Composition](14518-object-decomposition-and-composition.md)
+
+### Lighting and Appearance Models
+Lighting models. [Lighting and Appearance Models](14522-lighting-and-appearance-models.md)
+
+### Optimization and Training Procedures
+Training procedures. [Optimization and Training Procedures](14565-optimization-and-training-procedures.md)
+
+### Image Enhancement and Restoration Methods
+Image enhancement. [Image Enhancement and Restoration Methods](14566-image-enhancement-and-restoration-methods.md)
+
+### Modular, Hierarchical, and Latent Architectures
+Modular architectures. [Modular, Hierarchical, and Latent Architectures](14567-modular-hierarchical-and-latent-architectures.md)
+
+### NeRF-W
+NeRF-W method. [NeRF-W](14630-nerf-w.md)
+
+### Generalizable Implicit Reconstruction with SRDF
+SRDF method. [Generalizable Implicit Reconstruction with SRDF](14760-generalizable-implicit-reconstruction-with-srdf.md)
+
+### TriDF
+TriDF method. [TriDF](14761-tridf.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method achieves 50.1 mAP@.25 and 50.1 mAP@.50 when using Avg+Var+Color features [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Variance features provide good geometry priors, improving 3D detection performance [S1]. Color information also provides good geometry cues [S1].
+*   **Limitations:** The ablation study shows that adding variance to average features alone reduces performance from 50.1 to 49.7 mAP@.25, and adding color further reduces it to 49.0 mAP@.25, contradicting the text's claim of improvement over "only average features" if "Avg" is the baseline. The text claims variance improves performance by over 0.7 mAP@.25 compared to using only average features, but Table 7 shows a decrease. This discrepancy is noted [S1].
+*   **When to use:** When geometry priors from multi-view consistency are needed for 3D detection or novel view synthesis [S1].
+*   **When not:** When computational resources are limited and the overhead of computing variance and color volumes is prohibitive.
+
+## Background
+The method was introduced in the paper "NeRF-Det: Learning Geometry-Aware Volumetric Representation for Multi-View 3D Object Detection" [S1]. It builds on the idea of using NeRF for scene geometry estimation and augments it with statistical features from cost volumes.
+
+## Sources
+[S1] NeRF-Det: Learning Geometry-Aware Volumetric Representation for Multi-View 3D Object Detection, https://doi.org/10.1109/iccv51070.2023.02131, fetched 2026-10-30

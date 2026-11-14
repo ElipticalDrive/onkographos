@@ -3,17 +3,17 @@
 Also called: Analytical cubic solution, Isosurface Intersection via Cubic Polynomial
 
 ## Overview
-Trilinear Isosurface Intersection computes the exact intersection point between a ray and an isosurface defined by a threshold value within a single hexahedral voxel of a scalar grid [S1, S3, S5]. It solves the problem of finding the precise surface location without the approximation errors of linear interpolation or the iterative convergence costs of ray marching [S3][S4, unofficial]. Unlike [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) which relies on iterative subdivision, or [Neubauer Iso-surface Ray Casting](7024-neubauer-iso-surface-ray-casting.md) which uses iterative root-finding, this method formulates the intersection as a cubic polynomial derived from trilinear interpolation and solves it analytically or via robust numerical methods [S3, S5]. It builds on [Ray Tracing and Ray Intersection Methods](5617-ray-tracing-and-ray-intersection-methods.md) by providing the specific algebraic mechanism for hexahedral cells.
+Trilinear Isosurface Intersection computes the intersection point between a ray and an isosurface defined by a threshold value within a single hexahedral voxel of a scalar grid [S1, S3, S5]. It solves the problem of finding the precise surface location by formulating the intersection as a cubic polynomial derived from trilinear interpolation, which is then solved analytically or via robust numerical methods [S3, S5]. This method builds on [Ray Tracing and Ray Intersection Methods](5617-ray-tracing-and-ray-intersection-methods.md) by providing the specific algebraic mechanism for hexahedral cells [S3, S5].
 
 ## How it works
 **Inputs:**
-*   Ray origin $\mathbf{O}$ and direction $\mathbf{D}$ (normalized or unnormalized, but consistent with $t$).
-*   Voxel corner scalar values $v_{ijk}$ for $i,j,k \in \{0,1\}$, where $v_{000}$ is the value at the voxel minimum corner and $v_{111}$ at the maximum corner.
-*   Isovalue $I$ (threshold).
+*   Ray origin $\mathbf{O}$ and direction $\mathbf{D}$ [S4, unofficial].
+*   Voxel corner scalar values $v_{ijk}$ for $i,j,k \in \{0,1\}$ [S3, S5].
+*   Isovalue $I$ (threshold) [S1].
 
 **Outputs:**
-*   Intersection distance $t$ (if an intersection exists within the voxel bounds).
-*   Intersection point $\mathbf{P} = \mathbf{O} + t\mathbf{D}$.
+*   Intersection distance $t$ (if an intersection exists within the voxel bounds) [S3, S5].
+*   Intersection point $\mathbf{P} = \mathbf{O} + t\mathbf{D}$ [S5].
 
 **Data Structures:**
 The method operates on the eight scalar values associated with the voxel corners. No additional geometric data structures (like normals or Hermite data) are required for the intersection calculation itself [S6].
@@ -26,10 +26,10 @@ The method operates on the eight scalar values associated with the voxel corners
     Define the trilinear interpolant $f(u, v, w)$ over the parametric domain $(u, v, w) \in [0, 1]^3$. The value at any point is:
     $$ f(u, v, w) = \sum_{i=0}^1 \sum_{j=0}^1 \sum_{k=0}^1 (1 - U_i)(1 - V_j)(1 - W_k) v_{ijk} $$
     where $U_0 = 1-u, U_1 = u$, $V_0 = 1-v, V_1 = v$, $W_0 = 1-w, W_1 = w$ [S6].
-    The isosurface is defined by $f(u, v, w) = I$.
+    The isosurface is defined by $f(u, v, w) = I$ [S6].
 
 3.  **Substitute Ray Parametrization:**
-    The ray in parametric voxel coordinates is $\mathbf{r}(t) = \mathbf{V}_{start} + t(\mathbf{V}_{end} - \mathbf{V}_{start})$. However, for a general ray passing through the voxel, we map the ray $\mathbf{R}(t) = \mathbf{O} + t\mathbf{D}$ into the voxel's local coordinate system. Let the voxel span from $\mathbf{C}_{min}$ to $\mathbf{C}_{max}$. The parametric coordinates $(u(t), v(t), w(t))$ are linear functions of $t$:
+    For a general ray passing through the voxel, map the ray $\mathbf{R}(t) = \mathbf{O} + t\mathbf{D}$ into the voxel's local coordinate system. Let the voxel span from $\mathbf{C}_{min}$ to $\mathbf{C}_{max}$. The parametric coordinates $(u(t), v(t), w(t))$ are linear functions of $t$:
     $$ u(t) = \frac{O_x + t D_x - C_{min,x}}{C_{max,x} - C_{min,x}}, \quad v(t) = \frac{O_y + t D_y - C_{min,y}}{C_{max,y} - C_{min,y}}, \quad w(t) = \frac{O_z + t D_z - C_{min,z}}{C_{max,z} - C_{min,z}} $$
     Substituting these linear expressions into the trilinear equation $f(u(t), v(t), w(t)) - I = 0$ yields a cubic polynomial in $t$:
     $$ G_3 t^3 + G_2 t^2 + G_1 t + G_0 = 0 $$
@@ -53,19 +53,25 @@ The method operates on the eight scalar values associated with the voxel corners
         *   If $y_N \neq 0$: One distinct real root and two equal real roots.
     *   If $D_3 < 0$: Three distinct real roots.
 
-    For the quadratic case ($G_3=0, G_2 \neq 0$), compute $D_2 = G_1^2 - 4G_2G_0$. If $D_2 < 0$, no real roots.
+    For the quadratic case ($G_3=0, G_2 \neq 0$), compute $D_2 = G_1^2 - 4G_2G_0$. If $D_2 < 0$, no real roots [S6].
 
 5.  **Select Valid Root:**
-    Filter roots $t$ such that $t > 0$ (assuming forward ray) and the intersection point lies within the voxel bounds (if using local parametric $t \in [0,1]$ for cell diagonals, or global $t$ mapped to voxel entry/exit). Select the smallest positive $t$ as the first intersection [S3, S5].
+    Filter roots $t$ such that $t > 0$ (assuming forward ray) and the intersection point lies within the voxel bounds. Select the smallest positive $t$ as the first intersection [S3, S5].
 
 6.  **Compute Intersection Point:**
-    Evaluate $\mathbf{P} = \mathbf{O} + t\mathbf{D}$.
+    Evaluate $\mathbf{P} = \mathbf{O} + t\mathbf{D}$ [S5].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def cbrt(x):
+    """Compute the real cube root of x."""
+    return math.copysign(abs(x)**(1.0/3.0), x)
+
 def trilinear_isosurface_intersection(O, D, voxel_min, voxel_max, corner_values, isovalue):
     """
     O: Ray origin (vec3)
@@ -83,17 +89,12 @@ def trilinear_isosurface_intersection(O, D, voxel_min, voxel_max, corner_values,
     if isovalue < v_min or isovalue > v_max:
         return None
 
-    # 2. Compute voxel dimensions
+    # 2. Compute voxel dimensions and ray parametric derivatives
     dx = voxel_max.x - voxel_min.x
     dy = voxel_max.y - voxel_min.y
     dz = voxel_max.z - voxel_min.z
     
-    # 3. Compute coefficients G3, G2, G1, G0
-    # The trilinear function is f(u,v,w) = sum( (1-Ui)(1-Vj)(1-Wk) * v_ijk )
-    # u(t) = (Ox + t*Dx - vmin.x) / dx
-    # Let u(t) = u0 + t*du, where u0 = (Ox - vmin.x)/dx, du = Dx/dx
-    # Similarly for v(t) and w(t)
-    
+    # u(t) = u0 + t*du, v(t) = v0 + t*dv, w(t) = w0 + t*dw
     u0 = (O.x - voxel_min.x) / dx
     du = D.x / dx
     v0 = (O.y - voxel_min.y) / dy
@@ -101,31 +102,8 @@ def trilinear_isosurface_intersection(O, D, voxel_min, voxel_max, corner_values,
     w0 = (O.z - voxel_min.z) / dz
     dw = D.z / dz
     
-    # Expand f(u,v,w) - I = 0
-    # f(u,v,w) = v000*(1-u)(1-v)(1-w) + v001*(1-u)(1-v)w + ...
-    # This expansion results in a cubic in t.
-    # We can compute coefficients by evaluating the polynomial at specific points or symbolic expansion.
-    # Here we use the property that f(u,v,w) is linear in each variable.
-    
-    # Coefficient calculation based on corner values and ray parameters
-    # G3 comes from the u*v*w term
-    # G2 comes from u*v, u*w, v*w terms
-    # G1 comes from u, v, w terms
-    # G0 is the constant term (at t=0)
-    
-    # Using the explicit expansion from trilinear interpolation:
+    # 3. Compute trilinear coefficients c0..c7
     # f(u,v,w) = c0 + c1*u + c2*v + c3*w + c4*u*v + c5*u*w + c6*v*w + c7*u*v*w
-    # where coefficients c are derived from v_ijk.
-    
-    # c0 = v000
-    # c1 = v100 - v000
-    # c2 = v010 - v000
-    # c3 = v001 - v000
-    # c4 = v000 - v100 - v010 + v110
-    # c5 = v000 - v100 - v001 + v101
-    # c6 = v000 - v010 - v001 + v011
-    # c7 = v000 - v100 - v010 - v001 + v110 + v101 + v011 - v111
-    
     c0 = corner_values[0]
     c1 = corner_values[4] - corner_values[0]
     c2 = corner_values[2] - corner_values[0]
@@ -135,90 +113,58 @@ def trilinear_isosurface_intersection(O, D, voxel_min, voxel_max, corner_values,
     c6 = corner_values[0] - corner_values[2] - corner_values[1] + corner_values[3]
     c7 = corner_values[0] - corner_values[4] - corner_values[2] - corner_values[1] + corner_values[6] + corner_values[5] + corner_values[3] - corner_values[7]
     
-    # Substitute u = u0 + t*du, v = v0 + t*dv, w = w0 + t*dw
-    # f(t) = c0 + c1(u0+t*du) + c2(v0+t*dv) + c3(w0+t*dw) 
-    #      + c4(u0+t*du)(v0+t*dv) + c5(u0+t*du)(w0+t*dw) + c6(v0+t*dv)(w0+t*dw)
-    #      + c7(u0+t*du)(v0+t*dv)(w0+t*dw) - isovalue = 0
-    
-    # Collect coefficients for t^3, t^2, t^1, t^0
-    
-    # t^3 term: c7 * du * dv * dw
+    # 4. Compute cubic coefficients G3, G2, G1, G0 for f(u(t),v(t),w(t)) - isovalue = 0
     G3 = c7 * du * dv * dw
-    
-    # t^2 term:
-    # From c4: c4 * (du*v0 + dv*u0) -> no, c4*(u0+t*du)(v0+t*dv) = c4*(u0*v0 + t*(u0*dv + v0*du) + t^2*du*dv)
-    # So t^2 from c4 is c4*du*dv
-    # From c5: c5*du*dw
-    # From c6: c6*dv*dw
-    # From c7: c7 * (du*dv*w0 + du*dw*v0 + dv*dw*u0)
     G2 = (c4 * du * dv) + (c5 * du * dw) + (c6 * dv * dw) + \
          c7 * (du * dv * w0 + du * dw * v0 + dv * dw * u0)
-         
-    # t^1 term:
-    # From c1: c1*du
-    # From c2: c2*dv
-    # From c3: c3*dw
-    # From c4: c4*(u0*dv + v0*du)
-    # From c5: c5*(u0*dw + w0*du)
-    # From c6: c6*(v0*dw + w0*dv)
-    # From c7: c7*(du*dv*w0 + du*dw*v0 + dv*dw*u0) -> wait, this was t^2 part of c7 expansion?
-    # c7*(u0+t*du)(v0+t*dv)(w0+t*dw)
-    # = c7 * [ u0*v0*w0 + t*(u0*v0*dw + u0*w0*dv + v0*w0*du) + t^2*(u0*dv*dw + v0*du*dw + w0*du*dv) + t^3*du*dv*dw ]
-    # So t^1 from c7 is c7*(u0*v0*dw + u0*w0*dv + v0*w0*du)
-    
     G1 = (c1 * du) + (c2 * dv) + (c3 * dw) + \
          (c4 * (u0 * dv + v0 * du)) + \
          (c5 * (u0 * dw + w0 * du)) + \
          (c6 * (v0 * dw + w0 * dv)) + \
          c7 * (u0 * v0 * dw + u0 * w0 * dv + v0 * w0 * du)
-         
-    # t^0 term (constant):
-    # c0 + c1*u0 + c2*v0 + c3*w0 + c4*u0*v0 + c5*u0*w0 + c6*v0*w0 + c7*u0*v0*w0 - isovalue
     G0 = c0 + (c1 * u0) + (c2 * v0) + (c3 * w0) + \
          (c4 * u0 * v0) + (c5 * u0 * w0) + (c6 * v0 * w0) + \
          (c7 * u0 * v0 * w0) - isovalue
 
-    # 4. Solve Cubic
+    # 5. Solve Cubic
     roots = []
-    if abs(G3) < 1e-9:
+    EPS = 1e-9
+    if abs(G3) < EPS:
         # Quadratic or lower
-        if abs(G2) < 1e-9:
+        if abs(G2) < EPS:
             # Linear G1*t + G0 = 0
-            if abs(G1) > 1e-9:
+            if abs(G1) > EPS:
                 roots.append(-G0 / G1)
         else:
             # Quadratic G2*t^2 + G1*t + G0 = 0
             D2 = G1*G1 - 4*G2*G0
             if D2 >= 0:
-                sqrt_D2 = sqrt(D2)
+                sqrt_D2 = math.sqrt(D2)
                 roots.append((-G1 + sqrt_D2) / (2*G2))
                 roots.append((-G1 - sqrt_D2) / (2*G2))
     else:
         # Cubic G3*t^3 + G2*t^2 + G1*t + G0 = 0
-        # Normalize
+        # Normalize to t^3 + a*t^2 + b*t + c = 0
         a = G2 / G3
         b = G1 / G3
         c = G0 / G3
         
         # Cardano's method
-        # p = b - a^2/3
-        # q = 2*a^3/27 - a*b/3 + c
         p = b - (a * a) / 3.0
         q = (2 * a * a * a) / 27.0 - (a * b) / 3.0 + c
         
-        # Discriminant
         delta = (q*q)/4.0 + (p*p*p)/27.0
         
-        if delta > 0:
+        if delta > EPS:
             # One real root
-            sqrt_delta = sqrt(delta)
+            sqrt_delta = math.sqrt(delta)
             u = cbrt(-q/2.0 + sqrt_delta)
             v = cbrt(-q/2.0 - sqrt_delta)
             t = u + v - a/3.0
             roots.append(t)
-        elif delta == 0:
-            # Multiple roots
-            if q == 0:
+        elif delta > -EPS:
+            # Multiple roots (delta approx 0)
+            if abs(q) < EPS:
                 t = -a/3.0
                 roots.append(t) # Triple root
             else:
@@ -230,18 +176,21 @@ def trilinear_isosurface_intersection(O, D, voxel_min, voxel_max, corner_values,
         else:
             # 3 distinct real roots (delta < 0)
             # Use trigonometric solution
-            r = sqrt(-p*p*p/27.0)
-            theta = acos(-q / (2*r))
+            r = math.sqrt(-p*p*p/27.0)
+            cos_theta = -q / (2*r)
+            # Clamp to [-1, 1] to handle floating point errors
+            cos_theta = max(-1.0, min(1.0, cos_theta))
+            theta = math.acos(cos_theta)
             m = 2 * cbrt(r)
-            t1 = m * cos(theta/3.0) - a/3.0
-            t2 = m * cos((theta + 2*pi)/3.0) - a/3.0
-            t3 = m * cos((theta + 4*pi)/3.0) - a/3.0
+            t1 = m * math.cos(theta/3.0) - a/3.0
+            t2 = m * math.cos((theta + 2*math.pi)/3.0) - a/3.0
+            t3 = m * math.cos((theta + 4*math.pi)/3.0) - a/3.0
             roots.append(t1)
             roots.append(t2)
             roots.append(t3)
 
-    # 5. Filter and return smallest positive t
-    valid_roots = [t for t in roots if t > 1e-6] # Epsilon for precision
+    # 6. Filter and return smallest positive t
+    valid_roots = [t for t in roots if t > 1e-6] 
     
     if not valid_roots:
         return None
@@ -261,7 +210,7 @@ def trilinear_isosurface_intersection(O, D, voxel_min, voxel_max, corner_values,
 ## Subtopics
 
 ### [Analytic Voxel Intersection](9669-analytic-voxel-intersection.md)
-Analytic Voxel Intersection is a method for computing the intersection between a ray and the isosurface defined by the zero level set of a signed distance function (SDF) within a single voxel of an SDF grid. It solves the cubic polynomial derived from trilinear interpolation of the corner signed distances to find the exact intersection distance $t$. Unlike sphere tracing, which requires iterative stepping that slows down near the surface, this method provides a direct solution, avoiding iterative step reduction and offering superior performance for silhouette and secondary rays. It builds on [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) by providing the specific algebraic formulation and solution strategies for the resulting cubic equation.
+Analytic Voxel Intersection is a method for computing the intersection between a ray and the isosurface defined by the zero level set of a signed distance function (SDF) within a single voxel of an SDF grid. It solves the cubic polynomial derived from trilinear interpolation of the corner signed distances to find the exact intersection distance $t$. Unlike sphere tracing, which requires iterative stepping that slows down near the surface, this method provides a direct solution, avoiding iterative step reduction and offering superior performance for silhouette and secondary rays.
 
 ### [Monotone Path Construction in Trilinear Cells](11651-monotone-path-construction-in-trilinear-cells.md)
 Monotone Path Construction is an algorithm used to determine the start (low) and end (high) vertices of a monotone path passing through a specific sample point within a trilinear cell. It solves the problem of identifying the relevant arcs in a contour tree by mapping a continuous sample position to discrete mesh vertices, enabling the traversal of the contour tree's branch decomposition. It differs from analytic methods by relying on a deterministic, axis-parallel greedy descent/ascent strategy rather than solving polynomial roots for the exact intersection.
@@ -275,14 +224,14 @@ A rendering technique that uses fast trilinear interpolation for ray intersectio
 ## Operating characteristics
 *   **Time Complexity:** $O(1)$ per voxel intersection, as it involves a fixed number of arithmetic operations to compute coefficients and solve a cubic equation.
 *   **Memory Complexity:** $O(1)$ auxiliary memory per intersection.
-*   **Performance:** Analytical solutions are generally faster than iterative methods like Neubauer's root finder or binary search, though they may be more complex to implement robustly [S3, S5]. GPU implementations can optimize coefficient extraction by fetching as few as 4 data samples per voxel [S2, unofficial].
-*   **Strengths:** Exact intersection points; no convergence issues; suitable for secondary rays (reflection, refraction) where precision is critical [S1][S4, unofficial].
+*   **Performance:** Iterative methods like Neubauer's root finder are slightly faster than analytical solvers and yield single-precision, numerically stable results [S3, S5]. GPU implementations can optimize coefficient extraction by fetching as few as 4 data samples per voxel [S2, unofficial].
+*   **Strengths:** Computes intersection points directly from the cubic polynomial; avoids iterative step reduction near surfaces; suitable for secondary rays where precision is critical [S1][S4, unofficial].
 *   **Limitations:** Cubic solver complexity; potential numerical instability in single precision if not handled carefully; only applicable to hexahedral/trilinear grids [S3, S6].
 *   **When to use:** When exact surface location is required, or when performance of iterative marching is insufficient.
 *   **When not to use:** For non-hexahedral grids, or when approximate intersection is sufficient and simpler linear traversal is preferred.
 
 ## Background
-Trilinear Isosurface Intersection originates from the need to accurately render isosurfaces in volume data using ray tracing techniques. It was formalized in the context of interactive isosurface ray tracing of large octree volumes [S3, S5] and implicit surface ray tracing [S7, unofficial]. The method leverages the fact that trilinear interpolation within a voxel results in a cubic polynomial along any ray passing through it. Early implementations used analytical cubic solvers (Schwarze's cubic solver) [S3, S5], while later optimizations explored iterative root finders (Neubauer) for stability and speed [S3, S5]. The method is also used in dual isosurfacing to compute interior points without Hermite data [S6].
+Trilinear Isosurface Intersection originates from the need to accurately render isosurfaces in volume data using ray tracing techniques [S3, S5]. It leverages the fact that trilinear interpolation within a voxel results in a cubic polynomial along any ray passing through it [S3, S5]. Early implementations used analytical cubic solvers (Schwarze's cubic solver) [S3, S5], while later optimizations explored iterative root finders (Neubauer) for stability and speed [S3, S5]. The method is also used in dual isosurfacing to compute interior points without requiring Hermite data, contrasting with dual contouring which does require it [S6].
 
 ## Sources
 [S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24

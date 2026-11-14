@@ -1,0 +1,99 @@
+# NeRF-Det Training Objectives
+Also called: Joint NeRF-Detection Training Loss, Loss Functions for NeRF Branch, Photo-metric and Depth Loss for NeRF-Det
+
+## Overview
+NeRF-Det training objectives jointly optimize a 3D object detection branch and a Neural Radiance Field (NeRF) branch end-to-end, using the NeRF branch to learn a geometry-aware volumetric representation that mitigates the ambiguity inherent in explicit depth or cost-volume methods [S1]. Unlike sibling methods that rely on per-scene optimization or separate pre-training stages, this approach trains a generalizable network where the NeRF branch provides multi-view consistency cues to the detector without requiring per-scene tuning at inference time [S1].
+
+## How it works
+The method jointly trains two branches: a detection branch (following ImVoxelNet) and a NeRF branch. The NeRF branch models scene geometry via an opacity field, supervised by photometric and optional depth losses, while the detection branch is supervised by 3D bounding box regression losses [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view RGB images, camera intrinsics/extrinsics, and optionally ground-truth depth maps $D_{gt}$ and 3D bounding boxes.
+*   **Outputs:** Detection predictions (categories, locations, centerness) and rendered RGB colors $\hat{C}(r)$ and expected depths $D(r)$ for rays $r$ passing through the scene [S1].
+
+**Data Structures:**
+*   **Detection Head:** Uses 27 location candidates per object and three convolutional layers to predict categories, locations, and centerness [S1].
+*   **NeRF Branch:** A volumetric representation learning an opacity field. Features are scattered along rays rather than fixed voxel cells, allowing for continuous geometry modeling [S1].
+
+**Formulas:**
+The total loss $L$ is a weighted sum of detection losses and NeRF supervision losses [S1]:
+
+$$ L = L_{cls} + L_{cntr} + L_{loc} + L_c + L_d $$
+
+Where:
+*   $L_{cls}$: Focal loss for classification [S1].
+*   $L_{cntr}$: Centerness loss [S1].
+*   $L_{loc}$: Localization loss [S1].
+*   $L_c$: Photometric loss, defined as the squared $L_2$ norm between the rendered color $\hat{C}(r)$ and the ground-truth color $\hat{C}_{gt}(r)$:
+    $$ L_c = ||\hat{C}(r) - \hat{C}_{gt}(r)||^2 $$
+*   $L_d$: Depth supervision loss (optional), defined as the $L_1$ norm between the expected depth $D(r)$ and ground-truth depth $D_{gt}(r)$:
+    $$ L_d = ||D(r) - D_{gt}(r)|| $$
+    Here, $D(r)$ is computed via the standard volume rendering integration equation (referred to as Eq. 5 in the source) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_nerf_det_loss(predictions, ground_truth, use_depth_supervision=False):
+    """
+    Computes the joint loss for NeRF-Det.
+    
+    Args:
+        predictions: Dict containing detection outputs (cls, loc, cntr) 
+                     and NeRF outputs (rendered_color, expected_depth).
+        ground_truth: Dict containing 3D bounding boxes, RGB images, 
+                      and optionally depth maps.
+        use_depth_supervision: Boolean flag indicating if depth ground truth is available.
+        
+    Returns:
+        Total scalar loss.
+    """
+    # 1. Detection Losses (following ImVoxelNet)
+    # L_cls: Focal loss for classification
+    l_cls = focal_loss(predictions['cls_logits'], ground_truth['labels'])
+    
+    # L_cntr: Centerness loss
+    l_cntr = centerness_loss(predictions['centerness'], ground_truth['centerness_targets'])
+    
+    # L_loc: Localization loss (e.g., L1 or GIoU)
+    l_loc = localization_loss(predictions['boxes'], ground_truth['boxes'])
+    
+    # 2. NeRF Branch Losses
+    # L_c: Photometric loss
+    # Rendered color C_hat(r) vs Ground truth color C_gt(r)
+    l_c = squared_l2_norm(predictions['rendered_color'] - ground_truth['rgb_images'])
+    
+    # L_d: Depth supervision loss (optional)
+    l_d = 0.0
+    if use_depth_supervision:
+        # D(r) is computed via volume rendering integration (Eq. 5 in source)
+        # Expected depth vs Ground truth depth D_gt(r)
+        l_d = l1_norm(predictions['expected_depth'] - ground_truth['depth_maps'])
+        
+    # 3. Final Loss
+    total_loss = l_cls + l_cntr + l_loc + l_c + l_d
+    
+    return total_loss
+```
+
+**Parameters and Edge Cases:**
+*   **Depth Supervision:** Optional during training but not required at inference [S1].
+*   **Generalization:** The network is trained to be generalizable to new, unseen scenes without per-scene optimization [S1].
+*   **Pitfalls:** Removing both photometric and depth losses causes performance to degrade to that of a cost-volume based method, dropping by 1.2 mAP@.25 and 0.5 mAP@.50 [S1].
+
+## Subtopics
+
+### Scene Geometry Modeling via NeRF Opacity Field
+This variant emphasizes using the NeRF opacity field to mitigate volume representation ambiguity, which is more effective than explicit depth estimation or cost volumes [S1]. Using depth supervision as a loss term in this geometry modeling approach yields an improvement of +3.7 mAP@.50 [S1]. Compared to the baseline, using NeRF for scene geometry modeling improves performance by +3.6 mAP@.25 and +2.5 mAP@.50, outperforming methods that use predicted depth or cost volumes [S1].
+
+## Operating characteristics
+*   **Performance:** Using only photometric loss yields performance close to purely using depth supervision in terms of mAP@.50 [S1]. Using both photometric and depth losses improves performance further [S1].
+*   **Comparison to Alternatives:** The joint NeRF-and-Det paradigm is more effective than "NeRF-then-Det" methods like NeRF-RPN [S1].
+*   **Feature Influence:** Introducing variance features improves performance significantly (>0.7 mAP@.25 and >0.6 mAP@.50) compared to using only average features, providing strong geometry priors [S1].
+*   **Inference:** No per-scene optimization is performed for the NeRF branch at test time [S1].
+
+## Background
+NeRF-Det was introduced to address the ambiguity of volume representations in 3D object detection by leveraging the geometric priors of Neural Radiance Fields [S1]. It builds on the ImVoxelNet detection framework and integrates it with NeRF-style rendering within the MMDetection3D ecosystem [S1]. The method was presented at ICCV 2023 [S1].
+
+## Sources
+[S1] NeRF-Det: Learning Geometry-Aware Volumetric Representation for Multi-View 3D Object Detection, https://doi.org/10.1109/iccv51070.2023.02131, fetched 2026-10-30

@@ -58,7 +58,9 @@ class ConnectivityProxy:
     def set_primary_buffer(self, buf): self.primary_buffer = buf
     def set_emission_buffer(self, buf): self.emission_buffer = buf
     def set_render_settings(self, settings): self.render_settings = settings
-    def partial_trace(self): pass
+    def partial_trace(self):
+        # The sources do not provide the internal traversal and accumulation logic for PartialTrace.
+        pass
     def get_result(self): return self.dataset
 
 def energy_based_volume_rendering(dataset, primary_field_name, secondary_field_name=None, num_bins=1):
@@ -111,11 +113,6 @@ def energy_based_volume_rendering(dataset, primary_field_name, secondary_field_n
 *   **Precision:** The implementation supports both single (`vtkm::Float32`) and double (`vtkm::Float64`) precision. Switching precision requires deleting and recreating the scheduler [S1, unofficial].
 *   **MPI Parallelism:** If MPI is enabled, the communication handle must be set correctly using `set_mpi_comm_handle` [S1, unofficial].
 *   **Empty Secondary Field:** If `m_secondary_field` is empty, the emission buffer is not allocated, and no emission accumulation occurs [S1, unofficial].
-
-## Subtopics
-
-### Volumetric Liquid Rendering
-A sibling method focused on simulating liquid-like optical properties. Choose this when simulating fluids with specific refraction and reflection characteristics rather than pure emission-absorption energy tracking. See [Volumetric Liquid Rendering](4017-volumetric-liquid-rendering.md).
 
 ## Operating characteristics
 *   **Time Complexity:** Linear with respect to the number of rays and the number of steps per ray (determined by volume resolution and ray length) [G].

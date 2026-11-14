@@ -1,0 +1,216 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Isosurface rendering extracts and visualizes a specific density threshold (isovalue) from a volumetric dataset, rendering only the surface where the scalar field equals that threshold [S5, unofficial]. Unlike polygonal mesh extraction (e.g., Marching Cubes) which generates discrete geometry, this method typically employs ray marching to procedurally locate the surface at render time, producing a smooth, continuous appearance without explicit polygonal artifacts [S3]. It is distinct from full volumetric rendering because it ignores internal structures and occluded surfaces, relying on lighting calculations to convey shape and depth [S5, unofficial].
++Isosurface rendering extracts and visualizes a specific density threshold (isovalue) from a volumetric dataset, rendering only the surface where the scalar field equals that threshold [S5, unofficial]. Unlike polygonal mesh extraction which generates discrete geometry, this method typically employs ray marching to procedurally locate the surface at render time, producing a smooth, continuous appearance without explicit polygonal artifacts [S3]. It is distinct from full volumetric rendering because it ignores internal structures and occluded surfaces, relying on lighting calculations to convey shape and depth [S5, unofficial].
+ 
+ ## How it works
+@@ -54,5 +54,5 @@
+ *   **Diffuse Coefficient (`diffuse`):** Default 0.6 [S4, unofficial].
+ *   **Ambient Coefficient (`ambient`):** Default 0.3 [S4, unofficial].
+-*   **Specular Coefficient (`specular`):** Default 0.05 [S4, unofficial]. (Note: OSPRay uses 0.1 [S2, unofficial]).
++*   **Specular Coefficient (`specular`):** Default 0.05 [S4, unofficial] (OSPRay uses 0.1 [S2, unofficial]).
+ *   **Specular Power (`specular_power`):** Default 1.0 [S4, unofficial].
+ *   **Surface Color (`rgb`):** Default [0.0, 0.0, 1.0] (Blue) [S4, unofficial].
+@@ -72,35 +72,44 @@
+ 
+ ```python
+-def isosurface_render(volume, threshold, camera, lights, params):
++import math
++import random
++
++def isosurface_render(grid, dims, bounds, threshold, camera, lights, params):
+     """
+     Renders an isosurface from a volume dataset using ray marching.
++    grid: 3D list [x][y][z] of scalar values
++    dims: (W, H, D)
++    bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+     """
+     height, width = camera.resolution
+     image = [[[0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
+     
++    step_size = params.get('step_size', 0.05)
++    max_depth = params.get('max_depth', 100.0)
++    use_precomputed_gradients = params.get('use_precomputed_gradients', False)
++    ambient_coeff = params.get('ambient_coeff', 0.3)
++    surface_color = params.get('surface_color', [0.0, 0.0, 1.0])
++    specular_coeff = params.get('specular_coeff', 0.05)
++    specular_power = params.get('specular_power', 1.0)
++    
+     for y in range(height):
+         for x in range(width):
+-            # 1. Ray Initialization
+             ray_origin = camera.eye_position
+             ray_direction = compute_ray_direction(camera, x, y)
+             ray_direction = normalize(ray_direction)
+-            ray_origin += random_offset()
++            ray_origin = [ray_origin[i] + random.uniform(-0.5, 0.5) for i in range(3)]
+             
+-            # 2. Ray Marching
+             t = 0.0
+-            step_size = params.get('step_size', 0.05)
+             hit = False
+             hit_point = None
+-            hit_normal = None
+             
+-            while t < params.get('max_depth', 100.0):
+-                current_pos = ray_origin + ray_direction * t
+-                
+-                if not is_inside_volume(current_pos, volume.bounds):
++            while t < max_depth:
++                current_pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++                
++                if not is_inside_volume(current_pos, bounds):
+                     break
+                 
+-                density = sample_volume(volume, current_pos)
+-                
+-                # 3. Surface Detection
++                density = sample_volume(grid, dims, current_pos, bounds)
++                
+                 if density >= threshold:
+                     hit = True
+@@ -111,38 +120,29 @@
+             
+             if hit:
+-                # 4. Normal Calculation
+-                if params.get('use_precomputed_gradients', False):
+-                    grad = sample_gradient_texture(volume.gradient_texture, hit_point)
++                if use_precomputed_gradients:
++                    grad = sample_gradient_texture(grid, dims, hit_point, bounds)
+                 else:
+-                    grad = compute_gradient(volume, hit_point)
++                    grad = compute_gradient(grid, dims, hit_point, bounds)
+                 
+                 hit_normal = normalize(grad)
+                 
+-                # 5. Lighting Calculation
+                 color = [0.0, 0.0, 0.0]
+-                surface_color = params.get('surface_color', [0.0, 0.0, 1.0])
+                 
+                 for light in lights:
+-                    light_dir = normalize(light.position - hit_point)
++                    light_dir = normalize([light.position[i] - hit_point[i] for i in range(3)])
+                     
+-                    # Diffuse
+                     dot_product = max(0.0, dot(hit_normal, light_dir))
+                     diffuse_intensity = params.get('Kd', 1.0) * dot_product
+                     
+-                    # Specular (Phong)
+-                    view_dir = normalize(ray_origin - hit_point)
+-                    reflect_dir = reflect(-light_dir, hit_normal)
+-                    specular_intensity = pow(max(0.0, dot(view_dir, reflect_dir)), params.get('specular_power', 1.0))
+-                    specular_intensity *= params.get('specular_coeff', 0.05)
++                    view_dir = normalize([ray_origin[i] - hit_point[i] for i in range(3)])
++                    reflect_dir = reflect([-light_dir[i] for i in range(3)], hit_normal)
++                    specular_intensity = pow(max(0.0, dot(view_dir, reflect_dir)), specular_power)
++                    specular_intensity *= specular_coeff
+                     
+-                    # Combine
+-                    light_color = [light.intensity * (diffuse_intensity + specular_intensity) * c for c in surface_color]
++                    light_color = [light.intensity * (diffuse_intensity + specular_intensity) * surface_color[i] for i in range(3)]
+                     color = [color[i] + light_color[i] for i in range(3)]
+                 
+-                # Ambient
+-                ambient = params.get('ambient_coeff', 0.3)
+-                color = [color[i] + ambient * surface_color[i] for i in range(3)]
+-                
+-                # 6. Color Assignment
++                color = [color[i] + ambient_coeff * surface_color[i] for i in range(3)]
++                
+                 image[y][x] = color
+             else:
+@@ -152,42 +152,40 @@
+ 
+ def compute_ray_direction(camera, x, y):
+-    """Computes ray direction from pixel coordinates and camera projection."""
+-    # Standard perspective projection math
+     ndc_x = (2.0 * x / camera.resolution[0]) - 1.0
+     ndc_y = 1.0 - (2.0 * y / camera.resolution[1])
+-    # Unproject using camera matrices (simplified)
+     return [ndc_x, ndc_y, -1.0]
+ 
+-def random_offset():
+-    """Adds a small random vector to reduce sampling artifacts."""
+-    import random
+-    return [random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5), 0.0]
+-
+ def is_inside_volume(point, bounds):
+-    """Checks if a point lies within the volume bounding box."""
+-    return (bounds.min_x <= point[0] <= bounds.max_x and
+-            bounds.min_y <= point[1] <= bounds.max_y and
+-            bounds.min_z <= point[2] <= bounds.max_z)
+-
+-def sample_volume(volume, point):
+-    """Samples the scalar value at the given 3D point."""
+-    # Trilinear interpolation or direct lookup
+-    return volume.get_scalar_at(point)
+-
+-def compute_gradient(volume, point):
+-    """Computes the gradient of the scalar field at the given point."""
+-    # Finite differences
+-    dx = volume.get_scalar_at([point[0]+1, point[1], point[2]]) - volume.get_scalar_at([point[0]-1, point[1], point[2]])
+-    dy = volume.get_scalar_at([point[0], point[1]+1, point[2]]) - volume.get_scalar_at([point[0], point[1]-1, point[2]])
+-    dz = volume.get_scalar_at([point[0], point[1], point[2]+1]) - volume.get_scalar_at([point[0], point[1], point[2]-1])
++    return (bounds[0] <= point[0] <= bounds[3] and
++            bounds[1] <= point[1] <= bounds[4] and
++            bounds[2] <= point[2] <= bounds[5])
++
++def world_to_grid(point, bounds, dims):
++    scale = [dims[i] / (bounds[3+i] - bounds[i]) for i in range(3)]
++    offset = [-(bounds[i] * scale[i]) for i in range(3)]
++    return [int(point[i] * scale[i] + offset[i]) for i in range(3)]
++
++def sample_volume(grid, dims, point, bounds):
++    gx, gy, gz = world_to_grid(point, bounds, dims)
++    if 0 <= gx < dims[0] and 0 <= gy < dims[1] and 0 <= gz < dims[2]:
++        return grid[gx][gy][gz]
++    return 0.0
++
++def compute_gradient(grid, dims, point, bounds):
++    gx, gy, gz = world_to_grid(point, bounds, dims)
++    dx = grid[min(gx+1, dims[0]-1)][gy][gz] - grid[max(gx-1, 0)][gy][gz]
++    dy = grid[gx][min(gy+1, dims[1]-1)][gz] - grid[gx][max(gy-1, 0)][gz]
++    dz = grid[gx][gy][min(gz+1, dims[2]-1)] - grid[gx][gy][max(gz-1, 0)]
+     return [dx, dy, dz]
+ 
+-def sample_gradient_texture(texture, point):
+-    """Retrieves pre-computed gradient from RGB channels."""
+-    return texture.get_rgb_at(point)
++def sample_gradient_texture(grid, dims, point, bounds):
++    gx, gy, gz = world_to_grid(point, bounds, dims)
++    if 0 <= gx < dims[0] and 0 <= gy < dims[1] and 0 <= gz < dims[2]:
++        return grid[gx][gy][gz][:3]
++    return [0.0, 0.0, 0.0]
+ 
+ def normalize(v):
+-    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-    return [v[0]/mag, v[1]/mag, v[2]/mag] if mag > 0 else [0,0,0]
++    mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return [v[i]/mag if mag > 0 else 0.0 for i in range(3)]
+ 
+ def dot(a, b):
+@@ -195,5 +193,6 @@
+ 
+ def reflect(I, N):
+-    return [I[0] - 2*dot(I, N)*N[0], I[1] - 2*dot(I, N)*N[1], I[2] - 2*dot(I, N)*N[2]]
++    d = 2 * dot(I, N)
++    return [I[i] - d * N[i] for i in range(3)]
+ ```
+ 
+@@ -224,5 +223,5 @@
+ *   **Measured Performance:** Slower than Mesh mode (polygonal rendering) due to the computational cost of ray marching and gradient calculation [S3]. Performance can be improved by using larger step sizes or pre-computing gradients [S5, unofficial].
+ *   **Strengths:** Produces smooth, continuous surfaces without polygonal artifacts. Simple to implement for surface visualization [S3].
+-*   **Limitations:** Cannot render internal structures. Sensitive to step size (noise vs. performance trade-off). Gradient calculation is expensive if not pre-computed [S5, unofficial].
++*   **Limitations:** Cannot render internal structures. Sensitive to step size (noise vs. performance trade-off) [S3]. Gradient calculation is expensive if not pre-computed [S5, unofficial].
+ *   **When to use:** When visual quality (smoothness) is more important than performance, or when the mesh extraction produces jagged results that are hard to smooth [S3].
+ *   **When not to use:** When internal volume inspection is required (use full volumetric rendering) or when real-time performance on low-end hardware is critical (use optimized mesh) [S3].
+@@ -230,5 +229,5 @@
+ ## Background
+ 
+-Isosurface rendering is a fundamental technique in volume visualization, particularly in medical imaging and scientific visualization. It is widely used in applications such as virtual endoscopy, where the internal surface of a hollow organ (e.g., colon, blood vessels) needs to be visualized [S1, unofficial]. The method relies on the concept of an isosurface, defined as the set of points where the scalar field $f(x, y, z)$ equals a constant value [S1, unofficial]. While early implementations used polygonal mesh extraction (e.g., Marching Cubes), ray-marched isosurface rendering offers a procedural alternative that avoids mesh generation overhead and provides smoother results [S3].
++Isosurface rendering is widely used in applications such as virtual endoscopy, where the internal surface of a hollow organ (e.g., colon, blood vessels) needs to be visualized [S1, unofficial]. The method relies on the concept of an isosurface, defined as the set of points where the scalar field $f(x, y, z)$ equals a constant value [S1, unofficial]. While early implementations used polygonal mesh extraction (e.g., Marching Cubes), ray-marched isosurface rendering offers a procedural alternative that avoids mesh generation overhead and provides smoother results [S3].
+ 
+ ## Sources

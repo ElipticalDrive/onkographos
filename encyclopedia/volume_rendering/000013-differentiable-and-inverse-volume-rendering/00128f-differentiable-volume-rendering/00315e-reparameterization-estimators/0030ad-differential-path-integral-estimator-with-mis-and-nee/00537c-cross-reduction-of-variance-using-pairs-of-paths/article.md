@@ -1,0 +1,106 @@
+# Cross-reduction of variance using pairs of paths
+
+Also called: Cross-weighting scheme, Variance cross-reduction
+
+## Overview
+This method reduces the variance of gradient estimates in differentiable volume rendering by sampling pairs of similar paths and applying a control variate technique known as the cross-weighting scheme [S1]. It allows the use of suitable parameter values from one path estimate to reduce the variance of the other without introducing bias, addressing the high variance inherent in estimating derivatives of discontinuous integrands [S1]. It builds on [Differential path integral estimator with MIS and NEE](6332-differential-path-integral-estimator-with-mis-and-nee.md) by providing a specific variance reduction strategy for the differential contributions computed therein.
+
+## How it works
+**Inputs:** Scene parameters $\theta$, a reference parameter set $\theta_0$ (used for the control variate baseline), and a budget of path pairs $N$.
+**Outputs:** Unbiased gradient estimate of the rendered image with respect to $\theta$.
+
+**Data Structures:**
+*   **Path Pair:** Two paths, $P_0$ and $P_1$, generated for each sample index $i$.
+*   **Path Contribution Components:** For each path $i \in \{0, 1\}$ and each emitter contribution index $l$:
+    *   $f_{i,l}(\theta)$: Product of emitted radiance and path throughput at vertex $l$.
+    *   $W_{i,l}(\theta)$: Product of all associated weights $w_{i,l}(\theta)$ for the path segment up to emitter $l$.
+    *   Note: $\mathbb{E}[\partial W_{i,l} / \partial \theta] = 0$ because weights are independent of the gradients of other weights [S1].
+
+**Steps:**
+1.  **Sample Path Pairs:** For each sample $i$, generate a pair of paths $(P_0, P_1)$. The paths must be "similar" (see *Partially correlated path generation* below).
+2.  **Compute Contributions:** For each path $i \in \{0, 1\}$, compute the total contribution $r_i$ as a sum over all emitter contributions $l$:
+    $$ r_i = \sum_{l=0}^{\infty} f_{i,l}(\theta) W_{i,l}(\theta) \quad (27) $$
+3.  **Apply Cross-Reduction:** Combine the contributions $r_0$ and $r_1$ to form the reduced variance estimate $r'$ using the cross-weighting formula [S1]:
+    $$
+    \begin{aligned}
+    r' = & \frac{1}{2} \sum_{l} \left[ f_{0,l}(\theta) W_{0,l}(\theta) - f_{1,l}(\theta) (W_{0,l}(\theta) - W_{0,l}(\theta_0)) \right] \\
+    & + \frac{1}{2} \sum_{l} \left[ f_{1,l}(\theta) W_{1,l}(\theta) - f_{0,l}(\theta) (W_{1,l}(\theta) - W_{1,l}(\theta_0)) \right]
+    \end{aligned}
+    \quad (28)
+    $$
+    Here, $W_{i,l}(\theta_0)$ represents the weights evaluated at the reference parameters $\theta_0$. The term $(W_{0,l}(\theta) - W_{0,l}(\theta_0))$ acts as the control variate correction.
+4.  **Accumulate Gradient:** The gradient is estimated by averaging the derivatives of $r'$ over all sampled pairs.
+
+**Parameters:**
+*   **Samples per Integral:** 4 samples (ray intersection queries) are used to estimate changes of variables in each emitter, BSDF, and pixel integral [S1].
+*   **Beckmann Roughness Threshold:** 0.15 (root mean square of slopes). Convolutions are applied when roughness exceeds this value to handle integrands with large angular support [S1].
+*   **von Mises-Fisher Concentration:** $\kappa = 1000$. Used for spherical convolution kernels [S1].
+
+**Pitfalls:**
+*   **Degenerate Light Sources:** Point or directional lights containing Dirac delta terms are incompatible because visibility-related discontinuities cause the integrals to collapse [S1].
+*   **Area Light Discontinuities:** Area lights introduce two types of discontinuities (light source silhouette and occluder silhouettes), violating the single-discontinuity assumption. This is handled by replacing standard area lights with continuous analogues (e.g., smooth emission profiles falling to zero at boundaries) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cross_reduce_variance(path_pair, theta, theta_0):
+    """
+    Computes the cross-reduced variance estimate for a pair of paths.
+    
+    Args:
+        path_pair: Tuple (path_0, path_1)
+        theta: Current scene parameters
+        theta_0: Reference scene parameters for control variate
+        
+    Returns:
+        r_prime: The variance-reduced contribution estimate
+    """
+    path_0, path_1 = path_pair
+    
+    # Initialize sums for the two halves of the equation
+    sum_0 = 0.0
+    sum_1 = 0.0
+    
+    # Iterate over all emitter contributions l for both paths
+    # Note: In practice, l corresponds to the specific scattering event 
+    # where an emitter is sampled or connected.
+    for l in range(max_emitter_contributions):
+        # Get f and W for path 0
+        f_0_l = get_throughput_and_radiance(path_0, l, theta)
+        W_0_l = get_weight_product(path_0, l, theta)
+        W_0_l_ref = get_weight_product(path_0, l, theta_0)
+        
+        # Get f and W for path 1
+        f_1_l = get_throughput_and_radiance(path_1, l, theta)
+        W_1_l = get_weight_product(path_1, l, theta)
+        W_1_l_ref = get_weight_product(path_1, l, theta_0)
+        
+        # Term 1: 1/2 * [ f_0 * W_0 - f_1 * (W_0 - W_0_ref) ]
+        term_0 = 0.5 * (f_0_l * W_0_l - f_1_l * (W_0_l - W_0_l_ref))
+        sum_0 += term_0
+        
+        # Term 2: 1/2 * [ f_1 * W_1 - f_0 * (W_1 - W_1_ref) ]
+        term_1 = 0.5 * (f_1_l * W_1_l - f_0_l * (W_1_l - W_1_l_ref))
+        sum_1 += term_1
+        
+    r_prime = sum_0 + sum_1
+    return r_prime
+```
+
+## Subtopics
+
+### Partially correlated path generation
+A method to generate path pairs that are highly correlated to maximize variance reduction while maintaining the statistical independence required to avoid bias [S1]. It reuses random numbers for all sampling steps except those affecting the weights $W_{i,l}$, specifically the sampling of directions in re-parameterized integrals with small angular support [S1]. This ensures that $f_{0,l}$ is uncorrelated with $\partial W_{1,l}(\theta) / \partial \theta$ (and vice versa), which is a strict requirement for the unbiasedness of the cross-weighting scheme [S1].
+
+## Operating characteristics
+*   **Complexity:** Adds overhead proportional to the number of path pairs and the cost of evaluating weights at $\theta_0$. The number of ray intersection queries increases by a factor related to the samples per integral (4 samples) [S1].
+*   **Performance:** Forward rendering and backpropagation for 512x512 images with 32 path pairs and 3 bounces take less than one minute on an NVIDIA TITAN RTX [S1]. Ray-triangle intersections account for approximately 9% of the computation time [S1].
+*   **Strengths:** Substantially reduces variance of gradients without adding bias, enabling more stable optimization in differentiable rendering [S1].
+*   **Limitations:** Incompatible with degenerate light sources (point/directional) and requires careful handling of area lights [S1]. Performance is sensitive to the number of samples used for variable change estimation [S1].
+
+## Background
+The method is based on the "cross-weighting scheme" introduced by Rousselle et al. [2016] for image-space gradients [S1]. It was adapted for differentiable path tracing to handle nested integrals corresponding to scattering events [S1]. The implementation described in the primary source uses Mitsuba 2 with automatic differentiation and a JIT compiler for GPU kernel generation [S1].
+
+## Sources
+[S1] Reparameterizing discontinuous integrands for differentiable rendering, https://doi.org/10.1145/3355089.3356510, fetched 2026-10-26

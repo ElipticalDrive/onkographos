@@ -1,54 +1,36 @@
 # Isosurface Rendering
 
-Also called: Polygonal Surface Mesh Rendering from Volume, Volumetric Isosurface Rendering
+Also called: PBNJ Isosurface, Polygonal Surface Mesh Rendering from Volume, Volumetric Isosurface Rendering
 
 ## Overview
-Isosurface rendering extracts and visualizes a specific density threshold (isovalue) from a volumetric dataset, rendering only the surface where the scalar field equals that threshold [S4, unofficial]. Unlike polygonal mesh extraction (e.g., Marching Cubes) which generates discrete geometry, this method typically employs ray marching to procedurally locate the surface at render time, producing a smooth, continuous appearance without explicit polygonal artifacts [S2]. It is distinct from full volumetric rendering because it ignores internal structures and occluded surfaces, relying on lighting calculations to convey shape and depth [S4, unofficial].
+Isosurface rendering extracts and visualizes a specific density threshold (isovalue) from a volumetric dataset, rendering only the surface where the scalar field equals that threshold [S5, unofficial]. Unlike polygonal mesh extraction (e.g., Marching Cubes) which generates discrete geometry, this method typically employs ray marching to procedurally locate the surface at render time, producing a smooth, continuous appearance without explicit polygonal artifacts [S3]. It is distinct from full volumetric rendering because it ignores internal structures and occluded surfaces, relying on lighting calculations to convey shape and depth [S5, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   **Volume Data:** A 3D grid of scalar values (e.g., density, temperature). The data structure is typically a regular Cartesian grid [G].
-*   **Isosurface Threshold ($T$):** A scalar value defining the surface location. Voxels with values $< T$ are treated as empty/background; voxels $\ge T$ are treated as surface/material [S4, unofficial].
-*   **Camera Parameters:** Eye position, view direction, and projection matrix [S4, unofficial].
-*   **Lighting Parameters:** Light source positions, diffuse coefficient ($K_d$), ambient coefficient, specular coefficient, and specular power [S3, unofficial].
-*   **Transfer Function:** Maps scalar density values to color and opacity (optional, but common for defining material appearance) [S4, unofficial].
+*   **Volume Data:** A 3D grid of scalar values (e.g., density, temperature) stored on a regular Cartesian grid [G].
+*   **Isosurface Threshold ($T$):** A scalar value defining the surface location; voxels with values $\ge T$ are treated as surface material [S5, unofficial].
+*   **Camera Setup:** Ray origin and direction are computed from the eye position and pixel coordinates [G].
+*   **Lighting Parameters:** Light source positions, diffuse coefficient ($K_d$), ambient coefficient, specular coefficient, and specular power [S4, unofficial].
+*   **Transfer Function:** Maps scalar density values to color and opacity (optional) [S5, unofficial].
 
 **Outputs:**
-*   **Image:** A 2D pixel buffer where each pixel contains the color of the first surface hit by the corresponding view ray.
+*   **Image:** A 2D pixel buffer where each pixel contains the color of the first surface hit by the corresponding view ray [G].
 
 ### Data Structures
-*   **Volume Texture/Grid:** A 3D array or texture storing scalar values.
-    *   *Layout:* $V[x][y][z]$ where $x, y, z$ are integer indices within the grid dimensions $W \times H \times D$.
-    *   *Alternative Layout (Gradient Pre-computation):* To optimize performance, gradients may be pre-calculated and stored in the RGB channels of a texture, with the scalar density stored in the Alpha channel [S4, unofficial].
-*   **Ray Structure:**
-    *   `origin`: 3D vector $(o_x, o_y, o_z)$ representing the camera eye position.
-    *   `direction`: 3D vector $(d_x, d_y, d_z)$, normalized, representing the ray direction through the pixel.
+*   **Volume Texture/Grid:** A 3D array or texture storing scalar values. *Layout:* $V[x][y][z]$ where $x, y, z$ are integer indices within the grid dimensions $W \times H \times D$ [G]. *Alternative Layout (Gradient Pre-computation):* To optimize performance, gradients may be pre-calculated and stored in the RGB channels of a texture, with the scalar density stored in the Alpha channel [S5, unofficial].
+*   **Ray Structure:** `origin`: 3D vector $(o_x, o_y, o_z)$ representing the camera eye position. `direction`: 3D vector $(d_x, d_y, d_z)$, normalized, representing the ray direction through the pixel [G].
 
 ### Numbered Steps
 
-1.  **Ray Initialization:** For each pixel in the image, construct a ray originating from the camera eye position. The ray direction is calculated based on the pixel's screen coordinates and the camera's projection matrix [S4, unofficial]. A random offset may be added to the ray start position to reduce sampling artifacts [S4, unofficial].
-2.  **Ray Marching:** Advance the ray through the volume data structure along its direction.
-    *   Start at the entry point of the volume bounding box (or the eye position if inside) [S4, unofficial].
-    *   Step through the volume using a fixed or adaptive step size (`Step %` or `rendstep`) [S2].
-    *   At each step, sample the scalar value $v$ from the volume data at the current ray position [S4, unofficial].
-3.  **Surface Detection:** Compare the sampled value $v$ against the isosurface threshold $T$.
-    *   If $v < T$, continue marching along the ray [S4, unofficial].
-    *   If $v \ge T$, a surface intersection is detected. Stop marching [S4, unofficial].
-4.  **Normal Calculation:** Compute the surface normal $\mathbf{n}$ at the intersection point.
-    *   Calculate the gradient $\nabla f$ of the scalar field at the intersection point. The gradient is the vector of partial derivatives in the X, Y, and Z directions [S4, unofficial].
-    *   $\nabla f = \left( \frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z} \right)$ [G].
-    *   The normal $\mathbf{n}$ is the normalized gradient vector: $\mathbf{n} = \frac{\nabla f}{\|\nabla f\|}$ [S4, unofficial].
-    *   *Note:* If gradients are pre-computed, retrieve them directly from the texture (e.g., RGB channels) [S4, unofficial].
-5.  **Lighting Calculation:** Compute the color contribution using the surface normal, light direction, and material properties.
-    *   **Diffuse Lighting:** Calculate the diffuse intensity $I_d$ using the dot product of the normal $\mathbf{n}$ and the normalized light direction $\mathbf{l}$ [S4, unofficial].
-        $$ I_d = K_d \cdot \max(0, \mathbf{n} \cdot \mathbf{l}) $$
-        Where $K_d$ is the diffuse constant (often 1.0) [S4, unofficial].
-    *   **Specular Lighting (Optional):** If specular highlights are enabled, calculate the specular component using the Phong or Blinn-Phong model with the specular coefficient and specular power [S3, unofficial].
-    *   **Ambient Lighting:** Add ambient light contribution based on the ambient coefficient [S3, unofficial].
-6.  **Color Assignment:** Combine the lighting result with the material color (derived from the transfer function or a constant RGB value) to determine the final pixel color [S4, unofficial].
-7.  **Output:** Write the final color to the image buffer for the current pixel.
+1.  **Ray Initialization:** For each pixel in the image, construct a ray originating from the camera eye position [S5, unofficial]. A random offset may be added to the ray start position to reduce sampling artifacts [S5, unofficial].
+2.  **Ray Marching:** Advance the ray through the volume data structure along its direction [S5, unofficial]. Start at the entry point of the volume bounding box (or the eye position if inside) [S5, unofficial]. Step through the volume using a fixed step size (`Step %` or `rendstep`) [S3]. At each step, sample the scalar value $v$ from the volume data at the current ray position [S5, unofficial].
+3.  **Surface Detection:** Compare the sampled value $v$ against the isosurface threshold $T$ [S5, unofficial]. If $v < T$, continue marching along the ray [S5, unofficial]. If $v \ge T$, a surface intersection is detected and marching stops [S5, unofficial].
+4.  **Normal Calculation:** Compute the surface normal $\mathbf{n}$ at the intersection point [S5, unofficial]. Calculate the gradient $\nabla f$ of the scalar field at the intersection point by comparing neighbor data values in each axis (X, Y, Z) [S5, unofficial]. The gradient vector represents the direction of change [S5, unofficial]. The normal $\mathbf{n}$ is the normalized gradient vector: $\mathbf{n} = \frac{\nabla f}{\|\nabla f\|}$ [G]. If gradients are pre-computed, retrieve them directly from the texture (e.g., RGB channels) [S5, unofficial].
+5.  **Lighting Calculation:** Compute the color contribution using the surface normal, light direction, and material properties [S5, unofficial]. **Diffuse Lighting:** Calculate the diffuse intensity $I_d$ using the dot product of the normal $\mathbf{n}$ and the normalized light direction $\mathbf{l}$ [S5, unofficial]. $I_d = K_d \cdot \max(0, \mathbf{n} \cdot \mathbf{l})$ Where $K_d$ is the diffuse constant (often 1.0) [S5, unofficial]. **Specular Lighting (Optional):** If specular highlights are enabled, calculate the specular component using the Phong or Blinn-Phong model with the specular coefficient and specular power [S4, unofficial]. **Ambient Lighting:** Add ambient light contribution based on the ambient coefficient [S4, unofficial].
+6.  **Color Assignment:** Combine the lighting result with the material color (derived from the transfer function or a constant RGB value) to determine the final pixel color [S5, unofficial].
+7.  **Output:** Write the final color to the image buffer for the current pixel [G].
 
 ### Formulas
 
@@ -56,34 +38,35 @@ Isosurface rendering extracts and visualizes a specific density threshold (isova
 $$ I_d = K_d \cdot \text{dot}(\mathbf{n}, \mathbf{l}) $$
 Where:
 *   $I_d$: Diffuse light intensity.
-*   $K_d$: Diffuse constant (default 1.0) [S4, unofficial].
-*   $\mathbf{n}$: Surface normal vector (normalized) [S4, unofficial].
-*   $\mathbf{l}$: Normalized direction vector to the light source [S4, unofficial].
-*   $\text{dot}(\mathbf{n}, \mathbf{l}) = \cos(\theta)$, where $\theta$ is the angle between the normal and the light direction [S4, unofficial].
+*   $K_d$: Diffuse constant (default 1.0) [S5, unofficial].
+*   $\mathbf{n}$: Surface normal vector (normalized) [S5, unofficial].
+*   $\mathbf{l}$: Normalized direction vector to the light source [S5, unofficial].
+*   $\text{dot}(\mathbf{n}, \mathbf{l}) = \cos(\theta)$, where $\theta$ is the angle between the normal and the light direction [S5, unofficial].
 
 **Gradient (Normal) Calculation:**
 $$ \mathbf{n} = \frac{\nabla f}{\|\nabla f\|} $$
-Where $\nabla f$ is the gradient of the scalar field $f(x,y,z)$ at the intersection point [S4, unofficial].
+Where $\nabla f$ is the gradient of the scalar field $f(x,y,z)$ at the intersection point [S5, unofficial].
 
 ### Parameters
 
-*   **Threshold ($T$):** The isovalue. Voxels with density $> T$ are rendered [S4, unofficial].
-*   **Step Size (`Step %` / `rendstep`):** The distance between ray march steps, often expressed as a percentage of the voxel size. Smaller steps increase detail capture but reduce performance [S2].
-*   **Diffuse Coefficient (`diffuse`):** Default 0.6 [S3, unofficial].
-*   **Ambient Coefficient (`ambient`):** Default 0.3 [S3, unofficial].
-*   **Specular Coefficient (`specular`):** Default 0.05 [S3, unofficial].
-*   **Specular Power (`specular_power`):** Default 1.0 [S3, unofficial].
-*   **Surface Color (`rgb`):** Default [0.0, 0.0, 1.0] (Blue) [S3, unofficial].
-*   **Shading Interpolation (`interp`):** 'phong', 'flat', or 'gouraud' [S3, unofficial].
-*   **Sampler Type (`sampler`):** Determines blending between voxels. Options include 'Box' (fastest, no blending), 'Linear' (20-30% faster than Spherical), and 'Spherical' (smoothest) [S2].
-*   **Shading Enable (`shade`):** Boolean flag to enable/disable lighting calculations. Default True [S3, unofficial].
+*   **Threshold ($T$):** The isovalue. Voxels with density $\ge T$ are rendered [S5, unofficial].
+*   **Step Size (`Step %` / `rendstep`):** The distance between ray march steps, often expressed as a percentage of the voxel size. Smaller steps increase detail capture but reduce performance [S3].
+*   **Diffuse Coefficient (`diffuse`):** Default 0.6 [S4, unofficial].
+*   **Ambient Coefficient (`ambient`):** Default 0.3 [S4, unofficial].
+*   **Specular Coefficient (`specular`):** Default 0.05 [S4, unofficial]. (Note: OSPRay uses 0.1 [S2, unofficial]).
+*   **Specular Power (`specular_power`):** Default 1.0 [S4, unofficial].
+*   **Surface Color (`rgb`):** Default [0.0, 0.0, 1.0] (Blue) [S4, unofficial].
+*   **Shading Interpolation (`interp`):** 'phong', 'flat', or 'gouraud' [S4, unofficial].
+*   **Sampler Type (`sampler`):** Determines blending between voxels. Options include 'Box' (fastest, no blending), 'Linear' (20-30% faster than Spherical), and 'Spherical' (smoothest) [S3].
+*   **Shading Enable (`shade`):** Boolean flag to enable/disable lighting calculations. Default True [S4, unofficial].
+*   **Border Fade (`borderFade`):** Makes content near the grid's boundaries more transparent to prevent sharp edges [S3].
 
 ### Edge Cases and Pitfalls
 
-*   **Gradient Calculation Cost:** Computing gradients in the shader is expensive. Pre-calculating gradients and storing them in the texture (RGB for gradient, Alpha for density) trades memory usage for performance [S4, unofficial].
-*   **Jagged Artifacts:** If the step size is too large, details smaller than a voxel may be skipped or rendered noisy. Decreasing the step size improves quality but slows rendering [S2].
-*   **Boundary Artifacts:** Sharp edges may appear at the boundaries of the volume grid. A "Border Fade" parameter can make content near boundaries more transparent to mitigate this [S2].
-*   **Occlusion:** Since only the first surface is rendered, internal structures are not visible. This is suitable for surface visualization but not for internal inspection [S4, unofficial].
+*   **Gradient Calculation Cost:** Computing gradients in the shader is expensive. Pre-calculating gradients and storing them in the texture (RGB for gradient, Alpha for density) trades memory usage for performance [S5, unofficial].
+*   **Jagged Artifacts:** If the step size is too large, details smaller than a voxel may be skipped or rendered noisy. Decreasing the step size improves quality but slows rendering [S3].
+*   **Boundary Artifacts:** Sharp edges may appear at the boundaries of the volume grid. A 'Border Fade' parameter can make content near boundaries more transparent to mitigate this [S3].
+*   **Occlusion:** Since only the first surface is rendered, internal structures are not visible. This is suitable for surface visualization but not for internal inspection [S5, unofficial].
 
 ### Pseudocode
 
@@ -93,19 +76,9 @@ Where $\nabla f$ is the gradient of the scalar field $f(x,y,z)$ at the intersect
 def isosurface_render(volume, threshold, camera, lights, params):
     """
     Renders an isosurface from a volume dataset using ray marching.
-    
-    Args:
-        volume: 3D array or texture of scalar values.
-        threshold: Scalar threshold for surface extraction.
-        camera: Object containing eye position and projection matrix.
-        lights: List of light sources with position and intensity.
-        params: Dictionary containing rendering parameters (step_size, Kd, etc.).
-        
-    Returns:
-        Image buffer (2D array of colors).
     """
-    width, height = camera.resolution
-    image = zeros((height, width, 3))
+    height, width = camera.resolution
+    image = [[[0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
     
     for y in range(height):
         for x in range(width):
@@ -113,13 +86,11 @@ def isosurface_render(volume, threshold, camera, lights, params):
             ray_origin = camera.eye_position
             ray_direction = compute_ray_direction(camera, x, y)
             ray_direction = normalize(ray_direction)
-            
-            # Optional: Add random offset to reduce artifacts
             ray_origin += random_offset()
             
             # 2. Ray Marching
             t = 0.0
-            step_size = params.get('step_size', 0.05) # Example default
+            step_size = params.get('step_size', 0.05)
             hit = False
             hit_point = None
             hit_normal = None
@@ -127,11 +98,9 @@ def isosurface_render(volume, threshold, camera, lights, params):
             while t < params.get('max_depth', 100.0):
                 current_pos = ray_origin + ray_direction * t
                 
-                # Check if out of bounds
                 if not is_inside_volume(current_pos, volume.bounds):
                     break
                 
-                # Sample volume data
                 density = sample_volume(volume, current_pos)
                 
                 # 3. Surface Detection
@@ -144,17 +113,16 @@ def isosurface_render(volume, threshold, camera, lights, params):
             
             if hit:
                 # 4. Normal Calculation
-                # Option A: Pre-computed gradients
                 if params.get('use_precomputed_gradients', False):
                     grad = sample_gradient_texture(volume.gradient_texture, hit_point)
-                # Option B: Compute gradient in shader
                 else:
                     grad = compute_gradient(volume, hit_point)
                 
                 hit_normal = normalize(grad)
                 
                 # 5. Lighting Calculation
-                color = vec3(0.0)
+                color = [0.0, 0.0, 0.0]
+                surface_color = params.get('surface_color', [0.0, 0.0, 1.0])
                 
                 for light in lights:
                     light_dir = normalize(light.position - hit_point)
@@ -170,29 +138,65 @@ def isosurface_render(volume, threshold, camera, lights, params):
                     specular_intensity *= params.get('specular_coeff', 0.05)
                     
                     # Combine
-                    light_color = light.intensity * (diffuse_intensity + specular_intensity)
-                    color += light_color * params.get('surface_color', vec3(0.0, 0.0, 1.0))
+                    light_color = [light.intensity * (diffuse_intensity + specular_intensity) * c for c in surface_color]
+                    color = [color[i] + light_color[i] for i in range(3)]
                 
                 # Ambient
-                color += params.get('ambient_coeff', 0.3) * params.get('surface_color', vec3(0.0, 0.0, 1.0))
+                ambient = params.get('ambient_coeff', 0.3)
+                color = [color[i] + ambient * surface_color[i] for i in range(3)]
                 
                 # 6. Color Assignment
-                image[y, x] = color
+                image[y][x] = color
             else:
-                # Background color
-                image[y, x] = params.get('background_color', vec3(0.0, 0.0, 0.0))
+                image[y][x] = params.get('background_color', [0.0, 0.0, 0.0])
                 
     return image
 
+def compute_ray_direction(camera, x, y):
+    """Computes ray direction from pixel coordinates and camera projection."""
+    # Standard perspective projection math
+    ndc_x = (2.0 * x / camera.resolution[0]) - 1.0
+    ndc_y = 1.0 - (2.0 * y / camera.resolution[1])
+    # Unproject using camera matrices (simplified)
+    return [ndc_x, ndc_y, -1.0]
+
+def random_offset():
+    """Adds a small random vector to reduce sampling artifacts."""
+    import random
+    return [random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5), 0.0]
+
+def is_inside_volume(point, bounds):
+    """Checks if a point lies within the volume bounding box."""
+    return (bounds.min_x <= point[0] <= bounds.max_x and
+            bounds.min_y <= point[1] <= bounds.max_y and
+            bounds.min_z <= point[2] <= bounds.max_z)
+
 def sample_volume(volume, point):
     """Samples the scalar value at the given 3D point."""
-    # Implementation depends on volume data structure (e.g., trilinear interpolation)
-    pass
+    # Trilinear interpolation or direct lookup
+    return volume.get_scalar_at(point)
 
 def compute_gradient(volume, point):
     """Computes the gradient of the scalar field at the given point."""
-    # Implementation depends on volume data structure (e.g., finite differences)
-    pass
+    # Finite differences
+    dx = volume.get_scalar_at([point[0]+1, point[1], point[2]]) - volume.get_scalar_at([point[0]-1, point[1], point[2]])
+    dy = volume.get_scalar_at([point[0], point[1]+1, point[2]]) - volume.get_scalar_at([point[0], point[1]-1, point[2]])
+    dz = volume.get_scalar_at([point[0], point[1], point[2]+1]) - volume.get_scalar_at([point[0], point[1], point[2]-1])
+    return [dx, dy, dz]
+
+def sample_gradient_texture(texture, point):
+    """Retrieves pre-computed gradient from RGB channels."""
+    return texture.get_rgb_at(point)
+
+def normalize(v):
+    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return [v[0]/mag, v[1]/mag, v[2]/mag] if mag > 0 else [0,0,0]
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def reflect(I, N):
+    return [I[0] - 2*dot(I, N)*N[0], I[1] - 2*dot(I, N)*N[1], I[2] - 2*dot(I, N)*N[2]]
 ```
 
 ## Subtopics
@@ -217,21 +221,22 @@ def compute_gradient(volume, point):
 
 ## Operating characteristics
 
-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of steps per ray. $S$ depends on the volume size, step size, and density distribution.
-*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume data. If gradients are pre-computed, memory usage increases by a factor of 3 (for RGB) plus the original data (for Alpha) [S4, unofficial].
-*   **Measured Performance:** Slower than Mesh mode (polygonal rendering) due to the computational cost of ray marching and gradient calculation [S2]. Performance can be improved by using larger step sizes or pre-computing gradients [S4, unofficial].
-*   **Strengths:** Produces smooth, continuous surfaces without polygonal artifacts. Simple to implement for surface visualization.
-*   **Limitations:** Cannot render internal structures. Sensitive to step size (noise vs. performance trade-off). Gradient calculation is expensive if not pre-computed.
-*   **When to use:** When visual quality (smoothness) is more important than performance, or when the mesh extraction produces jagged results that are hard to smooth [S2].
-*   **When not to use:** When internal volume inspection is required (use full volumetric rendering) or when real-time performance on low-end hardware is critical (use optimized mesh).
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of steps per ray. $S$ depends on the volume size, step size, and density distribution [G].
+*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume data. If gradients are pre-computed, memory usage increases by a factor of 3 (for RGB) plus the original data (for Alpha) [S5, unofficial].
+*   **Measured Performance:** Slower than Mesh mode (polygonal rendering) due to the computational cost of ray marching and gradient calculation [S3]. Performance can be improved by using larger step sizes or pre-computing gradients [S5, unofficial].
+*   **Strengths:** Produces smooth, continuous surfaces without polygonal artifacts. Simple to implement for surface visualization [S3].
+*   **Limitations:** Cannot render internal structures. Sensitive to step size (noise vs. performance trade-off). Gradient calculation is expensive if not pre-computed [S5, unofficial].
+*   **When to use:** When visual quality (smoothness) is more important than performance, or when the mesh extraction produces jagged results that are hard to smooth [S3].
+*   **When not to use:** When internal volume inspection is required (use full volumetric rendering) or when real-time performance on low-end hardware is critical (use optimized mesh) [S3].
 
 ## Background
 
-Isosurface rendering is a fundamental technique in volume visualization, particularly in medical imaging and scientific visualization. It is widely used in applications such as virtual endoscopy, where the internal surface of a hollow organ (e.g., colon, blood vessels) needs to be visualized [S1, unofficial]. The method relies on the concept of an isosurface, defined as the set of points where the scalar field $f(x, y, z)$ equals a constant value [S1, unofficial]. While early implementations used polygonal mesh extraction (e.g., Marching Cubes), ray-marched isosurface rendering offers a procedural alternative that avoids mesh generation overhead and provides smoother results [S2].
+Isosurface rendering is a fundamental technique in volume visualization, particularly in medical imaging and scientific visualization. It is widely used in applications such as virtual endoscopy, where the internal surface of a hollow organ (e.g., colon, blood vessels) needs to be visualized [S1, unofficial]. The method relies on the concept of an isosurface, defined as the set of points where the scalar field $f(x, y, z)$ equals a constant value [S1, unofficial]. While early implementations used polygonal mesh extraction (e.g., Marching Cubes), ray-marched isosurface rendering offers a procedural alternative that avoids mesh generation overhead and provides smoother results [S3].
 
 ## Sources
 
 [S1] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
-[S2] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
-[S3] Volume Renderer with VTK - yuta-hi, https://github.com/yuta-hi/volume-renderer, fetched 2026-10-29 (unofficial)
-[S4] Volume Rendering in Unity3D - Speaker Deck, https://speakerdeck.com/mlavik1/volume-rendering-in-unity3d, fetched 2026-10-30 (unofficial)
+[S2] seelabutk/pbnj, https://github.com/seelabutk/pbnj, fetched 2026-10-27 (unofficial)
+[S3] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
+[S4] Volume Renderer with VTK - yuta-hi, https://github.com/yuta-hi/volume-renderer, fetched 2026-10-29 (unofficial)
+[S5] Volume Rendering in Unity3D - Speaker Deck, https://speakerdeck.com/mlavik1/volume-rendering-in-unity3d, fetched 2026-10-30 (unofficial)
