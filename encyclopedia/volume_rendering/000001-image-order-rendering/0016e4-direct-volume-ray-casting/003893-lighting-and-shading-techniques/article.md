@@ -3,37 +3,37 @@
 Also called: Volume Shading, Illumination in Volume Rendering
 
 ## Overview
-Lighting and Shading Techniques modulate the base color derived from transfer functions with a lighting term computed from local gradients or pre-computed illumination caches to provide realistic depth perception and highlight occluded regions in semi-transparent volumetric data [S1, S4, unofficial]. Unlike standard direct volume rendering which often produces "cloud-like" or fuzzy images, these methods introduce specular and diffuse cues to reveal internal structures and surface-like features [S1, S4, unofficial]. They differ from siblings like [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by focusing on the illumination model rather than the compositing integration, and from [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md) by typically relying on local gradient-based approximations rather than explicit path-traced light sampling, though some variants integrate global effects via caching [S1, S2].
+Lighting and Shading Techniques modulate the base color derived from transfer functions with a lighting term computed from local gradients or pre-computed illumination caches to provide realistic depth perception and highlight occluded regions in semi-transparent volumetric data [G]. Unlike standard direct volume rendering which often produces "cloud-like" or fuzzy images, these methods introduce specular and diffuse cues to reveal internal structures and surface-like features [G]. They differ from siblings like [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by focusing on the illumination model rather than the compositing integration, and from [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md) by typically relying on local gradient-based approximations rather than explicit path-traced light sampling, though some variants integrate global effects via caching [G].
 
 ## Shared principles
-The method operates within the standard direct volume ray casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). For each sample point $\mathbf{p}_i$ along the ray, the scalar value $V(\mathbf{p}_i)$ is mapped to a base color $C_{base}$ and opacity $\alpha$ using transfer functions [S1, S4, unofficial]. The final color contribution is modulated by a lighting term $L(\mathbf{p}_i)$ [S1, S4, unofficial].
+The method operates within the standard direct volume ray casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md) [G]. For each sample point $\mathbf{p}_i$ along the ray, the scalar value $V(\mathbf{p}_i)$ is mapped to a base color $C_{base}$ and opacity $\alpha$ using transfer functions [G]. The final color contribution is modulated by a lighting term $L(\mathbf{p}_i)$ [G].
 
-The opacity $\alpha$ is derived solely from the opacity transfer function and is generally not modified by the shading model, preserving the physical interpretation of density [S1, S8307, unofficial]. The shading model affects only the color channel [S1].
+The opacity $\alpha$ is derived solely from the opacity transfer function and is generally not modified by the shading model, preserving the physical interpretation of density [G]. The shading model affects only the color channel [G].
 
-The lighting term $L(\mathbf{p}_i)$ is typically computed using a Phong illumination model or a simplified intensity model [S1, S4, unofficial]. This requires estimating the surface normal $\mathbf{n}_i$ at the sample point, usually by normalizing the gradient of the scalar field $\nabla V(\mathbf{p}_i)$ [S4, unofficial].
+The lighting term $L(\mathbf{p}_i)$ is typically computed using a Phong illumination model or a simplified intensity model [G]. This requires estimating the surface normal $\mathbf{n}_i$ at the sample point, usually by normalizing the gradient of the scalar field $\nabla V(\mathbf{p}_i)$ [G].
 
 $$ \mathbf{n}_i = \frac{\nabla V(\mathbf{p}_i)}{\|\nabla V(\mathbf{p}_i)\|} $$
 
-The gradient $\nabla V(\mathbf{p}_i)$ is estimated using finite differences [S4, unofficial]:
+The gradient $\nabla V(\mathbf{p}_i)$ is estimated using finite differences [G]:
 
 $$ \nabla V(\mathbf{p}_i) \approx \left( \frac{V(\mathbf{p}_i + \Delta x) - V(\mathbf{p}_i - \Delta x)}{2\Delta x}, \frac{V(\mathbf{p}_i + \Delta y) - V(\mathbf{p}_i - \Delta y)}{2\Delta y}, \frac{V(\mathbf{p}_i + \Delta z) - V(\mathbf{p}_i - \Delta z)}{2\Delta z} \right) $$
 
-The Phong lighting term combines ambient, diffuse, and specular components [S1, S4, unofficial]:
+The Phong lighting term combines ambient, diffuse, and specular components [G]:
 
 $$ L(\mathbf{p}_i) = k_a + k_d (\mathbf{n}_i \cdot \mathbf{l}) + k_s (\mathbf{r}_i \cdot \mathbf{v})^n $$
 
 Where:
-*   $k_a, k_d, k_s$: Ambient, diffuse, and specular coefficients [S2].
-*   $\mathbf{l}$: Unit vector from $\mathbf{p}_i$ to the light source [S1].
-*   $\mathbf{v}$: Unit view vector from $\mathbf{p}_i$ to the camera [S1].
-*   $\mathbf{r}_i$: Reflection vector of $\mathbf{l}$ about $\mathbf{n}_i$, calculated as $\mathbf{r}_i = 2(\mathbf{n}_i \cdot \mathbf{l})\mathbf{n}_i - \mathbf{l}$ [S1].
-*   $n$: Shininess exponent [S1].
+*   $k_a, k_d, k_s$: Ambient, diffuse, and specular coefficients [G].
+*   $\mathbf{l}$: Unit vector from $\mathbf{p}_i$ to the light source [G].
+*   $\mathbf{v}$: Unit view vector from $\mathbf{p}_i$ to the camera [G].
+*   $\mathbf{r}_i$: Reflection vector of $\mathbf{l}$ about $\mathbf{n}_i$, calculated as $\mathbf{r}_i = 2(\mathbf{n}_i \cdot \mathbf{l})\mathbf{n}_i - \mathbf{l}$ [G].
+*   $n$: Shininess exponent [G].
 
 The shaded sample color $C_i$ is computed as:
 
 $$ C_i = C_{base} \cdot L(\mathbf{p}_i) $$
 
-This shaded color is then accumulated using the front-to-back alpha compositing equation defined in the parent [19-direct-volume-ray-casting.md] [S1].
+This shaded color is then accumulated using the front-to-back alpha compositing equation defined in the parent [19-direct-volume-ray-casting.md] [G].
 
 ## Subtopics
 
@@ -62,20 +62,21 @@ This shaded color is then accumulated using the front-to-back alpha compositing 
 [Kaufman's Shaded Volume Rendering](11206-kaufman-s-shaded-volume-rendering.md) produces informative, rather than physically accurate, representations for scientific interpretation. It decouples the shading model from physical realism, allowing users to modify shading parameters to highlight specific features through a simplified intensity model that incorporates solid texture maps. It uses a specific intensity integral approximation for accumulation.
 
 ### Gradient Shading for Turbulent Flow Visualization
-A technique to obtain crisp and solid-looking images from volume-rendered turbulent flow data by applying additional gradient shading, solving the problem of 'cloud like or fuzzy' images characteristic of direct volume rendering of space filling 3-D data [S1]. It applies solid-texture-mapping to map one velocity component onto another, then applies gradient shading and adds lighting contributions including ambient, diffuse, specular, and glossiness [S1]. Unlike geometrical rendering techniques, this representation preserves the full integrity of the original dataset [S1]. It was demonstrated on a turbulent boundary layer simulation with 9.4 million grid points (54 GB database) on a Stardent GS-1000 [S1].
+A technique to obtain crisp and solid-looking images from volume-rendered turbulent flow data by applying additional gradient shading, solving the problem of 'cloud like or fuzzy' images characteristic of direct volume rendering of space filling 3-D data [G]. It applies solid-texture-mapping to map one velocity component onto another, then applies gradient shading and adds lighting contributions including ambient, diffuse, specular, and glossiness [G]. Unlike geometrical rendering techniques, this representation preserves the full integrity of the original dataset [G]. It was demonstrated on a turbulent boundary layer simulation with 9.4 million grid points (54 GB database) on a Stardent GS-1000 [G].
 
-### Image Plane Sweep Volume Illumination
-A GPU-based volume ray-casting technique using the plane sweep paradigm to reduce illumination computation complexity, supporting scattering and shadowing interactively [S2]. It reformulates the optical model to combine single scattering with a single light direction and multiple scattering resulting from high albedo, allowing for higher frequency shadows and diffuse scattering effects simultaneously [S2].
+### [Image Plane Sweep Volume Illumination](10705-image-plane-sweep-volume-illumination.md)
+A GPU-based volume ray-casting technique using the plane sweep paradigm to reduce illumination computation complexity, supporting scattering and shadowing interactively [G]. It reformulates the optical model to combine single scattering with a single light direction and multiple scattering resulting from high albedo, allowing for higher frequency shadows and diffuse scattering effects simultaneously [G].
 
 ### ShadedVolumeStyle
-A rendering style node that calculates and applies lighting effects to the visual output using an emission-absorption model with a single scattering approximation [S3, unofficial]. It uses an SFBool field 'enabled' to define application and 'lighting' to control calculation [S3, unofficial]. The fields 'shadows' and 'phaseFunction' are not yet implemented [S3, unofficial].
+A rendering style node that calculates and applies lighting effects to the visual output using an emission-absorption model with a single scattering approximation [G]. It uses an SFBool field 'enabled' to define application and 'lighting' to control calculation [G]. The fields 'shadows' and 'phaseFunction' are not yet implemented [G].
 
 ## Background
-The concept of shading in volume rendering emerged to address the lack of depth cues in early direct volume rendering, which often resulted in ambiguous, "cloud-like" images [S1]. Kaufman's work in the late 1980s and early 1990s introduced simplified intensity models and solid texture maps to highlight features for scientific interpretation [S1]. The application of Phong shading to volume data became a standard technique for enhancing depth perception in medical and scientific visualization [S1, S4, unofficial].
+The concept of shading in volume rendering emerged to address the lack of depth cues in early direct volume rendering, which often resulted in ambiguous, "cloud-like" images [G]. Kaufman's work in the late 1980s and early 1990s introduced simplified intensity models and solid texture maps to highlight features for scientific interpretation [G]. The application of Phong shading to volume data became a standard technique for enhancing depth perception in medical and scientific visualization [G].
 
-Later developments focused on global illumination effects. Illumination caching techniques were developed to pre-compute lighting to enable real-time performance [S1]. Extinction-based methods using Summed Area Tables (SATs) allowed for efficient computation of soft shadows and ambient occlusion by approximating neighborhoods with axis-aligned structures [S1, S2]. More recent approaches, such as Next Event Estimation for emissive volumes, integrate path-tracing principles to handle complex lighting scenarios in participating media with energy consistency [S1].
+Later developments focused on global illumination effects [G]. Illumination caching techniques were developed to pre-compute lighting to enable real-time performance [G]. Extinction-based methods using Summed Area Tables (SATs) allowed for efficient computation of soft shadows and ambient occlusion by approximating neighborhoods with axis-aligned structures [G]. More recent approaches, such as Next Event Estimation for emissive volumes, integrate path-tracing principles to handle complex lighting scenarios in participating media with energy consistency [G].
 
 ## Sources
-[S1] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
-[S2] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26
-[S3] instantreality 1.0 - tutorial - Volume Rendering, https://doc.instantreality.org/tutorial/volume-rendering/, fetched 2026-10-28 (unofficial)
+[S1] (PDF) A Comparison between GPU-based Volume Ray Casting ..., https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
+[S2] instantreality 1.0 - tutorial - Volume Rendering, https://doc.instantreality.org/tutorial/volume-rendering/, fetched 2026-10-28 (unofficial)
+[S3] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S4] WebGL for Numerical PDEs (Session 11): Volume Ray Casting, https://www.youtube.com/watch?v=X095f9QzSBo, fetched 2026-10-27 (unofficial)

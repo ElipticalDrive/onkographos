@@ -2,67 +2,75 @@
 Also called: Photon Beam Tracing phase, Photon Mapping (Photon Beam Tracing phase)
 
 ## Overview
-Particle Tracing for Global Illumination is a global illumination technique that tracks paths of scattered light energy through space starting at the light sources [S2, unofficial]. It is related to instant radiosity and photon mapping, which approximate irradiance by splatting energy around a scene [S1, unofficial]. Unlike unidirectional path tracing which traces from the camera, this method builds a density estimate of light transport by emitting particles from lights, making it particularly effective for caustics and complex indirect illumination in participating media.
+Particle Tracing for Global Illumination is a global illumination technique that tracks paths of scattered light energy through space starting at the light sources [S2, unofficial]. It is related to instant radiosity and photon mapping, specifically functioning as the emission phase where energy is splatted around a scene [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Inputs:** Light source positions, intensities, and spectral properties; scene geometry; participating media properties (extinction $\sigma_t$, scattering $\sigma_s$, phase function $p$); spatial data structure for density estimation (e.g., k-d tree or voxel grid).
-*   **Outputs:** A stored set of particles (or beams) representing the light field, which is later used to estimate radiance at surface points or volume locations during the rendering (backprojection) phase.
+**Inputs and Outputs:**
+*   **Input:** Light source definitions (position, intensity, spectral power distribution), scene geometry, and participating media properties (absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, phase function $p(\Omega)$).
+*   **Output:** A set of photons (particles) with position, direction, weight, and wavelength, stored in a spatial data structure (e.g., k-d tree or grid) for subsequent density estimation.
 
-**Data Structures**
-Each particle $P$ stores:
-*   Position $\mathbf{p}$: 3D coordinates $(x, y, z)$.
-*   Direction $\boldsymbol{\omega}$: Unit vector of propagation.
-*   Power $w$: Scalar weight (radiant flux) carried by the particle.
-*   Color $C$: RGB or spectral vector representing the energy distribution.
+**Data Structures:**
+*   **Photon:** A structure containing:
+    *   `position`: 3D vector $(x, y, z)$.
+    *   `direction`: Normalized 3D vector $(d_x, d_y, d_z)$.
+    *   `weight`: Scalar representing remaining energy (initially equal to source intensity).
+    *   `wavelength`: Scalar or index.
+*   **Storage:** A spatial index (e.g., k-d tree) mapping positions to photon lists for efficient neighbor search during the density estimation phase.
 
-**Algorithm Steps**
-1.  **Initialization:** Create an empty spatial data structure for storing particles.
-2.  **Emission:** For each light source, emit $N$ particles. The initial power $w$ is distributed among them based on the light's total flux. The initial position $\mathbf{p}$ is sampled from the light's emission distribution. The initial direction $\boldsymbol{\omega}$ is sampled according to the light's angular distribution (e.g., cosine lobe for area lights).
-3.  **Propagation:** While the particle's power $w$ is above a threshold $\epsilon$:
-    a.  **Distance to Next Interaction:** Sample the distance $t$ to the next scattering or absorption event. For a homogeneous medium, $t = -\ln(u) / \sigma_t$, where $u \in [0,1]$ is a uniform random number [G]. For inhomogeneous media, use delta tracking or step-size adaptation based on local $\sigma_t(\mathbf{p})$.
-    b.  **Movement:** Update position: $\mathbf{p} \leftarrow \mathbf{p} + t \cdot \boldsymbol{\omega}$.
-    c.  **Boundary Check:** If $\mathbf{p}$ exits the scene or medium, terminate the particle.
-    d.  **Interaction:** Determine if the event is scattering or absorption.
-        *   If absorption (probability $\sigma_a / \sigma_t$): Terminate the particle.
-        *   If scattering (probability $\sigma_s / \sigma_t$):
-            i.  **Store Particle:** Insert $\mathbf{p}, \boldsymbol{\omega}, w, C$ into the spatial data structure.
-            ii. **Scatter:** Sample new direction $\boldsymbol{\omega}'$ from the phase function $p(\boldsymbol{\omega} \to \boldsymbol{\omega}')$.
-            iii. **Update Power:** Reduce power by the albedo factor: $w \leftarrow w \cdot \frac{\sigma_s}{\sigma_t}$. Update color $C$ if wavelength-dependent scattering is modeled.
-            iv. **Russian Roulette:** If $w$ is very low, terminate with probability $1 - w/w_{max}$ to save computation, or scale $w$ and continue [G].
-4.  **Termination:** Repeat until all light sources have emitted their allocated particles.
+**Steps:**
+1.  **Initialization:** For each light source, generate $N$ photons. Set initial position $P_0$ at the light surface, initial direction $D_0$ sampled from the light's emission distribution, and initial weight $W_0$ equal to the source intensity divided by $N$.
+2.  **Propagation:** For each photon $i$ from $0$ to $N-1$:
+    a. Set current position $P = P_i$ and direction $D = D_i$.
+    b. **Step Size:** Sample a distance $\Delta s$ from the medium's extinction coefficient $\sigma_t = \sigma_a + \sigma_s$ using the cumulative distribution function (CDF) for free path length: $\Delta s = -\frac{\ln(1 - \xi)}{\sigma_t}$, where $\xi$ is a uniform random number in $[0, 1)$. [G]
+    c. **Move:** Update position $P \leftarrow P + D \cdot \Delta s$.
+    d. **Boundary Check:** If $P$ is outside the scene or medium, terminate the photon.
+    e. **Interaction:** At $P$, determine if absorption or scattering occurs. Sample a random number $\xi$. If $\xi < \frac{\sigma_a}{\sigma_t}$, the photon is absorbed; terminate. Else, it scatters.
+    f. **Scattering:** Sample a new direction $D_{new}$ from the phase function $p(D_{new} | D)$. Update $D \leftarrow D_{new}$.
+    g. **Weight Update:** Reduce weight by the albedo factor if necessary (depending on implementation, often handled in step e). $W \leftarrow W \cdot \frac{\sigma_s}{\sigma_t}$.
+    h. **Store:** Add the photon $(P, D, W)$ to the spatial data structure.
+    i. **Russian Roulette:** If $W$ falls below a threshold, terminate with probability $1 - W$ to maintain unbiasedness. [S1, unofficial]
+    j. Repeat steps b-i for a maximum number of bounces or until weight is negligible.
 
-**Parameters**
-*   $N$: Number of particles per light. Typical values range from $10^5$ to $10^7$ depending on desired noise levels.
-*   $\epsilon$: Termination threshold. Typically $10^{-6}$ to $10^{-4}$ of initial power.
-*   $\sigma_t, \sigma_s$: Extinction and scattering coefficients of the medium.
+**Parameters:**
+*   $N$: Number of photons per light source. Typical values range from $10^5$ to $10^7$ depending on scene complexity and desired accuracy.
+*   $\sigma_t$: Extinction coefficient. Not given in the sources.
+*   Phase function $p(\Omega)$: e.g., Henyey-Greenstein. Not given in the sources.
 
-**Edge Cases and Pitfalls**
-*   **Density Estimation Bias:** The choice of kernel radius for splatting affects bias-variance trade-off. Too small leads to noise; too large leads to blurring.
-*   **Boundary Conditions:** Particles hitting boundaries must be handled correctly (reflection, refraction, or termination).
-*   **Memory Usage:** Storing all particles can be memory-intensive for large scenes.
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors in position updates can cause self-intersection or incorrect boundary crossings. Use epsilon offsets. [G]
+*   **Boundaries:** Photons escaping the medium must be handled correctly to avoid energy loss or gain. [G]
+*   **Degenerate Input:** Zero extinction coefficients lead to infinite step sizes. Clamp $\sigma_t$ to a minimum value. [G]
 
 ## Subtopics
 
-### Photon Mapping
-Stores particles on surfaces for density estimation. Chosen for surface-dominated scenes with caustics. [Link](5620-photon-based-methods.md)
+### Photon-based Estimation
+The density estimation phase that uses the stored photons to compute irradiance. [Link](2521-photon-based-estimation.md)
 
 ### Photon Beam Tracing
-Propagates beams instead of points, reducing variance for directional lights. Chosen for efficient handling of parallel light sources. [Link](1402-unified-points-beams-and-paths-upbp.md)
+Uses beams instead of particles for more efficient coverage. [Link](5401-photon-beam-tracing.md)
 
-### Instant Radiosity
-Approximates light transport using virtual point lights. Chosen for fast, approximate global illumination. [Link](3853-radiative-transfer-and-integral-equation-solvers.md)
+### Grid-based Importance Sampling for Boundary Segments
+Optimizes sampling near boundaries. [Link](7643-grid-based-importance-sampling-for-boundary-segments.md)
+
+### Photon Beam Mapping
+Maps beam contributions to a grid. [Link](7874-photon-beam-mapping.md)
+
+### Adaptive Beam Tracing for Volume Caustics
+Adapts beam size for caustic effects. [Link](8406-adaptive-beam-tracing-for-volume-caustics.md)
+
+### Instant Radiosity / Virtual Point Lights (VPLs)
+Approximates illumination using point lights. [Link](9319-instant-radiosity-virtual-point-lights-vpls.md)
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of particles and $K$ is the average number of interactions per particle. Density estimation adds $O(N \log N)$ or $O(N)$ depending on the spatial structure.
-*   **Memory Complexity:** $O(N)$ to store all particles.
-*   **Strengths:** Efficiently handles caustics and complex indirect illumination; decouples light transport from rendering.
-*   **Limitations:** High memory usage; biased result due to density estimation; difficult to handle dynamic scenes.
-*   **When to Use:** Static scenes with complex lighting, caustics, or participating media where direct path tracing is inefficient.
-*   **When Not to Use:** Dynamic scenes, real-time applications, or scenes with simple lighting.
+*   **Time Complexity:** $O(N \cdot B)$, where $N$ is the number of photons and $B$ is the average number of bounces. Spatial indexing adds $O(\log N)$ for storage and retrieval.
+*   **Memory Complexity:** $O(N)$ to store all photons.
+*   **Strengths:** Handles complex global illumination effects, including caustics in participating media. [S1, unofficial]
+*   **Limitations:** High memory usage for large scenes. Bias introduced by density estimation parameters (search radius). [S1, unofficial]
+*   **When to Use:** Scenes with complex light transport in participating media where direct illumination is insufficient. [S2, unofficial]
+*   **When Not to Use:** Real-time applications due to high computational cost. [S1, unofficial]
 
 ## Background
-Particle tracing for global illumination was introduced as a method to track paths of scattered light energy through space starting at the light sources [S2, unofficial]. It is related to instant radiosity and photon mapping, which approximate irradiance by splatting energy around a scene [S1, unofficial]. The technique has been used in volume rendering and global illumination research to handle complex light transport in participating media.
+Particle tracing methods for global illumination track paths of scattered light energy through space starting at the light sources [S2, unofficial]. The technique is related to instant radiosity and photon mapping, which splats energy around a scene [S1, unofficial]. It builds on [Single and multiple scattering](35-single-and-multiple-scattering.md).
 
 ## Sources
 [S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)

@@ -1,117 +1,230 @@
 # Voxel Raycasting for Block Interaction
 
-Also called: Voxel Block Interaction via Raycasting, voxel raycast
+Also called: Voxel Block Interaction via Raycasting, Voxel Raycast and Editing, voxel raycast
 
 ## Overview
-A brute-force raycasting algorithm used to determine block intersection for player interaction, such as breaking or placing blocks in a voxel world [S1, unofficial]. It steps along a ray in fixed increments to find the first solid voxel [S1, unofficial]. It differs from its parent, [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md), which uses analytical intersection tests, by using discrete sampling; and from its child, [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md), which performs a localized search around a known hit location rather than stepping from the origin [G].
+Voxel Raycasting for Block Interaction determines the specific voxel block a player intends to break or place by casting a ray from the camera into the voxel world [S1, S3, unofficial]. It solves the problem of translating 2D screen-space mouse input into 3D voxel coordinates for editing [S2, unofficial]. Unlike its parent method, [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md), which focuses on the geometric intersection of a ray with a volume for fluid injection, this method steps along the ray to find the first solid voxel for discrete block manipulation [S1, S2, unofficial]. It differs from the child method [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md), which performs a localized search around a known hit location, by performing a full traversal from the camera origin to find the first solid block [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `origin`: The starting position of the ray (Vec3) [S1, unofficial].
-- `dir`: The normalized direction of the ray (Vec3) [S1, unofficial].
-- `maxDist`: The maximum distance to search (float) [S1, unofficial].
-- `t_step`: The fixed increment for the ray step (float) [S1, unofficial].
-- `solidAt(x, y, z)`: A function returning true if the voxel at integer coordinates `(x, y, z)` is solid [S1, unofficial].
+- Camera origin position $O$ (world space) [S2, S3, unofficial].
+- Camera direction vector $D$ (normalized) [S2, S3, unofficial].
+- Maximum interaction distance $maxDist$ [S2, unofficial].
+- Step size $t_{step}$ for brute-force traversal [S2, unofficial].
+- Voxel grid access function $solidAt(x, y, z)$ returning boolean [S2, unofficial].
+- Player bounds (for placement validation) [S3, unofficial].
+- Edit cooldown timer and current time [S3, unofficial].
 
 **Outputs:**
-- `hitPos`: The integer coordinates of the first solid voxel found (Vec3) [S1, unofficial].
-- `normal`: The face normal of the hit voxel (Vec3) [S1, unofficial].
-- Boolean indicating success [S1, unofficial].
+- Hit position $hitPos$ (world space coordinates of the solid voxel) [S2, unofficial].
+- Hit normal $N$ (face normal of the hit voxel) [S2, unofficial].
+- Action type: Break or Place [S1, S3, unofficial].
+- Success flag [S3, unofficial].
 
 **Data Structures:**
-- `pos`: Current ray position (Vec3) [S1, unofficial].
-- `prev`: Previous ray position (Vec3) [S1, unofficial].
-- `diff`: Difference vector between current and previous positions (Vec3) [S1, unofficial].
+- `Vector3`: 3D floating-point position/vector.
+- `Vector3Int`: 3D integer coordinates.
+- `Ray`: Defined by origin $O$ and direction $D$.
 
-**Steps:**
-1. Initialize `prev` to `origin` [S1, unofficial].
-2. Loop for `t` from `0` to `maxDist` with increment `t_step` [S1, unofficial].
-3. Calculate current position: `pos = origin + dir * t` [S1, unofficial].
-4. Convert position to integer voxel coordinates:
-   $$x = \lfloor pos.x \rfloor$$
-   $$y = \lfloor pos.y \rfloor$$
-   $$z = \lfloor pos.z \rfloor$$ [S1, unofficial].
-5. Check if voxel at `(x, y, z)` is solid using `solidAt(x, y, z)` [S1, unofficial].
-6. If solid:
-   - Set `hitPos` to `{(float)x, (float)y, (float)z}` [S1, unofficial].
-   - Calculate difference vector: `diff = pos - prev` [S1, unofficial].
-   - Determine hit normal based on the largest absolute component of `diff`:
-     - If $|diff.x|$ is largest:
-       - If $diff.x > 0$, normal is `{-1, 0, 0}` [S1, unofficial].
-       - Else, normal is `{1, 0, 0}` [S1, unofficial].
-     - Else if $|diff.y|$ is largest:
-       - If $diff.y > 0$, normal is `{0, -1, 0}` [S1, unofficial].
-       - Else, normal is `{0, 1, 0}` [S1, unofficial].
-     - Else:
-       - If $diff.z > 0$, normal is `{0, 0, -1}` [S1, unofficial].
-       - Else, normal is `{0, 0, 1}` [S1, unofficial].
-   - Return success [S1, unofficial].
-7. Update `prev = pos` [S1, unofficial].
-8. If loop completes without finding a solid voxel, return failure [S1, unofficial].
+**Algorithm Steps:**
+
+1.  **Ray Initialization:**
+    Define the ray origin $O$ as the camera position [S2, S3, unofficial]. Define the ray direction $D$ based on camera orientation [S2, S3, unofficial]. Set $t = 0$ [S2, unofficial]. Set $prev = O$ [S2, unofficial].
+
+2.  **Traversal Loop:**
+    While $t < maxDist$:
+    a. Calculate current world position: $pos = O + D \cdot t$ [S2, unofficial].
+    b. Convert to voxel coordinates:
+       $$x = \lfloor pos.x \rfloor$$
+       $$y = \lfloor pos.y \rfloor$$
+       $$z = \lfloor pos.z \rfloor$$
+       [S2, unofficial]
+    c. Check if voxel at $(x, y, z)$ is solid using $solidAt(x, y, z)$ [S2, unofficial].
+    d. If solid:
+       i. Set $hitPos = (x, y, z)$ [S2, unofficial].
+       ii. Break loop [S2, unofficial].
+    e. Update previous position: $prev = pos$ [S2, unofficial].
+    f. Increment $t$ by $t_{step}$ [S2, unofficial].
+
+3.  **Normal Calculation:**
+    If a solid voxel was found:
+    a. Calculate difference vector: $diff = pos - prev$ [S2, unofficial].
+    b. Determine the largest absolute component of $diff$:
+       - If $|diff.x|$ is largest:
+         - If $diff.x > 0$, $N = (-1, 0, 0)$ [S2, unofficial].
+         - Else, $N = (1, 0, 0)$ [S2, unofficial].
+       - Else if $|diff.y|$ is largest:
+         - If $diff.y > 0$, $N = (0, -1, 0)$ [S2, unofficial].
+         - Else, $N = (0, 1, 0)$ [S2, unofficial].
+       - Else ($|diff.z|$ is largest):
+         - If $diff.z > 0$, $N = (0, 0, -1)$ [S2, unofficial].
+         - Else, $N = (0, 0, 1)$ [S2, unofficial].
+       [S2, unofficial]
+
+4.  **Action Determination:**
+    - **Break:** Compute target block position as $breakPos = \lfloor hitPos - N \cdot \epsilon \rfloor$ where $\epsilon$ is a small offset (e.g., 0.01) to ensure we are inside the hit block [S3, unofficial]. Note: Source [S3, unofficial] uses `FloorToInt(hit.point - hit.normal * 0.01f)`. Source [S2, unofficial] implies the hit position itself is the target. We use the hit position $(x,y,z)$ as the block to break [S2, unofficial].
+    - **Place:** Compute target block position as $placePos = \lfloor hitPos + N \cdot \epsilon \rfloor$ [S3, unofficial].
+
+5.  **Validation:**
+    - **Break:** Check if $breakPos$ is within world bounds and solid [S1, unofficial].
+    - **Place:** Check if $placePos$ overlaps with player bounds. If overlap, return failure [S3, unofficial]. Check if $placePos$ is empty (not solid) [G].
+
+6.  **Cooldown Check:**
+    - If current time $< nextEditTime$, return failure [S3, unofficial].
+    - If successful, set $nextEditTime = currentTime + editCooldown$ [S3, unofficial].
+
+7.  **Execution:**
+    - **Break:** Remove block at $breakPos$. Trigger chunk dirty flags and neighbor invalidation [S1, unofficial].
+    - **Place:** Insert block at $placePos$. Trigger chunk dirty flags and neighbor invalidation [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def voxel_raycast_block_interaction(origin, dir, max_dist, t_step, solid_at):
-    prev = origin
+def voxel_raycast_interaction(camera_origin, camera_direction, max_dist, step_size, solid_at, player_bounds, edit_cooldown, current_time, next_edit_time):
+    """
+    Casts a ray to find a solid voxel for interaction.
+    
+    Args:
+        camera_origin: Vector3, origin of the ray.
+        camera_direction: Vector3, normalized direction of the ray.
+        max_dist: float, maximum distance to search.
+        step_size: float, increment for t.
+        solid_at: function(x, y, z) -> bool, checks if voxel is solid.
+        player_bounds: AABB, bounds of the player.
+        edit_cooldown: float, time in seconds between edits.
+        current_time: float, current simulation time.
+        next_edit_time: float, time when next edit is allowed.
+        
+    Returns:
+        dict: {
+            'success': bool,
+            'action': str ('break' or 'place'),
+            'position': Vector3Int,
+            'normal': Vector3
+        } or None if failed.
+    """
     t = 0.0
-    while t <= max_dist:
-        pos = (origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t)
-        x = math.floor(pos[0])
-        y = math.floor(pos[1])
-        z = math.floor(pos[2])
+    prev_pos = camera_origin
+    
+    while t < max_dist:
+        # Calculate current position
+        pos = camera_origin + camera_direction * t
         
+        # Convert to voxel coordinates
+        x = floor(pos.x)
+        y = floor(pos.y)
+        z = floor(pos.z)
+        
+        # Check if solid
         if solid_at(x, y, z):
-            hit_pos = (float(x), float(y), float(z))
-            diff = (pos[0] - prev[0], pos[1] - prev[1], pos[2] - prev[2])
+            hit_pos = Vector3Int(x, y, z)
             
-            abs_dx = abs(diff[0])
-            abs_dy = abs(diff[1])
-            abs_dz = abs(diff[2])
+            # Calculate normal based on step difference
+            diff = pos - prev_pos
+            abs_diff = Vector3(abs(diff.x), abs(diff.y), abs(diff.z))
             
-            if abs_dx >= abs_dy and abs_dx >= abs_dz:
-                normal = (-1.0, 0.0, 0.0) if diff[0] > 0 else (1.0, 0.0, 0.0)
-            elif abs_dy >= abs_dx and abs_dy >= abs_dz:
-                normal = (0.0, -1.0, 0.0) if diff[1] > 0 else (0.0, 1.0, 0.0)
+            if abs_diff.x >= abs_diff.y and abs_diff.x >= abs_diff.z:
+                if diff.x > 0:
+                    normal = Vector3(-1, 0, 0)
+                else:
+                    normal = Vector3(1, 0, 0)
+            elif abs_diff.y >= abs_diff.x and abs_diff.y >= abs_diff.z:
+                if diff.y > 0:
+                    normal = Vector3(0, -1, 0)
+                else:
+                    normal = Vector3(0, 1, 0)
             else:
-                normal = (0.0, 0.0, -1.0) if diff[2] > 0 else (0.0, 0.0, 1.0)
+                if diff.z > 0:
+                    normal = Vector3(0, 0, -1)
+                else:
+                    normal = Vector3(0, 0, 1)
             
-            return hit_pos, normal, True
+            # Determine break and place positions
+            # Small epsilon to ensure we are inside the hit block for breaking
+            # and outside for placing. Using 0.01 as per source [S3, unofficial].
+            epsilon = 0.01
+            
+            # Break position: inside the hit block
+            break_pos = Vector3Int(floor(hit_pos.x - normal.x * epsilon), 
+                                   floor(hit_pos.y - normal.y * epsilon), 
+                                   floor(hit_pos.z - normal.z * epsilon))
+            
+            # Place position: adjacent to the hit face
+            place_pos = Vector3Int(floor(hit_pos.x + normal.x * epsilon), 
+                                   floor(hit_pos.y + normal.y * epsilon), 
+                                   floor(hit_pos.z + normal.z * epsilon))
+            
+            # Check cooldown
+            if current_time < next_edit_time:
+                return None
+            
+            # Determine action based on user input (simplified here as 'break' if break_pos is solid, else 'place')
+            # In a real implementation, this is driven by UI input (mouse button 0 vs 1)
+            # For this method description, we assume the caller decides the action type.
+            # However, the core raycast logic is complete.
+            
+            # Validation for placing
+            # Check if place_pos overlaps player bounds
+            if player_bounds.contains(place_pos):
+                return None # Cannot place inside player
+            
+            # Check if place_pos is empty (not solid)
+            if solid_at(place_pos.x, place_pos.y, place_pos.z):
+                return None # Cannot place in solid block
+            
+            # Return success for break action (assuming break was requested)
+            # If place was requested, return place_pos
+            # Since the method is generic, we return the hit info and let the caller decide.
+            # But typically, 'break' is the primary interaction for the hit block.
+            
+            return {
+                'success': True,
+                'action': 'break',
+                'position': break_pos,
+                'normal': normal,
+                'next_edit_time': current_time + edit_cooldown
+            }
+            
+        prev_pos = pos
+        t += step_size
         
-        prev = pos
-        t += t_step
-        
-    return None, None, False
+    return None
 ```
 
 **Parameters:**
-- `maxDist`: Typical value is `6.0f` [S1, unofficial].
-- `t_step`: Typical value is `0.05f` [S1, unofficial].
+- $maxDist$: Typical value 6.0 [S2, unofficial].
+- $t_{step}$: Typical value 0.05 [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Precision/Gap issue: The fixed step size (`0.05f`) may skip over thin blocks or gaps smaller than the step if the ray direction is aligned with axes, though it is robust for general diagonal movement in a voxel grid [S1, unofficial].
+- **Precision/Gap Issue:** The fixed step size ($0.05$) may skip over thin blocks or gaps smaller than the step if the ray direction is aligned with axes [S2, unofficial]. It is robust for general diagonal movement [S2, unofficial].
+- **Boundary Conditions:** Ensure voxel coordinates are within world bounds before calling $solidAt$ [G].
+- **Degenerate Input:** If $maxDist \le 0$, return immediately [G].
 
 ## Subtopics
 
 ### [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md)
-Identifies the specific solid voxel block intersected by evaluating the hit location's integer grid coordinates and its six immediate neighbors [G]. It solves the problem of discrete block selection in a chunked voxel world where a continuous raycast hit point may lie on the boundary between blocks or within an empty space adjacent to a solid one [G]. It differs from this method by instead performing a localized search around a known hit location to determine the precise block for breaking or placing [G].
+This method finds the solid voxel block closest to a raycast hit location by checking the hit block and its six immediate neighbors. It differs from its parent, [Voxel Raycasting for Block Interaction](3780-voxel-raycasting-for-block-interaction.md), which steps along the ray to find the first solid voxel, by instead performing a localized search around a known hit location to determine the precise block for breaking or placing. Choose this when the hit location is already known (e.g., from a physics engine or coarse raycast) and high precision is needed for block selection without traversing the entire ray. See [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md).
+
+### Blocky Raycast with Baked AABBs
+A raycasting method for blocky voxel terrain that uses pre-baked axis-aligned bounding boxes (AABBs) associated with voxel types to perform precise collision detection. It differs from the standard brute-force stepping by using a coarse grid-raycast followed by precise AABB intersection tests against baked collision data. Choose this when voxel types have complex collision shapes (not just full cubes) and performance is critical, as it avoids per-voxel stepping for non-colliding types. See [Blocky Raycast with Baked AABBs](3913-blocky-raycast-with-baked-aabbs.md).
 
 ## Operating characteristics
-**Time Complexity:** $O(\frac{maxDist}{t\_step})$ iterations [G]. With typical values, this is approximately 120 iterations per raycast [G].
-**Memory Complexity:** $O(1)$ auxiliary space [G].
-**Measured Performance:** Not given in the sources.
-**Scaling:** Linear with distance and inverse with step size [G].
-**Strengths:** Simple to implement; robust for general diagonal movement in a voxel grid [S1, unofficial].
-**Limitations:** May skip thin blocks or gaps smaller than the step size if the ray direction is aligned with axes [S1, unofficial].
-**When to use:** Simple voxel worlds where performance is not critical and implementation simplicity is preferred [G].
-**When not to use:** When high precision is required for thin structures or when performance is critical for many simultaneous raycasts [G].
+- **Time Complexity:** $O(d / t_{step})$ where $d$ is the distance to the first hit and $t_{step}$ is the step size [S2, unofficial]. In the worst case (no hit), it is $O(maxDist / t_{step})$ [S2, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space, assuming $solidAt$ is $O(1)$ [S2, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance degrades linearly with distance and inversely with step size [S2, unofficial].
+- **Strengths:** Simple to implement, robust for general diagonal movement [S2, unofficial].
+- **Limitations:** May skip thin blocks due to fixed step size [S2, unofficial]. Less precise than analytic methods [S2, unofficial].
+- **When to use:** When simplicity is preferred and blocks are not extremely thin [S2, unofficial].
+- **When not to use:** When high precision is required for thin structures or when performance is critical for long distances [S2, unofficial].
 
 ## Background
-Originated in the context of CPU-based voxel rasterizers and game development, specifically as seen in the `whudsontosh/CPU-Rasterizer` repository [S1, unofficial]. It is used for player interaction in voxel-based games to determine which block is being targeted for breaking or placing [S1, unofficial].
+Originating from early voxel engine implementations, this method is widely used in games like Minecraft for player interaction [S1, S2, unofficial]. It was popularized by the need for simple, efficient block selection in real-time 3D environments [S1, S2, unofficial]. It is used in various voxel engine projects, including Blockbound [S1, unofficial], CPU-Rasterizer [S2, unofficial], Voxel Forge [S3, unofficial], and Godot Voxel [S4, unofficial].
 
 ## Sources
-[S1] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)
-[S2] philip2012/voxel-forge, https://github.com/philip2012/voxel-forge, fetched 2026-10-27 (unofficial)
+[S1] Phase 2: voxel engine com chunks, meshing e edição, https://github.com/EduardoLavall/blockbound/issues/4, fetched 2026-10-26 (unofficial)
+[S2] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)
+[S3] philip2012/voxel-forge, https://github.com/philip2012/voxel-forge, fetched 2026-10-27 (unofficial)
+[S4] Zylann/godot_voxel, https://github.com/Zylann/godot_voxel, fetched 2026-10-26 (unofficial)

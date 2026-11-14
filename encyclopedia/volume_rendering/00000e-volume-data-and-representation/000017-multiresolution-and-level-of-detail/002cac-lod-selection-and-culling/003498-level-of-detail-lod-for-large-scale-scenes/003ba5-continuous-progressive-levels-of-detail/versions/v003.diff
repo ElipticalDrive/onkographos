@@ -1,0 +1,133 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Continuous (Progressive) Levels of Detail (LoD) is a technique for generating multi-resolution hierarchies for 3D data volumes or scenes by creating a continuous-resolution representation that allows smooth transitions between approximations [S1, S3, unofficial][S2, unofficial]. Unlike discrete LoD systems that switch abruptly between fixed resolution steps, this method enables fine-grained control over detail levels, eliminating popping artifacts and allowing the renderer to fall back to lower resolutions if rendering time exceeds allotted limits [S1, unofficial][S2, unofficial]. It is distinguished from its sibling [Scene Contraction Function](8533-scene-contraction-function.md) by its focus on precomputing a continuous spectrum of detail rather than geometric simplification via contraction.
++Continuous (Progressive) Levels of Detail (LoD) generates multi-resolution hierarchies for 3D volumes or scenes by precomputing a continuous-resolution representation that enables smooth transitions between approximations [S1, unofficial][S3, unofficial][S2, unofficial]. Unlike discrete LoD systems that switch abruptly between fixed steps, this method provides fine-grained control over detail levels (e.g., Gaussian counts), eliminating popping artifacts and allowing fallback to lower resolutions when rendering exceeds allotted time [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+@@ -14,20 +14,20 @@
+ 
+ **Data Structures:**
+-The hierarchy is typically structured as a set of resolutions or a continuous parameter space. In Gaussian Splatting contexts, this may involve a continuous budget parameter $c$ that sweeps a memory-quality curve [S4, unofficial]. The data structure must support querying the appropriate resolution or Gaussian count based on a continuous LoD value.
++The hierarchy maps filter support sizes (or a continuous budget parameter) to precomputed low-pass filtered datasets [S1, unofficial][S4, unofficial]. The data structure must support querying the appropriate resolution or Gaussian count based on a continuous LoD value [S2, unofficial][S4, unofficial].
+ 
+ **Steps:**
+ 1.  **Low-Pass Filtering:** The input dataset is sampled and low-pass filtered to create lower-resolution versions [S1, unofficial].
+-2.  **Filter Support Mapping:** Establish a direct correspondence between the size of the low-pass filter support and the resulting resolution [S1, unofficial].
+-3.  **Hierarchy Construction:** Create every detail in the hierarchy by convolving the *original* dataset with a low-pass filter of the appropriate support [S1, unofficial]. This ensures that each level is an independent approximation of the original, not of the previous level.
+-4.  **Continuous Interpolation:** At runtime, interpolate between precomputed levels or adjust properties (e.g., Gaussian count) continuously based on the view-dependent or time-budget LoD parameter [S2, unofficial][S4, unofficial].
++2.  **Filter Support Mapping:** A direct correspondence is established between the size of the low-pass filter support and the resulting resolution [S1, unofficial].
++3.  **Hierarchy Construction:** Every detail in the hierarchy is created by convolving the *original* dataset with a low-pass filter of the appropriate support [S1, unofficial]. This ensures that each level is an independent approximation of the original, not of the previous level [S1, unofficial].
++4.  **Continuous Interpolation:** At runtime, properties (e.g., Gaussian count, volume values) are interpolated continuously between precomputed levels based on a view-dependent or time-budget LoD parameter [S2, unofficial][S4, unofficial].
+ 
+ **Formulas and Parameters:**
+-*   **Filtering:** $D_{res} = \text{LowPassFilter}(D_{original}, \sigma)$, where $\sigma$ corresponds to the desired resolution [S1, unofficial].
+-*   **Error Propagation:** Errors from non-ideal filters do not accumulate because $D_{level_i}$ is computed from $D_{original}$, not $D_{level_{i-1}}$ [S1, unofficial].
+-*   **Continuous Budget ($c$):** In specific implementations like Budgeted-GS, a parameter $c$ controls the trade-off between memory and quality [S4, unofficial]. For example, $c=4$ may be lossless, while lower values reduce memory usage significantly (e.g., 110.6 MB vs 1926 MB at ~20.8 dB) [S4, unofficial].
++*   **Filtering:** $D_{level} = D_{original} * h_{\sigma}$, where $h_{\sigma}$ is a low-pass filter kernel with support $\sigma$ mapped to the target resolution [S1, unofficial].
++*   **Error Propagation:** Errors from non-ideal filters do not accumulate because $D_{level_i}$ is computed directly from $D_{original}$ rather than $D_{level_{i-1}}$ [S1, unofficial].
++*   **Continuous Budget ($c$):** In implementations like Budgeted-GS, a parameter $c$ sweeps a memory-quality curve [S4, unofficial]. At $c=4$, rendering is lossless; at ~20.8 dB, memory drops to 110.6 MB from a baseline of 1926 MB (17× reduction) [S4, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def build_continuous_lod(original_dataset):
++def build_continuous_lod(original_dataset, filter_supports):
+     """
+     Builds a continuous LoD hierarchy by convolving the original dataset
+@@ -35,35 +35,44 @@
+     """
+     hierarchy = {}
+-    
+-    # Define a range of filter supports corresponding to desired resolutions
+-    # Note: Resolutions need not be powers of two [S1, unofficial]
+-    filter_supports = [1.0, 1.5, 2.0, 3.0, 4.0] 
+-    
+     for support in filter_supports:
+         # Convolve the ORIGINAL dataset, not the previous level
+         # This prevents error accumulation [S1, unofficial]
+-        filtered_dataset = low_pass_filter(original_dataset, support)
+-        
+-        # Store with the support/resolution as key
+-        hierarchy[support] = filtered_dataset
+-        
++        filtered = convolve_3d(original_dataset, generate_gaussian_kernel(support))
++        hierarchy[support] = filtered
+     return hierarchy
+ 
+-def render_continuous_lod(hierarchy, lod_parameter):
++def generate_gaussian_kernel(sigma):
++    """Standard isotropic Gaussian kernel for low-pass filtering [G]."""
++    return standard_gaussian_3d(sigma)
++
++def convolve_3d(data, kernel):
++    """Standard 3D convolution operation [G]."""
++    return standard_convolution_3d(data, kernel)
++
++def interpolate_datasets(hierarchy, lod_value):
+     """
+-    Renders using continuous interpolation between precomputed levels.
+-    lod_parameter: A continuous value (e.g., memory budget or distance)
++    Interpolates between precomputed levels based on a continuous parameter.
++    lod_value: A continuous value (e.g., memory budget or distance)
+     mapping to a specific resolution in the hierarchy.
+     """
+-    # Find the two bounding filter supports in the hierarchy
+-    # Interpolate between them to get the final dataset
+-    # Implementation detail: Specific interpolation method (e.g., linear)
+-    # depends on the data type (volume values, Gaussian properties) [S2, unofficial]
+-    
+-    # Example: Linear interpolation of Gaussian counts or volumes
+-    # This avoids popping artifacts [S2, unofficial]
+-    dataset = interpolate_datasets(hierarchy, lod_parameter)
+-    
+-    return render(dataset)
++    keys = sorted(hierarchy.keys())
++    if lod_value <= keys[0]:
++        return hierarchy[keys[0]]
++    if lod_value >= keys[-1]:
++        return hierarchy[keys[-1]]
++    # Linear interpolation between bounding levels [G]
++    for i in range(len(keys) - 1):
++        if keys[i] <= lod_value <= keys[i+1]:
++            t = (lod_value - keys[i]) / (keys[i+1] - keys[i])
++            return lerp_3d(hierarchy[keys[i]], hierarchy[keys[i+1]], t)
++    return hierarchy[keys[-1]]
++
++def lerp_3d(a, b, t):
++    """Standard linear interpolation for 3D data [G]."""
++    return a + t * (b - a)
++
++def render(dataset):
++    """Standard volume/Gaussian rendering pass [G]."""
++    return standard_render_pass(dataset)
+ ```
+ 
+@@ -76,17 +85,17 @@
+ 
+ ### Continuous LOD Parameter (c)
+-A specific implementation detail found in Budgeted-GS where a continuous budget parameter $c$ is used to sweep a memory-quality curve [S4, unofficial]. This allows the same model to be rendered at different LOD levels without retraining [S4, unofficial]. Across the full ladder, a single model sweeps a continuous memory-quality curve; re-rendering through the GPS renderer reproduces it within 0.5 dB [S4, unofficial]. At an operating point of ~20.8 dB, the method costs 110.6 MB against GPS's full 1926 MB (17x reduction) [S4, unofficial]. The value $c=4$ is lossless under both renderers [S4, unofficial].
++A continuous budget parameter used to sweep a memory-quality curve, allowing the same model to be rendered at different LOD levels without retraining [S4, unofficial]. Across the full ladder, a single model sweeps a continuous memory-quality curve; re-rendering through the GPS renderer reproduces it within 0.5 dB [S4, unofficial]. At ~20.8 dB, the method costs 110.6 MB against GPS's full 1926 MB (17× reduction) [S4, unofficial]. The value $c=4$ is lossless under both renderers [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Higher computation time for precomputing the hierarchy compared to static LODs, as each level is derived from the original via convolution [S1, unofficial][S3, unofficial].
+-*   **Memory Complexity:** Depends on the number of precomputed levels or the continuous parameter range. Can be optimized via caching (e.g., reusing Gaussians from previous frames) [S2, unofficial].
+-*   **Performance:** Produces images with higher fidelity for a given polygon budget compared to static LODs [S3, unofficial]. Eliminates popping artifacts associated with discrete switching [S2, unofficial].
+-*   **Strengths:** Smooth quality transitions, no error accumulation between levels, flexible resolution (not limited to powers of two) [S1, unofficial][S2, unofficial].
+-*   **Limitations:** Higher runtime overhead, more complex to implement than discrete LOD, requires careful tuning of filter supports and interpolation mechanisms [S1, unofficial][S3, unofficial].
+-*   **When to Use:** When smooth visual transitions are critical, or when rendering time is variable and needs to be adaptively managed [S1, unofficial].
+-*   **When Not to Use:** When memory or precomputation time is extremely constrained, or when discrete, predictable LOD switching is sufficient [S3, unofficial].
++*   **Time Complexity:** Higher precomputation time than static LODs, as each level requires convolution of the original dataset [S1, unofficial][S3, unofficial].
++*   **Memory Complexity:** Scales with the number of precomputed levels or the continuous parameter range; optimized via caching previously rendered Gaussians [S2, unofficial][S4, unofficial].
++*   **Performance:** Delivers higher fidelity for a given polygon budget than static LODs [S3, unofficial]. Eliminates popping artifacts from discrete switching [S2, unofficial].
++*   **Strengths:** Smooth quality transitions, no inter-level error accumulation, flexible resolution (not restricted to powers of two) [S1, unofficial][S2, unofficial].
++*   **Limitations:** Higher runtime overhead and precomputation cost; requires careful tuning of filter supports and interpolation [S1, unofficial][S3, unofficial].
++*   **When to Use:** When smooth visual transitions are critical or rendering time is variable and requires adaptive fallback [S1, unofficial].
++*   **When Not to Use:** When precomputation time or memory is strictly constrained, or when discrete LOD switching is sufficient [S3, unofficial].
+ 
+ ## Background
+-The concept of hierarchical level-of-detail representation for 3D volumes was introduced in the context of time-critical volume rendering, where gradual elimination of high-frequency features allows fallback to lower resolutions if rendering exceeds allotted time [S1, unofficial]. The approach was highlighted for its robustness and applicability, particularly in avoiding the error propagation issues of 3D mipmaps [S1, unofficial]. Later, the concept was extended to continuous-resolution representations in out-of-core visualization systems [S3, unofficial]. In recent years, continuous LoD has been adapted for Gaussian Splatting, where it enables fine-grained control over Gaussian counts and memory usage without retraining [S2, unofficial][S4, unofficial].
++Introduced for time-critical volume rendering to allow fallback to lower resolutions when rendering exceeds allotted time [S1, unofficial]. The approach avoids error propagation inherent in recursive mipmap generation by deriving all levels directly from the original via convolution [S1, unofficial]. Extended to continuous-resolution representations for out-of-core visualization of large datasets [S3, unofficial]. Recently adapted to Gaussian Splatting to enable fine-grained control over Gaussian counts and memory usage without retraining [S2, unofficial][S4, unofficial].
+ 
+ ## Sources

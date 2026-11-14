@@ -1,0 +1,56 @@
+# Navier-Stokes Solver Components
+Also called: Fluid Solver Components, Navier-Stokes Discretization
+
+## Overview
+This family encompasses the numerical methods used to discretize and solve the Navier-Stokes equations for incompressible flow, producing the velocity and pressure fields that drive fluid simulation. It solves the problem of computing physically plausible fluid motion (velocity, pressure, density) from a continuous partial differential equation into a discrete grid-based representation. It is distinguished from particle-based methods (like [Position Based Fluids](1765-position-based-fluids.md)) by its Eulerian grid-based approach, and from pure advection methods (like [Smoke Advection](4639-smoke-advection.md)) by its inclusion of pressure projection and diffusion steps required to maintain incompressibility and viscosity.
+
+## Shared principles
+All methods in this family solve the incompressible Navier-Stokes equations on a staggered or collocated grid. The core mechanism involves:
+1.  **Velocity Advection**: Advecting the velocity field $\mathbf{u}$ by itself using the convective term $(\mathbf{u} \cdot \nabla) \mathbf{u}$ [S2, unofficial].
+2.  **Pressure Projection**: Solving a Poisson equation for pressure $p$ to enforce the divergence-free constraint ($\nabla \cdot \mathbf{u} = 0$) [S2, unofficial].
+3.  **Diffusion**: Solving a diffusion equation for viscosity $\nu$ to handle viscous forces $\nu \nabla^2 \mathbf{u}$ [S2, unofficial].
+4.  **Time Integration**: Advancing the state using a semi-Lagrangian or similar scheme, typically splitting the operations into advection, diffusion, and pressure solve steps per time step $dt$ [S2, unofficial].
+
+## Subtopics
+
+### [Smoke Advection](4639-smoke-advection.md)
+Smoke advection tracks scalar quantities (such as density, temperature, or color) that are transported by a fluid velocity field to visualize smoke effects. It is distinguished from general fluid updates by focusing on the transport of passive (or buoyant) scalars rather than the momentum and pressure solves required for velocity projection. It builds on [Navier-Stokes Solver Components](13501-navier-stokes-solver-components.md). See [Smoke Advection](4639-smoke-advection.md).
+
+### [General Fluid Simulation Update Loop](13472-general-fluid-simulation-update-loop.md)
+The general update loop orchestrates the sequence of advection, diffusion, and pressure projection steps to advance the fluid state. It ensures that the velocity field remains divergence-free and that physical forces (buoyancy, external forces) are applied correctly within the time step. See [General Fluid Simulation Update Loop](13472-general-fluid-simulation-update-loop.md).
+
+### Smoke Source Injection
+#### definition
+- [S1, unofficial] A Unity MonoBehaviour component that injects density and velocity into the Navier-Stokes solver at the transform's world position during FixedUpdate.
+#### parameter
+- [S1, unofficial] smoke_amount: float amount of density to add.
+- [S1, unofficial] smoke_initial_velocity: Vector3 velocity vector to add.
+- [S1, unofficial] active: bool flag (defined but not used in the provided code snippet).
+
+### Buoyant Force for Smoke
+#### definition
+- [S2, unofficial] Adding a buoyant force to the velocity field based on temperature differences to make hot smoke rise and cool smoke fall.
+#### step
+- [S2, unofficial] Add the buoyant force to the velocity field immediately following velocity advection.
+#### formula
+- [S2, unofficial] The buoyant force is calculated as:
+  $$ \mathbf{f}_{buoyancy} = \frac{Pmg}{R} \left( \frac{1}{T_0} - \frac{1}{T} \right) \mathbf{z} $$
+  where $P$ is pressure, $m$ is molar mass, $g$ is gravity, $R$ is the universal gas constant, $T_0$ is ambient temperature, $T$ is advected temperature, and $\mathbf{z}$ is the normalized upward vector.
+#### parameter
+- [S2, unofficial] Physical Constants: $P, m, g, R$ can be treated as a single value and tweaked for visual appearance.
+
+### Reduced Navier-Stokes Wind Field Simulation
+#### definition
+- [S3, unofficial] A physics-based framework for modeling gaseous flow (wind field) that incorporates only physical elements corresponding to interesting visual effects, not scientific accuracy. It represents a volume of gas as a combination of a scalar temperature field, a scalar pressure field, and a vector velocity field.
+#### step
+- [S3, unofficial] Model rotational, buoyant, and convective components of gaseous motion by coupling a reduced form of the Navier-Stokes equations with an equation for turbulent mixing due to temperature differences in a gas.
+#### formula
+- [S3, unofficial] $\frac{\partial \mathbf{u}}{\partial t} = \nu \nabla^2 \mathbf{u} - (\mathbf{u} \cdot \nabla) \mathbf{u} - \nabla p$ where $\mathbf{u}$ is a four-dimensional vector (three spatial dimensions and time), $x_p$ is the position of the particle, $\nu$ is the kinematic viscosity, $\nabla p$ is the pressure gradient, and $(\mathbf{u} \cdot \nabla) \mathbf{u}$ is convection. Smaller viscosity leads to more rotation.
+
+## Background
+The numerical solution of Navier-Stokes equations for computer graphics was popularized by Jos Stam's "Stable Fluids" [S2, unofficial] and later extended to GPU implementations by researchers such as I-Jen Liu and others. The specific implementations cited here draw from GPU Gems 3 [S2, unofficial], Unity-based open-source projects [S1, unofficial], and production-oriented research on real-time fire rendering [S3, unofficial]. These methods are widely used in visual effects for film and real-time rendering in games.
+
+## Sources
+[S1] furkanunsal42/VolumetricSmoke, https://github.com/furkanunsal42/VolumetricSmoke, fetched 2026-10-26 (unofficial)
+[S2] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S3] Realistic Real-Time Rendering of Fire in a Production System, https://clas.iusb.edu/math-compsci/_prior-proposals/YVanzine_Proposal.pdf, fetched 2026-10-28 (unofficial)

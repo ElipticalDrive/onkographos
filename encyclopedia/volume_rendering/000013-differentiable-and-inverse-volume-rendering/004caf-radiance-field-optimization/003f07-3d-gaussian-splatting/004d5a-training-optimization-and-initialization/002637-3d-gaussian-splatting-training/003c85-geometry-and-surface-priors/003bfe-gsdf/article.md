@@ -2,112 +2,51 @@
 Also called: Gaussian SDF, Gaussian Signed Distance Function
 
 ## Overview
-GSDF is a geometry regularization technique for 3D Gaussian Splatting (3DGS) that enhances surface reconstruction quality by enforcing consistency between the discrete Gaussian representation and a continuous Signed Distance Function (SDF) [S1][S2, unofficial]. It differs from sibling methods like NeuSG and Surface and Geometry Alignment by specifically leveraging neural SDFs to recover detailed mesh structures, adapting strategies previously used in NeRF-based methods [S2, unofficial].
+GSDF is a training optimization technique that transfers explicit surface properties to the discrete 3D Gaussian representation by enforcing consistency with a neural Signed Distance Function (SDF) [S1]. It enhances geometry reconstruction quality and recovers detailed mesh structures, distinguishing itself from standard 3D Gaussian Splatting by explicitly modeling the zero-level set of the surface [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of 3D Gaussians $\mathcal{G} = \{g_i\}$, where each $g_i$ has a center $\mathbf{c}_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients. An implicit neural SDF network $f_{\theta}(\mathbf{x})$ that outputs the signed distance to the surface at point $\mathbf{x}$.
-*   **Outputs:** Updated Gaussian parameters (centers, opacities) and potentially the SDF network weights, optimized to minimize geometric loss.
+*   **Inputs:** A set of $N$ 3D Gaussians $\{G_i\}$, where each Gaussian $i$ has a center $\mathbf{c}_i$, a covariance matrix $\Sigma_i$ (or rotation quaternion and scale), and an opacity $\alpha_i$. A neural SDF network $f_\theta(\mathbf{x})$ parameterized by weights $\theta$.
+*   **Outputs:** Updated Gaussian attributes (centers, covariances, opacities) and SDF weights $\theta$ after optimization.
 
 **Data Structures:**
 *   **Gaussian Center:** $\mathbf{c}_i \in \mathbb{R}^3$.
-*   **SDF Network:** A multi-layer perceptron (MLP) mapping $\mathbb{R}^3 \to \mathbb{R}$, parameterized by $\theta$.
+*   **SDF Network:** $f_\theta: \mathbb{R}^3 \rightarrow \mathbb{R}$.
 
 **Numbered Steps:**
-1.  **SDF Evaluation:** For each Gaussian center $\mathbf{c}_i$, query the neural SDF network to obtain the signed distance value $d_i = f_{\theta}(\mathbf{c}_i)$ [S1][S2, unofficial].
-2.  **SDF Consistency Loss:** Compute a loss term that encourages the signed distance values of the Gaussian centers to be zero, effectively pulling the Gaussian centers onto the implicit surface defined by the SDF [S1].
-    $$ \mathcal{L}_{sdf} = \frac{1}{N} \sum_{i=1}^{N} |f_{\theta}(\mathbf{c}_i)| $$
-3.  **Normal Consistency Loss:** Compute the normal vector for each Gaussian, $\mathbf{n}_i$, derived from the Gaussian's covariance or orientation. Compute the surface normal from the SDF gradient, $\mathbf{m}_i = \nabla f_{\theta}(\mathbf{c}_i) / \|\nabla f_{\theta}(\mathbf{c}_i)\|$. Minimize the angular difference between $\mathbf{n}_i$ and $\mathbf{m}_i$ [S1].
+1.  **SDF Evaluation:** For each Gaussian $i$, evaluate the neural SDF at its center: $d_i = f_\theta(\mathbf{c}_i)$.
+2.  **SDF Consistency Loss:** Compute the loss encouraging Gaussians to lie on the surface (zero distance):
+    $$ \mathcal{L}_{sdf} = \frac{1}{N} \sum_{i=1}^{N} |f_\theta(\mathbf{c}_i)| $$
+    [S1]
+3.  **Normal Estimation:**
+    *   Compute the geometric normal $\mathbf{m}_i$ from the SDF gradient: $\mathbf{m}_i = \frac{\nabla f_\theta(\mathbf{c}_i)}{\|\nabla f_\theta(\mathbf{c}_i)\|}$.
+    *   Compute the Gaussian normal $\mathbf{n}_i$ from the covariance matrix $\Sigma_i$. If $\Sigma_i = R_i S_i S_i^T R_i^T$, the principal axis is derived from the eigenvector corresponding to the smallest eigenvalue, or directly from the rotation quaternion $q_i$ [S1].
+4.  **Normal Consistency Loss:** Minimize the angular difference between the Gaussian orientation and the surface geometry:
     $$ \mathcal{L}_{normal} = \frac{1}{N} \sum_{i=1}^{N} (1 - \mathbf{n}_i \cdot \mathbf{m}_i) $$
-4.  **Total Loss:** Combine the photometric rendering loss (standard 3DGS) with the geometric losses:
-    $$ \mathcal{L}_{total} = \mathcal{L}_{photo} + \lambda_{sdf} \mathcal{L}_{sdf} + \lambda_{normal} \mathcal{L}_{normal} $$
-    where $\lambda_{sdf}$ and $\lambda_{normal}$ are weighting hyperparameters [S1].
+    [S1]
+5.  **Total Objective:** Combine with the standard photometric rendering loss $\mathcal{L}_{rgb}$:
+    $$ \mathcal{L}_{total} = \mathcal{L}_{rgb} + \lambda_{sdf} \mathcal{L}_{sdf} + \lambda_{normal} \mathcal{L}_{normal} $$
+    [S1]
+6.  **Optimization:** Perform gradient descent on both Gaussian attributes and SDF weights $\theta$.
 
 **Parameters:**
-*   $\lambda_{sdf}, \lambda_{normal}$: Typical values are not given in the sources. Not given in the sources.
+*   $\lambda_{sdf}, \lambda_{normal}$: Weights for the geometric losses. Typical values are not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The SDF network must be trained concurrently or pre-trained to ensure stable gradients for the normal consistency term.
-*   **Boundaries:** The method assumes the SDF accurately represents the surface near the Gaussian centers. If the SDF is inaccurate, the consistency constraints may pull Gaussians to incorrect locations.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_gsdf_loss(gaussians, sdf_network, lambda_sdf, lambda_normal):
-    """
-    Computes the GSDF geometric loss for a batch of Gaussians.
-    
-    Args:
-        gaussians: List of Gaussian objects, each with .center (3D vector) and .normal (3D vector).
-                   Note: Gaussian normal is derived from orientation/covariance.
-        sdf_network: Neural network function f_theta(x) returning signed distance.
-        lambda_sdf: Weight for SDF consistency loss.
-        lambda_normal: Weight for normal consistency loss.
-        
-    Returns:
-        Total geometric loss scalar.
-    """
-    sdf_loss_sum = 0.0
-    normal_loss_sum = 0.0
-    count = len(gaussians)
-    
-    if count == 0:
-        return 0.0
-
-    for g in gaussians:
-        # Step 1: Query SDF at Gaussian center
-        # [G] Assuming sdf_network is a differentiable PyTorch/TensorFlow module
-        signed_distance = sdf_network(g.center)
-        
-        # Step 2: SDF Consistency - encourage distance to be zero
-        sdf_loss_sum += torch.abs(signed_distance)
-        
-        # Step 3: Normal Consistency
-        # Compute SDF gradient (normal) at center
-        # [G] Requires autograd to compute gradient of sdf_network w.r.t. g.center
-        signed_distance.requires_grad_(True)
-        sdf_normal = torch.autograd.grad(
-            signed_distance, g.center, grad_outputs=torch.ones_like(signed_distance), create_graph=True
-        )[0]
-        sdf_normal = sdf_normal / (torch.norm(sdf_normal) + 1e-8)
-        
-        # Get Gaussian normal (assumed pre-computed or derived from rotation/quaternion)
-        gaussian_normal = g.normal / (torch.norm(g.normal) + 1e-8)
-        
-        # Minimize angular difference (1 - dot product)
-        dot_product = torch.dot(gaussian_normal, sdf_normal)
-        normal_loss_sum += (1.0 - dot_product)
-        
-    # Average losses
-    sdf_loss = sdf_loss_sum / count
-    normal_loss = normal_loss_sum / count
-    
-    # Total geometric loss
-    total_loss = lambda_sdf * sdf_loss + lambda_normal * normal_loss
-    
-    return total_loss
-```
-
-## Subtopics
-
-### NeuSG
-Uses a neural implicit surface (SDF) to guide the Gaussian distribution, focusing on surface-aware rendering. Choose when high-fidelity surface topology is required. [NeuSG](9172-neusg.md)
-
-### Surface and Geometry Alignment
-A broader category of methods aligning Gaussians with geometric priors. GSDF is a specific instance using SDF consistency. [Surface and Geometry Alignment](9267-surface-and-geometry-alignment.md)
+*   **Degenerate Gaussians:** If a Gaussian is far from the surface, $f_\theta(\mathbf{c}_i)$ may be large, leading to unstable gradients.
+*   **SDF Smoothness:** The SDF network must be trained to be differentiable and smooth to provide stable normals.
+*   **Not given in the sources:** Specific initialization strategies for the SDF network or Gaussian centers.
 
 ## Operating characteristics
-*   **Time Complexity:** Adds overhead proportional to the number of Gaussians for SDF queries and gradient computations. SDF evaluation is typically fast (MLP), but gradient computation via backpropagation through the SDF network adds cost.
-*   **Memory Complexity:** Requires storing the SDF network parameters in addition to the Gaussian attributes.
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Enhances geometry reconstruction quality, recovering more detailed mesh structures compared to standard 3DGS [S1][S2, unofficial].
-*   **Limitations:** Relies on the quality of the neural SDF; may introduce artifacts if the SDF is not well-regularized.
-*   **When to use:** When surface reconstruction quality and mesh extraction are critical goals.
-*   **When not to use:** When computational efficiency is the primary constraint and surface detail is less important than photometric accuracy.
+*   **Time Complexity:** Adds overhead for SDF evaluation and gradient computation for each Gaussian per training step.
+*   **Memory Complexity:** Requires storing the SDF network weights $\theta$ in addition to Gaussian attributes.
+*   **Strengths:** Recovers more detailed mesh structures and improves geometry reconstruction quality [S2, unofficial].
+*   **Limitations:** Requires training an additional neural network (SDF).
+*   **When to use:** When high-fidelity surface geometry and mesh extraction are required.
+*   **When not:** When only photometric accuracy is needed or computational resources are severely limited.
 
 ## Background
-GSDF was introduced as a method to transfer surface properties to the 3DGS representation, leveraging neural signed distance functions (SDFs) for surface reconstruction [S1][S2, unofficial]. It was inspired by similar approaches used in NeRF-based methods [S2, unofficial]. The technique is part of a lineage of works including 3DGSR and GSPull that aim to improve the geometric fidelity of Gaussian splatting [S1][S2, unofficial].
+GSDF was introduced to leverage neural signed distance functions for surface reconstruction, inspired by similar approaches used in NeRF-based methods [S2, unofficial]. It was extended in subsequent works like 2DGS, which replaced 3D Gaussians with 2D Gaussians for more accurate ray-splat intersection [S2, unofficial]. It is part of a family of methods including 3DGSR and GSPull that encourage consistency between SDF and 3DGS [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

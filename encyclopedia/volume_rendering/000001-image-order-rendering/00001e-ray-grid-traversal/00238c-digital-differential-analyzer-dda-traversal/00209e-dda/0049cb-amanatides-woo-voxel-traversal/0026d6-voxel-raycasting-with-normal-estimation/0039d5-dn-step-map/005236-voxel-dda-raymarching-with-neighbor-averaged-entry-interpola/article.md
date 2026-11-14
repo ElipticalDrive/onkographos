@@ -1,0 +1,83 @@
+# Voxel DDA Raymarching with Neighbor-Averaged Entry Interpolation
+
+Also called: Voxel DDA smooth terrain interpolation, Voxel terrain raymarching entry height calculation
+
+## Overview
+A voxel raymarching technique that calculates smooth surface entry heights by averaging adjacent voxel volume/height values and interpolating based on the ray's entry position within the cube [S1, unofficial]. It improves upon simple linear interpolation between two voxels by using neighbor-averaged face heights, though it initially ignores the center voxel's influence, leading to sharp edges [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Ray entry position within the current voxel cube (normalized $u, v \in [0, 1]$ along the entry face axes); height values of the current voxel and its immediate neighbors ($h_{left}, h_{right}, h_{center}$, etc.).
+- **Output:** Smoothed entry height $h_{entry}$ at the ray's intersection point with the voxel face.
+
+**Data Structures:**
+- Voxel heights are stored in a 0-7 range (3 bits) [S1, unofficial].
+- Note: The developer notes that fixing color artifacts would require sacrificing four bits, implying higher precision or additional data may be needed for production [S1, unofficial].
+
+**Steps:**
+1. **Identify Entry Face:** Determine which face the ray enters the voxel cube (e.g., left side if traversing positive X) [S1, unofficial].
+2. **Retrieve Neighbor Heights:** Get the height values of the two adjacent voxels defining that face (e.g., $h_{left}$ and $h_{right}$ for an X-axis entry) [S1, unofficial].
+3. **Calculate Base Side Height:** Average the two adjacent voxel heights to define the entry face height:
+   $$ h_{side} = \frac{h_{left} + h_{right}}{2} $$
+   [S1, unofficial]
+4. **Normalize Entry Coordinate:** Normalize the ray's entry coordinate along the entry axis to a 0-1 range. Let this normalized value be $t_{raw} \in [0, 1]$ [S1, unofficial].
+5. **Scale Entry Coordinate:** Adjust $t_{raw}$ to $t \in [0, 1]$ to account for the center voxel's influence (which is not yet integrated but affects the coordinate mapping):
+   - If $t_{raw} < 0.5$: $t = t_{raw} \times 2$
+   - If $t_{raw} \ge 0.5$: $t = (t_{raw} - 0.5) \times 2$
+   [S1, unofficial]
+6. **Compute Final Entry Height:** Linearly interpolate between the two adjacent voxel heights using the scaled entry coordinate $t$:
+   $$ h_{entry} = h_{A} + (h_{B} - h_{A}) \cdot t $$
+   where $h_A$ and $h_B$ are the heights of the voxels defining the entry face (e.g., $h_{left}$ and $h_{right}$) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_entry_height(h_left, h_right, t_raw):
+    """
+    Calculate smooth entry height using neighbor-averaged interpolation.
+    
+    Args:
+        h_left (float): Height of the left neighbor voxel.
+        h_right (float): Height of the right neighbor voxel.
+        t_raw (float): Raw entry coordinate normalized to [0, 1] along the entry axis.
+        
+    Returns:
+        float: Smoothed entry height.
+    """
+    # Step 3: Calculate base side height by averaging adjacent voxels
+    h_side = (h_left + h_right) / 2.0
+    
+    # Step 5: Scale entry coordinate to [0, 1] based on half-cube position
+    if t_raw < 0.5:
+        t = t_raw * 2.0
+    else:
+        t = (t_raw - 0.5) * 2.0
+        
+    # Step 6: Linear interpolation between adjacent voxel heights
+    h_entry = h_left + (h_right - h_left) * t
+    
+    return h_entry
+```
+
+**Parameters:**
+- Voxel height values are stored in a 0-7 range (3 bits) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Center Voxel Ignorance:** The center voxel's height is initially ignored in the interpolation, causing flat or incorrectly sloped surfaces. The surface should curve toward the center voxel's height to avoid sharp edges [S1, unofficial].
+- **Ambiguous Zero Height:** A voxel height value of 0 is ambiguous: it may represent an empty voxel ('cold entirely') or a valid surface height of zero, causing incorrect surface deformation [S1, unofficial].
+- **Negative FOV:** A negative field of view (FOV) inverts the camera's coordinate system, causing input axes (horizontal/vertical) to flip. This requires negating the input values or flipping the FOV back to positive [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Constant time $O(1)$ per voxel entry, involving basic arithmetic operations (addition, division, multiplication, comparison).
+- **Memory Complexity:** Minimal additional memory, requiring storage for neighbor heights and entry coordinates.
+- **Strengths:** Provides smoother surface transitions compared to simple linear interpolation by averaging neighbor heights.
+- **Limitations:** Initial implementation ignores the center voxel, leading to sharp edges and incorrect slopes. Ambiguity in zero-height voxels can cause visual artifacts.
+- **When to Use:** Suitable for voxel-based terrain rendering where smooth surface approximation is desired, and computational efficiency is critical.
+- **When Not to Use:** When high precision is required, or when the center voxel's influence is critical for surface continuity.
+
+## Background
+This method originates from a video tutorial on smooth terrain rendering using voxel DDA raymarching [S1, unofficial]. The developer discusses the challenges of achieving smooth surfaces in voxel environments, highlighting the limitations of simple linear interpolation and the need for neighbor-averaged techniques. The method is part of an ongoing development process to improve visual quality in voxel-based graphics.
+
+## Sources
+[S1] Smooth terrain with voxel DDA raymarching, https://www.youtube.com/watch?v=CxoC0E7inUg, fetched 2026-10-25 (unofficial)

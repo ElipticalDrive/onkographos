@@ -3,118 +3,161 @@
 Also called: LOD ground truth generation, NMC GT preprocessing
 
 ## Overview
-This method generates multi-resolution ground truth data for training Neural Marching Cubes (NMC) by computing per-grid-cell labels (case IDs, vertex positions, and plane parameters) from high-resolution voxel and surface intersection data [S1, unofficial]. It solves the problem of creating accurate training targets for a Convolutional Neural Network (CNN) that predicts Marching Cubes configurations, enabling the network to learn the mapping from input fields to mesh primitives [S1, unofficial]. It differs from gradient-based methods by explicitly using computed surface intersection points and their normals for least-squares fitting to determine plane parameters, rather than relying solely on voxel occupancy or field gradients [S1, unofficial].
+This method generates multi-resolution ground truth data for training Neural Marching Cubes (NMC) and Neural Dual Contouring (NDC) by computing per-grid-cell labels (case IDs, vertex positions, and plane parameters) from high-resolution voxel and surface intersection data [S1, unofficial]. It solves the problem of creating accurate training targets for a CNN to predict Marching Cubes configurations, differing from gradient-based methods by explicitly using computed intersection points and their normals for least-squares fitting [S1, unofficial]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by providing the supervised labels required for learning-based extraction.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** High-resolution voxel grid (e.g., $1024^3$) and a list of surface intersection points with normals derived from a high-resolution mesh or SDF [S1, unofficial].
-*   **Output:** HDF5 datasets containing ground truth labels for target grid resolutions (e.g., $32^3$ or $64^3$), including case IDs, integer parameters (vertex counts), and float parameters (vertex coordinates and plane equations) [S1, unofficial].
+**Inputs:**
+- High-resolution voxel grid (e.g., $1024^3$) representing the signed distance field (SDF) or occupancy.
+- High-resolution surface intersection points (e.g., 4096 points) with normals, derived from the high-resolution grid [S1, unofficial].
+- Target grid resolutions (e.g., 32 or 64) [S1, unofficial].
+- Look-Up Table (LUT) configurations and tessellations for Marching Cubes [S1, unofficial].
+
+**Outputs:**
+- HDF5 datasets containing per-cell ground truth for each target grid size:
+  - `_case_id`: Integer case ID for each cell.
+  - `_int`: Integer parameters (corner/face/internal vertex counts).
+  - `_float`: Float parameters (corner/face/internal vertex positions, edge/face plane parameters).
+  - `_sdf`: SDF values at grid vertices.
+  - `_voxel`: Voxel occupancy data.
 
 **Data Structures:**
-The method relies on specific lookup tables and arrays to map voxel configurations to mesh outputs [S1, unofficial]:
-1.  **LUT Configs (`configs`):** Shape $32768 \times 3$ [S1, unofficial]. Stores `[case_id, #insideCC, #outsideCC]` for all $2^{15}$ possible voxel occupancy patterns [S1, unofficial].
-2.  **LUT Tessellations (`tessellations`):** Shape $32768 \times \text{max\_num\_of\_triangles} \times 3$ [S1, unofficial]. Stores triangle vertex indices for each case [S1, unofficial].
-3.  **Integer Parameters (`_int`):** Per cell, stores `num_of_int_params - 1` integers [S1, unofficial]. `num_of_int_params = 1 + 1 + 3 + 1` (Case ID, Corner Vertex Count, Face Vertex Count, Internal Vertex Count) [S1, unofficial].
-4.  **Float Parameters (`_float`):** Per cell, stores `num_of_float_params` floats [S1, unofficial]. `num_of_float_params = 8 \times 3 + 3 \times 1 + 12 \times 2` (8 Corner Vertices $\times$ 3 coords, 3 Face Vertices $\times$ 1 coord, 12 Edge Plane Params $\times$ 2 coords) [S1, unofficial].
+- `configs`: Shape $32768 \times 3$, storing `[case_id, #insideCC, #outsideCC]` for all $2^{15}$ possible voxel occupancy patterns [S1, unofficial].
+- `tessellations`: Shape $32768 \times \text{max\_num\_of\_triangles} \times 3$, storing triangle vertex indices for each case [S1, unofficial].
+- Integer parameters per cell (`num_of_int_params`): $1 + 1 + 3 + 1$ (case ID, corner V count, face V count, internal V count) [S1, unofficial].
+- Float parameters per cell (`num_of_float_params`): $8 \times 3 + 3 \times 1 + 12 \times 2$ (8 corner vertices $\times$ 3 coords, 3 face vertices $\times$ 1 coord, 12 edge plane params $\times$ 2 coords) [S1, unofficial].
 
-**Numbered Steps:**
-1.  **Downsampling:** Filter high-resolution intersection points where coordinates are multiples of `downscale = 1024 // voxel_size` [S1, unofficial]. Downsample the high-resolution voxels to the target grid size (32 or 64) by aggregating or sampling the original $1024^3$ grid [S1, unofficial].
-2.  **Intersection Aggregation:** Compute `LOD_intersection_pointer` and `LOD_intersection_data` arrays [S1, unofficial]. Use a utility function (e.g., `cutils.get_intersection_points_in_cells`) to map the filtered intersection points to their corresponding cells in the target grid [S1, unofficial].
-3.  **Ground Truth Computation:** Call `cutils.get_gt` with the downsampled voxels, intersection data, LUT configs, and LUT tessellations [S1, unofficial]. This function computes integer parameters (Case ID, and counts of corner, face, and internal vertices) and float parameters (Positions of corner and face vertices, and plane parameters for edges/faces) [S1, unofficial].
-4.  **Storage:** Save the results into HDF5 datasets with the layout: `_case_id` ($(\text{grid\_size}+1)^3$ int32), `_int` ($(\text{grid\_size}+1)^3 \times (\text{num\_of\_int\_params}-1)$ int32), `_float` ($(\text{grid\_size}+1)^3 \times \text{num\_of\_float\_params}$ float32), `_sdf` ($(\text{grid\_size}+1)^3$ float32), and `_voxel` ($(\text{grid\_size}+1)^3$ uint8) [S1, unofficial].
+**Steps:**
+1. **Downsampling:** Filter high-resolution intersection points where coordinates are multiples of `downscale = 1024 // voxel_size`. Downsample coordinates by dividing by `downscale` [S1, unofficial].
+2. **Intersection Mapping:** Compute `LOD_intersection_pointer` and `LOD_intersection_data` arrays to store intersection points per cell using `cutils.get_intersection_points_in_cells` [S1, unofficial].
+3. **Ground Truth Computation:** Call `cutils.get_gt` with downsampled voxels, intersection data, LUT configs, and LUT tessellations. This function computes:
+   - Integer parameters: case ID, corner/face/internal vertex counts.
+   - Float parameters: corner/face/internal vertex positions, edge/face plane parameters [S1, unofficial].
+4. **Storage:** Save results to HDF5 files with layout: `_case_id` ($(grid\_size+1)^3$ int32), `_int` ($(grid\_size+1)^3 \times (num\_of\_int\_params-1)$ int32), `_float` ($(grid\_size+1)^3 \times num\_of\_float\_params$ float32), `_sdf` ($(grid\_size+1)^3$ float32), `_voxel` ($(grid\_size+1)^3$ uint8) [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
+import h5py
 
-def generate_ground_truth(high_res_voxels, high_res_intersections, target_grid_size):
+def generate_ground_truth(high_res_voxels, high_res_intersections, target_grid_size, downscale_factor):
     """
-    Generate ground truth for Neural Marching Cubes.
+    Generate ground truth for a specific target grid size.
     
     Args:
-        high_res_voxels: np.array of shape (1024, 1024, 1024), uint8.
-        high_res_intersections: list of tuples (point, normal).
+        high_res_voxels: numpy array of shape (1024, 1024, 1024) or similar high-res grid.
+        high_res_intersections: list of tuples (x, y, z, nx, ny, nz) representing surface intersections.
         target_grid_size: int, e.g., 32 or 64.
+        downscale_factor: int, e.g., 1024 // target_grid_size.
         
     Returns:
-        dict: Ground truth data ready for HDF5 storage.
+        dict: Ground truth data for the target grid size.
     """
-    base_res = 1024
-    downscale = base_res // target_grid_size
-    
-    # Step 1: Downsample voxels
-    # Aggregate voxels to target grid by sampling every `downscale` step.
-    low_res_voxels = high_res_voxels[::downscale, ::downscale, ::downscale]
-    
-    # Step 2: Filter and map intersections
-    filtered_intersections = []
-    for point, normal in high_res_intersections:
-        if (point[0] % downscale == 0 and 
-            point[1] % downscale == 0 and 
-            point[2] % downscale == 0):
-            filtered_intersections.append((point, normal))
+    # Step 1: Downsample intersection points
+    # Filter points where coordinates are multiples of downscale_factor
+    valid_indices = []
+    for i, (x, y, z, nx, ny, nz) in enumerate(high_res_intersections):
+        if x % downscale_factor == 0 and y % downscale_factor == 0 and z % downscale_factor == 0:
+            valid_indices.append(i)
             
-    # Map to target grid cells
-    cell_indices = []
-    for point, normal in filtered_intersections:
-        cell_idx = (point // downscale).astype(int)
-        if np.all(cell_idx < target_grid_size):
-            cell_indices.append((cell_idx, normal))
+    downsampled_intersections = []
+    for i in valid_indices:
+        x, y, z, nx, ny, nz = high_res_intersections[i]
+        # Downsample coordinates
+        dx, dy, dz = x // downscale_factor, y // downscale_factor, z // downscale_factor
+        downsampled_intersections.append((dx, dy, dz, nx, ny, nz))
+        
+    # Step 2: Map intersections to cells
+    # This step assumes cutils.get_intersection_points_in_cells is available
+    # It returns LOD_intersection_pointer and LOD_intersection_data
+    # LOD_intersection_pointer: array of pointers to intersections per cell
+    # LOD_intersection_data: array of intersection data per cell
+    # For implementation, we simulate this mapping:
+    num_cells = (target_grid_size + 1) ** 3
+    cell_intersections = [[] for _ in range(num_cells)]
+    
+    for (x, y, z, nx, ny, nz) in downsampled_intersections:
+        # Determine cell index based on intersection position
+        # Assuming intersections are associated with the cell they fall into or on the boundary
+        # This is a simplified mapping; actual implementation uses cutils
+        cell_idx = (x * (target_grid_size + 1) + y) * (target_grid_size + 1) + z
+        if 0 <= cell_idx < num_cells:
+            cell_intersections[cell_idx].append((nx, ny, nz))
             
-    # Step 3: Compute GT using cutils.get_gt
-    # Initialize output arrays matching the exact HDF5 layout
-    grid_dim = target_grid_size + 1
-    num_cells = grid_dim ** 3
+    # Step 3: Compute ground truth for each cell
+    # This step assumes cutils.get_gt is available
+    # It computes case_id, int_params, float_params based on voxels and intersections
+    case_ids = np.zeros(num_cells, dtype=np.int32)
+    int_params = np.zeros((num_cells, 1 + 3 + 1), dtype=np.int32) # case_id, corner V, face V, internal V
+    float_params = np.zeros((num_cells, 8 * 3 + 3 * 1 + 12 * 2), dtype=np.float32) # corner, face, edge plane params
     
-    case_id = np.zeros(num_cells, dtype=np.int32)
-    int_params = np.zeros((num_cells, 5), dtype=np.int32)  # num_of_int_params - 1 = 5
-    float_params = np.zeros((num_cells, 51), dtype=np.float32)  # 8*3 + 3*1 + 12*2 = 51
-    sdf = np.zeros(num_cells, dtype=np.float32)
-    voxel = np.zeros(num_cells, dtype=np.uint8)
-    
-    # The internal case ID lookup, vertex positioning, and plane parameter 
-    # computation are implemented in the Cython extension cutils.get_gt [S1, unofficial].
-    # cutils.get_gt(low_res_voxels, cell_indices, configs, tessellations, 
-    #               case_id, int_params, float_params)
-    
+    # Simulate get_gt logic
+    for cell_idx in range(num_cells):
+        # Get voxel occupancy for the cell (simplified)
+        # In reality, this involves sampling the high-res voxels
+        voxel_occupancy = get_voxel_occupancy(high_res_voxels, cell_idx, target_grid_size, downscale_factor)
+        
+        # Get intersections for this cell
+        intersections = cell_intersections[cell_idx]
+        
+        # Compute case ID and parameters
+        # This is a placeholder for the actual cutils.get_gt logic
+        case_id, int_p, float_p = compute_marching_cubes_gt(voxel_occupancy, intersections)
+        
+        case_ids[cell_idx] = case_id
+        int_params[cell_idx] = int_p
+        float_params[cell_idx] = float_p
+        
+    # Step 4: Store results
+    # This step assumes saving to HDF5
+    # For implementation, we return the data
     return {
-        'case_id': case_id,
-        'int': int_params,
-        'float': float_params,
-        'sdf': sdf,
-        'voxel': voxel
+        'case_id': case_ids,
+        'int_params': int_params,
+        'float_params': float_params
     }
+
+def get_voxel_occupancy(high_res_voxels, cell_idx, target_grid_size, downscale_factor):
+    # Simplified voxel sampling
+    # In reality, this involves mapping cell_idx to high-res voxel coordinates
+    # and checking occupancy
+    return 0 # Placeholder
+
+def compute_marching_cubes_gt(voxel_occupancy, intersections):
+    # Simplified Marching Cubes logic
+    # In reality, this uses LUT configs and tessellations
+    case_id = 0 # Placeholder
+    int_p = np.array([0, 0, 0, 0], dtype=np.int32) # Placeholder
+    float_p = np.zeros(8 * 3 + 3 * 1 + 12 * 2, dtype=np.float32) # Placeholder
+    return case_id, int_p, float_p
 ```
 
 **Parameters:**
-*   `cell_size = 8`: Ratio between grid cell size and base voxel size [S1, unofficial].
-*   `grid_size_list = [32, 64]`: Target grid resolutions for ground truth generation [S1, unofficial].
-*   `configs`: Shape $32768 \times 3$, stores `[case_id, #insideCC, #outsideCC]` [S1, unofficial].
-*   `tessellations`: Shape $32768 \times \text{max\_num\_of\_triangles} \times 3$, stores triangle vertex indices [S1, unofficial].
+- `cell_size = 8`: Ratio between grid cell size and base voxel size [S1, unofficial].
+- `grid_size_list = [32, 64]`: Target grid resolutions for ground truth generation [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Alignment:** Voxels and Marching Cubes cells are not naturally aligned [S1, unofficial]. This is handled by padding or offsetting during voxel sampling via `cutils.get_input_voxel` [S1, unofficial].
-*   **Precision:** Floating-point precision in vertex positions and plane parameters must be maintained to ensure mesh quality [G].
-*   **Degenerate Input:** Empty grids or grids with no surface intersections must be handled gracefully, likely resulting in zero-filled parameters [G].
+- Voxels and Marching Cubes cells are not aligned; handled by padding or offsetting during voxel sampling via `cutils.get_input_voxel` [S1, unofficial].
+- Precision issues in coordinate downsampling may lead to incorrect intersection mapping.
 
 ## Subtopics
 
 ### [NDC Ground Truth LOD Generation via Least-Squares Plane Fitting](4398-ndc-ground-truth-lod-generation-via-least-squares-plane-fitt.md)
-This method generates multi-resolution ground truth data for training Neural Distance Fields (NDC) by fitting planes to surface intersection points within grid cells. It solves the problem of creating accurate per-cell labels (signs and plane parameters) from high-resolution voxel and intersection data, which are then used to train a CNN to predict Marching Cubes configurations. It differs from gradient-based methods by explicitly using computed intersection points and their normals for least-squares fitting.
+This method generates multi-resolution ground truth data for Neural Distance Fields (NDC) by fitting planes to surface intersection points within grid cells. It solves the problem of creating accurate per-cell labels (signs and plane parameters) from high-resolution voxel and intersection data, which are then used to train a CNN to predict Marching Cubes configurations. It differs from gradient-based methods by explicitly using computed intersection points and their normals for least-squares fitting.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of high-resolution voxels and intersection points for downsampling and filtering [G]. The ground truth computation per cell is constant time, dependent on the number of intersections per cell [G].
-*   **Memory Complexity:** Proportional to the target grid size cubed, $(\text{grid\_size}+1)^3$, for storing the ground truth datasets [G].
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Provides accurate training data for CNNs by explicitly using surface geometry [S1, unofficial]. Supports multiple resolutions [S1, unofficial].
-*   **Limitations:** Requires high-resolution input data [S1, unofficial]. Computationally intensive for very large grids [G].
-*   **When to use:** When training Neural Marching Cubes or similar neural surface extraction methods [S1, unofficial].
-*   **When not to use:** When real-time ground truth generation is required, or when high-resolution input data is unavailable [G].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths and Limitations:** Explicitly uses computed intersection points and normals, potentially leading to more accurate ground truth for training [S1, unofficial]. However, it requires high-resolution input data and complex preprocessing [S1, unofficial].
+- **When to Use:** When training NMC or NDC models that require precise ground truth labels for per-cell configurations.
+- **When Not to Use:** When computational resources for high-resolution preprocessing are limited.
 
 ## Background
-The method originates from the Neural Marching Cubes (NMC) paper by Zhiqin Chen and Hao Zhang, published in ACM Transactions on Graphics (SIGGRAPH Asia) in 2021 [S1, unofficial]. It was developed to enable the training of neural networks for predicting Marching Cubes configurations, allowing for more flexible and high-quality surface extraction from implicit fields [S1, unofficial]. The supplementary material and code repository provide the implementation details [S1, unofficial].
+Originated by Zhiqin Chen and Hao Zhang in 2021 with the paper "Neural Marching Cubes" [S1, unofficial]. The method is part of the NMC framework, which aims to learn the Marching Cubes algorithm using neural networks. The ground truth generation is a crucial preprocessing step to train the CNN to predict the correct Marching Cubes configuration for each grid cell.
 
 ## Sources
 [S1] czq142857/NMC, https://github.com/czq142857/NMC, fetched 2026-10-26 (unofficial)
+[S2] Accurate Isosurface Interpolation with Hermite Data, https://ieeexplore.ieee.org/document/7335492/, fetched 2026-11-05

@@ -1,0 +1,114 @@
+# Geometry-Driven Pruning Score
+
+Also called: PointSplat pruning score
+
+## Overview
+A scoring mechanism to select a subset of $K$ Gaussians that preserves global structure and visual appearance using only intrinsic 3D attributes, avoiding expensive ray-pixel intersections [S1, unofficial]. It sets itself apart from image-driven pruning methods (e.g., LightGaussians, PUP-3DGS) by relying solely on 3D data, and from SplatFormer by decoupling geometry and appearance to prevent high-dimensional spherical harmonics from dominating the selection [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Set of $N$ 3D Gaussians, each defined by position $\mathbf{p}_i$, scale vector $\mathbf{s}_i = (s_{xi}, s_{yi}, s_{zi})$, opacity $\alpha_i$, and spherical harmonic coefficients $c_{lm}$ (for degree $L$, order $m$).
+- Output: A subset of $K$ Gaussians with the highest scores.
+
+**Data Structures:**
+- Gaussian attributes are stored in arrays of size $N$.
+- Spherical Harmonics (SH) coefficients are stored per Gaussian. For degree $L$, there are $(L+1)^2$ coefficients per Gaussian.
+
+**Steps:**
+1. Compute the raw volume $V_i$ for each Gaussian $i$:
+   $$ V_i = \frac{4}{3} \pi s_{xi} s_{yi} s_{zi} $$
+2. Compute the appearance contribution $A_i$ for each Gaussian $i$. This is the sum of the absolute values of the spherical harmonic coefficients, representing the magnitude of the view-dependent appearance:
+   $$ A_i = \sum_{l=0}^{L} \sum_{m=-l}^{l} |c_{lm,i}| $$
+   *Note: The source formula (3) in [S1, unofficial] shows $\sum_{l=0}^{L} \sum_{m=-l}^{l} \gamma_{lm}^{(i)} Y_{lm}(v_i)$, but the text clarifies that the score balances geometric coverage and appearance contribution using opacity and volume. The term $\nu(\dots)$ denotes z-score normalization. The appearance term in the score formula is derived from the SH coefficients. We interpret the appearance contribution as the magnitude of the SH coefficients, as this represents the "visual appearance" component distinct from opacity.*
+3. Normalize the opacity $\alpha_i$ and volume $V_i$ using z-score normalization across all $N$ Gaussians to get $\nu(\alpha_i)$ and $\nu(V_i)$.
+   $$ \nu(\alpha_i) = \frac{\alpha_i - \mu_\alpha}{\sigma_\alpha} $$
+   $$ \nu(V_i) = \frac{V_i - \mu_V}{\sigma_V} $$
+   where $\mu_\alpha, \sigma_\alpha$ are the mean and standard deviation of all opacities, and $\mu_V, \sigma_V$ are the mean and standard deviation of all volumes.
+4. Compute the pruning score $S_i$ for each Gaussian $i$:
+   $$ S_i = \lambda_\alpha \cdot \nu(\alpha_i) + (1 - \lambda_\alpha) \cdot \nu(V_i) $$
+   where $\lambda_\alpha$ is a trade-off parameter.
+5. Select the top $K$ Gaussians with the highest scores $S_i$.
+
+**Parameters:**
+- $\lambda_\alpha$: Trade-off parameter controlling the balance between appearance (opacity) and spatial (volume) contribution. Typical value: 0.3 [S1, unofficial]. Range: $[0, 1]$.
+
+**Edge Cases and Pitfalls:**
+- If $\sigma_\alpha$ or $\sigma_V$ is zero (all Gaussians have identical opacity or volume), z-score normalization is undefined. In this case, the normalized value should be 0 or handled as a constant [G].
+- The source mentions "appearance contribution" but the formula uses opacity $\alpha_i$ and volume $V_i$. The text states "The score is computed from Gaussian volume... and opacity $\alpha_i$". The SH coefficients are mentioned in the context of appearance dominance in SplatFormer, but the specific formula (3) in [S1, unofficial] only includes $\alpha_i$ and $V_i$. We follow the explicit formula (3) provided. The mention of SH in the formula snippet $\sum \gamma Y$ might be a typo or refer to a different variant, but the text explicitly says "score is computed from Gaussian volume... and opacity". We stick to the explicit formula (3) and the text description.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def geometry_driven_pruning_score(gaussians, K, lambda_alpha=0.3):
+    """
+    Select top K Gaussians based on geometry-driven pruning score.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - alpha: float, opacity
+            - scale: tuple (sx, sy, sz), scale vector
+            - sh_coeffs: list of floats, spherical harmonic coefficients (not used in score per explicit formula)
+        K: int, number of Gaussians to select
+        lambda_alpha: float, trade-off parameter (default 0.3)
+        
+    Returns:
+        List of indices of the top K Gaussians
+    """
+    N = len(gaussians)
+    if N == 0:
+        return []
+    
+    # Extract attributes
+    alphas = np.array([g.alpha for g in gaussians])
+    scales = np.array([g.scale for g in gaussians])
+    
+    # Compute volumes
+    volumes = (4.0 / 3.0) * np.pi * scales[:, 0] * scales[:, 1] * scales[:, 2]
+    
+    # Z-score normalization
+    # Guard against zero variance
+    alpha_mean = np.mean(alphas)
+    alpha_std = np.std(alphas)
+    if alpha_std == 0:
+        alpha_norm = np.zeros(N)
+    else:
+        alpha_norm = (alphas - alpha_mean) / alpha_std
+        
+    volume_mean = np.mean(volumes)
+    volume_std = np.std(volumes)
+    if volume_std == 0:
+        volume_norm = np.zeros(N)
+    else:
+        volume_norm = (volumes - volume_mean) / volume_std
+        
+    # Compute scores
+    scores = lambda_alpha * alpha_norm + (1 - lambda_alpha) * volume_norm
+    
+    # Select top K
+    top_k_indices = np.argsort(scores)[::-1][:K]
+    
+    return top_k_indices.tolist()
+```
+
+## Subtopics
+
+### [PointSplat](14667-pointsplat.md)
+PointSplat is a geometry-driven prune-and-refine framework for 3D Gaussian Splatting (3DGS) that enables high-quality reconstruction of compact Gaussian sets without requiring per-scene optimization at deployment. It bridges the gap between Gaussian pruning and transformer refinement by using intrinsic 3D attributes for pruning and a dual-branch encoder for refinement. Unlike image-driven pruning methods (e.g., LightGaussians, PUP-3DGS, Speedy-Splat) that rely on 2D images and per-scene optimization, PointSplat uses only 3D attributes for pruning. Unlike SplatFormer, which concatenates all Gaussian parameters into a single feature vector causing appearance dominance due to high-dimensional spherical harmonics, PointSplat decouples geometry and appearance.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ to compute volumes and normalize, $O(N \log N)$ to sort for top-K selection. Overall $O(N \log N)$.
+- **Memory Complexity:** $O(N)$ to store scores and normalized values.
+- **Performance:** Efficient as it avoids ray-pixel intersections required by image-driven methods [S1, unofficial].
+- **Strengths:** Preserves global structure and visual appearance using only intrinsic 3D attributes [S1, unofficial]. Robust to variations in $\lambda_\alpha$ [S1, unofficial].
+- **Limitations:** Relies on z-score normalization, which may be sensitive to outliers in opacity or volume distributions. Does not account for view-dependent appearance directly in the score, only opacity and volume [S1, unofficial].
+- **When to use:** When pruning 3D Gaussians for compact representation without per-scene optimization, especially in transformer-based refinement frameworks like PointSplat [S1, unofficial].
+- **When not to use:** When view-dependent appearance is critical and cannot be captured by opacity and volume alone, or when image-driven pruning is feasible and preferred.
+
+## Background
+Originated in the PointSplat paper [S1, unofficial]. It was developed to address the limitations of image-driven pruning methods that require expensive ray-pixel intersections and per-scene optimization. The method leverages intrinsic 3D attributes to enable efficient pruning for transformer-based refinement.
+
+## Sources
+[S1] PointSplat: Efficient Geometry-Driven Pruning and Transformer Refinement for 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2604.09903, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,385 @@
+--- v001.md
++++ v002.md
+@@ -1,55 +1,56 @@
+ # Multi-View Feature Encoder
+ 
+-Also called: MuRF Feature Encoder
++Also called: MuRF Multi-View Feature Encoder
+ 
+ ## Overview
+-The Multi-View Feature Encoder aggregates information from $K$ input images to construct a target volume that encodes appearance and geometry for subsequent radiance field prediction [S1]. It sets itself apart by combining a per-image 2D CNN with a joint multi-view Transformer to extract features, then explicitly quantifying multi-view consistency via pairwise cosine similarities to provide geometric cues for volume density prediction [S1]. This approach alleviates multi-view inconsistency and models 3D context more efficiently than full 3D CNNs [S1].
++The Multi-View Feature Encoder aggregates essential appearance and geometric information from $K$ input images to serve as the input for feed-forward Neural Radiance Field (NeRF) models [S1]. It solves the problem of multi-view inconsistency and information loss during downsampling by extracting features via a weight-sharing 2D CNN and a joint multi-view Transformer, then aggregating them using visibility-weighted cosine similarities [S1]. It sets itself apart from sibling methods by explicitly modeling multi-view consistency through pairwise cosine similarities and using a learned weighted average for aggregation, rather than simple averaging or attention [S1].
+ 
+ ## How it works
+-**Inputs:** $K$ input images $\{I_k\}_{k=1}^K$.
+-**Outputs:** A target volume $z \in \mathbb{R}^{\frac{H}{8} \times \frac{W}{8} \times D \times C}$, where $H, W$ are image dimensions, $D$ is depth, and $C$ is the channel dimension [S1].
++**Inputs:** $K$ input images $\{I_k\}_{k=1}^K$, camera poses for each view, and a target 3D point cloud or volume grid defined by spatial dimensions $H/8 \times W/8 \times D$.
++**Outputs:** A target volume $z \in \mathbb{R}^{\frac{H}{8} \times \frac{W}{8} \times D \times C}$ encoding appearance and geometry [S1].
+ 
+ **Data Structures:**
+-1.  **Feature Maps:** Extracted at 1/8 resolution. Dimensions: $K \times \frac{H}{8} \times \frac{W}{8} \times M$, where $M$ is the feature dimension [S1].
+-2.  **Cosine Similarity Matrix:** Computed in parallel. A $K \times M$ matrix of normalized features is multiplied by its transpose. The upper triangle is extracted to obtain all $K(K-1)/2$ pairwise similarities [S1].
+-3.  **Volume:** $z \in \mathbb{R}^{\frac{H}{8} \times \frac{W}{8} \times D \times C}$ [S1].
++1.  **Feature Maps:** Extracted at 1/2, 1/4, and 1/8 resolutions. The encoder uses the 1/8 resolution features for the Transformer stage [S1].
++2.  **Windowed Color Vector:** For each 3D point, a $9 \times 9$ window is sampled from each of the $K$ feature maps centered at the 2D projection of the point. The colors within this window are concatenated to form $\tilde{c}_k$ for view $k$ [S1].
++3.  **Feature Matrix:** Sampled features $\{f_i\}_{i=1}^K$ are collected into a matrix of shape $K \times M$, where $M$ is the feature dimension [S1].
+ 
+ **Steps:**
+ 
+-1.  **2D CNN Feature Extraction:**
+-    For each input image $I_k$, pass it through a weight-sharing 2D CNN consisting of 6 residual blocks [S1]. Every 2 residual blocks include a stride-2 convolutional layer to achieve 2× downsampling [S1]. This yields features at 1/2, 1/4, and 1/8 resolutions [S1].
++1.  **2D Feature Extraction:**
++    Pass each input image $I_k$ through a weight-sharing 2D CNN. The CNN consists of 6 residual blocks [12]. Every 2 residual blocks include a stride-2 convolutional layer to achieve 2× downsampling. This produces feature maps at 1/2, 1/4, and 1/8 resolutions [S1].
+ 
+ 2.  **Multi-View Transformer:**
+-    Feed the 1/8 resolution convolutional features into a joint multi-view Transformer [S1]. The Transformer extends a 2-view cross-attention architecture to $K$ views [S1]. The output is the final feature maps $\{f_i\}_{i=1}^K$ at 1/8 resolution [S1].
+-
+-3.  **Window Sampling:**
+-    For each 3D point in the target volume, project it to the 2D plane of each input view [S1]. Sample a $9 \times 9$ window centered at this 2D projection from the feature maps of view $k$ to obtain a color vector $\tilde{c}_k$ and feature vector $f_k$ [S1]. The vector $\tilde{c}_k$ denotes the concatenation of colors within the window [S1].
+-
+-4.  **Pairwise Cosine Similarity:**
+-    Compute pairwise cosine similarities to quantify multi-view consistency [S1].
+-    a. Normalize features $f_i$ to unit vectors.
+-    b. Collect them as a $K \times M$ matrix $F$ [S1].
+-    c. Compute $S = F F^T$.
+-    d. Extract the upper triangle of $S$ to get all pairwise similarities $\cos(f_i, f_j)$ for $i < j$ [S1].
+-    e. Use group-wise cosine similarities for improved expressiveness [S1].
+-
+-5.  **Aggregation Weights:**
+-    Compute normalized learned weights $w_i$ and visibility weights $w_{ij}$ [S1].
+-    a. **Visibility weights $w_{ij}$:** Derived from the entropy of the depth distribution on each ray [S1].
+-    b. **Aggregation weights $w_i$:** Predicted by a small MLP network taking the concatenation of sampled features and the view direction difference between source and target views as input [S1].
+-
+-6.  **Aggregated Similarity:**
+-    Compute the aggregated cosine similarity $\hat{s}$ using the weighted sum:
++    Feed the 1/8 resolution convolutional features into a joint multi-view Transformer. This Transformer extends the 2-view cross-attention architecture (from GMFlow [34, 35]) to $K$ input views. The output is the refined feature maps at 1/8 resolution [S1].
++
++3.  **Sampling:**
++    For each 3D point in the target volume:
++    *   Project the 3D point to 2D coordinates in each of the $K$ input views.
++    *   Sample a $9 \times 9$ window centered at these 2D coordinates from the 1/8 resolution feature maps.
++    *   Concatenate the pixel values within the window to obtain the color vector $\tilde{c}_k$ for each view $k$ [S1].
++    *   Sample the feature vector $f_k$ at the center of the window for each view $k$ [S1].
++
++4.  **Compute Pair-wise Cosine Similarities:**
++    Quantify multi-view consistency by computing pair-wise cosine similarities between the sampled features $\{f_i\}_{i=1}^K$.
++    *   Normalize all feature vectors $f_i$ to unit length.
++    *   Collect them into a matrix $F \in \mathbb{R}^{K \times M}$.
++    *   Compute the Gram matrix $G = F F^T$.
++    *   Extract the upper triangle of $G$ to obtain all $K(K-1)/2$ pair-wise cosine similarities $\cos(f_i, f_j)$ for $i < j$ [S1].
++    *   *Note:* In practice, group-wise cosine similarities are used for improved expressiveness, but the matrix multiplication approach remains valid [S1].
++
++5.  **Aggregate Cosine Similarities:**
++    Compute the aggregated cosine similarity $\hat{s}$ using a learned weighted average based on visibility:
+     $$ \hat{s} = \sum_{i<j} w_{ij} \cos(f_i, f_j) $$
+-    where $i, j = 1, \dots, K$ and $w_{ij}$ are the normalized visibility weights [S1].
+-
+-7.  **Aggregated Color and Features:**
+-    Compute the aggregated color $\hat{c}$ and aggregated feature $\hat{f}$ using learned weights $w_i$:
++    where $w_{ij}$ are normalized visibility weights learned from the entropy of the depth distribution on each ray [S1].
++
++6.  **Aggregate Colors and Features:**
++    Compute the aggregated color $\hat{c}$ and aggregated feature $\hat{f}$ using a learned weighted average:
+     $$ \hat{c} = \sum_{i=1}^K w_i \tilde{c}_i $$
+     $$ \hat{f} = \sum_{i=1}^K w_i f_i $$
+-    where $w_i$ are normalized learned weights [S1].
+-
+-8.  **Volume Construction:**
+-    Concatenate the aggregated similarity $\hat{s}$, aggregated color $\hat{c}$, and aggregated feature $\hat{f}$ [S1]. Project this concatenation to a $C$-dimensional vector using a linear layer [S1]. This produces the target volume $z \in \mathbb{R}^{\frac{H}{8} \times \frac{W}{8} \times D \times C}$ for all 3D points [S1].
++    The weights $w_i$ are normalized learned weights. A small MLP network predicts $w_i$ from the concatenation of the sampled features and the view direction difference between the source and target views [S1].
++
++7.  **Volume Projection:**
++    Concatenate the aggregated cosine similarity $\hat{s}$, the aggregated color $\hat{c}$, and the aggregated feature $\hat{f}$.
++    Project this concatenated vector to a $C$-dimensional vector using a linear layer.
++    The result is the target volume $z \in \mathbb{R}^{\frac{H}{8} \times \frac{W}{8} \times D \times C}$ [S1].
+ 
+ **Pseudocode:**
+@@ -61,138 +62,167 @@
+ 
+ class MultiViewFeatureEncoder(nn.Module):
+-    def __init__(self, K, M, C, H, W, D):
++    def __init__(self, num_views, feature_dim, hidden_dim, num_residual_blocks=6):
+         super().__init__()
+-        self.K = K
+-        self.M = M
+-        self.C = C
+-        # 2D CNN: 6 residual blocks, stride-2 conv every 2 blocks
+-        self.cnn = build_2d_cnn_with_residual_blocks(num_blocks=6, stride_every=2)
+-        # Joint Multi-View Transformer (extends 2-view cross-attention to K views)
+-        self.transformer = build_joint_multi_view_transformer(K=K, feature_dim=M)
+-        # MLP for aggregation weights
++        self.num_views = num_views
++        self.feature_dim = feature_dim
++        
++        # 2D CNN for per-image feature extraction
++        # Consists of 6 residual blocks, with stride-2 conv every 2 blocks
++        self.cnn = self._build_cnn(num_residual_blocks, feature_dim)
++        
++        # Joint Multi-View Transformer (simplified as a placeholder for GMFlow-based architecture)
++        # Extends 2-view cross-attention to K views
++        self.transformer = nn.TransformerEncoder(
++            nn.TransformerEncoderLayer(d_model=feature_dim, nhead=8),
++            num_layers=2
++        )
++        
++        # MLP for predicting aggregation weights
+         self.weight_mlp = nn.Sequential(
+-            nn.Linear(2 * M, 64),
++            nn.Linear(feature_dim * 2 + 3, hidden_dim), # features + view direction diff
+             nn.ReLU(),
+-            nn.Linear(64, 1) # Outputs logit for w_i
++            nn.Linear(hidden_dim, 1)
+         )
++        
+         # Linear projection for final volume
+-        self.projection = nn.Linear(2 * M + 1, C) # 1 for similarity, M for color, M for feature
+-
+-    def forward(self, images):
+-        # images: (K, 3, H, W)
+-        # Step 1: 2D CNN Feature Extraction
+-        # Features at 1/8 resolution
+-        features_1_8 = self.cnn(images) # (K, M, H/8, W/8)
+-        
+-        # Step 2: Multi-View Transformer
+-        # Reshape for transformer: (K, H/8*W/8, M)
+-        B, C_in, H_out, W_out = features_1_8.shape
+-        features_flat = features_1_8.permute(0, 2, 3, 1).reshape(B, H_out * W_out, C_in)
+-        features_transformer = self.transformer(features_flat) # (K, H/8*W/8, M)
+-        features_final = features_transformer.reshape(B, H_out, W_out, C_in).permute(0, 3, 1, 2) # (K, M, H/8, W/8)
+-        
+-        # Step 3: Window Sampling
+-        # For each 3D point, sample 9x9 window. 
+-        # Assuming we have a grid of 3D points projected to 2D.
+-        # Let's assume we are processing a batch of rays/points.
+-        # For simplicity, we sample from the feature maps.
+-        # In practice, this involves gathering features for specific 2D coordinates.
+-        # Here we simulate the aggregation logic for a single point's projection across K views.
+-        
+-        # Let's assume we have sampled features f_i and colors c_tilde_i for K views
+-        # f_i: (K, M)
+-        # c_tilde_i: (K, M) (concatenated colors in 9x9 window, reshaped to M)
+-        # Note: The source says c_tilde_k is concatenation of colors. 
+-        # If 9x9=81 pixels and 3 channels, that's 243 values. 
+-        # The source says "concatenation of colors within the window" and then uses it in aggregation.
+-        # It also says "concatenate cosine similarity s_hat, colors c_hat, and features f_hat".
+-        # And projects to C.
+-        # We need to define how c_tilde is handled. The source implies it's treated similarly to f.
+-        # Let's assume c_tilde is projected or treated as a feature vector of dim M for the sake of the linear layer input.
+-        # Or, more likely, the "color vector" is just the raw pixel values, but the aggregation formula uses w_i.
+-        # The source says: "concatenate cosine similarity s_hat, colors c_hat, and features f_hat".
+-        # c_hat is aggregated color. f_hat is aggregated feature.
+-        # So we need to aggregate c_tilde and f_tilde first.
+-        
+-        # Step 4: Pairwise Cosine Similarity
++        self.projection = nn.Linear(feature_dim * 2 + 1, feature_dim) # s, c, f concatenated
++
++    def _build_cnn(self, num_blocks, out_dim):
++        # Simplified CNN structure
++        layers = []
++        # Initial conv
++        layers.append(nn.Conv2d(3, 64, 7, stride=2, padding=3))
++        layers.append(nn.ReLU())
++        
++        for i in range(num_blocks):
++            # Residual block logic
++            # Every 2 blocks, add stride-2 conv for downsampling
++            if i % 2 == 0 and i > 0:
++                layers.append(nn.Conv2d(64, 64, 3, stride=2, padding=1))
++            layers.append(nn.Conv2d(64, 64, 3, padding=1))
++            layers.append(nn.ReLU())
++            
++        layers.append(nn.Conv2d(64, out_dim, 1))
++        return nn.Sequential(*layers)
++
++    def forward(self, images, camera_poses, target_points_3d):
++        """
++        images: (K, H, W, 3)
++        camera_poses: (K, 4, 4) or similar projection matrix
++        target_points_3d: (N, 3) in world coordinates
++        """
++        K = self.num_views
++        
++        # Step 1: Extract features using weight-sharing 2D CNN
++        # images shape: (K, H, W, 3) -> permute to (K, 3, H, W)
++        img_tensor = images.permute(0, 3, 1, 2)
++        features_1_8 = self.cnn(img_tensor) # (K, C, H/8, W/8)
++        
++        # Step 2: Joint Multi-View Transformer
++        # Reshape for transformer: (K, H/8 * W/8, C)
++        B, C, H_f, W_f = features_1_8.shape
++        features_flat = features_1_8.permute(0, 2, 3, 1).reshape(K, -1, C)
++        
++        # Apply transformer (simplified attention mechanism)
++        # In reality, this involves cross-attention between views
++        transformed_features = self.transformer(features_flat) # (K, H/8*W/8, C)
++        transformed_features = transformed_features.reshape(K, H_f, W_f, C)
++        
++        # Step 3: Sampling
++        # Project 3D points to 2D for each view
++        # Assuming a function to project 3D points to 2D image coordinates
++        projected_points = self.project_3d_to_2d(target_points_3d, camera_poses) # (N, K, 2)
++        
++        # Sample 9x9 windows for colors and features
++        # This requires gathering patches from the feature maps
++        # For simplicity, we assume a function that returns windowed features
++        windowed_colors, sampled_features = self.sample_windows(
++            transformed_features, projected_points, window_size=9
++        )
++        # windowed_colors: (N, K, 9*9*3)
++        # sampled_features: (N, K, C)
++        
++        # Step 4: Compute Pair-wise Cosine Similarities
+         # Normalize features
+-        f_norm = F.normalize(features_final, dim=1) # (K, M, H/8, W/8)
+-        # Reshape for matrix mult: (K, M, H_out*W_out) -> (K*H_out*W_out, M)
+-        # Actually, the source says "collect them as a K x M matrix".
+-        # This implies we are computing similarity for a specific spatial location (or averaged).
+-        # Let's assume we are processing one spatial location (H/8, W/8) at a time, or the transformer output is already aggregated.
+-        # The source says "sample image features {fi} from K feature maps".
+-        # So fi is a vector of size M for view i.
+-        
+-        # Let's assume f_i is (K, M)
+-        # Normalize
+-        f_norm = F.normalize(features_final, dim=1) # (K, M, H/8, W/8)
+-        # For a specific pixel (h, w):
+-        # f_i = features_final[:, :, h, w] # (K, M)
+-        
+-        # Compute pairwise similarities
+-        # S = F @ F.T -> (K, K)
++        norm_features = F.normalize(sampled_features, p=2, dim=-1) # (N, K, C)
++        
++        # Compute Gram matrix for each point
++        # (N, K, C) @ (N, C, K) -> (N, K, K)
++        gram_matrix = torch.bmm(norm_features, norm_features.transpose(1, 2))
++        
+         # Extract upper triangle
+-        # This is done in parallel for all pixels.
+-        # f_norm: (K, M, H/8, W/8)
+-        # Reshape to (K, M, N) where N = H/8 * W/8
+-        f_norm_reshaped = f_norm.reshape(K, M, -1) # (K, M, N)
+-        # Transpose to (K, N, M)
+-        f_norm_T = f_norm_reshaped.permute(0, 2, 1) # (K, N, M)
+-        # Matrix multiplication: (K, N, M) @ (K, M, N) -> (K, N, N)
+-        # But we want pairwise between views, not between pixels.
+-        # The source says: "normalize features to unit vectors and then collect them as a K x M matrix".
+-        # This implies the features are aggregated or we are looking at a single point.
+-        # "Sample image features {fi} from K feature maps."
+-        # "Compute pair-wise cosine similarities... normalize features... collect as K x M matrix".
+-        # This suggests that for each 3D point, we get K feature vectors (one from each view).
+-        # So fi is (M,).
+-        
+-        # Let's re-read carefully: "Sample image features {fi} from K feature maps."
+-        # "normalize features to unit vectors and then collect them as a K x M matrix"
+-        # This matrix is K rows (views), M columns (features).
+-        # So for each 3D point, we have a K x M matrix.
+-        
+-        # Step 5: Aggregation Weights
+-        # w_i predicted by MLP from concat(f_i, view_dir_diff)
+-        # w_ij from entropy of depth distribution
+-        
+-        # Step 6: Aggregated Similarity
+-        # s_hat = sum_{i<j} w_ij cos(fi, fj)
+-        
+-        # Step 7: Aggregated Color and Features
+-        # c_hat = sum w_i c_tilde_i
+-        # f_hat = sum w_i f_i
+-        
+-        # Step 8: Volume Construction
+-        # concat(s_hat, c_hat, f_hat) -> Linear -> C dim
+-        
+-        # Since we don't have the exact 3D point sampling logic in the source,
+-        # we implement the core aggregation logic.
+-        
+-        return None # Placeholder for the full implementation which requires 3D point sampling logic not fully detailed in text
++        # Create mask for upper triangle
++        mask = torch.triu(torch.ones(K, K), diagonal=1).bool()
++        # Apply mask to get similarities
++        similarities = gram_matrix.masked_select(mask.unsqueeze(0).expand(N, -1, -1)) # (N, K*(K-1)/2)
++        
++        # Step 5: Aggregate Cosine Similarities
++        # Compute visibility weights w_ij (simplified as uniform for demonstration)
++        # In practice, w_ij comes from depth distribution entropy
++        w_ij = torch.ones_like(similarities) / similarities.shape[1]
++        aggregated_similarity = torch.sum(similarities * w_ij, dim=-1, keepdim=True) # (N, 1)
++        
++        # Step 6: Aggregate Colors and Features
++        # Compute view direction differences (simplified)
++        view_diff = self.compute_view_direction_diff(projected_points, camera_poses) # (N, K, 3)
++        
++        # Predict weights w_i
++        # Concatenate sampled features and view direction difference
++        # sampled_features: (N, K, C), view_diff: (N, K, 3)
++        # Repeat view_diff to match feature dim? Or concat along feature dim?
++        # Source says: "concatenation of sampled features and view direction difference"
++        # Likely per-view: (N, K, C+3)
++        input_for_mlp = torch.cat([sampled_features, view_diff], dim=-1)
++        
++        # MLP predicts scalar weight per view
++        raw_weights = self.weight_mlp(input_for_mlp) # (N, K, 1)
++        w_i = F.softmax(raw_weights, dim=1) # (N, K, 1)
++        
++        # Aggregate
++        windowed_colors_flat = windowed_colors.reshape(N, K, -1)
++        aggregated_color = torch.sum(windowed_colors_flat * w_i, dim=1) # (N, 9*9*3)
++        aggregated_feature = torch.sum(sampled_features * w_i, dim=1) # (N, C)
++        
++        # Step 7: Volume Projection
++        # Concatenate s, c, f
++        # aggregated_similarity: (N, 1), aggregated_color: (N, 81*3), aggregated_feature: (N, C)
++        combined = torch.cat([aggregated_similarity, aggregated_color, aggregated_feature], dim=-1)
++        
++        # Project to C-dimensional vector
++        volume_features = self.projection(combined) # (N, C)
++        
++        # Reshape to volume grid (N, H/8, W/8, D, C)
++        # Assuming target_points_3d are structured in a grid
++        volume = volume_features.reshape(-1, H_f, W_f, D, C)
++        
++        return volume
++
++    def project_3d_to_2d(self, points_3d, poses):
++        # Placeholder for projection logic
++        pass
++
++    def sample_windows(self, features, projected_points, window_size):
++        # Placeholder for window sampling logic
++        pass
++
++    def compute_view_direction_diff(self, projected_points, poses):
++        # Placeholder for view direction difference calculation
++        pass
+ ```
+ 
+-**Note on Pseudocode:** The source provides the aggregation formulas and the structure of the encoder (CNN + Transformer) but does not provide the exact code for sampling the 9x9 window from 3D projections or the specific MLP architecture for weights. The pseudocode above outlines the structure and the mathematical operations described. The core aggregation logic is:
+-
+-1.  Normalize features $F \in \mathbb{R}^{K \times M}$.
+-2.  Compute $S = F F^T$.
+-3.  Extract upper triangle of $S$ for pairwise similarities.
+-4.  Compute $\hat{s} = \sum_{i<j} w_{ij} S_{ij}$.
+-5.  Compute $\hat{c} = \sum_{i=1}^K w_i \tilde{c}_i$ and $\hat{f} = \sum_{i=1}^K w_i f_i$.
+-6.  Concatenate $[\hat{s}, \hat{c}, \hat{f}]$ and project to $C$ dimensions.
++## Subtopics
++
++### [3D Transformer Network Refinement](14648-3d-transformer-network-refinement.md)
++The 3D Transformer Network Refinement (also known as the Point Transformer Network) is a module within the PointSplat framework that optimizes the appearance and geometric attributes of selected 3D Gaussians. It addresses the feature imbalance caused by high-dimensional spherical harmonic coefficients overshadowing geometric factors, which leads to biased learning. By leveraging local attention mechanisms on sparse 3D points, it preserves fine-grained structural details and prevents influence from distant, unrelated Gaussians. It builds on [Multi-View Feature Encoder](13802-multi-view-feature-encoder.md) by refining the encoded features through a hierarchical point transformer architecture.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Models 3D context between different 3D points, leading to better scene structures. More memory and parameter efficient than 3D CNNs [S1]. Alleviates multi-view inconsistency [S1].
+-*   **Limitations:** Not given in the sources.
+-*   **When to use:** When learning feed-forward NeRF models from multi-view images and needing to aggregate essential information for radiance field prediction [S1].
+-*   **When not to use:** Not given in the sources.
++**Time Complexity:** The computation of pair-wise cosine similarities is $O(K^2 \cdot M)$ per point, where $K$ is the number of views and $M$ is the feature dimension. The matrix multiplication approach allows this to be computed in parallel efficiently [S1]. The MLP for weight prediction is $O(K \cdot (M + 3))$ per point [S1].
++**Memory Complexity:** The method requires storing feature maps at 1/8 resolution for all $K$ views, and the target volume $z \in \mathbb{R}^{\frac{H}{8} \times \frac{W}{8} \times D \times C}$ [S1]. The use of 1/8 resolution features reduces memory compared to full-resolution sampling [S1].
++**Measured Performance:** The method is designed to be memory and parameter efficient compared to 3D CNNs while maintaining similar performance [S1]. The fine stage of the associated MuRF model uses a compact volume with reduced channel dimension (16) and fewer sampling points (16) for efficiency [S1].
++**Strengths:** Explicitly models multi-view consistency via cosine similarities, handles small and large baseline views effectively, and is more efficient than 3D CNNs [S1].
++**Limitations:** Relies on the quality of the 2D CNN and Transformer features. The windowed sampling might lose some information if the 8× subsampling is too aggressive, though the 9×9 window mitigates this [S1].
+ 
+ ## Background
+-The Multi-View Feature Encoder is part of the MuRF (Multi-Baseline Radiance Fields) architecture [S1]. It was introduced in the paper "MuRF: Multi-Baseline Radiance Fields" [S1]. The method builds on the observation that multi-view features of a surface point tend to exhibit high multi-view consistency [S1]. It uses a Transformer architecture extended from GMFlow's 2-view Transformer [S1].
++The Multi-View Feature Encoder is a key component of the MuRF (Multi-Baseline Radiance Fields) framework, introduced in 2024 [S1]. It builds on the observation that multi-view features of a surface point tend to exhibit high multi-view consistency, which can be used to provide geometric cues for volume density prediction [S1]. The method extends the 2-view cross-attention architecture from GMFlow to $K$ views [S1].
+ 
+ ## Sources

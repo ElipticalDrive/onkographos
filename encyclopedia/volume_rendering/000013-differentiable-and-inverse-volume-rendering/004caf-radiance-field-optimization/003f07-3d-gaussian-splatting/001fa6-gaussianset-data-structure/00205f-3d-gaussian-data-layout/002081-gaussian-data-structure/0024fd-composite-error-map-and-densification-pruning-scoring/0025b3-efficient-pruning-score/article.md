@@ -1,23 +1,26 @@
 # Efficient Pruning Score
 
-Also called: Speedy-Splat Pruning Score
+Also called: Pruning (Speedy-Splat), Speedy-Splat Pruning Score
 
 ## Overview
-The Efficient Pruning Score is a sensitivity-based metric used to identify and remove redundant 3D Gaussian primitives during the training of 3D Gaussian Splatting (3DGS) models [S1, S2]. It solves the problem of high memory overhead and inefficient gradient flow associated with the original PUP 3D-GS pruning method, which requires storing a large Hessian matrix for every Gaussian [S1]. By reparameterizing the sensitivity score to depend on the scalar projected Gaussian value rather than the full 3D spatial parameters, it reduces storage requirements by 36×, enabling pruning to occur directly within the training pipeline [S1, S2].
+The Efficient Pruning Score is a sensitivity-based metric used to identify and remove redundant 3D Gaussian primitives during the training of 3D Gaussian Splatting (3DGS) models [S1, S2]. It solves the problem of high memory overhead and inefficient gradient flow associated with the original PUP 3D-GS pruning score by reparameterizing the Hessian approximation with respect to the 2D projected Gaussian value $g_i$ rather than the 3D spatial parameters [S1]. This reparameterization reduces storage requirements by 36×, enabling the score to be computed and applied during training (Soft Pruning) rather than only post-hoc [S2]. It sets itself apart from its parent method, the Composite Error Map, by focusing specifically on second-order sensitivity to spatial parameters to reduce Gaussian count, whereas the parent method uses frequency-aware masks and photometric loss for densification control [Parent].
 
 ## How it works
+The method computes a pruning score for each Gaussian primitive to determine its contribution to the reconstruction error. It operates in two phases: Soft Pruning during the initial densification stage and Hard Pruning after densification is complete [S1][S3, unofficial].
+
 ### Inputs and Outputs
-- **Inputs**:
-  - The set of 3D Gaussians $\mathcal{G} = \{G_1, \dots, G_N\}$ [S1, S2].
-  - The set of training camera poses $\mathcal{P}_{gt}$ [S2].
-  - The rendered image gradients with respect to the projected Gaussian values, $\nabla_{g_i} I_{\mathcal{G}}(\phi)$, computed during the standard backward pass of the differentiable renderer [S1, S2].
-- **Outputs**:
-  - A scalar pruning score $\tilde{U}_i$ for each Gaussian $G_i$ [S1, S2].
-  - A list of Gaussians to be removed based on a threshold [S1].
+*   **Inputs**:
+    *   $\mathcal{G}_i$: The set of $N$ Gaussian primitives.
+    *   $\mathcal{P}_{gt}$: The set of all training camera poses.
+    *   $I_{\mathcal{G}}(\phi)$: The rendered image for camera pose $\phi$.
+    *   $g_i(\phi, p)$: The projected scalar value of Gaussian $\mathcal{G}_i$ at pixel $p$ for pose $\phi$ [S1, S2].
+    *   $\nabla_{g_i} I_{\mathcal{G}}(\phi, p)$: The gradient of the rendered image with respect to the projected Gaussian value $g_i$, computed during the standard backward pass of the 3DGS render kernel [S1].
+*   **Outputs**:
+    *   $\tilde{U}_i$: The pruning score for Gaussian $\mathcal{G}_i$.
+    *   A binary mask or list of indices for Gaussians to be pruned.
 
 ### Data Structures
-- **Pruning Score Buffer**: An array of size $N$ (number of Gaussians) storing the accumulated score $\tilde{U}_i$ for each Gaussian [S1, S2].
-- **Gradient Accumulator**: During the backward pass, the gradient $\nabla_{g_i} I_{\mathcal{G}}(\phi)$ is squared and added to the corresponding entry in the Pruning Score Buffer [S1, S2].
+*   **Pruning Score Array**: An array of size $N$ (number of Gaussians) storing the scalar score $\tilde{U}_i$ for each Gaussian. This replaces the $N \times 36$ matrix required by the original PUP 3D-GS score [S1].
 
 ### Formulas
 The original PUP 3D-GS sensitivity score $U_i$ is defined as the log determinant of the second-order approximation of the $L_2$ reconstruction error with respect to the mean $\mu_i$ and scaling $s_i$ parameters [S2]:
@@ -28,110 +31,125 @@ $$
 
 where $\nabla_{\mu_i,s_i} I_{\mathcal{G}}(\phi)$ is a vector of gradients with respect to the 3D parameters [S2].
 
-The Efficient Pruning Score $\tilde{U}_i$ reparameterizes this by computing the Hessian approximation with respect to the 2D projected value $g_i$ of the Gaussian at pixel $p$ [S1]:
+The Efficient Pruning Score $\tilde{U}_i$ reparameterizes this by computing the Hessian approximation with respect to the 2D projected value $g_i$ [S1]:
 
 $$
 \tilde{U}_i = \log \left| \sum_{\phi \in \mathcal{P}_{gt}} \nabla_{g_i} I_{\mathcal{G}}(\phi) \nabla_{g_i} I_{\mathcal{G}}(\phi)^T \right|
 $$
 
-Since $g_i$ is a scalar at each pixel, the term inside the determinant is a $1 \times 1$ matrix (a scalar squared) [S2]. Furthermore, because the logarithm is monotonically increasing, the log determinant simplifies to a sum of squared gradients [S1, S2]:
+Since $g_i$ is a scalar at each pixel, the term inside the determinant is a scalar squared. Because the logarithm is monotonically increasing, the log determinant simplifies to the sum of squared gradients [S1, S2]:
 
 $$
 \tilde{U}_i = \sum_{\phi \in \mathcal{P}_{gt}} \nabla_{g_i} I_{\mathcal{G}}(\phi)^2
 $$
 
+Note: In implementation, the gradient $\nabla_{g_i} I_{\mathcal{G}}$ is typically accumulated per pixel during the backward pass. The final score is the sum of these squared gradients across all training views [S1, S2].
+
 ### Parameters
-- **Pruning Threshold**: Not explicitly defined in the sources as a fixed constant. It is determined empirically to remove up to 90% of Gaussians while retaining high visual quality [S1, S2].
-- **Iteration Split**:
-  - **Soft Pruning**: Applied during densification in the first 15,000 iterations [S1].
-  - **Hard Pruning**: Applied after densification is completed, after iteration 15,000 [S1].
+*   **Pruning Threshold**: Not explicitly defined in the sources as a fixed constant. The method identifies Gaussians with low scores for removal. The sources state that up to 90% of Gaussians can be pruned [S1][S3, unofficial].
+*   **Densification Iteration Limit**: 15,000 iterations. Soft pruning occurs before this; Hard pruning occurs after [S1][S3, unofficial].
 
 ### Pseudocode
-The following pseudocode illustrates the integration of the Efficient Pruning Score into the training loop. It assumes access to the standard 3DGS backward pass which computes $\nabla_{g_i} I_{\mathcal{G}}$.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Efficient Pruning Score Integration
-# N: Total number of Gaussians
-# P_gt: Set of training camera poses
-# pruning_scores: Array of size N, initialized to 0.0
-# current_iteration: Integer tracking training step
-
-def accumulate_pruning_scores(rendered_image, gt_image, gaussians, camera_poses, pruning_scores):
+def compute_efficient_pruning_score(gaussians, training_poses, gradients):
     """
-    Computes the backward pass and accumulates the efficient pruning score.
-    """
-    # 1. Compute image loss (e.g., L2)
-    loss = sum((rendered_image - gt_image) ** 2)  # Standard loss computation [G]
+    Computes the Efficient Pruning Score for all Gaussians.
     
-    # 2. Backward pass through the renderer
-    # Computes gradients with respect to the projected Gaussian values g_i
-    # for each Gaussian contributing to each pixel.
-    # gradient_g: Dictionary mapping Gaussian index i to a list of gradient values per pixel/view
-    gradient_g = {}
-    for phi in camera_poses:
-        # Standard differentiable rendering backward pass computes ∇_{g_i} I_G [S1]
-        # In practice, this is provided by the autograd framework [G]
-        pixel_gradients = compute_pixel_gradients(rendered_image, gt_image, gaussians, phi)
-        for i, grad_val in pixel_gradients.items():
-            if i not in gradient_g:
-                gradient_g[i] = []
-            gradient_g[i].append(grad_val)
+    Args:
+        gaussians: List of Gaussian primitives.
+        training_poses: Set of all training camera poses.
+        gradients: Dictionary or structure containing gradient values 
+                   dI/dg_i for each Gaussian i and each training pose.
+                   Specifically, gradients[i][pose] contains the gradient 
+                   of the rendered image w.r.t the projected value g_i.
+    
+    Returns:
+        scores: Array of pruning scores for each Gaussian.
+    """
+    n_gaussians = len(gaussians)
+    scores = [0.0] * n_gaussians
+    
+    # Accumulate squared gradients across all training poses
+    for pose in training_poses:
+        for i in range(n_gaussians):
+            # Get gradient of rendered image w.r.t projected value g_i
+            # This value is assumed to be available from the backward pass
+            grad = gradients[i][pose]
             
-    # 3. Accumulate pruning scores
-    # Squared gradients are summed across all pixels and views for each Gaussian
-    for i, grad_vals in gradient_g.items():
-        pruning_scores[i] += sum(g ** 2 for g in grad_vals)
-        
-    return loss
-
-def compute_pixel_gradients(rendered_image, gt_image, gaussians, camera_pose):
-    """
-    Computes ∇_{g_i} I_G per pixel using the standard differentiable renderer backward pass [S1].
-    Returns a dictionary mapping Gaussian index to gradient values.
-    """
-    # Implementation depends on the autograd framework [G]
-    pass
-
-def prune_gaussians(gaussians, pruning_scores, current_iteration):
-    """
-    Removes Gaussians based on the accumulated pruning score.
-    """
-    if current_iteration < 15000:
-        # Soft Pruning: During densification phase [S1]
-        # Exact thresholding logic is not specified in sources [S1]
-        pass
-    else:
-        # Hard Pruning: After densification phase [S1]
-        # Determine threshold to remove up to 90% of Gaussians [S1, S2]
-        sorted_indices = sorted(range(len(pruning_scores)), key=lambda k: pruning_scores[k], reverse=True)
-        num_to_remove = int(len(pruning_scores) * 0.9)
-        gaussians_to_remove = sorted_indices[:num_to_remove]
-        
-        # Remove Gaussians from the data structure
-        for i in reversed(gaussians_to_remove):
-            gaussians.pop(i)
+            # Square the gradient
+            grad_sq = grad * grad
             
-        # Reset scores for remaining Gaussians
-        new_scores = [0.0] * len(gaussians)
-        # Note: Exact score reset/remapping procedure is not detailed in sources [S1]
+            # Accumulate to the score
+            scores[i] += grad_sq
+            
+    return scores
+
+def apply_pruning(gaussians, scores, threshold=None, phase='hard'):
+    """
+    Applies pruning based on the computed scores.
+    
+    Args:
+        gaussians: List of Gaussian primitives.
+        scores: Array of pruning scores.
+        threshold: Optional threshold. If None, removes bottom 90% or 
+                   uses a fixed count. Not specified in sources.
+        phase: 'soft' or 'hard'.
+               Soft: During densification (first 15,000 iterations).
+               Hard: After densification (after 15,000 iterations).
+    
+    Returns:
+        pruned_gaussians: List of Gaussians remaining after pruning.
+    """
+    # Determine which Gaussians to keep
+    # The sources do not specify the exact thresholding logic (e.g., 
+    # percentile vs absolute threshold). 
+    # Common practice in such methods is to remove a percentage of the 
+    # lowest scoring Gaussians.
+    
+    # Placeholder for specific thresholding logic not detailed in sources
+    # [G] Assuming a percentile-based removal of the lowest scoring Gaussians
+    # to achieve ~90% reduction as stated in sources.
+    
+    n_gaussians = len(gaussians)
+    # Sort indices by score ascending
+    sorted_indices = sorted(range(n_gaussians), key=lambda k: scores[k])
+    
+    # Remove the lowest scoring Gaussians
+    # Sources state ~90% reduction.
+    # [G] Implementation detail: Keep top 10% of Gaussians by score.
+    num_to_keep = int(n_gaussians * 0.1)
+    
+    keep_indices = set(sorted_indices[-num_to_keep:])
+    
+    pruned_gaussians = [gaussians[i] for i in keep_indices]
+    
+    return pruned_gaussians
 ```
 
 ### Edge Cases and Pitfalls
-- **Gradient Flow**: The original PUP 3D-GS method requires back-propagating through the render kernel per pixel and then per Gaussian, which breaks the efficient gradient flow of 3DGS [S1]. The Efficient Pruning Score avoids this by using $\nabla_{g_i} I_G$, which is already computed in the standard backward pass [S1].
-- **Timing**: Pruning must be carefully timed. Soft pruning occurs during densification (first 15,000 iterations), while hard pruning occurs after [S1].
+*   **Gradient Availability**: The method relies on $\nabla_{g_i} I_{\mathcal{G}}$ being available from the standard backward pass. If the render kernel does not expose this specific gradient, the method cannot be implemented directly [S1].
+*   **Precision**: Squaring small gradients may lead to underflow or loss of precision if not handled with appropriate data types.
+*   **Boundary Conditions**: The simplification $\tilde{U}_i = \sum (\nabla_{g_i} I_{\mathcal{G}})^2$ assumes $g_i$ is a scalar. If the projected value is multi-channel (e.g., RGB), the formula must be adapted to sum over channels or treat the vector appropriately [S1, S2].
+
+## Subtopics
+
+### [Geometry-Driven Pruning Score](14647-geometry-driven-pruning-score.md)
+A scoring mechanism that selects a subset of Gaussians based solely on intrinsic 3D attributes, decoupling geometry from appearance to prevent high-dimensional spherical harmonics from dominating the selection. It avoids expensive ray-pixel intersections and is chosen when memory efficiency is critical and appearance details are less important than global structure.
 
 ## Operating characteristics
-- **Time Complexity**: The score computation is $O(N \cdot P)$ where $N$ is the number of Gaussians and $P$ is the number of pixels/views, but it is integrated into the existing backward pass, adding minimal overhead [S1, S2].
-- **Memory Complexity**: Storage is proportional to $N$ (one scalar per Gaussian), compared to $N \times 36$ for the original PUP 3D-GS method [S1, S2]. This represents a 36× reduction in storage [S1, S2].
-- **Performance**: The method allows pruning to be performed during training, reducing the final number of Gaussians by approximately 90% while maintaining high visual fidelity [S1, S2]. This leads to increased rendering and training speeds [S2].
-- **Strengths**: Low memory overhead, compatible with standard 3DGS training pipeline, effective at removing redundant Gaussians [S1, S2].
-- **Limitations**: Requires careful tuning of pruning thresholds and timing (soft vs. hard pruning) [S1].
+*   **Time Complexity**: The score computation requires iterating over all Gaussians and all training poses. However, since the gradients are already computed during the backward pass, the additional cost is primarily the summation of squared gradients, which is $O(N \cdot |\mathcal{P}_{gt}|)$ [S1, S2].
+*   **Memory Complexity**: The storage requirement is proportional to $N$ (one score per Gaussian), a 36× reduction compared to the $N \times 36$ storage required by the original PUP 3D-GS score [S1, S2].
+*   **Measured Performance**: The full method (including pruning) achieves 6.51× FPS, 10.6× compression, and 1.45× faster training compared to original 3D-GS [S3, unofficial]. It reduces the total number of Gaussians by approximately 90% [S1][S3, unofficial].
+*   **Strengths**: Enables training-time pruning, reducing memory footprint and accelerating training and rendering. It maintains high visual quality despite significant compression [S1][S3, unofficial].
+*   **Limitations**: Requires access to gradients with respect to projected values, which may not be available in all renderers. The pruning is aggressive (~90%), which may impact fine details if not tuned carefully [S1][S3, unofficial].
 
 ## Background
-The Efficient Pruning Score was introduced in the "Speedy-Splat" paper, which builds upon the PUP 3D-GS method [S1, S2]. PUP 3D-GS demonstrated that up to 90% of Gaussians could be pruned post-hoc, but its Hessian-based score was too memory-intensive for training-time use [S1]. Speedy-Splat addressed this by reparameterizing the score to use projected values, enabling efficient in-training pruning [S1, S2].
+The Efficient Pruning Score was introduced in the Speedy-Splat paper by Zwicker et al. in 2025 [S1]. It builds upon the PUP 3D-GS method, which demonstrated that post-hoc pruning could reduce Gaussian counts by ~90% but suffered from high memory overhead and inefficient gradient flow [S1, S2]. The Speedy-Splat authors identified these drawbacks and proposed the reparameterization to enable efficient, training-time pruning [S1]. The method is part of the Speedy-Splat framework, which also includes sparse pixels and sparse primitives techniques [S1][S3, unofficial].
 
 ## Sources
 [S1] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://doi.org/10.1109/cvpr52734.2025.02006, fetched 2026-10-26
 [S2] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse ..., https://speedysplat.github.io/, fetched 2026-10-28
+[S3] Poster Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://speedysplat.github.io/static/files/speedysplat_poster.pdf?v=2026.10.18, fetched 2026-10-29 (unofficial)

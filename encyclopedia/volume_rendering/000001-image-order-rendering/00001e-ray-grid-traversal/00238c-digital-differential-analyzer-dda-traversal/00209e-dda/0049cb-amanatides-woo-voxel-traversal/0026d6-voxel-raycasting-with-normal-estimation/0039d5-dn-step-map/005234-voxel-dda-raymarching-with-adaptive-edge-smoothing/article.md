@@ -1,0 +1,139 @@
+# Voxel DDA Raymarching with Adaptive Edge Smoothing
+
+Also called: Adaptive voxel terrain marching, Corner-based volume smoothing
+
+## Overview
+This method extends standard DDA raymarching by sampling corner and edge voxel occupancy to adaptively compute volume content, eliminating stepping artifacts and spikes caused by uniform voxel traversal [S1, unofficial]. Unlike standard DDA which steps uniformly through fixed voxels, this technique smooths terrain surfaces without increasing the step count or requiring geometry subdivision [S1, unofficial]. It builds on [DN_step_map](8596-dn-step-map.md) by refining the surface normal and volume estimation at the hit voxel.
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, voxel grid data $V$, camera field of view (FOV).
+**Outputs:** Hit position, voxel data, surface normal, and adaptive volume content.
+
+### Data Structures
+The voxel grid $V$ stores occupancy states. Each voxel has a state:
+- `AIR`: Empty space.
+- `SURFACE`: Solid terrain block.
+- `NON-SURFACE`: Solid but not terrain (e.g., bedrock, or internal structure).
+- `EMPTY`: Explicitly empty (often synonymous with `AIR` in this context, but distinguished by adjacency checks).
+
+The noise function generates a float value $N$ for each voxel coordinate.
+- Height offset $H = \lfloor N \rfloor$ (integer part).
+- Volume content $V_c = N - H$ (decimal part, $0 \le V_c < 1$).
+
+### Steps
+1. **Ray Direction Correction:** Determine the ray direction based on the camera's FOV. If the camera has a negative Z FOV (looking in the negative Z direction), the ray direction $\mathbf{d}$ must be inverted to match the coordinate system [S1, unofficial]. Failure to invert results in swapped entry/exit masks and incorrect terrain rendering [S1, unofficial].
+2. **Corner Sampling:** For the current voxel being traversed, sample the occupancy state at its four corners: Northwest (NW), Northeast (NE), Southwest (SW), and Southeast (SE) [S1, unofficial].
+3. **Priority Volume Calculation:**
+   - If any corner block is `NON-SURFACE` and not `AIR`, set the volume content to maximum ($1.0$) [S1, unofficial].
+   - This `NON-SURFACE` state has the highest priority [S1, unofficial].
+4. **Edge Adjacency Check:** If no `NON-SURFACE` blocks exist:
+   - Check for `AIR` blocks.
+   - For each corner (e.g., NW), check the adjacent orthogonal blocks (West and North) [S1, unofficial].
+   - If either adjacent orthogonal block is `AIR` or `NON-SURFACE`, set the volume content to $0$ (if `AIR`) or maximum (if `NON-SURFACE`) [S1, unofficial].
+   - This logic prevents elevation spikes at edges where diagonal blocks are solid but orthogonal neighbors are empty [S1, unofficial].
+5. **Zero-Volume Smoothing:** Handle voxels with zero volume to prevent visual spikes and square artifacts [S1, unofficial].
+   - Average adjacent volumes or make zero-volume voxels shallow [S1, unofficial].
+   - This ensures smooth transitions and avoids sharp edges when traversing near empty space [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_adaptive_volume(voxel_coords, grid, noise_func):
+    """
+    Computes adaptive volume content for a voxel based on corner and edge occupancy.
+    """
+    # 1. Get base noise value
+    noise_val = noise_func(voxel_coords)
+    height_offset = int(noise_val)
+    base_volume = noise_val - height_offset
+    
+    # 2. Sample corner states
+    # Assuming grid.get_state(x, y, z) returns 'AIR', 'SURFACE', or 'NON-SURFACE'
+    nw = grid.get_state(voxel_coords.x, voxel_coords.y, voxel_coords.z)
+    ne = grid.get_state(voxel_coords.x + 1, voxel_coords.y, voxel_coords.z)
+    sw = grid.get_state(voxel_coords.x, voxel_coords.y + 1, voxel_coords.z)
+    se = grid.get_state(voxel_coords.x + 1, voxel_coords.y + 1, voxel_coords.z)
+    
+    corners = [nw, ne, sw, se]
+    
+    # 3. Priority: Non-surface, non-air blocks
+    for state in corners:
+        if state == 'NON-SURFACE':
+            return 1.0  # Max volume
+            
+    # 4. Check for air and adjacent orthogonal blocks
+    has_air = any(state == 'AIR' for state in corners)
+    
+    # Check orthogonal neighbors for each corner
+    # NW corner checks West (x-1) and North (y+1)
+    # Note: Coordinate system orientation may vary; this assumes standard axes
+    west_of_nw = grid.get_state(voxel_coords.x - 1, voxel_coords.y, voxel_coords.z)
+    north_of_nw = grid.get_state(voxel_coords.x, voxel_coords.y + 1, voxel_coords.z) # This is actually the SW corner in some systems, adjust based on grid definition
+    
+    # Simplified logic from source: if adjacent orthogonal is empty/non-surface, set volume to 0 or max
+    # We check the immediate orthogonal neighbors of the voxel face being evaluated
+    # For robustness, we check the 4 orthogonal neighbors of the current voxel center
+    west = grid.get_state(voxel_coords.x - 1, voxel_coords.y, voxel_coords.z)
+    east = grid.get_state(voxel_coords.x + 1, voxel_coords.y, voxel_coords.z)
+    south = grid.get_state(voxel_coords.x, voxel_coords.y - 1, voxel_coords.z)
+    north = grid.get_state(voxel_coords.x, voxel_coords.y + 1, voxel_coords.z)
+    
+    orthogonal_states = [west, east, south, north]
+    
+    for state in orthogonal_states:
+        if state == 'NON-SURFACE':
+            return 1.0
+        if state == 'AIR':
+            return 0.0
+            
+    # 5. Default to base volume if no special conditions met
+    # Apply smoothing for zero-volume voxels
+    if base_volume == 0:
+        # Average adjacent volumes or make shallow
+        # [G] Implementation detail: average the volume of the 6 orthogonal neighbors
+        neighbor_volumes = []
+        for ox, oy, oz in [(-1,0,0), (1,0,0), (0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]:
+            n_vol = noise_func((voxel_coords.x + ox, voxel_coords.y + oy, voxel_coords.z + oz))
+            neighbor_volumes.append(n_vol - int(n_vol))
+        if neighbor_volumes:
+            return sum(neighbor_volumes) / len(neighbor_volumes)
+        return 0.0
+        
+    return base_volume
+```
+
+### Parameters
+- **Terrain Height Offset:** Integer part of the noise value (e.g., 6 from 6.9) [S1, unofficial].
+- **Voxel Volume:** Decimal part of the noise value (e.g., 0.9 from 6.9) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Negative FOV:** If the ray direction is not inverted to match a negative Z FOV, entry/exit masks appear swapped, causing incorrect terrain side rendering [S1, unofficial].
+- **Zero-Volume Voxels:** Cause stepping artifacts and spikes. Smoothing must account for adjacent empty blocks to avoid sharp transitions and over-elevation at edges [S1, unofficial].
+- **Diagonal Artifacts:** Without edge checks, diagonal solid blocks can cause elevation spikes even if orthogonal neighbors are empty [S1, unofficial].
+
+## Subtopics
+
+### [Corner-based Voxel Volume Calculation](14665-corner-based-voxel-volume-calculation.md)
+Calculates volume based on corner occupancy. Choose when simple corner sampling is sufficient.
+
+### [Voxel DDA Raymarching with Neighbor-Averaged Entry Interpolation](14668-voxel-dda-raymarching-with-neighbor-averaged-entry-interpola.md)
+Uses neighbor averaging for entry points. Choose when smoother entry transitions are needed.
+
+### [Midpoint UV Calculation](14669-midpoint-uv-calculation.md)
+Calculates UVs at the midpoint. Choose when texture mapping precision is critical.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels traversed. The additional corner and edge checks add a constant factor but do not change the asymptotic complexity.
+- **Memory Complexity:** $O(1)$ additional memory per voxel traversal.
+- **Performance:** Reduces visual artifacts without increasing step count [S1, unofficial]. Suitable for real-time rendering [S1, unofficial].
+- **Strengths:** Eliminates stepping artifacts and spikes; smooths terrain without geometry subdivision [S1, unofficial].
+- **Limitations:** Requires access to corner and edge voxel data; sensitive to noise function continuity [S1, unofficial].
+- **When to Use:** Real-time voxel terrain rendering where smooth surfaces are required [S1, unofficial].
+- **When Not to Use:** When performance is critical and visual artifacts are acceptable, or when voxel data is not accessible at corners/edges.
+
+## Background
+This method was developed for real-time voxel terrain rendering to address visual artifacts in standard DDA raymarching [S1, unofficial]. It adapts volume calculation based on corner and edge occupancy to smooth terrain surfaces [S1, unofficial].
+
+## Sources
+[S1] Smooth terrain with voxel DDA raymarching, https://www.youtube.com/watch?v=CxoC0E7inUg, fetched 2026-10-25 (unofficial)

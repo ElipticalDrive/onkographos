@@ -1,0 +1,327 @@
+--- v001.md
++++ v002.md
+@@ -4,169 +4,173 @@
+ 
+ ## Overview
+-A real-time rendering method for atmospheric light scattering and volumetric shadows that computes the direct contribution of a participating medium on any surface using an analytical expression of the light transport equation, avoiding precomputation and texture memory [S1, unofficial]. It differs from volume rendering methods (e.g., shadow maps) by not requiring texture memory and avoiding sampling artifacts for sharp edges like light shafts, and from other direct representation methods by integrating volumetric shadows [S1, unofficial].
++A real-time rendering method for atmospheric light scattering and volumetric shadows that computes the direct contribution of a participating medium on any surface using an analytical expression of the light transport equation, avoiding precomputation and texture memory [S1, unofficial]. It differs from volume rendering methods (e.g., shadow maps) by not requiring texture memory and avoiding sampling artifacts for sharp edges like light shafts [S1, unofficial]. It differs from other direct representation methods (e.g., Sun et al. [SR05]) by integrating volumetric shadows [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Scene geometry (2-manifold meshes with connectivity), participating media boundaries (bounding boxes or explicit surfaces), one or several static/moving point light sources, camera position.
+-*   **Outputs:** Final image with atmospheric scattering and volumetric shadows.
++**Inputs:**
++*   Scene geometry (triangular meshes, 2-manifold with connectivity).
++*   Participating media definitions (homogeneous, constant extinction coefficient $k_t$).
++*   Light sources (one or several static or moving point lights).
++*   Camera position.
++
++**Outputs:**
++*   Final image with atmospheric scattering and volumetric shadows.
+ 
+ **Data Structures:**
+-*   **Silhouette Edges:** List of edges common to a front-facing triangle (w.r.t. light) and a back-facing triangle. Stored in loop lists [S1, unofficial].
+-*   **Shadow Planes:** Meshed quads/triangles generated from silhouette edges, extending from the light source to infinity (or scene bounds). Mesh density is finer near the light and coarser far away [S1, unofficial].
+-*   **Stencil Buffer:** Used to track lit areas (value 1) and shadowed areas (value 0), and to manage shadow-in-shadow artifacts during plane rendering [S1, unofficial].
++*   **Shadow Plane Mesh:** A mesh generated from object silhouettes. Vertices store the analytical medium contribution value.
++*   **Stencil Buffer:** Used to track lit areas and manage shadow volume logic.
++*   **Silhouette Loop List:** Linked list of edges forming the silhouette of shadow casters.
+ 
+ **Parameters:**
+-*   **Extinction Coefficient ($k_t$):** Assumed constant (homogeneous medium) [S1, unofficial].
+-*   **Scattering Order:** Single scattering only. Multiple scattering is approximated by a constant ambient term [S1, unofficial].
+-*   **Phase Function:** Approximated by a 4th-degree polynomial base in the angular formulation [S1, unofficial].
++*   $k_t$: Extinction coefficient (constant per medium) [S1, unofficial].
++*   Light intensity $I_s$ [S1, unofficial].
++*   Shadow plane mesh density: Finely meshed near the light, coarsely far away, based on radial distribution [S1, unofficial].
++*   Polynomial approximation degree: 4th degree for phase function approximation [S1, unofficial].
+ 
+-**Numbered Steps:**
++**Steps:**
+ 
+-1.  **Compute Silhouettes:** For each shadow caster, determine all edges of the mesh common to a front-facing triangle (regarding the light position) and one back-facing triangle. Link these edges together and store in a loop list [S1, unofficial]. If the light is moving, silhouettes must be recomputed [S1, unofficial].
++1.  **Compute Silhouettes:**
++    For every moving shadow caster, determine silhouettes regarding the light position. Identify all edges common to a front-facing triangle and one back-facing triangle. Link these edges together and store in a loop list [S1, unofficial].
+ 
+-2.  **Render Scene (Surface + Hard Shadows):**
+-    *   Render the scene classically with light attenuation due to absorption and scattering. The luminance of a surface point $P$ is:
++2.  **Render Scene (Surface + Ambient):**
++    *   Render the scene classically with light attenuation due to absorption and scattering.
++    *   Compute surface luminance $L(P)$ for each point $P$:
+         $$ L(P) = \rho_P \frac{I(\omega_P) \cos(\theta_P)}{\pi r_P^2} e^{-k_t r_P} $$
+-        where $\rho_P$ is surface reflectivity, $I$ is light intensity, $\theta_P$ is the angle between surface normal and light direction, and $r_P$ is distance to the light [S1, unofficial].
+-    *   Add ambient fog to account for absorption and multiple scattering [S1, unofficial].
+-    *   Compute hard surface shadows using a stencil algorithm (shadow volumes/planes) [S1, unofficial].
+-    *   Disable lighting at the end of this stage. The stencil buffer now contains lit areas of the scene (value 1) and shadowed areas (value 0) [S1, unofficial].
++        where $\rho_P$ is surface reflectivity, $I$ is light intensity in direction $\omega$ toward $P$, $\theta_P$ is the angle between surface normal and light direction, and $r_P$ is distance to light [S1, unofficial].
++    *   Add ambient fog to account for absorption and multiple scattering.
++    *   Compute hard surface shadows using a stencil algorithm.
++    *   Disable lighting at the end of this stage. The stencil buffer now contains lit areas (value 1) and shadowed areas (value 0) [S1, unofficial].
+ 
+-3.  **Render Scene (Medium Contribution on Surfaces):**
+-    *   Render the scene once more to add the medium contribution for each vertex using additive blending.
++3.  **Compute Medium Contribution on Scene Vertices:**
++    *   Render the scene once more to add medium contribution for each vertex using additive blending.
+     *   Set depth test to equality.
+-    *   Use the stencil buffer to render only lit parts of the scene (stencil function allows fragments if stencil equals 1) [S1, unofficial].
+-    *   Compute the medium contribution $L_m(P)$ using Equation (2) below [S1, unofficial].
++    *   Use the stencil buffer to render only lit parts of the scene.
++    *   Compute the medium contribution $L_m(P)$ for each vertex using the analytical expression (Equation 2 below) [S1, unofficial].
+ 
+ 4.  **Sort Shadow Planes:**
+-    *   Sort the shadow planes back-to-front.
+-    *   Distance metric: Cosine of the angle between vector $\vec{SO}$ (camera to light) and vector $\vec{SP}$ (camera to silhouette edge center), where $S$ is light position, $O$ is camera center, and $P$ is a point on the silhouette edge [S1, unofficial].
+-    *   Remove planes that do not cut the medium bounding box [S1, unofficial].
++    *   Sort shadow planes in back-to-front order.
++    *   Distance metric: Cosine of the angle between vector $\vec{SO}$ (camera to light) and vector $\vec{SP}$ (camera to silhouette edge center) [S1, unofficial].
+ 
+-5.  **Render Shadow Planes (Volumetric Shadows):**
++5.  **Render Shadow Planes:**
+     *   Render shadow planes in the sorted order.
+     *   Depth test accepts only fragments closer to the camera.
+-    *   **Front-facing planes:** Add their contribution. Stencil function allows fragments if stencil equals 1. Increment stencil buffer by +1.
+-    *   **Back-facing planes:** Subtract their contribution. Stencil function allows fragments if stencil equals 0. Decrement stencil buffer by -1.
+-    *   For bounded media, when a back-facing triangle of the medium boundary is rendered, set the stencil to 255 to avoid further rendering in that area [S1, unofficial].
++    *   **Front-facing planes:** Add contribution. Stencil function allows fragments if stencil equals 1. Increment stencil buffer by +1.
++    *   **Back-facing planes:** Subtract contribution. Stencil function allows fragments if stencil equals 0. Decrement stencil buffer by -1.
++    *   Render simple quads with stencil function set to 'always' to work around hardware limitations regarding stencil increment/decrement [S1, unofficial].
++    *   For bounded media, set stencil to 255 when rendering back-facing triangles of the medium boundary to avoid further rendering [S1, unofficial].
+ 
+-**Formulas:**
++**Analytical Formula for Medium Contribution:**
++The method uses an angular formulation variable change: $r = \sqrt{h^2 + (x - t)^2}$, allowing integration with respect to angle $\theta$ instead of distance $x$ [S1, unofficial].
+ 
+-*   **Angular Formulation Variable Change:**
+-    $$ r = \sqrt{h^2 + (x - t)^2} $$
+-    where $h$ is the perpendicular distance from the light to the view ray, $x$ is distance along the ray, and $t$ is the projection of the light on the ray [S1, unofficial].
++The medium contribution $L_m(P)$ is approximated using a 4th-degree polynomial base for the phase function:
++$$ p(\theta + \pi/2) \approx c_0(k_t, h) + c_1(k_t, h)\theta + c_2(k_t, h)\theta^2 + c_3(k_t, h)\theta^3 + c_4(k_t, h)\theta^4 $$
++where coefficients $c_i$ depend on extinction coefficient $k_t$ and height $h$ [S1, unofficial].
+ 
+-*   **Medium Contribution Approximation:**
+-    The phase function $p(\theta + \pi/2)$ is approximated by a 4th-degree polynomial:
+-    $$ p(\theta + \pi/2) \approx c_0(k_t, h) + c_1(k_t, h)\theta + c_2(k_t, h)\theta^2 + c_3(k_t, h)\theta^3 + c_4(k_t, h)\theta^4 $$
+-    where coefficients $c_i$ depend on extinction coefficient $k_t$ and height $h$ [S1, unofficial].
++The final analytical solution for a non-directional point light source is:
++$$ L_m(P) = \frac{k_t e^{-k_t t} \Omega}{4\pi h} \left[ c_0(k_t, h)[\theta]_{\theta_0}^{\theta_d} + c_1(k_t, h)\left[\frac{\theta^2}{2}\right]_{\theta_0}^{\theta_d} + \dots \right] $$
++This is computed in constant time without numerical integration [S1, unofficial].
+ 
+-*   **Analytical Medium Contribution $L_m(P)$:**
+-    For a non-directional point light source, the single scattering contribution along a ray is computed in constant time:
+-    $$ L_m(P) = \frac{k_t e^{-k_t t} \Omega}{4\pi h} \left[ c_0(k_t, h)[\theta]_{\theta_0}^{\theta_d} + c_1(k_t, h)\left[\frac{\theta^2}{2}\right]_{\theta_0}^{\theta_d} + \dots \right] $$
+-    where $\Omega$ is the solid angle, $t$ is distance from camera to light projection, and $\theta_0, \theta_d$ are the angular limits of the ray segment [S1, unofficial].
+-
+-*   **Shadow Plane Contribution Decomposition:**
+-    The total contribution along a ray $OP$ intersecting shadow planes is rewritten as a sum of differences:
+-    $$ L_m(P) = (\Gamma_m(F) - \Gamma_m(E)) + (\Gamma_m(D) - \Gamma_m(C)) + (\Gamma_m(B) - \Gamma_m(A)) $$
+-    where $\Gamma_m(P)$ is the expression (2) for a lit ray between camera center $O$ and point $P$. Points $A, F$ are on the medium boundary; $B, C, D, E$ are on shadow planes [S1, unofficial].
+-
+-*   **Bounded Media Adjustment:**
+-    For bounded media, $r$ and $x$ in exponentials are distances to the medium boundary. $r$ is approximated to the average distance $R$ between a point on the boundary and a point in the medium. $x_n$ is computed on the fly [S1, unofficial].
++For a ray passing through shadowed regions, the contribution is decomposed into a sum of differences between lit segments defined by shadow planes and medium boundaries:
++$$ L_m(P) = (\Gamma_m(F) - \Gamma_m(E)) + (\Gamma_m(D) - \Gamma_m(C)) + (\Gamma_m(B) - \Gamma_m(A)) $$
++where $\Gamma_m(P)$ is the expression (2) for a lit ray between camera center $O$ and point $P$, points $A, F$ are on the medium boundary, and $B, C, D, E$ are on shadow planes [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def compute_medium_contribution_analytical(theta_0, theta_d, k_t, h, omega, t):
++    """
++    Computes Lm(P) using the analytical polynomial approximation.
++    theta_0, theta_d: Integration limits in radians.
++    k_t: Extinction coefficient.
++    h: Height parameter from angular formulation.
++    omega: Solid angle factor.
++    t: Distance parameter from angular formulation.
++    Returns: Medium contribution Lm(P).
++    """
++    # Coefficients c0 to c4 depend on k_t and h.
++    # In a real implementation, these would be precomputed or looked up.
++    # For this pseudocode, we assume a function get_coefficients exists.
++    c = get_coefficients(k_t, h)
++    
++    # Polynomial integration terms
++    # Integral of theta^n is theta^(n+1) / (n+1)
++    # Limits are theta_0 to theta_d
++    
++    term_0 = c[0] * (theta_d - theta_0)
++    term_1 = c[1] * (theta_d**2 / 2 - theta_0**2 / 2)
++    term_2 = c[2] * (theta_d**3 / 3 - theta_0**3 / 3)
++    term_3 = c[3] * (theta_d**4 / 4 - theta_0**4 / 4)
++    term_4 = c[4] * (theta_d**5 / 5 - theta_0**5 / 5)
++    
++    sum_terms = term_0 + term_1 + term_2 + term_3 + term_4
++    
++    prefactor = (k_t * math.exp(-k_t * t) * omega) / (4 * math.pi * h)
++    
++    return prefactor * sum_terms
+ 
+-```python
+-def render_shadow_volume_atmospheric_scattering(scene, lights, camera):
+-    # Stage 1: Compute Silhouettes
+-    silhouette_edges = []
+-    for light in lights:
+-        for mesh in scene.shadow_casters:
+-            edges = []
+-            for edge in mesh.edges:
+-                tri1, tri2 = edge.triangles
+-                if is_front_facing(tri1, light) and is_back_facing(tri2, light):
+-                    edges.append(edge)
+-            # Link edges into loops
+-            loops = link_edges_into_loops(edges)
+-            silhouette_edges.append(loops)
++def render_shadow_planes(shadow_planes, camera_pos, light_pos, stencil_buffer):
++    """
++    Renders shadow planes in back-to-front order, updating stencil and framebuffer.
++    """
++    # Sort planes back-to-front using cosine of angle between SO and SP
++    sorted_planes = sort_back_to_front(shadow_planes, camera_pos, light_pos)
++    
++    for plane in sorted_planes:
++        if plane.is_front_facing:
++            # Add contribution
++            set_stencil_func(equal, 1) # Allow if stencil is 1
++            set_stencil_op(increment) # Increment stencil
++            render_plane_additive(plane)
++        else:
++            # Subtract contribution
++            set_stencil_func(equal, 0) # Allow if stencil is 0
++            set_stencil_op(decrement) # Decrement stencil
++            render_plane_subtractive(plane)
++            
++        # Handle bounded media boundary back-facing triangles
++        if plane.is_medium_boundary_back_facing:
++            set_stencil_func(always)
++            set_stencil_op(replace, 255)
++            render_plane(plane)
+ 
+-    # Stage 2: Render Scene (Surface + Hard Shadows)
+-    render_scene_with_attenuation(scene, lights, camera)
+-    # Add ambient fog for multiple scattering
+-    add_ambient_fog(scene, camera)
+-    # Compute hard shadows using stencil
+-    render_shadow_volumes_for_surface_shadows(scene, lights, camera)
+-    # Disable lighting, stencil buffer now has 1 for lit, 0 for shadowed
+-    disable_lighting()
++def get_coefficients(k_t, h):
++    """
++    Returns coefficients c0 to c4 for the polynomial approximation.
++    Exact formulas depend on the phase function (isotropic, hazy, etc.).
++    Not given in the sources. [G]
++    """
++    # Placeholder for actual coefficient calculation based on [S1, unofficial]
++    # Annex of the source paper contains formal expressions.
++    return [0.0, 0.0, 0.0, 0.0, 0.0]
+ 
+-    # Stage 3: Render Medium Contribution on Surfaces
+-    set_depth_test(EQUAL)
+-    set_stencil_func(KEEP, 1, 0xFF) # Only render if stencil == 1
+-    set_stencil_op(REPLACE, REPLACE, REPLACE)
+-    set_stencil_ref(1)
+-    set_blend_mode(ADDITIVE)
+-    for vertex in scene.vertices:
+-        compute_and_render_medium_contribution(vertex, lights, camera)
+-    reset_blend_mode()
+-    reset_depth_test()
+-    reset_stencil_func()
++def sort_back_to_front(planes, camera_pos, light_pos):
++    """
++    Sorts planes based on cosine of angle between SO and SP.
++    S = light_pos, O = camera_pos, P = silhouette edge center.
++    """
++    def sort_key(plane):
++        # Vector SO
++        vec_so = light_pos - camera_pos
++        # Vector SP (using edge center)
++        vec_sp = plane.edge_center - camera_pos
++        
++        # Cosine similarity
++        cos_val = dot(vec_so, vec_sp) / (length(vec_so) * length(vec_sp))
++        return cos_val
++    
++    # Sort descending to render back-to-front (higher cosine = further back in this metric?)
++    # The source says "back to front" and uses cosine. 
++    # Figure 5 implies ordering based on this metric.
++    return sorted(planes, key=sort_key, reverse=True)
++```
+ 
+-    # Stage 4: Sort Shadow Planes
+-    shadow_planes = []
+-    for loops in silhouette_edges:
+-        for loop in loops:
+-            plane = generate_shadow_plane(loop, light)
+-            # Mesh plane: fine near light, coarse far
+-            mesh_plane_with_radial_distribution(plane, light)
+-            shadow_planes.append(plane)
+-    
+-    # Sort back-to-front using cosine of angle between SO and SP
+-    def sort_key(plane):
+-        center = plane.center
+-        vec_so = camera.pos - light.pos
+-        vec_sp = camera.pos - center
+-        return cosine(vec_so, vec_sp)
+-    
+-    shadow_planes.sort(key=sort_key, reverse=True) # Back to front
+-
+-    # Stage 5: Render Shadow Planes
+-    set_depth_test(LESS)
+-    set_stencil_func(KEEP, KEEP, KEEP)
+-    
+-    for plane in shadow_planes:
+-        if not plane_intersects_medium_bounding_box(plane, scene.media):
+-            continue
+-            
+-        if plane.is_front_facing(camera):
+-            # Front-facing: Add contribution, stencil must be 1
+-            set_stencil_func(KEEP, 1, 0xFF)
+-            set_stencil_op(INCR, INCR, INCR)
+-            set_blend_mode(ADDITIVE)
+-            render_plane(plane)
+-            set_blend_mode(NONE)
+-        else:
+-            # Back-facing: Subtract contribution, stencil must be 0
+-            set_stencil_func(KEEP, 0, 0xFF)
+-            set_stencil_op(DECR, DECR, DECR)
+-            set_blend_mode(SUBTRACTIVE)
+-            render_plane(plane)
+-            set_blend_mode(NONE)
+-            
+-        # Special case for bounded media: back-facing boundary sets stencil to 255
+-        if plane.is_back_facing_boundary_of_medium():
+-            set_stencil_func(KEEP, 255, 0xFF)
+-            set_stencil_op(REPLACE, REPLACE, REPLACE)
+-            render_plane(plane)
+-            reset_stencil_func()
+-
+-    reset_depth_test()
+-    reset_stencil_func()
+-```
++**Edge Cases and Pitfalls:**
++*   **Shadow-in-shadows:** Occurs if shadow planes are not rendered in back-to-front order or if stencil is not used to skip shadowed planes. Prevented by sorting planes and using stencil to reject shadowed shadow planes [S1, unofficial].
++*   **Framebuffer Clamping:** Causes darkening if medium contribution exceeds 1 and is later subtracted. Avoided by choosing reasonable light intensities or using float textures (though blending in float buffers was not supported at the time) [S1, unofficial].
++*   **Approximation Errors:** Occur when the ray passes close to the source (contribution is so high) or when the observer is far from the source (contribution is so small); these errors remain unnoticeable [S1, unofficial].
++*   **Bounded Media:** Coefficients $r$ and $x$ in exponentials must be distances to the medium boundary. The method approximates $r$ to the average distance $R$ between a point on the boundary and a point in the medium [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Real-Time Single Scattering Algorithm with Exact Shadow Planes
+-A real-time algorithm computing single scattering for one or several participating media, utilizing exact shadow planes to avoid sampling aliasing artifacts for both surface and volumetric shadows [S1, unofficial]. It differs from the main method by performing the computation of participating medium contributions and the ordering/computation of shadow planes in software, whereas the main method suggests GPU implementation [S1, unofficial]. It is chosen when avoiding sampling aliasing is critical and software preprocessing is acceptable [S1, unofficial]. Pitfalls include framebuffer clamping causing darkening if medium contribution exceeds 1, avoided by reasonable light intensities or future float textures [S1, unofficial].
++A real-time algorithm computing single scattering for one or several participating media, utilizing exact shadow planes to avoid sampling aliasing artifacts for both surface and volumetric shadows [S1, unofficial]. It computes participating medium contributions in software, orders and computes shadow planes in software, and renders shadow plane contributions, which represent the main computational cost [S1, unofficial]. It is an improvement over other atmospheric scattering algorithms, especially when a medium covers the whole scene, achieving >25 FPS for moderately complex scenes [S1, unofficial]. It handles moving lights, changing colors, and complex scenes with ~100,000 triangles [S1, unofficial]. Pitfalls include avoiding darkness by choosing a reasonable light source intensity or using a float texture [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -176,11 +180,11 @@
+     *   Fig 7 left: Stage 1 (1%), Stage 2 (8.7%), Stage 3 (21.7%), Stage 4 (9.6%), Stage 5 (59%) [S1, unofficial].
+     *   Fig 7 right: Stage 1 (1.7%), Stage 2 (14%), Stage 3 (33.6%), Stage 4 (16%), Stage 5 (34.7%) [S1, unofficial].
+-*   **Strengths:** Real-time performance for complex scenes (>25 FPS for moderately complex scenes with ~100,000 triangles), no texture memory cost, no sampling aliasing artifacts for sharp edges like light shafts, supports moving lights and objects [S1, unofficial].
+-*   **Limitations:** Single scattering only (multiple scattering approximated by ambient term), homogeneous medium assumption, requires 2-manifold meshes with connectivity, shadow-in-shadow artifacts if planes are not sorted or stencil not used, framebuffer clamping issues if medium contribution exceeds 1 [S1, unofficial].
+-*   **When to use:** Real-time rendering of atmospheric effects and volumetric shadows where sharp light shafts are important and texture memory is limited [S1, unofficial].
+-*   **When not to use:** Scenes requiring multiple scattering accuracy, heterogeneous media, or when hardware does not support stencil buffer operations efficiently [S1, unofficial].
++*   **Strengths:** Real-time performance, no texture memory cost, no sampling aliasing artifacts for sharp edges like light shafts, supports moving lights and objects [S1, unofficial].
++*   **Limitations:** Single scattering only (multiple scattering approximated by constant ambient term), homogeneous medium assumption, framebuffer clamping issues if not managed, requires 2-manifold meshes with connectivity for silhouette computation [S1, unofficial].
++*   **When to use:** Real-time rendering of atmospheric effects and volumetric shadows in scenes where texture memory is limited or sharp light shafts are required.
++*   **When not to use:** Scenes requiring multiple scattering, inhomogeneous media, or soft shadows (without further extension) [S1, unofficial].
+ 
+ ## Background
+-Originated in the paper "Real Time Rendering of Atmospheric Scattering and Volumetric Shadows" [S1, unofficial]. The method builds on shadow volume techniques [He91] and shadow plane algorithms [AA03], adapting them for volumetric scattering. It addresses the difficulty of rendering volumetric shadows in real-time, which previous methods like Dobashi et al. [DY02] handled with high fill-rate costs and texture memory [S1, unofficial].
++Originated in the paper "Real Time Rendering of Atmospheric Scattering and Volumetric Shadows" [S1, unofficial]. It was developed to address the difficulty of rendering volumetric shadows in real-time, providing a great performance improvement over previous methods like Dobashi et al. [DY02] [S1, unofficial]. The method is close to shadow volume techniques [He91] and uses shadow planes [AA03] [S1, unofficial]. It is used in the paper's proposed algorithm for real-time rendering of atmospheric effects and volumetric shadows [S1, unofficial].
+ 
+ ## Sources

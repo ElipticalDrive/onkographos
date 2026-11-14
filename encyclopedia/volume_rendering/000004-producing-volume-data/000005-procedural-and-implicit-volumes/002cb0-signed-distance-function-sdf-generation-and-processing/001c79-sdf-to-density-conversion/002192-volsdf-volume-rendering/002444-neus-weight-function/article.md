@@ -1,147 +1,190 @@
 # NeuS Weight Function
 
-Also called: NeuS opaque density, SDF-based volume rendering weight
+Also called: NeuS Unbiased Density, NeuS density function, NeuS opaque density, SDF-based volume rendering weight
 
 ## Overview
-The NeuS weight function is a volume rendering technique that derives an unbiased, occlusion-aware weight $w(t)$ from a Signed Distance Function (SDF) $f(x)$ to reconstruct surfaces from multi-view images without explicit 3D supervision [S1, unofficial]. It solves the problem that naive volume density $\sigma(t) = \phi_s(f(p(t)))$ produces biased surface reconstructions, while simple normalization of S-density fails to handle occlusions correctly [S1, unofficial].
+The NeuS weight function is a volume rendering technique that derives an unbiased and occlusion-aware weight function $w(t)$ from a Signed Distance Function (SDF) $f(\mathbf{x})$ to reconstruct surfaces from multi-view images without explicit 3D supervision [S1, unofficial]. It solves the problem of geometric bias inherent in standard volume rendering formulations when applied to SDFs, ensuring that the volume-rendered surface aligns precisely with the geometric SDF zero-crossing [S2, unofficial]. Unlike its sibling [U-density Function](3695-u-density-function.md), which focuses on Unsigned Distance Fields, this method specifically addresses the asymmetry of SDFs to prevent the weight function from peaking before the actual surface intersection [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-- **Input**: A ray $p(t) = o + tv$ where $o$ is the camera center and $v$ is the unit direction vector; an SDF network $f(x)$; a color network $c(x, v)$; the number of samples $n$; and the inverse standard deviation parameter $s$ [S1, unofficial].
-- **Output**: The accumulated color $\hat{C}$ for the ray.
+**Inputs and Outputs:**
+*   **Input:** A ray $\mathbf{p}(t) = \mathbf{o} + t\mathbf{v}$, where $\mathbf{o}$ is the camera center and $\mathbf{v}$ is the unit direction vector. An SDF network $f(\mathbf{x})$ that outputs the signed distance at any point $\mathbf{x}$. A trainable inverse standard deviation parameter $s$.
+*   **Output:** The rendered color $C(\mathbf{o}, \mathbf{v})$ and the accumulated opacity/transmittance for training losses.
 
-**Data Structures**
-- **SDF Value**: $f(p(t)) \in \mathbb{R}$ [S1, unofficial].
-- **S-density**: $\phi_s(f(x))$ is a Gaussian-like density derived from the SDF, typically $\phi_s(d) = \frac{1}{\sqrt{2\pi}\sigma} e^{-\frac{d^2}{2\sigma^2}}$, where $\sigma$ is a standard deviation [S1, unofficial].
-- **Cumulative S-density Integral**: $\Phi_s(d) = \int_{-\infty}^{d} \phi_s(u) du$ is the cumulative distribution function corresponding to $\phi_s$ [S1, unofficial].
+**Data Structures:**
+*   **SDF Network:** A neural network mapping 3D coordinates to scalar SDF values.
+*   **Sigmoid Function $\Phi_s$:** Defined as $\Phi_s(x) = (1 + e^{-sx})^{-1}$, where $s$ is a trainable parameter that approaches 0 as training converges [S2, unofficial].
+*   **Sample Points:** A set of $n$ points $\{ \mathbf{p}_i = \mathbf{o} + t_i \mathbf{v} \mid i=1,\dots,n \}$ sampled along the ray.
 
-**Formulas**
-1. **Rendering Equation**:
-   $$C(\mathbf{o}, \mathbf{v}) = \int_0^{+\infty} w(t) c(\mathbf{p}(t), \mathbf{v}) dt \quad (2)$$
-   where $w(t)$ is the weight function [S1, unofficial].
+**Formulas:**
+1.  **Rendering Integral:**
+    $$C(\mathbf{o}, \mathbf{v}) = \int_0^{+\infty} w(t) c(\mathbf{p}(t), \mathbf{v}) dt$$
+    where $c(\mathbf{p}(t), \mathbf{v})$ is the color at point $\mathbf{p}(t)$ along viewing direction $\mathbf{v}$ [S1, unofficial].
 
-2. **Opaque Density $\rho(t)$**:
-   The method replaces standard volume density with an opaque density $\rho(t)$ [S1, unofficial]. For a general case with multiple intersections:
-   $$\rho(t) = \max \left( -\frac{d\Phi_s}{dt} (f(\mathbf{p}(t))), 0 \right) \quad (10)$$
-   The derivative is computed via the chain rule: $\frac{d\Phi_s}{dt} = \phi_s(f(\mathbf{p}(t))) \nabla f(\mathbf{p}(t)) \cdot \mathbf{v}$ [G]. The $\max(\cdot, 0)$ operation clips negative values that occur when the SDF is increasing (i.e., the ray is leaving the surface), ensuring $\rho(t) \ge 0$ [S1, unofficial].
+2.  **Weight Function Definition:**
+    $$w(t) = T(t)\rho(t)$$
+    where $T(t)$ is the accumulated transmittance and $\rho(t)$ is the opaque density [S1, unofficial].
 
-3. **Transmittance $T(t)$**:
-   $$T(t) = \exp\left(-\int_0^t \rho(u) du\right) \quad (5)$$
+3.  **Accumulated Transmittance:**
+    $$T(t) = \exp\left(-\int_0^t \rho(u) du\right)$$
 
-4. **Weight Function $w(t)$**:
-   $$w(t) = T(t)\rho(t) \quad (5)$$
-   This weight is unbiased (peaks at $f(p(t^*))=0$) and occlusion-aware (nearer points with the same SDF value have higher weight) [S1, unofficial].
+4.  **Opaque Density $\rho(t)$:**
+    The opaque density is derived to ensure the weight function is unbiased (peaks at $f(\mathbf{p}(t^*))=0$) and occlusion-aware (nearer points contribute more).
+    $$\rho(t) = \max \left( -\frac{d\Phi_s}{dt}(f(\mathbf{p}(t))), 0 \right)$$
+    The term $-\frac{d\Phi_s}{dt}(f(\mathbf{p}(t)))$ represents the rate of change of the sigmoid SDF. It is clipped to 0 to ensure $\rho(t)$ is non-negative, which occurs when the SDF value is increasing (i.e., the ray is leaving the surface) [S1, unofficial].
 
-5. **Discrete Opacity $\alpha_i$**:
-   For a sample interval $[t_i, t_{i+1}]$, the opacity is:
-   $$\alpha_i = \max \left( \frac{\Phi_s(f(\mathbf{p}(t_i))) - \Phi_s(f(\mathbf{p}(t_{i+1})))}{\Phi_s(f(\mathbf{p}(t_i)))}, 0 \right) \quad (13)$$
-   This is derived from the assumption that $T(t) \approx \Phi_s(f(p(t)))$ in the single-plane intersection case, generalized via the clipping [S1, unofficial].
+    *Derivation Note:* In the ideal case of a single plane intersection, the transmittance $T(t)$ equals $\Phi_s(f(\mathbf{p}(t)))$. Differentiating $\ln(T(t))$ yields the opaque density formula above [S1, unofficial].
 
-6. **Discrete Color Accumulation**:
-   $$\hat{C} = \sum_{i=1}^n T_i \alpha_i c_i \quad (11)$$
-   where $T_i = \prod_{j=1}^{i-1} (1-\alpha_j)$ is the discrete accumulated transmittance, and $c_i = c(p(t_i), v)$ is the color at sample $i$ [S1, unofficial].
+5.  **Discrete Opacity $\alpha_i$:**
+    For discrete sampling intervals $[t_i, t_{i+1}]$, the opacity $\alpha_i$ is computed as:
+    $$\alpha_i = \max \left( \frac{\Phi_s(f(\mathbf{p}(t_i))) - \Phi_s(f(\mathbf{p}(t_{i+1})))}{\Phi_s(f(\mathbf{p}(t_i)))}, 0 \right)$$
+    This is derived from $\alpha_i = 1 - \exp\left(-\int_{t_i}^{t_{i+1}} \rho(t) dt\right)$ [S1, unofficial].
 
-**Parameters**
-- $n$: Number of points sampled along each ray for discretization [S1, unofficial].
-- $s$: Inverse standard deviation parameter, optimized during training, used for fine sampling probability [S1, unofficial].
-- $\lambda$: Weight for Eikonal regularization [S1, unofficial].
-- $\beta$: Weight for mask loss [S1, unofficial].
+6.  **Discrete Color Accumulation:**
+    $$\hat{C} = \sum_{i=1}^n T_i \alpha_i c_i$$
+    where $T_i = \prod_{j=1}^{i-1} (1-\alpha_j)$ is the discrete accumulated transmittance [S1, unofficial].
 
-**Pseudocode**
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import numpy as np
+import torch
+import torch.nn.functional as F
 
-def compute_sdf_density(sdf_value, sigma):
-    """Computes the S-density phi_s(f(x)) using a Gaussian distribution."""
-    return (1.0 / (math.sqrt(2 * math.pi) * sigma)) * math.exp(-(sdf_value ** 2) / (2 * sigma ** 2))
-
-def compute_cumulative_sdf(sdf_value, sigma):
-    """Computes the cumulative integral Phi_s(f(x)) using the error function."""
-    return 0.5 * (1 + math.erf(sdf_value / (sigma * math.sqrt(2))))
-
-def compute_gradient_sdf(sdf_network, point):
-    """Computes the gradient of the SDF at a point using finite differences."""
-    eps = 1e-4
-    grad = np.zeros(3)
-    for d in range(3):
-        point_plus = point.copy()
-        point_minus = point.copy()
-        point_plus[d] += eps
-        point_minus[d] -= eps
-        grad[d] = (sdf_network(point_plus) - sdf_network(point_minus)) / (2 * eps)
-    return grad
-
-def neuus_weight_function(ray_origin, ray_direction, sdf_network, color_network, 
-                          t_values, sigma):
+def sigmoid_sdf(s, f_val):
     """
-    Renders a single ray using the NeuS weight function.
-    
+    Computes the sigmoid of the SDF value.
     Args:
-        ray_origin: 3D vector o
-        ray_direction: 3D vector v (unit length)
-        sdf_network: Function f(x) returning SDF value
-        color_network: Function c(x, v) returning color
-        t_values: Sorted array of distances t_i along the ray
-        sigma: Standard deviation parameter for the S-density
+        s: Trainable inverse standard deviation parameter (scalar or tensor).
+        f_val: SDF values f(p(t)) at sample points.
     Returns:
-        accumulated_color: Float
+        Phi_s: Sigmoid SDF values.
     """
-    n = len(t_values)
-    p_points = [ray_origin + t * ray_direction for t in t_values]
-    sdf_values = [sdf_network(p) for p in p_points]
-    
-    # 1. Compute Opaque Density rho(t)
-    rho_values = []
-    for p, sdf_val in zip(p_points, sdf_values):
-        grad_f = compute_gradient_sdf(sdf_network, p)
-        df_dt = np.dot(grad_f, ray_direction)
-        phi_s = compute_sdf_density(sdf_val, sigma)
-        dPhi_dt = phi_s * df_dt
-        rho_values.append(max(-dPhi_dt, 0.0))
-        
-    # 2. Compute Discrete Opacity alpha_i
-    alpha_values = []
-    for i in range(n - 1):
-        phi_i = compute_cumulative_sdf(sdf_values[i], sigma)
-        phi_next = compute_cumulative_sdf(sdf_values[i+1], sigma)
-        # Guard against division by zero [G]
-        if phi_i < 1e-6:
-            alpha_values.append(0.0)
-        else:
-            alpha_values.append(max((phi_i - phi_next) / phi_i, 0.0))
-            
-    # 3. Accumulate Color
-    accumulated_color = 0.0
-    T_i = 1.0
-    for i in range(n - 1):
-        c_i = color_network(p_points[i], ray_direction)
-        accumulated_color += T_i * alpha_values[i] * c_i
-        T_i *= (1.0 - alpha_values[i])
-        
-    return accumulated_color
-```
-*Note: The sources describe a hierarchical sampling strategy (uniform coarse sampling followed by importance fine sampling based on S-density) to select `t_values` efficiently, but the weight function itself is independent of the sampling strategy [S1, unofficial].*
+    return 1.0 / (1.0 + torch.exp(-s * f_val))
 
-**Edge Cases and Pitfalls**
-- **Bias in Naive Solution**: Using $\sigma(t) = \phi_s(f(p(t)))$ directly in $w(t) = T(t)\sigma(t)$ results in a weight peak *before* the surface intersection, causing biased reconstruction [S1, unofficial].
-- **Occlusion Failure in Normalized Solution**: Using $w(t) = \phi_s(f(p(t))) / \int \phi_s du$ is unbiased but not occlusion-aware; it blends colors from multiple surfaces equally if a ray intersects multiple zero-level sets [S1, unofficial].
-- **Negative Density**: The term $-\frac{d\Phi_s}{dt}$ can be negative when the ray exits a surface (SDF increases). The $\max(\cdot, 0)$ clip is essential to maintain non-negative opacity [S1, unofficial].
-- **Division by Zero**: In the discrete opacity formula, if $\Phi_s(f(p(t_i)))$ is near zero, division may occur. A small epsilon guard is required [G].
+def compute_opaque_density(s, f_val):
+    """
+    Computes the opaque density rho(t) from SDF values.
+    Args:
+        s: Trainable inverse standard deviation parameter.
+        f_val: SDF values f(p(t)) at sample points.
+    Returns:
+        rho: Opaque density values.
+    """
+    # Compute Phi_s
+    phi_s = sigmoid_sdf(s, f_val)
+    
+    # Compute derivative d(Phi_s)/dt using numerical differentiation or autograd
+    # Assuming f_val is a tensor with gradient tracking enabled
+    # d(Phi_s)/dt = d(Phi_s)/df * df/dt
+    # However, in practice, we compute the gradient of Phi_s w.r.t t directly
+    # or use the chain rule if df/dt is available. 
+    # Here we assume we compute the gradient of phi_s w.r.t the input coordinates
+    # to get df/dx, then dot with v, but the paper defines it as d(Phi_s)/dt.
+    # Using autograd:
+    phi_s.sum().backward(retain_graph=True) # This is a placeholder for conceptual clarity
+    # In implementation, one typically computes:
+    # grad_phi_s = torch.autograd.grad(phi_s, f_val, create_graph=True)[0] * grad_f_val
+    # But the paper formula is -d(Phi_s)/dt. 
+    # Let's assume we have the gradient of f w.r.t spatial coordinates grad_f,
+    # and the ray direction v. Then df/dt = dot(grad_f, v).
+    # d(Phi_s)/dt = d(Phi_s)/df * df/dt = (s * Phi_s * (1 - Phi_s)) * dot(grad_f, v)
+    
+    # Simplified implementation assuming we have df/dt (grad_f_dot_v)
+    # d(Phi_s)/df = s * Phi_s * (1 - Phi_s)
+    d_phi_s_d_f = s * phi_s * (1.0 - phi_s)
+    
+    # Assuming grad_f_dot_v is precomputed as the directional derivative of f along v
+    # d(Phi_s)/dt = d_phi_s_d_f * grad_f_dot_v
+    d_phi_s_d_t = d_phi_s_d_f * grad_f_dot_v
+    
+    # Opaque density rho(t) = max(-d(Phi_s)/dt, 0)
+    rho = torch.clamp(-d_phi_s_d_t, min=0.0)
+    
+    return rho
+
+def render_neus_weight(s, f_vals, grad_f_dot_v, colors, n_samples):
+    """
+    Renders color using the NeuS weight function.
+    Args:
+        s: Trainable inverse standard deviation.
+        f_vals: SDF values at n_samples points along the ray.
+        grad_f_dot_v: Directional derivative of SDF along ray direction v.
+        colors: Colors at n_samples points.
+        n_samples: Number of samples.
+    Returns:
+        rendered_color: Rendered color for the pixel.
+        accumulated_opacity: Sum of weights (for mask loss).
+    """
+    # 1. Compute Phi_s
+    phi_s = sigmoid_sdf(s, f_vals)
+    
+    # 2. Compute Opaque Density rho
+    # d(Phi_s)/df = s * Phi_s * (1 - Phi_s)
+    d_phi_s_d_f = s * phi_s * (1.0 - phi_s)
+    d_phi_s_d_t = d_phi_s_d_f * grad_f_dot_v
+    rho = torch.clamp(-d_phi_s_d_t, min=0.0)
+    
+    # 3. Compute Discrete Opacity alpha_i
+    # alpha_i = max((Phi_s(t_i) - Phi_s(t_{i+1})) / Phi_s(t_i), 0)
+    # Note: phi_s[i] corresponds to t_i
+    phi_s_next = torch.cat([phi_s[1:], torch.zeros(1, device=phi_s.device)], dim=0)
+    
+    # Avoid division by zero if Phi_s(t_i) is 0
+    denom = phi_s.clone()
+    denom[denom == 0] = 1e-8
+    
+    alpha = torch.clamp((phi_s - phi_s_next) / denom, min=0.0)
+    
+    # 4. Compute Transmittance T_i
+    # T_i = product_{j=1}^{i-1} (1 - alpha_j)
+    # T_1 = 1
+    one_minus_alpha = 1.0 - alpha
+    # Cumulative product
+    cum_prod = torch.cumprod(one_minus_alpha, dim=0)
+    T = torch.cat([torch.ones(1, device=phi_s.device), cum_prod[:-1]], dim=0)
+    
+    # 5. Compute Rendered Color
+    # C = sum(T_i * alpha_i * c_i)
+    weights = T * alpha
+    rendered_color = torch.sum(weights * colors, dim=0)
+    
+    # 6. Compute Accumulated Opacity (sum of weights)
+    accumulated_opacity = torch.sum(weights)
+    
+    return rendered_color, accumulated_opacity
+```
+
+**Parameters:**
+*   $n$: Number of points sampled along each ray for discretization [S1, unofficial].
+*   $s$: Trainable inverse standard deviation parameter. It is optimized during training and used in the sigmoid function $\Phi_s$ and the computation of the opaque density [S1, unofficial].
+*   $\lambda$: Weight for the Eikonal regularization term [S1, unofficial].
+*   $\beta$: Weight for the mask loss term [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Bias in Naive Solution:** Using standard volume density $\sigma(t) = \phi_s(f(\mathbf{p}(t)))$ results in a weight function that peaks *before* the surface intersection, causing geometric bias [S1, unofficial].
+*   **Occlusion Failure in Straightforward Unbiased Weight:** A simple normalized S-density weight $w(t) = \phi_s(f(\mathbf{p}(t))) / \int \phi_s(f(\mathbf{p}(u))) du$ is unbiased but not occlusion-aware. If a ray intersects multiple surfaces, it blends their colors equally regardless of depth [S1, unofficial].
+*   **Negative Density:** The term $-\frac{d\Phi_s}{dt}$ can be negative when the SDF is increasing (ray leaving the surface). The $\max(\cdot, 0)$ clipping is essential to ensure non-negative density [S1, unofficial].
 
 ## Subtopics
 
 ### [NeUDF Hierarchical Importance Sampling](4863-neudf-hierarchical-importance-sampling.md)
-A two-stage sampling strategy used in the NeUDF framework to reconstruct surfaces from Unsigned Distance Functions (UDFs) using differentiable volume rendering. It solves the problem of unbalanced gradient magnitudes in UDF regularization by decoupling the sampling distribution from the rendering distribution. Unlike the rendering weight function which concentrates weight before the surface intersection to handle open surfaces, this method employs a specially-tailored sampling weight function $w_s(t)$ that distributes weights to achieve well-balanced Eikonal loss regularization across the entire space. It builds on the NeuS weight function but modifies the sampling density to prevent the UDF gradient quality from being hampered by the asymmetry inherent in UDF-based rendering.
+A two-stage sampling strategy for Unsigned Distance Functions (UDFs) that decouples sampling distribution from rendering distribution to balance Eikonal loss gradients. It modifies the sampling density to handle UDF asymmetry, unlike the NeuS weight function which handles SDF asymmetry directly in the weight definition.
+
+### [Naive UDF Solution (NeuS-based)](6015-naive-udf-solution-neus-based.md)
+A direct extension of the NeuS weight function to UDFs. It uses a fixed, non-adaptive weight formulation derived from NeuS but suffers from geometric errors like redundant surfaces due to inherent bias in color rendering.
 
 ## Operating characteristics
-Time and memory complexity are not given in the sources. The method requires evaluating the SDF and color networks for $n$ samples per ray, with hierarchical sampling concentrating fine samples near the surface to improve efficiency over uniform sampling [S1, unofficial]. Strengths include unbiased surface reconstruction, occlusion awareness, and operation without explicit 3D supervision [S1, unofficial]. Limitations include sensitivity to the inverse standard deviation parameter $s$, the need to tune regularization weights $\lambda$ and $\beta$, and the computational overhead of computing gradients for $\rho(t)$ [S1, unofficial]. When to use it and when not to use it are not given in the sources.
+*   **Time Complexity:** Dominated by the evaluation of the SDF network and its gradients for $n$ samples per ray. Hierarchical sampling adds a coarse pass but reduces the number of fine samples needed for convergence.
+*   **Memory Complexity:** Requires storing SDF values, gradients, colors, and intermediate transmittance/opaque values for $n$ samples per ray.
+*   **Strengths:** Provides unbiased surface reconstruction by aligning the rendering weight peak with the SDF zero-crossing. It is occlusion-aware, correctly handling multiple surface intersections.
+*   **Limitations:** Relies on the first-order approximation of the SDF for unbiasedness. Performance depends heavily on the quality of the SDF gradient (Eikonal regularization).
+*   **When to Use:** When reconstructing surfaces from multi-view images using SDFs and requiring high geometric accuracy without explicit 3D supervision.
+*   **When Not to Use:** When using Unsigned Distance Fields (UDFs) directly without modification, as the SDF-specific derivation may not hold.
 
 ## Background
-The method was introduced in "NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction" [S1, unofficial]. It addresses the limitations of previous neural implicit surface methods that required explicit 3D supervision or suffered from biased surface reconstruction due to improper volume density definitions [S1, unofficial]. The training process minimizes a composite loss combining color reconstruction, Eikonal regularization, and optional mask supervision [S1, unofficial].
+The NeuS weight function was introduced in the paper "NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction" [S1, unofficial]. It addresses the limitations of previous neural implicit surface methods that suffered from geometric bias when using standard volume rendering formulations with SDFs. The method builds on the idea that the weight function in volume rendering should be derived from the SDF to ensure the rendered surface matches the implicit surface defined by the SDF zero-level set.
 
 ## Sources
 [S1] NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-view Reconstruction, https://doi.org/10.48550/arxiv.2106.10689, fetched 2026-10-26 (unofficial)
-[S2] NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering, https://doi.org/10.1109/cvpr52729.2023.00031, fetched 2026-10-26
+[S2] WACV 2023 Open Access Repository, https://openaccess.thecvf.com/content/WACV2023/html/Chen_Recovering_Fine_Details_for_Neural_Implicit_Surface_Reconstruction_WACV_2023_paper.html, fetched 2026-10-29 (unofficial)
