@@ -14,12 +14,12 @@ This method sorts the intersection vertices of a volume slice around their centr
 
 ### Steps
 1. **Compute Centroid**: Calculate the centroid $C$ of the input vertices by averaging their coordinates:
-   $$ C = \frac{1}{n} \sum_{i=0}^{n-1} v_i $$
-2. **Compute Pseudo-Angle**: For each vertex $v_i$, compute the delta vector $\Delta = v_i - C$. Calculate the pseudo-angle $A(\Delta)$ using the following formula [S1, unofficial]:
+   $$ C = \frac{1}{n} \sum_{i=0}^{n-1} v_i $$ [S1, unofficial].
+2. **Compute Pseudo-Angle**: For each vertex $v_i$, compute the delta vector $\Delta = v_i - C$ [S1, unofficial]. Calculate the pseudo-angle $A(\Delta)$ using the following formula [S1, unofficial]:
    $$ A(\Delta) = \begin{cases} -1 & \text{if } \Delta x = 0 \text{ and } \Delta y = 0 \\ 2.0 - \frac{\Delta y}{|\Delta x| + |\Delta y|} & \text{if } \Delta x < 0 \\ 4.0 + \frac{\Delta y}{|\Delta x| + |\Delta y|} & \text{if } \Delta x \ge 0 \end{cases} $$
    where $\Delta x$ and $\Delta y$ are the x and y components of $\Delta$ [S1, unofficial].
 3. **Sort Vertices**: Sort the vertices based on their computed pseudo-angle values in ascending order [S1, unofficial].
-4. **Triangulation**: If the number of vertices $n > 3$, generate triangles by iterating through the sorted vertices. For each $i$ from $0$ to $n-1$, let $j = (i+1) \pmod n$. Create a triangle using vertices $v_{sorted}[i]$, $C$, and $v_{sorted}[j]$. If $n \le 3$, push the vertices in sorted order directly [S1, unofficial].
+4. **Triangulation**: If the number of vertices $n > 3$, generate triangles by iterating through the sorted vertices [S1, unofficial]. For each $i$ from $0$ to $n-1$, let $j = (i+1) \pmod n$ [S1, unofficial]. Create a triangle using vertices $v_{sorted}[i]$, $C$, and $v_{sorted}[j]$ [S1, unofficial]. If $n \le 3$, push the vertices in sorted order directly [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -78,7 +78,7 @@ def generate_triangles(sorted_vertices, centroid):
 - **Degenerate Polygons**: If the intersection results in fewer than 3 vertices, the triangulation step handles it by storing the vertices directly [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(n \log n)$ due to sorting, where $n$ is the number of vertices. Computing the centroid and pseudo-angles is $O(n)$ [G].
+- **Time Complexity**: $O(n \log n)$ due to sorting, where $n$ is the number of vertices [G]. Computing the centroid and pseudo-angles is $O(n)$ [G].
 - **Memory Complexity**: $O(n)$ to store the vertex-angle pairs [G].
 - **Strengths**: Avoids expensive trigonometric functions (sin, cos, atan2), making it computationally efficient for GPU implementation [G].
 - **Limitations**: The pseudo-angle metric is an approximation and may not perfectly preserve angular order in all degenerate cases, though it is sufficient for convex polygon triangulation [G].

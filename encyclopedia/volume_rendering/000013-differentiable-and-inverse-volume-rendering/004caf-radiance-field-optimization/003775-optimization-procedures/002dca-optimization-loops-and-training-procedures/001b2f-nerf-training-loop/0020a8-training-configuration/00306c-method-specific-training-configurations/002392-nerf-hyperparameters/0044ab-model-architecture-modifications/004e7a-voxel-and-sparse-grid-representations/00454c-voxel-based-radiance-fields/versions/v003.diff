@@ -1,0 +1,204 @@
+--- v002.md
++++ v003.md
+@@ -4,97 +4,127 @@
+ 
+ ## Overview
+-Voxel-based Radiance Fields replace the multi-layer perceptron (MLP) in standard Neural Radiance Fields with discrete voxel grids to store volume density and spherical harmonic (SH) coefficients, enabling real-time volume rendering by eliminating heavy feed-forward neural network computations [S1]. Unlike MLP-based NeRF which requires evaluating fully-connected layers for every sample point, this method directly computes color from interpolated grid values, offering a memory-efficient framework that limits learnable parameters to the voxel grid values [S1].
++Voxel-based Radiance Fields replace the multi-layer perceptron (MLP) of standard Neural Radiance Fields with explicit 3D voxel grids to store volume density and spherical harmonic (SH) coefficients, enabling real-time differentiable volume rendering [S1]. Unlike MLP-based approaches that require heavy feed-forward computation for every sample point, this method computes color and density directly via trilinear interpolation from the grid, significantly reducing latency while maintaining the memory-efficient framework of sparse voxel representations [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D query position $\mathbf{X}_k$ and a viewing direction $\mathbf{d}$ for the $k$-th sample point on a ray.
+-*   **Output:** Volume density $\sigma_k$ and view-dependent color $\mathbf{c}_k$.
++**Inputs and Outputs**
++*   **Input:** A ray $r$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, sampled at $N$ points $\mathbf{X}_k$ along the ray.
++*   **Output:** The rendered color $\hat{C}(r)$ and its gradient for backpropagation.
+ 
+-**Data Structures:**
+-Two dense voxel grids are defined over the 3D space:
+-1.  **Density Grid ($G_\sigma$):** Maps $\mathbb{R}^3 \rightarrow \mathbb{R}$. Stores scalar volume density values at voxel vertices.
+-2.  **SH Coefficient Grid ($G_{sh}$):** Maps $\mathbb{R}^3 \rightarrow \mathbb{R}^{9 \times 3}$. Stores degree-2 spherical harmonic coefficients for RGB color. Each voxel stores a vector of 27 values (9 SH coefficients $\times$ 3 color channels).
++**Data Structures**
++Two dense or sparse voxel grids are maintained:
++1.  **Density Grid ($G_\sigma$):** Maps 3D coordinates to a scalar.
++    *   Layout: $G_\sigma: \mathbb{R}^3 \rightarrow \mathbb{R}$.
++    *   Content: Volume density $\sigma$.
++2.  **SH Coefficient Grid ($G_{sh}$):** Maps 3D coordinates to a vector of SH coefficients.
++    *   Layout: $G_{sh}: \mathbb{R}^3 \rightarrow \mathbb{R}^{9 \times 3}$.
++    *   Content: Degree 2 spherical harmonic coefficients for RGB color. The dimension $9$ corresponds to the number of basis functions for degree 2 SH, and $3$ corresponds to the RGB channels.
+ 
+-**Interpolation:**
+-For any query point $\mathbf{X}_k$, the features are retrieved via trilinear interpolation from the nearest 8 voxels. Let $\mathcal{G}_\sigma(\mathbf{X}_k)$ denote the interpolated density and $\mathcal{G}_{sh}(\mathbf{X}_k)$ denote the interpolated SH coefficient vector.
++**Algorithm Steps**
++1.  **Sample Points:** Generate $N$ sample points $\mathbf{X}_k$ along the ray $r$ within the bounding volume of the scene.
++2.  **Retrieve Density:** For each point $\mathbf{X}_k$, perform trilinear interpolation on the nearest 8 voxels of $G_\sigma$ to obtain the volume density $\sigma_k$ [S1]:
++    $$
++    \sigma_k = \mathcal{G}_\sigma(\mathbf{X}_k)
++    $$
++3.  **Retrieve SH Coefficients:** For each point $\mathbf{X}_k$, perform trilinear interpolation on the nearest 8 voxels of $G_{sh}$ to obtain the SH coefficient vector $\mathbf{v}_k$ [S1]:
++    $$
++    \mathbf{v}_k = \mathcal{G}_{sh}(\mathbf{X}_k)
++    $$
++4.  **Compute Color:** Map the viewing direction $\mathbf{d}$ to a SH basis vector $\mathbf{S}(\mathbf{d}) \in \mathbb{R}^9$ using the degree 2 spherical harmonic functions. Compute the color $\mathbf{c}_k \in \mathbb{R}^3$ by projecting the SH coefficients onto the basis [S1]:
++    $$
++    \mathbf{c}_k = \mathbf{S}(\mathbf{d})^\intercal \cdot \mathbf{v}_k
++    $$
++    *Note: The source defines $\mathbf{c}_k = S(\mathbf{d})^\intercal \cdot \mathcal{G}_{sh}(\mathbf{X}_k)$, implying the dot product between the SH basis vector and the interpolated coefficient vector.*
++5.  **Volume Rendering:** Compute opacity $\alpha_k$ and transmittance $T_k$ using the standard differentiable volume rendering equation [S1]:
++    $$
++    \alpha_k = 1 - e^{-\sigma_k \delta_k}
++    $$
++    $$
++    T_k = \prod_{j=1}^{k-1} (1 - \alpha_j)
++    $$
++    $$
++    w_k = T_k \alpha_k
++    $$
++    $$
++    \hat{C}(r) = \sum_{k=1}^{N} w_k \mathbf{c}_k
++    $$
++    where $\delta_k$ is the distance between adjacent sample points.
+ 
+-**Formulas:**
+-The volume density is computed directly from the density grid:
+-$$ \sigma_k = \mathcal{G}_\sigma(\mathbf{X}_k) $$
+-
+-The color is computed by projecting the interpolated SH coefficients onto the viewing direction:
+-$$ \mathbf{c}_k = S(\mathbf{d})^\intercal \cdot \mathcal{G}_{sh}(\mathbf{X}_k) $$
+-Where:
+-*   $S(\mathbf{d}): \mathbb{R}^3 \rightarrow \mathbb{R}^9$ is the spherical harmonic function mapping the viewing direction $\mathbf{d}$ to a 9-dimensional basis vector.
+-*   $\mathcal{G}_{sh}(\mathbf{X}_k)$ is the $9 \times 3$ matrix of interpolated SH coefficients.
+-*   The dot product results in a 3D RGB color vector.
+-
+-**Algorithm Steps:**
+-1.  **Query Density:** Perform trilinear interpolation on $G_\sigma$ using $\mathbf{X}_k$ to obtain $\sigma_k$.
+-2.  **Query SH Coefficients:** Perform trilinear interpolation on $G_{sh}$ using $\mathbf{X}_k$ to obtain the $9 \times 3$ coefficient matrix $\mathbf{C}_{sh}$.
+-3.  **Compute SH Basis:** Evaluate the degree-2 spherical harmonic basis functions for the viewing direction $\mathbf{d}$ to form the vector $\mathbf{s} = S(\mathbf{d}) \in \mathbb{R}^9$.
+-4.  **Compute Color:** Calculate $\mathbf{c}_k = \mathbf{s}^\intercal \mathbf{C}_{sh}$.
+-5.  **Volume Rendering:** Use $\sigma_k$ and $\mathbf{c}_k$ in the standard differentiable volume rendering integral (as defined in the parent NeRF framework) to compute the final pixel color.
+-
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+-def voxel_radiance_field_query(X_k, d, G_sigma, G_sh):
++def render_voxel_nerf(ray_origin, ray_direction, grid_sigma, grid_sh, num_samples):
+     """
+-    Query voxel-based radiance field for density and color.
++    Renders a single ray using voxel-based radiance fields.
+     
+     Args:
+-        X_k: 3D query position (float, shape [3])
+-        d: Viewing direction (float, shape [3])
+-        G_sigma: Density grid, tensor of shape [D, D, D]
+-        G_sh: SH coefficient grid, tensor of shape [D, D, D, 27]
+-               (27 = 9 SH coefficients * 3 RGB channels)
+-               
++        ray_origin: (3,) float, origin of the ray.
++        ray_direction: (3,) float, normalized direction of the ray.
++        grid_sigma: VoxelGrid object storing density, supports trilinear interpolation.
++        grid_sh: VoxelGrid object storing SH coefficients (shape 9x3 per voxel), supports trilinear interpolation.
++        num_samples: int, number of sample points along the ray.
++        
+     Returns:
+-        sigma: Volume density (float)
+-        c: RGB color (float, shape [3])
++        color: (3,) float, rendered RGB color.
++        transmittance: float, final transmittance.
+     """
+-    # 1. Trilinear interpolation for density
+-    # Assuming a standard trilinear interpolation function `trilinear`
+-    # which takes a grid and a normalized coordinate (0-1) or voxel index
+-    sigma = trilinear(G_sigma, X_k)
++    # 1. Sample points along the ray
++    # Assuming a fixed step size or bounding box intersection logic is handled externally.
++    # For simplicity, we assume sample_positions is pre-computed as (num_samples, 3).
++    sample_positions = sample_along_ray(ray_origin, ray_direction, num_samples)
+     
+-    # 2. Trilinear interpolation for SH coefficients
+-    # Extract the 27 values for the 3 color channels
+-    sh_coeffs_flat = trilinear(G_sh, X_k) # shape [27]
++    accumulated_color = np.zeros(3)
++    accumulated_transmittance = 1.0
+     
+-    # Reshape to [9, 3] (9 SH bases, 3 RGB channels)
+-    C_sh = sh_coeffs_flat.reshape(9, 3)
+-    
+-    # 3. Compute Spherical Harmonic basis for direction d
+-    # Degree 2 SH has 9 coefficients. 
+-    # S(d) maps direction to R^9.
+-    s = spherical_harmonic_basis(d, degree=2) # shape [9]
+-    
+-    # 4. Compute color: c = S(d)^T * C_sh
+-    # Matrix multiplication: (1, 9) @ (9, 3) -> (1, 3)
+-    c = s @ C_sh
+-    
+-    return sigma, c
++    for i in range(num_samples):
++        x_k = sample_positions[i]
++        
++        # 2. Retrieve density via trilinear interpolation
++        sigma_k = grid_sigma.interpolate(x_k)
++        
++        # 3. Retrieve SH coefficients via trilinear interpolation
++        # grid_sh returns a vector of size 9*3 = 27 if flattened, or (9, 3)
++        sh_coeffs = grid_sh.interpolate(x_k) # Shape: (9, 3)
++        
++        # 4. Compute color
++        # S(d) is the SH basis vector for degree 2, shape (9,)
++        sh_basis = spherical_harmonic_basis(ray_direction, degree=2)
++        
++        # Color is the dot product of SH basis and coefficients for each channel
++        # sh_coeffs is (9, 3), sh_basis is (9,)
++        # Resulting color is (3,)
++        color_k = np.dot(sh_basis, sh_coeffs)
++        
++        # 5. Volume rendering step
++        # delta_k is the distance to the next sample. 
++        # If not provided, assume uniform spacing or compute from positions.
++        if i < num_samples - 1:
++            delta_k = np.linalg.norm(sample_positions[i+1] - x_k)
++        else:
++            delta_k = 0.0 # Last sample contributes nothing if delta is 0, or handled by epsilon
++            
++        alpha_k = 1.0 - np.exp(-sigma_k * delta_k)
++        
++        weight = accumulated_transmittance * alpha_k
++        accumulated_color += weight * color_k
++        accumulated_transmittance *= (1.0 - alpha_k)
++        
++        # Early termination optimization can be added here if accumulated_transmittance is very small
++        
++    return accumulated_color, accumulated_transmittance
+ ```
+ 
+-**Parameters:**
+-*   **SH Degree:** 2 is used in the cited implementation, resulting in 9 basis functions per color channel [S1].
+-*   **Grid Resolution:** Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Trilinear interpolation requires handling coordinates outside the grid bounds. Standard practice is clamping or zero-padding, though not explicitly detailed in the source [S1].
+-*   **Precision:** The SH basis evaluation $S(\mathbf{d})$ must be numerically stable for all viewing directions.
+-*   **Memory:** While more efficient than MLPs, dense voxel grids scale cubically with resolution. The source mentions "coarse-to-fine sparse voxel reconstruction" as a strategy for memory-efficient training, implying that dense grids may be too large for high resolutions without sparsity techniques [S1].
++**Edge Cases and Pitfalls**
++*   **Boundary Conditions:** Trilinear interpolation requires valid neighbors. If $\mathbf{X}_k$ falls outside the voxel grid bounds, values must be clamped or padded with zero density/neutral color [G].
++*   **SH Basis Normalization:** The SH basis function $S(\mathbf{d})$ must be correctly normalized to ensure energy conservation and correct color representation [S1].
++*   **Sparse Grids:** If sparse voxel structures (e.g., hash tables) are used instead of dense grids, the interpolation logic must handle missing voxels by returning zero or a default value, which may introduce artifacts at the boundary of the sparse region [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is significantly faster than MLP-based NeRF because it replaces expensive fully-connected layer evaluations with fast trilinear lookups and a small matrix-vector multiplication for SH projection [S1]. This enables real-time volume rendering.
+-*   **Memory Complexity:** Memory usage is proportional to the number of voxels. For a grid of size $N \times N \times N$, memory is $O(N^3)$ for the density grid and $O(27 N^3)$ for the SH grid. This is generally more memory-efficient than large MLPs for comparable spatial resolution, but less flexible than sparse representations for large scenes.
+-*   **Strengths:** Real-time rendering capability; memory-efficient parameter storage; differentiable nature allows for gradient-based optimization [S1].
+-*   **Limitations:** Fixed spatial resolution determined by grid size; aliasing artifacts at high frequencies if grid resolution is insufficient; less expressive than deep MLPs for complex geometry without very high resolution grids.
+-*   **When to use:** Applications requiring real-time rendering or efficient training of radiance fields where scene complexity fits within the voxel grid resolution.
+-*   **When not to use:** Scenes with extremely high-frequency details that exceed the voxel grid's Nyquist limit, or very large open-world scenes where sparse representations are more appropriate.
++*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. The constant factor is significantly lower than MLP-based NeRF because it replaces multiple matrix multiplications (fully connected layers) with simple trilinear interpolation and a single dot product [S1].
++*   **Memory Complexity:** $O(V \cdot D)$, where $V$ is the number of voxels and $D$ is the feature dimension (1 for density, 27 for SH coefficients). This is generally more memory-efficient than MLPs for high-resolution scenes because parameters are shared across space via the grid structure [S1].
++*   **Performance:** Enables real-time volume rendering on standard hardware, whereas MLP-based NeRF typically requires offline training and slow inference [S1].
++*   **Strengths:** Real-time rendering capability, memory efficiency through sparse voxel reconstruction, and simplified training pipeline [S1].
++*   **Limitations:** Limited by the resolution of the voxel grid; fine details may be lost if the grid is too coarse. Trilinear interpolation may introduce blurring compared to learned MLP representations [G].
+ 
+ ## Background
+-Voxel-based Radiance Fields were introduced as a memory-efficient alternative to the original Neural Radiance Fields (NeRF) [29] by replacing the MLP network with voxel grids [S1]. This approach leverages the differentiable volume rendering of NeRF while eliminating the heavy computation of fully-connected layers [S1]. The specific implementation cited, ExBluRF, utilizes this representation for efficient radiance field optimization in the context of extreme motion blurred image reconstruction [S1]. The method builds on the principle of decoupled prediction, where spatial features are stored in a grid and combined with view directions via SH coefficients [S1].
++Voxel-based Radiance Fields were introduced as a memory-efficient alternative to MLP-based Neural Radiance Fields (NeRF) [S1]. The approach leverages the differentiable volume rendering framework of NeRF but replaces the neural network with explicit voxel grids for density and spherical harmonic coefficients [S1]. This method was notably applied in the context of extreme motion blur reconstruction (ExBluRF), demonstrating its utility in optimization tasks where real-time feedback is beneficial [S1]. The technique builds on the principles of sparse voxel representations, combining coarse-to-fine reconstruction with pruning strategies to maintain efficiency [S1].
+ 
+ ## Sources

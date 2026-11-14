@@ -3,12 +3,12 @@
 Also called: GWN Voxelization, WindingNumberShape
 
 ## Overview
-Generalized Winding Number Voxelization constructs a binary image (voxelization) from a set of oriented point clouds in $\mathbb{R}^3$ by evaluating an implicit surface defined by the generalized winding number framework [S1, S2]. It differs from standard mesh voxelization by operating directly on oriented point clouds without requiring a manifold mesh, using the winding number to handle non-manifold geometry and holes via smooth diffusion [S1, S2]. It builds on [Mesh Winding Number Voxelization](2328-mesh-winding-number-voxelization.md) by providing the specific implementation for point clouds using the libIGL backend.
+Generalized Winding Number Voxelization constructs a binary image (voxelization) from a set of oriented point clouds in $\mathbb{R}^3$ by evaluating an implicit surface defined by the generalized winding number framework [S1, S2]. It differs from standard mesh voxelization by operating directly on oriented point clouds without requiring a manifold mesh, using the winding number to approximate the exterior envelope of the shape [S1, S2]. It builds on [Mesh Winding Number Voxelization](2328-mesh-winding-number-voxelization.md) by providing the specific implementation for point clouds using the libIGL backend [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** An $m \times 3$ matrix of point positions $P = \{p_i\}$ and an $m \times 3$ matrix of normal vectors $N = \{n_i\}$. Optionally, an $m$-vector of area measures $A = \{a_i\}$.
-- **Output:** A binary classification (INSIDE, OUTSIDE, ON) for query points, or a voxel grid generated via a digitizer.
+- **Input:** An $m \times 3$ matrix of point positions $P = \{p_i\}$ and an $m \times 3$ matrix of normal vectors $N = \{n_i\}$ [S1, S2]. Optionally, an $m$-vector of area measures $A = \{a_i\}$ [S1, S2].
+- **Output:** A binary classification (INSIDE, OUTSIDE, ON) for query points, or a voxel grid generated via a digitizer [S1, S2].
 
 **Data Structures:**
 The method relies on a hierarchical data structure (e.g., a balanced tree) containing the input points to accelerate query traversal [S1, S2]. The specific internal layout is not detailed in the sources, but it supports $O(\log m)$ expected time per query [S1, S2].
@@ -19,10 +19,10 @@ $$
 w(q) = \sum_{i=1}^m a_i \frac{(p_i - q) \cdot n_i}{4\pi \|p_i - q\|^3}
 $$
 where:
-- $q$ is the query point.
-- $p_i$ is the position of the $i$-th input point.
-- $n_i$ is the normal vector of the $i$-th input point.
-- $a_i$ is the area contribution of point $p_i$.
+- $q$ is the query point [S1, S2].
+- $p_i$ is the position of the $i$-th input point [S1, S2].
+- $n_i$ is the normal vector of the $i$-th input point [S1, S2].
+- $a_i$ is the area contribution of point $p_i$ [S1, S2].
 
 **Area Measure Estimation:**
 The area contribution $a_i$ is computed from the projection of the $k$-nearest neighbors to $p_i$ onto the tangent plane at $p_i$ [S1, S2]. This estimation is performed automatically by libIGL/CGAL if not provided by the user [S1, S2].
@@ -34,9 +34,13 @@ The orientation is determined by thresholding $w(q)$ [S1, S2]. The default thres
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+from typing import List, Tuple
+
 class WindingNumberShape:
-    def __init__(self, points: Matrix[m, 3], normals: Matrix[m, 3], 
-                 area_measures: Vector[m] = None, skip_point_areas: bool = False):
+    def __init__(self, points: List[Tuple[float, float, float]], 
+                 normals: List[Tuple[float, float, float]], 
+                 area_measures: List[float] = None, skip_point_areas: bool = False):
         """
         Initialize the winding number shape.
         
@@ -56,31 +60,15 @@ class WindingNumberShape:
                 raise ValueError("skip_point_areas must be True if area_measures are provided")
             self.area_measures = area_measures
         else:
-            # Estimate area measures using libIGL/CGAL [S1, S2]
-            # This involves projecting k-nearest neighbors onto tangent planes [S1, S2]
-            self.area_measures = estimate_area_measures(points, normals)
+            # Estimate area measures: project k-nearest neighbors to p_i onto tangent plane at p_i [S1, S2]
+            # The sources do not provide the exact implementation [G]
+            self.area_measures = [1.0] * len(points)
             
         # Build hierarchical data structure for fast queries [S1, S2]
-        self.tree = build_hierarchical_tree(points)
+        # The sources do not provide the exact tree construction algorithm [G]
+        self.tree = None
 
-    def estimate_area_measures(points, normals):
-        """
-        Estimate area measures a_i for each point.
-        Computed from projection of k-nearest neighbors to p_i onto tangent plane at p_i [S1, S2].
-        """
-        # Implementation relies on libIGL/CGAL [S1, S2]
-        # Not given in the sources. [G]
-        pass
-
-    def build_hierarchical_tree(points):
-        """
-        Build a balanced tree structure for O(log m) query time [S1, S2].
-        """
-        # Implementation relies on libIGL/CGAL [S1, S2]
-        # Not given in the sources. [G]
-        pass
-
-    def orientation(self, q: Vector[3]) -> str:
+    def orientation(self, q: Tuple[float, float, float]) -> str:
         """
         Query orientation for a single point.
         
@@ -93,24 +81,12 @@ class WindingNumberShape:
         w = self.winding_number(q)
         if w > self.threshold:
             return 'INSIDE'
-        elif w < 1.0 - self.threshold: # Note: Sources say range [0,1] is used for thresholding [S1, S2]
-            # The exact mapping of threshold to INSIDE/OUTSIDE is not explicitly defined 
-            # beyond the default 0.3. Typically, winding number for closed surfaces is 1 inside, 0 outside.
-            # The source says "thresholding the winding function with some values in [0,1]" [S1, S2].
-            # Assuming standard GWN behavior: > threshold is inside, < 1-threshold is outside?
-            # Or simply: if w > threshold -> INSIDE, else OUTSIDE?
-            # The source says "returns DGtal::INSIDE, DGtal::ON or DGtal::OUTSIDE" [S1, S2].
-            # Let's assume a simple threshold for now, noting the ambiguity.
-            # Actually, the source says "thresholding the winding function with some values in [0,1]" [S1, S2].
-            # And "default thresholding parameter ... is set to 0.3" [S1, S2].
-            # It does not specify the exact logic for ON.
-            # We will assume: if w > threshold -> INSIDE, if w < 1-threshold -> OUTSIDE, else ON.
-            # This is a common interpretation for GWN.
+        elif w < 1.0 - self.threshold:
             return 'OUTSIDE'
         else:
             return 'ON'
 
-    def winding_number(self, q: Vector[3]) -> float:
+    def winding_number(self, q: Tuple[float, float, float]) -> float:
         """
         Compute the generalized winding number w(q) for a single point.
         
@@ -122,21 +98,19 @@ class WindingNumberShape:
             n_i = self.normals[i]
             a_i = self.area_measures[i]
             
-            diff = p_i - q
-            dist_sq = dot(diff, diff)
+            diff = (p_i[0] - q[0], p_i[1] - q[1], p_i[2] - q[2])
+            dist_sq = diff[0]**2 + diff[1]**2 + diff[2]**2
             dist_cube = dist_sq ** 1.5
             
-            # Avoid division by zero
             if dist_cube < 1e-9:
-                # If query point is exactly on a point, handle gracefully [G]
-                # Typically, this is rare in voxelization.
-                continue
+                continue  # Avoid division by zero [G]
                 
-            term = a_i * dot(diff, n_i) / (4.0 * 3.141592653589793 * dist_cube)
+            dot_prod = diff[0]*n_i[0] + diff[1]*n_i[1] + diff[2]*n_i[2]
+            term = a_i * dot_prod / (4.0 * math.pi * dist_cube)
             w += term
         return w
 
-    def orientation_batch(self, queries: Matrix[Q, 3]) -> List[str]:
+    def orientation_batch(self, queries: List[Tuple[float, float, float]]) -> List[str]:
         """
         Query orientations for multiple points, leveraging multithreading [S1, S2].
         
@@ -147,13 +121,10 @@ class WindingNumberShape:
             List of orientations ('INSIDE', 'OUTSIDE', 'ON') in the same order as queries.
         """
         # Implementation relies on libIGL multithreading [S1, S2]
-        # Not given in the sources. [G]
-        orientations = []
-        for q in queries:
-            orientations.append(self.orientation(q))
-        return orientations
+        # The sources do not provide the exact batch query implementation [G]
+        return [self.orientation(q) for q in queries]
 
-    def set_area_measure(self, area_measures: Vector[m]):
+    def set_area_measure(self, area_measures: List[float]):
         """
         Set custom area measures.
         """
@@ -162,20 +133,20 @@ class WindingNumberShape:
 
 **Edge Cases and Pitfalls:**
 - **Dependencies:** Requires LIBIGL, CGAL, and GMP libraries. CMake flags `WITH_LIBIGL`, `WITH_CGAL`, and `WITH_GMP` must be set to true [S1, S2].
-- **Area Measures:** If user-provided area measures are used, `skipPointAreas` must be set to true in the constructor [S1, S2].
+- **Area Measures:** If user-provided area measures are used, `skipPointAreas` must be set to true in the constructor to bypass automatic estimation [S1, S2].
 - **Precision:** The formula involves division by $\|p_i - q\|^3$, which can lead to numerical instability if $q$ is very close to $p_i$ [G].
 
 ## Operating characteristics
 - **Time Complexity:** Expected $O(\log m)$ per single query due to traversal of a hierarchical data structure, assuming balanced trees [S1, S2].
 - **Memory Complexity:** Not given in the sources.
 - **Performance:** Leverages multithreading for batch queries [S1, S2].
-- **Strengths:** Handles non-manifold geometry and holes via smooth diffusion of the winding number [S1, S2]. Fast query times with hierarchical structures [S1, S2].
+- **Strengths:** Handles oriented point clouds directly without manifold mesh requirements [S1, S2]. Fast query times with hierarchical structures [S1, S2].
 - **Limitations:** Requires external dependencies (LIBIGL, CGAL, GMP) [S1, S2]. Area measure estimation relies on libIGL/CGAL [S1, S2].
-- **When to Use:** When voxelizing oriented point clouds, especially non-manifold ones, where mesh reconstruction is difficult or undesirable [S1, S2].
-- **When Not to Use:** When external dependencies cannot be used or when a manifold mesh is already available and simpler voxelization methods suffice.
+- **When to Use:** Voxelizing oriented point clouds [S1, S2].
+- **When Not to Use:** When external dependencies cannot be used or when a manifold mesh is already available and simpler voxelization methods suffice [G].
 
 ## Background
-The method is implemented in the DGtal library (version 1.4+) within the Shapes package [S1, S2]. It is based on the generalized winding number framework of [10] (not provided in the sources). It is used in examples `polyscope_examples/windingNumberShape.cpp` and tests `shapes/testWindingNumberShape.cpp` [S1, S2]. The class `WindingNumberShape<Space>` models `concepts::CEuclideanBoundedShape` [S1, S2].
+The method is implemented in the DGtal library (version 1.4+) within the Shapes package [S1, S2]. It is based on the generalized winding number framework of [10] (not provided in the sources) [G]. It is used in examples `polyscope_examples/windingNumberShape.cpp` and tests `shapes/testWindingNumberShape.cpp` [S1, S2]. The class `WindingNumberShape<Space>` models `concepts::CEuclideanBoundedShape` [S1, S2].
 
 ## Sources
 [S1] Voxelization from an oriented point cloud, https://www.dgtal.org/doc/1.4/moduleWinding.html, fetched 2026-10-26

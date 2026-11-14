@@ -1,56 +1,40 @@
 # CoR-GS
 
-Also called: Consistency Regularization for Gaussian Splatting
 
 ## Overview
-CoR-GS is a method designed to improve sparse-view reconstruction in 3D Gaussian Splatting by defining two independent reconstructions and comparing them to discard inaccurate Gaussians [S1][S2, unofficial]. It addresses the ambiguity and instability inherent in reconstructing scenes from minimal view overlap, where standard optimization often yields noisy or inconsistent geometry [S1][S2, unofficial].
+CoR-GS improves sparse-view reconstruction by defining two independent reconstructions and comparing them to discard inaccurate Gaussians [S1][S2, unofficial]. It differs from feed-forward network approaches by relying on a consistency check between dual optimization paths to prune erroneous primitives [S1][S2, unofficial].
 
 ## How it works
-CoR-GS operates by enforcing consistency between two distinct Gaussian field representations derived from the same sparse input views. The core mechanism involves generating two independent reconstructions and evaluating their agreement to identify and remove unreliable Gaussians.
-
-**Inputs:**
-- Sparse set of input views (images and camera poses).
-- Initial set of 3D Gaussians (typically from a standard 3DGS initialization).
-
-**Outputs:**
-- Refined set of 3D Gaussians with improved geometric and photometric consistency.
+**Inputs and Outputs:**
+*   **Inputs:** A sparse set of input images [G].
+*   **Outputs:** A refined set of 3D Gaussians with improved geometric and photometric accuracy [G].
 
 **Data Structures:**
-- Two independent sets of Gaussian parameters (position, covariance, opacity, SH coefficients) are maintained during the comparison phase.
-- A mask or filter is applied to the union of Gaussians to discard those failing the consistency check.
+The method operates on the standard 3D Gaussian Splatting representation, utilizing the `GaussianSet` data structure [3D Gaussian Splatting](1795-3d-gaussian-splatting.md). Each Gaussian is defined by position $\mathbf{p}$, covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{S}$), opacity $\alpha$, and spherical harmonics coefficients for color $\mathbf{c}$ [G].
 
-**Steps:**
-1. **Dual Reconstruction:** Train two independent Gaussian fields from the same sparse input views. These fields are initialized separately or optimized with different random seeds/initializations to ensure independence [S1][S2, unofficial].
-2. **Comparison:** Render views from both reconstructions and compare the results. The comparison metric identifies discrepancies between the two fields [S1][S2, unofficial].
-3. **Discard Inaccurate Gaussians:** Gaussians that contribute to inconsistent rendering results between the two fields are identified as inaccurate and removed [S1][S2, unofficial].
-4. **Refinement:** The remaining Gaussians form the final, consistent representation.
+**Method Steps:**
+1.  **Dual Reconstruction Initialization:** Initialize two separate sets of 3D Gaussians, $G_A$ and $G_B$, from the input sparse views [G].
+2.  **Independent Optimization:** Perform independent differentiable rendering optimization for both sets $G_A$ and $G_B$ against the input views [G].
+3.  **Consistency Comparison:** Compare the resulting Gaussians from $G_A$ and $G_B$ to identify inconsistencies [S1][S2, unofficial].
+4.  **Pruning:** Discard inaccurate Gaussians based on the comparison [S1][S2, unofficial].
 
 **Parameters:**
-- Not given in the sources.
+*   Number of independent reconstructions: 2 [S1][S2, unofficial].
+*   Optimization hyperparameters (learning rate, loss weights): Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- Sparse view overlap: The method is specifically designed for scenarios with minimal view overlap, where scale ambiguity is high [S1][S2, unofficial].
-- Inaccurate Gaussians: The method relies on the ability to distinguish accurate from inaccurate Gaussians via the consistency check. If both reconstructions are equally poor, the method may not improve results.
-
-## Subtopics
-
-### [3D Gaussian Splatting](1795-3d-gaussian-splatting.md)
-The base method for which CoR-GS provides a consistency regularization strategy.
-
-### [Density Control and Densification](5337-density-control-and-splatting.md)
-CoR-GS acts as a pruning mechanism, complementing densification strategies by removing unreliable Gaussians.
+*   **Sparse Views:** The method targets sparse-view reconstruction [S1][S2, unofficial]. Standard methods may struggle with insufficient constraints [G].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Improves novel view synthesis quality in sparse-view scenarios, particularly with minimal view overlap [S1][S2, unofficial].
-- **Limitations:** Requires maintaining two independent reconstructions, potentially increasing computational cost during the training phase.
-- **When to use:** Sparse-view reconstruction where standard 3DGS yields inconsistent or noisy results.
-- **When not to use:** Dense-view scenarios where standard 3DGS performs well.
+*   **Time Complexity:** Higher than standard 3D Gaussian Splatting due to two independent optimization passes and a comparison step [G].
+*   **Memory Complexity:** Requires storing two sets of Gaussians during the optimization phase [G].
+*   **Strengths:** Superior novel view synthesis quality in sparse-view scenarios [S1][S2, unofficial].
+*   **Limitations:** Increased computational cost due to dual reconstruction [G].
+*   **When to use:** Sparse-view reconstruction tasks where standard 3DGS fails to produce accurate geometry [S1][S2, unofficial].
+*   **When not to use:** Not given in the sources.
 
 ## Background
-CoR-GS was introduced in the context of improving sparse-view reconstruction for 3D Gaussian Splatting. It is cited in surveys discussing the evolution from volume rendering to 3D Gaussian Splatting, highlighting its role in addressing scale ambiguity and improving quality in challenging sparse-view settings [S1][S2, unofficial]. The method is referenced alongside other approaches like FFN-based methods and MAtCha, positioning it as a regularization technique rather than a generative model [S1][S2, unofficial].
+CoR-GS is cited in surveys of avatar generation methods, which typically process full-body or head-only inputs using body models like SMPL or FLAME [S1][S2, unofficial]. It is positioned as an alternative to feed-forward network approaches and MLP-based methods like MAtCha, which use atlas-of-charts and depth estimation [S1][S2, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26

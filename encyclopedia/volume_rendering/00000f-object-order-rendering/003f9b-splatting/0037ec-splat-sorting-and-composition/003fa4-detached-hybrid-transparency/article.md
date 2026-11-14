@@ -1,53 +1,52 @@
 # Detached Hybrid Transparency
 
-Also called: DHT
 
 ## Overview
 Detached Hybrid Transparency (DHT) is a technique used during the training of volumetric representations (specifically 3D Gaussian Splatting) to stabilize the optimization process when Early Ray Termination (ERT) is enabled [S1]. While ERT improves rendering speed by skipping distant or transparent primitives, it introduces gradient bias because the skipped contributions are not backpropagated [S1]. DHT resolves this by approximating the color contribution of the skipped "tail" of Gaussians using unordered alpha blending and applying a stop-gradient operator to detach this approximation from the gradient computation [S1]. This allows the use of aggressive early termination thresholds during training without causing the rapid Gaussian expansion and convergence failure seen in naive implementations [S1].
 
 ## How it works
 **Inputs:**
-- $\mathbf{c}_{\text{head}}$: The accumulated color from the sorted, processed Gaussians (the "head") up to the point where transmittance drops below the threshold.
-- $\tau$: The current transmittance at the point of early termination.
-- $\tau_{\text{exact}}$: The exact final transmittance of the pixel, computed out-of-order (e.g., via a secondary traversal or approximation) to determine the total remaining opacity.
-- $G_{\text{tail}}$: The set of Gaussians that were skipped due to early termination.
-- $\tau_{\min}$: The transmittance threshold below which early termination is triggered.
+- $\mathbf{c}_{\text{head}}$: The accumulated color from the sorted, processed Gaussians (the "head") up to the point where transmittance drops below the threshold [S1].
+- $\tau$: The current transmittance at the point of early termination [S1].
+- $\tau_{\text{exact}}$: The exact final transmittance of the pixel, computed out-of-order to determine the total remaining opacity [S1].
+- $G_{\text{tail}}$: The set of Gaussians that were skipped due to early termination [S1].
+- $\tau_{\min}$: The transmittance threshold below which early termination is triggered [S1].
 
 **Outputs:**
-- $\mathbf{c}$: The final estimated pixel color for the training step.
+- $\mathbf{c}$: The final estimated pixel color for the training step [S1].
 
 **Data Structures:**
 - The method relies on the standard Gaussian representation (position, covariance, opacity, color) as defined in the parent article [S1].
-- A mechanism to compute $\tau_{\text{exact}}$ is required. The source notes that this can be done "out of order" [S1]. In practice, this often involves a secondary pass or a hierarchical structure (like a Depth Histogram Tree, though DHT itself is the transparency method, not the tree) to estimate the total remaining contribution [S1].
+- A mechanism to compute $\tau_{\text{exact}}$ is required, which the source notes can be done out of order [S1].
 
 **Steps:**
-1.  **Accumulate Head:** Perform standard front-to-back alpha compositing for the sorted Gaussians until the accumulated transmittance $\tau$ falls below $\tau_{\min}$ [S1]. Let the accumulated color be $\mathbf{c}_{\text{head}}$ and the current transmittance be $\tau$ [S1].
-2.  **Compute Exact Transmittance:** Determine $\tau_{\text{exact}}$, the transmittance after all Gaussians (including those in the tail) have been processed [S1].
-3.  **Estimate Tail Color:** Calculate the average color of the skipped Gaussians ($G_{\text{tail}}$) weighted by their individual opacities ($\alpha_i$) [S1]:
-    $$ \mathbf{c}_{\text{tail}} = \frac{1}{\alpha_{\text{tail}}} \sum_{i \in G_{\text{tail}}} \alpha_i \mathbf{c}_i $$
-    where $\alpha_{\text{tail}}$ is the sum of the opacities of the skipped Gaussians:
-    $$ \alpha_{\text{tail}} = \sum_{i \in G_{\text{tail}}} \alpha_i $$
-    If $\alpha_{\text{tail}} = 0$, then $\mathbf{c}_{\text{tail}} = \mathbf{0}$ [S1].
-4.  **Apply Stop-Gradient:** Compute the difference between the current transmittance and the exact final transmittance, scale it by the estimated tail color, and detach it from the gradient graph using the stop-gradient operator $\text{sg}(\cdot)$ [S1]:
-    $$ \mathbf{c}_{\text{approx}} = \text{sg}\left( (\tau - \tau_{\text{exact}}) \mathbf{c}_{\text{tail}} \right) $$
-5.  **Combine:** Add the head color and the detached tail approximation to get the final color for the backward pass [S1]:
-    $$ \mathbf{c} = \mathbf{c}_{\text{head}} + \mathbf{c}_{\text{approx}} $$
+1. **Accumulate Head:** Perform standard front-to-back alpha compositing for the sorted Gaussians until the accumulated transmittance $\tau$ falls below $\tau_{\min}$ [S1]. Let the accumulated color be $\mathbf{c}_{\text{head}}$ and the current transmittance be $\tau$ [S1].
+2. **Compute Exact Transmittance:** Determine $\tau_{\text{exact}}$, the transmittance after all Gaussians (including those in the tail) have been processed [S1].
+3. **Estimate Tail Color:** Calculate the average color of the skipped Gaussians ($G_{\text{tail}}$) weighted by their individual opacities ($\alpha_i$) [S1]:
+   $$ \mathbf{c}_{\text{tail}} = \frac{1}{\alpha_{\text{tail}}} \sum_{i \in G_{\text{tail}}} \alpha_i \mathbf{c}_i $$
+   where $\alpha_{\text{tail}}$ is the sum of the opacities of the skipped Gaussians:
+   $$ \alpha_{\text{tail}} = \sum_{i \in G_{\text{tail}}} \alpha_i $$
+   If $\alpha_{\text{tail}} = 0$, then $\mathbf{c}_{\text{tail}} = \mathbf{0}$ [S1].
+4. **Apply Stop-Gradient:** Compute the difference between the current transmittance and the exact final transmittance, scale it by the estimated tail color, and detach it from the gradient graph using the stop-gradient operator $\text{sg}(\cdot)$ [S1]:
+   $$ \mathbf{c}_{\text{approx}} = \text{sg}\left( (\tau - \tau_{\text{exact}}) \mathbf{c}_{\text{tail}} \right) $$
+5. **Combine:** Add the head color and the detached tail approximation to get the final color for the backward pass [S1]:
+   $$ \mathbf{c} = \mathbf{c}_{\text{head}} + \mathbf{c}_{\text{approx}} $$
 
 **Parameters:**
-- $\tau_{\min}$: The transmittance threshold for early termination.
-    - Typical training value: $0.001$ [S1].
-    - Typical inference/runtime value: $0.03$ [S1].
-    - Tested values include: $0.001, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.0$ (disabled) [S1].
+- $\tau_{\min}$: The transmittance threshold for early termination [S1].
+  - Typical training value: $0.001$ [S1].
+  - Typical inference/runtime value: $0.03$ [S1].
+  - Tested values include: $0.001, 0.01, 0.02, 0.03, 0.04, 0.05, 0.1, 0.0$ (disabled) [S1].
 
 **Pitfalls:**
 - **Training Instability:** Using a high $\tau_{\min}$ (e.g., $0.03$ or higher) without DHT causes rapid Gaussian expansion and training failure [S1].
-- **Threshold Mismatch:** Naive implementations of ERT require different threshold values for training vs. inference. DHT allows the use of a single, robust threshold strategy by stabilizing the gradients [S1].
+- **Threshold Mismatch:** Naive implementations of ERT require different threshold values for training vs. inference [S1].
 - **Gradient Bias:** Without the stop-gradient operator, the approximation $\mathbf{c}_{\text{tail}}$ would propagate gradients through the skipped Gaussians, leading to incorrect updates because those Gaussians were not actually used in the forward accumulation [S1].
 
 ## Subtopics
 
 ### Early Ray Termination with DHT
-This is the primary application context for DHT. It involves enabling DHT during the training phase of 3D Gaussian Splatting to allow the use of Early Ray Termination (ERT) [S1]. ERT skips Gaussians when the accumulated transmittance $\tau$ drops below $\tau_{\min}$ [S1]. DHT stabilizes this process by approximating the skipped contribution [S1]. Without DHT, high $\tau_{\min}$ values lead to convergence failure [S1]. With DHT, $\tau_{\min}=0.03$ yields a PSNR of 26.47 and LPIPS of 0.236, with 40.28% of Gaussians skipped [S1]. In contrast, disabling DHT (GRay NoDHT) at high truncation drops PSNR to 24.54 and worsens LPIPS to 0.284 [S1]. At $\tau_{\min}=0.04$ and $0.1$, training fails completely without DHT [S1].
+This is the primary application context for DHT [S1]. It involves enabling DHT during the training phase of 3D Gaussian Splatting to allow the use of Early Ray Termination (ERT) [S1]. ERT skips Gaussians when the accumulated transmittance $\tau$ drops below $\tau_{\min}$ [S1]. DHT stabilizes this process by approximating the skipped contribution [S1]. Without DHT, high $\tau_{\min}$ values lead to convergence failure [S1]. With DHT, $\tau_{\min}=0.03$ yields a PSNR of 26.47 and LPIPS of 0.236, with 40.28% of Gaussians skipped [S1]. In contrast, disabling DHT (GRay NoDHT) at high truncation drops PSNR to 24.54 and worsens LPIPS to 0.284 [S1]. At $\tau_{\min}=0.04$ and $0.1$, training fails completely without DHT [S1].
 
 ## Operating characteristics
 **Time and Memory Complexity:**

@@ -1,33 +1,22 @@
 # SDF-based Neural Fields
+
 Also called: SDF NeRF, Signed Distance Function Neural Fields
 
 ## Overview
-SDF-based Neural Fields replace the standard volume density $\sigma$ with a Signed Distance Function (SDF) $s(\mathbf{x})$ to provide a more explicit and smooth formulation of surfaces, addressing the geometric inaccuracy and surface holes typical of density-based NeRFs [S1, unofficial]. Unlike standard NeRF which models opacity as a continuous accumulation, this family defines geometry via the zero-level set $\{ \mathbf{x} \mid s(\mathbf{x}) = 0 \}$, enabling sharper boundaries and better topological consistency [S1, unofficial].
+SDF-based Neural Fields replace the standard NeRF density prediction with a Signed Distance Function (SDF) to provide a more explicit and smooth formulation of surfaces, addressing the geometric inaccuracy and surface holes typical of density-based NeRFs [S1, unofficial]. Unlike standard NeRFs which model volume density $\sigma$, this method models the distance to the nearest surface, allowing for precise geometry extraction via the zero-level set.
 
 ## Shared principles
-The core mechanism involves replacing the density prediction $\sigma$ with an SDF prediction $s(\mathbf{x})$. A signed distance function is a 3D representation based on a continuous scalar field $s: \mathbb{R}^3 \rightarrow \mathbb{R}$, where for each 3D point $\mathbf{x} \in \mathbb{R}^3$, the function value $s(\mathbf{x})$ gives the distance to the closest surface, with the sign conventionally negative inside the object and positive outside [S1, unofficial]. The surface itself is thus defined as the zero-level set $\{ \mathbf{x} \mid s(\mathbf{x}) = 0 \}$ [S1, unofficial].
-
-In SDF-based neural fields, instead of predicting a density $\sigma(\mathbf{x})$ directly, the network predicts an SDF value $s(\mathbf{x})$, which is then converted into a density to enable volumetric rendering [S1, unofficial]. The conversion typically involves a softplus or sigmoid function to map the unbounded SDF values to positive density values suitable for the volume rendering integral. Let $\sigma(\mathbf{x}) = \text{softplus}(s(\mathbf{x}))$ or $\sigma(\mathbf{x}) = \text{sigmoid}(s(\mathbf{x})) \cdot \beta$ where $\beta$ is a temperature parameter [G]. This allows the use of standard differentiable volume rendering pipelines while enforcing geometric priors.
-
-The rendering equation remains:
+The core mechanism involves replacing the density output $\sigma(\mathbf{x})$ with an SDF value $s(\mathbf{x})$. The SDF is a continuous scalar field $s: \mathbb{R}^3 \rightarrow \mathbb{R}$ where $s(\mathbf{x})$ represents the distance to the closest surface for any 3D point $\mathbf{x} \in \mathbb{R}^3$ [S1, unofficial]. The sign convention is typically negative inside the object and positive outside [S1, unofficial]. The surface geometry is defined as the zero-level set:
 $$
-\hat{C}(r) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i
+\{ \mathbf{x} \mid s(\mathbf{x}) = 0 \}
 $$
-where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1, unofficial]. The key difference lies in the source of $\sigma_i$, derived from $s(\mathbf{x}_i)$ rather than a direct MLP output.
+To enable volumetric rendering, the predicted SDF value $s(\mathbf{x})$ must be converted into a density $\sigma$. While the exact conversion function varies by implementation, it generally involves a differentiable mapping from distance to opacity/density, often using a sigmoid or similar function parameterized by a sharpness term, to allow gradients to flow through the rendering equation [S1, unofficial]. This substitution allows the network to learn explicit surfaces rather than implicit volumetric blobs.
 
 ## Subtopics
-
-### [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md)
-The foundational approach of using SDFs for geometry representation in neural fields.
-
-### [FlipNeRF](12967-flipnerf.md)
-Uses SDFs to handle transparent and reflective surfaces by flipping the sign of the distance.
-
-### [Volume-Augmented NeRF](12973-volume-augmented-nerf.md)
-Combines SDF geometry with volume density for complex scenes.
+Not given in the sources.
 
 ## Background
-The concept of combining NeRF with Signed Distance Functions (SDFs) emerged as a prominent research direction to improve surface quality [S1, unofficial]. Several strategies have been proposed to improve surface quality, ranging from regularization terms to depth-guided supervision [S1, unofficial]. A prominent research direction [130, 196, 177, 95, 179] has focused on representing geometry by combining NeRF with Signed Distance Functions (SDFs), which provide a more explicit and smooth formulation of surfaces [S1, unofficial]. This approach addresses the limitations of density-based NeRFs, which often suffer from geometric inaccuracies and surface holes [S1, unofficial].
+The approach emerged as a prominent research direction to improve surface quality in neural radiance fields, addressing limitations of density-based representations [S1, unofficial]. It builds on the foundational NeRF architecture [S6, unofficial] by substituting the density head with an SDF head. Key citations in this lineage include works referenced as [130, 196, 177, 95, 179] in the source literature, which focus on representing geometry by combining NeRF with SDFs [S1, unofficial].
 
 ## Sources
 [S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)

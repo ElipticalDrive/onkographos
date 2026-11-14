@@ -1,0 +1,558 @@
+--- v003.md
++++ v004.md
+@@ -4,84 +4,54 @@
+ 
+ ## Overview
+-DeblurNeRF is a framework that reconstructs a sharp Neural Radiance Field (NeRF) from blurry input images by explicitly modeling the blurring process via an analysis-by-synthesis approach [S1]. It differs from sibling methods like [Sharp-NeRF](14270-sharp-nerf.md) by learning a deformable sparse kernel to warp ray origins and directions, approximating spatially varying blur through an MLP that models local ray mixing [S2]. Unlike [DP-NeRF](14270-sharp-nerf.md) which uses scene-wise shared rigid transformations, DeblurNeRF employs pixel-wise independent transformations, which is computationally efficient but can introduce 3D geometric inconsistency [S3].
++DeblurNeRF is a framework that reconstructs a sharp Neural Radiance Field (NeRF) from blurry input images by explicitly modeling the blurring process via an analysis-by-synthesis approach [S1]. Unlike standard NeRF which assumes sharp inputs, DeblurNeRF jointly optimizes the radiance field and a Deformable Sparse Kernel (DSK) module to simulate spatially varying blur (such as camera motion or defocus) during training, allowing the NeRF to converge to a sharp representation [S1]. It differs from sibling methods like [Sharp-NeRF](14270-sharp-nerf.md) by not requiring sharp ground-truth images, and from [DP-NeRF](14566-image-enhancement-and-restoration-methods.md) by using pixel-wise independent ray transformations rather than scene-wise rigid transformations, which allows it to handle spatially varying blur more flexibly at the cost of potential 3D inconsistency [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of blurry multi-view images $B$. Camera poses and intrinsics are assumed known or estimated (e.g., via COLMAP) [S1].
+-*   **Outputs:** A sharp NeRF representation $F_\Theta$ and a Deformable Sparse Kernel (DSK) module $G_\Phi$. At inference, the output is sharp novel views rendered directly from $F_\Theta$ [S1].
++*   **Inputs:** A set of blurry multi-view images $B$, camera poses, and intrinsics.
++*   **Outputs:** A sharp NeRF model $F_\Theta$ and a DSK module $G_\Phi$. At inference, the output is sharp novel views rendered directly from $F_\Theta$.
+ 
+ **Data Structures:**
+-1.  **NeRF MLP ($F_\Theta$):** Maps 3D position $x$ and view direction $d$ to color $c$ and density $\sigma$.
+-    *   Structure: Standard NeRF architecture (coordinate-based MLP with positional encoding) [S1].
+-    *   Positional Encoding $\gamma_L$: Maps vector elements to higher dimensional frequency space:
+-        $$ \gamma_L(x) = [\sin(\pi x), \cos(\pi x), \dots, \sin(2^{L-1}\pi x), \cos(2^{L-1}\pi x)]^T $$
+-        where $L$ is the highest frequency used [S1].
+-2.  **DSK MLP ($G_\Phi$):** Parameterizes the spatially varying blur kernel.
+-    *   Structure: 4 fully-connected hidden layers, each with 64 channels and ReLU activations. Includes a shortcut connection from the first layer to the last layer [S1].
+-    *   Inputs: Pixel coordinate $p$, canonical kernel location $q^0$, and a learned view embedding $l$ (length 32) [S1].
+-    *   Outputs: For each of $N$ kernel points, a tuple $(\Delta o_q, \Delta q, w_q)$:
++1.  **NeRF ($F_\Theta$):** An MLP mapping 3D position $x$ and view direction $d$ to color $c$ and density $\sigma$.
++    *   Input: $\gamma_L(x), \gamma_L(d)$ where $\gamma_L$ is positional encoding.
++    *   Output: $(c, \sigma)$.
++2.  **Deformable Sparse Kernel (DSK) Module ($G_\Phi$):** An MLP parameterized by $\Phi$.
++    *   Input: Pixel coordinate $p$, canonical kernel location $q^0$, and view embedding $l$.
++    *   Output: Tuple $(\Delta o_q, \Delta q, w_q)$ for each of the $N$ sparse locations.
+         *   $\Delta o_q \in \mathbb{R}^3$: Ray origin translation.
+-        *   $\Delta q \in \mathbb{R}^2$: Kernel location deformation (2D image plane offset).
++        *   $\Delta q \in \mathbb{R}^2$: Kernel location deformation (on image plane).
+         *   $w_q \in \mathbb{R}$: Composition weight.
+-3.  **Canonical Kernel:** A set of $N$ fixed locations $N^0(p) = \{q^0_i\}_{i=0}^{N-1}$ distributed around pixel $p$ [S1].
+-
+-**Parameters:**
+-*   $N$: Number of sparse kernel locations per pixel. Default: 5 [S1].
+-*   $L$: Highest frequency in positional encoding [S1].
+-*   $\epsilon$: Initialization gain. Default: 0.1 [S1].
+-*   $\lambda_o$: Alignment loss weight for origin translation. Default: 10 [S1].
+-*   $\lambda_a$: Alignment loss weight in total loss. Default: 0.1 [S1].
+-*   Batch size: 1024 rays [S1].
+-*   Sampling: 64 coordinates in coarse volume, 64 additional coordinates in fine volume [S1].
+-*   Optimizer: Adam with default parameters [S1].
+-*   Learning Rate: Starts at $5 \times 10^{-4}$, decays exponentially to $8 \times 10^{-5}$ [S1].
+-
+-**Algorithm Steps:**
+-
+-1.  **Initialization:**
+-    *   Initialize $F_\Theta$ and $G_\Phi$.
+-    *   Initialize the output tuples $(\Delta o_q, \Delta q, w_q)$ of $G_\Phi$ by multiplying a small gain $\epsilon = 0.1$ to each element. This ensures optimized rays start close to the input ray and kernel points are close to the pixel center [S1].
+-
+-2.  **Training Loop (per batch of pixels):**
+-    For each pixel $p$ in the batch:
+-    a.  **Generate Canonical Rays:**
+-        Emit a primary ray $r_p(t) = o + t d_p$ from camera center $o$ along direction $d_p$ [S1].
+-    b.  **Predict DSK Parameters:**
+-        For each canonical location $q^0 \in N^0(p)$, compute the deformation and weight using $G_\Phi$:
+-        $$ (\Delta o_q, \Delta q, w_q) = G_\Phi(p, q^0, l) $$
+-        where $l$ is the view embedding for the current view [S1].
+-    c.  **Generate Optimized Rays:**
+-        Compute the deformed kernel location $q = q^0 + \Delta q$.
+-        Derive the direction $d_q$ from the deformed location $q$ (conceptually, the ray points towards $q$ on the image plane).
+-        Compute the deformed ray origin $o_q = o + \Delta o_q$.
+-        Construct the optimized ray:
+-        $$ r_q(t) = (o + \Delta o_q) + t d_q $$
+-        [S1].
+-    d.  **Render Optimized Rays:**
+-        For each optimized ray $r_q$, perform hierarchical volume rendering to obtain color $c^0_q$:
+-        i.  **Coarse Sampling:** Stratified sampling divides ray bounds $[t_n, t_f]$ into $N_s$ intervals. Generate samples $r_i = o_q + t_i d_q$. Render coarse color $\hat{C}_c$ using standard volume rendering formula:
+-            $$ \hat{C}_c(r_q) = \sum_{i=1}^{N_s} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-            where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and $\delta_i = t_{i+1} - t_i$ [S3].
+-        ii. **Fine Sampling:** Compute normalized weights $\hat{w}_i = w_i / \sum_j w_j$ as a PDF. Use these weights to sample fine points. Render fine color $\hat{C}_f$ [S3].
+-        iii. **Final Color:** The color $c^0_q$ is the result of the fine rendering [S1].
+-    e.  **Composite Blurred Pixel:**
+-        Blend the rendered colors of the optimized rays using the predicted weights $w_q$. Apply gamma correction to compensate for the Camera Response Function (CRF):
+-        $$ \hat{b}_p = g\left( \sum_{q \in N(p)} w_q c^0_q \right) $$
+-        where $g(c^0) = (c^0)^{1/2.2}$ [S1].
+-    f.  **Compute Loss:**
+-        i.  **Reconstruction Loss:** L2 loss between the predicted blurry pixel $\hat{b}_p$ and the ground truth blurry pixel $b^{gt}_p$:
+-            $$ L_{reconstruct} = \sum_{p \in R} \|\hat{b}_p - b^{gt}_p\|_2^2 $$
+-            [S1].
+-        ii. **Alignment Loss:** Constrain the NeRF to align with observations by forcing one canonical ray (corresponding to a fixed $q^0$) to remain close to the original ray $r_p$:
+-            $$ L_{align} = \|q^0 - p\|_2^2 + \lambda_o \|\Delta o_{q^0}\|_2^2 $$
+-            [S1].
+-        iii. **Total Loss:**
+-            $$ L = L_{reconstruct} + \lambda_a L_{align} $$
+-            [S1].
+-    g.  **Update:**
+-        Backpropagate $L$ to update parameters $\Theta$ (NeRF) and $\Phi$ (DSK) using Adam optimizer [S1].
+-
+-3.  **Inference:**
+-    *   Render novel views by emitting rays from the new camera pose and querying $F_\Theta$ directly, bypassing the DSK module $G_\Phi$ [S1].
++    *   Structure: 4 fully-connected hidden layers, 64 channels each, ReLU activations, with a shortcut connection from the first layer to the last [S1].
++3.  **View Embedding ($l$):** A learnable vector of length 32 per view [S1].
++4.  **Canonical Kernel Locations ($N^0(p)$):** A set of $N$ fixed 2D coordinates $\{q^0_i\}_{i=0}^{N-1}$ distributed around pixel $p$ [S1].
++
++**Numbered Steps:**
++
++1.  **Ray Generation (Standard NeRF):** For a pixel $p$, generate a ray $r_p(t) = o + t d_p$ from camera center $o$ along direction $d_p$. Perform stratified sampling to divide the near-to-far bounds $[t_n, t_f]$ into $N_{samples}$ intervals, generating coarse samples $r_i = o + t_i d_p$.
++2.  **Coarse Rendering:** Render coarse color $\hat{C}_c$ using volume rendering:
++    $$ \hat{C}_c(r) = \sum_{i=1}^{N_{samples}} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\delta_i = t_{i+1} - t_i$, and $(c_i, \sigma_i) = F_\Theta(\gamma_L(x_i), \gamma_L(d_p))$.
++3.  **Hierarchical Sampling:** Compute normalized weights $\hat{w}_i = w_i / \sum_j w_j$ as a PDF. Use these to generate fine samples for higher quality rendering $\hat{C}_f$ [S3].
++4.  **DSK Prediction:** For each pixel $p$ in the batch, predict $N$ tuples $(\Delta o_q, \Delta q, w_q)$ using the DSK module:
++    $$ (\Delta o_q, \Delta q, w_q) = G_\Phi(p, q^0, l), \quad q^0 \in N^0(p) $$
++    *   Note: Positional encoding on input $p$ is **not** used, as it was found to not improve quality [S1].
++5.  **Ray Deformation:** Generate $N$ optimized rays $r_q$ for the blur simulation:
++    $$ q = q^0 + \Delta q $$
++    $$ r_q(t) = (o + \Delta o_q) + t d_q $$
++    where $d_q$ is the direction derived from the deformed location $q$ [S1, S3].
++6.  **Blurred Rendering:** Render each deformed ray $r_q$ using the NeRF to obtain color $c_q^0$.
++7.  **Blending:** Compute the final blurry pixel color $\hat{b}_p$ by blending the rendered colors with weights $w_q$, applying gamma correction to account for the Camera Response Function (CRF):
++    $$ \hat{b}_p = g\left( \sum_{q \in N(p)} w_q c_q^0 \right) $$
++    where $g(c^0) = (c^0)^{1/2.2}$ [S1].
++8.  **Loss Computation:** Compute the reconstruction loss against the ground truth blurry image $b^{gt}$:
++    $$ L_{reconstruct} = \sum_{p \in R} \| \hat{b}_p - b^{gt}_p \|_2^2 $$
++    where $R$ is the set of rays in the batch [S1].
++9.  **Alignment Loss:** To prevent non-rigid distortion of the NeRF, apply an alignment loss that constrains the canonical kernel location $q^0$ (specifically the center element) to align with the pixel $p$ and its origin translation $\Delta o_{q^0}$ to be small:
++    $$ L_{align} = \| q^0 - p \|_2^2 + \lambda_o \| \Delta o_{q^0} \|_2^2 $$
++    where $\lambda_o = 10$ [S1].
++10. **Total Loss:**
++    $$ L = L_{reconstruct} + \lambda_a L_{align} $$
++    where $\lambda_a = 0.1$ [S1].
++11. **Optimization:** Jointly optimize NeRF parameters $\Theta$ and DSK parameters $\Phi$ (and view embeddings $l$) using Adam [S1].
++12. **Inference:** Render the NeRF directly using the original ray $r_p$ (without DSK deformation) to produce sharp novel views [S1].
+ 
+ **Pseudocode:**
+@@ -93,234 +63,207 @@
+ 
+ class DeblurNeRF:
+-    def __init__(self, nerf_mlp, dsk_mlp, N=5, lambda_o=10, lambda_a=0.1, epsilon=0.1):
+-        self.nerf = nerf_mlp
+-        self.dsk = dsk_mlp
+-        self.N = N
+-        self.lambda_o = lambda_o
+-        self.lambda_a = lambda_a
+-        self.epsilon = epsilon
+-        
+-        # Canonical kernel locations relative to pixel p (e.g., grid around p)
+-        # Shape: (N, 2)
+-        self.register_buffer('canonical_offsets', torch.zeros(N, 2)) 
+-        # Note: In implementation, these are relative to p, so q0 = p + offset
+-        # The paper defines q0 as canonical locations. We assume they are fixed relative to p.
+-        
+-        # View embedding (learned per view)
+-        self.view_embedding = None 
+-
+-    def initialize_dsk(self):
+-        """Initialize DSK outputs with small gain epsilon."""
+-        # Assuming dsk_mlp outputs (delta_o, delta_q, w) concatenated
+-        # We need to ensure the initial forward pass returns small values
+-        # The paper says: "Multiply a small gain of epsilon = 0.1 to each element of the output tuples"
+-        # This implies the MLP weights are initialized such that output is small, 
+-        # or we clamp/modify the output. 
+-        # Implementation note: Usually achieved by initializing bias/weights to produce ~0 output.
+-        pass
+-
++    def __init__(self, nerf_mlp, dsk_mlp, num_sparse_points=5, view_embedding_len=32):
++        self.nerf = nerf_mlp  # MLP F_Theta
++        self.dsk = dsk_mlp    # MLP G_Phi
++        self.N = num_sparse_points
++        self.view_embeddings = nn.Parameter(torch.randn(len(cameras), view_embedding_len))
++        # Canonical kernel locations: shape (N, 2)
++        self.canonical_locs = nn.Parameter(torch.randn(self.N, 2) * 0.1) 
++        # Small gain for initialization to keep rays close to input
++        self.init_gain = 0.1
++        
+     def positional_encoding(self, x, L=10):
+         """Standard NeRF positional encoding."""
+-        # x: (..., 3) or (..., 2)
++        # x shape: (..., 3)
+         scales = torch.tensor([2**i for i in range(L)], dtype=x.dtype, device=x.device)
+-        xb = torch.reshape((x * scales).unsqueeze(-1), (*x.shape[:-1], L * x.shape[-1]))
+-        freq_bands = torch.cat([torch.sin(xb), torch.cos(xb)], dim=-1)
+-        return freq_bands
+-
+-    def render_ray(self, ray_o, ray_d, num_coarse=64, num_fine=64):
++        shaped = x.unsqueeze(-1) * scales.view(1, 1, 1, -1)
++        pe = torch.cat([torch.sin(shaped), torch.cos(shaped)], dim=-1)
++        return pe.view(*x.shape[:-1], -1)
++
++    def render_ray(self, ray_o, ray_d, num_samples=64):
++        """Render a single ray using the NeRF."""
++        # ray_o: (3), ray_d: (3)
++        t_vals = torch.linspace(0.0, 1.0, num_samples + 1)
++        z_vals = 0.8 * t_vals + 0.2 * (t_vals[1:] + t_vals[:-1]) # Stratified sampling approximation
++        pts = ray_o.unsqueeze(0) + ray_d.unsqueeze(0) * z_vals.unsqueeze(1) # (N, 3)
++        
++        pts_enc = self.positional_encoding(pts)
++        ray_enc = self.positional_encoding(ray_d.repeat(num_samples, 1))
++        
++        # Forward NeRF
++        # Output: (N, 4) -> (c_r, c_g, c_b, sigma)
++        out = self.nerf(torch.cat([pts_enc, ray_enc], dim=-1))
++        c = torch.sigmoid(out[..., :3])
++        sigma = out[..., 3]
++        
++        # Volume Rendering
++        dists = z_vals[1:] - z_vals[:-1]
++        sigmas_term = sigma * dists
++        transmittance = torch.exp(-torch.cumsum(sigmas_term[:-1], dim=0))
++        weights = sigmas_term * torch.exp(-sigmas_term) # Approximation for alpha
++        # More precise: alpha = 1 - exp(-sigma * dist)
++        alpha = 1.0 - torch.exp(-sigmas_term)
++        weights = alpha * transmittance
++        color = torch.sum(weights.unsqueeze(-1) * c, dim=0)
++        return color
++
++    def forward(self, pixel_coords, ray_origins, ray_directions, view_idx):
+         """
+-        Render a single ray using hierarchical sampling.
+-        ray_o: (3,)
+-        ray_d: (3,)
+-        Returns: color (3,), density (1,)
++        pixel_coords: (B, 2)
++        ray_origins: (B, 3)
++        ray_directions: (B, 3)
++        view_idx: (B,) indices into view_embeddings
+         """
+-        # 1. Coarse sampling
+-        t_coarse = torch.linspace(0.0, 1.0, num_coarse + 1) # Normalized t, needs scaling to scene bounds
+-        # Assuming near/far planes are handled by t scaling. 
+-        # For simplicity, assume t is in [0, 1] mapped to [tn, tf]
+-        t_coarse_samples = t_coarse[:-1] + (t_coarse[1:] - t_coarse[:-1]) * torch.rand(num_coarse)
+-        
+-        points_coarse = ray_o.unsqueeze(0) + t_coarse_samples.unsqueeze(1) * ray_d.unsqueeze(0)
+-        # points_coarse: (num_coarse, 3)
+-        
+-        # Query NeRF
+-        # Note: NeRF takes (x, d). d is constant for the ray.
+-        # We need to encode x and d.
+-        # In standard NeRF, d is also encoded.
+-        
+-        # Simplified query: assume nerf_mlp handles encoding internally or we pass encoded inputs
+-        # Here we assume nerf_mlp expects raw x and d, or we encode them.
+-        # Let's assume standard NeRF input: (x, d) -> (c, sigma)
+-        
+-        # Encode positions and directions
+-        # x: (num_coarse, 3), d: (3,) -> (1, 3)
+-        d_enc = self.positional_encoding(ray_d.unsqueeze(0).expand(num_coarse, -1), L=10)
+-        x_enc = self.positional_encoding(points_coarse, L=10)
+-        
+-        # Concatenate for NeRF input if it expects separate, or pass as tuple
+-        # Standard NeRF MLP usually takes concatenated encoding or separate.
+-        # Let's assume nerf_mlp(x_enc, d_enc) -> (c, sigma)
+-        c_coarse, sigma_coarse = self.nerf(x_enc, d_enc)
+-        
+-        # Volume rendering
+-        # delta_t
+-        delta_t = t_coarse_samples[1:] - t_coarse_samples[:-1]
+-        delta_t = torch.cat([delta_t, torch.tensor([1.0 - t_coarse_samples[-1]])]) # Last segment
+-        
+-        # Transmittance
+-        alpha = 1.0 - torch.exp(-sigma_coarse * delta_t)
+-        T = torch.cumprod(torch.exp(-sigma_coarse * delta_t), dim=0)
+-        T = torch.cat([torch.ones_like(T[:1]), T[:-1]], dim=0)
+-        
+-        weight = alpha * T
+-        color_coarse = torch.sum(weight.unsqueeze(-1) * c_coarse, dim=0)
+-        
+-        # 2. Fine sampling
+-        # Use normalized weights as PDF
+-        pdf = weight / (weight.sum() + 1e-8)
+-        # Sample indices
+-        indices = torch.multinomial(pdf, num_fine, replacement=True)
+-        # Interpolate t
+-        t_fine = t_coarse_samples[indices]
+-        points_fine = ray_o.unsqueeze(0) + t_fine.unsqueeze(1) * ray_d.unsqueeze(0)
+-        
+-        x_enc_fine = self.positional_encoding(points_fine, L=10)
+-        c_fine, sigma_fine = self.nerf(x_enc_fine, d_enc)
+-        
+-        # Re-render with fine samples
+-        # Note: delta_t for fine samples needs to be defined. 
+-        # Simplified: assume uniform or use coarse deltas if indices align.
+-        # For correctness, we should define t_fine bounds.
+-        # Let's assume t_fine are points, and we approximate delta as coarse delta or uniform.
+-        # Standard approach: use the sampled t's to define intervals.
+-        # For brevity, we assume a helper `render_samples` exists or implement simple uniform delta.
+-        # Here, we just return coarse color as approximation if fine logic is complex, 
+-        # but DeblurNeRF uses fine.
+-        
+-        # Simplified fine render:
+-        delta_t_fine = torch.ones(num_fine) * 0.01 # Placeholder for delta
+-        alpha_fine = 1.0 - torch.exp(-sigma_fine * delta_t_fine)
+-        T_fine = torch.cumprod(torch.exp(-sigma_fine * delta_t_fine), dim=0)
+-        T_fine = torch.cat([torch.ones_like(T_fine[:1]), T_fine[:-1]], dim=0)
+-        weight_fine = alpha_fine * T_fine
+-        color_fine = torch.sum(weight_fine.unsqueeze(-1) * c_fine, dim=0)
+-        
+-        return color_fine
+-
+-    def forward(self, pixel_p, ray_o, ray_d, view_embedding):
+-        """
+-        Forward pass for a single pixel.
+-        pixel_p: (2,)
+-        ray_o: (3,)
+-        ray_d: (3,)
+-        view_embedding: (32,)
+-        Returns: blurry_color (3,)
+-        """
+-        N = self.N
+-        # Canonical locations q0 = p + offset
+-        # self.canonical_offsets is (N, 2)
+-        q0 = pixel_p.unsqueeze(0) + self.canonical_offsets # (N, 2)
+-        
+-        # Prepare inputs for DSK
+-        # p: (2,), q0: (N, 2), l: (32,)
+-        # DSK expects batched input? Or loop?
+-        # Paper: "forward the MLP G_phi N times".
+-        # We can batch them.
+-        
+-        p_batch = pixel_p.unsqueeze(0).expand(N, -1)
+-        l_batch = view_embedding.unsqueeze(0).expand(N, -1)
+-        
+-        # DSK Output: (delta_o, delta_q, w)
+-        # delta_o: (N, 3), delta_q: (N, 2), w: (N, 1)
+-        dsk_out = self.dsk(p_batch, q0, l_batch)
+-        
+-        delta_o = dsk_out[:, :3]
+-        delta_q = dsk_out[:, 3:5]
+-        w = dsk_out[:, 5:]
+-        
+-        # Deform locations
+-        q = q0 + delta_q # (N, 2)
+-        
+-        # Generate optimized rays
+-        # Direction d_q: derived from q. 
+-        # If q is image coordinate, d_q is direction from camera center to q.
+-        # Assuming pinhole camera: d_q = normalize(K^{-1} [q, 1]) - o?
+-        # Simplified: d_q is direction towards pixel q.
+-        # In ray space, if ray_o is origin, and q is target on image plane at z=1:
+-        # d_q = normalize(q_3d - ray_o)
+-        # Let's assume a helper `get_direction_from_pixel`
+-        d_q = self.get_direction_from_pixel(q, ray_o) # (N, 3)
+-        
+-        # Deform origin
+-        o_q = ray_o.unsqueeze(0) + delta_o # (N, 3)
+-        
+-        # Render each ray
+-        colors = []
+-        for i in range(N):
+-            c = self.render_ray(o_q[i], d_q[i])
+-            colors.append(c)
+-        colors = torch.stack(colors) # (N, 3)
+-        
+-        # Composite
+-        # w: (N, 1), colors: (N, 3)
+-        blurred_color = torch.sum(w * colors, dim=0) # (3,)
+-        
+-        # Gamma correction
+-        blurred_color = blurred_color ** (1.0 / 2.2)
+-        
+-        return blurred_color
+-
+-    def get_direction_from_pixel(self, pixel_coords, origin):
+-        """
+-        pixel_coords: (N, 2) in image space (e.g. normalized or pixel indices)
+-        origin: (3,) camera center
+-        Returns: directions (N, 3)
+-        """
+-        # Assuming pixel_coords are in camera space (x, y) at z=1
+-        # Convert to 3D: (x, y, 1)
+-        points_3d = torch.cat([pixel_coords, torch.ones_like(pixel_coords[:, :1])], dim=1)
+-        # Direction is from origin to point
+-        # But ray_o is origin.
+-        # d = normalize(point - origin)
+-        # However, in NeRF, ray_d is usually normalized.
+-        # If pixel_coords are relative to principal point, this works.
+-        # Simplified: assume pixel_coords are already in direction space or handled by camera model.
+-        # For this pseudocode, we assume d_q is computed correctly by external camera logic.
+-        # Here we return a placeholder direction based on q.
+-        # In reality, d_q = normalize(K^{-1} [q_x, q_y, 1])
+-        return F.normalize(points_3d - origin.unsqueeze(0), dim=1)
+-
+-    def compute_loss(self, blurry_pred, blurry_gt, canonical_offsets, pixel_p, delta_o_pred):
+-        """
+-        Compute total loss.
+-        """
+-        # Reconstruction Loss
+-        L_recon = torch.mean((blurry_pred - blurry_gt) ** 2)
+-        
+-        # Alignment Loss
+-        # q0 is pixel_p + canonical_offsets
+-        q0 = pixel_p.unsqueeze(0) + canonical_offsets
+-        # Pick one fixed element, e.g., index 0
+-        q0_fixed = q0[0]
+-        delta_o_fixed = delta_o_pred[0]
+-        
+-        L_align = torch.norm(q0_fixed - pixel_p) ** 2 + self.lambda_o * torch.norm(delta_o_fixed) ** 2
+-        
+-        L_total = L_recon + self.lambda_a * L_align
+-        
+-        return L_total
++        B = pixel_coords.shape[0]
++        view_emb = self.view_embeddings[view_idx] # (B, 32)
++        
++        # 1. Predict DSK parameters
++        # Inputs: p (B,2), q0 (N,2), l (B,32)
++        # We need to broadcast q0 for each pixel
++        q0 = self.canonical_locs.unsqueeze(0).expand(B, -1, -1) # (B, N, 2)
++        
++        # Reshape for MLP input: (B*N, 2 + 2 + 32)
++        p_exp = pixel_coords.unsqueeze(1).expand(-1, self.N, -1).reshape(-1, 2)
++        q0_exp = q0.reshape(-1, 2)
++        l_exp = view_emb.unsqueeze(1).expand(-1, self.N, -1).reshape(-1, 32)
++        
++        dsk_input = torch.cat([p_exp, q0_exp, l_exp], dim=-1)
++        dsk_out = self.dsk(dsk_input) # (B*N, 3 + 2 + 1)
++        
++        delta_o = dsk_out[..., :3].reshape(B, self.N, 3)
++        delta_q = dsk_out[..., 3:5].reshape(B, self.N, 2)
++        weights = dsk_out[..., 5].reshape(B, self.N, 1)
++        
++        # Apply initialization gain
++        delta_o = delta_o * self.init_gain
++        delta_q = delta_q * self.init_gain
++        weights = weights * self.init_gain
++        
++        # Normalize weights to sum to 1
++        weights = F.softmax(weights, dim=1)
++        
++        # 2. Generate deformed rays
++        # q = q0 + delta_q
++        q = q0 + delta_q # (B, N, 2)
++        
++        # Convert 2D pixel offset to direction change? 
++        # The paper says dq is derived from deformed location. 
++        # In implementation, we often approximate direction change or treat q as a shift in the image plane 
++        # which implies a direction change relative to the camera center.
++        # For simplicity in this pseudocode, we assume delta_q represents a shift in the endpoint 
++        # or we approximate the new direction. 
++        # Strictly, dq is the direction of the ray passing through (p + delta_q).
++        # Let's approximate: new_endpoint = ray_origin + direction * depth. 
++        # The paper defines rq = (o + delta_o) + t * dq.
++        # We need dq. If q is a 2D coordinate on the image plane, dq is the vector from o to q in 3D?
++        # Or q is a perturbation of the direction? 
++        # Source [S3] says: "dq is transformed ray direction by applying delta_vT to pixel coordinates".
++        # Let's assume delta_q is a 2D offset on the image plane. 
++        # We need to convert this to a 3D direction. 
++        # Assuming pinhole camera, direction d_q is proportional to (K^-1 * [q, 1]).
++        # However, the paper simplifies this by just optimizing the ray origin and direction implicitly.
++        # For the purpose of the algorithm description, we treat dq as a computed direction.
++        # Here we use a placeholder logic for dq based on q offset if intrinsics were available,
++        # but since intrinsics aren't in the DSK input, we assume the direction change is handled 
++        # by the optimization of delta_o and the implicit geometry.
++        # Actually, Source [S1] Eq 9: rq = (o + delta_o) + t * dq.
++        # And q = q0 + delta_q.
++        # It implies dq is the direction corresponding to pixel q.
++        
++        blurred_colors = []
++        for i in range(self.N):
++            # Compute direction for pixel q[:, i, :]
++            # This requires camera intrinsics K. Assuming K is available or q is in normalized coords.
++            # For this generic pseudocode, we assume a helper `get_direction_from_pixel` exists.
++            dq = get_direction_from_pixel(q[:, i, :], ray_origins) # (B, 3)
++            new_o = ray_origins + delta_o[:, i, :] # (B, 3)
++            
++            # Render ray
++            c_q = self.render_ray(new_o, dq)
++            blurred_colors.append(c_q)
++            
++        blurred_colors = torch.stack(blurred_colors, dim=1) # (B, N, 3)
++        
++        # 3. Blend
++        # weights: (B, N, 1)
++        blended = torch.sum(blurred_colors * weights, dim=1) # (B, 3)
++        
++        # 4. Gamma correction
++        # g(c) = c^(1/2.2)
++        # Ensure non-negative for power
++        blended = torch.clamp(blended, min=0.0)
++        blurred_pred = torch.pow(blended, 1.0/2.2)
++        
++        return blurred_pred
++
++    def compute_loss(self, blurred_pred, ground_truth_blurry):
++        L_recon = torch.mean((blurred_pred - ground_truth_blurry) ** 2)
++        
++        # Alignment loss
++        # q0 is self.canonical_locs. p is pixel_coords.
++        # We need to identify the "center" element. Usually the first or middle one.
++        # Let's assume index 0 is the center.
++        q0_center = self.canonical_locs[0] # (2,)
++        p_center = pixel_coords[:, 0] # This logic is flawed for batch. 
++        # Alignment loss is per pixel.
++        # L_align = ||q0 - p||^2 + lambda_o ||delta_o_q0||^2
++        # q0 is (B, N, 2). p is (B, 2).
++        # We align q0[0] with p.
++        
++        q0_0 = self.canonical_locs[0].unsqueeze(0).unsqueeze(0).expand_as(pixel_coords) # (B, 2)
++        # Wait, q0 in DSK output is per pixel. The canonical locs are fixed.
++        # The alignment loss constrains the *predicted* center ray to be close to the input ray.
++        # Source [S1]: "supervises q0 to be the center of the kernel".
++        # L_align = ||q^0 - p||^2 + lambda_o ||delta_o_{q^0}||^2
++        # Here q^0 refers to the canonical location used for the center ray.
++        
++        # Let's pick the first canonical location as the center
++        center_idx = 0
++        delta_o_center = delta_o[:, center_idx, :] # (B, 3)
++        
++        # q0_center is the canonical coordinate (2D). p is the pixel coordinate (2D).
++        # They are already in the same space.
++        align_pos = torch.mean((self.canonical_locs[center_idx] - pixel_coords) ** 2)
++        align_orig = torch.mean(torch.sum(delta_o_center ** 2, dim=1))
++        
++        L_align = align_pos + 10.0 * align_orig
++        
++        return L_recon + 0.1 * L_align
++
++# Helper function to get direction from 2D pixel coordinate
++def get_direction_from_pixel(pixel_2d, ray_origins):
++    # This is a placeholder. In reality, this requires camera intrinsics K.
++    # d = K^-1 * [x, y, 1]
++    # Since K is not part of the DSK module, it's assumed to be known from the camera pose.
++    # For the sake of self-contained pseudocode, we assume a standard pinhole model.
++    # This function would typically be outside the class or passed as a module.
++    pass
+ ```
+ 
++**Parameters:**
++*   $N$ (Number of sparse locations): 5 [S1].
++*   View embedding length: 32 [S1].
++*   Batch size: 1024 rays [S1].
++*   Sampling: 64 coarse coordinates, 64 fine coordinates [S1].
++*   Optimizer: Adam (default parameters) [S1].
++*   Learning rate: Starts at $5 \times 10^{-4}$, decays exponentially to $8 \times 10^{-5}$ [S1].
++*   Training duration: 200k iterations on a single NVIDIA V100 GPU [S1].
++*   Alignment loss weight $\lambda_o$: 10 [S1].
++*   Reconstruction loss weight $\lambda_a$: 0.1 [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Non-rigid Distortion:** If all components (NeRF and DSK) are freely optimized, the NeRF may undergo non-rigid distortion to compensate for blur errors. This is mitigated by the alignment loss $L_{align}$ [S1].
++*   **3D Inconsistency:** Because the blur kernel is optimized pixel-wise independently, it may incur inconsistency in 3D geometry and appearance compared to methods that enforce rigid transformations [S3].
++*   **Positional Encoding:** Using positional encoding on the input pixel coordinate $p$ for the DSK module was tested but found not to help, likely because the spatially-varying kernel changes gradually without high-frequency variation [S1].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Training is computationally expensive due to the need to render $N$ rays per pixel. With $N=5$, this is 5x the cost of standard NeRF per pixel, plus the overhead of the DSK MLP.
+-*   **Memory Complexity:** Requires storing the NeRF MLP and the DSK MLP. The view embeddings add minimal memory overhead ($32 \times$ number of views).
+-*   **Performance:** On synthetic scenes, DeblurNeRF achieves higher PSNR/SSIM and lower LPIPS compared to ablations without gamma correction, alignment, or origin optimization [S1]. It handles both camera motion blur and defocus blur effectively [S1].
+-*   **Strengths:** Efficient approximation for moderate blur; does not require sharp ground truth images; joint optimization recovers sharp NeRFs [S1].
+-*   **Limitations:** Pixel-wise independent blur modeling can lead to 3D inconsistency (geometric artifacts) compared to methods with rigid scene-wise constraints [S3]. Performance may degrade under severe motion blur compared to physically grounded methods like BAD-NeRF [S2].
+-*   **When to use:** When input images are blurry (motion or defocus) and sharp ground truth is unavailable, and computational resources are limited compared to physically accurate blur models.
+-*   **When not to use:** When severe motion blur is present and high geometric fidelity is critical, as rigid transformation models (e.g., DP-NeRF) may be more accurate [S2, S3].
++*   **Time Complexity:** Training is computationally intensive due to the joint optimization of the NeRF and the DSK module. For each pixel, $N$ rays are rendered instead of 1. With $N=5$ and 128 samples per ray, the rendering cost is roughly $5 \times$ that of standard NeRF per pixel.
++*   **Memory Complexity:** Requires storing the NeRF MLP, the DSK MLP, and view embeddings for all input views. The DSK MLP is small (4 layers, 64 channels), so its memory footprint is negligible compared to the NeRF.
++*   **Performance:** On synthetic scenes, DeblurNeRF achieves higher PSNR/SSIM and lower LPIPS than variants without gamma correction, alignment loss, or origin optimization [S1]. It is suited for moderate blur. For severe motion blur, physically grounded methods like BAD-NeRF may recover sharper results and improve pose accuracy, albeit with higher computational complexity [S2].
++*   **Strengths:** Does not require sharp ground-truth images; handles both camera motion and defocus blur; efficient approximation for moderate blur.
++*   **Limitations:** Potential 3D inconsistency due to pixel-wise independent blur modeling; less effective for severe blur compared to trajectory-based methods; requires careful tuning of the alignment loss to prevent NeRF distortion.
+ 
+ ## Background
+-DeblurNeRF was proposed by Xiaoyu Li et al. in 2021/2022 [S1]. It is the first method to recover a sharp NeRF from blurry inputs by simulating the blurring process. The method builds on the original NeRF framework [S1] and addresses the degradation caused by defocus and motion blur in real-world captures. It was tested on synthetic scenes generated with Blender and real-world scenes captured with a Canon EOS RP [S1].
++DeblurNeRF (also known as DeRF) was introduced by Xiaoyu Li et al. in 2021/2022 [S1]. It is the first method to recover a sharp NeRF from blurry input images by adopting an analysis-by-synthesis approach. The method was implemented on a PyTorch re-implementation of NeRF and tested on synthetic scenes generated with Blender and real-world scenes captured with a Canon EOS RP [S1]. It differs from DP-NeRF by using pixel-wise independent transformations (DSK) instead of scene-wise shared rigid transformations, which leads to 3D inconsistency but allows for more flexible spatially varying blur modeling [S3].
+ 
+ ## Sources

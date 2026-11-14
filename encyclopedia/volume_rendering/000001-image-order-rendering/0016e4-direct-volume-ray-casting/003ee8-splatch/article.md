@@ -7,11 +7,11 @@ Splatch is a lightweight, CPU-based ray-tracing software tool designed for the f
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of $N$ particles, each defined by position $\mathbf{p}_i$, peak density $\rho_{0,i}$, spread parameter $\sigma_i$, and emission/absorption coefficients $\mathbf{E}_i, \mathbf{A}_i$ (vectors of size 3 for RGB). Camera parameters: position $\mathbf{c}$, look-at point $\mathbf{l}$, sky vector $\mathbf{s}$, and field-of-view angle $\phi$.
+*   **Input:** A set of $N$ particles, each defined by position $\mathbf{p}_i$, peak density $\rho_{0,i}$, spread parameter $\sigma_i$, and emission/absorption coefficients $\mathbf{E}_i, \mathbf{A}_i$ (vectors of size 3 for RGB) [S1]. Camera parameters: position $\mathbf{c}$, look-at point $\mathbf{l}$, sky vector $\mathbf{s}$, and field-of-view angle $\phi$ [S1].
 *   **Output:** A 2D image (frame buffer) stored in a standard format (e.g., TGA, JPEG) [S1].
 
 **Data Structures:**
-*   **Particle Data:** Each particle requires 30 bytes of memory [S1]. The exact layout is not specified in the sources, but it must store position (3 floats), density parameters (2 floats), and emission/absorption coefficients (6 floats) [S1].
+*   **Particle Data:** The algorithm requires 30 bytes per particle [S1]. The exact memory layout is not specified in the sources [S1].
 *   **Frame Buffer:** An array storing an RGB color triplet for every pixel of the resulting image [S1]. Initialized to black (0, 0, 0) [S1].
 
 **Algorithm Steps:**
@@ -26,7 +26,7 @@ Splatch is a lightweight, CPU-based ray-tracing software tool designed for the f
     Apply a perspective projection using the user-defined field-of-view angle $\phi$ [S1]. This defines the mapping from 3D world coordinates to 2D screen coordinates for each pixel [S1].
 
 4.  **Initialization:**
-    Allocate the frame buffer for the desired image resolution. Initialize all pixel values to black (0, 0, 0) [S1].
+    Allocate the frame buffer for the desired image resolution [S1]. Initialize all pixel values to black (0, 0, 0) [S1].
 
 5.  **Rendering Loop:**
     For each particle $i$ in the sorted list:
@@ -56,210 +56,88 @@ import math
 import numpy as np
 
 def splatch_render(particles, camera_pos, look_at, sky_vec, fov_deg, image_width, image_height):
-    """
-    Renders a scene using the Splatch algorithm.
-    
-    Args:
-        particles: List of dicts with keys: 'pos' (3-tuple), 'rho0' (float), 'sigma' (float), 
-                   'E' (3-tuple), 'A' (3-tuple).
-        camera_pos: 3-tuple (x, y, z) of camera position.
-        look_at: 3-tuple (x, y, z) of look-at point.
-        sky_vec: 3-tuple (x, y, z) of sky/up vector.
-        fov_deg: Field of view angle in degrees.
-        image_width: Width of the output image in pixels.
-        image_height: Height of the output image in pixels.
-        
-    Returns:
-        frame_buffer: 2D numpy array of shape (image_height, image_width, 3) with RGB values.
-    """
     # Step 1: Coordinate Transformation
-    # Calculate viewing direction
     v = np.array(look_at) - np.array(camera_pos)
     v_norm = v / np.linalg.norm(v)
     
-    # Construct transformation matrix M
-    # We need a matrix that maps camera_pos to origin and v to (0,0,1)
-    # This is a simplified construction; a full orthonormal basis is needed for robustness [G]
-    # Assuming standard camera setup where sky_vec is roughly up
-    # For the purpose of this algorithm, we assume M is pre-calculated or can be derived 
-    # from camera_pos, look_at, and sky_vec to align v with +z axis [S1]
-    # Let's assume a function get_transformation_matrix exists that returns M
-    M = get_transformation_matrix(camera_pos, v_norm, sky_vec)
+    # Construct transformation matrix M: maps camera_pos to origin, aligns v with +z
+    z_axis = v_norm
+    x_axis = np.cross(sky_vec, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
     
-    # Transform all particles
+    R = np.array([x_axis, y_axis, z_axis])
+    T = np.eye(4)
+    T[:3, 3] = -np.array(camera_pos)
+    R_4x4 = np.eye(4)
+    R_4x4[:3, :3] = R
+    M = R_4x4 @ T
+    
     transformed_particles = []
     for p in particles:
         pos = np.array(p['pos'])
-        pos_transformed = M @ np.append(pos, 1) # Assuming homogeneous coordinates if M is 4x4
-        # If M is 3x3, just M @ pos
-        # The source says "linear transformation matrix", implying 3x3 or 4x4 affine
-        # Let's assume 3x3 for simplicity as per "linear" description, but position needs translation
-        # The source says "maps c to origin", so it includes translation.
-        # Let's assume M is 4x4 for correctness in general graphics, but the source text is ambiguous.
-        # We will use a 4x4 matrix approach for robustness [G]
-        pos_hom = np.append(pos, 1)
+        pos_hom = np.append(pos, 1.0)
         pos_new = M @ pos_hom
         transformed_particles.append({
             'pos': pos_new[:3],
             'rho0': p['rho0'],
             'sigma': p['sigma'],
-            'E': p['E'],
-            'A': p['A']
+            'E': np.array(p['E']),
+            'A': np.array(p['A'])
         })
         
     # Step 2: Sorting
-    # Sort by descending z-coordinate
     transformed_particles.sort(key=lambda p: p['pos'][2], reverse=True)
     
     # Step 3: Projection Setup
-    # Calculate pixel size and ray directions
     fov_rad = math.radians(fov_deg)
-    aspect_ratio = image_width / image_height
-    # Assuming symmetric FOV around z-axis
-    # Ray direction for pixel (x,y)
-    # This is a simplified projection; exact mapping depends on camera matrix details [G]
+    tan_fov_half = math.tan(fov_rad / 2.0)
     
     # Step 4: Initialization
     frame_buffer = np.zeros((image_height, image_width, 3))
     
     # Step 5: Rendering Loop
     for p in transformed_particles:
-        pos = p['pos']
+        pos_p = np.array(p['pos'])
         rho0 = p['rho0']
         sigma = p['sigma']
-        E = np.array(p['E'])
-        A = np.array(p['A'])
+        E = p['E']
+        A = p['A']
         
-        # Determine bounding box in screen space
-        # The particle's influence is limited to distance f * sigma in 3D
-        # We need to map this to screen coordinates
-        # For simplicity, we iterate over all pixels and check if the ray intersects the particle's footprint
-        # This is inefficient but matches the "For every particle and every related pixel" description [S1]
-        # A more efficient implementation would calculate the bounding box [G]
-        
-        # Calculate the integral factor for each pixel
-        # The integral depends on d0, the minimum distance between the ray and the particle center
-        # Ray for pixel (i,j) passes through camera_pos and has direction r_ij
-        # In transformed space, camera is at origin, looking down +z
-        # Ray direction in transformed space is (x_screen, y_screen, -focal_length) normalized?
-        # The source says "perspective projection... using FOV" [S1]
-        # Let's assume standard perspective projection where ray direction in transformed space is:
-        # r = (x, y, -1) normalized, where x,y are screen coords scaled by FOV
-        
-        # To avoid complex ray-particle intersection math not fully detailed in source,
-        # we use the formula provided for the integral which depends on d0 [S1]
-        # d0 is the distance from the particle center to the ray.
-        # In transformed space, particle is at pos_p, ray starts at origin (0,0,0) with direction r
-        # d0 = |pos_p x r| / |r| ? No, that's distance from origin to line.
-        # d0 is the minimum distance between the ray and the particle center.
-        # Since the ray starts at the camera (origin in transformed space) and goes through the pixel,
-        # and the particle is at pos_p, the ray is the line L(t) = t * r.
-        # The distance from point pos_p to line L is |(pos_p) x r| / |r| if the ray is infinite.
-        # However, the ray is semi-infinite. But for cosmological simulations, particles are far away.
-        # We assume the ray intersects the particle's influence region.
-        
-        # Let's iterate over pixels. This is O(N_pixels * N_particles) which is slow, but matches the description [S1]
-        # Optimization: Only iterate over pixels where the particle has significant influence [G]
+        # Guard against division by zero if A is zero [G]
+        A_safe = np.where(A == 0, 1.0, A)
+        E_safe = np.where(A == 0, 0.0, E)
+        ratio = E_safe / A_safe
         
         for y in range(image_height):
             for x in range(image_width):
                 # Calculate ray direction in transformed space
-                # Map pixel (x,y) to normalized device coordinates
-                # Assuming center of image is (0,0)
-                nx = (x - image_width/2) / (image_width/2)
-                ny = (y - image_height/2) / (image_height/2)
-                
-                # Scale by FOV
-                # tan(fov/2) is the half-width of the view at z=-1
-                tan_fov_half = math.tan(fov_rad / 2)
+                nx = (x - image_width / 2.0) / (image_width / 2.0)
+                ny = (y - image_height / 2.0) / (image_height / 2.0)
                 rx = nx * tan_fov_half
                 ry = ny * tan_fov_half
-                rz = -1.0 # Looking down -z? Source says align v with +z, so camera looks down +z?
-                # Source says "aligns viewing direction v with the positive z-axis" [S1]
-                # So camera looks in +z direction.
-                # Ray direction should be (rx, ry, 1) normalized?
-                # Let's assume ray direction r = (rx, ry, 1)
-                r = np.array([rx, ry, 1.0])
-                r_norm = np.linalg.norm(r)
-                r_unit = r / r_norm
+                rz = 1.0
+                r = np.array([rx, ry, rz])
+                r_unit = r / np.linalg.norm(r)
                 
-                # Particle position in transformed space
-                pos_p = np.array(p['pos'])
-                
-                # Calculate d0: minimum distance between ray and particle center
-                # Ray: O + t*R, where O=(0,0,0), R=r_unit
-                # Point: P = pos_p
-                # Vector from O to P: V = P
-                # d0 = |V x R| / |R| = |V x R| since R is unit
+                # d0 is distance from ray to particle center
                 cross_prod = np.cross(pos_p, r_unit)
                 d0 = np.linalg.norm(cross_prod)
                 
-                # Check if particle influences this pixel
-                # Influence radius in 3D is f * sigma
-                # But d0 is distance in 3D? No, d0 is distance from ray to particle center.
-                # The integral formula uses d0 [S1]
-                # If d0 is very large, the exponential term will be negligible.
-                
-                # Calculate integral
-                # Integral = rho0 * sigma * exp(-d0^2 / sigma^2) * sqrt(pi)
-                # Note: The source formula has exp(-d0^2 / sigma^2) [S1]
+                # Compact support culling: skip if d0 is too large
+                # f is typically ~3 for SPH kernels, but exact value not given [G]
+                if d0 > sigma * 3.0:
+                    continue
+                    
+                # Calculate integral of density along ray
                 integral_val = rho0 * sigma * math.exp(-(d0**2) / (sigma**2)) * math.sqrt(math.pi)
                 
-                # Update intensity
-                # I_after = (I_before - E/A) * exp(-A * integral) + E/A
-                # Component-wise operations
-                # Avoid division by zero if A is 0
-                if np.any(A == 0):
-                    # If A is 0, no absorption, intensity doesn't change due to this particle?
-                    # Or E/A is undefined. Assume E=0 if A=0 for stability [G]
-                    E_safe = np.where(A == 0, 0, E)
-                    A_safe = np.where(A == 0, 1, A) # Avoid div by zero
-                else:
-                    E_safe = E
-                    A_safe = A
-                    
-                ratio = E_safe / A_safe
+                # Update intensity using radiative transfer solution
                 exponent = -A_safe * integral_val
                 frame_buffer[y, x] = (frame_buffer[y, x] - ratio) * np.exp(exponent) + ratio
-                
+        
     return frame_buffer
-
-def get_transformation_matrix(camera_pos, view_dir, sky_vec):
-    """
-    Constructs a 4x4 transformation matrix that maps camera_pos to origin
-    and aligns view_dir with the positive z-axis.
-    """
-    # Normalize view direction
-    z_axis = view_dir / np.linalg.norm(view_dir)
-    
-    # Calculate right vector
-    # Cross product of sky_vec and view_dir
-    x_axis = np.cross(sky_vec, z_axis)
-    x_axis = x_axis / np.linalg.norm(x_axis)
-    
-    # Calculate up vector
-    y_axis = np.cross(z_axis, x_axis)
-    y_axis = y_axis / np.linalg.norm(y_axis)
-    
-    # Construct rotation matrix
-    # We want to rotate the world so that view_dir becomes (0,0,1)
-    # The rotation matrix R has rows x_axis, y_axis, z_axis?
-    # If we multiply R * v, we get coordinates in the new basis.
-    # R = [x_axis^T; y_axis^T; z_axis^T]
-    R = np.array([x_axis, y_axis, z_axis])
-    
-    # Translation matrix T to move camera_pos to origin
-    T = np.eye(4)
-    T[:3, 3] = -camera_pos
-    
-    # Rotation matrix in 4x4
-    R_4x4 = np.eye(4)
-    R_4x4[:3, :3] = R
-    
-    # Combined matrix M = R_4x4 * T
-    M = R_4x4 @ T
-    
-    return M
 ```
 
 **Parameters:**
@@ -270,7 +148,7 @@ def get_transformation_matrix(camera_pos, view_dir, sky_vec):
 **Edge Cases and Pitfalls:**
 *   **Particle Overlap:** The algorithm assumes particles do not overlap for the simple intensity update formula, but in reality, they do. The source notes that since relative intensity changes due to a single particle are small, the approximation is acceptable [S1].
 *   **Precision:** The exponential decay in the Gaussian distribution can lead to underflow for large $d_0$. The compact support factor $f$ helps mitigate this by truncating the distribution [S1].
-*   **Division by Zero:** If absorption coefficient $A_p$ is zero, the term $E_p/A_p$ is undefined. The pseudocode handles this by setting $E_p=0$ if $A_p=0$ [G].
+*   **Division by Zero:** If absorption coefficient $A_p$ is zero, the term $E_p/A_p$ is undefined. The sources do not specify handling for this case, so a guard should clamp or skip zero absorption [G].
 
 ## Operating characteristics
 *   **Time Complexity:** CPU time $T_{CPU}$ is proportional to the number of pixels $n_{pixel}$ ($T_{CPU} \propto n_{pixel}$) and inversely proportional to the square root of the field-of-view angle $\phi$ ($T_{CPU} \propto \phi^{-0.5}$) [S1].

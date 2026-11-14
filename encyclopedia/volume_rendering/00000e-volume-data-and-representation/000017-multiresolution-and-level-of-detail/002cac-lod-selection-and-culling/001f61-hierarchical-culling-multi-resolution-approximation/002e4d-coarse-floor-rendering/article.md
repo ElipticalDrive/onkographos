@@ -7,26 +7,30 @@ Coarse Floor Rendering prevents scene flicker during chunk plan swaps in hierarc
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The volume dataset with its multi-resolution pyramid structure; the current chunk plan defining which bricks are resident.
-*   **Output:** A rendered frame where the background is occluded by the coarsest level's volume data, preventing visual gaps.
+*   **Input:** The volume dataset with its multi-resolution pyramid structure and the current chunk plan defining which bricks are resident [S1, unofficial].
+*   **Output:** A rendered frame where the background is occluded by the coarsest level's volume data, preventing visual gaps [S1, unofficial].
 
 **Data Structures:**
-*   **Coarsest Pyramid Level:** The lowest-resolution representation of the entire volume.
-*   **Texture Upload:** The coarsest level must fit within a single texture upload constraint. If the coarsest level is too big for one texture upload, the floor is skipped [S1, unofficial].
+*   **Coarsest Pyramid Level:** The lowest-resolution representation of the entire volume [S1, unofficial].
+*   **Exact Layouts:** Not given in the sources.
 
 **Parameters:**
 *   `coarseFloor` (boolean): Enables the technique. Default is `true`. Set to `false` to opt out [S1, unofficial].
 *   `chunkFadeMs` (number): Controls the transition duration for fine detail dissolving over the floor. Default is `120` ms. Set to `0` to disable fading [S1, unofficial].
 
 **Steps:**
-1.  **Fetch Coarsest Level:** Retrieve the coarsest pyramid level of the volume data once.
+1.  **Fetch Coarsest Level:** Retrieve the coarsest pyramid level of the volume data once [S1, unofficial].
 2.  **Install Floor:** Install this coarsest level as a whole-volume floor positioned behind the active octree structure [S1, unofficial].
 3.  **Render as Volume:** Render the floor as a volume rather than a dark shell or solid background to maintain visual continuity [S1, unofficial].
-4.  **Apply Fade Transition:** When new bricks stream in, apply a fade transition over the coarse floor to prevent popping artifacts. The fine detail dissolves in over the floor over the duration specified by `chunkFadeMs` [S1, unofficial].
+4.  **Apply Fade Transition:** When new bricks stream in, apply a fade transition over the coarse floor to prevent popping artifacts; fine detail dissolves in over the floor over the duration specified by `chunkFadeMs` [S1, unofficial].
+
+**Formulas:** Not given in the sources.
+
+**Pseudocode:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Texture Size Limit:** If the coarsest level exceeds the maximum texture upload size, the floor is skipped, potentially reverting to flicker behavior if not handled [S1, unofficial].
-*   **OME-Zarr Demo:** The OME-Zarr demo builds plans by hand, so the automatic floor never reached it; it must build one from the coarse data it already keeps resident [S1, unofficial].
+*   **Manual Plan Demos:** The OME-Zarr demo builds plans by hand, so the automatic floor never reached it; it must build one from the coarse data it already keeps resident [S1, unofficial].
 
 ## Subtopics
 
@@ -35,8 +39,8 @@ A transition effect applied on both backends to prevent popping artifacts when n
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   Requires fetching and uploading the coarsest pyramid level once.
-*   Adds a fade transition step during brick streaming.
+*   Requires fetching and uploading the coarsest pyramid level once [S1, unofficial].
+*   Adds a fade transition step during brick streaming [S1, unofficial].
 
 **Measured Performance:**
 *   Not given in the sources.
@@ -49,7 +53,7 @@ A transition effect applied on both backends to prevent popping artifacts when n
 *   **Limitations:** Dependent on texture upload size limits; requires manual adjustment for demos that build plans by hand (e.g., OME-Zarr) [S1, unofficial].
 
 **When to Use:**
-*   Use when chunk plan swaps cause visible flicker due to missing bricks.
+*   Use when chunk plan swaps cause visible flicker due to missing bricks [S1, unofficial].
 *   Do not use if the coarsest level exceeds texture upload limits and no alternative floor generation is available [S1, unofficial].
 
 ## Background

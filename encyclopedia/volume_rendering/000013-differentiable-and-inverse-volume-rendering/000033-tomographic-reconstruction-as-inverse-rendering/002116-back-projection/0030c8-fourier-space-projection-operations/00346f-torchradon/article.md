@@ -3,42 +3,40 @@
 Also called: Differentiable Radon Transform, Implementation Details (TorchRadon), TorchRadon library
 
 ## Overview
-TorchRadon is a PyTorch-integrated library providing differentiable forward and backward Radon projection operators for computed tomography [S1, unofficial]. It solves the problem of computing line integrals (projections) and their adjoints (back-projections) within a deep learning pipeline, enabling gradient-based optimization for tomographic reconstruction [S1, unofficial]. Unlike standard non-differentiable C++ libraries, TorchRadon allows backpropagation of gradients through the projection operations, which is essential for training generative models or optimizing latent variables in inverse rendering contexts [S1, unofficial].
+TorchRadon is a PyTorch-integrated library providing differentiable forward and backward Radon projection operators for computed tomography [S1, unofficial]. It computes line integrals (projections) and their adjoints (back-projections) within a deep learning pipeline, enabling gradient-based optimization for tomographic reconstruction [S1, unofficial]. Unlike standard non-differentiable C++ libraries, TorchRadon allows backpropagation of gradients through the projection operations, which is essential for training generative models or optimizing latent variables in inverse rendering contexts [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-The library operates on 2D or 3D tensor inputs representing the object volume or image.
-- **Forward Projection:** Input is an image/volume tensor $x$. Output is a sinogram tensor $y$ (projection data).
-- **Backward Projection:** Input is a sinogram tensor $y$. Output is a back-projected image/volume tensor $x_{bp}$.
+The library operates on 2D or 3D tensor inputs representing the object volume or image [Parent].
+- **Forward Projection:** Input is an image/volume tensor $x$. Output is a sinogram tensor $y$ (projection data) [S2, unofficial].
+- **Backward Projection:** Input is a sinogram tensor $y$. Output is a back-projected image/volume tensor $x_{bp}$ [S2, unofficial].
 
 **Data Structures:**
-Inputs are PyTorch tensors. The library handles memory layout internally. No explicit user-side data structure layout is defined in the sources beyond standard tensor dimensions [S1, unofficial][S2, unofficial].
+Inputs and outputs are PyTorch tensors [S1, unofficial]. The library configuration requires explicit parameters for geometry and sampling: grid resolution (e.g., $512 \times 512$), an array of sampling angles, and for fan-beam geometry, `source_distance` and `det_distance` [S2, unofficial]. Memory layout is handled internally by the PyTorch backend [G].
 
 **Parameters:**
-- **Resolution:** Defined by the grid size (e.g., $512 \times 512$) [S2, unofficial].
-- **Angles:** Array of sampling angles. For parallel beam, typically $[0, \pi)$ or $[0, 2\pi)$ [S2, unofficial]. For fan-beam, angles are equally spaced in $[0, 2\pi)$ [S2, unofficial].
+- **Resolution:** Grid size of the input image/volume (e.g., $512 \times 512$) [S2, unofficial].
+- **Angles:** Array of sampling angles. For parallel beam, angles are equally spaced in $[0, \pi)$ [S2, unofficial]. For fan-beam, angles are equally spaced in $[0, 2\pi)$ [S2, unofficial].
 - **Interpolation:** Supports linear and cubic interpolation [Parent].
+- **Fan-Beam Geometry:** `source_distance` (distance from X-ray source to object center, default 512) and `det_distance` (distance from detector to object center, default equals `source_distance`) [S2, unofficial].
 
 **Algorithm Steps:**
-1. Initialize the Radon operator with resolution, angles, and geometry parameters (e.g., `Radon` or `RadonFanbeam`) [S2, unofficial].
-2. Perform forward projection: $y = \text{radon.forward}(x)$ [S1, unofficial][S2, unofficial].
-3. Perform backward projection: $x_{bp} = \text{radon.backprojection}(y)$ [S1, unofficial][S2, unofficial].
+1. Initialize the Radon operator with resolution, angles, and geometry parameters using `Radon` for parallel beam or `RadonFanbeam` for fan-beam [S2, unofficial].
+2. Perform forward projection: $y = \text{radon.forward}(x)$, computing the product with matrix $A$ [S1, unofficial][S2, unofficial].
+3. Perform backward projection: $x_{bp} = \text{radon.backprojection}(y)$, computing the product with matrix $A^T$ [S1, unofficial][S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
 import numpy as np
-from torchradon import Radon, RadonFanbeam
+import torch
 
-# Example: Parallel Beam
-# Define angles: 512 angles equally spaced in [0, pi)
+# Parallel Beam Setup
 angles = np.linspace(0, np.pi, 512, endpoint=False)
-# Initialize operator for 512x512 image
 radon = Radon(512, angles)
 
-# Input image tensor x (e.g., 512x512)
+# Input image tensor x (batch, channels, height, width)
 x = torch.randn(1, 1, 512, 512)
 
 # Forward projection (product with A)
@@ -47,12 +45,8 @@ sino = radon.forward(x)
 # Backward projection (product with A^T)
 bp = radon.backprojection(sino)
 
-# Example: Fan-Beam
-# Define angles: 512 angles equally spaced in [0, 2*pi)
+# Fan-Beam Setup
 angles_fb = np.linspace(0, 2 * np.pi, 512, endpoint=False)
-# Initialize fan-beam operator
-# source_distance: Distance from X-ray source to center (default 512)
-# det_distance: Distance from detector to center (default equals source_distance)
 radon_fb = RadonFanbeam(512, angles_fb, source_distance=512)
 
 # Forward projection
@@ -64,7 +58,7 @@ bp_fb = radon_fb.backprojection(sino_fb)
 
 **Edge Cases and Pitfalls:**
 - **Precision:** The library's forward projection has a relative error of $8.34 \cdot 10^{-4}$ compared to the Astra Toolbox, and backprojection has a relative error of $4.84 \cdot 10^{-5}$ [S2, unofficial].
-- **Geometry:** Fan-beam requires specific source and detector distances [S2, unofficial].
+- **Geometry:** Fan-beam requires specific source and detector distances to ensure rays cover the whole image; detector spacing must be adjusted accordingly [S2, unofficial].
 
 ## Subtopics
 

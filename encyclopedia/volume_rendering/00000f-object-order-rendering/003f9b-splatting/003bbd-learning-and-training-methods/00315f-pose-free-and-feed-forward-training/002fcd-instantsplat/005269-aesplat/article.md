@@ -1,0 +1,198 @@
+# AESplat
+
+Also called: AESplat: Advancing Pose-Free Feed-Forward 3D Gaussian Splatting via Decoupled Appearance Modeling
+
+## Overview
+AESplat is a pose-free, feed-forward 3D Gaussian Splatting (3DGS) framework that improves novel view synthesis by decoupling appearance modeling into view-independent (zeroth-order spherical harmonics) and view-dependent (higher-order spherical harmonics) components [S1, unofficial]. Unlike unified prediction paradigms that regress all SH coefficients jointly, AESplat derives the zeroth-order coefficient directly from input pixel RGB values without training, while predicting higher-order coefficients using a shallow MLP conditioned on 3D-aware inductive biases [S1, unofficial]. This approach addresses the suboptimal rendering quality of existing pose-free methods that overlook the fundamental distinction between diffuse base appearance and specular/view-dependent variations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ unposed images $\{I_v\}_{v=1}^N$, comprising $N_C$ context images $I_C$ and $N_T$ target images $I_T$. The input resolution is $224 \times 224$ pixels [S1, unofficial].
+*   **Output:** A set of 3D Gaussian primitives $\{G_{v \to 1}\}$ in the canonical frame of the first view, and camera parameters (extrinsics $P_{v \to 1}$ and intrinsics $K_v$) for all views [S1, unofficial].
+
+**Data Structures:**
+*   **Gaussian Primitive $G_j$:** Defined in the canonical frame of the first view.
+    *   Center $\mu \in \mathbb{R}^3$
+    *   Rotation $r \in \mathbb{R}^4$ (quaternion)
+    *   Scale $s \in \mathbb{R}^3$
+    *   Opacity $\alpha \in \mathbb{R}$
+    *   SH Coefficients $c \in \mathbb{R}^{(l+1)^2 \times 3}$, where $l$ is the SH degree [S1, unofficial].
+*   **Camera Parameters:**
+    *   Extrinsics $P_{v \to 1}$: 6D rotation representation + 4D homogeneous translation vector, converted to a homogeneous transformation matrix [S1, unofficial].
+    *   Intrinsics $K_v$: Field of View (FOV), assuming equal horizontal/vertical FOV and centered principal point [S1, unofficial].
+
+**Method Steps:**
+
+1.  **Multi-View Feature Extraction:**
+    Input images are patchified and encoded by a DINOv2 backbone into image features $F_v$. These are concatenated with learnable camera tokens $g_v$. A ViT-based encoder-decoder with Alternating-Attention aggregates information. Masked attention restricts context tokens to attend only to context tokens, while target tokens attend to both, preventing target-view leakage into Gaussian reconstruction [S1, unofficial].
+
+2.  **Camera Parameter Estimation:**
+    Refined camera tokens $\hat{g}_v$ are passed to a camera head to predict extrinsics $P_{v \to 1}$ and intrinsics $K_v$ for each view. The first view is defined as the canonical frame [S1, unofficial].
+
+3.  **Gaussian Geometry Prediction:**
+    Refined context tokens $\hat{F}_v^C$ are processed by two DPT heads:
+    *   One predicts depth to recover Gaussian centers $\mu$.
+    *   The other predicts rotation $r$, scale $s$, opacity $\alpha$, and initial SH coefficients.
+    All Gaussians are transformed into the canonical frame of the first view:
+    $$ \{G_{v \to 1}\}_{v=1}^N = \{(\mu_j, r_j, s_j, \alpha_j, c_j)\}_{j=1}^{H \times W} $$
+    where $\mu \in \mathbb{R}^3, r \in \mathbb{R}^4, s \in \mathbb{R}^3, \alpha \in \mathbb{R}, c \in \mathbb{R}^{(l+1)^2 \times 3}$ [S1, unofficial].
+
+4.  **View-Independent Appearance Modeling (VIAM):**
+    The zeroth-order SH coefficient $c_{00}$ is derived directly from the input image pixel RGB value $C_j^v \in \mathbb{R}^3$ for pixel-aligned Gaussians, without training. This is termed Image-to-Direct Component (I2DC). The formula is:
+    $$ c_{00}^{(v,j)} = \frac{C_j^v - 0.5}{Y_{00}} $$
+    where $Y_{00} = \frac{1}{2\sqrt{\pi}}$ is the constant zeroth-order SH basis function [S1, unofficial].
+
+5.  **Inductive Bias Generation:**
+    Two 3D-aware inductive biases are computed to guide view-dependent appearance prediction:
+    *   **Gaussian-to-Views Spatial Relation Embedding (GVSRE):** For each Gaussian center $\mu_j^{vs}$ from view $vs$, a multi-view spatial descriptor $r_j^{vs}$ is formed by concatenating the normalized direction and log-distance to each context camera center $o^{vc}$:
+        $$ r_j^{vs} = \text{concat}_{vc \in I_C} \left[ \frac{o^{vc} - \mu_j^{vs}}{\|o^{vc} - \mu_j^{vs}\|_2}, \log \|o^{vc} - \mu_j^{vs}\|_2 \right] \in \mathbb{R}^{4|I_C|} $$
+        This descriptor is mapped to an embedding via a shallow MLP [S1, unofficial].
+    *   **Warped Color Map (WCM):** For a context view $v_p$ and target view $v_q$, project Gaussian $G_j$ center $\mu_j^{v_p}$ to $v_q$ using intrinsic $K^{v_q}$ and camera-to-camera transform $T^{v_q \leftarrow v_p}$:
+        $$ u_j^{v_q \leftarrow v_p} = \pi(K^{v_q} T^{v_q \leftarrow v_p} \mu_j^{v_p}) $$
+        Sample RGB color $\hat{C}_j^{v_q \leftarrow v_p}$ from $I^{v_q}$ via bilinear interpolation at $u_j^{v_q \leftarrow v_p}$. Compute validity mask:
+        $$ m_j^{v_q \leftarrow v_p} = \mathbb{I}[z_j^{v_q \leftarrow v_p} > 0] \cdot \mathbb{I}[u_j^{v_q \leftarrow v_p} \in \Omega] $$
+        where $z$ is depth and $\Omega$ is the normalized image domain. Aggregate all $H \times W$ Gaussians to form warped color map $\hat{C}^{v_q \leftarrow v_p}$ and mask $m^{v_q \leftarrow v_p}$ [S1, unofficial].
+
+6.  **View-Dependent Appearance Prediction:**
+    A four-layer MLP with GELU activations (after the first three hidden layers) and linear output predicts the higher-order SH coefficients. Inputs are:
+    *   GVSRE embedding
+    *   Warped Color Map (WCM)
+    *   Intermediate features from the Gaussian geometry head
+    Layer normalization is applied before the final prediction [S1, unofficial].
+
+7.  **Rendering and Loss:**
+    The model is optimized using photometric error between rendered image $I_{render}$ and ground-truth $I_{gt}$:
+    $$ \mathcal{L} = \lambda_{mse} \|I_{render} - I_{gt}\|_2^2 + \lambda_{lpips} \text{LPIPS}(I_{render}, I_{gt}) $$
+    Typical parameters: $\lambda_{mse} = 1$, $\lambda_{lpips} = 0.05$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def aesplat_pipeline(context_images, target_images):
+    """
+    context_images: List of N_C images (H, W, 3)
+    target_images: List of N_T images (H, W, 3)
+    Returns: Gaussian primitives in canonical frame, camera params
+    """
+    # 1. Feature Extraction
+    # Patchify and encode with DINOv2
+    image_features = [dino_v2_encode(img) for img in context_images + target_images]
+    # Concatenate with learnable camera tokens
+    tokens = [feat + learnable_camera_token for feat in image_features]
+    # Alternating-Attention Decoder
+    refined_tokens = alternating_attention_decoder(tokens)
+    
+    # 2. Camera Estimation
+    # Predict 6D rotation + 4D translation and FOV
+    extrinsics = camera_head_extrinsics(refined_tokens)
+    intrinsics = camera_head_intrinsics(refined_tokens)
+    
+    # 3. Gaussian Geometry Prediction
+    # Two DPT heads
+    depth_maps = dpt_head_depth(refined_tokens)
+    geo_params = dpt_head_geo(refined_tokens) # r, s, alpha, initial_c
+    
+    # Recover centers from depth and camera params
+    centers = recover_centers_from_depth(depth_maps, extrinsics, intrinsics)
+    
+    # Transform to canonical frame of first view
+    canonical_gaussians = transform_to_canonical(centers, geo_params, extrinsics)
+    
+    # 4. View-Independent Appearance (VIAM)
+    # c00 = (RGB - 0.5) / Y00
+    Y00 = 1.0 / (2.0 * torch.sqrt(torch.tensor(torch.pi)))
+    view_independent_coeffs = []
+    for img in context_images:
+        # Pixel-aligned: assume 1 Gaussian per pixel or aggregated
+        # Simplified: mean RGB per Gaussian or pixel
+        rgb = img # (H, W, 3)
+        c00 = (rgb - 0.5) / Y00
+        view_independent_coeffs.append(c00)
+        
+    # 5. Inductive Biases
+    # GVSRE
+    gvsre_embeddings = []
+    for g in canonical_gaussians:
+        # g.center is (3,)
+        # Compute relative direction and log distance to all context camera centers
+        # Note: Camera centers must be extracted from extrinsics
+        spatial_desc = compute_spatial_descriptor(g.center, context_camera_centers)
+        gvsre_embeddings.append(spatial_mlp(spatial_desc))
+        
+    # WCM
+    warped_color_maps = []
+    for vp in context_images:
+        # Project Gaussians from vp to other context views vq
+        # Aggregate colors and masks
+        wcm = compute_warped_color_map(vp, canonical_gaussians, extrinsics, intrinsics)
+        warped_color_maps.append(wcm)
+        
+    # 6. View-Dependent Appearance Prediction
+    # MLP inputs: GVSRE, WCM, intermediate geo features
+    higher_order_coeffs = view_dependent_mlp(gvsre_embeddings, warped_color_maps, geo_features)
+    
+    # Combine coefficients
+    # c = [c00, higher_order_coeffs]
+    final_gaussians = combine_sh_coefficients(canonical_gaussians, view_independent_coeffs, higher_order_coeffs)
+    
+    return final_gaussians, extrinsics, intrinsics
+
+def compute_spatial_descriptor(center, camera_centers):
+    desc = []
+    for cam_center in camera_centers:
+        diff = cam_center - center
+        norm = torch.linalg.norm(diff)
+        direction = diff / norm
+        log_dist = torch.log(norm)
+        desc.append(torch.cat([direction, log_dist]))
+    return torch.cat(desc)
+
+def compute_warped_color_map(source_img, gaussians, extrinsics, intrinsics):
+    # Project each gaussian center to the target view
+    # Sample color from target view
+    # Compute validity mask
+    # Aggregate
+    pass
+```
+
+**Parameters:**
+*   **SH Degree ($l$):** Determines the dimensionality of SH coefficients $c \in \mathbb{R}^{(l+1)^2 \times 3}$ [S1, unofficial].
+*   **Input Resolution:** $224 \times 224$ pixels [S1, unofficial].
+*   **Batch Size:** 10 samples per iteration [S1, unofficial].
+*   **Training Iterations:** 400k [S1, unofficial].
+*   **Learning Rate:** $3 \times 10^{-4}$ for the view-dependent appearance head; same as NAS3R for remaining modules [S1, unofficial].
+*   **Loss Weights:** $\lambda_{mse} = 1$, $\lambda_{lpips} = 0.05$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The derivation of $c_{00}$ relies on the assumption that pixel RGB is a strong observation of base appearance. If lighting conditions vary significantly or if the pixel does not correspond to a single Gaussian (e.g., occlusion), this training-free derivation may introduce artifacts [S1, unofficial].
+*   **Boundaries:** The validity mask in WCM computation uses $\mathbb{I}[u \in \Omega]$ to handle points falling outside the image domain. Points with $z \le 0$ are also masked out [S1, unofficial].
+*   **Degenerate Input:** The method assumes unposed images. If poses are known, the camera estimation head may still function but the pose-free advantage is lost. The masked attention mechanism prevents target-view information from affecting Gaussian reconstruction, which is critical when $N_T > 0$ [S1, unofficial].
+
+## Subtopics
+
+### Holistic Gaussian Initialization
+Initializes Gaussians using holistic scene priors. Sets apart by focusing on initialization quality rather than appearance decoupling. Choose when initialization stability is the primary bottleneck. [Holistic Gaussian Initialization](9776-holistic-gaussian-initialization.md)
+
+### ReSplat
+Refines splats through iterative refinement. Sets apart by using a refinement loop rather than a single feed-forward pass. Choose when iterative optimization is feasible and higher fidelity is needed at the cost of speed. [ReSplat](11511-resplat.md)
+
+## Operating characteristics
+*   **Time Complexity:** Feed-forward inference is fast as it avoids per-scene optimization. The complexity is dominated by the ViT encoder-decoder and the shallow MLPs.
+*   **Memory Complexity:** Depends on the number of Gaussians ($H \times W$ per view) and the storage of SH coefficients. The use of a shallow MLP for view-dependent appearance reduces memory compared to storing full SH tables for all views.
+*   **Measured Performance:** On the RealEstate10K dataset, AESplat achieves a 0.8 dB PSNR improvement over NAS3R and a 1.1 dB improvement over DepthSplat [S1, unofficial].
+*   **Strengths:** Decoupled appearance modeling improves rendering quality, especially for specular surfaces. Pose-free operation enables generalized novel view synthesis without per-scene tuning.
+*   **Limitations:** Relies on the accuracy of the pose estimation and geometry prediction heads. The training-free VIAM may not capture complex view-independent lighting variations (e.g., shadows) as effectively as learned components.
+*   **When to Use:** When high-quality novel view synthesis is required from unposed images, and computational resources for per-scene optimization are limited.
+*   **When Not to Use:** When ground-truth poses are available and per-scene optimization is feasible, as traditional 3DGS may achieve higher fidelity. When real-time inference on extremely low-power hardware is required, the ViT backbone may be too heavy.
+
+## Background
+AESplat was introduced in the paper "AESplat: Advancing Pose-Free Feed-Forward 3D Gaussian Splatting via Decoupled Appearance Modeling" [S1, unofficial]. It builds on the foundation of 3D Gaussian Splatting (3DGS) [Kerbl et al., 2023] and pose-free feed-forward methods like NAS3R [Huang et al., 2026] and DepthSplat. The method addresses the limitation of existing pose-free methods that jointly predict all SH coefficients, overlooking the distinction between view-independent and view-dependent appearance [S1, unofficial]. It is used in applications requiring generalized novel view synthesis, such as virtual reality and autonomous driving, where rapid reconstruction from unposed images is beneficial [S1, unofficial].
+
+## Sources
+[S1] AESplat: Advancing Pose-Free Feed-Forward 3D Gaussian Splatting via Decoupled Appearance Modeling, https://arxiv.org/abs/2609.36693, fetched 2026-10-29 (unofficial)

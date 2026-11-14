@@ -3,54 +3,99 @@
 Also called: Grid-based Fast Deblurring Neural Radiance Fields using Sharpness Prior
 
 ## Overview
-Sharp-NeRF is a grid-based Neural Radiance Field (NeRF) framework designed to render clean, sharp images from input blurry images by modeling spatially varying defocus blur [S1]. It distinguishes itself from sibling methods like [DeblurNeRF](11964-deblurnerf.md) and PDRF by replacing neural network-based kernel generators with discrete learnable kernels indexed by a sharpness prior, and by using a decomposed-grid representation instead of MLPs, reducing training time to approximately half an hour [S1].
+Sharp-NeRF is a grid-based Neural Radiance Field (NeRF) framework designed to render clean, sharp images from input blurry images by modeling spatially varying blur using discrete learnable kernels [S1]. Unlike sibling methods such as DeblurNeRF and DP-NeRF that rely on Multi-Layer Perceptrons (MLPs) to generate blur kernels, Sharp-NeRF uses a decomposed-grid representation and a sharpness prior to quantize blur levels into a small set of discrete kernels, significantly reducing computational cost and training time to approximately half an hour [S1]. It addresses the challenge of spatially varying defocus blur, which cannot be handled by fixed kernels, by assigning a specific blur kernel to groups of pixels with similar sharpness levels [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of blurry training images (and their corresponding camera poses).
-*   **Outputs:** A trained grid-based neural field model capable of rendering sharp novel views.
+*   **Inputs:** A set of blurry training images $I_{input}$ and their corresponding camera poses.
+*   **Outputs:** A radiance field model capable of rendering sharp novel views $I_c$ at inference time.
 
 **Data Structures:**
-1.  **Sharpness Level Map ($L$):** A 2D map of the same resolution as the input image, where each pixel value is an integer index in $[0, N_k - 1]$. This is computed during preprocessing and stored as a static texture or array.
-2.  **Discrete Blur Kernels ($B$):** A set of $N_k$ learnable 2D convolution kernels. Each kernel $b_i$ has a fixed size $K \times K$ (where $K$ is the patch size, e.g., 5 or 6). The total parameters are $N_k \times K^2$.
-3.  **Grid-based Neural Field:** A decomposed-grid representation (e.g., Triplane or Hash Grid) that maps 3D coordinates $(x, y, z)$ and viewing direction $(\theta, \phi)$ to density $\sigma$ and color $c$. This backbone renders the sharp image.
+1.  **Decomposed-Grid Representation:** The scene is represented using a decomposed-grid neural field architecture [S1]. This structure accelerates training and efficiently encodes density and color compared to standard MLP-based NeRFs.
+2.  **Sharpness Level Map ($L$):** A per-pixel map where each value corresponds to a quantized sharpness level. This map is precomputed for each training view.
+3.  **Discrete Blur Kernels ($B$):** A set of $N_k$ learnable blur kernels. Each kernel is a 2D convolution kernel (e.g., Gaussian-like) used to simulate blur.
+4.  **Kernel Weights ($w_x$):** Per-pixel weights indicating the contribution of each discrete kernel to the final blur synthesis.
 
 **Preprocessing:**
-1.  For each training view, compute a defocus map (sharpness measure) using a sharpness measure operator (e.g., variance of Laplacian or gradient-based metric) [S1].
-2.  Quantize the continuous defocus values into $N_k$ discrete bins to create the sharpness level map $L$. This step is performed once before training [S1].
+1.  **Sharpness Measurement:** For each training view, compute a defocus map (sharpness level) for every pixel using a sharpness measure operator [S1].
+2.  **Quantization:** Quantize the continuous defocus map into $N_k$ discrete values to create the sharpness level map $L$. This reduces the problem from learning a kernel per pixel to learning $N_k$ global kernels [S1].
 
-**Training Steps:**
-1.  **Ray Patch Sampling:** Instead of sampling individual rays, sample a patch of rays with stride 1. The spatial size of the patch corresponds to $K \times K$ pixels in the image plane [S1].
-2.  **Sharp Rendering:** Pass the 3D coordinates of the rays in the patch through the grid-based neural field to render a sharp image patch $I_c'$ [S1].
-3.  **Kernel Indexing:** For each pixel $(u, v)$ in the patch, retrieve its sharpness level index $l_{u,v}$ from the preprocessed map $L$. Use this index to select the corresponding blur kernel $b_{l_{u,v}}$ from the set $B$ [S1].
-4.  **Blurring Synthesis:** Apply the selected kernel to the sharp patch $I_c'$ to synthesize the blurred patch $I_b$. This is implemented as a weighted sum of the sharp patch pixels convolved with the per-pixel kernel weights. Specifically, for a pixel $p$ in the output blurred patch:
-    $$ I_b(p) = \sum_{k \in \text{kernel\_support}} I_c'(p - k) \cdot b_{l_p}(k) $$
-    where $b_{l_p}$ is the kernel selected for pixel $p$ based on its sharpness level [S1].
-5.  **Loss Computation:** Compare the synthesized blurred patch $I_b$ with the ground-truth blurry training image patch using a photometric loss (e.g., L1 or L2) [S1].
-6.  **Optimization:** Update the grid-based neural field parameters and the discrete blur kernels $B$ using gradient descent [S1].
+**Training Procedure:**
+The training loop follows these steps for each batch:
+
+1.  **Ray Patch Sampling:** Instead of sampling individual rays, sample ray patches with stride 1. Each patch has a spatial size of $K \times K$ [S1]. This allows the application of convolution operations over the patch.
+2.  **Sharp Rendering:** Pass the ray patch inputs through the backbone decomposed-grid neural fields to render a sharp and clean image patch $I_c'$ [S1].
+3.  **Kernel Indexing:** Use the preprocessed sharpness level map $L$ corresponding to the input ray patch to index into the set of learned discrete blur kernels $B$. This yields per-pixel weights $w_x$ for each kernel in $B$ [S1].
+4.  **Blurring Synthesis:** Perform a weighted sum of the per-pixel weights $w_x$ and the rendered sharp image patch $I_c'$ to produce the final blurred image patch $I_b$. Mathematically, this can be viewed as a convolution of $I_c'$ with the weighted combination of discrete kernels [S1].
+    $$ I_b = \sum_{k=1}^{N_k} w_x^{(k)} * I_c' $$
+    Where $*$ denotes convolution and $w_x^{(k)}$ is the weight for the $k$-th kernel at pixel $x$ [S1].
+5.  **Loss Calculation:** Compare the synthesized blurred patch $I_b$ with the input blurry image patch $I_{input}$ using a reconstruction loss (e.g., $\ell_2$ or $\ell_1$) [S1].
 
 **Inference:**
-1.  Sample rays for the target novel view.
-2.  Render the sharp image $I_c$ directly using the trained grid-based neural field.
-3.  The blur kernel module is bypassed; no blurring is applied [S1].
+At inference time, the blur kernel modules are discarded. The backbone neural fields render the sharp image $I_c$ directly, which is used as the final output [S1].
 
 **Parameters:**
-*   $N_k$: The number of discrete blur kernels. Not given in the sources.
-*   $K$: The size of the blur kernel and the rendered patch (e.g., 5 or 6). Not given in the sources.
+*   $N_k$: The number of discrete blur kernels. The sources do not specify the exact value used in experiments, but note that it is a small number to ensure marginal increase in learnable parameters [S1].
+*   $K$: The size of the ray patch ($K \times K$). The sources mention rendering 5 or 6 neighboring pixels, implying $K$ is small (e.g., $5 \times 5$ or $6 \times 6$) [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Memory:** Storing a unique blur kernel for every pixel is impractical for high-resolution, multi-view images. Sharp-NeRF mitigates this by quantizing sharpness levels into $N_k$ discrete kernels [S1].
-*   **Training Speed:** Rendering multiple neighboring pixels to simulate one blurred pixel increases training time proportionally. Sharp-NeRF handles this by rendering a $K \times K$ patch at once and applying the convolution operation over the patch, significantly reducing overhead [S1].
+*   **High-Resolution/Multi-View Impracticality:** Retaining blur kernels for every individual pixel is impractical due to the high resolution of images and the number of views. Sharp-NeRF handles this by quantizing sharpness levels into a few discrete kernels [S1].
+*   **Training Time:** Rendering multiple neighboring pixels to render one pixel increases training time proportionally. Sharp-NeRF mitigates this by rendering a patch and applying convolution over the patch, rather than rendering each ray individually [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing (One-time)
+def compute_sharpness_map(blurry_image):
+    # Compute defocus map using a sharpness measure operator
+    defocus_map = sharpness_measure_operator(blurry_image)
+    # Quantize into Nk discrete values
+    sharpness_level_map = quantize(defocus_map, Nk)
+    return sharpness_level_map
+
+# Training Step
+def train_step(sharpness_level_map, ray_patches, grid_model, blur_kernels):
+    # 1. Render sharp patch from grid model
+    # ray_patches: shape (B, K, K, 3) for RGB
+    sharp_patch = grid_model(ray_patches)
+    
+    # 2. Index blur kernels based on sharpness level map
+    # sharpness_level_map: shape (B, K, K) with values in [0, Nk-1]
+    # blur_kernels: shape (Nk, H_k, W_k)
+    # Get weights for each pixel in the patch
+    # w_x is effectively the one-hot or soft assignment to the Nk kernels
+    # In practice, this might be a direct lookup or soft weighting
+    selected_kernels = blur_kernels[sharpness_level_map]
+    
+    # 3. Synthesize blurred patch
+    # Convolve sharp_patch with the selected kernels
+    # Assuming selected_kernels are applied per-pixel or as a spatially varying filter
+    blurred_patch = spatially_varying_convolution(sharp_patch, selected_kernels)
+    
+    # 4. Compute loss against input blurry image
+    # input_blurry_patch: shape (B, K, K, 3)
+    loss = reconstruction_loss(blurred_patch, input_blurry_patch)
+    
+    return loss
+
+# Inference
+def render_sharp_view(ray, grid_model):
+    # Only the backbone grid model is used
+    sharp_color = grid_model(ray)
+    return sharp_color
+```
 
 ## Operating characteristics
-*   **Time Complexity:** Training time is approximately half an hour, significantly faster than MLP-based methods like Deblur-NeRF and DP-NeRF [S1].
-*   **Memory Complexity:** Lower than MLP-based methods due to the use of a decomposed-grid representation. The memory for blur kernels is $O(N_k \cdot K^2)$, which is small compared to the grid parameters [S1].
-*   **Strengths:** Fast training, handles spatially varying defocus blur, preserves fine details and vivid colors [S1].
-*   **Limitations:** Requires precomputed sharpness maps. Performance depends on the accuracy of the sharpness measure operator [S1].
-*   **When to use:** When training time is a constraint and the blur is primarily defocus-based. Not suitable for motion blur or camera shake without modification [S1].
+*   **Time Complexity:** Training time is significantly reduced compared to MLP-based methods. The sources state training takes approximately half an hour [S1]. This is achieved by using a grid-based representation and patch-based rendering with convolution.
+*   **Memory Complexity:** The decomposed-grid representation is more memory-efficient than large MLPs. The number of learnable parameters is kept low by using a small set of discrete kernels ($N_k$) instead of per-pixel kernels or large kernel-generating networks [S1].
+*   **Performance:** Sharp-NeRF performs on par with or better than previous methods in terms of image quality (vivid colors, fine details) while being much faster [S1].
+*   **Strengths:** Fast training, handles spatially varying blur, grid-based efficiency.
+*   **Limitations:** Requires precomputed sharpness maps. The quality depends on the accuracy of the sharpness measure operator and the quantization into $N_k$ levels.
 
 ## Background
-Sharp-NeRF was proposed to address the high computational cost of MLP-based NeRF methods for image deblurring, such as Deblur-NeRF and DP-NeRF, which suffer from long training times [S1]. It builds on grid-based NeRF architectures (e.g., [Triplane](link), [Hash Grid](link)) to accelerate rendering and uses a sharpness prior to model spatially varying blur without the need for a neural network to generate kernels, unlike PDRF which uses two MLPs [S1]. The method was evaluated on real-world datasets with blurry images, demonstrating superior training speed and competitive quantitative results [S1].
+Sharp-NeRF was proposed to overcome the limitations of MLP-based NeRF methods (like Deblur-NeRF and DP-NeRF) which suffer from long training times and computational costs due to the use of neural networks for kernel generation [S1]. It builds on the idea of grid-based NeRFs (like Instant-NGP) and extends them to handle blind deblurring by introducing a sharpness prior and discrete learnable kernels [S1]. The method is particularly relevant for scenes with spatially varying defocus blur, where fixed kernels are insufficient [S1].
 
 ## Sources
 [S1] Sharp-NeRF: Grid-based Fast Deblurring Neural Radiance Fields using Sharpness Prior, https://doi.org/10.1109/wacv57701.2024.00367, fetched 2026-10-27

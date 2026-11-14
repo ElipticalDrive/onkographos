@@ -3,68 +3,137 @@
 Also called: Dual-Head NeRF
 
 ## Overview
-UA-PlantNeRF is a unified framework for reconstructing volumetric radiance fields, spatially varying uncertainty fields, and conformal prediction intervals from sparse, unstructured video footage [S1, unofficial]. It addresses the degraded geometry and lack of calibrated uncertainty estimates typical in sparse-view plant reconstruction [S1, unofficial]. It distinguishes itself from standard NeRF variants by explicitly decomposing uncertainty into aleatoric and epistemic components via a dual-head architecture and Monte Carlo Dropout, enabling provable coverage guarantees through split conformal prediction [S1, unofficial].
+UA-PlantNeRF is a unified framework for reconstructing volumetric radiance fields from sparse, unstructured video footage of plants, addressing degraded geometry and the absence of calibrated uncertainty estimates [S1, unofficial]. It distinguishes itself from standard NeRF variants by explicitly decomposing uncertainty into aleatoric and epistemic components via a dual-head architecture and Monte Carlo Dropout, while employing conformal prediction to provide distribution-free coverage guarantees [S1, unofficial]. Unlike [Uncertainty-aware NeRF](12968-uncertainty-aware-nerf.md), which focuses on general scene uncertainty, UA-PlantNeRF is specialized for botanical structures, incorporating semantic consistency losses to prevent geometry collapse in occluded leaf regions [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Sparse video frames (as few as 15), identified via intelligent frame selection [S1, unofficial].
-*   **Outputs:** Reconstructed color $\hat{c}$, density $\sigma$, aleatoric uncertainty variance $\beta$, epistemic uncertainty $U_{ep}$, and total uncertainty $U_{total}$ for each ray.
+*   **Input:** A set of $N$ calibrated camera poses and corresponding RGB images (typically $N \approx 15$ frames selected via frame-selection strategies like VISAR).
+*   **Output:** A volumetric radiance field predicting density $\sigma$, color $\mathbf{c}$, and total uncertainty $U_{total}$ for any 3D point $\mathbf{x}$ and viewing direction $\mathbf{d}$.
 
 **Data Structures:**
-*   **Backbone:** Two Multi-Layer Perceptrons (MLPs), each with 8 layers and width 256. Skip connections are inserted at layer 4 [S1, unofficial].
-*   **Positional Encoding:** Hierarchical positional encoding with $L=10$ frequency levels [S1, unofficial].
-*   **Dual Head:** A parallel head outputting the log-variance $\log \beta(\mathbf{x}, \mathbf{d})$ [S1, unofficial].
+The model consists of a shared backbone and two parallel heads:
+1.  **Backbone:** A hierarchical NeRF structure using positional encoding with $L=10$ frequency levels. It utilizes two Multi-Layer Perceptrons (MLPs), each with 8 layers and width 256. Skip connections are inserted at layer 4.
+    *   *MLP 1:* Predicts density $\sigma(\mathbf{x})$.
+    *   *MLP 2:* Predicts color $\mathbf{c}(\mathbf{x}, \mathbf{d})$.
+2.  **Dual Head (Aleatoric):** A parallel head (architecture details not specified beyond "parallel head") that predicts the log-variance $\log \beta(\mathbf{x}, \mathbf{d})$ for the aleatoric uncertainty component [S1, unofficial].
+3.  **Epistemic Estimation:** Achieved via Monte Carlo Dropout applied after every hidden layer of the fine network [S1, unofficial].
 
-**Numbered Steps:**
-1.  **Frame Selection:** Identify maximally informative, non-redundant viewpoints from raw footage using the VISAR strategy [S1, unofficial].
-2.  **Backbone Forward Pass:** The coarse and fine networks (standard NeRF architecture) take positional encoded position $\gamma(\mathbf{x})$ and view direction $\gamma(\mathbf{d})$. The fine network outputs latent features, density $\sigma$, and color $\hat{c}$ [S1, unofficial].
-3.  **Aleatoric Uncertainty Prediction:** The dual head predicts the log-variance $\log \beta(\mathbf{x}, \mathbf{d})$ [S1, unofficial].
-4.  **Epistemic Uncertainty Estimation (Inference):** Apply Monte Carlo Dropout with probability $p=0.1$ after every hidden layer of the fine network. Perform $K=20$ stochastic passes to generate predictions $\hat{c}_k$ [S1, unofficial].
-5.  **Uncertainty Aggregation:** Compute epistemic uncertainty as the variance of the $K$ predictions and aleatoric uncertainty as the volume-rendered variance [S1, unofficial].
+**Training Objective:**
+The training loss $\mathcal{L}$ combines three terms [S1, unofficial]:
+$$ \mathcal{L} = \mathcal{L}_{NLL} + \lambda_{reg} \mathcal{L}_{reg} + \lambda_{sem} \mathcal{L}_{sem} $$
 
-**Formulas:**
-*   **Epistemic Uncertainty:** The variance of $K$ stochastic predictions [S1, unofficial]:
-    $$
-    U_{ep}(r) = K^{-1} \sum_{k=1}^{K} \|\hat{c}_k - \bar{c}\|^2
-    $$
-    where $\hat{c}_k$ is the prediction of the $k$-th pass and $\bar{c}$ is the mean prediction.
-*   **Aleatoric Uncertainty:** Volume-rendered variance based on the predicted log-variance $\beta$ [S1, unofficial]:
-    $$
-    U_{al}(r) = \sum_{i=1}^{M} T_i \alpha_i \beta(\mathbf{x}_i)
-    $$
-*   **Total Uncertainty:**
-    $$
-    U_{total}(r) = U_{ep}(r) + U_{al}(r)
-    $$
-*   **Training Loss:** Combines Negative Log-Likelihood ($\mathcal{L}_{NLL}$), distortion regularization ($\mathcal{L}_{reg}$), and semantic consistency ($\mathcal{L}_{sem}$) [S1, unofficial]:
-    $$
-    \mathcal{L} = \mathcal{L}_{NLL} + \lambda_{reg} \mathcal{L}_{reg} + \lambda_{sem} \mathcal{L}_{sem}
-    $$
-*   **Negative Log-Likelihood Loss:** For a batch $B$ [S1, unofficial]:
-    $$
-    \mathcal{L}_{NLL} = \frac{1}{|B|} \sum_{r \in B} \left[ \frac{\|\hat{c}(r) - c(r)\|^2}{2\beta(r)} + \frac{1}{2} \log \beta(r) \right]
-    $$
+1.  **Negative Log-Likelihood ($\mathcal{L}_{NLL}$):** Models the color prediction as a heteroscedastic Gaussian distribution with variance $\beta(\mathbf{x}, \mathbf{d})$. For a batch $B$:
+    $$ \mathcal{L}_{NLL} = \frac{1}{|B|} \sum_{r \in B} \left[ \frac{\|\hat{\mathbf{c}}(r) - \mathbf{c}(r)\|^2}{2\beta(r)} + \frac{1}{2} \log \beta(r) \right] $$
+    where $\hat{\mathbf{c}}(r)$ is the predicted color and $\mathbf{c}(r)$ is the ground truth color for ray $r$.
+
+2.  **Distortion Regularization ($\mathcal{L}_{reg}$):** Uses the Mip-NeRF 360 distortion regularizer to improve geometry [S1, unofficial].
+
+3.  **Semantic Consistency ($\mathcal{L}_{sem}$):** A CLIP-based term that prevents geometry collapse in occluded leaf regions by enforcing semantic similarity between rendered and input views [S1, unofficial].
 
 **Parameters:**
-*   Dropout probability $p$: 0.1 [S1, unofficial].
-*   Number of stochastic passes $K$: 20 [S1, unofficial].
-*   Positional encoding levels $L$: 10 [S1, unofficial].
-*   Regularization weights: $\lambda_{reg} = 0.01$ (Mip-NeRF 360 distortion regulariser), $\lambda_{sem} = 0.1$ (CLIP semantic-consistency term) [S1, unofficial].
+*   Dropout probability $p = 0.1$ [S1, unofficial].
+*   Number of stochastic passes for epistemic estimation $K = 20$ [S1, unofficial].
+*   Regularization weights: $\lambda_{reg} = 0.01$, $\lambda_{sem} = 0.1$ [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Calibration Set Construction:** To preserve exchangeability for conformal prediction, the calibration set must be constructed from held-out plants entirely excluded from NeRF training, not just held-out views of the same plants [S1, unofficial].
-*   **Geometry Collapse:** The semantic consistency term $\mathcal{L}_{sem}$ is critical to prevent geometry collapse in occluded leaf regions [S1, unofficial].
+**Inference and Uncertainty Calculation:**
+1.  **Epistemic Uncertainty:** Perform $K=20$ stochastic forward passes through the network with dropout active. Let $\hat{\mathbf{c}}_k$ be the color prediction from the $k$-th pass and $\bar{\mathbf{c}}$ be the mean prediction across all $K$ passes. The epistemic uncertainty $U_{ep}(r)$ for ray $r$ is the variance:
+    $$ U_{ep}(r) = \frac{1}{K} \sum_{k=1}^{K} \|\hat{\mathbf{c}}_k - \bar{\mathbf{c}}\|^2 $$
+2.  **Aleatoric Uncertainty:** Render the aleatoric component $U_{al}(r)$ using the transmittance weights $T_i$ and opacity $\alpha_i$ accumulated along the ray, weighted by the predicted variance $\beta(\mathbf{x}_i)$:
+    $$ U_{al}(r) = \sum_{i=1}^{M} T_i \alpha_i \beta(\mathbf{x}_i) $$
+    where $M$ is the number of sample points along the ray.
+3.  **Total Uncertainty:**
+    $$ U_{total}(r) = U_{ep}(r) + U_{al}(r) $$
+
+**Conformal Calibration:**
+To provide coverage guarantees, the model uses split conformal prediction. A calibration set $D_{cal}$ is constructed from held-out plants (entirely excluded from training, not just held-out views) to ensure exchangeability with test plants [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def forward_pass(x, d, model, dropout_prob=0.1, k=20):
+    """
+    Performs K stochastic passes to estimate epistemic uncertainty.
+    x: 3D point coordinates (N, 3)
+    d: Viewing directions (N, 3)
+    model: The UA-PlantNeRF model containing backbone and dual head.
+    """
+    predictions = []
+    for _ in range(k):
+        # Apply dropout mask to hidden layers of the fine network
+        # Note: Standard PyTorch/TensorFlow dropout is handled by model.train() 
+        # or explicit mask application if manual. Here we assume model handles it.
+        sigma, c, log_beta = model(x, d, training=True)
+        beta = np.exp(log_beta)
+        predictions.append(c)
+    
+    predictions = np.array(predictions) # Shape (K, N, 3)
+    mean_c = np.mean(predictions, axis=0)
+    
+    # Epistemic uncertainty: Variance of predictions
+    # U_ep = (1/K) * sum(||c_k - mean_c||^2)
+    squared_diffs = np.sum((predictions - mean_c)**2, axis=2) # Shape (K, N)
+    u_ep = np.mean(squared_diffs, axis=0) # Shape (N,)
+    
+    return mean_c, u_ep, beta
+
+def render_uncertainty(ray_samples, transmittance, alpha, beta, u_ep):
+    """
+    Renders aleatoric uncertainty and combines with epistemic.
+    ray_samples: Sample points along ray (M, 3)
+    transmittance: T_i for each sample (M,)
+    alpha: Opacity alpha_i for each sample (M,)
+    beta: Predicted variance log_beta -> exp(log_beta) (M,)
+    u_ep: Epistemic uncertainty for the ray (scalar or per-sample aggregated)
+    """
+    # Aleatoric uncertainty is the weighted sum of variance
+    # U_al = sum(T_i * alpha_i * beta_i)
+    u_al = np.sum(transmittance * alpha * beta)
+    
+    # Total uncertainty
+    u_total = u_ep + u_al
+    
+    return u_total
+
+def compute_loss(batch, model, lambda_reg=0.01, lambda_sem=0.1):
+    """
+    Computes the total training loss.
+    batch: Dictionary containing 'rays', 'gt_colors', 'clip_features'
+    """
+    # Forward pass (single pass for gradient computation, dropout active)
+    sigma, c_pred, log_beta = model(batch['rays'], training=True)
+    beta = np.exp(log_beta)
+    gt_colors = batch['gt_colors']
+    
+    # NLL Loss
+    # L_NLL = (1/|B|) * sum( ||c_pred - c_gt||^2 / (2*beta) + 0.5 * log(beta) )
+    nll_term = (np.sum((c_pred - gt_colors)**2) / (2 * beta) + 0.5 * np.log(beta))
+    l_nll = np.mean(nll_term)
+    
+    # Distortion Regularization (Mip-NeRF 360)
+    # Implementation details of L_reg are external (Mip-NeRF 360)
+    l_reg = compute_mipnerf360_distortion_loss(sigma, batch['rays']) 
+    
+    # Semantic Consistency (CLIP)
+    # Implementation details of L_sem are external (CLIP)
+    l_sem = compute_clip_semantic_loss(c_pred, batch['clip_features'])
+    
+    total_loss = l_nll + lambda_reg * l_reg + lambda_sem * l_sem
+    return total_loss
+```
 
 ## Operating characteristics
-*   **Time Complexity:** Inference requires $K=20$ forward passes per ray for epistemic uncertainty estimation, significantly increasing computational cost compared to standard NeRF [S1, unofficial].
-*   **Memory Complexity:** The dual-head architecture adds minimal memory overhead (one additional head for $\log \beta$) [S1, unofficial].
-*   **Strengths:** Provides calibrated uncertainty estimates and robust geometry from sparse views (as few as 15 frames) [S1, unofficial].
-*   **Limitations:** Requires careful calibration set construction to ensure exchangeability; increased inference time due to MC Dropout sampling [S1, unofficial].
-*   **When to use:** Sparse-view plant reconstruction where uncertainty quantification and robustness to occlusion are critical [S1, unofficial].
-*   **When not to use:** Dense-view scenarios where uncertainty is less critical or computational resources are severely constrained [S1, unofficial].
+*   **Time Complexity:** Training is comparable to standard NeRF but slightly slower due to the dual-head output and additional loss terms. Inference is significantly slower, requiring $K=20$ forward passes per ray to estimate epistemic uncertainty [S1, unofficial].
+*   **Memory Complexity:** The dual-head architecture adds minimal memory overhead compared to the backbone. However, storing the calibration set for conformal prediction requires additional storage for held-out plant data [S1, unofficial].
+*   **Strengths:** Provides calibrated uncertainty estimates, which are crucial for distinguishing reliable geometry from artifacts in sparse-view scenarios. The semantic consistency term specifically addresses the challenge of occluded leaves in plant reconstruction [S1, unofficial].
+*   **Limitations:** Performance degrades if the frame selection strategy (e.g., VISAR) fails to capture informative viewpoints. The reliance on conformal calibration requires a sufficiently large and representative calibration set of held-out plants [S1, unofficial].
+*   **When to use:** Ideal for 3D plant reconstruction from sparse video where uncertainty quantification is required for downstream tasks like phenotyping or health assessment. Not suitable for real-time applications due to the $K=20$ inference passes.
 
 ## Background
-UA-PlantNeRF was introduced to address limitations in 3D plant reconstruction from sparse video frames [S1, unofficial]. It builds on the VISAR frame-selection strategy and integrates concepts from heteroscedastic regression and conformal prediction [S1, unofficial]. The method was evaluated on benchmarks including Pheno4D, ROSE-X, and a novel UA-Field greenhouse dataset [S1, unofficial].
+UA-PlantNeRF was introduced to address the limitations of standard NeRF in the context of 3D plant reconstruction, specifically dealing with sparse, unstructured image capture and the lack of uncertainty estimates [S1, unofficial]. It builds upon prior work such as VISAR for intelligent video frame selection and Mip-NeRF 360 for distortion regularization [S1, unofficial]. The method was evaluated on benchmarks including Pheno4D, ROSE-X, and a novel UA-Field greenhouse dataset [S1, unofficial].
 
 ## Sources
 [S1] Uncertainty-Aware 3D Plant Reconstruction from Sparse Video Frames Using Neural Radiance Fields, https://doi.org/10.21203/rs.3.rs-9904108/v1, fetched 2026-10-26 (unofficial)

@@ -76,32 +76,22 @@ class NeuralVolumes:
         images: Tensor of shape (B, K, H, W, 3)
         Returns: mu, sigma (Tensors of shape (B, latent_dim))
         """
-        # Process each camera view through dedicated CNN branches
         features = [self.encoder.branch(i)(img) for i, img in enumerate(images.unbind(dim=1))]
-        # Concatenate features from all K cameras
         combined = torch.cat(features, dim=-1)
-        # Encode down to latent space
         mu, log_var = self.encoder.head(combined)
         sigma = torch.exp(0.5 * log_var)
         return mu, sigma
 
     def sample_latent(self, mu, sigma):
-        """Reparameterization trick"""
         eps = torch.randn_like(sigma)
         z = mu + sigma * eps
         return z
 
     def decode(self, z, c=None):
-        """
-        z: Tensor of shape (B, latent_dim)
-        c: Optional conditioning tensor
-        Returns: voxel_grid (RGBA), warp_grid (Inverse Warp)
-        """
         if c is not None:
             z = torch.cat([z, c], dim=-1)
-        # Decoder outputs explicit voxel grid and warp grid
-        voxel_grid = self.decoder(z) # Shape: (B, D, D, D, 4)
-        warp_grid = self.decoder_warp(z) # Shape: (B, D_w, D_w, D_w, 3)
+        voxel_grid = self.decoder(z)
+        warp_grid = self.decoder_warp(z)
         return voxel_grid, warp_grid
 
     def render(self, voxel_grid, warp_grid, ray_origins, ray_directions, near, far):
@@ -112,33 +102,60 @@ class NeuralVolumes:
         ray_origins: (B, N_rays, 3)
         ray_directions: (B, N_rays, 3)
         """
-        # 1. Sample points along rays
-        t_vals = torch.linspace(near, far, 128).to(voxel_grid.device)
+        # Ensure inputs are float32 tensors to prevent vec3 subscript errors
+        ray_origins = torch.as_tensor(ray_origins, dtype=torch.float32)
+        ray_directions = torch.as_tensor(ray_directions, dtype=torch.float32)
+        
+        N_samples = 128
+        t_vals = torch.linspace(near, far, N_samples).to(voxel_grid.device)
+        
+        # Normalize directions to unit length
+        ray_directions = ray_directions / (torch.norm(ray_directions, dim=-1, keepdim=True) + 1e-8)
+        
+        # points_3d: (B, N_rays, N_samples, 3)
         points_3d = ray_origins.unsqueeze(-2) + ray_directions.unsqueeze(-2) * t_vals.unsqueeze(-1)
         
-        # 2. Apply inverse warp to find source locations in template grid
-        # warp_grid stores W^-1(x). We need to sample W^-1 at points_3d.
-        # Note: warp_grid is defined on a coarse grid (32^3), so interpolation is needed.
+        # Sample inverse warp at points_3d
         warped_points = self.sample_warp(warp_grid, points_3d)
         
-        # 3. Sample RGBA from voxel grid at warped locations
+        # Sample RGBA from voxel grid at warped locations
         rgba = self.sample_voxel(voxel_grid, warped_points)
         rgb = rgba[..., :3]
         alpha = rgba[..., 3]
         
-        # 4. Front-to-back compositing
-        # T_i = exp(-sum(sigma_j * delta_j)) approximated by product of (1-alpha)
-        # Using discrete alpha blending as per formula in [S4, unofficial]
-        weights = alpha * torch.cumprod(torch.ones_like(alpha) - alpha, dim=-2)
-        # Handle the first term correctly (cumprod starts with 1, so weights[0] = alpha[0])
-        # Correct accumulation:
-        transmittance = torch.cumprod(1 - alpha, dim=-2)
-        transmittance = torch.cat([torch.ones_like(transmittance[:, :, :1]), transmittance[:, :, :-1]], dim=-2)
-        weights = alpha * transmittance
-        color = torch.sum(weights.unsqueeze(-1) * rgb, dim=-2)
-        opacity = 1 - transmittance[:, :, -1]
+        # Front-to-back compositing matching the evidence formula
+        # Clamp alpha to [0, 1] for numerical stability in product
+        alpha = torch.clamp(alpha, 0.0, 1.0)
+        one_minus_alpha = 1.0 - alpha
+        transmittance = torch.cumprod(one_minus_alpha, dim=-1)
+        # Shift transmittance so T_j = prod_{k<j} (1-alpha_k)
+        T = torch.cat([torch.ones_like(transmittance[..., :1]), transmittance[..., :-1]], dim=-1)
+        weights = alpha * T
+        color = torch.sum(weights.unsqueeze(-1) * rgb, dim=-1)
+        opacity = 1.0 - transmittance[..., -1]
         
         return color, opacity
+
+    def sample_warp(self, warp_grid, points):
+        # warp_grid: (B, D_w, D_w, D_w, 3)
+        # points: (B, N_rays, N_samples, 3) in world space
+        # Normalize points to [-1, 1] for grid sampling
+        points_norm = points / (self.warp_res / 2.0)
+        B, N_rays, N_samples, _ = points.shape
+        points_flat = points_norm.view(B, N_rays * N_samples, 1, 1, 3)
+        # F.grid_sample expects (N, C, D, H, W)
+        warp_grid_perm = warp_grid.permute(0, 4, 1, 2, 3)
+        sampled = F.grid_sample(warp_grid_perm, points_flat, align_corners=True, mode='trilinear')
+        return sampled.view(B, N_rays, N_samples, 3)
+
+    def sample_voxel(self, voxel_grid, points):
+        # voxel_grid: (B, D, D, D, 4)
+        points_norm = points / (self.voxel_res / 2.0)
+        B, N_rays, N_samples, _ = points.shape
+        points_flat = points_norm.view(B, N_rays * N_samples, 1, 1, 3)
+        voxel_grid_perm = voxel_grid.permute(0, 4, 1, 2, 3)
+        sampled = F.grid_sample(voxel_grid_perm, points_flat, align_corners=True, mode='trilinear')
+        return sampled.view(B, N_rays, N_samples, 4)
 
     def train_step(self, images, target_images, ray_params):
         mu, sigma = self.encode(images)
@@ -146,7 +163,6 @@ class NeuralVolumes:
         voxel_grid, warp_grid = self.decode(z)
         pred_color, pred_alpha = self.render(voxel_grid, warp_grid, **ray_params)
         
-        # Loss components
         recon_loss = F.mse_loss(pred_color, target_images[..., :3])
         kl_loss = -0.5 * torch.mean(1 + sigma.log() - mu**2 - sigma**2)
         tv_loss = self.total_variation_loss(voxel_grid[..., 3])
@@ -154,15 +170,6 @@ class NeuralVolumes:
         
         loss = recon_loss + 0.1 * kl_loss + 0.01 * tv_loss + 0.01 * beta_loss
         return loss
-
-    def sample_warp(self, warp_grid, points):
-        # Trilinear interpolation of warp vectors from warp_grid at points
-        # Points are normalized to [-1, 1] for grid sampling
-        pass
-
-    def sample_voxel(self, voxel_grid, points):
-        # Trilinear interpolation of RGBA from voxel_grid at points
-        pass
 ```
 
 ## Subtopics
@@ -186,7 +193,7 @@ GRU Volume Fusion incrementally fuses per-frame local radiance fields into a glo
 *   **When not to use:** Scenes with fine high-frequency details requiring higher resolution than the grid allows, or unbounded scenes [S1, S3].
 
 ## Background
-Neural Volumes was introduced by Kato et al. in 2019 [S2]. It builds on the concept of ray potentials and volume rendering, extending them to dynamic scenes by introducing a warp field [S2]. It is a baseline method in the field of neural volumetric video representation [S3].
+Neural Volumes was introduced in 2019 [S2]. It builds on the concept of ray potentials and volume rendering, extending them to dynamic scenes by introducing a warp field [S2]. It is a baseline method in the field of neural volumetric video representation [S3].
 
 ## Sources
 [S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27

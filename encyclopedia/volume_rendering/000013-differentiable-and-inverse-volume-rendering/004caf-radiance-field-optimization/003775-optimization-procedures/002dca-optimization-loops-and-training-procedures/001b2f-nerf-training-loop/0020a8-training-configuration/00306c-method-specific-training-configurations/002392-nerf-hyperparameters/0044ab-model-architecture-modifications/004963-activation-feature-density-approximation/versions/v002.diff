@@ -1,0 +1,165 @@
+--- v001.md
++++ v002.md
+@@ -4,117 +4,73 @@
+ 
+ ## Overview
+-Activation Feature Density Approximation estimates volumetric density $\hat{d}$ directly from intermediate activation features $f_\ell$ of a coordinate-based MLP, replacing the expensive evaluation of the coarse network $\Theta_{coarse}$ with a lightweight computation [S1]. It enables significant inference speedups in real-world scenes by leveraging the structural information naturally stored in early MLP layers [S1]. Unlike standard NeRF which requires full forward passes for density estimation, this method uses statistical properties of activations to predict where density exists, allowing for adaptive sampling strategies [S1].
++Activation Feature Density Approximation estimates volumetric density $\hat{d}$ directly from intermediate activation features $\mathbf{f}_\ell$ of a coordinate-based MLP, allowing the replacement of expensive coarse network evaluations with a lightweight computation [S1]. It differs from sibling methods like [SDF-based Neural Fields](12947-sdf-based-neural-fields.md) by retaining the standard density-based rendering formulation while optimizing the density prediction step itself, rather than changing the underlying geometric representation.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Intermediate activation features $f_\ell$ for a ray $r$ at layer $\ell$.
+-- **Output:** Estimated density vector $\hat{\vec{d}}$ and estimated weights $\hat{\vec{w}}$ for inverse transform sampling.
++*   **Input:** Intermediate activation features $\mathbf{A}^{(\ell)}$ from layer $\ell$ of the coarse MLP $\Theta_{\text{coarse}}$, sampled along a ray $\mathbf{r}$.
++*   **Output:** Estimated density values $\hat{\mathbf{d}}$ for each sample point, used to compute weights $\hat{\mathbf{w}}$ for inverse transform sampling.
+ 
+ **Data Structures:**
+-- $A^{(\ell)} \in \mathbb{R}^{N_s \times N_h}$: Activation matrix for layer $\ell$, where $N_s$ is the number of samples along the ray and $N_h$ is the number of hidden units. Values are recorded after the ReLU activation function [S1].
+-- $f_\ell \in \mathbb{R}^{N_s}$: Feature vector for the ray, computed as the mean over hidden units [S1].
++*   $\mathbf{A}^{(\ell)} \in \mathbb{R}^{N_s \times N_h}$: Activation matrix for layer $\ell$. $N_s$ is the number of samples along the ray, and $N_h$ is the number of hidden units in the layer. The values are recorded *after* the ReLU activation function has been applied [S1].
+ 
+ **Steps:**
+-1.  **Extract Activation Features:** Compute the mean activation $f_\ell$ for each sample along the ray $r$ [S1]:
++1.  **Feature Extraction:** Compute the mean activation feature vector $\mathbf{f}_\ell \in \mathbb{R}^{N_s}$ for the ray by averaging over the hidden units $N_h$ [S1]:
+     $$
+-    f_\ell = \frac{1}{N_h} \sum_{i=1}^{N_h} A^{(\ell)}_i
++    \mathbf{f}_\ell = \frac{1}{N_h} \sum_{i=1}^{N_h} \mathbf{A}^{(\ell)}_i
+     $$
+-    where $A^{(\ell)}_i$ is the activation vector for the $i$-th hidden unit at layer $\ell$ [S1].
++    where $\mathbf{A}^{(\ell)}_i$ is the $i$-th hidden unit's activation vector across all $N_s$ samples [S1].
+ 
+-2.  **Compute Statistics:** Calculate the mean $\mu(f_\ell)$ and standard deviation $\sigma(f_\ell)$ of the feature vector $f_\ell$ along the last dimension (the $N_s$ samples) [S1].
++2.  **Statistical Computation:** Compute the mean $\mu(\mathbf{f}_\ell)$ and standard deviation $\sigma(\mathbf{f}_\ell)$ of the feature vector $\mathbf{f}_\ell$ along the last dimension (i.e., across the $N_s$ samples of the ray) [S1].
+ 
+-3.  **Estimate Density:** Apply one of three handcrafted functions $f_1, f_2,$ or $f_3$ to $f_\ell$ to produce the estimated density $\hat{\vec{d}}$ [S1]:
+-    $$
+-    \hat{\vec{d}} = f_k(f_\ell), \quad k \in \{1, 2, 3\}
+-    $$
+-    The functions are defined as [S1]:
+-    $$
+-    f_1(f_\ell) = \text{ReLU}\left( (\mu(f_\ell) - \sigma(f_\ell)) - f_\ell \right)
+-    $$
+-    $$
+-    f_2(f_\ell) = \text{ReLU}\left( \left(\mu(f_\ell) - \frac{\sigma(f_\ell)}{2}\right) - f_\ell \right)
+-    $$
+-    $$
+-    f_3(f_\ell) = \text{ReLU}\left( \left(\mu(f_\ell) - \frac{\sigma(f_\ell)}{2}\right) - f_\ell \right)^2
+-    $$
+-    These functions are designed such that activation minima correspond to significant density, transforming $f_\ell$ into a vector of mostly zeros except where density is significant [S1].
++3.  **Density Estimation:** Apply one of three handcrafted functions $f_k$ to $\mathbf{f}_\ell$ to produce the estimated density $\hat{\mathbf{d}}$ [S1]:
++    *   **f1 (Aggressive):**
++        $$
++        \hat{\mathbf{d}} = f_1(\mathbf{f}_\ell) = \text{ReLU}\left( (\mu(\mathbf{f}_\ell) - \sigma(\mathbf{f}_\ell)) - \mathbf{f}_\ell \right)
++        $$
++    *   **f2 (Conservative):**
++        $$
++        \hat{\mathbf{d}} = f_2(\mathbf{f}_\ell) = \text{ReLU}\left( \left(\mu(\mathbf{f}_\ell) - \frac{\sigma(\mathbf{f}_\ell)}{2}\right) - \mathbf{f}_\ell \right)
++        $$
++    *   **f3 (Squared Conservative):**
++        $$
++        \hat{\mathbf{d}} = f_3(\mathbf{f}_\ell) = \text{ReLU}\left( \left(\mu(\mathbf{f}_\ell) - \frac{\sigma(\mathbf{f}_\ell)}{2}\right) - \mathbf{f}_\ell \right)^2
++        $$
++    These functions are derived from the observation that activation feature space minima indicate samples with significant density [S1].
+ 
+-4.  **Normalize Weights:** Convert estimated density $\hat{\vec{d}}$ to weights $\hat{\vec{w}}$ using piecewise-constant PDF normalization [S1]:
++4.  **Weight Normalization:** Convert estimated densities $\hat{\mathbf{d}}$ to weights $\hat{\mathbf{w}}$ conforming to a piecewise-constant PDF along the ray [S1]:
+     $$
+     \hat{w}_i = \frac{\hat{d}_i}{\sum_{j=1}^{N_s} \hat{d}_j}
+     $$
+ 
+-5.  **Sample Positions:** Perform inverse transform sampling on weights $\hat{\vec{w}}$ to determine sample positions, as done in standard NeRF [S1].
++5.  **Sampling:** Perform inverse transform sampling on weights $\hat{\mathbf{w}}$ to determine sample positions, as done in standard NeRF [S1].
+ 
+ **Parameters:**
+-- **Layer $\ell$:** The method is typically applied to the first 3 layers of the MLP. Layer 2 ($\ell=2$) is often preferred for balancing speedup and quality [S1].
+-- **Function Choice:** $f_2$ generally performs best for Mip-NeRF [S1].
++*   **Layer $\ell$:** The method is applied to the first few layers of the MLP. Experiments show layer 2 ($\ell=2$) performs best for Mip-NeRF [S1]. Earlier layers (e.g., $\ell=1$) offer higher speedups but lower accuracy [S1].
++*   **Function Choice:** $f_2$ generally provides the best trade-off between quality and speed for Mip-NeRF [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **High Standard Deviation:** $f_1$ is prone to failures if the distribution along a ray exhibits high standard deviation [S1].
+-- **Insufficient Detail:** $f_2$ and $f_3$ extract density more conservatively, which might lead to insufficient detail as the interval between fine samples grows larger [S1].
+-- **Layer Selection:** Applying the method to earlier layers accelerates inference more substantially but may impact reconstruction quality [S1].
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def activation_feature_density_approximation(activations, layer_idx, method='f2'):
+-    """
+-    Estimate density from intermediate activation features.
+-    
+-    Args:
+-        activations: np.ndarray of shape (N_layers, N_samples, N_hidden)
+-                     Activations after ReLU.
+-        layer_idx: int, index of the layer to use (e.g., 1 for layer 2).
+-        method: str, 'f1', 'f2', or 'f3'.
+-        
+-    Returns:
+-        weights: np.ndarray of shape (N_samples,), normalized weights for sampling.
+-    """
+-    # Step 1: Extract activation features f_l
+-    # Mean over hidden units N_h
+-    f_l = np.mean(activations[layer_idx], axis=-1)  # Shape: (N_samples,)
+-    
+-    # Step 2: Compute mean and standard deviation along the ray (samples)
+-    mu = np.mean(f_l)
+-    sigma = np.std(f_l)
+-    
+-    # Step 3: Apply handcrafted function to estimate density
+-    if method == 'f1':
+-        # ReLU( (mu - sigma) - f_l )
+-        raw_density = np.maximum(0.0, (mu - sigma) - f_l)
+-    elif method == 'f2':
+-        # ReLU( (mu - sigma/2) - f_l )
+-        raw_density = np.maximum(0.0, (mu - sigma / 2.0) - f_l)
+-    elif method == 'f3':
+-        # ReLU( (mu - sigma/2) - f_l )^2
+-        raw_density = np.maximum(0.0, (mu - sigma / 2.0) - f_l) ** 2
+-    else:
+-        raise ValueError("Method must be 'f1', 'f2', or 'f3'")
+-        
+-    # Step 4: Normalize weights
+-    # Handle case where sum is zero to avoid division by zero
+-    density_sum = np.sum(raw_density)
+-    if density_sum == 0:
+-        # Uniform weights if no density detected
+-        weights = np.ones_like(raw_density) / raw_density.shape[0]
+-    else:
+-        weights = raw_density / density_sum
+-        
+-    return weights
+-```
++*   **High Variance:** $f_1$ is prone to failure if the activation distribution along a ray exhibits high standard deviation [S1].
++*   **Insufficient Detail:** $f_2$ and $f_3$ extract density more conservatively, which may lead to insufficient detail if the interval between fine samples grows larger [S1].
++*   **Layer Selection:** Applying the method to deeper layers reduces the potential speedup because the coarse network evaluation becomes less dominant compared to the fine network [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Significantly reduces inference time by replacing the coarse MLP evaluation with simple statistical operations and a small subset of layers. Speedups of 40-76% are reported depending on the dataset and layer used [S1].
+-- **Memory Complexity:** Requires storing intermediate activations $A^{(\ell)}$ during the forward pass, which increases memory usage compared to standard NeRF [S1].
+-- **Performance:** On the Mip-NeRF LLFF dataset (1008x756), using layer 2 with $f_2$ achieved 25.44 PSNR, 0.75 SSIM, and 0.22 LPIPS, with a 40% speedup [S1]. On the Blender dataset, layer 2 with $f_2$ achieved 29.04 PSNR, 0.93 SSIM, and 0.07 LPIPS, with a 49% speedup [S1].
+-- **Strengths:** Effective for real-world scenes; leverages structural information in early MLP layers; compatible with proposal network samplers [S1].
+-- **Limitations:** Prone to failure with high variance in activation distributions ($f_1$); may lose detail in complex scenes ($f_2, f_3$); requires storing activations [S1].
+-- **When to use:** When inference speed is critical and the scene has well-behaved activation distributions; particularly effective for Mip-NeRF due to its expensive coarse network evaluation [S1].
+-- **When not to use:** When high detail preservation is required in scenes with high activation variance; when memory is constrained due to activation storage [S1].
++*   **Time Complexity:** Reduces inference time by replacing the evaluation of the large $\Theta_{\text{coarse}}$ MLP with a small subset of operations (mean, std, ReLU). Speedups depend on the number of samples $N_s$ and the relative cost of the coarse MLP [S1].
++*   **Memory Complexity:** Requires storing intermediate activations $\mathbf{A}^{(\ell)}$ during the forward pass, increasing memory usage slightly compared to standard NeRF [S1].
++*   **Measured Performance:** On the Mip-NeRF LLFF dataset (1008x756), using layer 2 with $f_2$ achieved 25.44 PSNR, 0.75 SSIM, 0.22 LPIPS, and a 40% speedup [S1]. On the Blender dataset, layer 2 with $f_2$ achieved 29.04 PSNR and a 49% speedup [S1].
++*   **Strengths:** Significant inference speedup, particularly for Mip-NeRF where the coarse network is more expensive ($N_c=N_f=128$) [S1].
++*   **Limitations:** Quality degradation if the activation distribution is not "well-behaved" or if high variance is present [S1].
+ 
+ ## Background
+-The method was proposed in "Analyzing the Internals of Neural Radiance Fields" [S1]. It is based on the observation that intermediate activations of coordinate-based MLPs exhibit notable structural information and that activation feature space minima indicate samples with significant density [S1]. The approach was evaluated on NeRF, Mip-NeRF, and Mip-NeRF 360 using the Blender and LLFF datasets [S1].
++*   **Origin:** Proposed in "Analyzing the Internals of Neural Radiance Fields" [S1].
++*   **History:** The method leverages the finding that NeRF MLPs naturally store structural information within the first MLP layers [S1]. It was applied to NeRF, Mip-NeRF, and proposal network samplers (e.g., nerfacto) [S1].
++*   **Usage:** Used to accelerate NeRF and Mip-NeRF inference, and to speed up proposal network samplers in iterative refinement pipelines [S1].
++
++## Subtopics
++
++### Proposal Network Acceleration
++Applying density approximation to the first iteration of proposal sampling in iterative NeRF variants (e.g., nerfacto) to reduce the cost of adaptive sampling [S1].
++
++### Layer Selection Trade-offs
++Choosing between earlier layers (higher speedup, lower quality) and later layers (lower speedup, higher quality) based on the specific MLP architecture and performance requirements [S1].
+ 
+ ## Sources

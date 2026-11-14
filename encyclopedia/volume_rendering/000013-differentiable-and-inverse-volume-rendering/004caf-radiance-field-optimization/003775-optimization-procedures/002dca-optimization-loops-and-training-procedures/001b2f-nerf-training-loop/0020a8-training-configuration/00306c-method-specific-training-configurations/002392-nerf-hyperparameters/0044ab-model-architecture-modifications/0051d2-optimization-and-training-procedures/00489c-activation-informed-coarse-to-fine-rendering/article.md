@@ -3,112 +3,129 @@
 Also called: Activation-based early exit, Masked fine pass
 
 ## Overview
-This method accelerates NeRF inference by skipping the expensive fine-pass MLP evaluation for rays determined to be empty or background, based on intermediate activation values from the coarse pass [S1]. It differs from standard coarse-to-fine rendering by introducing a conditional mask derived from network internals rather than relying solely on density thresholds or fixed sampling strategies [S1].
+This method accelerates NeRF inference by skipping the expensive fine-pass MLP evaluation for rays determined to be empty or background, based on intermediate activation values from the coarse pass [S1]. It distinguishes itself from sibling methods like [Last Layer Re-training](13532-last-layer-re-training.md) by operating during the forward pass to prune computation rather than optimizing the model structure post-training [S1].
 
 ## How it works
-**Inputs:** Ray $r$ generated from pixel $(x, y)$; Coarse MLP $\Theta_{\text{coarse}}$; Fine MLP $\Theta_{\text{fine}}$; Number of coarse samples $N_c$; Number of fine samples $N_f$; Layer index $\ell$ for activation analysis.
-**Outputs:** Final radiance $\hat{C}$.
+**Inputs:**
+*   Ray $r$ for each pixel $(x, y)$.
+*   Coarse MLP $\Theta_{\text{coarse}}$.
+*   Fine MLP $\Theta_{\text{fine}}$.
+*   Number of coarse samples $N_c$ and fine samples $N_f$ (total fine samples $N_c + N_f = 192$ in the source experiment) [S1].
+*   Layer index $\ell$ for activation analysis [S1].
+
+**Outputs:**
+*   Final radiance $\hat{C}$ for each pixel.
 
 **Data Structures:**
-*   $A^{(\ell)} \in \mathbb{R}^{N_s \times N_h}$: Activation tensor at layer $\ell$, where $N_s$ is the number of samples and $N_h$ is the number of hidden units. This tensor is recorded after the ReLU activation function has been applied [S1].
-*   $V_\ell$: The "activation image," a 2D map where each pixel $(x, y)$ contains the scalar value $v_\ell$ for the corresponding ray [S1].
+*   Activation tensor $A^{(\ell)}$ of size $R^{N_s \times N_h}$, where $N_s$ is the number of samples and $N_h$ is the number of hidden units [S1].
+*   Scalar activation $v_\ell$ per ray [S1].
+*   Activation image $V_\ell$ containing $v_\ell$ for all rays/pixels [S1].
+*   Threshold $\tau$ [S1].
+*   Ray set $P$ (rays processed by fine pass) [S1].
 
 **Steps:**
 1.  For each pixel $(x, y)$, generate ray $r$ and apply positional encoding $\gamma(\cdot)$ [S1].
 2.  Pass samples along ray $r$ through $\Theta_{\text{coarse}}$ to obtain predicted densities $\sigma$ and intermediate activations $A^{(\ell)}$ [S1].
-3.  Compute the scalar activation $v_\ell$ for the ray by summing all elements of $A^{(\ell)}$ and dividing by the number of samples $N_s$ and hidden units $N_h$:
+3.  Compute the scalar activation $v_\ell$ for the ray by summing all elements of $A^{(\ell)}$ and dividing by the number of samples $N_s$ and hidden units $N_h$ [S1]:
     $$
     v_\ell = \frac{1}{N_s} \sum_{i=1}^{N_s} \sum_{j=1}^{N_h} A^{(\ell)}_{i,j}
     $$
-    [S1]
-4.  Calculate the threshold $\tau$ as the mean activation $\mu(V_\ell)$ of the activation image $V_\ell$ across all rays/pixels in the current batch or frame [S1].
+    Note: Activations are taken after the ReLU function has been applied [S1].
+4.  Calculate the threshold $\tau$ as the mean activation $\mu(V_\ell)$ of the activation image $V_\ell$ across all rays/pixels [S1]:
+    $$
+    \tau = \mu(V_\ell)
+    $$
 5.  Identify the set of rays $P$ where $v_\ell < \tau$. These rays are treated as having no significant scene content (e.g., transparent background) [S1].
-6.  For rays $r \in P$, evaluate $\Theta_{\text{fine}}$ to compute final radiance. For rays $r \notin P$, use the coarse radiance $\hat{C}_c$ as the final output [S1].
+6.  For rays $r \in P$, evaluate the fine MLP $\Theta_{\text{fine}}$ to compute final radiance. For rays $r \notin P$, use the coarse radiance $\hat{C}_c$ as the final output [S1].
 
 **Parameters:**
-*   $\tau$: Threshold for skipping fine pass. Value: $\mu(V_\ell)$, the mean of the activation image $V_\ell$ [S1].
+*   $\tau$: Threshold for skipping fine pass. Value: $\mu(V_\ell)$ [S1].
 *   $\ell$: Layer index for activation analysis. Typical value: 1, 2, or 3. Applying to earlier layers accelerates inference more substantially [S1].
 
 **Edge Cases and Pitfalls:**
-*   The method relies on transparent backgrounds found in synthetic scenes (e.g., Blender dataset) [S1]. It fails on real-world scenes with detailed backgrounds, necessitating a density approximation method instead [S1].
-*   Activations are recorded after ReLU. While this causes information loss, early experiments showed it results in more consistent histograms for feature representations [S1].
+*   The method relies on transparent backgrounds found in synthetic scenes (e.g., Blender dataset) [S1].
+*   It fails on real-world scenes with detailed backgrounds, necessitating a density approximation method instead [S1].
+*   Applying ReLU before computing $v_\ell$ causes information loss but results in more consistent histograms for $f_\ell$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def activation_informed_render(ray, theta_coarse, theta_fine, layer_idx):
-    # 1. Generate ray and encode
-    pos_enc = positional_encoding(ray)
+def activation_informed_rendering(rays, theta_coarse, theta_fine, layer_index):
+    """
+    rays: List of Ray objects, each with position and direction.
+    theta_coarse: Coarse MLP.
+    theta_fine: Fine MLP.
+    layer_index: Integer index of the layer to analyze.
+    """
+    N_samples = 128  # Number of samples along the ray for coarse pass
+    N_hidden = 256   # Number of hidden units in the MLP layer
     
-    # 2. Coarse pass
-    # Assume theta_coarse returns (sigma, activations)
-    # activations is a list of tensors for each layer
-    sigma_coarse, activations = theta_coarse(pos_enc)
+    # Step 1 & 2: Coarse pass and activation collection
+    activations = []
+    coarse_radiance = []
     
-    # 3. Compute scalar activation v_l
-    # A^(l) is activations[layer_idx], shape (N_samples, N_hidden)
-    A_l = activations[layer_idx]
-    N_s, N_h = A_l.shape
-    v_l = torch.sum(A_l) / (N_s * N_h)
-    
-    # 4. Determine if fine pass is needed
-    # In a full implementation, tau is computed over a batch or frame.
-    # Here we assume tau is available or computed globally.
-    if v_l < tau:
-        # 5. Fine pass for empty/background rays
-        # Note: The source states fine pass is evaluated for r in P (v_l < tau)
-        # and coarse radiance is used for r not in P.
-        # This implies the "mask" P selects rays that need refinement.
-        # However, standard logic suggests skipping fine pass for empty rays.
-        # Re-reading S1: "If r in P, we evaluate Theta_fine. Otherwise, we treat the coarse radiance C_c as our final output."
-        # And P = {r : v_l < tau}.
-        # So low activation -> fine pass? High activation -> coarse only?
-        # Let's check the logic: "empty space... we do not expect any sample with significant volumetric density."
-        # "If for any of the rays the result is 0, the corresponding pixel likely belongs to the transparent background."
-        # "When the value of g is high, the value of v_l is low, and vice versa."
-        # g is the count of densities > threshold.
-        # So low v_l -> high g? No, "value of g is high, value of v_l is low".
-        # Wait, Table 1 shows "Speedup" and "% fine Rays".
-        # If v_l < tau, we are in P.
-        # The text says: "If r in P, we evaluate Theta_fine. Otherwise, we treat the coarse radiance C_c as our final output."
-        # This seems counter-intuitive for "skipping" expensive passes. Usually you skip the fine pass for empty rays.
-        # Let's re-read carefully: "we can reduce the inference time... if we perform the fine pass only if the condition v_l < mu(V_l) is met."
-        # This implies: IF v_l < tau THEN fine pass. ELSE coarse only.
-        # Why? Maybe low activation means the coarse model is uncertain or the ray passes through empty space where coarse is inaccurate?
-        # Or maybe high activation means strong signal, so coarse is sufficient?
-        # Actually, looking at the results: 40% of rays processed by fine pass.
-        # If v_l < tau is the condition for fine pass, then 40% of rays have low activation.
-        # Let's stick to the literal instruction from S1.
+    for ray in rays:
+        # Generate samples along the ray
+        samples = generate_samples(ray, N_samples)
         
-        # Compute fine samples
-        pos_enc_fine = ... # Specific sampling strategy for fine pass
-        sigma_fine, _ = theta_fine(pos_enc_fine)
-        radiance = render_volume(sigma_fine, ...)
-    else:
-        # Use coarse radiance
-        radiance = render_volume(sigma_coarse, ...)
+        # Apply positional encoding
+        encoded_samples = positional_encoding(samples)
         
-    return radiance
+        # Pass through coarse MLP
+        # Assume theta_coarse returns (density, color, activations)
+        # activations[layer_index] is the tensor after ReLU of size (N_samples, N_hidden)
+        density, color, all_activations = theta_coarse(encoded_samples)
+        
+        # Get activation tensor A^(l)
+        A_l = all_activations[layer_index]
+        
+        # Step 3: Compute scalar activation v_l
+        # Sum all elements and divide by N_s * N_h
+        v_l = sum(A_l) / (N_samples * N_hidden)
+        
+        activations.append(v_l)
+        coarse_radiance.append(color)
+    
+    # Step 4: Calculate threshold tau
+    # Mean of all v_l values
+    tau = mean(activations)
+    
+    # Step 5: Identify set P
+    # P contains indices of rays where v_l < tau
+    P_indices = [i for i, v in enumerate(activations) if v < tau]
+    
+    # Step 6: Final rendering
+    final_radiance = []
+    for i, ray in enumerate(rays):
+        if i in P_indices:
+            # Ray is in P: evaluate fine pass
+            samples_fine = generate_samples_fine(ray) # Uses N_c + N_f samples
+            encoded_fine = positional_encoding(samples_fine)
+            _, color_fine, _ = theta_fine(encoded_fine)
+            final_radiance.append(color_fine)
+        else:
+            # Ray is not in P: use coarse radiance
+            final_radiance.append(coarse_radiance[i])
+            
+    return final_radiance
 ```
-*[G] The pseudocode assumes standard volume rendering integration functions `render_volume` which are not defined in the source but are standard in the field. The condition `v_l < tau` triggers the fine pass according to the source text.*
 
 ## Subtopics
 
-### Density Approximation via Activations
-Uses activation features $f_\ell$ to estimate density $\hat{d}$ directly, replacing the coarse MLP evaluation. This extends the method to real-world scenes with detailed backgrounds where the binary mask approach fails [S1].
+### Density Approximation
+Uses activation features $f_\ell$ to estimate density $\hat{d}$ via histograms, allowing the method to handle real-world scenes with detailed backgrounds where the simple thresholding fails [S1].
 
 ### Layer Selection
-The method is applied to the first 3 layers of the NeRF MLP. Earlier layers provide greater acceleration [S1].
+Applying the method to earlier layers (1, 2, 3) accelerates inference more substantially than later layers [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of fine-pass evaluations. On the Blender 'lego' scene (800x800), using layer 1 achieved a 34.69% speedup with 40% of rays processed by the fine pass [S1]. Using layer 3 achieved a 55% speedup with 47% of rays processed by the fine pass [S1].
-*   **Memory Complexity:** Requires storing intermediate activations $A^{(\ell)}$ during the forward pass of the coarse network.
-*   **Strengths:** Significant speedup on synthetic scenes with transparent backgrounds without substantial quality loss [S1].
-*   **Limitations:** Fails on real-world scenes with detailed backgrounds [S1].
+*   **Speedup:** On the Blender 'lego' scene (800x800), using layer 1 and threshold $\tau$ achieved 34.69% speedup with 40% of rays processed by fine pass [S1]. Using layer 3 achieved 55% speedup with 47% of rays processed by fine pass [S1].
+*   **Quality:** On the Blender 'lego' scene, layer 1 resulted in PSNR 29.66, SSIM 0.93, LPIPS 0.04 [S1]. Layer 3 resulted in PSNR 31.21, SSIM 0.95, LPIPS 0.02 [S1]. The full NeRF baseline had PSNR 32.20, SSIM 0.96, LPIPS 0.02 [S1].
+*   **Limitations:** The method fails on real-world scenes with detailed backgrounds [S1].
 
 ## Background
-Originated in the paper "Analyzing the Internals of Neural Radiance Fields" (CVPRW 2024) [S1]. The work builds on the observation that intermediate activations in coordinate-based MLPs contain structural information and density cues [S1].
+The method was introduced in "Analyzing the Internals of Neural Radiance Fields" (2024) [S1]. It leverages the observation that intermediate activations in NeRF MLPs contain structural information and density cues, allowing for early exit decisions during inference [S1].
 
 ## Sources
 [S1] Analyzing the Internals of Neural Radiance Fields, https://doi.org/10.1109/cvprw63382.2024.00288, fetched 2026-10-26
