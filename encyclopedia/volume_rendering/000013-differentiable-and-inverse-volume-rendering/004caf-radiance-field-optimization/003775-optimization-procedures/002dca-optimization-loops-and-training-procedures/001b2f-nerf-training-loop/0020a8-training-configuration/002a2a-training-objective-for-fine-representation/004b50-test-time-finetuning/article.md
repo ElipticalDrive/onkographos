@@ -1,0 +1,99 @@
+# Test-Time Finetuning
+
+Also called: Code Finetuning, Guidance-Finetuning
+
+## Overview
+Test-Time Finetuning is a post-sampling optimization step that refines the sampled scene code $x$ by minimizing a combined loss of rendering fidelity and a diffusion prior, while keeping the diffusion model and decoder parameters frozen [S1]. It addresses the limitation where reconstruction guidance alone cannot strictly enforce rendering constraints toward faithful reconstruction [S1]. Unlike two-stage methods that ignore the prior term during training or rely on external regularization like total variation [S1], this method jointly optimizes the latent code at inference time to balance data consistency with generative priors.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The initial scene code $x$ obtained from the sampling process (e.g., DDIM steps) [S1].
+*   **Output:** The optimized scene code $x^*$ that minimizes the combined loss [S1].
+*   **Frozen Parameters:** Diffusion model parameters $\phi$ and decoder parameters $\psi$ [S1].
+
+**Data Structures:**
+*   **Scene Code $x$:** The latent representation of the scene (e.g., triplane codes or autodecoder vectors) [S1].
+*   **Optimizer State:** Adam optimizer state for $x$ [S1].
+
+**Steps:**
+1.  Initialize the scene code $x$ from the sampling process [S1].
+2.  Define the combined loss function:
+    $$ \mathcal{L}_{total}(x) = \lambda_{rend} \mathcal{L}_{rend}(x) + \lambda'_{diff} \mathcal{L}_{diff}(x) $$
+    where $\mathcal{L}_{rend}$ is the rendering loss, $\mathcal{L}_{diff}$ is the diffusion prior loss, $\lambda_{rend}$ is the rendering weight, and $\lambda'_{diff}$ is the test-time prior weight [S1].
+3.  Optimize $x$ using the Adam optimizer to minimize $\mathcal{L}_{total}(x)$ [S1].
+4.  Ensure $\phi$ and $\psi$ remain frozen during optimization [S1].
+
+**Parameters:**
+*   $\lambda'_{diff}$: Test-time prior weight. This value should be lower than the training weight $\lambda_{diff}$ because the prior learned from the training dataset is less reliable when transferred to a different testing dataset [S1].
+*   $\lambda_{rend}$: Rendering loss weight. Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def test_time_finetuning(x, diffusion_model, decoder, rendering_fn, lambda_rend, lambda_diff_test, num_steps, lr):
+    """
+    Finetunes the scene code x by minimizing rendering and diffusion losses.
+    
+    Args:
+        x: Initial scene code tensor.
+        diffusion_model: Frozen diffusion model with parameters phi.
+        decoder: Frozen decoder with parameters psi.
+        rendering_fn: Function to render images from scene code x.
+        lambda_rend: Weight for rendering loss.
+        lambda_diff_test: Weight for diffusion prior loss at test time.
+        num_steps: Number of optimization steps.
+        lr: Learning rate for Adam optimizer.
+        
+    Returns:
+        x_opt: Optimized scene code.
+    """
+    # Initialize optimizer for x only
+    optimizer = Adam([x], lr=lr)
+    
+    for step in range(num_steps):
+        optimizer.zero_grad()
+        
+        # Compute rendering loss
+        # L_rend measures the difference between rendered images and ground truth
+        rendered_images = rendering_fn(x, decoder)
+        loss_rend = compute_rendering_loss(rendered_images)
+        
+        # Compute diffusion prior loss
+        # L_diff measures the consistency of the scene code with the diffusion prior
+        # This typically involves the noise prediction or score matching from the frozen diffusion model
+        loss_diff = compute_diffusion_loss(x, diffusion_model)
+        
+        # Combined loss
+        loss = lambda_rend * loss_rend + lambda_diff_test * loss_diff
+        
+        # Backpropagate and update x
+        loss.backward()
+        optimizer.step()
+        
+    return x
+```
+
+**Edge Cases and Pitfalls:**
+*   **Prior Reliability:** Using the training prior weight $\lambda_{diff}$ at test time may lead to suboptimal results because the prior is less reliable for unseen datasets [S1].
+*   **Frozen Parameters:** If the decoder or diffusion model parameters are not frozen, the optimization may deviate from the intended generative prior [S1].
+
+## Subtopics
+
+### Warm-up Strategy
+A training phase that prevents the model from overfitting to the input view and ensures fine details are captured during distillation by temporarily freezing or adjusting objectives before full joint training [S2]. It involves training with the encoder frozen to achieve relatively weak distillation with few fine details if never unfrozen [S2]. Replacing warm-up with a lower reconstruction weight ($\lambda_{recon} = 1$) breaks the balance between reconstruction and adversarial objectives, causing mode collapse for novel view synthesis [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of optimization steps and the cost of computing rendering and diffusion gradients per step [S1].
+*   **Memory Complexity:** Requires storing gradients for $x$ only, as $\phi$ and $\psi$ are frozen [S1].
+*   **Strengths:** Enforces faithful reconstruction by combining rendering constraints with generative priors [S1]. Avoids the biased and noisy scene codes resulting from two-stage methods that ignore the prior term [S1].
+*   **Limitations:** The diffusion prior learned from the training dataset may be less reliable for testing datasets, necessitating a lower test-time prior weight [S1].
+*   **When to Use:** When faithful reconstruction is required and the model has been trained with a joint diffusion and rendering objective [S1].
+*   **When Not to Use:** When computational resources are limited for iterative optimization or when the testing dataset distribution differs significantly from the training dataset, making the prior unreliable [S1].
+
+## Background
+Test-Time Finetuning was introduced in the context of Single-Stage Diffusion NeRF [S1]. It builds on the observation that reconstruction guidance alone is insufficient for faithful reconstruction and that previous two-stage methods often ignore the prior term during training, leading to biased scene codes [S1]. The method was proposed to unify 3D generation and reconstruction by reusing the training objective at test time [S1].
+
+## Sources
+[S1] Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction, https://doi.org/10.1109/iccv51070.2023.00229, fetched 2026-10-29
+[S2] Pix2NeRF: Unsupervised Conditional $\pi$-GAN for Single Image to Neural Radiance Fields Translation, https://doi.org/10.1109/cvpr52688.2022.00395, fetched 2026-10-29

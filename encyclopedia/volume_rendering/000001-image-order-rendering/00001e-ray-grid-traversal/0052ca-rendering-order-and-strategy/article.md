@@ -1,0 +1,33 @@
+# Rendering Order and Strategy
+
+
+## Overview
+Rendering Order and Strategy defines the sequence in which volumetric cells are processed during ray-grid traversal to ensure correct optical compositing (typically front-to-back) and efficient occlusion culling. It solves the problem of determining which cells contribute to the final pixel color and in what order, distinguishing itself from sibling methods by decoupling the geometric traversal logic (handled by the parent [Ray-grid traversal](17-ray-grid-traversal.md)) from the semantic processing order required for correct alpha blending or visibility determination.
+
+## Shared principles
+The family shares the fundamental requirement that cell processing must respect the viewing direction to correctly accumulate opacity and color. While the parent [Ray-grid traversal](17-ray-grid-traversal.md) provides the geometric sequence of voxel indices visited by a ray, the rendering strategy determines how these visits are mapped to the final image buffer. The core principle is that for standard volume rendering with absorption, processing must occur from the camera towards the volume interior (front-to-back) to allow early termination when the ray becomes fully opaque. Strategies may also involve spatial partitioning (e.g., layers, octants) to group cells for batch processing or to handle complex hierarchical data structures where implicit occlusion rules replace per-ray depth sorting.
+
+## Subtopics
+
+### [Front-to-Back Layer Traversal](1212-front-to-back-layer-traversal.md)
+Front-to-Back Layer Traversal is a rendering order strategy for Matryoshka-like hierarchical data structures that processes cells in front-to-back order along the viewing direction to handle occlusion correctly. It sets itself apart from standard ray-grid traversal methods by operating on pre-defined "layers" composed of six planes, ensuring that outer cells occlude inner cells without requiring per-ray depth sorting. It builds on [Ray-grid traversal](17-ray-grid-traversal.md) but applies a specific plane-grouping logic to manage the visibility of nested structures. Choose this method when rendering hierarchical "Matryoshka" data structures where cells are grouped into concentric layers, and efficient occlusion culling of inner layers by outer layers is required without sorting every cell individually. See [Front-to-Back Layer Traversal](1212-front-to-back-layer-traversal.md).
+
+### [Backward Projection](1491-backward-projection.md)
+Backward Projection (also known as Backward Mapping or image-order rendering) is a volume rendering technique that iterates over all pixels of the output image to determine the contribution of the volume data to each pixel. It solves the problem of mapping 3D volumetric data to a 2D image plane by reversing the projection direction: instead of sampling the volume and projecting to the image (forward mapping), it traces rays from the camera through the image plane into the volume. It is distinguished from its siblings, such as [Front-to-Back Layer Traversal](1212-front-to-back-layer-traversal.md) and [Ray Marching with Octant Masking](2488-ray-marching-with-octant-masking.md), by its explicit iteration over the output image grid, which ensures every pixel is addressed exactly once and simplifies handling of non-uniform sampling or sparse data structures. Choose this method when uniform pixel coverage is required, or when the rendering pipeline is driven by the output image resolution rather than the volume data structure. See [Backward Projection](1491-backward-projection.md).
+
+### Object-Order Ray-Casting with Randomized Sampling
+#### definition
+- [S1] A ray-casting algorithm on rectilinear grids using object-order processing, randomized high sampling rate, and trilinear interpolation.
+#### parameter
+- [S1] Sampling rate variable ($\Delta s$): Initialized to 0.5, allowing between two and four samplings along a ray within a cell.
+- [S1] Pixel subdivisions: Fixed to $16^2$ (256 subdivisions).
+- [S1] Precomputed rays: Fixed to $16^2$.
+- [S1] Image resolution: 512x512 pixels.
+#### pitfall
+- [S1] The algorithm lacks perspective projection, which is a drawback for stereo viewing or VR, though parallel projection is often preferred in scientific visualization.
+
+## Background
+The distinction between object-order (volume-driven) and image-order (pixel-driven) rendering strategies has been fundamental since the early days of volume visualization. Object-order methods, such as the randomized sampling approach described by [S1], emerged to leverage the efficiency of traversing the volume data structure directly, often achieving interactive frame rates for isosurface visualization. Image-order methods, like backward projection, became standard for ensuring consistent pixel coverage and simplifying the compositing logic, particularly as hardware acceleration for ray-box intersection and texture sampling improved. The development of hierarchical strategies like Front-to-Back Layer Traversal addresses the specific needs of complex, nested data structures where traditional linear traversal is inefficient for occlusion culling.
+
+## Sources
+[S1] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26

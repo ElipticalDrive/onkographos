@@ -1,0 +1,153 @@
+# Voxel Face Texture Coordinate Unwrapping
+Also called: Cube Face Texture Coordinate Unwrapping
+
+## Overview
+This method computes 2D texture coordinates for a voxel grid by mapping world-space vertex positions and normals to a specific face of a voxel block, then projecting those coordinates onto a larger texture atlas. It differs from standard UV unwrapping by using the geometric normal to deterministically select the visible face and handling the discrete block structure explicitly, ensuring consistent texture alignment across adjacent voxels.
+
+## How it works
+**Inputs:**
+- `vertPosition`: World-space position of the vertex ($\mathbb{R}^3$).
+- `vertNormal`: Normal vector of the face/vertex ($\mathbb{R}^3$, normalized).
+- `tileCoord`: The integer tile index on the texture atlas ($\mathbb{R}^2$).
+
+**Outputs:**
+- `texcoord`: Final 2D texture coordinate ($\mathbb{R}^2$, range $[0,1]$).
+
+**Data Structures:**
+- `loc`: Integer block location ($\mathbb{Z}^3$).
+- `off`: Local offset within the block, normalized to $[0,1]$ ($\mathbb{R}^3$).
+- `texcoordOff`: Offset within the specific face tile ($\mathbb{R}^2$).
+
+**Parameters:**
+- `epsilon`: Small constant for floating-point precision, $10^{-5}$ [S1, unofficial].
+- `BLOCK_SIZE`: Size of a voxel block in world units, $3.0$ [S1, unofficial].
+- `ATLAS_SCALE`: Scale factor for the texture atlas, $16.0$ [S1, unofficial].
+
+**Steps:**
+
+1.  **Calculate Block Location:** Determine which $3 \times 3 \times 3$ block the vertex belongs to.
+    $$ loc = \left( \lfloor \frac{vertPosition.x + \epsilon}{3.0} \rfloor, \lfloor \frac{vertPosition.y + \epsilon}{3.0} \rfloor, \lfloor \frac{vertPosition.z + \epsilon}{3.0} \rfloor \right) $$
+    *Note: The source uses `int((pos + epsilon) / 3.0)`, which corresponds to floor for positive numbers. For negative coordinates, standard integer truncation towards zero differs from floor. The source code implies a specific handling where `int` is used. We assume standard floor behavior for grid alignment or that coordinates are non-negative. Given the context of "Cubes Demo", coordinates are likely positive or handled via specific engine logic. We stick to the formula provided: `int((pos + epsilon) / 3.0)`.*
+
+2.  **Calculate Local Offset:** Determine the position within the block, normalized to $[0,1]$.
+    $$ off = \left( \frac{(vertPosition.x + \epsilon) \pmod{3.0}}{3.0}, \frac{(vertPosition.y + \epsilon) \pmod{3.0}}{3.0}, \frac{(vertPosition.z + \epsilon) \pmod{3.0}}{3.0} \right) $$
+
+3.  **Initialize Face Offset:**
+    $$ texcoordOff = (0, 0) $$
+
+4.  **Select Face and Map Coordinates:**
+    The face is selected based on which component of `off` is smallest (closest to 0), indicating the vertex is near a boundary of the block. The normal determines the orientation (flipping) of the texture on that face.
+
+    -   **If** $off.x \le \epsilon$:
+        The vertex is on the X-face.
+        -   If $vertNormal.x < -0.5$:
+            $$ texcoordOff.x = off.z $$
+            $$ texcoordOff.y = off.y $$
+        -   Else:
+            $$ texcoordOff.x = 1.0 - off.z $$
+            $$ texcoordOff.y = off.y $$
+
+    -   **Else If** $off.y \le \epsilon$:
+        The vertex is on the Y-face.
+        -   If $vertNormal.y > 0.5$:
+            $$ texcoordOff.x = off.z $$
+            $$ texcoordOff.y = off.x $$
+        -   Else:
+            $$ texcoordOff.x = 1.0 - off.z $$
+            $$ texcoordOff.y = off.x $$
+
+    -   **Else If** $off.z \le \epsilon$:
+        The vertex is on the Z-face.
+        -   If $vertNormal.z > 0.5$:
+            $$ texcoordOff.x = off.x $$
+            $$ texcoordOff.y = off.y $$
+        -   Else:
+            $$ texcoordOff.x = 1.0 - off.x $$
+            $$ texcoordOff.y = off.y $$
+
+    *Pitfall:* If multiple `off` components are $\le \epsilon$ (e.g., at a corner), the `if-else if` chain prioritizes X, then Y, then Z. This is deterministic but may cause seams if normals are not consistent at corners.
+
+5.  **Compute Final Texture Coordinate:**
+    Combine the tile position with the face offset and scale to the atlas.
+    $$ texcoord = \frac{tileCoord + texcoordOff}{16.0} $$
+    Invert Y to match typical texture coordinate systems (origin at bottom-left or top-left depending on renderer, here inverted):
+    $$ texcoord.y = 1.0 - texcoord.y $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_face_uv_unwrap(vert_position, vert_normal, tile_coord, epsilon=1e-5, block_size=3.0, atlas_scale=16.0):
+    # Step 1: Calculate integer block location
+    # Note: int() in Python truncates towards zero. The source uses int((pos + eps) / 3.0).
+    # For positive coordinates, this is equivalent to floor.
+    loc_x = int((vert_position[0] + epsilon) / block_size)
+    loc_y = int((vert_position[1] + epsilon) / block_size)
+    loc_z = int((vert_position[2] + epsilon) / block_size)
+    
+    # Step 2: Calculate local offset within block
+    # mod(a, b) returns a % b. In Python, % can return negative results for negative operands.
+    # Assuming positive world space or consistent modulo behavior.
+    off_x = ((vert_position[0] + epsilon) % block_size) / block_size
+    off_y = ((vert_position[1] + epsilon) % block_size) / block_size
+    off_z = ((vert_position[2] + epsilon) % block_size) / block_size
+    
+    # Step 3: Initialize texcoordOff
+    texcoord_off = [0.0, 0.0]
+    
+    # Step 4: Determine face and map coordinates
+    if off_x <= epsilon:
+        # X-face
+        if vert_normal[0] < -0.5:
+            texcoord_off[0] = off_z
+            texcoord_off[1] = off_y
+        else:
+            texcoord_off[0] = 1.0 - off_z
+            texcoord_off[1] = off_y
+    elif off_y <= epsilon:
+        # Y-face
+        if vert_normal[1] > 0.5:
+            texcoord_off[0] = off_z
+            texcoord_off[1] = off_x
+        else:
+            texcoord_off[0] = 1.0 - off_z
+            texcoord_off[1] = off_x
+    elif off_z <= epsilon:
+        # Z-face
+        if vert_normal[2] > 0.5:
+            texcoord_off[0] = off_x
+            texcoord_off[1] = off_y
+        else:
+            texcoord_off[0] = 1.0 - off_x
+            texcoord_off[1] = off_y
+    else:
+        # Edge case: Vertex is not near any face boundary (inside the block volume).
+        # This should not happen for voxel surface vertices.
+        # [G] Return default or handle error.
+        texcoord_off = [0.0, 0.0]
+
+    # Step 5: Compute final texcoord
+    # tile_coord is assumed to be [tx, ty]
+    texcoord_x = (tile_coord[0] + texcoord_off[0]) / atlas_scale
+    texcoord_y = (tile_coord[1] + texcoord_off[1]) / atlas_scale
+    
+    # Invert Y
+    texcoord_y = 1.0 - texcoord_y
+    
+    return [texcoord_x, texcoord_y]
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per vertex. Constant number of arithmetic operations and comparisons.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Deterministic face selection based on geometry; handles texture atlas tiling; simple to implement.
+- **Limitations:** Relies on `epsilon` for face selection, which can cause artifacts if normals are not perfectly aligned with axes or if vertices lie exactly on boundaries with inconsistent normals. The prioritization of X > Y > Z faces at corners may lead to texture seams if the mesh topology is not strictly voxel-aligned.
+- **When to use:** When rendering voxel-based terrain or objects with a fixed block size and a texture atlas where each block face maps to a specific region.
+- **When not to use:** For organic meshes or non-voxel grids where UVs need to be continuous across arbitrary boundaries.
+
+## Background
+This method originates from the "Cubes" demo in the JMonkeyEngine (JME3) framework, specifically in the `TestPicking` class and associated block terrain logic. It is used to map textures onto a voxel grid where the world is divided into $3 \times 3 \times 3$ blocks, and a texture atlas is used to store the textures for these blocks. The method ensures that the texture coordinates are consistent across the surface of the voxel grid, allowing for efficient texture mapping without per-vertex UV storage in the traditional sense.
+
+## Sources
+[S1] destroflyer/cubes, https://github.com/destroflyer/cubes, fetched 2026-10-26 (unofficial)

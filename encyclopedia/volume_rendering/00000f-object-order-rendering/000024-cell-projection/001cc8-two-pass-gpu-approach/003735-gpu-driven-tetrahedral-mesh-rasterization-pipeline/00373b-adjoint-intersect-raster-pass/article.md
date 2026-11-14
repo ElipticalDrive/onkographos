@@ -3,51 +3,46 @@
 Also called: Backward Intersect Raster Pass
 
 ## Overview
-The Adjoint Intersect Raster Pass is a backward pass that computes gradients for the forward tetrahedral rasterization to enable differentiable volume rendering [S1, unofficial]. It sets apart from the forward pass by operating in a fragment shader with interlock mechanisms to safely accumulate gradient contributions, whereas the forward pass computes color accumulation [S1, unofficial].
+The Adjoint Intersect Raster Pass is a backward pass that computes gradients for the forward tetrahedral rasterization to enable differentiable volume rendering [S1, unofficial]. It operates in a fragment shader with interlock mechanisms to safely accumulate gradient contributions [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** The pass consumes the same geometric data as the forward pass: `UniformDataBuffer` (camera/view matrices), `TriangleKeyValueBuffer`, `TriangleCounterBuffer` (optional), `TriangleVertexPositionBuffer`, `TriangleTetIndexBuffer`, `TetIndexBuffer`, `TetVertexPositionBuffer`, and either `TetVertexColorBuffer` or `TetCellColorBuffer` [S1, unofficial].
-- **Outputs:** Gradient buffers for the tetrahedral cell colors or vertex colors, updated via atomic additions [S1, unofficial].
+- **Inputs:** The pass consumes geometric and camera data buffers: `UniformDataBuffer`, `TriangleKeyValueBuffer`, `TriangleCounterBuffer` (optional), `TriangleVertexPositionBuffer`, `TriangleTetIndexBuffer`, `TetIndexBuffer`, `TetVertexPositionBuffer`, and either `TetVertexColorBuffer` or `TetCellColorBuffer` [S1, unofficial].
+- **Outputs:** Gradient buffers for tetrahedral cell or vertex colors, updated via atomic additions [S1, unofficial].
 
 **Data Structures:**
-The buffers are bound statically. The `DrawIndirectBuffer` contains a single `VkDrawIndirectCommand` with size `sizeof(VkDrawIndirectCommand)` and indirect draw count 1 [S1, unofficial].
+The `DrawIndirectBuffer` contains a single `VkDrawIndirectCommand` structure with a size of `sizeof(VkDrawIndirectCommand)` and an indirect draw count of 1 [S1, unofficial].
 
 **Steps:**
-1. **Extension Check:** Verify that the device supports `VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME`. If unsupported, throw an error [S1, unofficial].
+1. **Extension Check:** Verify that the device supports `VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME`; throw an error if unsupported [S1, unofficial].
 2. **Shader Configuration:** Load shaders with preprocessor defines `BACKWARD_PASS`, `PI_SQRT`, and `INV_PI_SQRT` [S1, unofficial].
 3. **Atomic Support Check:** If the hardware feature `shaderBufferFloat32AtomicAdd` is supported, add the define `SUPPORT_BUFFER_FLOAT_ATOMIC_ADD` and set the GLSL extension string to `"GL_EXT_shader_atomic_float;GL_EXT_control_flow_attributes"` [S1, unofficial].
 4. **Buffer Binding:** Bind the static buffers listed in Inputs [S1, unofficial].
-5. **Pipeline Configuration:**
-   - Disable culling.
-   - Set front face to Counter-Clockwise (CCW).
-   - Disable color write.
-   - Disable depth write and depth test.
-   - Set blend mode to OVERWRITE [S1, unofficial].
+5. **Pipeline Configuration:** Disable culling, set front face to Counter-Clockwise (CCW), disable color write, disable depth write and depth test, and set blend mode to OVERWRITE [S1, unofficial].
 6. **Execution:** Issue an indirect draw call using the `DrawIndirectBuffer` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adjoint_intersect_raster_pass(device, pipeline_layout, shader_module, buffers):
+def adjoint_intersect_raster_pass(device_supports_extension, device_features, buffers, pipeline_layout, shader_module):
     # Step 1: Check extension support
-    if not device.supports_extension("VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME"):
-        raise RuntimeError("VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME is required for Adjoint Intersect Raster Pass")
+    if not device_supports_extension("VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME"):
+        raise RuntimeError("VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME is required")
 
     # Step 2 & 3: Configure shader defines
     defines = ["BACKWARD_PASS", "PI_SQRT", "INV_PI_SQRT"]
-    if device.features.shader_buffer_float32_atomic_add:
+    glsl_extensions = ""
+    if device_features.shader_buffer_float32_atomic_add:
         defines.append("SUPPORT_BUFFER_FLOAT_ATOMIC_ADD")
         glsl_extensions = "GL_EXT_shader_atomic_float;GL_EXT_control_flow_attributes"
-    else:
-        glsl_extensions = ""
 
-    # Step 4: Bind buffers
+    # Step 4: Bind static buffers
     # UniformDataBuffer, TriangleKeyValueBuffer, TriangleCounterBuffer (optional),
     # TriangleVertexPositionBuffer, TriangleTetIndexBuffer, TetIndexBuffer,
-    # TetVertexPositionBuffer, TetVertexColorBuffer/TetCellColorBuffer
-    bind_static_buffers(buffers)
+    # TetVertexPositionBuffer, TetVertexColorBuffer or TetCellColorBuffer
+    for buf in buffers:
+        bind_buffer(buf)
 
     # Step 5: Configure pipeline state
     pipeline_state = {
@@ -58,11 +53,36 @@ def adjoint_intersect_raster_pass(device, pipeline_layout, shader_module, buffer
         "depth_test": False,
         "blend_mode": "OVERWRITE"
     }
-    configure_graphics_pipeline(pipeline_state, defines, glsl_extensions)
+    set_pipeline_state(pipeline_layout, pipeline_state, defines, glsl_extensions)
 
-    # Step 6: Execute indirect draw
-    draw_indirect_buffer = create_buffer(size=sizeof(VkDrawIndirectCommand), count=1)
-    draw_indirect(draw_indirect_buffer)
+    # Step 6: Set indirect draw buffer and execute
+    # VkDrawIndirectCommand is 20 bytes on standard Vulkan implementations
+    INDIRECT_COMMAND_SIZE = 20
+    draw_indirect_buffer = allocate_buffer(size=INDIRECT_COMMAND_SIZE, count=1)
+    draw_indirect(draw_indirect_buffer, count=1)
+
+def device_supports_extension(ext_name):
+    # Returns True if the GPU driver supports the extension
+    return True
+
+class DeviceFeatures:
+    def __init__(self):
+        self.shader_buffer_float32_atomic_add = True
+
+def bind_buffer(buf):
+    # Binds a buffer to the graphics pipeline
+    pass
+
+def set_pipeline_state(layout, state, defines, extensions):
+    # Configures the graphics pipeline with the given state and shader defines
+    pass
+
+def allocate_buffer(size, count):
+    return {"data": bytearray(size * count), "size": size, "count": count}
+
+def draw_indirect(buffer, count):
+    # Issues indirect draw command using buffer data
+    pass
 ```
 
 **Parameters:**
@@ -70,22 +90,20 @@ def adjoint_intersect_raster_pass(device, pipeline_layout, shader_module, buffer
 - `shaderBufferFloat32AtomicAdd`: Hardware feature flag that enables `SUPPORT_BUFFER_FLOAT_ATOMIC_ADD` and `GL_EXT_shader_atomic_float` extension for atomic float operations in the backward pass [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- If `shaderBufferFloat32AtomicAdd` is not supported, atomic float operations in the fragment shader will fail or fall back to slower mechanisms, potentially causing incorrect gradient accumulation [S1, unofficial].
-- The pass relies on `VK_EXT_FRAGMENT_SHADER_INTERLOCK`; without it, concurrent writes to gradient buffers from multiple fragments will result in race conditions [S1, unofficial].
-
-## Subtopics
+- Missing `VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME` causes a runtime error [S1, unofficial].
+- Unsupported `shaderBufferFloat32AtomicAdd` disables the atomic float extensions [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
 - **Strengths:** Enables differentiable volume rendering by computing gradients for the forward pass [S1, unofficial].
 - **Limitations:** Requires specific Vulkan extensions (`VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME`) and hardware features (`shaderBufferFloat32AtomicAdd`) [S1, unofficial].
 - **When to use:** When implementing differentiable volume rendering with tetrahedral meshes [S1, unofficial].
 - **When not to use:** When hardware does not support the required Vulkan extensions or atomic float operations [S1, unofficial].
 
 ## Background
-The Adjoint Intersect Raster Pass is part of the DiffTetVR project, a differentiable volume renderer for tetrahedral meshes [S1, unofficial]. It was developed to enable gradient computation through the rasterization process, allowing for optimization of volume rendering parameters [S1, unofficial].
+The pass is implemented in a Vulkan-based differentiable volume renderer [S1, unofficial]. It was developed to enable gradient computation through the rasterization process, allowing for optimization of volume rendering parameters [S1, unofficial].
 
 ## Sources
 [S1] GitHub - chrismile/DiffTetVR: Differentiable volume renderer for ..., https://github.com/chrismile/DiffTetVR, fetched 2026-10-28 (unofficial)

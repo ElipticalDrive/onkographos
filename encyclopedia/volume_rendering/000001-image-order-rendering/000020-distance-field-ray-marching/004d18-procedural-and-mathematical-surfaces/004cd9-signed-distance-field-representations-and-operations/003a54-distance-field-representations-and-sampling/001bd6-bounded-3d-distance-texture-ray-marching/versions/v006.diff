@@ -1,0 +1,172 @@
+--- v005.md
++++ v006.md
+@@ -4,104 +4,105 @@
+ 
+ ## Overview
+-Bounded 3D Distance Texture Ray Marching is a method for evaluating a Signed Distance Function (SDF) using a discrete 3D texture to represent an implicit surface, specifically designed to handle boundary conditions and invalid distance values at texture edges [S1, S2, unofficial]. It solves the problem of sampling artifacts that occur when a ray marches outside the valid interior of a distance texture but remains within the texture's physical volume [S1, unofficial]. Unlike standard texture sampling which may return noisy or invalid data near the edges, this method employs two bounding regions (an inner "red" box and an outer "green" box) to ensure that ray marching stops correctly at the texture boundary or uses valid interior data, preventing the "red box" artifact in ambient occlusion calculations [S1, S2, unofficial]. It builds on [Distance Field Representations and Sampling](8725-distance-field-representations-and-sampling.md).
++Bounded 3D Distance Texture Ray Marching is a technique for rendering implicit surfaces defined by a 3D distance texture, specifically addressing the problem of invalid distance values at the texture boundaries [S1, S2, unofficial]. It employs two nested bounding boxes (an inner "red" box and an outer "green" box) to distinguish between valid texture data and a boundary shell where samples may be unreliable [S1, S2, unofficial]. Unlike standard texture lookups that might return erroneous distances near edges, this method returns the distance to the outer boundary for points in the invalid shell, ensuring the ray marcher steps safely without tunneling into undefined data [S1, S2, unofficial]. It enables the inclusion of pre-computed distance textures (e.g., the Stanford Bunny) into scenes using standard SDF composition operators [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A query point $\mathbf{x}$ in local texture space (typically normalized to $[-0.5, 0.5]^3$ or similar, centered at origin), a 3D distance texture, and two parameters: `textureBoundary` and `textureShell`.
+-*   **Output:** A scalar distance value $res$. If the point is within the valid interior region, this is the sampled SDF value from the texture. If the point is outside the valid region (but potentially inside the texture volume), it is the distance to the inner boundary, ensuring the ray marcher does not proceed into invalid data.
++**Inputs and Outputs:**
++*   **Input:** A query point $\mathbf{x}$ in world space, a 3D distance texture `texture`, and parameters `textureBoundary` and `textureShell`.
++*   **Output:** A signed distance value $res$ representing the distance to the implicit surface or the texture boundary.
+ 
+-**Data Structures**
+-*   **3D Distance Texture:** A 3D array of floating-point values. In the reference implementation, dimensions are $192 \times 192 \times 192$ [S1, S2, unofficial].
+-*   **Parameters:**
+-    *   `textureBoundary`: A 3D vector defining the half-dimensions of the inner valid region. Value: $(0.5, 0.5, 0.5)$ [S2, unofficial].
+-    *   `textureShell`: A 3D vector defining the thickness of the boundary region surrounding the inner valid region. Value: $(0.05, 0.05, 0.05)$ [S2, unofficial].
++**Data Structures:**
++*   **3D Distance Texture:** A voxel grid storing distance values. In the reference implementation, dimensions are $192 \times 192 \times 192$ [S1, S2, unofficial].
++*   **textureBoundary:** A vector defining the half-dimensions of the inner valid region. Value: $(0.5, 0.5, 0.5)$ [S2, unofficial].
++*   **textureShell:** A vector defining the thickness of the boundary region where data is considered invalid. Value: $(0.05, 0.05, 0.05)$ [S2, unofficial].
+ 
+-**Algorithm Steps**
+-1.  **Calculate Distance to Inner Boundary:** Compute the distance from the query point $\mathbf{x}$ to the inner valid region box defined by `textureBoundary`. This calculation assumes the point is outside the inner region.
+-    *   Compute component-wise difference: $\mathbf{d_i} = |\mathbf{x}| - \text{textureBoundary} + \text{textureShell}$ [S2, unofficial].
+-    *   Compute the Euclidean norm: $res = \|\max(\mathbf{d_i} + \text{textureShell}, 0)\|$ [S2, unofficial]. This value represents the distance to the "red box" (the boundary of the valid region) if the point is outside it.
++**Algorithm Steps:**
++1.  **Calculate Distance to Outer Boundary:** Compute the distance from $\mathbf{x}$ to the inner valid region box. This assumes $\mathbf{x}$ is outside the valid region initially.
++    $$ \mathbf{d_i} = |\mathbf{x}| - \text{textureBoundary} + \text{textureShell} $$
++    [S2, unofficial]
++2.  **Compute Outer Distance (Fallback):** Calculate the norm of the adjusted distance vector. This value is used if the point is outside the valid texture space or in the invalid shell.
++    $$ res = \| \max(\mathbf{d_i} + \text{textureShell}, 0) \| $$
++    [S2, unofficial]
++    *Note: The source uses $\|\cdot\|$ notation for the norm [S2, unofficial].*
++3.  **Check Valid Region:** Determine if $\mathbf{x}$ is inside the inner valid region by checking the components of $\mathbf{d_i}$.
++    $$ c = \max(d_{ix}, \max(d_{iy}, d_{iz})) $$
++    [S2, unofficial]
++4.  **Lookup if Inside:** If $c < 0$, the point is inside the valid region.
++    *   Adjust coordinates to align with texture space:
++        $$ \mathbf{x}_{adj} = \mathbf{x} + \text{textureBoundary} $$
++        [S2, unofficial]
++    *   Perform texture lookup:
++        $$ res = \text{lookupTexture}(\text{texture}, \mathbf{x}_{adj}) $$
++        [S2, unofficial]
++5.  **Return Result:** Return $res$. If the point was outside the valid region (or in the shell), $res$ holds the distance to the boundary calculated in Step 2. If inside, it holds the texture value [S1, S2, unofficial].
+ 
+-2.  **Check Interior Status:** Determine if the point $\mathbf{x}$ is inside the inner valid region.
+-    *   Compute $c = \max(d_{ix}, \max(d_{iy}, d_{iz}))$ [S2, unofficial].
+-    *   Here, $d_{ix}, d_{iy}, d_{iz}$ are the components of $\mathbf{d_i}$ from Step 1.
+-
+-3.  **Sample Texture (If Interior):** If $c < 0$, the point is inside the inner valid region.
+-    *   Adjust coordinates to align with texture coordinate space: $\mathbf{x}_{adj} = \mathbf{x} + \text{textureBoundary}$ [S2, unofficial].
+-    *   Lookup the distance value from the 3D texture using the adjusted coordinates: $res = \text{lookupTexture}(\text{texture}, \mathbf{x}_{adj})$ [S2, unofficial].
+-
+-4.  **Return Result:** Return $res$. If the point was outside the inner region, $res$ holds the distance to the boundary calculated in Step 1. If inside, it holds the texture sample [S1, S2, unofficial].
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+ def bounded_3d_distance_texture_ray_marching(x, texture, texture_boundary, texture_shell):
+     """
+-    Evaluates the SDF for a bounded 3D distance texture.
++    Computes the signed distance for a point x using a bounded 3D distance texture.
+     
+     Args:
+-        x: Query point in local space (vector).
+-        texture: 3D distance texture array.
+-        texture_boundary: Half-dimensions of the inner valid region (vector).
+-        texture_shell: Thickness of the boundary shell (vector).
++        x (vec3): Query point in world space.
++        texture (3D Texture): The distance field texture.
++        texture_boundary (vec3): Half-dimensions of the inner valid region. Default: (0.5, 0.5, 0.5).
++        texture_shell (vec3): Thickness of the invalid boundary shell. Default: (0.05, 0.05, 0.05).
+         
+     Returns:
+-        Distance value.
++        float: Signed distance to the surface or boundary.
+     """
+-    # Step 1: Calculate distance to the inner boundary (red box)
+-    # Assumes point is outside the inner region for this calculation
++    # Step 1: Calculate distance to the inner valid region boundary, expanded by shell
++    # di represents the distance to the edge of the valid region, offset by the shell
+     di = abs(x) - texture_boundary + texture_shell
+     
+-    # Calculate Euclidean norm of the clamped distance vector
++    # Step 2: Compute fallback distance (distance to the outer boundary of the valid region)
++    # This is used for points outside the valid region or in the invalid shell
+     # max(di + texture_shell, 0) ensures we only consider positive distances
+-    # Note: The source formula uses k...k for norm.
+-    res = sqrt(max(di.x + texture_shell.x, 0)**2 + 
+-               max(di.y + texture_shell.y, 0)**2 + 
+-               max(di.z + texture_shell.z, 0)**2)
++    # The norm ||...|| is computed component-wise max then Euclidean norm? 
++    # Source formula: res = || max(di + textureShell, 0) ||
++    # Interpreting ||v|| as Euclidean norm of vector v:
++    adjusted_di = max(di + texture_shell, 0.0)
++    res = sqrt(adjusted_di.x**2 + adjusted_di.y**2 + adjusted_di.z**2)
+     
+-    # Step 2: Check if point is inside the inner valid region
++    # Step 3: Check if point is inside the inner valid region
++    # c is the maximum component of di. If c < 0, all components are negative, meaning inside.
+     c = max(di.x, max(di.y, di.z))
+     
+-    # Step 3: If inside, sample the texture
++    # Step 4: If inside, perform texture lookup
+     if c < 0:
+-        # Adjust coordinates to align with texture coordinate space
++        # Adjust coordinates to map to texture space [0,1] or similar
+         x_adj = x + texture_boundary
+-        
+-        # Lookup distance value from texture
+-        # lookupTexture performs trilinear interpolation or nearest neighbor
+-        # depending on texture configuration.
++        # Lookup distance from texture
+         res = lookup_texture(texture, x_adj)
+         
+-    # Step 4: Return result
++    # Step 5: Return result
+     return res
+ ```
+ 
+-**Parameters and Typical Values**
++**Parameters and Typical Values:**
+ *   `textureBoundary`: $(0.5, 0.5, 0.5)$ [S2, unofficial].
+-*   `textureShell`: $(0.05, 0.05, 0.05)$ [S2, unofficial]. This value is often deduced by trial and error and should be as small as possible to maximize the valid lookup region while preventing sampling of invalid boundary data [S1, S2, unofficial].
+-*   Texture Dimensions: $192 \times 192 \times 192$ with an inner valid region of $128 \times 128 \times 128$ in the reference example [S1, S2, unofficial].
++*   `textureShell`: $(0.05, 0.05, 0.05)$ [S2, unofficial].
++*   Texture Dimensions: $192 \times 192 \times 192$ with an inner valid region of $128 \times 128 \times 128$ [S1, S2, unofficial].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Invalid Boundary Data:** Texture samples outside the "green box" (inner valid region) but inside the "blue box" (total texture volume) may contain invalid distance values. The algorithm remedies this by disregarding that region for texture lookups and returning the distance to the red box instead [S1, S2, unofficial].
+-*   **Scale Mismatch:** The distance returned by the texture lookup must be in accordance with the scale of the scene. If not, an appropriate bound must be applied [S1, unofficial].
+-*   **Normal Estimation Epsilon:** When estimating normals via finite differences, the epsilon value must be adjusted to account for the voxel spacing in the texture. If the value is too small, the representation may exhibit a "grainy" look [S1, S2, unofficial].
+-*   **Mesh Holes:** For accurate distance field generation from meshes (e.g., Stanford Bunny), holes in the mesh must be closed before conversion to a 3D texture, otherwise the distance field will be incorrect [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Invalid Boundary Data:** Texture samples in the region between the inner valid region and the outer texture edge (the "green box" boundary) may contain invalid distance values [S1, S2, unofficial]. The algorithm remedies this by returning the distance to the outer boundary (red box) for these points, preventing the ray marcher from entering invalid data [S1, S2, unofficial].
++*   **Scale Mismatch:** The distance returned by the texture lookup must be in accordance with the scale of the scene. If not, an appropriate bound must be applied [S1, S2, unofficial].
++*   **Normal Estimation:** When estimating normals (e.g., using Algorithm 3.1 from the source), the epsilon value must be adjusted to account for the voxel spacing in the texture. If the value is too small, the representation may appear "grainy" [S1, S2, unofficial].
++*   **Mesh Holes:** For accurate distance field generation from meshes (like the Stanford Bunny), holes in the mesh must be closed before conversion to a 3D texture [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Ambient Occlusion Specific Distance Function](4320-ambient-occlusion-specific-distance-function.md)
+-A variant designed to mitigate ambient occlusion artifacts by returning a constant step size $\Delta t$ for points outside the texture volume, preventing the bounding shell from contributing to occlusion.
+-
+-### [Standard 3D Distance Texture Sampling](8725-distance-field-representations-and-sampling.md)
+-The parent method which does not explicitly handle the boundary shell logic, potentially leading to artifacts when marching near texture edges.
++A variant that returns a constant step size $\Delta t$ for points outside the texture volume to mitigate AO artifacts caused by the bounding shell.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per query. The algorithm involves a constant number of vector operations and a single texture lookup.
+-*   **Memory Complexity:** Depends on the 3D texture size. For a $192^3$ texture, this is significant compared to analytic SDFs.
+-*   **Strengths:** Robust handling of discrete texture boundaries; prevents ray marchers from entering invalid data regions; allows for complex implicit surface representations stored in textures.
+-*   **Limitations:** Requires pre-computation of the distance texture; memory intensive for high-resolution textures; boundary artifacts (like the "red box") can still appear in shading (e.g., AO) if not handled by specific variants like the AO-specific function.
+-*   **When to Use:** When the implicit surface is complex and best represented by a pre-computed distance field (e.g., from a mesh), and boundary artifacts need to be controlled during ray marching.
+-*   **When Not to Use:** For simple analytic shapes where analytic SDFs are faster and more precise; when memory is severely constrained.
++*   **Time Complexity:** $O(1)$ per query, involving basic vector arithmetic and one texture lookup.
++*   **Memory Complexity:** Depends on the 3D texture size. For a $192^3$ texture, this is significant compared to procedural SDFs [S1, S2, unofficial].
++*   **Strengths:** Allows the use of pre-computed distance fields from meshes (e.g., Stanford Bunny) in ray marching scenes [S1, S2, unofficial]. Handles boundary conditions robustly to prevent tunneling [S1, S2, unofficial].
++*   **Limitations:** Requires storing the 3D texture, which consumes more memory than procedural SDFs. The `textureShell` parameter is heuristic and determined by trial and error, potentially varying between textures [S1, S2, unofficial].
++*   **When to Use:** When rendering complex, pre-computed distance fields from meshes where procedural SDFs are insufficient or impractical [S1, S2, unofficial].
++*   **When Not to Use:** When memory is constrained or when the scene geometry is simple enough for analytical SDFs [S1, S2, unofficial].
+ 
+ ## Background
+-This method originates from research on GPU ray marching for ambient occlusion and distance fields, specifically detailed in works by researchers at DTU (Technical University of Denmark) [S1, S2, unofficial]. It was used to render the Stanford Bunny as a 3D distance texture, demonstrating the inclusion of such representations into scenes using union operators [S1, S2, unofficial]. The technique addresses limitations in early 3D texture distance field implementations where boundary conditions were not explicitly managed, leading to visual artifacts.
++This method originates from research on GPU ray marching for ambient occlusion and distance fields [S1, S2, unofficial]. It was developed to integrate pre-computed 3D distance textures (such as the Stanford Bunny) into ray marching pipelines, addressing the specific challenge of invalid distance values at the texture boundaries [S1, S2, unofficial]. The technique is described in the context of the GEL (GEometry and Linear algebra) framework [S2, unofficial].
+ 
+ ## Sources

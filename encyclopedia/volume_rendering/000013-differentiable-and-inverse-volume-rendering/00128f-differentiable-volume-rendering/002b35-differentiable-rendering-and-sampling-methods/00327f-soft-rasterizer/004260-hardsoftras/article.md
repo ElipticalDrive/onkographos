@@ -16,15 +16,15 @@ where $I(\Theta)$ is the rendered image, and $\theta_G, \theta_C, \theta_M, \the
 
 ### Inputs and Outputs
 **Inputs:**
-*   Vertex positions ($vtx\_pos$), UVs ($vtx\_uv$), and face indices ($faces$).
-*   Model, view, and projection matrices ($model\_mat, view\_mat, prj\_mat$).
-*   Material properties (albedo, metallic, roughness, normal map) and environment map.
-*   Background color.
+*   Vertex positions ($vtx\_pos$), UVs ($vtx\_uv$), and face indices ($faces$) [S1].
+*   Model, view, and projection matrices ($model\_mat, view\_mat, prj\_mat$) [S1].
+*   Material properties (albedo, metallic, roughness, normal map) and environment map [S1].
+*   Background color [S1].
 *   Parameters: Blur radius $r \in [0, 1]$, number of buffers $K \ge 1$, blending parameter $\sigma = r/7$, silhouette edge width $\delta = r$ [S1].
 
 **Outputs:**
-*   Blended shaded image ($blended\_shaded\_img$).
-*   Blended silhouette image ($blended\_silhouette\_img$).
+*   Blended shaded image ($blended\_shaded\_img$) [S1].
+*   Blended silhouette image ($blended\_silhouette\_img$) [S1].
 *   Final image: $Vec4(blended\_shaded\_img, blended\_silhouette\_img)$ [S1].
 
 ### Data Structures
@@ -74,28 +74,30 @@ Shift(depth, dist) =
 0.5 \times |dist| + 0.5 & \text{if } dist < 0 
 \end{cases}
 $$
-[ S1 ]
+[S1]
 
 **BuildBlend(shaded_imgs, stencils, edge_dists, background, K, sigma, delta):**
 Blends the shaded images from all peeling planes [S1].
-*   Compute weights: $weight_k = \frac{1}{1 + e^{dist_k / -\sigma}} \times stencil_k$ [S1].
-*   Compute color blend: $I_c = \frac{\sum_k weight_k C_k}{\sum_k weight_k}$ for edges, and $I_c = S_H C_1$ for non-edges [S1].
-*   Compute silhouette blend: $I_s = 1 - \prod_k (1 - weight_k)$ for edges, and $I_s = S_H$ for non-edges [S1].
+*   Compute weights: $D_k = \frac{1}{1 + e^{-dist_k/\sigma}} \times stencil_k$ [S1].
+*   Compute color blend: $I_c = I(I_{ce}, I_{cne})$, where $I_{ce} = \frac{\sum_k D_k C_k}{\sum_k D_k}$ for edges, and $I_{cne} = S_H C_1$ for non-edges [S1].
+*   Compute silhouette blend: $I_s = I(I_{se}, I_{sne})$, where $I_{se} = 1 - \prod_k (1 - D_k)$ for edges, and $I_{sne} = S_H$ for non-edges [S1].
+*   $S_H$ is the stencil mask of hard faces in the frontal buffer, and $C_1$ is the shaded color of the first buffer [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def HardSoftRas(vtx_pos, vtx_uv, faces, model_mat, view_mat, prj_mat, 
-                albedo, metallic, roughness, normal, background, 
+import numpy as np
+
+def HardSoftRas(vtx_pos, faces, model_mat, view_mat, prj_mat,
+                albedo, metallic, roughness, normal, background,
                 K, r, sigma, delta):
     """
     HardSoftRas differentiable rasterization.
     
     Args:
         vtx_pos: Vertex positions (N, 3)
-        vtx_uv: Vertex UVs (N, 2)
         faces: Face indices (F, 3)
         model_mat, view_mat, prj_mat: Transformation matrices
         albedo, metallic, roughness, normal: Material attributes
@@ -124,7 +126,7 @@ def HardSoftRas(vtx_pos, vtx_uv, faces, model_mat, view_mat, prj_mat,
             BuildEnlarge(vtx_pos, faces, r)
         
         # Stack enlarged vertices into a single buffer
-        large_prj_flat = Stack(large_prj_0, large_prj_1, large_prj_2)
+        large_prj_flat = np.concatenate([large_prj_0, large_prj_1, large_prj_2], axis=0)
         
         # 2. Rasterize enlarged triangles
         # Returns screen-space vertex indices for each fragment
@@ -145,16 +147,16 @@ def HardSoftRas(vtx_pos, vtx_uv, faces, model_mat, view_mat, prj_mat,
         uv = Interpolate(vtx_uv, faces, screen_vtx_idxs, bary_coords)
         
         # 6. Shift depth to handle pseudo-occlusion
-        prj_depth_w = GetW(prj_pos) # Extract w component
+        prj_depth_w = prj_pos[:, :, 3]  # Extract w component
         soft_depth = edge_dist * 0.5 + 0.5
         hard_depth = prj_depth_w * 0.5
-        is_inside = (edge_dist > 0.0)
-        prj_depth = Mix(soft_depth, hard_depth, is_inside)
+        is_inside = (edge_dist > 0.0).astype(np.float32)
+        prj_depth = np.where(is_inside, hard_depth, soft_depth)
         
         # 7. Set fragment depth and peel
         # Note: In a real GPU pipeline, this sets gl_FragDepth
         # Here we simulate the stencil generation
-        stencil = PeelDepth(prj_depth, prev_prj_depth)
+        stencil = (prj_depth < prev_prj_depth).astype(np.float32)
         
         # 8. Shade
         # Deferred shading with PBR
@@ -171,22 +173,21 @@ def HardSoftRas(vtx_pos, vtx_uv, faces, model_mat, view_mat, prj_mat,
         
     # 9. Blend
     blended_shaded_img, blended_silhouette_img = BuildBlend(
-        shaded_imgs, stencils, edge_dists, background, K, sigma, delta
-    )
+        shaded_imgs, stencils, edge_dists, background, K, sigma, delta)
     
     # 10. Edge Masking
-    is_hard = (edge_dists[0] > 0.0)
+    is_hard = (edge_dists[0] > 0.0).astype(np.float32)
     hard_shaded = shaded_imgs[0] * is_hard
     edge_mask = BuildEdgeMask(edge_dists[0], delta)
     
-    blended_col = Mix(hard_shaded, blended_shaded_img, edge_mask)
-    blended_sil = Mix(is_hard, blended_silhouette_img, edge_mask)
+    blended_col = np.where(edge_mask, blended_shaded_img, hard_shaded)
+    blended_sil = np.where(edge_mask, blended_silhouette_img, is_hard)
     
     # 11. Post-processing
     blended_shaded_img = ToneMap(blended_col)
     
     # Construct final image with silhouette as alpha
-    rendered_img = Vec4(blended_shaded_img, blended_sil)
+    rendered_img = np.stack([blended_shaded_img, blended_sil], axis=-1)
     
     return rendered_img
 
@@ -200,6 +201,7 @@ def BuildEnlarge(vtx_pos, faces, r):
     # Acute: Stretch vertices opposite to centroid
     # Obtuse (smallest angle < 30 deg): Expand bounding box
     # Return new vertex positions and mapping to original indices
+    # [G] Standard geometric expansion logic; exact vertex manipulation omitted for brevity
     pass
 
 def BuildEdgeDistance(vtx_pos, faces, screen_vtx_idxs):
@@ -207,12 +209,14 @@ def BuildEdgeDistance(vtx_pos, faces, screen_vtx_idxs):
     Compute signed distance from pixel to original triangle edges.
     """
     # Use barycentric coordinates or explicit edge distance formula
+    # [G] Standard signed distance to triangle edges
     pass
 
 def BuildBaryCoord(vtx_pos, faces, screen_vtx_idxs):
     """
     Compute screen-space barycentric coordinates for original triangles.
     """
+    # [G] Standard barycentric coordinate computation from projected vertices
     pass
 
 def Interpolate(attr, faces, screen_vtx_idxs, bary_coords):
@@ -223,13 +227,23 @@ def Interpolate(attr, faces, screen_vtx_idxs, bary_coords):
     # faces: (F, 3)
     # screen_vtx_idxs: (H, W, 3) indices into faces
     # bary_coords: (H, W, 3)
+    # [G] Standard barycentric interpolation
     pass
 
-def PeelDepth(prj_depth, prev_prj_depth):
+def Rasterize(vertices, original_vtx_idxs):
     """
-    Generate stencil mask for pixels that are in front of prev_prj_depth.
+    Hardware rasterization of enlarged triangles.
+    Returns screen-space vertex indices per fragment.
     """
-    return (prj_depth < prev_prj_depth).float()
+    # [G] Standard GPU rasterization pipeline simulation
+    pass
+
+def PhysicallyBasedShading(world_pos, world_nor, uv, albedo, metallic, roughness):
+    """
+    Compute PBR color for each pixel.
+    """
+    # [G] Standard PBR shading (e.g., Cook-Torrance BRDF)
+    pass
 
 def BuildBlend(shaded_imgs, stencils, edge_dists, background, K, sigma, delta):
     """
@@ -240,18 +254,18 @@ def BuildBlend(shaded_imgs, stencils, edge_dists, background, K, sigma, delta):
     
     for k in range(K):
         # Sigmoid weight based on edge distance
-        prob = 1.0 / (1.0 + Exp(edge_dists[k] / -sigma))
+        prob = 1.0 / (1.0 + np.exp(-edge_dists[k] / sigma))
         weight = prob * stencils[k]
         weights.append(weight)
         weighted_cols.append(weight * shaded_imgs[k])
         
     # Color blending
     # Sum of weighted colors
-    sum_weighted_cols = Sum(weighted_cols, axis=0)
-    sum_weights = Sum(weights, axis=0)
+    sum_weighted_cols = np.sum(weighted_cols, axis=0)
+    sum_weights = np.sum(weights, axis=0)
     
     # Avoid division by zero
-    sum_weights = Max(sum_weights, 1e-6)
+    sum_weights = np.maximum(sum_weights, 1e-6)
     
     blended_color = sum_weighted_cols / sum_weights
     
@@ -268,18 +282,13 @@ def BuildEdgeMask(edge_dist, delta):
     Create a binary mask for edge pixels.
     """
     # Mask is 1 where edge_dist is within delta of 0
-    return ((edge_dist > -delta) & (edge_dist < delta)).float()
+    return ((edge_dist > -delta) & (edge_dist < delta)).astype(np.float32)
 
 def ToneMap(img):
     """
     Apply tone mapping (e.g., Reinhard or ACES).
     """
-    pass
-
-def PhysicallyBasedShading(world_pos, world_nor, uv, albedo, metallic, roughness):
-    """
-    Compute PBR color for each pixel.
-    """
+    # [G] Standard tone mapping operator
     pass
 ```
 
@@ -303,7 +312,6 @@ def PhysicallyBasedShading(world_pos, world_nor, uv, albedo, metallic, roughness
 *   **Strengths:** Dense and smooth far-range gradients; robust optimization without shape collapse; hardware-accelerated; works with small $K$ [S1].
 *   **Limitations:** Requires careful tuning of $r$ and $K$; blending weights depend on edge distance, which may not always align with semantic edges [S1].
 *   **When to use:** Differentiable rendering with physically-based shading, especially for inverse rendering tasks requiring stable gradients [S1].
-*   **When not to use:** When extremely high precision at silhouette edges is required without any blurring, or when $K$ must be very large for complex transparency [S1].
 
 ## Background
 HardSoftRas was introduced in the Dressi renderer paper by Y. Takimoto et al. in 2022 [S1]. It is designed to propagate gradients from screen space to far-range vertex attributes using hardware rasterizers, addressing limitations in prior soft rasterization methods like SoftRas and PyTorch3D [S1]. The method is used in the Dressi renderer for differentiable rendering with physically-based shading [S1].

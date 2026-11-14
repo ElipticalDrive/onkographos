@@ -1,0 +1,93 @@
+# Color Composition
+Also called: AWP Color Composition, Adaptive Weighted Color Composition
+
+## Overview
+Color Composition aggregates multiple color samples along a ray into a final pixel color using adaptive weights, primarily to handle motion blur or multi-view consistency in neural radiance fields. It differs from standard volume rendering by incorporating learned adaptive weights ($m^{p-rig}$) alongside rigid weights ($ms$) to account for temporal or spatial variations, and requires pre-computation tone mapping of input colors.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of $k+1$ color samples $\hat{C}_{s;i}$ for $i \in \{0, \dots, k\}$, rigid weights $ms_{s;i}$, and adaptive weights $m^{p-rig}_{s;i}$ or $\tilde{m}^{p}_{s;i}$ derived from a neural network (e.g., DP-NeRF).
+- Output: The composed color $\hat{B}_{sp}$ or $\tilde{B}_{sp}$.
+
+**Data Structures:**
+- Colors $\hat{C}_{s;i}$: 3-channel vectors (RGB), typically in linear space before tone mapping.
+- Weights: Scalars normalized such that $\sum_{i=0}^k ms_{s;i} = 1$.
+
+**Steps:**
+1. **Tone Mapping:** Apply a gamma function to each input color sample to map from predicted scene irradiance to displayable color space. The gamma value is typically 2.2 [S1].
+   $$ g(c) = c^{1/2.2} $$
+2. **Weighted Summation:** Compute the final color using the specified weight variant.
+   - For rigid and adaptive rigid weights:
+     $$ \hat{B}_{sp} = ms_{s;0} g(\hat{C}_{s;0}) + \sum_{i=1}^{k} m^{p-rig}_{s;i} g(\hat{C}_{s;i}) $$
+   - For alternative adaptive weights:
+     $$ \tilde{B}_{sp} = \tilde{m}^{p}_{s;0} g(\hat{C}_{s;0}) + \sum_{i=1}^{k} \tilde{m}^{p-rig}_{s;i} g(\hat{C}_{s;i}) $$
+   Where $ms_{s;0}$ is the rigid weight for the reference view, and $m^{p-rig}_{s;i}$ are adaptive weights for other views/motions [S1].
+
+**Parameters:**
+- Gamma exponent: 2.2 [S1].
+- $k$: Hyper-parameter controlling the number of rigid camera motions or samples.
+
+**Edge Cases:**
+- Weight normalization: The rigid weights $ms_{s;0,\dots,k}$ are normalized along the motion axis to ensure they sum to 1 [S1].
+- Precision: Tone mapping must occur before composition to ensure correct perceptual blending.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def color_composition(colors, rigid_weights, adaptive_weights, gamma=2.2):
+    """
+    colors: list of k+1 RGB vectors (linear space)
+    rigid_weights: list of k+1 scalars (ms)
+    adaptive_weights: list of k+1 scalars (m^p-rig or m~^p)
+    gamma: float, typically 2.2
+    """
+    # Step 1: Tone mapping
+    tone_mapped_colors = []
+    for c in colors:
+        # Clamp to avoid negative values if any
+        c_clamped = [max(0.0, x) for x in c]
+        # Apply gamma
+        tone_mapped = [x ** (1.0 / gamma) for x in c_clamped]
+        tone_mapped_colors.append(tone_mapped)
+    
+    # Step 2: Weighted sum
+    # Note: rigid_weights[0] corresponds to the reference, others to adaptive
+    # Assuming rigid_weights and adaptive_weights are aligned with colors
+    result = [0.0, 0.0, 0.0]
+    
+    # Reference term (rigid weight)
+    w_ref = rigid_weights[0]
+    c_ref = tone_mapped_colors[0]
+    for ch in range(3):
+        result[ch] += w_ref * c_ref[ch]
+        
+    # Adaptive terms
+    for i in range(1, len(colors)):
+        w_adapt = adaptive_weights[i]
+        c_adapt = tone_mapped_colors[i]
+        for ch in range(3):
+            result[ch] += w_adapt * c_adapt[ch]
+            
+    return result
+```
+
+## Subtopics
+
+### CTF Color Blending
+Blends cluster colors from a Classification and Transfer Function (CTF) with voxel colors from the volume's transfer function using a user-specified blending factor $\beta$ ($0 \le \beta \le 1$) [S2, unofficial]. The CTF colors are derived from graph traversal of multiclassified data, where color arithmetic (union, intersection, complement) is applied to class attributes [S2, unofficial]. This method is chosen when structural focus+context rendering is required, allowing users to control the visibility of specific semantic clusters against the raw volume data [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of samples $k$ per ray. Tone mapping is $O(1)$ per sample.
+- **Memory Complexity:** $O(k)$ per ray for storing intermediate color and weight values.
+- **Strengths:** Handles motion blur and multi-view inconsistencies effectively by adapting weights [S1].
+- **Limitations:** Requires pre-computed or learned weights (neural network overhead in DP-NeRF) [S1]. Tone mapping introduces non-linearity that must be handled consistently.
+- **When to use:** Neural radiance fields with motion blur or multi-view synthesis where adaptive weighting improves visual quality [S1].
+- **When not to use:** Simple static volume rendering where standard alpha blending suffices.
+
+## Background
+Originated in the context of Deblurred Neural Radiance Fields (DP-NeRF) to handle motion blur by aggregating colors from multiple rigid camera motions with adaptive weights [S1]. The CTF Color Blending variant stems from structural focus+context rendering for multiclassified volume data, using graph-based color arithmetic [S2, unofficial].
+
+## Sources
+[S1] DP-NeRF: Deblurred Neural Radiance Field with Physical Scene Priors, https://arxiv.org/abs/2211.12046v4, fetched 2026-10-26
+[S2] Structural focus+context rendering of multiclassified volume data, http://hdl.handle.net/2117/86811, fetched 2026-10-26 (unofficial)

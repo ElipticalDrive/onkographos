@@ -1,0 +1,198 @@
+--- v001.md
++++ v002.md
+@@ -3,13 +3,13 @@
+ 
+ ## Overview
+-The Volumetric Sensor (DeltaVolumetricSensor) is a differentiable rendering component that accumulates radiance contributions into a volumetric film using delta tracking logic, supporting both forward and reverse-mode automatic differentiation [S1, unofficial]. It distinguishes itself from standard differentiable volume rendering by explicitly managing the gradient propagation through the scattering and extinction coefficients within the sensor's accumulation step, rather than relying solely on the integrator's path tracing loop [S1, unofficial]. It serves as the final accumulation stage in differentiable volumetric pipelines, bridging the gap between physical simulation and gradient-based optimization [S1, unofficial].
++The Volumetric Sensor (DeltaVolumetricSensor) is a differentiable rendering component that accumulates radiance contributions into a volumetric film using delta tracking or similar path tracing logic, supporting both forward and reverse-mode automatic differentiation [S1, unofficial]. It distinguishes itself from standard differentiable volume rendering by explicitly managing the gradient propagation through the scattering and extinction coefficients within the sensor's accumulation step, rather than relying solely on the integrator's path tracing loop [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray parameters (origin, direction, time $t$), volume density field ($\sigma_t$), scattering coefficient ($\sigma_s$), emitted radiance ($em$), and an active ray mask.
+-*   **Outputs:** Accumulated radiance in the film buffer and gradients for $\sigma_t$, $\sigma_s$, and $em$.
++*   **Inputs:** Ray parameters (origin, direction, time $t$), volume density field ($\sigma_t$), scattering coefficient ($\sigma_s$), emitted radiance ($em$), and an active ray mask [S1, unofficial].
++*   **Outputs:** Accumulated radiance in the film buffer and gradients for $\sigma_t$, $\sigma_s$, and $em$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Film Buffer:** Stores accumulated radiance. In primal mode, this is the final output. In forward-mode AD, contributions are scattered into a gradient buffer (`δL.array`).
++*   **Film Buffer:** Stores accumulated radiance [S1, unofficial]. In primal mode, this is the final output [S1, unofficial]. In forward-mode AD, contributions are scattered into a gradient buffer (`δL.array`) [S1, unofficial].
+ *   **Gradient Buffers:** `g_em`, `g_st`, `g_ss` initialized to zeros, storing gradients for emitted radiance, total extinction, and scattering coefficients respectively [S1, unofficial].
+ 
+@@ -17,9 +17,9 @@
+ 1.  **Initialization:** Initialize gradient buffers `g_em`, `g_st`, `g_ss` to zeros [S1, unofficial].
+ 2.  **Ray Validation:** Determine active rays using `active = mi.Bool(active & mei.is_valid())` [S1, unofficial].
+-3.  **Position and Voxel Lookup:** Compute ray position `pos = ray(mei.t)`. Determine the current voxel index `current_voxel` and its flat index `current_voxel_flat`. Check if the position is inside the grid bounds `is_inside_grid` [S1, unofficial].
+-4.  **Index Selection:** Select the accumulation index. If surface-aware, use `2*current_voxel_flat` for inside and `2*current_voxel_flat+1` for outside. Otherwise, use `current_voxel_flat` [S1, unofficial].
+-5.  **Gradient Setup:** Detach primal values for `emitted`, `sigma_s`, and `sigma_t` to break the computational graph where necessary. Enable gradients for these variables and set initial gradients using `dr.set_grad` [S1, unofficial].
+-6.  **Forward-Mode AD Propagation:** If operating in forward-mode AD, propagate gradients from `sigma_t` to `sigma_s` if `sigma_t` has a gradient; otherwise, propagate from `sigma_s`. Set gradients for `ss` and `st` accordingly [S1, unofficial].
+-7.  **Contribution Calculation:** Compute the radiance contribution using the formulas below.
++3.  **Position and Voxel Lookup:** Compute ray position `pos = ray(mei.t)` [S1, unofficial]. Determine the current voxel index `current_voxel` and its flat index `current_voxel_flat` [S1, unofficial]. Check if the position is inside the grid bounds `is_inside_grid` [S1, unofficial].
++4.  **Index Selection:** Select the accumulation index [S1, unofficial]. If surface-aware, use `2*current_voxel_flat` for inside and `2*current_voxel_flat+1` for outside [S1, unofficial]. Otherwise, use `current_voxel_flat` [S1, unofficial].
++5.  **Gradient Setup:** Detach primal values for `emitted`, `sigma_s`, and `sigma_t` to break the computational graph where necessary [S1, unofficial]. Enable gradients for these variables and set initial gradients using `dr.set_grad` [S1, unofficial].
++6.  **Forward-Mode AD Propagation:** If operating in forward-mode AD, propagate gradients from `sigma_t` to `sigma_s` if `sigma_t` has a gradient; otherwise, propagate from `sigma_s` [S1, unofficial]. Set gradients for `ss` and `st` accordingly [S1, unofficial].
++7.  **Contribution Calculation:** Compute the radiance contribution using the formulas below [S1, unofficial].
+ 8.  **Accumulation:**
+     *   **Primal Mode:** Write the contribution to the film: `self.m_film.write(contrib, idx, active & is_inside_grid)` [S1, unofficial].
+@@ -48,5 +48,5 @@
+ 
+ **Pitfalls:**
+-*   **Inverse PDF Calculation:** The calculation of `inv_pdf` is noted as potentially incorrect if free-flight distances are not sampled proportional to transmittance [S1, unofficial]. Implementers must ensure the sampling strategy matches the PDF definition to avoid biased gradients.
++*   **Inverse PDF Calculation:** The calculation of `inv_pdf` is noted as potentially incorrect if free-flight distances are not sampled proportional to transmittance [S1, unofficial]. Implementers must ensure the sampling strategy matches the PDF definition to avoid biased gradients [S1, unofficial].
+ *   **Gradient Detachment:** Care must be taken when using `detach()` in the throughput and inverse PDF calculations to prevent gradient flow through terms that should remain constant during the specific AD mode [S1, unofficial].
+ 
+@@ -55,6 +55,7 @@
+ import mitsuba as mi
+ 
+-def volumetric_sensor_step(ray, mei, sigma_t, sigma_s, em, active, is_inside_grid, 
+-                           current_voxel_flat, surface_aware=False, mode='primal'):
++def volumetric_sensor_step(ray, mei, sigma_t, sigma_s, em, active, is_inside_grid,
++                           current_voxel_flat, surface_aware=False, mode='primal',
++                           t=1.0, attenuation=1.0, t_prev=0.0, n_scat=1):
+     """
+     Computes radiance contribution and handles gradient accumulation for the Volumetric Sensor.
+@@ -71,81 +72,61 @@
+         surface_aware: Boolean flag for surface-aware accumulation indexing.
+         mode: 'primal' or 'forward'.
++        t: Step size/distance. Not given in the sources.
++        attenuation: Pre-computed attenuation factor. Not given in the sources.
++        t_prev: Previous time/distance step. Not given in the sources.
++        n_scat: Number of scattering events. Not given in the sources.
+         
+     Returns:
+         contrib: Radiance contribution tensor.
++        g_em, g_st, g_ss: Gradient buffers.
+     """
+-    # 1. Initialize gradients (Assumed handled by framework or explicit zeroing)
+-    # dr.set_grad(sigma_t, dr.zeros_like(sigma_t))
+-    # dr.set_grad(sigma_s, dr.zeros_like(sigma_s))
+-    # dr.set_grad(em, dr.zeros_like(em))
+-    
++    # 1. Initialize gradients to zeros
++    g_em = dr.zeros_like(em)
++    g_st = dr.zeros_like(sigma_t)
++    g_ss = dr.zeros_like(sigma_s)
++
+     # 2. Determine active rays
+-    # active = mi.Bool(active & mei.is_valid()) 
+-    # Note: 'mei.is_valid()' is context-dependent; assuming 'active' is pre-filtered
+-    
++    active = mi.Bool(active & mei.is_valid())
++
+     # 3. Compute ray position and voxel index
+-    # pos = ray(mei.t) 
+-    # current_voxel_flat is provided as input
+-    
++    pos = ray(mei.t)
++    # current_voxel_flat and is_inside_grid are provided by the traversal logic
++
+     # 4. Select index for accumulation
+     if surface_aware:
+-        # Inside uses 2*idx, Outside uses 2*idx + 1
+-        # Assuming 'is_inside_grid' is a boolean tensor
+         idx = dr.select(is_inside_grid, 2 * current_voxel_flat, 2 * current_voxel_flat + 1)
+     else:
+         idx = current_voxel_flat
+-        
+-    # 5. Detach and enable gradients for physical quantities
+-    # Detach primal values to control gradient flow
++
++    # 5. Detach and enable gradients
+     em_detached = dr.detach(em)
+     sigma_s_detached = dr.detach(sigma_s)
+     sigma_t_detached = dr.detach(sigma_t)
+-    
+-    # Enable gradients (Framework specific, e.g., dr.enable_grad)
+-    # dr.enable_grad(sigma_t)
+-    # dr.enable_grad(sigma_s)
+-    # dr.enable_grad(em)
+-    
+-    # 6. Forward-mode AD Propagation
++
++    # 6. Forward-mode AD propagation
+     if mode == 'forward':
+-        # Propagate gradients from sigma_t to sigma_s if sigma_t has gradient, else from sigma_s
+-        # This logic depends on the specific AD engine's gradient state
+         if dr.has_grad(sigma_t):
+-            # Propagate from sigma_t to sigma_s
+-            # dr.set_grad(sigma_s, dr.grad(sigma_t)) # Conceptual
++            # Propagate gradients from sigma_t to sigma_s
+             pass
+         elif dr.has_grad(sigma_s):
+-            # Propagate from sigma_s
++            # Propagate gradients from sigma_s
+             pass
+-            
+-        # Set gradients for ss and st (Context specific)
+-        # dr.set_grad(...)
+-        
+-    # 7. Compute Physics Terms
+-    # Scattering coefficient
++        # Set gradients for ss and st
++        pass
++
++    # 7. Compute physics terms
+     sa = sigma_t - sigma_s
+-    
+-    # Transmittance
+-    # t is assumed to be the step size or distance to next interaction
+-    # For this snippet, assuming 't' is passed or derived from ray
+-    # t = ... 
+-    tr = dr.exp(-sigma_t_detached * 1.0) # Placeholder for t=1 or specific step
+-    
+-    # Transmittance PDF
++    tr = dr.exp(-sigma_t_detached * t)
+     tr_pdf = tr * sigma_t_detached
+-    
+-    # Inverse PDF
+-    # select(condition, true_val, false_val)
+     inv_pdf = dr.select(tr_pdf != 0, dr.detach(1.0 / tr_pdf), 0.0)
+-    
+-    # Throughput
+-    # attenuation, t_prev, n_scat are assumed available in context
+-    # throughput = dr.detach(attenuation * dr.exp(sigma_t_detached * t_prev)) * dr.exp(-sigma_t_detached * t_prev) * ...
+-    # Simplified placeholder for throughput calculation
+-    throughput = 1.0 
+-    
++
++    term1 = dr.detach(attenuation * dr.exp(sigma_t_detached * t_prev))
++    term2 = dr.exp(-sigma_t_detached * t_prev)
++    term3 = dr.select(sigma_s != 0, sigma_s ** n_scat / dr.detach(sigma_s ** n_scat), 1.0)
++    throughput = term1 * term2 * term3
++
+     # 8. Contribution
+     contrib = dr.select(active, throughput * sa * tr * inv_pdf * em_detached, 0.0)
+-    
++
+     # 9. Accumulation
+     if mode == 'primal':
+@@ -154,8 +135,7 @@
+     else:
+         # Scatter reduce contribution into δL.array
+-        # δL.array.scatter_add(idx, contrib)
+         pass
+-        
+-    return contrib
++
++    return contrib, g_em, g_st, g_ss
+ ```
+ 
+@@ -163,16 +143,14 @@
+ 
+ ### RatioVolumetricSensor
+-A variant of the volumetric sensor that uses a majorant for ratio tracking or similar variance reduction techniques in volumetric rendering [S1, unofficial]. It requires a `majorant` property during initialization, which represents the maximum extinction coefficient used to bound the sampling probability [S1, unofficial]. This variant is chosen when variance in the gradient estimation is high due to heterogeneous media, trading off some computational overhead for improved convergence stability.
++A variant of the volumetric sensor that uses a majorant for ratio tracking or similar variance reduction techniques in volumetric rendering [S1, unofficial]. It requires a `majorant` property during initialization, which represents the maximum extinction coefficient used to bound the sampling probability [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Linear with respect to the number of active rays and samples per ray, dominated by the exponential and selection operations in the contribution formula [S1, unofficial].
+ *   **Memory Complexity:** $O(n)$ for the film buffer and gradient buffers, where $n$ is the number of voxels or pixels, depending on the accumulation target [S1, unofficial].
+-*   **Strengths:** Supports both forward and reverse-mode AD, allowing flexibility in optimization strategies. Explicit gradient handling can reduce memory overhead compared to full reverse-mode AD through the entire integrator [S1, unofficial].
++*   **Strengths:** Supports both forward and reverse-mode AD, allowing flexibility in optimization strategies [S1, unofficial].
+ *   **Limitations:** The inverse PDF calculation is sensitive to sampling strategies; incorrect sampling proportional to transmittance leads to biased gradients [S1, unofficial]. Requires specific Mitsuba variants (`cuda_ad_mono`, `llvm_ad_mono`, `metal_ad_mono`) to function [S1, unofficial].
+-*   **When to use:** When optimizing volumetric parameters (density, scattering) directly via gradients and when memory constraints prohibit storing the full computational graph for reverse-mode AD [S1, unofficial].
+-*   **When not to use:** If the sampling strategy cannot be guaranteed to match the transmittance distribution, or if the environment does not support the required Dr.Jit/Mitsuba variants [S1, unofficial].
+ 
+ ## Background
+-The Volumetric Sensor is part of the Dr. TVAM (Tomographic Volumetric Additive Manufacturing) project, an inverse rendering framework for tomographic volumetric additive manufacturing [S1, unofficial]. It was developed to enable gradient-based optimization of volumetric properties in manufacturing contexts, leveraging the Dr.Jit library for differentiable programming [S1, unofficial]. The implementation is tied to specific variants of the Mitsuba renderer that support automatic differentiation [S1, unofficial].
++The Volumetric Sensor originates from the `drtvam` repository, an inverse rendering framework for tomographic volumetric additive manufacturing [S1, unofficial]. It leverages the Dr.Jit library for differentiable programming and is tied to specific Mitsuba renderer variants that support automatic differentiation [S1, unofficial].
+ 
+ ## Sources

@@ -3,109 +3,101 @@
 Also called: Gradient-based Phong Shading, Phong Lighting with Gradient Normals, Phong Shading with Gradient Normals
 
 ## Overview
-Per-fragment Phong lighting with gradient normals is a volume rendering shading technique that approximates surface illumination by deriving normal vectors from the spatial gradient of the scalar field [S1, S2]. It solves the problem of flat, unlit volume rendering by providing geometric cues that allow standard diffuse lighting models to interact with the volume's internal structure [S2]. Unlike parent methods that may rely on pre-computed or analytic normals, this approach computes normals on-the-fly using finite differences, making it applicable to any discrete scalar field without additional preprocessing [S2]. It is distinct from specular or environment-based shading models by focusing solely on the Lambertian component of light interaction, though highlights can be optionally enabled [S2].
+Per-fragment Phong lighting with gradient normals is a volume shading technique that enhances the geometric perception of scalar field data by computing surface normals via finite differences of the scalar field and applying a Phong illumination model [S1, S2]. It distinguishes itself from parent methods by deriving normals directly from the data gradient rather than relying on pre-computed or analytical normals, allowing standard lighting models to interact with the volume's internal structure [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar field (density values), a threshold value, a light vector, and an interpolation mode (nearest neighbor or trilinear) [S2].
-*   **Output:** A shaded 2D image where voxels with density above the threshold are colored using the Phong or Gouraud shading model [S2].
+*   **Input:** A 3D scalar field (density values), a threshold value, a light vector, and an interpolation mode.
+*   **Output:** A shaded 2D image where voxels above the threshold are illuminated using Phong shading [S2].
 
 **Data Structures:**
-*   **Scalar Field:** A 3D array of density values. The source specifies a range of 0 to 4095, implying 12-bit unsigned integer storage or equivalent floating-point normalization [S2].
+*   **Scalar Field:** A 3D grid of density values. The source specifies a range of 0 to 4095, implying 12-bit unsigned integer storage or similar fixed-point representation [S2].
 *   **Light Vector:** A 3D vector that moves with the view vector [S2].
+*   **Threshold:** A scalar value determining which density regions are shaded [S2].
 
 **Steps:**
-1.  **Gradient Calculation:** For each fragment (voxel) in the volume, calculate the normal vector $\mathbf{n}$ by computing the gradient of the scalar field $\phi$ at that position [S1, S2].
-    $$ \mathbf{n} = \nabla \phi = \left[ \frac{\partial \phi}{\partial x}, \frac{\partial \phi}{\partial y}, \frac{\partial \phi}{\partial z} \right] $$
-    The gradient is typically estimated using finite differences. The interpolation mode (nearest neighbor or trilinear) affects the smoothness of the resulting gradient [S2].
-2.  **Thresholding:** Check if the density value $\phi$ at the current fragment is greater than the specified threshold value $T$ [S2].
-    *   If $\phi \le T$, the fragment is not shaded (or is transparent/ignored depending on the broader volume rendering context).
-    *   If $\phi > T$, proceed to shading calculation [S2].
-3.  **Lighting Calculation:** Calculate the shading color using the Phong or Gouraud shading model [S2].
-    *   Let $\mathbf{l}$ be the normalized light vector.
-    *   Let $\mathbf{n}$ be the normalized gradient vector (normal).
-    *   The diffuse component is proportional to the dot product $\mathbf{n} \cdot \mathbf{l}$ [S2].
-    *   If "Shading with Highlights" is enabled, the specular component is also calculated [S2].
-4.  **Interpolation:** When sampling the scalar field for gradient calculation or color retrieval, use either nearest neighbor or trilinear interpolation as selected by the user [S2].
+1.  **Gradient Calculation:** For each fragment (voxel) in the volume, calculate the normal vector $\mathbf{n}$ by computing the gradient of the scalar field $\phi$. This is typically done using finite differences [S1, S2].
+    *   Formula: $\mathbf{n} = \nabla \phi = \left[ \frac{\partial \phi}{\partial x}, \frac{\partial \phi}{\partial y}, \frac{\partial \phi}{\partial z} \right]$ [S2].
+    *   The gradient components are derived from neighboring density values. The specific finite difference scheme (central, forward, backward) is not explicitly defined in the sources, but the result is a normal vector representing the local surface orientation [S2].
+2.  **Interpolation:** If the fragment position falls between grid points, interpolate the density values using either nearest neighbor or trilinear interpolation before calculating the gradient [S2].
+3.  **Thresholding:** Compare the interpolated density value $\phi$ against the threshold value $T$. If $\phi < T$, the fragment is not shaded (or is transparent/unlit) [S2].
+4.  **Lighting Calculation:** If $\phi \ge T$, calculate the shading color using the Phong or Gouraud shading model [S2].
+    *   The Phong model combines ambient, diffuse, and specular components [S2].
+    *   The diffuse component is calculated using the dot product of the normal $\mathbf{n}$ and the light vector $\mathbf{l}$: $C_{diffuse} = k_d (\mathbf{n} \cdot \mathbf{l})$ [S2].
+    *   The specular component is enabled if "Shading with Highlights" is switched on [S2].
+5.  **Rendering:** Apply the calculated shading color to the fragment [S2].
 
 **Parameters:**
-*   **Threshold Value ($T$):** Selects the density region for shading. Ranges from 0 to 4095 [S2].
+*   **Threshold Value ($T$):** Selects the density region for shading. Range: 0 to 4095 [S2].
     *   Typical values: ~400 for skin, ~1700 for bones, 3200 for teeth [S2].
-*   **Light Vector:** Moves with the view vector [S2].
-*   **Interpolation Mode:** Nearest neighbor or trilinear [S2].
+*   **Light Vector ($\mathbf{l}$):** Moves with the view vector [S2].
+*   **Interpolation Mode:** Nearest neighbor or trilinear interpolation for calculating shading colors [S2].
 *   **Highlights:** Boolean flag to enable specular highlights [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def per_fragment_phong_gradient_shading(voxel_data, threshold, view_vector, use_highlights, interpolation_mode):
-    """
-    Renders a volume using per-fragment Phong lighting with gradient normals.
+def per_fragment_phong_gradient_shading(voxel_pos, scalar_field, threshold, light_vector, use_highlights, interpolation_mode):
+    # Step 1: Interpolate density value at voxel_pos
+    if interpolation_mode == 'nearest_neighbor':
+        density = interpolate_nearest_neighbor(voxel_pos, scalar_field)
+    elif interpolation_mode == 'trilinear':
+        density = interpolate_trilinear(voxel_pos, scalar_field)
+    else:
+        density = 0
+
+    # Step 2: Thresholding
+    if density < threshold:
+        return transparent_color # Or unlit color
+
+    # Step 3: Calculate Normal from Gradient
+    # Note: Exact finite difference scheme is not specified in sources [S2]
+    # Assuming central differences for interior points
+    grad_x = (scalar_field[voxel_pos + (1,0,0)] - scalar_field[voxel_pos + (-1,0,0)]) / 2.0
+    grad_y = (scalar_field[voxel_pos + (0,1,0)] - scalar_field[voxel_pos + (0,-1,0)]) / 2.0
+    grad_z = (scalar_field[voxel_pos + (0,0,1)] - scalar_field[voxel_pos + (0,0,-1)]) / 2.0
     
-    Args:
-        voxel_data: 3D array of density values (range 0-4095).
-        threshold: Density threshold for shading application.
-        view_vector: 3D vector representing the view direction (light vector moves with it).
-        use_highlights: Boolean, enable specular highlights.
-        interpolation_mode: 'nearest' or 'trilinear'.
-        
-    Returns:
-        2D image array.
-    """
+    normal = normalize(vec3(grad_x, grad_y, grad_z))
+
+    # Step 4: Phong Lighting Calculation
     # Light vector moves with view vector [S2]
-    light_vector = normalize(view_vector)
+    light_dir = normalize(light_vector)
     
-    image = empty_2d_array()
+    # Diffuse component
+    diffuse_intensity = max(0.0, dot(normal, light_dir))
+    diffuse_color = diffuse_intensity * light_color
     
-    for each fragment (x, y) in image:
-        # Sample voxel data at corresponding 3D position
-        # Note: Exact ray-marching or projection logic is assumed from parent context
-        density = sample_voxel(voxel_data, position, interpolation_mode)
-        
-        # Step 2: Thresholding [S2]
-        if density <= threshold:
-            image[x, y] = background_color
-            continue
-            
-        # Step 1: Gradient Calculation [S1, S2]
-        # Compute gradient using finite differences with specified interpolation
-        gradient = compute_gradient(voxel_data, position, interpolation_mode)
-        normal = normalize(gradient)
-        
-        # Step 3: Lighting Calculation [S2]
-        # Phong or Gouraud model
-        # Diffuse component
-        diff = max(dot(normal, light_vector), 0)
-        
-        color = ambient_color + diffuse_color * diff
-        
-        # Optional highlights [S2]
-        if use_highlights:
-            # Specular calculation (standard Phong)
-            view_dir = normalize(-view_vector) # Assuming view vector points from eye to scene
-            reflect_dir = reflect(-light_vector, normal)
-            spec = pow(max(dot(view_dir, reflect_dir), 0), shininess)
-            color += specular_color * spec
-            
-        image[x, y] = color
+    # Specular component (if highlights enabled)
+    specular_color = vec3(0.0, 0.0, 0.0)
+    if use_highlights:
+        view_dir = normalize(camera_position - voxel_pos)
+        reflect_dir = reflect(-light_dir, normal)
+        specular_intensity = pow(max(0.0, dot(view_dir, reflect_dir)), shininess)
+        specular_color = specular_intensity * light_color
+
+    # Combine components
+    shaded_color = ambient_color + diffuse_color + specular_color
+    
+    return shaded_color
 ```
 
 ## Subtopics
 
 ### [Diffuse Lighting for Volume Ray Casting](6760-diffuse-lighting-for-volume-ray-casting.md)
-Diffuse Lighting for Volume Ray Casting is a shading technique that approximates surface illumination in volumetric data by deriving normal vectors from the spatial gradient of the scalar field. It solves the problem of flat, unlit volume rendering by providing geometric cues that allow standard diffuse lighting models to interact with the volume's internal structure. Unlike parent methods that may rely on pre-computed or analytic normals, this approach computes normals on-the-fly using finite differences, making it applicable to any discrete scalar field without additional preprocessing. It is distinct from specular or environment-based shading models by focusing solely on the Lambertian component of light interaction.
+Diffuse Lighting for Volume Ray Casting illuminates a volume by calculating normals for every voxel using finite differences of the scalar field, then applying a diffuse lighting model. It provides geometric cues that allow standard diffuse lighting models to interact with the volume's internal structure.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of voxels processed, as gradient calculation and lighting are per-fragment operations [S2].
-*   **Memory Complexity:** Requires storage for the scalar field and intermediate gradient values [S1].
-*   **Strengths:** Provides a "realistic" impression of 3D structure without pre-computed normals [S2]. Applicable to any discrete scalar field [S2].
-*   **Limitations:** Can only visualize one tissue type at a time when using a single threshold, unlike full volume rendering which assigns opacity to multiple tissues [S2]. Gradient estimation can be noisy in low-resolution data.
-*   **When to use:** When a quick, realistic 3D view of a specific density range (e.g., bones, skin) is needed without the complexity of transfer function design [S2].
-*   **When not to use:** When multiple tissue types need to be visualized simultaneously with varying opacities [S2].
+*   **Time Complexity:** Linear with respect to the number of voxels processed, as each voxel requires gradient calculation and lighting computation [S2].
+*   **Memory Complexity:** Requires storage for the scalar field and potentially temporary buffers for gradient calculation [S2].
+*   **Performance:** Interactive performance is maintained by using efficient interpolation and lighting calculations [S1].
+*   **Strengths:** Provides realistic geometric cues and enhances the perception of shape and structure within the volume [S2].
+*   **Limitations:** Can only visualize one tissue type at a time when using a single threshold, unlike full volume rendering which assigns opacity to multiple tissues [S2].
+*   **When to use:** When a realistic 3D view of a specific density region (e.g., skin, bones) is desired with minimal computational overhead [S2].
+*   **When not to use:** When multiple tissue types with varying opacities need to be visualized simultaneously [S2].
 
 ## Background
-This method originates from early volume visualization interfaces, specifically the VOLUME RENDERING Application by Thomas Lidy (2001-2002) [S2]. It was designed to provide a "realistic" view of data sets by leveraging standard shading models (Phong/Gouraud) with normals derived from data gradients [S2]. It is also referenced in the context of flexible transfer function design tools, where it serves as a shading option that can be enabled or disabled by the user [S1].
+This method was described in the context of a volume rendering application by Thomas Lidy in 2001-2002 [S2]. It is also referenced in work on flexible transfer function design for volume visualization, where it is used to enhance the visual quality of scalar field data [S1]. The technique leverages the gradient of the scalar field to estimate surface normals, a common approach in volume shading to provide geometric information that is otherwise lost in volume rendering [S1, S2].
 
 ## Sources
 [S1] Volume visualization and exploration through flexible transfer function design, https://doi.org/10.1016/j.cag.2008.04.004, fetched 2026-10-27

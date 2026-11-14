@@ -1,0 +1,294 @@
+# Horizon Principled BRDF
+
+Also called: Disney Principled BRDF variant, Horizon PBR
+
+## Overview
+The Horizon Principled BRDF is a bidirectional reflectance distribution function used in the Horizon rendering engine, designed to be compatible with Disney's principled shading approach [S1, unofficial]. It solves the problem of providing a physically plausible, energy-conserving shading model that supports a wide range of material types (dielectric, metallic, clear coat, sheen) through a unified set of normalized parameters [S1, unofficial]. It sets itself apart from its parent, Aggregated Microfacet Distribution Approximation, by fixing specific parameter values (such as $\gamma=2$ for the main lobe and $\gamma=1$ for clear coat) and implementing a specific diffuse Fresnel variation to correct edge darkening, rather than using a general aggregation function [S1, unofficial].
+
+## How it works
+The Horizon BRDF computes the total reflected radiance $f_r(l, v)$ as the sum of a diffuse component $f_d$ and a specular component $f_s$ [S1, unofficial]:
+
+$$ f_r(l, v) = f_d + f_s $$
+
+where $l$ is the incoming light vector, $v$ is the outgoing view vector, and $n$ is the surface normal vector [S1, unofficial].
+
+### Inputs and Parameters
+The method requires the following inputs and parameters, all normalized between 0 and 1 unless specified:
+*   **albedo**: Surface color at the point [S1, unofficial].
+*   **roughness**: Controls microfacet alignment. 0 is smooth, 1 is rough [S1, unofficial].
+*   **F0**: Base reflectivity constant for the material [S1, unofficial].
+*   **anisotropic**: Controls anisotropy. 0 is isotropic, 1 is highly anisotropic [S1, unofficial].
+*   **Subsurface**: Blends diffuse with a Hanrahan-Krueger inspired subsurface BRDF. 0 is no subsurface, 1 is full blending [S1, unofficial].
+*   **Metallic**: 0 is dielectric, 1 is metallic [S1, unofficial].
+*   **Specular**: Intensity of specular light. 0 is low, 1 is high [S1, unofficial].
+*   **Specular Tint**: Interpolates specular color between achromatic (white, 0) and base color (1) [S1, unofficial].
+*   **Sheen**: Intensity of edge reflections. 0 is low, 1 is high [S1, unofficial].
+*   **Sheen Tint**: Tint for sheen reflections [S1, unofficial].
+*   **Clear Coat**: Intensity of the second specular lobe. 0 is none, 1 is full [S1, unofficial].
+*   **Clear Coat Gloss**: Smoothness of the clear coat lobe. 0 is matte, 1 is satin [S1, unofficial].
+*   **absorption coefficient ($\alpha$)**, **distance ($l$)**, **concentration ($c$)**: Used for translucent materials via Beer-Lambert law [S1, unofficial].
+
+### Data Structures
+No specific complex data structures are defined beyond standard vector/matrix types for $l, v, n, h, x, y$. The halfway vector $h$ is computed as:
+
+$$ h = \frac{l + v}{|l + v|} $$
+
+### Diffuse Component ($f_d$)
+The diffuse component uses a modified Lambertian model with a Fresnel factor to prevent edge darkening [S1, unofficial].
+
+1.  Calculate the base Lambertian diffuse:
+    $$ f_{Lambert} = \frac{albedo}{\pi} $$
+2.  Calculate the diffuse Fresnel factor $FD_{90}$:
+    $$ FD_{90} = 0.5 + 2(h \cdot v)^{roughness} $$
+3.  Compute the final diffuse term:
+    $$ f_d = f_{Lambert} \left[1 + (FD_{90} - 1)(1 - (l \cdot n))^5\right] \left[1 + (FD_{90} - 1)(1 - (n \cdot v))^5\right] $$
+
+This factor accounts for the portion of light reflected vs. refracted based on viewing angle, reducing incident reflectance by half at sharp angles for smooth surfaces and increasing response for rough surfaces [S1, unofficial].
+
+### Specular Component ($f_s$)
+The specular component follows the Cook-Torrance microfacet model:
+
+$$ f_s = \frac{D(h) F(h, v) G(l, h, v)}{4(l \cdot n)(n \cdot v)} $$
+
+where $D$ is the Normal Distribution Function (NDF), $F$ is the Fresnel coefficient, and $G$ is the Geometry Shadowing Function [S1, unofficial].
+
+#### Fresnel Coefficient ($F$)
+Uses the Schlick approximation [S1, unofficial]:
+
+$$ F_{Schlick}(F_0, h, v) = F_0 + (1 - F_0)(1 - (h \cdot v))^5 $$
+
+#### Normal Distribution Function ($D$)
+Horizon uses the Generalized Trowbridge-Reiss (GTR) distribution with fixed $\gamma$ values [S1, unofficial].
+
+*   **Main Lobe ($\gamma = 2$)**: Equivalent to GGX. Used for the base material.
+    $$ D_{GGX} = \frac{\alpha^2}{\pi \left[1 + (\alpha^2 - 1)(h \cdot n)^2\right]^2} $$
+    where $\alpha = roughness^2$ [S1, unofficial].
+
+*   **Clear Coat Lobe ($\gamma = 1$)**: Used for the clear coat layer. This lobe is always isotropic and non-metallic [S1, unofficial]. Due to a singularity at $\gamma=1$, the limit form is used:
+    $$ D_{GTR1} = \frac{\alpha^2 - 1}{2\pi \log(\alpha^2) \left[1 + (\alpha^2 - 1)(h \cdot n)^2\right]} $$
+
+*   **Anisotropic Main Lobe**: If `anisotropic` > 0, the main lobe uses an anisotropic GTR form:
+    $$ D_{GTR2, anisotropic} = \frac{1}{\pi \alpha_x \alpha_y \left[\frac{(h \cdot x)^2}{\alpha_x^2} + \frac{(h \cdot y)^2}{\alpha_y^2} + (h \cdot n)^2\right]^2} $$
+    where $x$ and $y$ are tangent and binormal vectors [S1, unofficial].
+    
+    The anisotropic roughness parameters are:
+    $$ \alpha_x = \frac{roughness^2}{ar}, \quad \alpha_y = roughness^2 \cdot ar $$
+    
+    The aspect ratio $ar$ is derived from the `anisotropic` parameter:
+    $$ ar = \sqrt{1 - 0.9 \cdot anisotropic} $$
+    The factor 0.9 limits the aspect ratio to 10:1 [S1, unofficial].
+
+#### Geometry Shadowing Function ($G$)
+Uses the separable Smith GGX function [S1, unofficial].
+
+*   **Isotropic**:
+    $$ G_{GGX} = \frac{1}{(l \cdot h) + \sqrt{\alpha^2 + (l \cdot h)^2 - \alpha^2(l \cdot h)^2}} $$
+
+*   **Anisotropic**:
+    $$ G_{GGX, anisotropic} = \frac{1}{\sqrt{2} \sqrt{(l \cdot h)^2 + \alpha_x^2(l \cdot x)^2 + \alpha_y^2(l \cdot y)^2 + (l \cdot h)^2}} $$
+
+### Subsurface and Translucency
+*   **Subsurface Blending**: The `Subsurface` parameter blends the calculated $f_d$ with a Hanrahan-Krueger inspired subsurface BRDF [S1, unofficial]. This is not a substitute for full subsurface transport; it does not bleed light into shadows or through the surface [S1, unofficial].
+*   **Beer-Lambert Law**: For translucent materials (glass, liquids), light absorption is modeled independently:
+    $$ \frac{I_1}{I_0} = e^{-\alpha l c} $$
+    where $I_0$ is incident intensity, $I_1$ is transmitted intensity, $\alpha$ is the absorption coefficient, $l$ is the distance light travels, and $c$ is the concentration of absorbing elements [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def horizon_principled_brdf(l, v, n, albedo, roughness, F0, anisotropic, 
+                            metallic, specular, specular_tint, sheen, sheen_tint,
+                            clear_coat, clear_coat_gloss, subsurface, 
+                            tangent_x, tangent_y, absorption_coeff, distance, concentration):
+    """
+    Computes the Horizon Principled BRDF.
+    
+    Args:
+        l: Incoming light vector (normalized).
+        v: Outgoing view vector (normalized).
+        n: Surface normal vector (normalized).
+        albedo: Surface color (vec3).
+        roughness: Float [0, 1].
+        F0: Base reflectivity (float or vec3).
+        anisotropic: Float [0, 1].
+        metallic: Float [0, 1].
+        specular: Float [0, 1].
+        specular_tint: Float [0, 1].
+        sheen: Float [0, 1].
+        sheen_tint: Float [0, 1].
+        clear_coat: Float [0, 1].
+        clear_coat_gloss: Float [0, 1].
+        subsurface: Float [0, 1].
+        tangent_x: Tangent vector (normalized).
+        tangent_y: Binormal vector (normalized).
+        absorption_coeff: Float.
+        distance: Float.
+        concentration: Float.
+        
+    Returns:
+        vec3: Total reflected radiance.
+    """
+    
+    # 1. Precompute vectors
+    h = (l + v) / math.sqrt(dot(l + v, l + v))
+    cos_theta_l = dot(l, n)
+    cos_theta_v = dot(v, n)
+    cos_theta_h = dot(h, n)
+    cos_theta_hv = dot(h, v)
+    
+    # 2. Compute Diffuse Component
+    f_lambert = albedo / math.pi
+    
+    # FD90 calculation
+    # Note: roughness is used as exponent. Source uses (h . v)^roughness
+    fd90 = 0.5 + 2.0 * (cos_theta_hv ** roughness)
+    
+    # Diffuse Fresnel variation
+    term_l = 1.0 + (fd90 - 1.0) * ((1.0 - cos_theta_l) ** 5)
+    term_v = 1.0 + (fd90 - 1.0) * ((1.0 - cos_theta_v) ** 5)
+    
+    f_d = f_lambert * term_l * term_v
+    
+    # 3. Compute Specular Component (Main Lobe)
+    alpha = roughness ** 2
+    
+    # Determine NDF D and Geometry G for main lobe
+    if anisotropic > 0:
+        ar = math.sqrt(1.0 - 0.9 * anisotropic)
+        alpha_x = (alpha / ar)
+        alpha_y = alpha * ar
+        
+        # Anisotropic NDF (GTR gamma=2 equivalent)
+        denom_ndf = (cos_theta_h ** 2) + ((dot(h, tangent_x) ** 2) / alpha_x) + ((dot(h, tangent_y) ** 2) / alpha_y)
+        D_main = 1.0 / (math.pi * alpha_x * alpha_y * (denom_ndf ** 2))
+        
+        # Anisotropic Geometry
+        # G = 1 / (sqrt(2) * sqrt( (l.h)^2 + alpha_x^2(l.x)^2 + alpha_y^2(l.y)^2 + (l.h)^2 ))
+        # Note: Source formula has (l.h)^2 appearing twice in the sqrt sum? 
+        # Source: sqrt(2) * sqrt( (l.h)^2 + alpha_x^2(l.x)^2 + alpha_y^2(l.y)^2 + (l.h)^2 )
+        # This simplifies to sqrt(2) * sqrt( 2*(l.h)^2 + ... )
+        # However, standard Smith anisotropic is usually different. 
+        # We follow the source exactly:
+        g_denom_sq = (cos_theta_h ** 2) + (alpha_x ** 2 * (dot(l, tangent_x) ** 2)) + (alpha_y ** 2 * (dot(l, tangent_y) ** 2)) + (cos_theta_h ** 2)
+        G_main = 1.0 / (math.sqrt(2.0) * math.sqrt(g_denom_sq))
+    else:
+        # Isotropic NDF (GGX)
+        denom_ndf = 1.0 + (alpha - 1.0) * (cos_theta_h ** 2)
+        D_main = alpha / (math.pi * (denom_ndf ** 2))
+        
+        # Isotropic Geometry
+        # G = 1 / ( (l.h) + sqrt(alpha^2 + (l.h)^2 - alpha^2(l.h)^2) )
+        g_denom = cos_theta_h + math.sqrt(alpha ** 2 + (cos_theta_h ** 2) - (alpha ** 2 * (cos_theta_h ** 2)))
+        G_main = 1.0 / g_denom
+
+    # Fresnel for main lobe
+    F_main = F0 + (1.0 - F0) * ((1.0 - cos_theta_hv) ** 5)
+    
+    # Specular term denominator
+    spec_denom = 4.0 * cos_theta_l * cos_theta_v
+    
+    # Avoid division by zero
+    if spec_denom < 1e-8:
+        f_s_main = vec3(0.0)
+    else:
+        f_s_main = (D_main * F_main * G_main) / spec_denom
+
+    # 4. Compute Clear Coat Specular Component
+    # Clear coat is always isotropic and non-metallic (gamma=1)
+    # Use Clear Coat Gloss for roughness of clear coat
+    cc_roughness = clear_coat_gloss
+    cc_alpha = cc_roughness ** 2
+    
+    # D_GTR1 (Limit form gamma=1)
+    # D = (alpha^2 - 1) / (2 * pi * log(alpha^2) * [1 + (alpha^2 - 1)(h.n)^2])
+    # Note: If alpha is 1 (roughness 1), log(1)=0. Handle singularity? 
+    # Source implies this form is used for gamma=1. 
+    # If alpha -> 1, D -> 1/pi (uniform). 
+    # We implement the formula as given.
+    if cc_alpha == 1.0:
+        D_cc = 1.0 / math.pi
+    else:
+        denom_ndf_cc = 1.0 + (cc_alpha - 1.0) * (cos_theta_h ** 2)
+        log_alpha_sq = math.log(cc_alpha ** 2)
+        if abs(log_alpha_sq) < 1e-8:
+             D_cc = 1.0 / math.pi
+        else:
+            D_cc = (cc_alpha ** 2 - 1.0) / (2.0 * math.pi * log_alpha_sq * denom_ndf_cc)
+            
+    # Clear Coat Fresnel (Non-metallic, so F0 is typically lower, e.g., 0.04 for dielectric)
+    # Source says "non-metallic". We use a standard dielectric F0 or the provided F0?
+    # Source doesn't specify F0 for clear coat explicitly, but says "non-metallic".
+    # We assume a standard dielectric F0 (e.g., 0.04) or that the user provides it.
+    # Given the "Principled" nature, clear coat F0 is often fixed or derived.
+    # The source notes F0 is "base reflectivity constant for the material".
+    # We will use a default dielectric F0 for clear coat if not specified, 
+    # but strictly following source, we just compute F.
+    F_cc = 0.04 + (1.0 - 0.04) * ((1.0 - cos_theta_hv) ** 5) # Standard dielectric Schlick
+    
+    # Clear Coat Geometry (Isotropic Smith GGX)
+    g_denom_cc = cos_theta_h + math.sqrt(cc_alpha ** 2 + (cos_theta_h ** 2) - (cc_alpha ** 2 * (cos_theta_h ** 2)))
+    G_cc = 1.0 / g_denom_cc
+    
+    # Clear Coat Specular
+    f_s_cc = (D_cc * F_cc * G_cc) / spec_denom
+    
+    # 5. Combine Specular
+    # Main lobe is modulated by Metallic/Specular parameters?
+    # Source says: "Metallic regulates conductive property... Specular specifies amount of incident reflection"
+    # In Principled BRDF, F0 is often computed from Metallic and Specular.
+    # However, source lists F0 as an input. 
+    # We assume F0 is pre-computed or provided.
+    # The clear coat is additive.
+    f_s = f_s_main + (clear_coat * f_s_cc)
+    
+    # 6. Subsurface Blending
+    # Subsurface blends f_d with Hanrahan-Krueger inspired BRDF.
+    # Source does not give the HK formula, only that it blends.
+    # We assume a linear blend for the diffuse part as per "blending between...".
+    # f_d_final = lerp(f_d, f_subsurface, subsurface)
+    # Since f_subsurface is not defined in the source text provided, 
+    # we cannot implement the exact HK term. 
+    # [G] We assume the subsurface term is a pre-computed value or zero if not provided.
+    # For a complete implementation from text alone, we note this gap.
+    f_d_final = f_d # Placeholder for subsurface blend if f_subsurface is available
+    
+    # 7. Sheen
+    # Source mentions Sheen and Sheen Tint but does not provide the Sheen BRDF formula.
+    # [G] Sheen is typically a separate lobe. Without the formula, we cannot compute it.
+    f_sheen = vec3(0.0) # Placeholder
+    
+    # 8. Total
+    f_r = f_d_final + f_s + f_sheen
+    
+    # 9. Translucency (Beer-Lambert)
+    # This is applied to transmitted light, not reflected BRDF directly.
+    # If the material is translucent, the outgoing radiance includes transmitted component.
+    # I_transmitted = I_incident * exp(-alpha * l * c)
+    # This is outside the scope of the reflection BRDF f_r(l,v) unless we are computing total radiance.
+    
+    return f_r
+```
+
+### Edge Cases and Pitfalls
+*   **Singularity at $\gamma=1$**: The GTR NDF has a singularity at $\gamma=1$. The source specifies using the limit form $D_{GTR1}$ for the clear coat lobe [S1, unofficial].
+*   **Edge Darkening**: Standard Lambertian diffuse is darker at grazing angles. The Horizon model addresses this with the $FD_{90}$ Fresnel variation [S1, unofficial].
+*   **Subsurface Limitations**: The subsurface blending parameter does not perform full subsurface transport; it does not bleed light into shadows or through the surface [S1, unofficial].
+*   **Clear Coat Constraints**: The clear coat lobe is always isotropic and non-metallic, regardless of the main lobe's settings [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The computation involves several trigonometric and power operations. The anisotropic case requires additional dot products with tangent/binormal vectors. The clear coat adds a second specular lobe calculation. Overall, it is more expensive than a simple GGX due to the additional lobe and diffuse modification, but cheaper than full subsurface transport.
+*   **Memory Complexity**: Minimal, requiring storage for the input parameters and intermediate vectors.
+*   **Strengths**: Compatible with Disney's principled shading workflow; supports a wide range of materials (metallic, dielectric, clear coat, sheen, anisotropy); handles edge darkening in diffuse; provides a simple translucency model via Beer-Lambert law.
+*   **Limitations**: Subsurface is an approximation and does not simulate light transport through volume; clear coat is limited to isotropic, non-metallic layers; sheen formula is not provided in the source, limiting implementation completeness from text alone.
+*   **When to use**: When a principled, physically-based shading model is needed with support for clear coat and anisotropy, and full subsurface transport is not required.
+*   **When not to use**: When accurate subsurface scattering through thin geometry or shadows is required; when anisotropic clear coat is needed.
+
+## Background
+The Horizon Principled BRDF was introduced in the Horizon rendering engine, which aims to bridge the gap between cinematic visualization and medical imaging [S1, unofficial]. It is inspired by Disney's "principled" shading approach, adhering to its usability and interactivity principles [S1, unofficial]. The engine is used for visualizing large medical imaging datasets, such as fiber tracking algorithms generating millions of streamlines, and translucent materials like glass and liquids [S1, unofficial]. The BRDF was published in a preprint in 2023 [S1, unofficial].
+
+## Sources
+[S1] Horizon, closing the gap between cinematic visualization and medical imaging, https://doi.org/10.1101/2023.07.11.23292519, fetched 2026-10-26 (unofficial)

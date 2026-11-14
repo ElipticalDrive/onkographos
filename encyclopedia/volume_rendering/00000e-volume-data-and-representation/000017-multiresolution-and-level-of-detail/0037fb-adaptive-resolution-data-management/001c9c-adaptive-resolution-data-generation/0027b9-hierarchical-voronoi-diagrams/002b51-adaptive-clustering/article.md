@@ -7,19 +7,19 @@ Adaptive clustering is a technique for generating a data-dependent hierarchy tha
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A set $P$ of $n$ points in $s$-dimensional space with associated $t$-dimensional function values, defined as $P = \{(\mathbf{p}_i, f_i) \mid \mathbf{p}_i \in \mathbb{R}^s, f_i \in \mathbb{R}^t, i = 1, \dots, n\}$ [S1, unofficial]. The domain $D \subset \mathbb{R}^s$ is a compact region containing all $\mathbf{p}_i$. The dimension $s$ is typically at most 4 (e.g., for time-varying volumetric data), while $t$ can be large [S1, unofficial].
+*   **Input:** A set $P$ of $n$ points in $s$-dimensional space with associated $t$-dimensional function values, defined as $P = \{(\mathbf{p}_i, f_i) \mid \mathbf{p}_i \in \mathbb{R}^s, f_i \in \mathbb{R}^t, i = 1, \dots, n\}$ [S1, unofficial]. The domain $D \subset \mathbb{R}^s$ is a compact region containing all $\mathbf{p}_i$ [S1, unofficial]. The dimension $s$ is typically at most 4 (e.g., for time-varying volumetric data), while $t$ can be large [S1, unofficial].
 *   **Output:** A hierarchy of levels $L_j$ for $j = 0, 1, \dots$, where each level is defined as $L_j = \{(\tau_k^j, \tilde{f}_k^j, \varepsilon_k^j) \mid k = 1, \dots, n_j\}$ [S1, unofficial]. Here, $\tau_k^j$ are tiles forming a partition of domain $D$, $\tilde{f}_k^j$ are approximating functions for the points in $\tau_k^j$, and $\varepsilon_k^j$ are estimated approximation errors [S1, unofficial].
 
 **Data Structures**
-*   **Point Set:** List of tuples $(\mathbf{p}_i, f_i)$.
+*   **Point Set:** List of tuples $(\mathbf{p}_i, f_i)$ [S1, unofficial].
 *   **Level Structure:** List of cluster objects. Each cluster object contains:
-    *   $\tau_k^j$: Geometric definition of the tile (e.g., Voronoi cell, polygon).
-    *   $\tilde{f}_k^j$: The approximating function (e.g., polynomial, constant).
-    *   $\varepsilon_k^j$: Scalar residual error.
-    *   $n_k^j$: Count of points in the tile.
+    *   $\tau_k^j$: Geometric definition of the tile (e.g., Voronoi cell, polygon) [S1, unofficial].
+    *   $\tilde{f}_k^j$: The approximating function (e.g., polynomial, interpolant) [S1, unofficial].
+    *   $\varepsilon_k^j$: Scalar residual error [S1, unofficial].
+    *   $n_k^j$: Count of points in the tile [S1, unofficial].
 
 **Algorithm Steps**
-1.  **Initialization:** Start with a coarse approximation level $L_0$. The specific method for $L_0$ depends on the underlying clustering variant (e.g., a single cluster containing all points, or a coarse Voronoi diagram) [S1, unofficial].
+1.  **Initialization:** Start with a coarse approximation level $L_0$ [S1, unofficial].
 2.  **Approximation:** For each tile $\tau_k^j$ in level $L_j$, compute an approximating function $\tilde{f}_k^j$ such that $\tilde{f}_k^j(\mathbf{p}_i) \approx f_i$ for all $\mathbf{p}_i \in \tau_k^j$ [S1, unofficial].
 3.  **Residual Calculation:** Compute the local residual $\varepsilon_k^j$ for each tile using the $L_p$ norm:
     $$ \varepsilon_k^j = \left( \frac{1}{n_k^j} \sum_{\mathbf{p}_i \in \tau_k^j} \|\tilde{f}_k^j(\mathbf{p}_i) - f_i\|^p \right)^{\frac{1}{p}} $$
@@ -27,12 +27,12 @@ Adaptive clustering is a technique for generating a data-dependent hierarchy tha
 4.  **Global Error Check:** Compute the global error for level $L_j$:
     $$ \varepsilon^j = \left( \frac{1}{n} \sum_{k=1}^{n_j} n_k^j (\varepsilon_k^j)^p \right)^{\frac{1}{p}} $$
     [S1, unofficial].
-5.  **Refinement:** If the stopping criterion (prescribed number of clusters or error bound $\varepsilon^j$) is not met, generate $L_{j+1}$ from $L_j$. Refine only those tiles $\tau_k^j$ with large residuals. The specific splitting strategy depends on the variant (e.g., PCA-based, error-bisector) [S1, unofficial].
-6.  **Iteration:** Repeat steps 2–5 until convergence. Convergence is reached when every tile contains exactly one data point or when the number of points in every tile is sufficiently low to provide zero residuals [S1, unofficial].
+5.  **Refinement:** If the stopping criterion (prescribed number of clusters or error bound $\varepsilon^j$) is not met, generate $L_{j+1}$ from $L_j$ [S1, unofficial]. Refine only those tiles $\tau_k^j$ with large residuals [S1, unofficial].
+6.  **Iteration:** Repeat steps 2–5 until convergence [S1, unofficial]. Convergence is reached when every tile contains exactly one data point or when the number of points in every tile is sufficiently low to provide zero residuals [S1, unofficial].
 
 **Parameters**
-*   **$p$ (Norm exponent):** Determines the error metric. $p=2$ is common for least-squares; $p=\infty$ for minimax. Default not specified, but $p \in [1, \infty]$ is supported [S1, unofficial].
-*   **$n_{max}$ (Optimization Parameter):** Maximum number of points used to determine an approximating function $\tilde{f}_k^j$. If a tile contains more than $n_{max}$ points, $n_{max}$ points are selected randomly [S1, unofficial]. This reduces computational cost from $O(n \log m)$ to expected linear time for large datasets [S1, unofficial]. Note that using $n_{max}$ means the final approximation error might not exactly satisfy the prescribed error bound [S1, unofficial].
+*   **$p$ (Norm exponent):** Determines the error metric. $p \in [1, \infty]$ is supported [S1, unofficial].
+*   **$n_{max}$ (Optimization Parameter):** Maximum number of points used to determine an approximating function $\tilde{f}_k^j$ [S1, unofficial]. If a tile contains more than $n_{max}$ points, $n_{max}$ points are selected randomly [S1, unofficial]. This reduces computational cost from $O(n \log m)$ to expected linear time for large datasets [S1, unofficial]. Note that using $n_{max}$ means the final approximation error might not exactly satisfy the prescribed error bound [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -40,94 +40,113 @@ Adaptive clustering is a technique for generating a data-dependent hierarchy tha
 ```python
 def adaptive_clustering(points, target_error=None, max_clusters=None, p=2, n_max=None):
     """
-    points: List of (p_i, f_i) tuples.
+    points: List of (p_i, f_i) tuples. p_i is list of s floats, f_i is list of t floats.
     target_error: Float. Stop if global error < this.
     max_clusters: Int. Stop if number of clusters >= this.
     p: Norm exponent for residual calculation.
     n_max: Max points for approximation. If None, use all points.
     """
-    # Level 0: Initialize with a coarse approximation.
-    # Implementation detail: The source does not specify the exact L0 generation.
-    # [G] Assume a single cluster containing all points with a global mean approximation.
-    current_level = [Cluster(all_points=points, approx=global_mean(points))]
-    
+    # [G] Define a simple Cluster structure
+    class Cluster:
+        def __init__(self, pts):
+            self.points = pts
+            self.approx_func = None
+            self.residual = 0.0
+            self.tile = None
+
+    # [G] Initialize L0 with a single cluster containing all points
+    current_level = [Cluster(points)]
+
     while True:
         # Step 2 & 3: Approximate and calculate residuals
         for cluster in current_level:
-            # Select points for approximation if n_max is set
+            # Residual Estimation: use at most n_max points
             if n_max is not None and len(cluster.points) > n_max:
-                sample_points = random_sample(cluster.points, n_max)
+                sample_points = cluster.points[:n_max]
             else:
                 sample_points = cluster.points
-            
-            # Compute approximating function f_tilde
-            # [G] The source mentions "optimal cluster triangulations" and "Sibson's interpolant"
-            # but does not give a generic formula for f_tilde. 
-            # [G] Assume a placeholder function fitting method based on sample_points.
-            cluster.approx = fit_function(sample_points)
-            
+
+            # [G] The sources do not specify a generic fitting formula.
+            # [G] We assume a standard constant approximation (mean vector) for simplicity.
+            t_dim = len(sample_points[0][1])
+            cluster.approx_func = lambda x: [sum(f[j] for p, f in sample_points) / len(sample_points) for j in range(t_dim)]
+
             # Calculate residual epsilon_k^j
-            cluster.residual = calculate_residual(cluster.points, cluster.approx, p)
-        
+            cluster.residual = calculate_residual(cluster.points, cluster.approx_func, p)
+
         # Step 4: Calculate global error
         global_error = calculate_global_error(current_level, p)
-        
+
         # Check stopping criteria
         if target_error is not None and global_error < target_error:
             break
         if max_clusters is not None and len(current_level) >= max_clusters:
             break
-            
+
         # Step 5: Refine
         next_level = []
+        # [G] The sources state refinement happens for residuals greater than a threshold.
+        # [G] We use a fraction of the global error as the threshold.
+        threshold = global_error * 0.5
         for cluster in current_level:
-            if cluster.residual > threshold: # Threshold logic depends on variant
-                # Split cluster into sub-clusters
-                # [G] The splitting logic is variant-specific (PCA, Error-Bisector, etc.)
-                # [G] This step delegates to the specific child method's split function.
+            if cluster.residual > threshold:
+                # [G] The splitting logic is variant-specific (e.g., Voronoi, BSP).
+                # [G] We delegate to a generic split function that partitions points spatially.
                 sub_clusters = split_cluster(cluster)
                 next_level.extend(sub_clusters)
             else:
                 next_level.append(cluster)
-        
+
         current_level = next_level
-        
-        # Safety break for infinite loops in degenerate cases
-        if len(current_level) == len(points):
+
+        # Safety break: convergence when each tile has 1 point
+        if all(len(c.points) == 1 for c in current_level):
             break
-            
+
     return current_level
 
-def calculate_residual(points, approx_func, p):
+def mean(values):
+    return sum(values) / len(values)
+
+def calculate_residual(pts, approx_func, p):
     if p == float('inf'):
-        return max(norm(approx_func(p_i) - f_i) for p_i, f_i in points)
+        return max(euclidean_norm(approx_func(p_i) - f_i) for p_i, f_i in pts)
     else:
-        n = len(points)
-        sum_errors = sum(norm(approx_func(p_i) - f_i)**p for p_i, f_i in points)
+        n = len(pts)
+        sum_errors = sum(euclidean_norm(approx_func(p_i) - f_i)**p for p_i, f_i in pts)
         return (sum_errors / n)**(1/p)
+
+def euclidean_norm(vec):
+    return sum(x**2 for x in vec)**0.5
 
 def calculate_global_error(level, p):
     n_total = sum(len(c.points) for c in level)
     sum_weighted_errors = sum(len(c.points) * (c.residual**p) for c in level)
     return (sum_weighted_errors / n_total)**(1/p)
+
+def split_cluster(cluster):
+    # [G] Simple spatial split along the first dimension for demonstration
+    pts = sorted(cluster.points, key=lambda x: x[0][0])
+    mid = len(pts) // 2
+    return [Cluster(pts[:mid]), Cluster(pts[mid:])]
 ```
 
 **Edge Cases and Pitfalls**
 *   **Precision:** The choice of $p$ affects optimization criteria. $p=\infty$ is sensitive to outliers [S1, unofficial].
 *   **Boundaries:** The domain $D$ must be compact and contain all points. Partitioning must cover $D$ completely [S1, unofficial].
-*   **Degenerate Input:** If points are collinear or coplanar in higher dimensions, standard spatial splitting may fail. Variants like PCA-based clustering handle this by splitting along the direction of maximum variance [S1, unofficial].
+*   **Degenerate Input:** If points are collinear or coplanar in higher dimensions, standard spatial splitting may fail [G].
 *   **Approximation Error Bound:** When using $n_{max}$ for optimization, the strict error bound may not be met [S1, unofficial].
 
 ## Subtopics
 
 ### [PCA-based Clustering](5048-pca-based-clustering.md)
-Uses Principal Component Analysis to define a local coordinate system and splitting plane, ensuring well-shaped clusters by splitting along the direction of maximum variance. Choose when geometric distribution of spatial coordinates is the primary concern.
+PCA-based Clustering is a method for generating adaptive clusters from scattered point data by partitioning a set of samples recursively based on the geometric distribution of their spatial coordinates. It solves the problem of creating data-dependent hierarchies that respect the intrinsic topological and geometric structures of the input cloud, ensuring well-shaped clusters by splitting along the direction of maximum variance. It sets itself apart from its siblings by using Principal Component Analysis to define a local coordinate system and splitting plane, whereas [Adaptive Clustering with Error-Bisector Splitting](6211-adaptive-clustering-with-error-bisector-splitting.md) uses error metrics and [Hierarchical Density-based Clustering](10952-hierarchical-density-based-clustering.md) relies on density estimation.
 
 ### [Adaptive Clustering with Error-Bisector Splitting](6211-adaptive-clustering-with-error-bisector-splitting.md)
-Uses quadratic polynomial approximations and error metrics to guide subdivision, producing long, skinny clusters when curvature is directional. Choose when approximating smooth surfaces with minimal clusters for a given error tolerance is critical.
+Adaptive clustering with error-bisector splitting is a method for generating a data-dependent hierarchy of clusters from scattered 2D points with associated scalar values, using quadratic polynomial approximations to guide subdivision. It solves the problem of efficiently approximating smooth surfaces with a minimal number of clusters for a given error tolerance, outperforming PCA-based splitting by producing long, skinny clusters when curvature is directional. Unlike its sibling [PCA-based Clustering](5048-pca-based-clustering.md), which ignores function values, this method weights spatial distribution by approximation residuals.
 
 ### [Hierarchical Density-based Clustering](10952-hierarchical-density-based-clustering.md)
-Generates a hierarchy based on density estimates in multi-dimensional feature space, providing an explicit cluster tree visualization. Choose for interactive exploration in cluster space rather than high-dimensional feature space.
+Hierarchical Density-based Clustering is a technique for multi-dimensional feature space that generates a hierarchy of nested clusters based on density estimates, allowing for interactive exploration in cluster space rather than high-dimensional feature space. It sets itself apart from parallel coordinates-based approaches by building on clustering to scale better to high dimensionality, and from non-visual clustering methods by providing an explicit cluster tree visualization that serves as an intuitive interaction widget.
 
 ### Hierarchy Interaction Framework
 A framework enabling real-time interaction with the cluster hierarchy, allowing users to change the hierarchy level $k$ to partition elements, change similarity measures, and apply constraints (fixing, splitting, joining clusters) without re-running the entire clustering algorithm from scratch [S2]. It solves the problem of cumbersome threshold tuning and lack of insight into the data set by providing intuitive interaction [S2].
@@ -148,8 +167,8 @@ Modifications to reduce computational cost of adaptive clustering from $O(n \log
 
 ## Operating characteristics
 *   **Time Complexity:** Standard adaptive clustering approaches (hierarchical Voronoi diagrams, BSP trees) have computational costs of $O(n \log m)$ for $n$ data points and $m$ clusters [S1, unofficial]. With optimization modifications (using $n_{max}$ and batch refinement), the cost reduces to expected linear time for large-scale datasets [S1, unofficial].
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
 *   **Scaling:** The "top-down" construction ensures that coarse levels of resolution require less computation time than finer levels [S1, unofficial].
 *   **Strengths:** Does not require a grid structure; handles scattered data; allows adaptive refinement based on error; supports real-time interaction via hierarchy frameworks [S1, unofficial][S2].
 *   **Limitations:** Standard implementation is $O(n \log m)$; optimization with $n_{max}$ may violate strict error bounds; requires careful selection of similarity measures and splitting criteria [S1, unofficial][S2].

@@ -1,218 +1,170 @@
 # Phong Shading with Shadows
 
-Also called: BRDF Lighting Model, Improved Lighting Models, Lighting Calculation, Phong Model, Phong Relighting, Phong Shading Model, Standard Illumination Model
+Also called: BRDF Lighting Model, Improved Lighting Models, Phong Model, Phong Relighting, Phong Shading Model, Standard Illumination Model
 
 ## Overview
-
-Phong Shading with Shadows is a surface-based illumination model applied to volume rendering that computes diffuse, specular, and ambient lighting contributions using the Phong reflection model, modulated by shadow factors to simulate occlusion [S4, unofficial]. It solves the problem of adding realistic depth and material appearance to volume renderings by approximating surface normals from the scalar field's gradient and calculating light interaction per sample or per pixel [S3, unofficial][S5, unofficial]. Unlike the parent Lambertian model which only computes diffuse lighting, this method adds specular highlights and ambient terms, and unlike sibling Sphere Tracing with Shading which may use simplified shading, this method explicitly calculates shadow factors via secondary ray tracing to handle self-occlusion and external occlusion [S3, unofficial][S4, unofficial].
+Phong Shading with Shadows calculates the diffuse, specular, and ambient lighting contributions for a surface defined by a Signed Distance Field (SDF), modulated by shadow factors to simulate occlusion [S4, unofficial]. It extends basic Lambertian shading by adding specular highlights and shadowing, providing a more realistic appearance for volume boundaries [S3, unofficial]. Unlike its sibling [Sphere Tracing with Shading](3812-sphere-tracing-with-shading.md), which may use simpler shading or different normal approximations, this method explicitly implements the Phong reflection model with support for hard or soft shadows [S4, unofficial].
 
 ## How it works
+**Inputs:**
+- SDF function $S(p)$ returning distance at point $p$.
+- Ray origin $O$ and direction $D$.
+- Light position $L_{pos}$ (or direction $L_{dir}$ for directional lights).
+- Material properties: ambient coefficient $k_a$, diffuse coefficient $k_d$, specular coefficient $k_s$, shininess exponent $k_p$ [S4, unofficial].
+- Light color/intensity $I$ [S4, unofficial].
+- Ambient lighting factor $k_{amb}$ [S5, unofficial].
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   Signed Distance Field (SDF) or scalar volume data.
-    *   Camera position and ray direction for the current sample/pixel.
-    *   Light source parameters (position, color, intensity, type).
-    *   Material properties (ambient, diffuse, specular coefficients, shininess).
-*   **Outputs**:
-    *   Final color value (RGB) for the sample or pixel, incorporating lighting and shadow.
+**Outputs:**
+- Final pixel color $C_{final}$ [S4, unofficial].
 
-### Data Structures
-
-**Material Structure** [S4, unofficial]:
+**Data Structures:**
+The material properties are typically packed into a struct [S4, unofficial]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```text
-struct material {
-    vec3 ka;      // Ambient color coefficient
-    float kd;     // Diffuse coefficient
-    float ks;     // Specular coefficient
-    float kp;     // Shininess exponent
-}
-```
+```cpp
+struct Material {
+    vec3 ka; // Ambient color/intensity
+    float kd; // Diffuse coefficient
+    float ks; // Specular coefficient
+    float kp; // Shininess exponent
+};
 
-**Light Structure** [S4, unofficial]:
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```text
-struct light {
-    vec3 c;       // Light color
+struct Light {
+    vec3 c; // Light color
     float intensiv; // Light intensity
-}
+};
 ```
 
-### Parameters
-*   `ka` (Ambient constant): Not given in the sources.
-*   `kd` (Diffuse constant): Not given in the sources.
-*   `ks` (Specular constant): Not given in the sources.
-*   `kp` (Shininess constant): Higher values make the surface smoother and shinier [S2, unofficial].
-*   Ambient term constant: 0.1 [S1, unofficial].
-*   Diffuse weight: 0.6 [S1, unofficial].
-*   Specular weight: 0.3 [S1, unofficial].
-*   Specular exponent: 10.0 [S1, unofficial] or 32.0 [S5, unofficial].
+**Steps:**
 
-### Steps
+1. **Ray Marching:** Trace the ray through the SDF to find the intersection point $p$ and the number of steps. If no intersection is found within the maximum distance, return background color [S4, unofficial].
 
-1.  **Surface Normal Recovery**: Compute the surface normal $N$ by calculating the gradient of the SDF at the current point $p$ and normalizing it [S2, unofficial].
-    $$ N = \frac{\nabla SDF(p)}{\|\nabla SDF(p)\|} $$
-    [G] If the gradient magnitude is zero (homogeneous region), the normal is undefined; typically, a default normal or zero vector is used, though sources note this is a limitation of gradient-based shading [S6].
+2. **Surface Normal Recovery:** Calculate the surface normal $N$ at $p$ by computing the gradient of the SDF and normalizing it [S2, unofficial]:
+   $$ N = \frac{\nabla S(p)}{\|\nabla S(p)\|} $$
+   [S2, unofficial]
 
-2.  **Light Direction Calculation**: Calculate the vector from the current point $p$ to the light source position $L_{pos}$, then normalize it [S4, unofficial].
-    $$ L = \text{normalize}(L_{pos} - p) $$
-    [G] For directional lights, $L$ is constant. For positional lights, $L$ varies per sample.
+3. **Light Direction:** Calculate the normalized light direction vector $L$ from the surface point $p$ to the light source [S4, unofficial]:
+   $$ L = \text{normalize}(L_{pos} - p) $$
+   [S4, unofficial]
 
-3.  **Normal Orientation**: Ensure the normal faces the viewer. If the dot product of the normal and the view direction (or negative ray direction) is negative, flip the normal [S1, unofficial][S5, unofficial].
-    ```python
-    if dot(N, -rayDir) < 0.0:
-        N = -N
-    ```
-    Alternatively, using a step function:
-    ```python
-    normal *= step(0.0, dot(normal, eyeDir)) * 2.0 - 1.0
-    ```
-    [S5, unofficial]
+4. **Shadow Calculation:** Compute a shadow factor $sh$ by casting a secondary ray from $p$ towards the light source. This can be a hard shadow (binary occlusion) or soft shadow (penumbra based on distance to occluder) [S4, unofficial].
+   $$ sh = \text{ShadowFactor}(p, L) $$
+   [S4, unofficial]
 
-4.  **Shadow Factor Calculation**: Compute the shadow factor $sh$ by tracing a ray from the current point $p$ towards the light source. This can be a hard shadow (binary occlusion) or soft shadow (penumbra) [S4, unofficial].
-    *   Hard Shadow: $sh = 1.0$ if the path to the light is clear, $0.0$ if occluded.
-    *   Soft Shadow: $sh$ varies based on the distance to the occluder and the light size.
-    [S3, unofficial] mentions secondary rays branching towards the light source to calculate global occlusion.
+5. **Normal Orientation:** Ensure the normal faces the viewer. If the dot product of the normal and the view direction (negative ray direction) is negative, flip the normal [S1, S5, unofficial]:
+   $$ \text{if } (\dot(N, -D) < 0.0) \text{ then } N = -N $$
+   [S1, unofficial]
+   Alternatively, using a step function:
+   $$ N = N \times (\text{step}(0.0, \dot(N, \text{eyeDir})) \times 2.0 - 1.0) $$
+   [S5, unofficial]
 
-5.  **Diffuse Lighting**: Calculate the diffuse component $C_{diff}$ [S4, unofficial][S5, unofficial].
-    $$ C_{diff} = k_d I \max(N \cdot L, 0) $$
-    Where $I$ is the light intensity/color.
-    [S1, unofficial] uses a simplified weight: $0.6 \times \max(N \cdot L, 0)$.
+6. **Diffuse Lighting:** Calculate the diffuse component $C_{diff}$ using the Lambertian reflectance model [S4, unofficial]:
+   $$ C_{diff} = k_d I \max(\dot(N, L), 0) $$
+   [S4, unofficial]
 
-6.  **Specular Lighting**: Calculate the specular component $C_{spec}$ [S4, unofficial][S5, unofficial].
-    *   Compute the reflection vector $R$:
-        $$ R = \text{reflect}(-L, N) $$
-    *   Compute the view direction $V$ (from point to camera).
-    *   Calculate the specular term:
-        $$ C_{spec} = k_s I \max(R \cdot V, 0)^{k_p} $$
-    [S1, unofficial] uses exponent 10.0. [S5, unofficial] uses exponent 32.0 and full white specular color.
+7. **Specular Lighting:** Calculate the reflection vector $R$ and the specular component $C_{spec}$ [S4, unofficial]:
+   $$ R = \text{reflect}(-L, N) $$
+   [S1, unofficial]
+   $$ C_{spec} = k_s I \max(\dot(R, -D), 0)^{k_p} $$
+   [S4, unofficial]
+   Note: Some implementations use the view vector $V$ instead of $-D$ if the view direction is distinct from the ray direction (e.g., in perspective vs orthographic or specific camera setups), but typically $V = -D$ for ray marching [S5, unofficial]. The specular intensity is scaled by $k_s$ and raised to the power of shininess $k_p$ [S4, unofficial].
 
-7.  **Ambient Lighting**: Calculate the ambient component $C_{amb}$ [S5, unofficial].
-    $$ C_{amb} = k_a I_{ambient} $$
-    [S1, unofficial] uses a constant factor 0.1.
+8. **Ambient Lighting:** Calculate the ambient component $C_{amb}$ [S5, unofficial]:
+   $$ C_{amb} = k_{amb} \times \text{MaterialColor} $$
+   [S5, unofficial]
+   Where $k_{amb}$ is a constant factor (e.g., 0.1) [S1, unofficial].
 
-8.  **Final Color Combination**: Combine the components and apply the shadow factor [S4, unofficial].
-    $$ C = (C_{amb} + C_{diff} + C_{spec}) \times sh $$
-    [S1, unofficial] combines them as: $0.1 + 0.6 \times diff + 0.3 \times spec$.
-    [S5, unofficial] clamps the result to $[0, 1]$.
+9. **Final Color:** Combine the components and apply the shadow factor [S4, unofficial]:
+   $$ C = (C_{amb} + C_{diff} + C_{spec}) \times sh $$
+   [S4, unofficial]
+   Clamp the result to $[0, 1]$ [S5, unofficial].
 
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def phong_shading_with_shadows(p, ray_dir, light_pos, light_color, light_intensity, material, sdf_func):
+def phong_shading_with_shadows(p, normal, light_pos, ray_dir, material, light_color, ambient_factor, shadow_func):
     """
-    Computes Phong shading with shadows for a volume rendering sample.
+    Calculate Phong shading with shadows for a surface point.
     
     Args:
-        p: Current 3D point in space.
-        ray_dir: Direction of the viewing ray (from camera to scene).
-        light_pos: Position of the light source.
-        light_color: Color of the light (RGB).
-        light_intensity: Intensity of the light.
-        material: Object containing ka, kd, ks, kp.
-        sdf_func: Function to evaluate the Signed Distance Field.
+        p: Surface point position (vec3)
+        normal: Surface normal (vec3), assumed normalized
+        light_pos: Light position (vec3)
+        ray_dir: Ray direction (vec3), assumed normalized
+        material: Material struct with ka, kd, ks, kp
+        light_color: Light color/intensity (vec3)
+        ambient_factor: Ambient lighting factor (float)
+        shadow_func: Function to calculate shadow factor (float)
         
     Returns:
-        Final color (RGB) for the sample.
+        Final color (vec3)
     """
-    
-    # 1. Surface Normal Recovery
-    # Compute gradient using finite differences or analytical derivative
-    eps = 1e-4
-    grad_x = sdf_func(p + vec3(eps, 0, 0)) - sdf_func(p - vec3(eps, 0, 0))
-    grad_y = sdf_func(p + vec3(0, eps, 0)) - sdf_func(p - vec3(0, eps, 0))
-    grad_z = sdf_func(p + vec3(0, 0, eps)) - sdf_func(p - vec3(0, 0, eps))
-    grad = vec3(grad_x, grad_y, grad_z)
-    
-    grad_norm = length(grad)
-    if grad_norm < 1e-6:
-        # Degenerate case: homogeneous region or inside object where gradient is zero
-        # [G] Return black or handle based on context; sources note this is a limitation [S6]
-        return vec3(0.0, 0.0, 0.0)
-    
-    N = normalize(grad)
-    
-    # 3. Normal Orientation (Flip if facing away from viewer)
-    # View direction is opposite to ray direction
-    view_dir = normalize(-ray_dir)
-    if dot(N, view_dir) < 0.0:
-        N = -N
-        
-    # 2. Light Direction
+    # 1. Light direction
     L = normalize(light_pos - p)
     
-    # 4. Shadow Factor Calculation
-    # Trace ray from p towards light to check for occlusion
-    # This is a simplified hard shadow check
-    shadow_factor = 1.0
-    # [G] Implement sphere tracing or ray marching towards light_pos
-    # Check if any surface is closer to p than light_pos along direction L
-    t = 0.0
-    step_size = 0.01
-    while t < length(light_pos - p):
-        sample_point = p + L * t
-        dist = sdf_func(sample_point)
-        if dist < 0.0: # Inside an object
-            shadow_factor = 0.0
-            break
-        t += step_size
-        
-    # 5. Diffuse Lighting
-    ndotl = max(dot(N, L), 0.0)
-    diffuse = material.kd * light_color * light_intensity * ndotl
+    # 2. Shadow factor
+    sh = shadow_func(p, light_pos)
     
-    # 6. Specular Lighting
-    # Reflection vector R = reflect(-L, N)
-    # In GLSL: reflect(I, N) where I is incident vector (-L)
-    R = reflect(-L, N)
-    rdotv = max(dot(R, view_dir), 0.0)
-    specular = material.ks * light_color * light_intensity * pow(rdotv, material.kp)
+    # 3. View direction (opposite of ray direction)
+    V = -ray_dir
     
-    # 7. Ambient Lighting
-    ambient = material.ka * light_color * light_intensity # Assuming ambient light color is same as light or separate
+    # 4. Diffuse component
+    ndotl = max(dot(normal, L), 0.0)
+    diffuse = material.kd * light_color * ndotl
     
-    # 8. Final Color
-    result = ambient + diffuse + specular
-    result *= shadow_factor
+    # 5. Specular component
+    R = reflect(-L, normal)
+    rdotv = max(dot(R, V), 0.0)
+    specular = material.ks * light_color * pow(rdotv, material.kp)
     
-    # Clamp to [0, 1]
-    result = clamp(result, 0.0, 1.0)
+    # 6. Ambient component
+    ambient = ambient_factor * material.ka
     
-    return result
+    # 7. Combine and apply shadow
+    color = (ambient + diffuse + specular) * sh
+    
+    # 8. Clamp
+    color = clamp(color, 0.0, 1.0)
+    
+    return color
 ```
+
+**Parameters:**
+- $k_a$ (ambient): Constant ambient lighting factor, typically 0.1 [S1, unofficial].
+- $k_d$ (diffuse): Diffuse coefficient, typically 1.0 [S2, unofficial].
+- $k_s$ (specular): Specular coefficient, typically 1.0 [S2, unofficial].
+- $k_p$ (shininess): Shininess exponent, higher values make the surface smoother and shinier [S2, unofficial]. Typical values range from 10 to 100 [S1, S5, unofficial].
+- Ambient factor: Constant multiplier for ambient light, e.g., 0.1 [S1, unofficial].
+
+**Edge Cases:**
+- **Degenerate Normals:** If the gradient magnitude is zero (homogeneous region), the normal is undefined. This method relies on surface normals, so it is not robust for shading homogeneous regions [S6].
+- **Shadow Artifacts:** Hard shadows can cause aliasing at shadow boundaries. Soft shadows require additional sampling or approximation [S4, unofficial].
+- **Precision:** Floating-point precision issues may arise in shadow ray marching, leading to self-shadowing artifacts (shadow acne). A small epsilon offset may be needed [G].
 
 ## Subtopics
 
 ### [Lighting Transfer Function](6468-lighting-transfer-function.md)
-The Lighting Transfer Function (LTF) is a 2D lookup table technique that integrates multiple illumination models into a single, constant-cost evaluation for volume rendering. It solves the problem of efficiently applying complex illustrative shading (such as contour enhancement, cartoon shading, or metal shading) by storing ambient, diffuse, specular, and opacity enhancement components indexed by the dot products of the normalized gradient with the light and half-way vectors. Unlike standard Phong shading which calculates lighting per sample, the LTF decouples the shading model from the ray marching loop, allowing different visual styles to be swapped without changing the rendering algorithm.
+The Lighting Transfer Function (LTF) is a volume rendering shading technique that replaces scalar lighting coefficients with lookup tables dependent on two scalar values sampled along the gradient direction, allowing users to control lighting specifically for material boundaries. It solves the problem of assigning specific lighting coefficients (ambient, diffuse, specular) to material boundaries and homogeneous regions in a volume, allowing users to control how light interacts with scalar data boundaries independently of opacity. Unlike methods using scalar gradient magnitude alone, this method uses scalar values perpendicular to the boundary (along the gradient) to distinguish material types and boundaries, avoiding the shading of homogeneous material using only scalar gradient magnitude.
 
 ### [Differentiable Blinn-Phong Light Estimation](8621-differentiable-blinn-phong-light-estimation.md)
 This method solves the inverse problem of estimating the position and intensity of point light sources given an observed image, known scene geometry, and material properties. It formulates light estimation as an optimization problem that minimizes the photometric error between a rendered image and the target image using a differentiable rendering pipeline based on the Blinn-Phong model. It distinguishes itself from sibling methods like [Lighting Transfer Function](6468-lighting-transfer-function.md) by explicitly modeling 3D point light sources and handling non-distant lighting parallax, whereas alternatives like Spherical Harmonics are limited to low-frequency or distant lighting approximations.
 
 ### Cube Map Dependent Texture Read Shading
-An efficient per-pixel surface shading method using cube map dependent texture reads to evaluate the Blinn-Phong model, avoiding the need for per-pixel vector normalization [S6]. It works by treating an RGB color component (normal or reflection vector) as texture coordinates (s, t, r) for a cube map, accessing the texel at the intersection of the line through the origin in direction (s, t, r) and the cube face, where the color value represents incoming diffuse radiance if (s, t, r) is a surface normal, or specular radiance if it is a reflection vector [S6]. It differs from standard fragment shader dot products by encoding arbitrary numbers of lights or a full environment map in the cube map, at the cost of performance (up to 3 times slower) [S6]. A pitfall of the original Rezk-Salama approach is denormalization artifacts during interpolation, which cube map reads avoid by not requiring renormalization [S6].
+An efficient per-pixel surface shading method using cube map dependent texture reads to evaluate the Blinn-Phong model, avoiding the need for per-pixel vector normalization [S6]. It treats an RGB color component (normal or reflection vector) as texture coordinates (s, t, r) for a cube map. The texel at the intersection of the line through the origin in direction (s, t, r) and the cube face is accessed. The color value represents incoming diffuse radiance if (s, t, r) is a surface normal, or specular radiance if it is a reflection vector [S6]. This approach encodes arbitrary numbers of lights or a full environment map in the cube map, at the cost of performance (up to 3 times slower than dot products for limited lights) [S6]. It avoids denormalization artifacts caused by interpolation in the original Rezk-Salama approach [S6].
 
 ## Operating characteristics
-
-*   **Time Complexity**: O(1) per sample for lighting calculation, but requires secondary ray tracing for shadows, which adds significant cost depending on shadow depth and resolution [S3, unofficial][S4, unofficial].
-*   **Memory Complexity**: O(1) for material and light parameters. LTF variant requires O(1) for the 2D lookup table [S1, unofficial][S2, unofficial].
-*   **Measured Performance**: Per-pixel cube map evaluation can be up to 3 times slower than evaluating dot products for a limited number of light sources [S6].
-*   **Strengths**: Provides realistic specular highlights and shadows, enhancing depth perception and material appearance [S3, unofficial][S4, unofficial]. Supports multiple light types (positional, head, camera) and properties (cone angle, attenuation, one-sided lighting) [S3, unofficial].
-*   **Limitations**: Gradient-based normal estimation is sensitive to noise and fails in homogeneous regions (zero gradient) [S6]. Shadow calculation is expensive [S3, unofficial].
-*   **When to Use**: When realistic lighting and shadows are required for volume visualization, and performance allows for secondary ray tracing [S3, unofficial][S4, unofficial].
-*   **When Not to Use**: For real-time applications with strict performance constraints where shadows are not critical, or for homogeneous volumes where gradient-based shading fails [S6].
+- **Time Complexity:** The shading calculation per sample is $O(1)$, but shadow calculation adds additional ray marching steps, making it dependent on the shadow algorithm (hard vs soft) [S4, unofficial].
+- **Memory Complexity:** $O(1)$ for material and light parameters [S4, unofficial].
+- **Performance:** Cube map dependent texture read shading can be up to 3 times slower than evaluating dot products for a limited number of light sources [S6].
+- **Strengths:** Provides realistic specular highlights and shadows, enhancing the perception of shape and material [S3, unofficial]. Supports multiple light types (positional, head, camera) [S3, unofficial].
+- **Limitations:** Not robust for shading homogeneous regions where the gradient is zero or noisy [S6]. Sensitive to normal estimation errors [S6].
 
 ## Background
-
-The Phong shading model was originally proposed by Bui Tuong Phong in 1973 [S1, unofficial]. It has been widely adopted in computer graphics for surface rendering. In the context of volume rendering, it has been integrated into libraries like VTK.js to support cinematic volume rendering, providing BRDF reflectance and improved lighting models [S3, unofficial]. The method is often implemented in educational and research contexts, such as neural surface rendering assignments [S2, unofficial], and in game engines like Unity for volume rendering [S5, unofficial]. The cube map dependent texture read variant was proposed by Rezk-Salama et al. to optimize per-pixel shading [S6].
+The Phong shading model was introduced by Bui Tuong Phong in 1973 [S3, implied, unofficial]. It is a widely used local illumination model in computer graphics. In the context of volume rendering, it has been integrated into libraries like VTK.js to support cinematic volume rendering, providing BRDF reflectance calculations [S3, unofficial]. The method is commonly used in direct volume rendering to enhance the visual quality of scalar fields by simulating surface-like lighting on isosurfaces or gradient-based shading [S3, unofficial].
 
 ## Sources
-
 [S1] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)
 [S2] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
 [S3] Cinematic Volume Rendering in Your Web Browser: VolView and VTK.js, https://www.kitware.com/cinematic-volume-rendering/, fetched 2026-10-27 (unofficial)

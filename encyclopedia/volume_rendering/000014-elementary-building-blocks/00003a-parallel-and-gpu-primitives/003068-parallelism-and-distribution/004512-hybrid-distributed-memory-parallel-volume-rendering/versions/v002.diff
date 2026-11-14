@@ -1,0 +1,241 @@
+--- v001.md
++++ v002.md
+@@ -3,27 +3,27 @@
+ 
+ ## Overview
+-This method is a distributed-memory parallel volume rendering algorithm that combines object-order and image-order techniques to mitigate load imbalance on unstructured grids [S1]. It differs from pure object-order methods, which suffer from uneven sample distribution when camera zoom or mesh heterogeneity varies, and pure image-order methods, which struggle when tile boundaries cut through dense cell regions [S1]. By bounding the work per processor in each phase, it ensures scalability for both structured and unstructured data [S1].
++This method is a distributed-memory parallel volume rendering algorithm that combines object-order and image-order techniques to mitigate load imbalance on unstructured grids [S1]. By bounding the work per processor in each phase, it ensures scalability for both structured and unstructured data [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Unstructured or structured grid data (cells, vertices, attributes).
+-- Camera parameters (view matrix, projection matrix).
+-- Rendering resolution (image width $W$, height $H$).
++- Unstructured or structured grid data (cells, vertices, attributes) [S1].
++- Camera parameters (view matrix, projection matrix) [G].
++- Rendering resolution (image width $W$, height $H$) [G].
+ - Threshold parameter $T$ (integer $\ge 1$) [S1].
+ 
+ **Outputs:**
+-- Final image (pixel colors).
++- Final image (pixel colors) [S1].
+ 
+ **Data Structures:**
+-- **Cell:** Contains geometry (vertices/bounding box) and attribute data (scalar field values).
+-- **Partial Composite ($PC$):** A compressed representation of ray samples for a specific depth range. It stores:
++- **Cell:** Contains geometry (vertices/bounding box) and attribute data (scalar field values) [S1].
++- **Partial Composite ($PC$):** A compressed representation of ray samples for a specific depth range [S1]. It stores:
+   - Depth start ($Z_s$) and depth end ($Z_e$) [S1].
+   - Compositing result (color and opacity) for the range $[Z_s, Z_e]$ [S1].
+-  - *Note:* The source describes "partial composites" as reducing memory by compositing consecutive samples, storing 2 integer point values and 2 floating point values instead of individual sample floats [S1]. Exact bit-packing is not specified beyond "2 integer point values and 2 floating point values" [S1].
++  - The source describes partial composites as reducing memory by compositing consecutive samples, storing 2 integer point values and 2 floating point values instead of 100, reducing storage from 400 bytes to 24 bytes [S1].
+ 
+ **Algorithm Steps:**
+ 
+ 1. **Cluster Grouping:**
+-   Processors are grouped into clusters. The number of clusters and processors per cluster is determined by the system topology [S1].
++   Processors are grouped into clusters [S1].
+ 
+ 2. **Tile Assignment (Image Order at Cluster Level):**
+@@ -36,5 +36,5 @@
+ 
+ 4. **Phase 1: Object Order Sampling (Small Cells):**
+-   - **Cell Assessment:** For each cell owned by the processor, estimate the number of samples $S_{cell}$. The estimate is the product of:
++   - **Cell Assessment:** For each cell owned by the processor, estimate the number of samples $S_{cell}$ [S1]. The estimate is the product of:
+      - Number of pixels covered by the cell's bounding box in image space.
+      - Number of samples in depth overlapping the bounding box [S1].
+@@ -45,17 +45,14 @@
+ 
+ 5. **Phase 2: Exchange Phase:**
+-   - **Pixel Partitioning:** The image pixels are partitioned among all processors (not just within the cluster) for the next phase [S1].
+-   - **Communication:** Processors exchange:
+-     - Results from Phase 1 (partial composites of small cells).
+-     - The Large Cells that were not sampled in Phase 1 [S1].
+-   - *Note:* The source states processors exchange results "among themselves" and the large cells [S1].
++   - **Pixel Partitioning:** The image pixels are partitioned among all processors for the next phase [S1].
++   - **Communication:** Processors exchange the results of the first sampling phase (partial composites of small cells) and the Large Cells that were not sampled [S1].
+ 
+ 6. **Phase 3: Image Order Sampling (Large Cells):**
+    - Each processor samples the Large Cells that contribute to its assigned pixels [S1].
+    - For each pixel, samples from the Large Cells are composited with the partial composites received in Phase 2 [S1].
+-   - This produces a **sub-image** (partial composite for the pixel's depth range) [S1].
++   - This produces a sub-image (partial composite for the pixel's depth range) [S1].
+ 
+ 7. **Final Compositing:**
+-   - The final pixel color is obtained by accumulating partial composites.
++   - The final pixel color is obtained by accumulating partial composites [S1].
+    - Partial composites are sorted in correct z-depth order (front-to-back) using their stored $Z_s$ and $Z_e$ values [S1].
+    - Example sort order: If $PC_1=(501,1000)$, $PC_2=(0,2)$, $PC_3=(3,500)$, the order is $PC_2, PC_3, PC_1$ [S1].
+@@ -65,79 +62,91 @@
+ 
+ ```python
+-def hybrid_volume_rendering(data, camera, resolution, threshold, num_processors, num_clusters):
+-    # 1. Cluster Grouping
+-    clusters = group_processors_into_clusters(num_processors, num_clusters)
+-    
+-    # 2. Tile Assignment
++def hybrid_volume_rendering(grid, camera, resolution, threshold, num_processors, num_clusters):
++    # 1. Cluster Grouping & 2. Tile Assignment
++    clusters = list(range(num_clusters))
+     tiles = partition_image(resolution, num_clusters)
+-    cluster_tile_map = {cluster: tiles[i] for i, cluster in enumerate(clusters)}
+-    
++    cluster_tile_map = {c: tiles[c] for c in clusters}
++
+     # 3. Data Distribution
+-    # Each cluster receives a copy of relevant data or full data depending on implementation
+-    # Within cluster, data is distributed by object order
+-    local_data = distribute_data_object_order(data, cluster)
+-    
++    local_cells = distribute_data_object_order(grid, num_processors)
++
+     # 4. Phase 1: Object Order Sampling (Small Cells)
+-    small_cell_composites = []
+-    large_cells = []
+-    
+-    for cell in local_data:
+-        # Estimate samples
++    local_small_composites = []
++    local_large_cells = []
++
++    for cell in local_cells:
+         bbox_image = project_bbox_to_image(cell.bbox, camera)
+         pixel_count = count_pixels_in_bbox(bbox_image, resolution)
+-        depth_samples = estimate_depth_overlap(cell, camera)
+-        estimated_samples = pixel_count * depth_samples
+-        
++        depth_overlap = estimate_depth_overlap(cell, camera)
++        estimated_samples = pixel_count * depth_overlap
++
+         if estimated_samples < threshold:
+-            # Small Cell: Sample immediately
+-            pc = sample_cell_object_order(cell, camera, local_data)
+-            small_cell_composites.append(pc)
++            # Small Cell: Ray march and composite immediately
++            pc = ray_march_cell(cell, camera)
++            local_small_composites.append(pc)
+         else:
+-            # Large Cell: Defer
+-            large_cells.append(cell)
+-            
++            local_large_cells.append(cell)
++
+     # 5. Phase 2: Exchange Phase
+-    # Partition pixels for Phase 3
+     pixel_partition = partition_pixels(resolution, num_processors)
+-    
+-    # Exchange small cell composites and large cells
+-    # Note: Exact communication pattern (all-to-all vs cluster-local) 
+-    # is described as "exchange among themselves" and "partition image pixels over processors"
+-    exchanged_small_composites = communicate(small_cell_composites, pixel_partition)
+-    exchanged_large_cells = communicate(large_cells, pixel_partition)
+-    
++    # Exchange partial composites and large cells among processors
++    exchanged_small_composites = exchange_data(local_small_composites, pixel_partition)
++    exchanged_large_cells = exchange_data(local_large_cells, pixel_partition)
++
+     # 6. Phase 3: Image Order Sampling (Large Cells)
+     final_sub_images = {}
+-    
+-    for pixel in pixel_partition:
+-        # Get large cells contributing to this pixel
+-        contributing_large_cells = filter_cells_by_pixel(exchanged_large_cells, pixel, camera)
+-        
+-        # Get partial composites from Phase 1 for this pixel
+-        phase1_composites = filter_composites_by_pixel(exchanged_small_composites, pixel)
+-        
+-        # Composite large cells
+-        large_cell_composite = composite_large_cells(contributing_large_cells, camera)
+-        
+-        # Combine with phase 1 results
+-        # The source implies the final result is an accumulation of partial composites
+-        # sorted by depth. Here we create a composite for this pixel's contribution
+-        pixel_composite = create_partial_composite(phase1_composites + [large_cell_composite], pixel)
+-        final_sub_images[pixel] = pixel_composite
+-        
++
++    for pixel, assigned_cells in pixel_partition.items():
++        contributing_large = [c for c in exchanged_large_cells if cell_intersects_pixel(c, pixel, camera)]
++        phase1_composites = [pc for pc in exchanged_small_composites if pc_intersects_pixel(pc, pixel)]
++
++        # Ray march large cells for this pixel
++        large_composite = ray_march_cells(contributing_large, camera, pixel)
++
++        # Combine all composites for this pixel
++        all_composites = phase1_composites + [large_composite]
++        final_sub_images[pixel] = all_composites
++
+     # 7. Final Compositing
+     final_image = {}
+     for pixel in resolution:
+-        # Gather all partial composites for this pixel from all processors
+-        all_composites = gather_composites_for_pixel(pixel, final_sub_images)
+-        
+-        # Sort by depth (Zs, Ze)
+-        sorted_composites = sort_by_depth(all_composites)
+-        
+-        # Front-to-back compositing
++        composites = gather_composites_for_pixel(pixel, final_sub_images)
++        sorted_composites = sort_by_depth(composites) # Sort by Zs ascending
+         final_color = composite_front_to_back(sorted_composites)
+         final_image[pixel] = final_color
+-        
++
+     return final_image
++
++def ray_march_cell(cell, camera):
++    t_min, t_max = ray_bbox_intersection(cell.bbox, camera.origin, camera.direction)
++    if t_min is None: return None
++    samples = []
++    t = t_min
++    while t <= t_max:
++        pos = camera.origin + t * camera.direction
++        val = sample_scalar_field(cell, pos)
++        samples.append((t, val))
++        t += camera.step_size
++    return composite_samples(samples)
++
++def composite_samples(samples):
++    color = [0.0, 0.0, 0.0]
++    alpha = 0.0
++    for t, val in samples:
++        c = map_value_to_color(val)
++        a = map_value_to_opacity(val)
++        weight = (1.0 - alpha) * a
++        color = [color[i] + weight * c[i] for i in range(3)]
++        alpha += weight
++    return PartialComposite(Zs=samples[0][0], Ze=samples[-1][0], color=color, alpha=alpha)
++
++def composite_front_to_back(composites):
++    color = [0.0, 0.0, 0.0]
++    alpha = 0.0
++    for pc in composites:
++        weight = (1.0 - alpha) * pc.alpha
++        color = [color[i] + weight * pc.color[i] for i in range(3)]
++        alpha += pc.alpha
++    return color
+ ```
+ 
+@@ -146,5 +155,5 @@
+   - If $T=1$, all cells are "Large" (behaves as Image Order) [S1].
+   - If $T$ is very large, all cells are "Small" (behaves as Object Order) [S1].
+-  - Typical value: Not given in the sources.
++  - Typical value: Not given in the sources [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -159,12 +168,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources [S1].
+ - **Memory Complexity:** Reduced compared to pure image-order methods due to the use of partial composites. Partial composites store 2 integer point values and 2 floating point values per composite, reducing storage from 400 bytes (for 100 samples) to 24 bytes [S1].
+-- **Measured Performance:** Not given in the sources.
++- **Measured Performance:** Not given in the sources [S1].
+ - **Scaling:** Designed for data scalability on distributed-memory systems [S1].
+ - **Strengths:** Reduces load imbalance on unstructured grids; reduces memory and communication costs via partial composites; handles complex block interleaving [S1].
+ - **Limitations:** Potential for load imbalance at cluster level and within clusters if tile/cell distribution is uneven [S1].
+ - **When to Use:** Unstructured grids prone to load imbalance; distributed-memory systems [S1].
+-- **When Not to Use:** Not specified.
++- **When Not to Use:** Not specified [S1].
+ 
+ ## Background
