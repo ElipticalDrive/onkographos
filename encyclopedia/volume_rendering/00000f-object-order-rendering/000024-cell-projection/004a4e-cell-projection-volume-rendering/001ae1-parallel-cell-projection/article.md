@@ -3,131 +3,150 @@
 Also called: Parallel Cell-Projection Implementation, Multi-threaded projection
 
 ## Overview
-Parallel Cell Projection is a distributed-memory strategy for object-order volume rendering that decomposes the workload into an object-space projection phase and an image-space composition phase [S4, unofficial]. Unlike ray-casting, it avoids the need for global depth-sorting of cells by having each processor scan-convert its local unstructured cells into ray segments, which are then routed to their final image destinations for merging [S4, unofficial]. It sets itself apart from synchronous cell projection by allowing asynchronous communication and task management to hide data transfer overheads [S1, unofficial].
+Parallel Cell Projection is a parallelization strategy for Cell-Projection Volume Rendering that distributes the computationally expensive task of software-based polygon generation and the subsequent image-space composition across multiple processors or threads [S1, S3, unofficial][S5]. It solves the bottleneck of rendering large unstructured grids by decomposing the workload into an object-space phase (projection/scan conversion) and an image-space phase (ray merging/composition) [S1, S4, unofficial]. It sets itself apart from synchronous alternatives by employing asynchronous communication and task management to hide data transfer overheads, and from concurrent scan-conversion/composition approaches by strictly separating these phases to reduce inter-processor communication frequency [S1, S3, S4, unofficial].
 
 ## How it works
-The method operates on a system with $N$ working nodes (WNs) for computation and one control node (CN) for global management, load distribution, and final image output [S4, unofficial]. The algorithm proceeds in two distinct phases:
+The method operates on a distributed-memory architecture (e.g., PC clusters) or shared-memory multiprocessors, typically involving $N$ working nodes (WNs) for computation and one control node (CN) for global management and final image output [S4, unofficial]. The algorithm proceeds in two distinct passes [S1, S4, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** Unstructured volume data (e.g., tetrahedral or general grids) partitioned among WNs; viewing parameters (viewpoint, projection matrix).
-*   **Output:** A composite volume-rendered image on the display.
+*   **Input:** A 3D volume dataset (structured or unstructured, e.g., tetrahedral or general grids), a viewing transformation matrix, and a screen resolution.
+*   **Output:** A 2D rendered image (color and opacity) for each pixel.
 
 ### Data Structures
-*   **Vertex Arrays:** Store polygonal information (vertices, normals, colors, opacities) generated during software projection [S5].
-*   **Ray-Segment Lists:** For each pixel (or screen region), a list of depth-sorted segments containing color, opacity, and depth values [S4, unofficial].
-*   **Output Buffers:** Store ray segments before sending to other nodes. The buffer depth is a tunable parameter, typically tested at 25 or 200 segments [S3, unofficial].
+*   **Ray-Segment List:** A list of depth-sorted segments for a specific pixel or region. Each segment contains color, opacity, and depth values [S1, S4, unofficial].
+*   **Vertex Array:** Stores the projected polygonal information (vertices, normals, colors) generated during the projection phase [S5][S6, unofficial].
+*   **Partition Regions:** The image or volume is divided into regions assigned to processors. Static load balancing divides the image/volume into these regions [S3, unofficial].
 
-### Steps
+### Numbered Steps
 
-1.  **Object-Space Projection (Phase 1):**
-    *   Each WN performs per-vertex calculations, including point/normal transformation and lighting [S1, unofficial].
-    *   Shared vertices are processed only once by partitioning object space [S1, unofficial].
-    *   Each WN projects its assigned cells into polygons in software and loads them into vertex arrays [S5].
-    *   *Note:* In multi-threaded implementations (e.g., SGI Onyx2), several threads compute polygons and load vertex arrays, while one thread handles sorting and another makes OpenGL calls [S5].
+**Phase 1: Object-Space Projection and Scan Conversion**
+1.  **Partitioning:** The dataset is partitioned into load-balanced chunks assigned to WNs [S2][S4, unofficial].
+2.  **Per-Vertex Calculation:** Each WN performs per-vertex calculations, including point/normal transformation and lighting [S1, unofficial]. Shared vertices are processed only once by partitioning object space [S1, unofficial].
+3.  **Polygon Generation:** Several threads (on shared-memory systems like SGI Onyx2) or WNs (on distributed systems) compute polygons in software for their assigned cells [S5][S6, unofficial].
+4.  **Vertex Array Loading:** The resulting polygonal information is loaded into vertex arrays [S5][S6, unofficial].
+5.  **Sorting:** One dedicated thread (or process) sorts the faces back-to-front [S1, unofficial][S5]. Note: Using only face centroids as a sorting criterion may lead to incorrect sorting [S1, unofficial].
+6.  **Scan Conversion:** The sorted faces are scan-converted. Each face contains linearly interpolated vertex color, opacity, and depth value for each pixel in its projection [S1, unofficial].
+7.  **Partial Composition:** During scan conversion, partial composition (alpha blending using Porter-Duff's over operation) is applied to reduce the size of ray-segment lists that need to be exchanged [S4, unofficial].
+8.  **Asynchronous Communication:** Processors send their generated ray-segment lists to other nodes. A feedback mechanism is used: if sending is blocked due to full buffers, the processor switches to the ray merging task and begins receiving, regardless of the polling interval [S3, unofficial].
 
-2.  **Image-Space Decomposition:**
-    *   The screen is partitioned into regions assigned to each WN [S4, unofficial].
-    *   Primitives are decomposed into faces. Faces are sorted back-to-front based on depth [S1, unofficial].
-    *   *Pitfall:* Using only face centroids as a sorting criterion may lead to incorrect sorting [S1, unofficial].
+**Phase 2: Image-Space Parallel Composition**
+1.  **Region Assignment:** Computation for a specific region of the screen is assigned to each WN [S4, unofficial].
+2.  **Gathering:** For each pixel in the assigned region, each node gathers ray-segment lists from other nodes corresponding to that pixel [S4, unofficial].
+3.  **Merging:** The gathered lists are merged into a single depth-sorted ray-segment list [S4, unofficial].
+4.  **Compositing:** The pixel value is calculated by compositing the depth-sorted ray-segments from front to back using Porter-Duff's over operation [S4, unofficial].
+5.  **Final Output:** Each WN sends its rendered image region to the control node to output the overall volume rendered image [S4, unofficial]. Binary-Swap Image Composition (BSC) may be adopted to reduce communication overhead and load imbalance during this global composition phase [S4, unofficial].
 
-3.  **Parallel Composition (Phase 2):**
-    *   For each pixel in the assigned region, each node gathers ray-segment lists from other nodes corresponding to that pixel [S4, unofficial].
-    *   The segments are merged into a single depth-sorted ray-segment list [S4, unofficial].
-    *   The pixel value is calculated by compositing the depth-sorted segments from front to back using Porter-Duff's "over" operation (alpha blending) [S4, unofficial].
-    *   Partial composition may be applied during scan conversion to reduce the size of ray-segment lists exchanged in the final composition phase [S4, unofficial].
+### Formulas
+*   **Compositing:** The color $C$ and opacity $\alpha$ of a pixel are updated using Porter-Duff's over operation for each segment $i$ with color $C_i$ and opacity $\alpha_i$:
+    $$ \alpha_{out} = \alpha_{in} + \alpha_i (1 - \alpha_{in}) $$
+    $$ C_{out} = C_{in} + C_i (1 - \alpha_{in}) $$
+    [S4, unofficial]
 
-4.  **Final Output:**
-    *   Each WN sends its rendered image region to the control node [S4, unofficial].
-    *   The control node outputs the overall volume-rendered image [S4, unofficial].
+### Parameters
+*   **Buffer Depth:** The number of ray segments stored in output buffers before sending. Typical values tested are 25 and 200 segments [S3, unofficial].
+*   **Polling Frequency:** The interval at which processors check for incoming messages. Typical values tested are after each cell scan conversion or after every 4 cells [S3, unofficial].
+*   **Partitioner Aspect Ratio:** Configuring the partitioner to produce regions with high aspect ratios results in larger footprints in image space to reduce congestion [S3, unofficial].
+*   **Minimum Region Size:** Parameters should be adjusted so regions are not allowed to fall below a certain size to prevent message traffic congestion [S3, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# System Setup
-N = number_of_working_nodes
-CN = control_node
+# Parallel Cell Projection Implementation
+# Assumes a distributed system with N Working Nodes (WN) and 1 Control Node (CN)
 
-# Phase 1: Object-Space Projection
-def project_cells(wn_id, local_cells):
-    vertex_arrays = []
-    for cell in local_cells:
-        # Per-vertex calculations: transformation, lighting
-        vertices = transform_and_light(cell.vertices)
-        # Generate polygons from cell geometry
-        polygons = decompose_into_polygons(vertices)
-        vertex_arrays.append(polygons)
-    return vertex_arrays
-
-# Phase 2: Image-Space Composition
-def compose_image(wn_id, screen_region, vertex_arrays):
-    # Decompose primitives into faces and sort back-to-front
-    sorted_faces = sort_faces_back_to_front(vertex_arrays)
+def parallel_cell_projection(volume_data, view_matrix, screen_res):
+    # Phase 1: Object-Space Projection
+    # Each WN processes its assigned chunk of volume_data
     
-    # Initialize local ray-segment lists for the screen region
-    local_ray_segments = {} 
-    
-    for face in sorted_faces:
-        # Scan-convert face to pixels in screen_region
-        for pixel in face.projection(screen_region):
-            segment = create_segment(face, pixel)
-            local_ray_segments[pixel].append(segment)
-            
-    # Gather segments from other nodes
-    all_segments = gather_segments_from_peers(local_ray_segments)
-    
-    # Merge and sort
-    merged_segments = merge_and_sort(all_segments)
-    
-    # Composite
-    pixel_value = 0.0
-    for segment in merged_segments:
-        pixel_value = porter_duff_over(pixel_value, segment.color, segment.opacity)
+    # 1. Per-vertex calculations (parallelized by object space partitioning)
+    transformed_vertices = []
+    for cell in assigned_cells:
+        # Transform points and normals, apply lighting
+        # Avoid multiple processing of shared vertices
+        vertices = transform_and_light(cell, view_matrix)
+        transformed_vertices.append(vertices)
         
-    return pixel_value
-
-# Execution
-for wn in WNs:
-    local_cells = partition_data(wn.id)
-    vertex_arrays = project_cells(wn.id, local_cells)
-    image_region = compose_image(wn.id, wn.screen_region, vertex_arrays)
-    send_to_cn(wn.id, image_region)
+    # 2. Polygon Generation (parallelized by threads or WNs)
+    # Several threads/WNs compute polygons in software
+    vertex_arrays = []
+    for vertices in transformed_vertices:
+        polygons = generate_polygons(vertices)
+        vertex_arrays.append(polygons)
+        
+    # 3. Sorting (single thread/process)
+    # Sort faces back-to-front
+    # Note: Centroid-only sorting may be incorrect [S1, unofficial]
+    sorted_polygons = sort_back_to_front(vertex_arrays)
+    
+    # 4. Scan Conversion and Partial Composition
+    ray_segment_lists = {} # Map: pixel_id -> list of segments
+    
+    for polygon in sorted_polygons:
+        # Interpolate vertex color, opacity, depth
+        segments = scan_convert(polygon)
+        
+        # Partial composition to reduce data size for exchange
+        for seg in segments:
+            pixel_id = get_pixel_id(seg)
+            if pixel_id not in ray_segment_lists:
+                ray_segment_lists[pixel_id] = []
+            ray_segment_lists[pixel_id].append(seg)
+            
+    # 5. Asynchronous Communication
+    # Send ray_segment_lists to other nodes
+    # Feedback mechanism: if send blocked, switch to receive [S3, unofficial]
+    send_ray_segments(ray_segment_lists)
+    receive_ray_segments()
+    
+    # Phase 2: Image-Space Composition
+    # Assign screen regions to WNs
+    
+    # 6. Gather and Merge
+    local_ray_segments = get_local_ray_segments()
+    remote_ray_segments = receive_remote_ray_segments()
+    
+    merged_segments = merge_and_sort(local_ray_segments + remote_ray_segments)
+    
+    # 7. Compositing
+    for pixel in assigned_screen_region:
+        # Front-to-back Porter-Duff over operation
+        color, opacity = composite(merged_segments[pixel])
+        set_pixel_color(pixel, color, opacity)
+        
+    # 8. Final Output
+    send_image_region_to_control_node()
 ```
-
-### Parameters
-*   **Buffer Depth:** Number of ray segments stored in output buffers before sending. Typical values tested are 25 and 200 segments [S3, unofficial].
-*   **Polling Frequency:** Interval at which processors check for incoming messages. Typical values tested are after each cell scan conversion or after every 4 cells [S3, unofficial].
-*   **Composition Scheme:** Binary-Swap Image Composition (BSC) is adopted to reduce communication overhead and load imbalance during global composition [S4, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **Sorting Errors:** Using only centroids of each face as a sorting criterion may lead to incorrect sorting [S1, unofficial].
-*   **Message Congestion:** Spatial partitioners may generate regions with very small projected areas, causing all message traffic to bombard a few nodes, backing up output buffers and leaving most nodes idle [S3, unofficial].
+*   **Message Congestion:** The spatial partitioner may generate regions with very small projected areas. This causes all message traffic for that region to bombard a few nodes, backing up output buffers and leaving most nodes idle [S3, unofficial].
 *   **Idle Time:** Larger buffers and longer polling intervals reduce sending/receiving/polling overhead but increase idle time (`send_wait`, `recv_wait`, `sync_wait`) because idle processors wait longer for new work [S3, unofficial].
-*   **Hot Spots:** High cell density regions map to few scanlines, causing load imbalance in the `t_merge` component. Translating the viewpoint slightly shifts these peaks cyclically [S3, unofficial].
+*   **Hot Spots:** High cell density regions map to few scanlines, causing load imbalance in image-space operations (ray merging) [S3, unofficial].
 
 ## Subtopics
 
 ### [Asynchronous Communication Task Management](3656-asynchronous-communication-task-management.md)
-A strategy to manage communication costs in parallel volume rendering by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering. It sets itself apart from synchronous cell projection by decoupling sending and receiving tasks, thereby hiding data transfer overheads and spreading the communication load over time.
+Asynchronous Communication Task Management is a strategy for managing communication costs in parallel cell-projection volume rendering by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering. It sets itself apart from synchronous alternatives by decoupling sending and receiving tasks, thereby hiding data transfer overheads and spreading the communication load over time.
 
 ### Dynamic Load Balancing
-A distributed work-stealing scheme used to handle load imbalance caused by initial data distribution, view dependency of scan conversion time, and run-time dynamic behavior of Early Ray Termination (ERT) [S4, unofficial]. It differs from preprocessing-based static load balancing (which cannot handle dynamic ERT behavior) and self-scheduling based schemes (which do not work well for non-shared memory systems like PC clusters) [S4, unofficial].
+Dynamic Load Balancing is a distributed work-stealing scheme used to handle load imbalance caused by initial data distribution, view dependency of scan conversion time, and run-time dynamic behavior of Early Ray Termination (ERT) [S4, unofficial]. It differs from preprocessing-based static load balancing (which cannot handle dynamic ERT behavior) and self-scheduling based schemes (which do not work well for non-shared memory systems like PC clusters) [S4, unofficial].
 
 ### Parallel AMR Rendering with Subdivision Strategies
-A framework for parallel AMR rendering that reimplements cell projection, sorts cells, and uses kD-tree subdivision in object space with various weighting strategies [S7, unofficial]. It sorts cells as described by Williams, Max & Stein, subdivides in object space with a kD-tree, and subdivides the first hierarchy level using uniform blocks (equal size) or weighted blocks (similar computational effort) [S7, unofficial].
+Parallel AMR Rendering with Subdivision Strategies is a framework for parallel AMR rendering that reimplements cell projection, sorts cells, and uses kD-tree subdivision in object space with various weighting strategies [S7, unofficial]. It sorts cells as described by Williams, Max & Stein, subdivides in object space with a kD-tree, and subdivides the first hierarchy level using uniform blocks (equal size) or weighted blocks (similar computational effort) [S7, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The object-space computations (viewing transformations and scan conversion) are well-balanced [S3, unofficial]. However, image-space operations (ray merging) show distinct patterns due to hot spots [S3, unofficial].
-*   **Memory Usage:** With 64 regions, the maximum number of unmerged ray segments stored on any processor is at most 15-20% of the total number received [S3, unofficial].
-*   **Measured Performance:** On a 128-processor Intel Paragon (66.7 MHz POWER2 chipset, 34 MB/s node-to-node bandwidth), the method achieved a speedup of 90 and parallel efficiency of 70%, with a rendering time of 2 frames per second (excluding display) [S3, unofficial].
-*   **Scalability:** The SDVR System targets large (16-1000+ node) PC clusters, aiming for constant rendering time as data set size increases with additional nodes [S2].
-*   **Strengths:** Avoids frequent asynchronous interprocessor communication compared to concurrent scan conversion/composition; partial composition reduces global composition cost [S4, unofficial]. Static load balancing compares favorably to earlier algorithms for smaller processor counts [S3, unofficial].
-*   **Limitations:** Speed-up levels out due to communications overhead. For tetrahedral cells with Shirley-Tuchman projection, speed-up leveled out after about 5 projection threads; for general grids, after 18 threads [S5]. Larger buffers and longer polling intervals provide only slight improvements in total rendering time due to increased idle time [S3, unofficial].
-*   **When to Use:** Suitable for distributed-memory message-passing architectures rendering complex unstructured grids [S3, unofficial].
-*   **When Not to Use:** When high aspect ratio partitioning is required to avoid congestion, as it may defeat the purpose of early ray merging [S3, unofficial].
+*   **Time Complexity:** The object-space computations (viewing transformations and scan conversion) are well-balanced [S3, unofficial]. The image-space operations (ray merging) show a distinct pattern with potential load imbalance due to "hot spots" [S3, unofficial].
+*   **Memory Complexity:** With 64 regions, the maximum number of unmerged ray segments stored on any processor is at most 15-20% of the total number received [S3, unofficial].
+*   **Measured Performance:** On a 66.7 MHz POWER2 chipset with 34 MB/s node-to-node bandwidth, using 128 processors, the system achieved a speedup of 90, a parallel efficiency of 70%, and a rendering time of 2 frames per second (excluding display) [S3, unofficial].
+*   **Scaling:** On an SGI Onyx2, speed-up for Shirley-Tuchman projection leveled out after about 5 projection threads, while for general grids, it leveled out after 18 projection threads [S5][S6, unofficial]. This leveling out is attributed to communications overhead [S5][S6, unofficial].
+*   **Strengths:** Scalability for large datasets (16-1000+ nodes); ability to run with or without graphics hardware; high performance on distributed-memory architectures [S2][S3, unofficial].
+*   **Limitations:** Load imbalance due to hot spots; communication overhead limits speedup; static load balancing may degrade efficiency with large processor counts [S3, unofficial].
+*   **When to Use:** Large unstructured grids on distributed-memory clusters where scalability is prioritized over peak per-node performance [S2][S3, unofficial].
+*   **When Not to Use:** Small datasets where communication overhead dominates; systems with shared memory where simpler parallelization suffices; scenarios requiring dynamic load balancing for highly adaptive grids [S3, S4, unofficial].
 
 ## Background
-Parallel Cell Projection was developed as an extension of cell-projection rendering to distributed systems. Early implementations by Lucas [Lucas92] described a pure software system handling all major topologies [S1, unofficial]. Wilhelms et al. [Wilhelms96] also used scan conversion for software rendering [S1, unofficial]. The SDVR System [S2] and other implementations like those by Ma et al. and Matsui et al. explored concurrent scan conversion and composition [S4, unofficial]. The method is used in systems like the SGI Onyx2 and large PC clusters running LINUX/UNIX with OpenGL and MPI [S2].
+Parallel Cell Projection originated from early parallelization efforts for cell-projection volume rendering. Lucas [Lucas92] suggested a pure software system that renders volumes in two passes, handling all major types of topologies [S1, unofficial]. Wilhelms et al. [Wilhelms96] also used scan conversion for their software renderer [S1, unofficial]. The Scalable Distributed Volume Rendering (SDVR) System [15] targeted large PC clusters, aiming for scalability where rendering time remains constant as data set size increases with additional nodes [S2][S6, unofficial]. The method has been implemented on various architectures, including SGI Onyx2 and Intel Paragon [S3, unofficial][S5][S6, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

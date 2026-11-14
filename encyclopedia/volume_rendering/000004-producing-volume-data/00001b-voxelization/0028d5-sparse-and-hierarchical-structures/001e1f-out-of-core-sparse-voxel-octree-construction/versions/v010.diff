@@ -1,0 +1,186 @@
+--- v009.md
++++ v010.md
+@@ -32,12 +32,12 @@
+     *   Determine the bounding box of the triangle mesh. If not given, compute it in a streaming manner [S1].
+     *   Subdivide the high-resolution 3D voxel grid into subgrids. The subdivision depth is chosen such that each subgrid fits in available memory [S1].
+-    *   For each subgrid, test every triangle in the mesh against the subgrid's axis-aligned bounding box (AABB).
++    *   For each subgrid, test every triangle in the mesh against the subgrid's axis-aligned bounding box (AABB) [S1].
+     *   Store the triangles intersecting each subgrid into a separate temporary file on disk. This creates a partitioned triangle mesh [S1].
+ 
+ 2.  **Actual Voxelization**:
+     *   Process the subgrids in Morton order (Z-order) [S1].
+-    *   For each subgrid, load its corresponding triangle partition from disk into memory.
++    *   For each subgrid, load its corresponding triangle partition from disk into memory [S1].
+     *   Voxelize the triangles using the 6-separability surface voxelization variant of Huang et al. [1998] [S1]. This method processes triangles independently, supporting streaming [S1].
+-    *   For each non-empty voxel cell found, compute its Morton code.
++    *   For each non-empty voxel cell found, compute its Morton code [G].
+     *   Write the Morton codes of these non-empty cells to the intermediate output stream. Do not output boolean values for empty cells [S1].
+ 
+@@ -45,18 +45,18 @@
+ The goal is to build the octree from the stream of Morton codes using a bottom-up approach. The key insight is that Morton order corresponds to a post-order depth-first traversal of the octree nodes [S1].
+ 
+-1.  **Initialization**: Create an array of queues, one for each level of the octree. Initialize all queues as empty.
++1.  **Initialization**: Create an array of queues, one for each level of the octree. Initialize all queues as empty [S1].
+ 2.  **Streaming Construction**:
+-    *   Read the next Morton code from the intermediate voxel grid stream.
+-    *   Determine the level of the leaf node corresponding to this Morton code (based on the resolution of the intermediate grid).
+-    *   Store this node in the queue corresponding to that level.
+-    *   **Check for Parent Completion**: If a queue for level $L$ is full (contains $2^d$ nodes), it implies all children for a parent at level $L-1$ have been processed.
+-        *   Create an internal node for the parent at level $L-1$. Its Morton code is derived from the children's codes (e.g., by shifting right by $d$ bits).
+-        *   Store this parent node in the queue for level $L-1$.
++    *   Read the next Morton code from the intermediate voxel grid stream [S1].
++    *   Determine the level of the leaf node corresponding to this Morton code (based on the resolution of the intermediate grid) [S1].
++    *   Store this node in the queue corresponding to that level [S1].
++    *   **Check for Parent Completion**: If a queue for level $L$ is full (contains $2^d$ nodes), it implies all children for a parent at level $L-1$ have been processed [S1].
++        *   Create an internal node for the parent at level $L-1$. Its Morton code is derived from the children's codes (e.g., by shifting right by $d$ bits) [S1].
++        *   Store this parent node in the queue for level $L-1$ [S1].
+         *   Record the parent-child relationship (e.g., by storing the parent's pointer or index to the children nodes before they are flushed, or by maintaining a mapping) [S1].
+-        *   Write all non-empty nodes currently in the queue for level $L$ to the final SVO output.
+-        *   Clear the queue for level $L$.
++        *   Write all non-empty nodes currently in the queue for level $L$ to the final SVO output [S1].
++        *   Clear the queue for level $L$ [S1].
+ 3.  **Termination**:
+-    *   Repeat steps 2 until the root node (level 0) is created.
+-    *   Write the root node to the output.
++    *   Repeat steps 2 until the root node (level 0) is created [S1].
++    *   Write the root node to the output [S1].
+     *   Clear the root's queue [S1].
+ 
+@@ -68,5 +68,5 @@
+     # Determine subgrid size by subdividing grid until it fits in memory [S1]
+     subgrid_size = determine_subgrid_size(grid_resolution, available_memory)
+-    subgrids = generate_subgrids(grid_resolution, subgrid_size)
++    subgrids = generate_subgrids_morton_order(grid_resolution, subgrid_size)
+ 
+     voxel_stream = []
+@@ -77,6 +77,6 @@
+                 partition.append(tri)
+         # Voxelize using Huang et al. 6-separability surface voxelization [S1]
+-        non_empty_cells = voxelize_triangles(partition, subgrid)
+-        for cell in non_empty_cells:
++        occupied_cells = voxelize_triangles(partition, subgrid)
++        for cell in occupied_cells:
+             voxel_stream.append(compute_morton_code(cell.coords, grid_resolution))
+ 
+@@ -134,10 +134,23 @@
+     return size
+ 
+-def generate_subgrids(grid_resolution, subgrid_size):
++def generate_subgrids_morton_order(grid_resolution, subgrid_size):
+     subgrids = []
+-    for i in range(0, grid_resolution, subgrid_size):
+-        for j in range(0, grid_resolution, subgrid_size):
+-            for k in range(0, grid_resolution, subgrid_size):
+-                subgrids.append(Subgrid(i, j, k, subgrid_size))
++    # Iterate in Morton order to ensure contiguous ranges [S1]
++    total_subgrids = (grid_resolution // subgrid_size) ** 3
++    for i in range(total_subgrids):
++        # Decode Morton index to 3D subgrid coordinates [G]
++        x = (i & 0x55555555) << 1
++        y = (i & 0x22222222) << 1
++        z = (i & 0x00000003) << 2
++        x = (x & 0x33333333) << 2
++        y = (y & 0x0F0F0F0F) << 4
++        z = (z & 0x00FF00FF) << 8
++        x = (x | (x >> 2)) & 0x33333333
++        y = (y | (y >> 4)) & 0x0F0F0F0F
++        z = (z | (z >> 8)) & 0x00FF00FF
++        x = (x | (x >> 16)) & 0x0000FFFF
++        y = (y | (y >> 16)) & 0x0000FFFF
++        z = (z | (z >> 16)) & 0x0000FFFF
++        subgrids.append(Subgrid(x * subgrid_size, y * subgrid_size, z * subgrid_size, subgrid_size))
+     return subgrids
+ 
+@@ -153,6 +166,31 @@
+     cells = []
+     for tri in triangles:
+-        cells.append(Cell(tri.center))
++        # Compute occupied cells within subgrid bounds [G]
++        min_c = max(0, int((tri.min_coords[0] - subgrid.origin[0]) / subgrid.size))
++        max_c = min(subgrid.size, int((tri.max_coords[0] - subgrid.origin[0]) / subgrid.size) + 1)
++        for cx in range(min_c, max_c):
++            for cy in range(min_c, max_c):
++                for cz in range(min_c, max_c):
++                    cell_coords = (subgrid.origin[0] + cx * subgrid.size,
++                                   subgrid.origin[1] + cy * subgrid.size,
++                                   subgrid.origin[2] + cz * subgrid.size)
++                    if point_in_triangle(cell_coords, tri):
++                        cells.append(Cell(cell_coords))
+     return cells
++
++def point_in_triangle(point, tri):
++    # Barycentric coordinate test [G]
++    v0 = tri.v1 - tri.v0
++    v1 = tri.v2 - tri.v0
++    v2 = point - tri.v0
++    dot00 = dot(v0, v0)
++    dot01 = dot(v0, v1)
++    dot02 = dot(v0, v2)
++    dot11 = dot(v1, v1)
++    dot12 = dot(v1, v2)
++    inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
++    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
++    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
++    return (u >= 0) and (v >= 0) and (u + v <= 1)
+ 
+ def write_to_svo_output(nodes):
+@@ -162,4 +200,6 @@
+ class Subgrid:
+     def __init__(self, x, y, z, size):
++        self.origin = (x, y, z)
++        self.size = size
+         self.aabb = (x, y, z, x+size, y+size, z+size)
+ 
+@@ -167,4 +207,27 @@
+     def __init__(self, coords):
+         self.coords = coords
++
++class Triangle:
++    def __init__(self, v0, v1, v2):
++        self.v0 = v0
++        self.v1 = v1
++        self.v2 = v2
++    def bounding_box(self):
++        min_c = (min(self.v0[0], self.v1[0], self.v2[0]),
++                 min(self.v0[1], self.v1[1], self.v2[1]),
++                 min(self.v0[2], self.v1[2], self.v2[2]))
++        max_c = (max(self.v0[0], self.v1[0], self.v2[0]),
++                 max(self.v0[1], self.v1[1], self.v2[1]),
++                 max(self.v0[2], self.v1[2], self.v2[2]))
++        return min_c, max_c
++    @property
++    def min_coords(self):
++        return self.bounding_box()[0]
++    @property
++    def max_coords(self):
++        return self.bounding_box()[1]
++
++def dot(a, b):
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+ ```
+ 
+@@ -177,14 +240,20 @@
+ 
+ ### [Sparse Voxel Octree Construction (Basic Version)](1694-sparse-voxel-octree-construction-basic-version.md)
+-Builds an SVO from a stream of Morton codes using queues per level. It differs from the main method by assuming the input stream is already available and does not handle the disk-based partitioning of the voxelization phase. It is simpler but not fully out-of-core for the voxelization step.
++Builds an SVO from a stream of Morton codes using queues per level. It differs from the main method by assuming the input stream is already available and does not handle the disk-based partitioning of the voxelization phase. It is simpler but not fully out-of-core for the voxelization step. Choose it when the voxel grid is already available in memory or on a fast stream.
+ 
+ ### [Morton-Partitioned Triangle Voxelization](7460-morton-partitioned-triangle-voxelization.md)
+-A streaming voxelization pipeline that constructs an SVO from a triangle mesh by processing a high-resolution 3D grid in Morton order. It sets itself apart by managing memory usage logarithmically through out-of-core partitioning, allowing the construction of large SVOs that exceed available RAM.
++A streaming voxelization pipeline that constructs an SVO from a triangle mesh by processing a high-resolution 3D grid in Morton order. It sets itself apart by managing memory usage logarithmically through out-of-core partitioning, allowing the construction of large SVOs that exceed available RAM. Choose it when disk I/O is the bottleneck and subgrid partitioning is required.
+ 
+ ### [Out-of-Core Octree Construction](9038-out-of-core-octree-construction.md)
+-An incremental out-of-core algorithm to build an octree where leaves contain geometry. It builds from the root downward, splitting leaves that exceed a primitive count limit. Unlike the main method which builds bottom-up from a voxel grid, this method builds top-down from primitives.
++An incremental out-of-core algorithm to build an octree where leaves contain geometry. It builds from the root downward, splitting leaves that exceed a primitive count limit. Unlike the main method which builds bottom-up from a voxel grid, this method builds top-down from primitives. Choose it when working directly with unstructured geometry rather than a voxelized representation.
+ 
+ ### [Grid-Free Out-Of-Core Voxelization to Sparse Voxel Octrees](9464-grid-free-out-of-core-voxelization-to-sparse-voxel-octrees.md)
+-A stream-based out-of-core voxelization technique that processes triangles and voxels in batches to build SVOs on the GPU. It differs by maintaining no global occupancy grid and using a Morton queue to manage voxel locality across batch boundaries.
++A stream-based out-of-core voxelization technique that processes triangles and voxels in batches to build SVOs on the GPU. It differs by maintaining no global occupancy grid and using a Morton queue to manage voxel locality across batch boundaries. Choose it for GPU-accelerated pipelines where global grid memory is prohibitive.
++
++### Out-of-Core Voxelization with Appearance Data
++An extension of the out-of-core SVO construction that handles appearance data (colors, normals, texture coordinates) by interpolating vertex attributes during voxelization and propagating them to higher levels of the octree, provided the data is available locally [S1].
++
++### Sparse-Voxel-Octree (SVO) Voxelization
++A variant of voxel cone tracing that uses a Sparse-Voxel-Octree (SVO) instead of a regular 3D texture to store lighting data, reducing GPU memory usage by dynamically instantiating nodes [S2, unofficial]. The voxelization procedure undergoes three rasterization passes, once for each spatial axis [S2, unofficial]. Storing lighting data in a sparse octree is significantly more challenging to implement and navigate compared to a regular grid [S2, unofficial].
+ 
+ ## Operating characteristics

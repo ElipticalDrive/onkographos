@@ -1,0 +1,167 @@
+--- v002.md
++++ v003.md
+@@ -4,23 +4,22 @@
+ 
+ ## Overview
+-This method constructs a hierarchical KD-tree data structure for Adaptive Mesh Refinement (AMR) datasets to enable efficient ray traversal and rendering without replicating cells into a voxel grid. It solves the problem of memory waste and performance penalties associated with homogeneous page tables or flat hierarchical structures by grouping same-level cells into axis-aligned patches. It sets itself apart from siblings like [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md) by explicitly leveraging cell level homogeneity to define leaf nodes, and from [Adaptive Mesh Refinement (AMR) Data Structures](5344-adaptive-mesh-refinement-amr-data-structures.md) by providing a specific construction algorithm for CPU-GPU hybrid traversal.
++This method constructs a hierarchical KD-tree for Adaptive Mesh Refinement (AMR) datasets to enable efficient ray traversal and rendering without replicating cells into a voxel grid [S1]. It solves the memory waste and performance penalties of homogeneous page tables by grouping same-level cells into axis-aligned patches [S1].
+ 
+ ## How it works
+-**Inputs:** An AMR dataset consisting of cells with associated refinement levels and spatial positions.
+-**Outputs:** A KD-tree where leaf nodes contain homogeneous patches (axis-aligned boxes of same-level cells) and internal nodes contain split information.
++**Inputs:** An AMR dataset consisting of cells with associated refinement levels and spatial positions [S1].
++**Outputs:** A KD-tree where leaf nodes contain homogeneous patches (axis-aligned boxes of same-level cells) and internal nodes contain split information [S1].
+ 
+ **Data Structures:**
+-*   **Box:** An axis-aligned bounding box defined by minimum and maximum coordinates.
++*   **Box:** An axis-aligned bounding box defined by minimum and maximum coordinates, containing a list of cells.
+ *   **Node:** Represents a region in the KD-tree.
+-    *   `is_leaf`: Boolean flag.
+-    *   `data`: If leaf, contains the list of cells in the patch.
+-    *   `children`: If internal, a tuple of two child nodes.
+-    *   `split_axis`: (Implicit in traversal) The axis along which the box was split.
++    *   `is_leaf`: Boolean flag indicating if the node is a leaf.
++    *   `data`: List of cells if the node is a leaf.
++    *   `children`: Tuple of two child nodes if the node is internal.
+ 
+ **Parameters:**
+-*   `homogeneity(box)`: A function returning the ratio of homogeneity of cell levels inside the box. Returns $1.0$ if all cells share the same level, $0.0$ if all have different levels. [S1]
++*   `homogeneity(box)`: A function returning the ratio of homogeneity of cell levels inside the box; returns $1.0$ if all cells share the same level, $0.0$ if all have different levels [S1].
+ 
+ **Algorithm:**
+-The construction is recursive. The root box contains the entire dataset.
++The construction is recursive, starting from the root box containing the entire dataset.
+ 
+ 1.  **Check Homogeneity:** Calculate $H = \text{homogeneity}(b)$ for the current box $b$.
+@@ -30,10 +29,9 @@
+     *   Return.
+ 3.  **Recursive Step (Split):** If $H < 1.0$:
+-    *   Initialize `best_score` to $0$.
+-    *   Initialize `best_cut` to `None`.
++    *   Initialize `best_score` to $0$ and `best_cut` to `None`.
+     *   For each axis direction $d \in \{x, y, z\}$:
+         *   For each possible cut plane $p$ in direction $d$ (typically at cell boundaries):
+             *   Split box $b$ by $p$ into $b_{left}$ and $b_{right}$.
+-            *   Calculate `current_score` = $\text{homogeneity}(b_{left}) + \text{homogeneity}(b_{right})$? *Note: The source text says "homogeneity(b cut by p)" which implies the score of the resulting configuration. Given the goal is to maximize homogeneity, and the base case is 1, the score likely represents the sum or average homogeneity of the children, or simply the homogeneity of the resulting split state. The pseudocode below follows the literal "current score = homogeneity(b cut by p)" but interprets it as the metric to maximize. In practice, this usually means maximizing the homogeneity of the resulting children.* [S1]
++            *   Calculate `current_score` = $\text{homogeneity}(b_{left}) + \text{homogeneity}(b_{right})$ [S1].
+             *   If `current_score` > `best_score`:
+                 *   `best_score` = `current_score`
+@@ -48,25 +46,47 @@
+ 
+ ```python
++class Node:
++    def __init__(self):
++        self.is_leaf = False
++        self.data = None
++        self.children = None
++
++class Box:
++    def __init__(self, min_coords, max_coords, cells):
++        self.min = min_coords
++        self.max = max_coords
++        self.cells = cells
++
++    def split(self, cut_plane, axis):
++        # Standard AABB split: returns two new boxes
++        left_min = list(self.min)
++        left_max = list(self.max)
++        right_min = list(self.min)
++        right_max = list(self.max)
++        left_max[axis] = cut_plane
++        right_min[axis] = cut_plane
++        left_cells = [c for c in self.cells if c.center[axis] <= cut_plane]
++        right_cells = [c for c in self.cells if c.center[axis] > cut_plane]
++        return Box(left_min, left_max, left_cells), Box(right_min, right_max, right_cells)
++
+ def homogeneity(box):
+-    """
+-    Returns the ratio of homogeneity of cell levels inside the box.
+-    Returns 1.0 if all cells share the same level.
+-    Returns 0.0 if all cells have different levels.
+-    """
++    """Returns ratio of homogeneity of cell levels inside the box.
++    Returns 1.0 if all cells share the same level, 0.0 if all have different levels [S1]."""
++    if not box.cells:
++        return 1.0 # Empty box is trivially homogeneous [G]
+     levels = [cell.level for cell in box.cells]
+-    if not levels:
+-        return 1.0 # Empty box is trivially homogeneous
+     unique_levels = set(levels)
+     if len(unique_levels) == 1:
+         return 1.0
+-    # If not all same, calculate ratio. 
+-    # Source defines 0 if all different, 1 if all same. 
+-    # Intermediate values are "ratio of homogeneity". 
+-    # A common interpretation for ratio is 1 / len(unique_levels) or similar.
+-    # However, for the split decision, we just need a scalar metric.
+-    # We will return 1.0 if homogeneous, 0.0 otherwise for simplicity 
+-    # as the exact intermediate formula is not specified, 
+-    # but the comparison logic remains valid.
+-    return 0.0 
++    # Intermediate ratios are implementation-defined; return 0.0 for non-homogeneous [G]
++    return 0.0
++
++def get_possible_cuts(box, axis):
++    """Returns sorted unique cell boundary coordinates along the axis [G]."""
++    cuts = set()
++    for cell in box.cells:
++        cuts.add(cell.min[axis])
++        cuts.add(cell.max[axis])
++    return sorted(c for c in cuts if c > box.min[axis] and c < box.max[axis])
+ 
+ def split_box(box):
+@@ -74,16 +94,9 @@
+     best_cut = None
+     
+-    # Iterate over axes
+     for axis in ['x', 'y', 'z']:
+-        # Iterate over possible cut planes
+-        # In a discrete grid, cuts are at cell boundaries
+         cuts = get_possible_cuts(box, axis)
+-        
+         for p in cuts:
+             b_left, b_right = box.split(p, axis)
+-            
+-            # Calculate score of the split
+-            # The source says "homogeneity(b cut by p)". 
+-            # This likely implies the combined homogeneity of the children.
++            # Source specifies: current score = homogeneity(b cut by p) [S1]
+             score = homogeneity(b_left) + homogeneity(b_right)
+             
+@@ -93,5 +106,5 @@
+                 
+     if best_cut is None:
+-        return box, box # Fallback, though unlikely if cuts exist
++        return box, box # Fallback if no valid cuts exist [G]
+         
+     p, axis = best_cut
+@@ -118,7 +131,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Boxes:** If a box contains no cells, `homogeneity` should return 1.0 to prevent infinite recursion or unnecessary splits. [G]
+-*   **Cut Plane Selection:** The number of possible cut planes can be large. Optimization is required to avoid $O(N^2)$ complexity in splitting. [G]
+-*   **GPU Traversal:** The resulting tree is traversed on the CPU, but patches are sent to the GPU. The CPU traversal must be back-to-front to support correct alpha blending. [S1]
++*   **Empty Boxes:** If a box contains no cells, `homogeneity` should return $1.0$ to prevent infinite recursion or unnecessary splits [G].
++*   **Cut Plane Selection:** The number of possible cut planes can be large; optimization is required to avoid $O(N^2)$ complexity in splitting [G].
++*   **Traversal Order:** The resulting tree is traversed on the CPU in back-to-front order, and each patch is sent to the GPU for rendering [S1].
+ 
+ ## Subtopics
+@@ -128,12 +141,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The construction time depends on the number of cells and the cost of evaluating homogeneity for each potential split. In the worst case, it is $O(N \log N)$ or higher depending on the cut plane search strategy. [G]
+-*   **Memory Complexity:** The structure stores cells only once in leaf nodes, avoiding the memory waste of voxel replication. The overhead is the tree structure itself. [S1]
+-*   **Performance:** Rendering is accelerated by sending homogeneous patches to the GPU, where traversal is trivial. CPU traversal handles the hierarchy. This hybrid approach balances CPU flexibility and GPU parallelism. [S1]
+-*   **Strengths:** No additional cells are added; memory efficient; leverages GPU regularity. [S1]
+-*   **Limitations:** CPU-GPU synchronization overhead; complex traversal logic on CPU. [S1]
++*   **Time Complexity:** Construction time depends on the number of cells and the cost of evaluating homogeneity for each potential split [G].
++*   **Memory Complexity:** The structure stores cells only once in leaf nodes, avoiding the memory waste of voxel replication [S1].
++*   **Performance:** Rendering is accelerated by sending homogeneous patches to the GPU, where traversal is trivial, while the CPU handles the hierarchical traversal [S1].
++*   **Strengths:** No additional cells are added; memory efficient; leverages GPU regularity [S1].
++*   **Limitations:** CPU-GPU synchronization overhead [G].
+ 
+ ## Background
+-This method was presented in the context of high-quality, semi-analytical volume rendering for AMR datasets. It addresses the limitations of previous multi-octree approaches that required data reformatting or voxel replication. The technique was developed to handle hierarchical structures efficiently on the GPU by using a hybrid CPU-GPU sorting approach. [S1]
++This method was presented in the context of high-quality, semi-analytical volume rendering for AMR datasets [S1]. It addresses the limitations of previous multi-octree approaches that required data reformatting or voxel replication [S1]. The technique was developed to handle hierarchical structures efficiently on the GPU by using a hybrid CPU-GPU sorting approach [S1].
+ 
+ ## Sources

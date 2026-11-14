@@ -1,117 +1,123 @@
 # Spatial Convolution
 
-Also called: Direct Spatial Convolution, Spatial Domain Convolution
+Also called: Direct Spatial Convolution, Discrete Convolution, Spatial Domain Convolution
 
 ## Overview
-Spatial Convolution is the direct application of a reconstruction kernel to discrete input samples in the spatial domain to produce output values [S1, S2, unofficial]. It solves the problem of reconstructing a continuous signal from discrete samples by gathering contributions from neighboring input samples for each output position [S1, S2, unofficial]. It is distinguished from frequency-domain convolution by avoiding Fourier transforms, making it computationally preferred for small, limited-extent kernels typical in volume rendering [S1, unofficial]. Unlike standard convolution, it can be extended to spatially varying kernels where the weighting function depends on the specific output pixel, though this precludes the use of standard FFT-based acceleration [S2, unofficial].
+Spatial convolution is a neighborhood-based operation where output values are calculated as a weighted average of neighboring input samples using a filter kernel [S2, unofficial]. In volume rendering, it is used to convolve discrete samples with a reconstruction kernel in the spatial domain [S1, unofficial]. It is distinguished from frequency-domain methods (like FFT-based convolution) by operating directly on spatial data, which is preferred for discrete kernels of limited extent because transforming to and from the frequency domain is more compute-intensive than direct spatial convolution [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A discrete signal $f$ (e.g., voxel values or initial pixel colors) defined on a grid.
-*   **Input:** A reconstruction kernel $h$ or weighting function $w$.
-*   **Output:** A reconstructed signal $g$ (e.g., final pixel colors) at desired output positions.
+**Inputs and Outputs:**
+- Input: A discrete signal (e.g., volume samples or image pixels) $f$ or $\mathbf{L}$.
+- Input: A filter kernel (reconstruction kernel) $h$ or $\mathbf{K}$.
+- Output: The convolved signal $g$ or $\mathbf{L}'$.
 
-**Data Structures**
-*   **Input Signal:** A 3D array (for volume data) or 2D array (for images) of floating-point values.
-*   **Kernel:** A 3D or 2D array of weights. For standard convolution, this is shift-invariant. For spatially varying convolution, the kernel is implicitly defined by a function $w_{\mathbf{x}'}(\mathbf{x}' - \mathbf{x})$ evaluated per output pixel [S2, unofficial].
+**Data Structures:**
+- The input signal is represented as a multi-dimensional array (1D, 2D, or 3D) indexed by spatial coordinates.
+- The kernel is a small multi-dimensional array centered at the origin (or defined by relative offsets).
 
-**Formulas**
-For a standard shift-invariant kernel $h$, the continuous convolution integral is [S1, unofficial]:
+**Formulas:**
+The continuous convolution integral is defined as:
+$$g(t) = \int_{-\infty}^{\infty} f(u)h(t-u) du$$
+In two dimensions:
+$$g(x, y) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(u, v) h(x - u, y - v) du dv$$
+In three dimensions:
 $$g(x, y, z) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(u, v, w) h(x - u, y - v, z - w) du dv dw$$
+
 For discrete signals, this becomes the convolution sum [S1, unofficial]:
 $$g(x, y, z) = \sum_{i=-\infty}^{\infty} \sum_{j=-\infty}^{\infty} \sum_{k=-\infty}^{\infty} f(i, j, k) h(x - i, y - j, z - k)$$
-In 2D notation often used for image-based filtering, this is expressed as [S2, unofficial]:
+
+In 2D discrete notation often used in image processing [S2, unofficial]:
 $$(\mathbf{L} * \mathbf{K})(\mathbf{x}) = \sum_{\mathbf{x}'} \mathbf{L}(\mathbf{x}') \mathbf{K}(\mathbf{x}' - \mathbf{x})$$
-where $\mathbf{L}$ is the input image and $\mathbf{K}$ is the filter kernel.
+where the sum iterates over all pixel positions or only the neighborhood of $\mathbf{x}$.
 
-For spatially varying kernels, where each output pixel $\mathbf{x}$ has a unique distribution, the operation is [S2, unofficial]:
-$$\mathbf{L}'(\mathbf{x}) = \sum_{\mathbf{x}'} w_{\mathbf{x}'}(\mathbf{x}' - \mathbf{x})\mathbf{L}(\mathbf{x}')$$
-Here, $w_{\mathbf{x}'}$ are weighting functions specific to the output location [S2, unofficial].
+**Parameters:**
+- Kernel size: Typically small in volume rendering algorithms [S1, unofficial].
+- Normalization: The sum of all kernel values should equal 1 for energy conservation:
+$$\sum_{\mathbf{x}} K(\mathbf{x}) = 1$$
 
-**Parameters**
-*   **Kernel Size:** Typically small in volume rendering to keep computation manageable [S1, unofficial].
-*   **Normalization:** The sum of kernel weights must equal 1 for energy conservation: $\sum_{\mathbf{x}} K(\mathbf{x}) = 1$ [S2, unofficial].
+**Steps:**
+1. For each output sample position $\mathbf{x}$:
+2. Initialize the accumulator to zero.
+3. Iterate over the kernel support (neighborhood $\mathbf{x}'$).
+4. Retrieve the input sample value $\mathbf{L}(\mathbf{x}')$.
+5. Retrieve the kernel weight $\mathbf{K}(\mathbf{x}' - \mathbf{x})$.
+6. Multiply the sample value by the kernel weight and add to the accumulator.
+7. Store the accumulator value in the output at $\mathbf{x}$.
 
-**Steps**
-1.  **Kernel Normalization:** If the kernel is derived from a continuous function (e.g., Gaussian), sample it at discrete positions. Sum the sampled values. Multiply every element in the kernel by the reciprocal of this sum to ensure $\sum K = 1$ [S2, unofficial].
-2.  **Iteration:** For each output position $\mathbf{x}$:
-    a. Initialize accumulator $A = 0$.
-    b. Iterate over all input positions $\mathbf{x}'$ within the kernel's support (neighborhood).
-    c. Calculate weight $W$. For standard convolution, $W = K(\mathbf{x}' - \mathbf{x})$. For spatially varying, $W = w_{\mathbf{x}'}(\mathbf{x}' - \mathbf{x})$ [S2, unofficial].
-    d. Add contribution: $A = A + L(\mathbf{x}') \times W$.
-    e. Store $A$ as the output value at $\mathbf{x}$.
-
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def spatial_convolution(input_signal, kernel, output_shape):
+def spatial_convolution(input_signal, kernel):
     """
-    Performs direct spatial convolution.
-    input_signal: 3D array of input values.
-    kernel: 3D array of weights (assumed normalized).
-    output_shape: tuple (D, H, W) for output dimensions.
+    Performs discrete spatial convolution.
+    input_signal: 2D or 3D array of values.
+    kernel: 2D or 3D array of weights, centered at (0,0,0) or defined by offsets.
     """
-    # Determine kernel radius to define neighborhood
-    kernel_shape = kernel.shape
-    radius = [s // 2 for s in kernel_shape]
+    # Determine dimensions
+    in_shape = input_signal.shape
+    out_shape = in_shape
     
-    output_signal = zeros(output_shape)
+    # Create output array
+    output = create_array(out_shape)
     
-    # Iterate over every output voxel
-    for z in range(output_shape[0]):
-        for y in range(output_shape[1]):
-            for x in range(output_shape[2]):
+    # Get kernel bounds to define neighborhood
+    # Assuming kernel is centered, calculate half-sizes
+    k_h, k_w, k_d = get_kernel_half_sizes(kernel)
+    
+    for x in range(in_shape[0]):
+        for y in range(in_shape[1]):
+            for z in range(in_shape[2]):
                 accumulator = 0.0
                 
-                # Iterate over the kernel neighborhood
-                for dz in range(-radius[0], radius[0] + 1):
-                    for dy in range(-radius[1], radius[1] + 1):
-                        for dx in range(-radius[2], radius[2] + 1):
+                # Iterate over kernel neighborhood
+                for dx in range(-k_h, k_h + 1):
+                    for dy in range(-k_w, k_w + 1):
+                        for dz in range(-k_d, k_d + 1):
+                            # Calculate neighbor coordinates
+                            nx = x + dx
+                            ny = y + dy
+                            nz = z + dz
                             
-                            # Calculate corresponding input coordinate
-                            src_z = z - dz
-                            src_y = y - dy
-                            src_x = x - dx
+                            # Boundary check
+                            if is_inside(nx, ny, nz, in_shape):
+                                # Get sample value
+                                sample_val = input_signal[nx, ny, nz]
+                                
+                                # Get kernel weight
+                                # Kernel indices are relative to center
+                                kw = get_kernel_value(kernel, dx, dy, dz)
+                                
+                                accumulator += sample_val * kw
                             
-                            # Check boundary conditions
-                            if not (0 <= src_z < input_signal.shape[0] and
-                                    0 <= src_y < input_signal.shape[1] and
-                                    0 <= src_x < input_signal.shape[2]):
-                                continue
-                            
-                            # Get weight from kernel
-                            # Kernel indices are relative to center
-                            k_z = dz + radius[0]
-                            k_y = dy + radius[1]
-                            k_x = dx + radius[2]
-                            
-                            weight = kernel[k_z, k_y, k_x]
-                            
-                            # Accumulate contribution
-                            accumulator += input_signal[src_z, src_y, src_x] * weight
+                output[x, y, z] = accumulator
                 
-                output_signal[z, y, x] = accumulator
-                
-    return output_signal
+    return output
 ```
 
-**Edge Cases and Pitfalls**
-*   **Normalization Error:** Sampling a continuous normalized function (like a Gaussian) at discrete points does not preserve normalization, violating energy conservation [S2, unofficial]. The kernel must be explicitly normalized after sampling [S2, unofficial].
-*   **Boundary Conditions:** The sources do not specify boundary handling (e.g., zero-padding, clamping, reflection). Implementation requires a guard for out-of-bounds access [G].
-*   **Spatially Varying Kernels:** If the kernel varies per pixel, standard convolution algorithms and FFT cannot be used. Alternative algorithms like splatting or gathering are required [S2, unofficial].
+**Edge Cases and Pitfalls:**
+- **Normalization:** Discrete convolution of a normalized continuous function (like a Gaussian) is not normalized because sampling at discrete values breaks normalization, violating energy conservation [S2, unofficial]. To fix this, sum the values of the kernel and multiply the whole kernel by the reciprocal value [S2, unofficial].
+- **Boundary Conditions:** The sum iterates over the neighborhood; handling boundaries (clamping, wrapping, or zero-padding) is required to avoid out-of-bounds access [S2, unofficial].
+
+## Subtopics
+
+### [Separable Convolution](14593-separable-convolution.md)
+Separable convolution is a method to accelerate hologram computation by exploiting the linear separability of the lens phase function $f_z$ into independent horizontal and vertical components. It solves the performance bottleneck of point-wise integration in direct volume ray casting for holographic displays by reducing the computational complexity of the spatial convolution operation. It is distinguished from FFT-based convolution by its reliance on spatial separability rather than frequency-domain transformation, making it faster for smaller sub-hologram sizes but inapplicable when the phase function is not separable.
+
+### Spatially Varying Kernel Filtering
+Filtering where each pixel has a different distribution/kernel, defined by weighting functions $w_{\mathbf{x}'}(\mathbf{x}' - \mathbf{x})$, which is not a standard convolution [S2, unofficial]. The formula is:
+$$\mathbf{L}'(\mathbf{x}) = \sum_{\mathbf{x}'} w_{\mathbf{x}'}(\mathbf{x}' - \mathbf{x})\mathbf{L}(\mathbf{x}')$$
+Unlike standard convolution, spatially varying kernels cannot be solved using convolution algorithms or FFT, requiring alternative algorithms like splatting or gathering [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(n^2 m^2)$ for 2D images with size $n \times n$ and kernel size $m \times m$ [S2, unofficial]. For 3D volume data, it scales with the volume of the data and the volume of the kernel support.
-*   **Memory Complexity:** $O(n^3)$ for 3D data storage plus $O(m^3)$ for the kernel [G].
-*   **Performance:** Preferred over frequency-domain multiplication (FFT) for discrete kernels of limited extent because the overhead of transforming back and forth is more compute-intensive than direct spatial convolution [S1, unofficial].
-*   **Strengths:** Simple to implement; efficient for small kernels; supports spatially varying kernels (with alternative algorithms) [S1, S2, unofficial].
-*   **Limitations:** Computationally expensive for large kernels; FFT acceleration is not applicable for spatially varying kernels [S1, S2, unofficial].
+- **Time Complexity:** For an image size $n \times n$ and kernel size $m \times m$, the time complexity is generally $O(n^2 m^2)$ [S2, unofficial].
+- **Memory Complexity:** Linear in the size of the input and output signals, plus the kernel size.
+- **Performance:** Preferred over frequency domain multiplication for discrete kernels of limited extent because transforming back and forth is more compute-intensive than direct spatial convolution [S1, unofficial]. However, for discrete kernels with a large extent, the convolution will be more compute-intensive [S1, unofficial].
+- **Strengths:** Simple to implement; efficient for small kernels; direct spatial domain operation avoids FFT overhead.
+- **Limitations:** High computational cost for large kernels; normalization issues with sampled continuous functions; not applicable for spatially varying kernels without alternative algorithms.
 
 ## Background
-*   **Origin:** The mathematical foundation of convolution is attributed to standard signal processing literature, specifically cited as [Oppenheim 75] in [S1, unofficial].
-*   **History:** In volume rendering, spatial domain convolution is the standard approach for reconstruction because volume rendering algorithms typically use small kernels [S1, unofficial].
-*   **Usage:** Used in direct volume ray casting for compositing and blending, specifically within feed-backward reconstruction techniques [S1, S2, unofficial].
+Spatial convolution is a fundamental operation in signal processing and image processing. In computer graphics, it is used for image filtering, blurring, and reconstruction. The mathematical foundation is based on the convolution integral and sum [S1, S2, unofficial]. It is widely used in volume rendering algorithms to convolve samples with reconstruction kernels in the spatial domain [S1, unofficial].
 
 ## Sources
 [S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)

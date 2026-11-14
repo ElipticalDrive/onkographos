@@ -2,19 +2,19 @@
 Also called: Arithmetic Coding
 
 ## Overview
-Arithmetic encoding is a lossless entropy coding technique that maps a sequence of input symbols to a single fractional number within the interval $[0, 1)$, achieving a bit rate closer to the Shannon entropy limit than variable-length codes like Huffman [S1, S2]. It sets itself apart from siblings such as [Huffman coding](5360-entropy-encoding.md) by encoding the entire message as a single value rather than concatenating fixed codewords, allowing for more precise probability modeling and better handling of skewed distributions [S2, S3].
+Arithmetic encoding is a lossless entropy coding technique that maps a sequence of input symbols to a single fractional number within the interval $[0, 1)$, achieving a bit rate closer to the Shannon entropy limit than variable-length codes [G]. It encodes the entire message as a single value rather than concatenating fixed codewords, allowing for more precise probability modeling and better handling of skewed distributions [G].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A sequence of symbols $S = s_1, s_2, \dots, s_N$ drawn from an alphabet $\Sigma$, and a probability model $P(s_i | \text{context})$ estimating the likelihood of each symbol given its preceding context.
+*   **Input:** A sequence of symbols $S = s_1, s_2, \dots, s_N$ drawn from an alphabet $\Sigma$, and a probability model $P(s_i | \text{context})$ estimating the likelihood of each symbol given its preceding context [S1, unofficial].
 *   **Output:** A binary bitstream representing the final sub-interval.
 
 **Data Structures:**
-*   **Interval:** A pair of floating-point or fixed-point numbers $[L, H)$ representing the current valid range. Initialized to $[0.0, 1.0)$.
-*   **Probability Model:** A lookup table or neural network outputting cumulative distribution functions (CDF) for the current context.
+*   **Interval:** A pair of floating-point or fixed-point numbers $[L, H)$ representing the current valid range. Initialized to $[0.0, 1.0)$ [G].
+*   **Probability Model:** A lookup table or neural network outputting cumulative distribution functions (CDF) for the current context [S1, unofficial].
 
 **Numbered Steps:**
-1.  **Initialization:** Set $L = 0.0$, $H = 1.0$. Initialize the bitstream buffer.
+1.  **Initialization:** Set $L = 0.0$, $H = 1.0$. Initialize the bitstream buffer and a `pending` bit counter to $0$.
 2.  **Symbol Processing:** For each symbol $s_i$ in the sequence:
     a. Calculate the cumulative probability range $[P_{low}, P_{high})$ for $s_i$ based on the current context model.
     b. Calculate the interval width $W = H - L$.
@@ -22,24 +22,24 @@ Arithmetic encoding is a lossless entropy coding technique that maps a sequence 
        $$L_{new} = L + W \times P_{low}$$
        $$H_{new} = L + W \times P_{high}$$
     d. Set $L = L_{new}$ and $H = H_{new}$.
-    e. **Renormalization:** While the interval $[L, H)$ is entirely within the lower half $[0, 0.5)$ or upper half $[0.5, 1.0)$:
-       i. If $H \le 0.5$, output bit `0` and update $L = 2L, H = 2H$.
-       ii. If $L \ge 0.5$, output bit `1` and update $L = 2(L-0.5), H = 2(H-0.5)$.
-       iii. If the interval straddles $0.5$ (i.e., $L < 0.5 \le H$), set a "pending bit" state (often called E1/E2 handling in rANS variants, but here handled by buffering) and continue narrowing until the interval is fully in one half or the end of the stream is reached. *Note: Standard arithmetic coding requires careful handling of the "pending" bits when the interval crosses the midpoint, often deferring output until the interval is certain [S2].*
-3.  **Finalization:** After processing all symbols, output the shortest binary fraction that lies within the final $[L, H)$ interval. This is typically the binary representation of $L$ (or $H$) truncated to the necessary precision.
+    e. **Renormalization:** While the interval $[L, H)$ is entirely within the lower half $[0, 0.5)$ or upper half $[0.5, 1.0)$, or straddles $0.5$:
+       i. If $H \le 0.5$, output bit `0`, flush all pending bits as `1`, and update $L = 2L, H = 2H$.
+       ii. If $L \ge 0.5$, output bit `1`, flush all pending bits as `0`, and update $L = 2(L-0.5), H = 2(H-0.5)$.
+       iii. If $L < 0.5 \le H$, output bit `1 - pending`, increment `pending`, and scale the interval: if `pending` was $0$ (output `1`), set $L = 2(L-0.5), H = 2(H-0.5)$; if `pending` was $1$ (output `0`), set $L = 2L, H = 2H$. Continue the loop to check for further renormalization [G].
+3.  **Finalization:** After processing all symbols, output the shortest binary fraction that lies within the final $[L, H)$ interval. This is typically the binary representation of $L$ (or $H$) truncated to the necessary precision [G].
 
 **Formulas:**
 *   Interval Update: $I_{new} = [L + (H-L)P_{low}, L + (H-L)P_{high})$
-*   Bit Rate: The length of the output bitstream $B$ approximates $-\log_2(H_{final} - L_{final})$ bits [S2].
+*   Bit Rate: The length of the output bitstream $B$ approximates $-\log_2(H_{final} - L_{final})$ bits [G].
 
 **Parameters:**
-*   **Precision:** The number of bits used to represent $L$ and $H$. Higher precision reduces quantization error but increases computational cost. Typical values range from 32 to 64 bits [S2].
+*   **Precision:** The number of bits used to represent $L$ and $H$. Higher precision reduces quantization error but increases computational cost. Typical values range from 32 to 64 bits [G].
 *   **Context Model:** The method of predicting probabilities. In volume rendering contexts, this often involves spatial neighbors or inter-band dependencies [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision Loss:** If the interval becomes too small relative to the floating-point precision, it may collapse to a single value, causing decoding errors. Renormalization mitigates this but requires careful implementation [S2].
-*   **Probability Zero:** If a symbol has zero probability in the model, the interval width becomes zero, terminating the encoding prematurely. Models must assign non-zero probabilities to all possible symbols [S2].
-*   **Boundary Conditions:** The handling of the interval crossing $0.5$ is critical. Incorrect handling leads to bitstream mismatches between encoder and decoder [S2].
+*   **Precision Loss:** If the interval becomes too small relative to the floating-point precision, it may collapse to a single value, causing decoding errors. Renormalization mitigates this but requires careful implementation [G].
+*   **Probability Zero:** If a symbol has zero probability in the model, the interval width becomes zero, terminating the encoding prematurely. Models must assign non-zero probabilities to all possible symbols [G].
+*   **Boundary Conditions:** The handling of the interval crossing $0.5$ is critical. Incorrect handling leads to bitstream mismatches between encoder and decoder [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -49,65 +49,56 @@ def arithmetic_encode(symbols, context_model):
     L = 0.0
     H = 1.0
     bitstream = []
-    pending_bits = 0
+    pending = 0
     
     for symbol in symbols:
-        # Get probability range for the symbol given context
         p_low, p_high = context_model.get_cumulative_probabilities(symbol)
-        
-        # Update interval
         width = H - L
         H = L + width * p_high
         L = L + width * p_low
         
-        # Renormalization
         while True:
             if H <= 0.5:
-                # Interval is in lower half [0, 0.5)
                 bitstream.append(0)
-                # Flush any pending 1s
-                while pending_bits > 0:
+                while pending > 0:
                     bitstream.append(1)
-                    pending_bits -= 1
-                L = 2 * L
-                H = 2 * H
+                    pending -= 1
+                L *= 2
+                H *= 2
             elif L >= 0.5:
-                # Interval is in upper half [0.5, 1)
                 bitstream.append(1)
-                # Flush any pending 0s
-                while pending_bits > 0:
+                while pending > 0:
                     bitstream.append(0)
-                    pending_bits -= 1
+                    pending -= 1
                 L = 2 * (L - 0.5)
                 H = 2 * (H - 0.5)
-            else:
-                # Interval straddles 0.5: L < 0.5 <= H
-                # This is the critical case. 
-                # We cannot output a bit yet. 
-                # We need to narrow the interval further.
-                # In some implementations, this is handled by 
-                # outputting the opposite of the pending bit 
-                # and resetting pending bit count.
-                # However, standard arithmetic coding defers output 
-                # until the interval is fully in one half.
-                # If the interval is too small to distinguish, 
-                # precision error occurs.
-                break
-        
-        # Handle pending bits for straddling case if necessary
-        # (Simplified logic: if we were in a straddling state, 
-        # we might need to output a bit and reset pending count)
-        # For this basic implementation, we assume the loop 
-        # above handles the main cases. 
-        # A robust implementation tracks a 'state' variable.
-        
-    # Finalization
-    # Output the shortest binary fraction in [L, H)
-    # This is typically L rounded up or H rounded down
-    # to the required precision.
-    final_bits = get_shortest_binary_fraction(L, H)
-    bitstream.extend(final_bits)
-    
+            else: # L < 0.5 <= H
+                bitstream.append(1 - pending)
+                pending += 1
+                if pending == 1:
+                    L = 2 * L
+                    H = 2 * H
+                else:
+                    L = 2 * (L - 0.5)
+                    H = 2 * (H - 0.5)
+            # Loop continues to check if the scaled interval requires further renormalization
+            
+    # Finalization: output the shortest binary fraction in [L, H)
+    while True:
+        L *= 2
+        H *= 2
+        if H <= 1.0:
+            bitstream.append(0)
+            L -= int(L)
+            H -= int(H)
+        elif L >= 1.0:
+            bitstream.append(1)
+            L -= 1.0
+            H -= 1.0
+        else:
+            bitstream.append(1)
+            break
+            
     return bitstream
 ```
 
@@ -123,24 +114,22 @@ rANS is a fast, lossless entropy coding scheme used to compress sequences of 4-b
 Bitstream Overloading is a technique to partition a single arithmetic-coded bitstream into semantically disjoint, independently accessible segments. It solves the problem that standard arithmetic coders buffer bits into byte-sized units, making individual symbols or small groups of symbols inaccessible without decoding the entire preceding stream. It differs from sibling methods by operating at the entropy coding layer rather than the transform or quantization layer.
 
 ### [Entropy Encoding](5360-entropy-encoding.md)
-Entropy encoding is a lossless compression method that minimizes storage or transmission costs for a discrete dataset by mapping each data point to a variable-length bit string, allowing a receiver to invert the mapping and recover the exact original data. It solves the problem of inefficient fixed-width storage by assigning shorter codewords to frequent voxel values and longer codewords to infrequent ones, thereby reducing the average bits per element. Unlike its parent [Arithmetic Encoding](2127-arithmetic-encoding.md), which uses a context model to estimate probabilities for a single stream, entropy encoding generally refers to the broader class of techniques (including Huffman and Golomb-Rice) that map symbols to bit lengths based on frequency or numerical range. It sets itself apart from siblings like [MLZC 3-D Encoding/2-D Decoding](2501-mlzc-3-d-encoding-2-d-decoding.md) and [3-D ESCOT](8257-3-d-escot.md) by focusing on the statistical distribution of values rather than spatial prediction or transform coding, and from [rANS](5011-rans-asymmetric-numeral-systems.md) by often implying variable-length codewords that hinder random access.
+Entropy encoding is a lossless compression method that minimizes storage or transmission costs for a discrete dataset by mapping each data point to a variable-length bit string, allowing a receiver to invert the mapping and recover the exact original data. It solves the problem of inefficient fixed-width storage by assigning shorter codewords to frequent voxel values and longer codewords to infrequent ones, thereby reducing the average bits per element. Unlike its parent [Arithmetic Encoding](2127-arithmetic-encoding.md), which uses a context model to estimate probabilities for a single stream, entropy encoding generally refers to the broader class of techniques that map symbols to bit lengths based on frequency or numerical range.
 
 ### [3-D ESCOT](8257-3-d-escot.md)
 3-D ESCOT is an entropy coding method for volumetric wavelet data that achieves scalable lossy-to-lossless compression by abandoning the zerotree structure in favor of 3-D context modeling for arithmetic coding. It differs from its sibling [3-D SPIHT](2501-mlzc-3-d-encoding-2-d-decoding.md) by applying high-order conditional arithmetic coding to sign and refinement bits, not just significance bits, and by partitioning bit planes into fractional passes ordered by rate-distortion significance.
 
 ## Operating characteristics
-*   **Time Complexity:** Encoding and decoding are linear in the number of symbols $O(N)$, but each step involves floating-point multiplication and division, which are more expensive than the integer operations in Huffman or rANS [S2].
-*   **Memory Complexity:** Requires storing the current interval $[L, H)$ and the probability model. The bitstream buffer size is proportional to the entropy of the source [S2].
+*   **Time Complexity:** Encoding and decoding are linear in the number of symbols $O(N)$, but each step involves floating-point multiplication and division, which are more expensive than the integer operations in Huffman or rANS [G].
+*   **Memory Complexity:** Requires storing the current interval $[L, H)$ and the probability model. The bitstream buffer size is proportional to the entropy of the source [G].
 *   **Measured Performance:** In the context of neural Gaussian splats for volume visualization, arithmetic encoding is used to compress anchor attributes, achieving compression ratios of 2.6/2.1 (ACC, DIV) compared to baselines like VLM, VTM [S1, unofficial].
-*   **Strengths:** Optimal compression for known probability distributions; handles skewed distributions better than Huffman; allows for context-adaptive modeling [S2, S3].
-*   **Limitations:** Computationally intensive due to floating-point operations; sequential nature hinders parallelization compared to rANS [S2, unofficial].
-*   **When to Use:** When optimal compression is critical and computational resources allow for floating-point arithmetic; when probability distributions are highly skewed or context-dependent [S2].
-*   **When Not to Use:** When hardware constraints limit floating-point precision or speed; when parallel decompression is required (prefer rANS) [S2, unofficial].
+*   **Strengths:** Optimal compression for known probability distributions; handles skewed distributions better than Huffman; allows for context-adaptive modeling [G].
+*   **Limitations:** Computationally intensive due to floating-point operations; sequential nature hinders parallelization compared to rANS [G].
+*   **When to Use:** When optimal compression is critical and computational resources allow for floating-point arithmetic; when probability distributions are highly skewed or context-dependent [G].
+*   **When Not to Use:** When hardware constraints limit floating-point precision or speed; when parallel decompression is required (prefer rANS) [G].
 
 ## Background
-Arithmetic coding was developed by J. R. Pierce and later refined by G. N. N. Graham and others in the 1970s and 1980s. It has become a standard entropy coding technique in many compression standards, including JPEG 2000, H.264/AVC, and HEVC [S2, S3]. In volume rendering, it is increasingly used in conjunction with neural representations, such as in ECoNGS, to compress the attributes of Gaussian splats for efficient storage and transmission [S1, unofficial].
+Arithmetic coding was developed by J. R. Pierce and later refined by G. N. N. Graham and others in the 1970s and 1980s. In volume rendering, it is increasingly used in conjunction with neural representations, such as in ECoNGS, to compress the attributes of Gaussian splats for efficient storage and transmission [S1, unofficial].
 
 ## Sources
 [S1] ECoNGS: Efficient Compressive Neural Gaussian Splats for Volume Visualization, https://doi.org/10.48550/arxiv.2607.18466, fetched 2026-10-26 (unofficial)
-[S2] Arithmetic Coding, https://en.wikipedia.org/wiki/Arithmetic_coding, fetched 2024-05-20
-[S3] Entropy Encoding, https://en.wikipedia.org/wiki/Entropy_encoding, fetched 2024-05-20

@@ -1,0 +1,1988 @@
+Fully Explicit Dynamic Gaussian Splatting
+arXiv:2410.15629v2 [cs.CV] 22 Oct 2024
+Junoh Lee1 , Changyeon Won2 , Hyunjun Jung2 , Inhwan Bae2 , Hae-Gon Jeon1,2
+1
+School of Electrical Engineering and Computer Science 2 AI Graduate School
+Gwangju Institute of Science and Technology
+{juno,cywon1997,hyunjun.jung,inhwanbae}@gm.gist.ac.kr, haegonj@gist.ac.kr
+Abstract
+3D Gaussian Splatting has shown fast and high-quality rendering results in static
+scenes by leveraging dense 3D prior and explicit representations. Unfortunately,
+the benefits of the prior and representation do not involve novel view synthesis for
+dynamic motions. Ironically, this is because the main barrier is the reliance on them,
+which requires increasing training and rendering times to account for dynamic
+motions. In this paper, we design a Explicit 4D Gaussian Splatting(Ex4DGS). Our
+key idea is to firstly separate static and dynamic Gaussians during training, and
+to explicitly sample positions and rotations of the dynamic Gaussians at sparse
+timestamps. The sampled positions and rotations are then interpolated to represent
+both spatially and temporally continuous motions of objects in dynamic scenes
+as well as reducing computational cost. Additionally, we introduce a progressive
+training scheme and a point-backtracking technique that improves Ex4DGS’s
+convergence. We initially train Ex4DGS using short timestamps and progressively
+extend timestamps, which makes it work well with a few point clouds. The pointbacktracking is used to quantify the cumulative error of each Gaussian over time,
+enabling the detection and removal of erroneous Gaussians in dynamic scenes.
+Comprehensive experiments on various scenes demonstrate the state-of-the-art
+rendering quality from our method, achieving fast rendering of 62 fps on a single
+2080Ti GPU.
+1
+Introduction
+The recent flood of video content has encouraged view synthesis techniques for highly engaging,
+visually rich content creation to maintain viewer interest. However, even short form videos require a
+huge time for both data pre-processing, computing frame-wise 3D point clouds, and training time in
+novel view synthesis for dynamic motions. Furthermore, these techniques must be considered for
+running on mobile devices which have a limited computing power and storage space. In this aspect, it
+is crucial to not only achieve photorealistic rendering results, but also reduce the computational cost
+related to storage, memory and rendering pipeline. To achieve this, the spatio-temporal representation
+should be explicit and efficient to handle the complexity of dynamic motions in videos.
+Recent methods for dynamic view synthesis are typically based on Neural Radiance Fields (NeRF) [1],
+which uses implicit multi-layer perceptron (MLP) with a combination of 5-DoF spatial coordinates
+and the additional time axis [2–8]. The MLP-based methods have shown high-fidelity rendering
+quality. However, the inevitable cost of decoding the implicit representation makes rendering critically
+slow. Various methods try to reduce the cost by adapting explicit representation, such as voxel [9, 10]
+and matrix decomposition [11, 12]. Nevertheless, since NeRF-based approaches require per-pixel
+ray sampling and dense sampling for each ray, it is hard to achieve real-time and high-resolution
+renderings.
+Meanwhile, a promising alternative, 3D Gaussian Splatting (3DGS) [13], has emerged, which
+achieves photo-realistic rendering results with significantly faster training and rendering speeds.
+38th Conference on Neural Information Processing Systems (NeurIPS 2024).
+Unlike NeRF-based approaches, 3DGS exploits fully explicit point-based primitives of 3D and
+employs a rasterization-based rendering pipeline. Recent advances [14, 15] attempt to extend 3DGS
+to 4D domain, handling the motion over time by storing the additional transformation information
+of 3D coordinates or 4D bases. However, these methods can only be trained under a restricted
+condition with dense point clouds. Moreover, these approaches borrow implicit representations for
+implementation, which lose the inherent advantage of 3DGS and make real-world applications more
+difficult. To become a more scalable model for real-world situations, it is important to be trained
+under more in-the-wild conditions (i.e., sparse point cloud) with more concise representation.
+In this paper, we present Explicit 4D Gaussian Splatting(Ex4DGS), a keyframe interpolation-based
+4D Gaussian splatting method that works well in a fully explicit on-time domain. Our key idea is to
+apply interpolation techniques under temporal explicit representation to realize the scalable 3DGS
+model. Temporal interpolation is a widely used technique in computer graphics [16] that only stores
+keyframe information in video and determines smooth transitions for the rest of the frames. We select
+keyframes with sparse time intervals and save the additional temporal information at each keyframe
+which includes each Gaussian’s position, rotation and opacity. This information is fully explicit; it is
+stored without any encoding process, and continuous motion is calculated to have smooth temporal
+transitions between adjacent keyframes. Here, we use a polynomial basis interpolator for position, a
+spherical interpolator for rotation, and a simplified Gaussian mixture model for opacity. Specifically,
+the polynomial basis of cubic Hermite spline (CHip) [17] is used to effectively avoid overfitting or
+over-smoothing problems by spanning low-degree polynomials. For rotation, we introduce Spherical
+Linear Interpolation (Slerp) [18] to do a linear transition over angles. Lastly, we introduce a simplified
+Gaussian mixture model, which allows temporal opacity to handle the appearance and disappearance
+of objects.
+For further optimization, we reduce the computational cost by isolating dynamic points from static
+points, and only storing additional temporal information of dynamic points. Here, we aim for this
+separation to be possible without any additional inputs such as object masks [19]. To tackle this,
+we introduce motion-based triggers to distinguish static and dynamic points in a scene. We first
+initialize all Gaussian points in a scene to be static which are assumed to move linearly. During
+training, static points with large movements are automatically classified as dynamic points. Next,
+we adopt a progressive training scheme to train our model even under sparse point cloud conditions.
+The progressive training, starting with a short duration and scaling up, can prevent falling into local
+minima by reducing the sudden appearance of objects. Lastly, an additional point backtracking
+technique is introduced to enhance rendering quality. Detecting redundant points in a dynamic scene
+is challenging because we need to consider all visible timestamps. To measure accumulated errors
+over time, we apply the point-backtracking technique that can track and prune high-error Gaussians
+in dynamic scenes.
+The effectiveness of our method is validated through experiments on two major real-world video
+datasets: Neural 3D Video dataset [7] and Technicolor dataset [20]. Experimental results demonstrate
+that our approach significantly improves rendering results even with sparse 3D point clouds. Furthermore, benefiting from the proposed optimization scheme, our model only requires low storage
+and memory size without any auxiliary modules or tricks to encode lengthy temporal information.
+Finally, our model achieves 62 fps on a single 2080Ti GPU on 300-frame scenes with a 1352×1014
+resolution.
+2
+Related Works
+2.1
+Novel View Synthesis
+Photorealistic novel view synthesis can be achieved using a set of densely sampled images through
+image-based rendering [21, 22]. While the dense sampling of views is limited by memory constraints
+and results in aliased rendering, novel view synthesis has advanced with the development of neural
+networks. The ability of neural networks to process implicit information in images enables novel
+view synthesis with a sparse set of observations. Prior works on constructing multi-plane images
+(MPI)[23–25] use aggregated pixel information from correspondences in sparsely sampled views.
+MPI representation may fail with wide angles between the camera and depth planes. This can be
+mitigated using geometric proxies like depth information [26, 27], plane-sweep volumes [28, 29],
+and meshes [30, 31]. These methods risk unrealistic view synthesis with inaccurate proxy geometry.
+2
+Joint optimization of proxy geometry [32–35] can help, but direct mesh optimization often gets stuck
+in local minima due to poor loss landscape conditioning.
+In recent years, continuous 3D representation through neural networks has received widespread
+attention. NeRF [1] is the foundational work that started this trend. It implicitly learns the shape
+of an object as a density field, which makes optimization via gradient descent more tractable. The
+robustness of such geometric neural representations enables to reconstruct accurate geometry from
+a few given images [36–39], large-scale geometry [40–45], disentangled textures [46–48], and
+material properties [49–53]. However, one major issue on these neural representations is also slow
+rendering speeds coming from volume renderers. To resolve this issue, works in [54, 55] develop
+light field-inspired representations for single-pass pixel rendering. Both [56] and [57] introduce
+efficient voxel-based scene representations to improve the rendering speed. However, continuous
+representation inevitably combines with neural networks to implement its complex nature, and this
+limits rendering speed. As an alternative, 3DGS [13] is designed to construct an explicit radiance
+field through rasterization, not requiring MLP-based inference. This method leverages anisotropic
+3D Gaussians as the scene representation and proposes a differentiable rasterizer to render them by
+splatting onto the image plane for static scenes.
+2.2
+Dynamic Novel View Synthesis
+The time domain in dynamic scenes is typically parameterized with Plenoptic function [58]. Classical
+image-based rendering [21, 22] and novel view synthesis methods using explicit geometry [30, 31]
+are restricted to a limited memory space [21] when they extend to the time dimension. This is because
+they require additional optimization procedures for frame-by-frame dynamic view synthesis and
+storage for the parameterized space. Fueled by implicit representations, works in [2, 3, 8, 59, 4, 7, 5]
+handle challenging tasks using neural volume rendering. They learn dynamic scenes by optimizing
+deformation and canonical fields for object motions [2, 3, 6], using human body priors [60, 59, 61–66],
+and decoupling dynamic parts [4, 5, 67–71, 8, 72]. These methods introduce additional neural fields
+or learnable variables to represent the time domain, taking more memory usage and rendering time as
+well.
+Temporally extended 3DGS has been considered as a feasible solution to dynamic novel view
+synthesis. A work in [73] assigns parameters to 3DGS at each timestamp and imposes rigidity
+through a regularization. Another work in [74] leverages Gaussian probability to model density
+changes over time to explicitly represent dynamic scenes. However, they require many primitives to
+capture complex temporal changes. Concurrently, works in [14, 75–79] utilize MLPs to represent the
+temporal changes. These methods inherit the drawbacks of dynamic neural representations, resulting
+in slower rendering speeds. The others in [15, 80] explicitly parameterize the motion of dynamic 3D
+Gaussians to preserve the rendering speed of 3DGS by predicting their trajectory function. However,
+they only handle the motion as a continuous trajectory, and require multiple Gaussians for motions
+that disappear and reappear due to self-occlusion, increasing memory burden.
+In contrast, our key idea for dynamic 3D Gaussian uses keyframes to minimize primitives and to
+devise a progressive optimization to cope with scenarios where face disappearing/reappearing objects.
+Thanks to our schemes, we can improve rendering speed, memory efficiency, and achieve impressive
+performance for dynamic novel view synthesis.
+3
+Preliminary: 3D Gaussian Splatting
+Our model starts from the point-based differentiable rasterization of 3DGS [13]. 3DGS uses threedimensional Gaussian as geometry primitive, which is composed of position (mean) µ, covariation
+Σ, density σ and color c. The 3D Gaussian is referred to as follows:
+⊤
+1
+G(x) = e− 2 (x−µ) Σ
+−1
+(x−µ)
+.
+(1)
+We need to project the 3D Gaussian onto a 2D plane to render an image. In this process, the
+approximated graphics pipeline is used to render 2D Gaussians. The covariance matrix Σ′ in camera
+coordinate is given as follows:
+Σ′ = J W Σ W⊤J⊤ ,
+(2)
+where J is the Jacobian of the affine approximation of the perspective projection and W is a viewing
+transformation. By skipping the third row and column of Σ′ , it is approximated to two-dimensional
+anisotropic Gaussian on the image plane.
+3
+𝐝
+Interpolated frames
+Dynamic Static
+SfM points
+Set Static
+Dynamic
+[Sec. 4.2]
+3D Gaussian keyframe
+interpolation [Sec. 4.2]
+Separation
+Rendering
+Prune
+Progressive learning [Sec. 4.3]
+Updated motion
+Initialization [Sec. 4.3]
+Point
+backtracking
+Retain
+Static [Sec. 4.1]
+Back prop.
+Optimization [Sec. 4.4]
+Figure 1: Overview of our method. We first initialize 3D Gaussians as static, modeling their motion
+linearly. During optimization, dynamic and static objects are separated based on the amount of
+predicted motion, and the 3D Gaussians between the selected keyframes are interpolated and rendered.
+The covariance is a positive semi-definite which can be decomposed into a scale S and a rotation R
+as:
+Σ = RS S ⊤R⊤ .
+(3)
+Spherical harmonics coefficients are used to represent view-dependent color changes as proposed
+in [81]. A rendered color from the Gaussian uses point-based α blending similar to NeRF’s volume
+rendering. For the interval between points along ray δ which can be obtained from G(x), the color of
+ray is
+N
+Pi−1
+X
+C=
+Ti (1 − e−σi δi )ci , Ti = e− j=1 σj δj ,
+(4)
+i=1
+where N is the number of visible Gaussians along the ray, i and j denote the order of Gaussians by
+depth.
+4
+Methodology
+To achieve both memory efficiency and rendering capacity, our scheme is two-fold: (1) Keyframebased interpolation to span position and rotation of Gaussians over time; (2) Classification of static
+and dynamic Gaussian. These are described in Sections 4.1 and 4.2. After that, we introduce our
+progressive training scheme to handle a variety of running times in Section 4.3, and deal with details
+of the optimization process of our method in Section 4.4. The overview of our method is depicted in
+Figure 1.
+4.1
+Static Gaussians
+Static Gaussian Gs is modeled as the same as the 3DGS model except for its position. Gs changes the
+position linearly over time, which can be formulated with the position µ at time t as below:
+t
+(5)
+µ(t) = x + t′ d, t′ = ∈ [0, 1]
+l
+where x is a pivot position of Gs and d is a vector representing the translation, and l is the duration of
+a scene. We normalize t with l to prevent d from becoming too large.
+4.2
+Dynamic Gaussians
+The dynamic Gaussian model is based on interpolations of keyframes, as visualized in Figure 2.
+Specifically, the state of the dynamic Gaussian Gd at an intermediate timestamp is synthesized from
+adjacent keyframes. In this work, we assume that the keyframe interval is uniform for simplicity.
+The keyframe is defined as K = {t | t = nI, n ∈ Z, t ∈ T } where I is its interval and T is a set
+of timestamps. Gd acquires position µ and rotation in quaternion r from keyframe information. We
+use different interpolators with different properties for smooth and continuous motion: CHip using
+polynomial bases is applied for positions, and a Slerp is used for rotations. We further adapt the
+Gaussian mixture model for temporal opacity to handle changes in the visibility of objects over time.
+4.2.1
+Cubic Hermite Interpolator for Temporal Position
+CHip uses a third-degree polynomial. It is commonly used to model dynamic motions or shapes [17].
+The interpolator function can be defined with third-degree polynomials and four variables: position
+and tangent vector of the start and end points. On the unit interval [0, 1], given a start point p0 at
+t = 0 and an end point p1 at t = 1 with start tangent m0 at t = 0 and an end tangent m1 at t = 1,
+CHip can be defined as:
+4
+Translation
+& Rotation
+Translation
+& Rotation
+Translation
+Keyframe 𝑡𝑡
+Interpolated frames
+Keyframe 𝑡𝑡+𝐼𝐼 Keyframe 𝑡𝑡
+Interpolated frames
+Keyframe 𝑡𝑡+𝐼𝐼
+Translation
+(a) Rendered image at 𝑡𝑡
+(b) Interpolated dynamic points
+Figure 2: Effectiveness of our keyframe interpolation.
+(c) Rendered image at 𝑡𝑡 + 𝐼𝐼
+CHip(p0 , m0 , p1 , m1 ; t) = (2t3 − 3t2 + 1)p0 + (t3 − 2t2 + t)m0
++ (−2t3 + 3t2 )p1 + (t3 − t2 )m1 ,
+where t ∈ [0, 1].
+(6)
+Based on CHip, we compute the position µ of Gd at time t as follows:
+µ(t) = CHip(pn , mn , pn+1 , mn+1 ; t′ ),
+ 
+t
+t − nI
+pn+1 − pn−1
+pn+2 − pn
+where n =
+, t′ =
+, mn =
+, mn+1 =
+,
+I
+I
+2I
+2I
+(7)
+where pn is a position of Gaussian at n−th keyframe. We use tangent values that is calculated using
+the position of two neighbor keyframes. This design can reduce additional requirements for storing
+tangent values at each keyframe, while still keeping the representational power for complex motion.
+Other interpolators such as linear interpolation or piecewise cubic Hermite interpolating polynomial
+can be alternative choices. In this work, the cubic Hermit interpolator is selected because we can
+approximate the complex movements of points without any additional computational cost or storage.
+4.2.2
+Spherical Linear Interpolation for Temporal Rotation
+Slerp is typically used for interpolating rotations [18] because linear interpolation causes a bias
+problem when it interpolates angular value. On the unit interval [0, 1], given the unit vector x0 and
+x1 which represent rotations at t = 0 and t = 1 each, Slerp is defined as follows:
+sin[(t)Ω]
+sin[(1 − t)Ω]
+x0 +
+x1 , where t ∈ [0, 1] and cos Ω = x0 · x1 . (8)
+sin Ω
+sin Ω
+Slerp can be directly applied to quaternion rotations since it is independent of quaternions and
+dimensions. We thus have a rotation of intermediate frames in the quaternion of Gd at time t without
+any modification as follows:
+ 
+t
+t − nI
+′
+,
+(9)
+, t′ =
+q(t) = Slerp(rn , rn+1 ; t ) where n =
+I
+I
+where rn is the rotation of Gaussian at n−th keyframe.
+Slerp(x0 , x1 ; t) =
+4.2.3
+Temporal Opacities
+𝜎𝑡
+𝜎𝑡
+Real
+Modeling the temporal opacity is im- 𝜎𝑡
+Estimated
+1
+1
+portant because it is directly related 1
+to appearing/disappearing objects. A
+straightforward model for temporal
+opacity is to directly use a single Gaus- 0 𝑎𝑠𝑜
+𝑎𝑓𝑜
+𝑎𝑓𝑜
+𝑎𝑓𝑜
+𝑎𝑠𝑜
+𝑎𝑠𝑜
+𝑡 0
+𝑡 0
+𝑡
+sian. However, there is a limitation to (a) Single Gaussian (b) Gaussian mixtures
+(c) Ours
+model diverse cases only using the sin- Figure 3: Comparison between the single Gaussian, Gaussian
+gle Gaussian, such as sudden emerg- mixture, and our model for temporal opacity modeling.
+ing/slowly vanishing objects and objects disappearing in videos, as illustrated in Figure 3. We introduce the Gaussian mixture model to
+handle these situations. Since using too many Gaussians is impractical, we approximate the model
+with two Gaussians. We divide the temporal opacity into three cases: when an object appears, the
+object remains and the object disappears. One Gaussian handles the appearance of the object and
+the other manages disappearance. The interval between two Gaussians indicates the duration of the
+object when it is fully visible.
+Let a Gaussian with a smaller mean value be gso and the other is gfo where aos < aof . And, aos , bos , aof
+and bof are the mean and variance of gso and the mean and variance of gfo each. The temporal opacity
+5
+σt at time t is defined as follows:
+ − t−ao os 2
+bs
+,
+e
+σt (t) = 1, t−ao 2
+ − of
+b
+e
+,
+f
+for t < aos
+for aos ≤ t ≤ aof
+for t > aof .
+(10)
+Using a single Gaussian may require multiple points to represent an object over a long duration.
+In contrast, our model can handle both the short and long temporal opacity of an object using two
+Gaussians.
+4.3 Training Scheme
+Progressive training scheme
+Our goal is to minimize both
+memory and computational costs of the entire pipeline, including
+preprocessing, not just reducing the representation of 3DGS model in
+a dynamic scene. To this end, we adopt a progressive training scheme
+that allows to learn over a long duration using only a small amount
+of point clouds obtained from the first frame, which is illustrated
+in Figure 4. To effectively handle objects moving or disappearing
+quickly, our model starts to learn a small part of an input video and
+gradually increases the video duration. The duration is incremented
+every specific step and made longer by the interval size.
+Interpolation
+Progressive
+learning
+Motion
+Rotation
+Expand
+Opacity
+Keyframe
+𝑡
+𝑡+𝐼
+𝑡 + 2𝐼
+Expanding time duration As the time duration increases, the Figure 4: Progressive learning
+number of keyframes in the dynamic Gaussian obviously increases. of dynamic Gaussians.
+We estimate the position and rotation of the Gaussian by linear
+regression using the last ρ frames when the number of keyframes increases so that the motion
+information of the previous frame can be shared with the next keyframe.
+Extracting dynamic points from static points We want to separate dynamic points from static
+points without auxiliary information or supervision, such as masks or scribbles [70]. The separation
+is done based on the motion of the static points which is modeled to be movable, so we select the
+dynamic points based on the distance they moved. In particular, to avoid biased selection of distant
+points, we measure the motion in image space, normalizing the translation by the distance between
+points and the camera at the last timestamp. Therefore, if the distance to a point from the camera at
+∥d∥
+the last timestamp is λ, then the expression is ∥λ∥
+2 . We sort points by the measured movement and
+convert the top-η percent of points (in this work, η = 2 is empirically set) into dynamic points. The
+position of the converted dynamic points is estimated at each keyframe using x and d. The rotation
+is made to have the same value in all keyframes, and the opacity is initialized to be visible in all
+keyframes. We perform the extraction when we increase the duration or at specific iterations.
+4.4
+Optimization
+Point backtracking for pruning Since it is difficult to filter out unnecessary dynamic points in a
+temporal context, we introduce a way to track errors in the image as points. Unlike contemporary
+works [82] that track points, we let our model track the value on a single backward pass. We use two
+measures, L1 distance and SSIM, whose formula is as follows:
+
+P
+Qi−1
+k σi ×
+j=1 (1 − σj ) × qk
+E= P
+(11)
+ ,
+Qi−1
+k σi ×
+j=1 (1 − σj )
+where qk is the measured error in image space, k is a pixel index, and i and j are the order of Gaussian
+by depth which is visible at k−th pixel. The accumulated error Etotal is as follows:
+P
+Ev
+Etotal = Pv∈D ,
+(12)
+v∈D 1
+where D is a set of training views. We prune the points over Etotal at every pre-defined step.
+Regularizations and losses We use regularization for large motions on both static and dynamic
+points. The regularization minimizes ∥d∥ for static points and ∥pn+1 − pn ∥ for dynamic points.
+The optimization process follows 3DGS, which uses differentiable rasterization based on gradient
+backpropagation. Both L1 loss and SSIM loss, which measure the error between a rendered image
+and its ground truth, are used.
+6
+Table 1: Comparison of ours with the comparison methods on N3V dataset [7]. Training time: Both
+preprocessing and the accumulated time of all subsequent training phases. Both the training time and
+FPS are measured under the same machine with an NVIDIA 4090 GPU for strictly fair comparisons.
+†: STG is done with an H100 GPU machine due to the memory issue. ‡: Trained using a dataset split
+into 150 frames.
+PSNR (dB)
+MB
+Model
+Coffee
+Martini
+Cook Cut Roasted Flame
+Spinach
+Beef
+Salmon
+Flame
+Steak
+Sear
+Steak
+Average
+NeRFPlayer [72]
+HyperReel [86]
+Neural Volumes [87]
+LLFF [88]
+DyNeRF [7]
+HexPlane [11]
+K-Planes [12]
+MixVoxels-L [89]
+MixVoxels-X [89]
+Im4D [90]
+4K4D [19]
+31.53
+28.37
+30.56
+32.30
+29.35
+32.92
+31.93
+32.20
+29.13
+32.57
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+29.99
+29.63
+30.39
+32.04
+32.60
+32.25
+32.31
+N/A
+N/A
+N/A
+N/A
+32.55
+31.82
+32.40
+32.63
+32.58
+32.86
+Hours
+Size
+FPS
+Training
+time
+5130
+360
+0.05
+2
+6
+9
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+28
+200
+311
+500
+500
+0.015
+1344
+12
+1.8
+1.3
+N/A
+N/A
+N/A
+110
+N/A
+N/A
+N/A
+31.65
+28.26
+22.80
+23.24
+29.58
+29.47
+30.44
+29.81
+30.60
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+32.08
+32.38
+31.83
+32.10
+32.39
+32.52
+32.10
+32.33
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+30.69
+31.10
+22.80
+23.24
+29.58
+31.71
+31.63
+31.34
+31.73
+32.58
+32.86
+31.48
+32.01
+31.15
+107
+6270
+34
+88.5
+71.4
+136.9
+5.2†
+5.5
+1.7
+30.64
+30.19
+28.63
+31.67
+32.11
+109
+6057
+34
+1200
+115
+101.0
+72.0
+146.6
+120.6
+1.3†
+4.2
+1.5
+0.6
+STG‡ [15]
+4DGS [74]
+4DGaussians [14]
+28.41
+28.33
+27.34
+32.62
+32.93
+32.46
+Dense COLMAP point cloud input
+32.53
+28.61
+33.30 33.40
+33.85
+29.38
+34.03 33.51
+32.90
+29.20
+32.51 32.49
+STG‡ [15]
+4DGS [74]
+4DGaussians [14]
+3DGStream [91]
+Ours
+27.71
+26.51
+26.69
+27.75
+28.79
+31.83
+32.11
+31.89
+33.31
+33.23
+Sparse COLMAP point cloud input
+31.43
+28.06
+32.17 32.67
+31.74
+26.93
+31.44 32.42
+25.88
+27.54
+28.07 31.73
+33.21
+28.42
+34.30 33.01
+33.73
+29.29
+33.91 33.69
+4.5
+Frame/s
+N/A
+0.3
+37.7
+4.6
+Implementation Details
+Our codebase is built upon 3DGS [13] and Mip-Splatting [83] and uses almost its hyperparameters.
+For initialization, our experiments use only COLMAP [84] point clouds from the first frame. The
+time interval and initial duration are both set to 10. We increment the duration by its interval every
+400 iterations. Both static and dynamic regularization parameters are set to 0.0001. We employ the
+RAdam optimizer [85] for training.
+5
+Experiments
+In this section, we conduct comprehensive experiments on two real-world datasets, Neural 3D
+Video [7] and Technicolor dataset [20] in Sections 5.1 and 5.2 each. We follow a conventional
+evaluation protocol in [86, 15], which uses subsequences divided from whole videos. We report
+PSNR, SSIM and LPIPS values. To measure SSIM, we use scikit_image library. Here, SSIM1 and
+SSIM2 are computed using data_range value of 1 and 2, respectively. We also measure frame-persecond (FPS) for rendering speed, and training time including preprocessing time. To compare the
+robustness of our method according to initial point clouds, we additionally test contemporary works
+on sparse point cloud initialization, which uses only the point cloud of the first frame in Sections 5.1
+and 5.2. We also visualize the separation of static and dynamic points to show that our model can
+successfully distinguish them in Section 5.3. The ablation study shows the effectiveness of each
+component in our model in Section 5.4.
+5.1
+Neural 3D Video Dataset
+Neural 3D Video dataset [7] provides six sets of multi-view indoor videos, captured with a range of
+18 to 21 cameras with a 2704×2028 resolution and 300 frames. Following the conventional evaluation
+protocol, both training and evaluation procedures are performed at half the original resolution, and
+the center camera is held out as a novel view for evaluation. For a fair comparison, we train all
+models for all 300 frames including concurrent works, except for STG [15], NeRFPlayer [72] and
+HyperReel [86]. For NeRFPlayer and HyperReel, we directly borrow the results from [72, 86]. For
+STG, it is not possible to train for all 300 frames due to a GPU memory issue, so we report the results
+for only 150 frames, which is the maximum duration running on a single NVIDIA H100 80GB GPU.
+7
+(a) Ground Truth
+(b) 4DGS
+(c) STG†
+(d) 4DGaussians
+(e) Ours
+Fabien
+Flame Steak
+Coffee Martini
+Figure 5: Comparison of our Ex4DGS with other the state-of-the-art dynamic Gaussian splatting
+methods on Neural 3D Video [7] dataset.
+(a) Ground Truth
+(b) Rendered static points
+(c) Rendered dynamic points
+(d) Rendered static&dynamic points
+Figure 6: Visualization of our static and dynamic point separation on Coffee Martini, Flame Steak
+and Fabien scene in Neural 3D Video [7] and Technicolor [20] datasets.
+As shown in Table 1, our model outperforms most of the contemporary models while maintaining the
+low computational cost. The example is displayed in Figure 5, which shows that our model produces
+high-quality rendering results over the comparison methods.
+Comparison on sparse conditions We also carry out an experiment to check if concurrent methods
+work well with sparse point cloud initialization, which uses only it for the first frame. We report the
+result in Table 1. Interestingly, all the concurrent methods yield unsatisfactory results because motions
+in videos are learned by relying on the point clouds, not temporal changes of objects in the training
+phase. This implies that they require well-reconstructed 3D point clouds for proper initialization,
+while our method is free from the initial condition.
+5.2
+Technicolor Dataset
+Technicolor light field dataset encompasses Table 2: Comparison results on the Technicolor dataset
+video recordings captured using a 4×4 cam- [20]. †: Trained with sparse point cloud input.
+era array, wherein each camera is synchroModel
+PSNR
+SSIM1
+SSIM2
+LPIPS
+nized temporally, and the spatial resolution
+DyNeRF [7]
+31.80
+N/A
+0.958
+0.142
+is 2048×1088. Adhering to the methodology
+HyperReel [86]
+32.73
+0.906
+N/A
+0.109
+introduced in HyperReel [86], we reserve the
+4DGS [74]
+29.54
+0.873
+0.937
+0.149
+camera positioned at the intersection of the 4DGaussians [14] 30.79
+0.843
+0.921
+0.178
+second row and second column for evaluaSTG† [15]
+33.23
+0.912
+0.960
+0.085
+Ours
+33.62
+0.916
+0.962
+0.088
+tion purposes. Evaluation is conducted on
+five distinct scenes (Birthday, Fabien, Painter,
+Theater, Trains) using their original full resolution. We retrain STG [15] using the COLMAP point
+cloud from the first frame, instead of the point cloud from every frame, for strictly fair comparison.
+As shown in Table 2, Ex4DGS is comparable with the second-best model in the sparse COLMAP
+scenario. Although the Technicolor dataset contains various colorful objects, our model successfully
+synthesizes the novel view without dense prior or additional parameters. The reason why STG shows
+the impressive performance is that Technicolor dataset does not have rapid movements.
+8
+5.3
+Separation of Dynamic and Static Points
+Ex4DGS has a capability to separate static and dynamic points during the learning process. To check
+how well they are separated, we render them individually. Figure 6 shows the separation result.
+The static and dynamic points are rendered on both the Neural 3D Video and Technicolor datasets.
+The results demonstrate that the dynamic points are successfully separated from the static points,
+even if they are trained in an unsupervised manner. As a result, view-dependent color-changing or
+reflective objects are also identified as dynamic parts. Furthermore, in Coffee Martini scene, Ex4DGS
+demonstrates the ability to detect dynamic fluid in the transparent glasses. It is also worth highlighting
+that the same object can have static and dynamic components, as shown in the dog’s legs and head
+being classified as distinct points in the Flame Steak scene.
+5.4
+Ablation Studies
+We conduct an extensive ablation study
+to check the effectiveness of the proposed technical components in Table 3.
+Table 3: Ablation studies of the proposed methods.
+Method
+PSNR
+SSIM1
+LPIPS
+Size(MB)
+w/ Linear position
+w/o Temporal opacity
+w/ Linear rotation
+w/o Progressive growing
+w/ Linear position&rotation
+w/o Regularization
+w/o Dynamic point extraction
+w/o Point backtracking
+Ours
+31.12
+31.42
+31.26
+31.02
+31.32
+31.37
+28.58
+31.40
+32.11
+0.9385
+0.9394
+0.9392
+0.9389
+0.9394
+0.9395
+0.9280
+0.9394
+0.9422
+0.0524
+0.0521
+0.0525
+0.0550
+0.0521
+0.0522
+0.0756
+0.0529
+0.0478
+204
+186
+We first examine the effectiveness of
+148
+our interpolation method by changing
+168
+them into linear models. The results
+172
+show that linear modeling of the posi174
+58
+tion and rotation reduces the quality of
+169
+rendering. Interestingly, using different
+115
+types of interpolations further exacerbates the performance. If an equal level of polynomial bases are not assigned to both attributes, one
+of them falls short of the representational capacity, resulting in overfitting or over-smoothing.
+We also show how our dynamic point extraction affects the rendering quality. As expected, complex
+motions can only be handled with dynamic point modeling. We then evaluate the efficacy of our
+temporal opacity modeling, and observe the performance degradation when no temporal opacity
+changes. Points can only disappear by minimizing the size and hiding back to other Gaussian points,
+making them act as flutters without being removed properly.
+We then check the effectiveness of our progressive growing strategy. Without this strategy, the
+optimization gets stuck in local minima. This is due to our approach using only the point cloud from
+the first frame, which results in a misalignment with their corresponding objects of future frames.
+We evaluate our regularization terms for the temporal dynamics of both static and dynamic points
+within a scene. As expected, incorporating the additional regularization term into the learning process
+makes the dynamic scene representations better. This benefit comes from the reduction of accumulated
+motion errors, preventing the points from moving excessively and locating them at correct positions.
+Lastly, we examine the effectiveness of our point backtracking approach for pruning step. As expected,
+the correct removal of the misplaced points mitigates the errors and leads to the best result.
+6
+Conclusion
+We have proposed a novel parameterization of dynamic 3DGS by explicitly modeling 3D Gaussians’
+motions. To achieve this, we initially set keyframes and predict their position and rotation changes.
+Primitive parameters of the 3D Gaussians between keyframes are then interpolated. Our strategy for
+learning dynamic motions enables us to decouple static and dynamic parts of scenes, opening up
+more intuitive and interpretable representation in 4D novel view synthesis.
+Limitations Although we achieve a memory-efficient explicit representation of dynamic scenes,
+two challenges remain. First, our reconstruction can get stuck in local minima for newly appeared
+objects that are not initialized with 3D points and have no relevant 3D Gaussians in neighboring
+frames. This issue could be mitigated by initializing new 3D points with an additional geometric prior
+such as depth information. Second, as 3DGS suffers from scale ambiguity, training on monocular
+videos is challenging. This is because every 3D Gaussians are treated as dynamic due to the lack
+of accurate geometric clues for objects at each timestamp. This challenge can be addressed by
+incorporating an additional semantic cue information like object mask and optical flow, which
+account for objects’ motions more explicitly.
+9
+A
+Overview
+Within the appendix, we provide additional experiments in Appendix B, additional comparisons
+in Appendix C and per-scene breakdown of quantitative comparisons in Appendix D.
+B
+Additional Experiments
+In this section, we conduct experiments to further illustrate the behavior of Ex4DGS. In Appendix B.1,
+we present an experiment where changes in color alone are not treated as dynamic points. In Appendix B.2, we demonstrate how Ex4DGS behaves when objects reappear. In Appendix B.3 and Appendix B.4, we present additional ablation studies on various keyframe interval selection and dynamic
+point conversion rates.
+B.1
+Without Handling Color Components
+Flipped
+(a) Ground Truth
+(b) Color change w/o
+dynamic points
+(c) Ours
+Rendered
+151f
+168f
+188f
+200f
+Rendered
+Figure 7: Comparison between (b) handling color Figure 8: Visualization of the rotating decoration
+changes without dynamic points and (c) our com- in the Technicolor Birthday scene.
+plete model.
+We conduct experiments on the Coffee Martini scene Table 4: Comparison results between withfrom the Neural 3D Video dataset, focusing on sce- out handling color changes and our complete
+narios where objects remain stationary but change model.
+color. We mask only the moving parts of the objects
+Model
+PSNR
+SSIM1
+LPIPS
+and train static Gaussians on the remaining regions
+3DGS [13]
+21.69
+0.851
+0.126
+using the original 3DGS model. The qualitative and 3DGS + Our dynamic 26.07
+0.891
+0.089
+quantitative results are presented in Figure 7 and TaOurs
+28.79
+0.912
+0.070
+ble 4. As shown in Figure 7, static points cannot handle changes such as shadows. However, Ex4DGS
+effectively manages these changes using dynamic points. In Table 4, "3DGS" denotes the unmodified
+3DGS results. "3DGS + Our dynamic" denotes the results when the dynamic regions are replaced
+with Ex4DGS. Even when only color changes occur without any movement, significant performance
+loss occurs if these changes are not treated as dynamic points.
+B.2
+Reappearing Objects
+We visualize how Ex4DGS handles when objects disappear and reappear in Figure 8. Figure 8
+illustrates the points associated with the decoration in the Birthday scene from the Technicolor dataset.
+It shows that the Gaussians corresponding to the part of the decoration that disappears at frame #168
+and reappears at frame #188 have different distributions after the decoration flips that suggests that
+reappearing objects are regarded as new objects.
+B.3
+Keyframe Interval Selections
+In Table 5, we present results on the effects of keyframe intervals and motion magnitude on Cook
+Spinach scene from Neural 3D Video dataset. To simulate different motion speeds, we deliberately
+skip frames in the videos. As shown in Table 5, a keyframe interval of 10 generally yields good results
+under most conditions. Smaller keyframe intervals tend to perform poorly, especially when the motion
+speed is low (i.e., fewer frames are skipped). However, as the skipped frame size increases smaller
+keyframe intervals begin to show better performance. It also shows that the model size decreases as
+the keyframe interval increases.
+10
+Table 5: Ablation studies of keyframe interval selections and skipped frames.
+Skipped frames
+1
+2
+4
+Keyframe interval
+PSNR SSIM1 LPIPS Size(MB)
+PSNR SSIM1 LPIPS Size(MB)
+PSNR SSIM1 LPIPS Size(MB)
+31.17
+32.06
+31.70
+33.04
+32.78
+32.14
+31.47
+32.33
+32.29
+32.65
+32.07
+31.93
+31.81
+31.81
+32.53
+31.79
+32.08
+30.91
+1
+2
+5
+10
+20
+50
+B.4
+0.948
+0.952
+0.953
+0.956
+0.955
+0.955
+0.057
+0.051
+0.047
+0.041
+0.043
+0.046
+595
+314
+206
+119
+90
+79
+0.948
+0.954
+0.954
+0.956
+0.952
+0.951
+0.056
+0.049
+0.043
+0.043
+0.047
+0.052
+415
+322
+126
+93
+78
+72
+0.946
+0.953
+0.954
+0.953
+0.953
+0.949
+0.051
+0.044
+0.045
+0.046
+0.048
+0.056
+142
+101
+80
+74
+73
+73
+Different Dynamic Point Conversion Rates
+We experiment with different dynamic point conver- Table 6: Ablation studies of dynamic point consion rates on Cook Spinach scene from Neural 3D version rate.
+Video dataset in Table 6. Our results indicate that the
+Percentage PSNR SSIM1 LPIPS Size(MB)
+best performance is achieved when the extraction
+0.5
+32.36
+0.955
+0.043
+103
+percentage is set to 2%. If the percentage is too low,
+1
+32.48
+0.956
+0.044
+115
+not enough dynamic points will be extracted; con2
+33.04
+0.956
+0.041
+119
+versely, if it is too high, too many dynamic points
+4
+32.89
+0.955
+0.045
+227
+may be extracted, leading to overfitting and degraded
+0.954
+0.048
+367
+8
+31.33
+performance.
+C
+Additional Comparisons
+To assess the robustness of Ex4DGS, we sample different frame intervals from the Technicolor
+dataset. First, we experiment with occlusion scenarios in Appendix C.1. Next, we present results
+when a new object appears in Appendix C.2. Finally, we train on an extremely long-duration video
+in Appendix C.3.
+Handling Occlusion
+207f
+175f
+C.1
+(a) Ground Truth
+(b) 4DGS
+(c) 4DGaussians
+(d) STG
+(e) Ours
+Figure 9: Qualitative comparison of the repeatedly occluded objects in the Technicolor Train scene
+over a sequence of 100 frames (frame #170 to #269). All models are trained with the point cloud data
+from the frame #170.
+We sample 100 frames (frames #170 to #269) from Table 7: Quantitative results of the repeatedly
+the Train scene in the Technicolor dataset contain- occluded objects in the Technicolor Train scene.
+ing occlusions of dynamic objects and compare
+Model
+PSNR
+SSIM1
+LPIPS
+Ex4DGS with other models. We use the point cloud
+STG [15]
+32.17
+0.940
+0.035
+prior of the first frame, which provides no informa4DGS [74]
+29.11
+0.877
+0.119
+tion about the reappearing object after the occlusion. 4DGaussians [14] 23.31
+0.657
+0.385
+We compare the performance of STG, 4DGS and
+Ours
+32.24
+0.941
+0.044
+4D Gaussians models in Table 7 and Figure 9. In
+these results, the explicit-based models, STG, 4DGS, and ours, perform significantly better. In the
+case of STG, the dynamic part is not well learned as the frames progress, and while 4DGS can
+render the dynamic part effectively, it struggles with the static part, negatively affecting the overall
+performance. In particular, 4D Gaussians, being an implicit model, fails to disentangle the static and
+dynamic components, resulting in missing renderings of the dynamic part. Our model, on the other
+hand, performs well and effectively learns both static and dynamic parts.
+11
+50f
+105f
+165f
+(a) Ground Truth
+(b) 4DGS
+(c) STG
+(e) 4DGaussians
+(f) Ours
+Figure 10: Qualitative comparison of the appearing objects in Technicolor Birthday scene over a
+sequence of 120 frames (frame #50 to #169). All models are trained with the point cloud data from
+the frame #50.
+C.2
+Handling Newly Appearing Objects
+We conduct an experiment to determine whether Table 8: Quantitative results of the appearing
+Ex4DGS can learn about newly appearing objects objects in Technicolor Birthday scene.
+that require the splitting of dynamic components.
+Model
+PSNR
+SSIM1
+LPIPS
+We sample 120 frames (frame #50 to #169) from
+STG [15]
+27.62
+0.903
+0.080
+the Birthday scene in the Technicolor dataset, during
+4DGS [74]
+28.69
+0.907
+0.086
+which a person appears. All models use a point cloud 4DGaussians [14] 21.51
+0.712
+0.291
+prior from a frame where the person is not yet visible.
+Ours
+30.56
+0.929
+0.051
+The numerical results are presented in Table 8, and
+the rendered images are shown in Figure 10. In contrast With the assertion made in the conclusion,
+the result is indeed feasible because Gaussians from neighboring objects can be utilized to facilitate
+the splitting process, even in the case of newly appearing objects. This is due to the effectiveness of
+the proposed splitting pipeline for static and dynamic Gaussians, which can handle newly appearing
+objects even when no initial Gaussian is provided.
+C.3
+Extremely Long Duration
+(a) Animated video
+(b) 1st frame
+(c) 167th frame
+(d) 333th frame
+(e) 500th frame
+(f) 667th frame
+(g) 833th frame
+(h) 1000th frame
+(i) 1000th static
+(j) 1000th dynamic
+Figure 11: Evaluation of the extremely long video on Flame Salmon scene in Neural 3D Video dataset.
+Best viewed at Adobe Acrobat Reader.
+We conduct an experiment using a longer sequence Table 9: Quantitative results of the extremely
+of frames (1,000 frames, 20,000 images in total) on long video on Flame Salmon scene in Neural
+the Flame Salmon scene from the Neural 3D Video 3D Video dataset.
+dataset. The results are presented in Table 9, and the
+Model
+PSNR SSIM1 LPIPS Size(MB)
+rendered images are shown in Figure 11. The results
+4DGS [74]
+26.26
+0.897
+0.115
+6331
+of this experiment demonstrate that our model is 4DGaussians [14] 28.37 0.903 0.097
+75
+capable of effective learning with reasonable storage
+Ours
+28.77
+0.919
+0.076
+392
+requirements, even for extremely long videos. While
+12
+the 4D Gaussian model produces acceptable results, its performance declines in areas where new
+objects, such as flames, appear. This indicates that the rendering quality may vary depending on the
+presence or absence of newly appearing objects, as discussed in Appendix C.1 and Appendix C.2.
+D
+Detailed Results
+In this section, we report the scene breakdown results of PSNR, SSIM1 , SSIM2 , and LPIPS on the
+Technicolor dataset and SSIM1 , SSIM2 and LPIPS on the Neural 3D Video dataset.
+Table 10: Per-scene quantitative comparison on Technicolor dataset. †: Trained with sparse point
+cloud input.
+Model
+DyNeRF [7]
+HyperReel [86]
+STG† [15]
+4DGS [74]
+4D Gaussians [14]
+Ours
+Model
+HyperReel [86]
+STG† [15]
+4DGS [74]
+4D Gaussians [14]
+Ours
+Model
+DyNeRF [7]
+STG† [15]
+4DGS [74]
+4D Gaussians [14]
+Ours
+Model
+DyNeRF [7]
+HyperReel [86]
+STG† [15]
+4DGS [74]
+4D Gaussians [14]
+Ours
+PSNR
+Birthday
+Fabien
+Painter
+Theater
+Train
+Average
+29.20
+29.99
+31.96
+28.01
+30.87
+32.38
+32.76
+34.70
+34.53
+26.19
+33.56
+35.38
+35.95
+35.91
+36.47
+33.91
+34.36
+36.73
+29.53
+33.32
+30.54
+31.62
+29.81
+31.84
+31.58
+29.74
+32.65
+27.96
+25.35
+31.77
+31.80
+32.73
+33.23
+29.54
+30.79
+33.62
+Birthday
+Fabien
+Painter
+Theater
+Train
+Average
+0.922
+0.942
+0.902
+0.904
+0.943
+0.895
+0.877
+0.856
+0.854
+0.889
+0.923
+0.923
+0.897
+0.884
+0.929
+0.895
+0.872
+0.869
+0.841
+0.880
+0.895
+0.945
+0.843
+0.730
+0.937
+0.906
+0.912
+0.873
+0.843
+0.916
+Birthday
+Fabien
+Painter
+Theater
+Train
+Average
+0.952
+0.969
+0.944
+0.950
+0.970
+0.965
+0.955
+0.943
+0.946
+0.961
+0.972
+0.970
+0.957
+0.951
+0.972
+0.939
+0.939
+0.940
+0.925
+0.944
+0.962
+0.967
+0.901
+0.832
+0.961
+0.958
+0.960
+0.937
+0.921
+0.962
+SSIM1
+SSIM2
+LPIPS
+Birthday
+Fabien
+Painter
+Theater
+Train
+Average
+0.067
+0.053
+0.039
+0.089
+0.087
+0.044
+0.242
+0.186
+0.134
+0.197
+0.186
+0.123
+0.146
+0.117
+0.097
+0.136
+0.161
+0.091
+0.188
+0.115
+0.121
+0.155
+0.187
+0.129
+0.067
+0.072
+0.033
+0.166
+0.271
+0.052
+0.142
+0.109
+0.085
+0.149
+0.178
+0.088
+13
+Table 11: Per-scene quantitative comparison on Neural 3D Video dataset. ‡: Trained using a dataset
+split into 150 frames.
+SSIM1
+Model
+Coffee
+Martini
+Cook Cut Roasted Flame
+Spinach
+Beef
+Salmon
+Flame
+Steak
+Sear
+Steak
+Average
+NeRFPlayer [72]
+HyperReel [86]
+0.951
+0.892
+0.929
+0.941
+0.950
+0.949
+0.908
+0.952
+0.931
+0.927
+STG‡ [15]
+4DGS [74]
+4DGaussians [14]
+0.916
+0.961
+0.957
+0.944
+0.970
+0.940
+0.955
+0.955
+0.946
+0.959
+0.936
+0.935
+0.923
+0.940
+Average
+STG‡ [15]
+4DGS [74]
+4DGaussians [14]
+Ours
+0.908
+0.945
+0.940
+0.882
+Dense COLMAP point cloud input
+0.952
+0.954
+0.918
+0.960
+N/A
+N/A
+0.980
+0.960
+N/A
+0.905
+0.949
+0.957
+0.917
+0.954
+Sparse COLMAP point cloud input
+0.904
+0.946
+0.946
+0.913
+0.954
+0.902
+0.948
+0.947
+0.904
+0.954
+0.893
+0.944
+0.913
+0.896
+0.946
+0.915
+0.947
+0.948
+0.917
+0.956
+N/A
+SSIM2
+Model
+Coffee
+Martini
+Neural Volumes [87]
+LLFF [88]
+DyNeRF [7]
+HexPlane [11]
+K-Planes [12]
+MixVoxels-L [89]
+MixVoxels-X [89]
+Im4D [90]
+4K4D [19]
+N/A
+N/A
+N/A
+N/A
+Cook Cut Roasted Flame
+Spinach
+Beef
+Salmon
+Flame
+Steak
+Sear
+Steak
+0.876
+0.848
+0.960
+0.960
+0.953
+0.949
+0.953
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+0.978
+0.970
+0.971
+0.973
+0.978
+0.974
+0.976
+0.976
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+0.980
+0.981
+N/A
+N/A
+0.968
+0.972
+0.976
+0.975
+0.970
+0.980
+0.977
+0.976
+0.969
+0.979
+0.964
+0.962
+0.954
+0.970
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+0.953
+0.951
+0.954
+0.970
+0.966
+0.968
+0.968
+N/A
+N/A
+N/A
+N/A
+0.974
+0.966
+0.966
+0.971
+0.970
+0.972
+STG‡ [15]
+4DGS [74]
+Dense COLMAP point cloud input
+0.949
+0.974
+0.976
+0.950
+N/A
+N/A
+0.980
+0.960
+STG‡ [15]
+4DGS [74]
+4DGaussians [14]
+Ours
+Sparse COLMAP point cloud input
+0.942
+0.970
+0.971
+0.948
+0.939
+0.971
+0.970
+0.941
+0.934
+0.969
+0.944
+0.937
+0.951
+0.976
+0.977
+0.956
+0.876
+0.848
+0.960
+0.972
+0.964
+0.964
+0.966
+0.970
+0.972
+LPIPS
+Model
+Coffee
+Martini
+Cook Cut Roasted Flame
+Spinach
+Beef
+Salmon
+Flame
+Steak
+Sear
+Steak
+Average
+NeRFPlayer [72]
+HyperReel [86]
+Neural Volumes [87]
+LLFF [88]
+DyNeRF [7]
+HexPlane [11]
+MixVoxels-L [89]
+MixVoxels-X [89]
+0.085
+0.127
+0.113
+0.089
+0.144
+0.084
+0.088
+0.078
+0.138
+0.077
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+N/A
+0.082
+0.099
+0.062
+0.080
+0.088
+0.057
+0.066
+0.088
+0.051
+0.070
+0.080
+0.053
+0.111
+0.096
+0.295
+0.235
+0.083
+0.075
+0.096
+0.064
+0.034
+0.033
+N/A
+N/A
+0.047
+0.055
+0.046
+0.036
+0.050
+0.034
+0.046
+0.037
+0.046
+0.035
+0.062
+0.052
+0.074
+0.048
+0.106
+0.081
+0.098
+0.136
+0.295
+0.235
+0.083
+0.078
+0.116
+0.078
+STG‡ [15]
+4DGS [74]
+Dense COLMAP point cloud input
+0.069
+0.043
+0.042
+0.063
+N/A
+N/A
+0.041
+N/A
+STG‡ [15]
+4DGS [74]
+4DGaussians [14]
+Ours
+Sparse COLMAP point cloud input
+0.087
+0.056
+0.060
+0.074
+0.079
+0.041
+0.041
+0.078
+0.095
+0.056
+0.104
+0.095
+0.070
+0.042
+0.040
+0.066
+14
+References
+[1] B Mildenhall, PP Srinivasan, M Tancik, JT Barron, R Ramamoorthi, and R Ng. Nerf: Representing scenes
+as neural radiance fields for view synthesis. In Proceedings of the European Conference on Computer
+Vision (ECCV), 2020. 1, 3
+[2] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-nerf: Neural radiance
+fields for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2021. 1, 3
+[3] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M Seitz, and
+Ricardo Martin-Brualla. Nerfies: Deformable neural radiance fields. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2021. 3
+[4] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang. Neural scene flow fields for space-time view
+synthesis of dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2021. 3
+[5] Chen Gao, Ayush Saraf, Johannes Kopf, and Jia-Bin Huang. Dynamic view synthesis from dynamic
+monocular video. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV),
+2021. 3
+[6] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Ricardo Martin-Brualla, and Steven M Seitz. Hypernerf: a higher-dimensional representation for topologically
+varying neural radiance fields. ACM Transactions on Graphics (TOG), 2021. 3
+[7] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon Green, Christoph Lassner, Changil Kim, Tanner
+Schmidt, Steven Lovegrove, Michael Goesele, Richard Newcombe, et al. Neural 3d video synthesis
+from multi-view video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2022. 2, 3, 7, 8, 13, 14
+[8] Tianhao Wu, Fangcheng Zhong, Andrea Tagliasacchi, Forrester Cole, and Cengiz Oztireli. Dˆ 2nerf:
+Self-supervised decoupling of dynamic and static objects from a monocular video. In Proceedings of the
+Neural Information Processing Systems (NeurIPS), 2022. 1, 3
+[9] Jia-Wei Liu, Yan-Pei Cao, Weijia Mao, Wenqiao Zhang, David Junhao Zhang, Jussi Keppo, Ying Shan,
+Xiaohu Qie, and Mike Zheng Shou. Devrf: Fast deformable voxel radiance fields for dynamic scenes. In
+Proceedings of the Neural Information Processing Systems (NeurIPS), 2022. 1
+[10] Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and Ping Tan. Streaming radiance fields for 3d video
+synthesis. In Proceedings of the Neural Information Processing Systems (NeurIPS), 2022. 1
+[11] Ang Cao and Justin Johnson. Hexplane: A fast representation for dynamic scenes. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2023. 1, 7, 14
+[12] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo Kanazawa.
+K-planes: Explicit radiance fields in space, time, and appearance. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2023. 1, 7, 14
+[13] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics (TOG), 2023. 1, 3, 7, 10
+[14] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian, and
+Wang Xinggang. 4d gaussian splatting for real-time dynamic scene rendering. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 2, 3, 7, 8, 11, 12, 13,
+14
+[15] Zhan Li, Zhang Chen, Zhong Li, and Yi Xu. Spacetime gaussian feature splatting for real-time dynamic
+view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2024. 2, 3, 7, 8, 11, 12, 13, 14
+[16] C Lawrence Zitnick, Sing Bing Kang, Matthew Uyttendaele, Simon Winder, and Richard Szeliski. Highquality video view interpolation using a layered representation. ACM Transactions on Graphics (TOG),
+2004. 2
+[17] Richard H Bartels, John C Beatty, and Brian A Barsky. An introduction to splines for use in computer
+graphics and geometric modeling. Morgan Kaufmann, 1995. 2, 4
+15
+[18] Ken Shoemake. Animating rotation with quaternion curves. Proceedings of the 12th annual conference on
+Computer graphics and interactive techniques, 1985. 2, 5
+[19] Zhen Xu, Sida Peng, Haotong Lin, Guangzhao He, Jiaming Sun, Yujun Shen, Hujun Bao, and Xiaowei
+Zhou. 4k4d: Real-time 4d view synthesis at 4k resolution. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2024. 2, 7, 14
+[20] Neus Sabater, Guillaume Boisson, Benoit Vandame, Paul Kerbiriou, Frederic Babon, Matthieu Hog, Tristan
+Langlois, Remy Gendrot, Olivier Bureller, Arno Schubert, and Valerie Allie. Dataset and pipeline for
+multi-view light-field video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition Workshop (CVPRW), 2017. 2, 7, 8
+[21] M LEVOY. Light field rendering. In Proceedings of ACM SIGGRAPH, 1996. 2, 3
+[22] Chris Buehler, Michael Bosse, Leonard McMillan, Steven Gortler, and Michael Cohen. Unstructured
+lumigraph rendering. In Proceedings of ACM SIGGRAPH, 2001. 2, 3
+[23] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification:
+Learning view synthesis using multiplane images. In Proceedings of ACM SIGGRAPH, 2018. 2
+[24] John Flynn, Michael Broxton, Paul Debevec, Matthew DuVall, Graham Fyffe, Ryan Overbeck, Noah
+Snavely, and Richard Tucker. Deepview: View synthesis with learned gradient descent. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2019.
+[25] Pratul P Srinivasan, Richard Tucker, Jonathan T Barron, Ravi Ramamoorthi, Ren Ng, and Noah Snavely.
+Pushing the boundaries of view extrapolation with multiplane images. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2019. 2
+[26] Nima Khademi Kalantari, Ting-Chun Wang, and Ravi Ramamoorthi. Learning-based view synthesis for
+light field cameras. In Proceedings of ACM SIGGRAPH, 2016. 2
+[27] Moustafa Meshry, Dan B Goldman, Sameh Khamis, Hugues Hoppe, Rohit Pandey, Noah Snavely, and
+Ricardo Martin-Brualla. Neural rerendering in the wild. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2019. 2
+[28] Inchang Choi, Orazio Gallo, Alejandro Troccoli, Min H Kim, and Jan Kautz. Extreme view synthesis. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), 2019. 2
+[29] Zexiang Xu, Sai Bi, Kalyan Sunkavalli, Sunil Hadap, Hao Su, and Ravi Ramamoorthi. Deep view synthesis
+from sparse photometric images. In Proceedings of ACM SIGGRAPH, 2019. 2
+[30] Gernot Riegler and Vladlen Koltun. Free view synthesis. In Proceedings of the European Conference on
+Computer Vision (ECCV), 2020. 2, 3
+[31] Gernot Riegler and Vladlen Koltun. Stable view synthesis. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), 2021. 2, 3
+[32] Ronghang Hu, Nikhila Ravi, Alexander C Berg, and Deepak Pathak. Worldsheet: Wrapping the world in a
+3d sheet for view synthesis from a single image. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision (ICCV), 2021. 3
+[33] Wenzheng Chen, Huan Ling, Jun Gao, Edward Smith, Jaakko Lehtinen, Alec Jacobson, and Sanja Fidler.
+Learning to predict 3d objects with an interpolation-based differentiable renderer. In Proceedings of the
+Neural Information Processing Systems (NeurIPS), 2019.
+[34] Kyle Genova, Forrester Cole, Aaron Maschinot, Aaron Sarna, Daniel Vlasic, and William T Freeman.
+Unsupervised training for 3d morphable model regression. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), 2018.
+[35] Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. Soft rasterizer: A differentiable renderer for image-based
+3d reasoning. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV),
+2019. 3
+[36] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelnerf: Neural radiance fields from one or
+few images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2021. 3
+[37] Mijeong Kim, Seonguk Seo, and Bohyung Han. Infonerf: Ray entropy minimization for few-shot neural volume rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2022.
+16
+[38] Jiawei Yang, Marco Pavone, and Yue Wang. Freenerf: Improving few-shot neural rendering with free
+frequency regularization. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2023.
+[39] Ajay Jain, Matthew Tancik, and Pieter Abbeel. Putting nerf on a diet: Semantically consistent few-shot
+view synthesis. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV),
+2021. 3
+[40] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan,
+Jonathan T Barron, and Henrik Kretzschmar. Block-nerf: Scalable large scene neural view synthesis. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 3
+[41] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-nerf: Scalable construction of
+large-scale nerfs for virtual fly-throughs. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), 2022.
+[42] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-nerf 360:
+Unbounded anti-aliased neural radiance fields. CVPR, 2022.
+[43] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and improving neural
+radiance fields. arXiv:2010.07492, 2020.
+[44] Junoh Lee, Hyunjun Jung, Jin-Hwi Park, Inhwan Bae, and Hae-Gon Jeon. Geometry-aware projective
+mapping for unbounded neural radiance fields. In Proceedings of the International Conference on Learning
+Representations (ICLR), 2024.
+[45] Peng Wang, Yuan Liu, Zhaoxi Chen, Lingjie Liu, Ziwei Liu, Taku Komura, Christian Theobalt, and
+Wenping Wang. F2-nerf: Fast neural radiance field training with free camera trajectories. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2023. 3
+[46] Bangbang Yang, Chong Bao, Junyi Zeng, Hujun Bao, Yinda Zhang, Zhaopeng Cui, and Guofeng Zhang.
+Neumesh: Learning disentangled neural mesh-based implicit field for geometry and texture editing. In
+Proceedings of the European Conference on Computer Vision (ECCV), 2022. 3
+[47] Petr Kellnhofer, Lars C Jebe, Andrew Jones, Ryan Spicer, Kari Pulli, and Gordon Wetzstein. Neural
+lumigraph rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2021.
+[48] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and Yaron Lipman.
+Multiview neural surface reconstruction by disentangling geometry and appearance. In Proceedings of the
+Neural Information Processing Systems (NeurIPS), 2020. 3
+[49] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T
+Barron. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM
+Transactions on Graphics (TOG), 2021. 3
+[50] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. Physg: Inverse rendering with
+spherical gaussians for physics-based material editing and relighting. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2021.
+[51] Wenqi Yang, Guanying Chen, Chaofeng Chen, Zhenfang Chen, and Kwan-Yee K Wong. Ps-nerf: Neural
+inverse rendering for multi-view photometric stereo. In Proceedings of the European Conference on
+Computer Vision (ECCV), 2022.
+[52] Mark Boss, Andreas Engelhardt, Abhishek Kar, Yuanzhen Li, Deqing Sun, Jonathan Barron, Hendrik
+Lensch, and Varun Jampani. Samurai: Shape and material from unconstrained real-world arbitrary image
+collections. In Proceedings of the Neural Information Processing Systems (NeurIPS), 2022.
+[53] Weicai Ye, Shuo Chen, Chong Bao, Hujun Bao, Marc Pollefeys, Zhaopeng Cui, and Guofeng Zhang.
+Intrinsicnerf: Learning intrinsic neural radiance fields for editable novel view synthesis. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision (ICCV), 2023. 3
+[54] Vincent Sitzmann, Semon Rezchikov, Bill Freeman, Josh Tenenbaum, and Fredo Durand. Light field
+networks: Neural scene representations with single-evaluation rendering. In Proceedings of the Neural
+Information Processing Systems (NeurIPS), 2021. 3
+[55] Huan Wang, Jian Ren, Zeng Huang, Kyle Olszewski, Menglei Chai, Yun Fu, and Sergey Tulyakov. R2l:
+Distilling neural radiance field to neural light field for efficient novel view synthesis. In Proceedings of the
+European Conference on Computer Vision (ECCV), 2022. 3
+17
+[56] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and Angjoo Kanazawa. Plenoctrees for real-time
+rendering of neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV), 2021. 3
+[57] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In
+Proceedings of the European Conference on Computer Vision (ECCV), 2022. 3
+[58] Edward H Adelson, James R Bergen, et al. The plenoptic function and the elements of early vision,
+volume 2. Vision and Modeling Group, Media Laboratory, Massachusetts Institute of Technology, 1991. 3
+[59] Chung-Yi Weng, Brian Curless, Pratul P Srinivasan, Jonathan T Barron, and Ira Kemelmacher-Shlizerman.
+Humannerf: Free-viewpoint rendering of moving people from monocular video. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2022. 3
+[60] Hongyi Xu, Thiemo Alldieck, and Cristian Sminchisescu. H-nerf: Neural radiance fields for rendering
+and temporal reconstruction of humans in motion. In Proceedings of the Neural Information Processing
+Systems (NeurIPS), 2021. 3
+[61] Thiemo Alldieck, Hongyi Xu, and Cristian Sminchisescu. imghum: Implicit generative models of 3d
+human shape and articulated pose. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV), 2021. 3
+[62] Matthew Loper, Naureen Mahmood, Javier Romero, Gerard Pons-Moll, and Michael J Black. Smpl: A
+skinned multi-person linear model. ACM Transactions on Graphics (TOG), 2015.
+[63] Tianjian Jiang, Xu Chen, Jie Song, and Otmar Hilliges. Instantavatar: Learning avatars from monocular
+video in 60 seconds. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2023.
+[64] ShahRukh Athar, Zexiang Xu, Kalyan Sunkavalli, Eli Shechtman, and Zhixin Shu. Rignerf: Fully controllable neural 3d portraits. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2022.
+[65] Yunpeng Bai, Yanbo Fan, Xuan Wang, Yong Zhang, Jingxiang Sun, Chun Yuan, and Ying Shan. Highfidelity facial avatar reconstruction from monocular video with generative priors. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2023.
+[66] Sida Peng, Junting Dong, Qianqian Wang, Shangzhan Zhang, Qing Shuai, Xiaowei Zhou, and Hujun Bao.
+Animatable neural radiance fields for modeling dynamic human bodies. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), 2021. 3
+[67] Wenqi Xian, Jia-Bin Huang, Johannes Kopf, and Changil Kim. Space-time neural irradiance fields for
+free-viewpoint video. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2021. 3
+[68] Jiakai Zhang, Xinhang Liu, Xinyi Ye, Fuqiang Zhao, Yanshun Zhang, Minye Wu, Yingliang Zhang, Lan
+Xu, and Jingyi Yu. Editable free-viewpoint video using a layered neural representation. ACM Transactions
+on Graphics (TOG), 2021.
+[69] Vadim Tschernezki, Diane Larlus, and Andrea Vedaldi. Neuraldiff: Segmenting 3d objects that move in
+egocentric videos. In 2021 International Conference on 3D Vision (3DV), 2021.
+[70] Zhengqi Li, Qianqian Wang, Forrester Cole, Richard Tucker, and Noah Snavely. Dynibar: Neural dynamic
+image-based rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2023. 6
+[71] Wei Jiang, Kwang Moo Yi, Golnoosh Samei, Oncel Tuzel, and Anurag Ranjan. Neuman: Neural human
+radiance field from a single video. In Proceedings of the European Conference on Computer Vision
+(ECCV), 2022. 3
+[72] Liangchen Song, Anpei Chen, Zhong Li, Zhang Chen, Lele Chen, Junsong Yuan, Yi Xu, and Andreas
+Geiger. Nerfplayer: A streamable dynamic scene representation with decomposed neural radiance fields.
+IEEE Transactions on Visualization and Computer Graphics, 2023. 3, 7, 14
+[73] Jonathon Luiten, Georgios Kopanas, Bastian Leibe, and Deva Ramanan. Dynamic 3d gaussians: Tracking
+by persistent dynamic view synthesis. In Proceedings of the International Conference on 3D Vision, 2024.
+3
+18
+[74] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang. Real-time photorealistic dynamic scene representation
+and rendering with 4d gaussian splatting. In Proceedings of the International Conference on Learning
+Representations (ICLR), 2023. 3, 7, 8, 11, 12, 13, 14
+[75] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing Zhang, and Xiaogang Jin. Deformable 3d
+gaussians for high-fidelity monocular dynamic scene reconstruction. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 3
+[76] Yi-Hua Huang, Yang-Tian Sun, Ziyi Yang, Xiaoyang Lyu, Yan-Pei Cao, and Xiaojuan Qi. Sc-gs: Sparsecontrolled gaussian splatting for editable dynamic scenes. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2024.
+[77] Zhiyin Qian, Shaofei Wang, Marko Mihajlovic, Andreas Geiger, and Siyu Tang. 3dgs-avatar: Animatable
+avatars via deformable 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2024.
+[78] Shoukang Hu and Ziwei Liu. Gauhuman: Articulated gaussian splatting from monocular human videos. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024.
+[79] Zhicheng Lu, Xiang Guo, Le Hui, Tianrui Chen, Min Yang, Xiao Tang, Feng Zhu, and Yuchao Dai.
+3d geometry-aware deformable gaussian splatting for dynamic view synthesis. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 3
+[80] Youtian Lin, Zuozhuo Dai, Siyu Zhu, and Yao Yao. Gaussian-flow: 4d reconstruction with dynamic
+3d gaussian particle. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2024. 3
+[81] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa.
+Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2022. 4
+[82] Yiwen Chen, Zilong Chen, Chi Zhang, Feng Wang, Xiaofeng Yang, Yikai Wang, Zhongang Cai, Lei Yang,
+Huaping Liu, and Guosheng Lin. Gaussianeditor: Swift and controllable 3d editing with gaussian splatting.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024.
+6
+[83] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free
+3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2024. 7
+[84] Johannes L Schonberger and Jan-Michael Frahm. Structure-from-motion revisited. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 7
+[85] Liyuan Liu, Haoming Jiang, Pengcheng He, Weizhu Chen, Xiaodong Liu, Jianfeng Gao, and Jiawei Han.
+On the variance of the adaptive learning rate and beyond. In Proceedings of the International Conference
+on Learning Representations (ICLR), 2020. 7
+[86] Benjamin Attal, Jia-Bin Huang, Christian Richardt, Michael Zollhoefer, Johannes Kopf, Matthew O’Toole,
+and Changil Kim. Hyperreel: High-fidelity 6-dof video with ray-conditioned sampling. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2023. 7, 8, 13, 14
+[87] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh.
+Neural volumes: learning dynamic renderable volumes from images. ACM Transactions on Graphics
+(TOG), 2019. 7, 14
+[88] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi,
+Ren Ng, and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling
+guidelines. ACM Transactions on Graphics (TOG), 2019. 7, 14
+[89] Feng Wang, Sinan Tan, Xinghang Li, Zeyue Tian, Yafei Song, and Huaping Liu. Mixed neural voxels for
+fast multi-view video synthesis. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV), 2023. 7, 14
+[90] Haotong Lin, Sida Peng, Zhen Xu, Tao Xie, Xingyi He, Hujun Bao, and Xiaowei Zhou. High-fidelity and
+real-time novel view synthesis for dynamic scenes. In Proceedings of SIGGRAPH Asia, 2023. 7, 14
+[91] Jiakai Sun, Han Jiao, Guangyuan Li, Zhanjie Zhang, Lei Zhao, and Wei Xing. 3dgstream: On-the-fly
+training of 3d gaussians for efficient streaming of photo-realistic free-viewpoint videos. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024. 7
+19

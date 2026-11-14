@@ -7,33 +7,33 @@ Composition via Convolution (Power Form) is a method for evaluating the composit
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A trivariate polynomial $f(x,y,z)$ of maximum degree $3d$, represented by coefficients $f_{ijk}$ for $1 \le i,j,k \le d$ (or $0 \le i,j,k \le d$ depending on indexing convention; the source uses 1-based for the sum limits in the first formula and 0-based in the reordered formula, implying coefficients exist for the full range). The ray is defined by its linear components: $\mathbf{r}_x = [p_x, v_x]$, $\mathbf{r}_y = [p_y, v_y]$, $\mathbf{r}_z = [p_z, v_z]$, representing the constant and velocity terms of the ray's projection onto the axes [S1].
+*   **Input:** A trivariate polynomial $f(x,y,z)$ of maximum degree $3d$, represented by coefficients $f_{ijk}$ for $0 \le i,j,k \le d$ [S1]. The ray is defined by its linear components: $\mathbf{r}_x = [p_x, v_x]$, $\mathbf{r}_y = [p_y, v_y]$, $\mathbf{r}_z = [p_z, v_z]$, representing the constant and velocity terms of the ray's projection onto the axes [S1].
 *   **Output:** The coefficient sequence $\mathbf{f}$ of the resulting univariate polynomial $f(t)$ of degree $3d$ [S1].
 
 **Data Structures:**
-*   Coefficients $f_{ijk}$: Stored as floating-point values.
-*   Ray components $\mathbf{r}_x, \mathbf{r}_y, \mathbf{r}_z$: Represented as pairs of floats $(p, v)$.
-*   Intermediate convolution results $\mathbf{r}_x^i, \mathbf{r}_y^j, \mathbf{r}_z^k$: Stored as coefficient sequences (arrays/lists of floats).
+*   Coefficients $f_{ijk}$: Stored as floating-point values [S1].
+*   Ray components $\mathbf{r}_x, \mathbf{r}_y, \mathbf{r}_z$: Represented as pairs of floats $(p, v)$ [S1].
+*   Intermediate convolution results $\mathbf{r}_x^i, \mathbf{r}_y^j, \mathbf{r}_z^k$: Stored as coefficient sequences (arrays/lists of floats) [S1].
 
 **Numbered Steps:**
-1.  **Initialize Ray Powers:** Compute the power expressions for the ray components incrementally using convolution. The base case is $\mathbf{r}_x^0 = [1, 0]$ (representing $t^0$) or handled implicitly. For $i$ from 1 to $d$:
+1.  **Initialize Ray Powers:** Compute the power expressions for the ray components incrementally using convolution. The base case is $\mathbf{r}_x^0 = [1]$ (representing $t^0$) [S1]. For $i$ from 1 to $d$:
     $$ \mathbf{r}_x^i = \mathbf{r}_x^{i-1} * \mathbf{r}_x $$
-    where $*$ denotes polynomial convolution. This is equivalent to the Horner scheme for polynomial evaluation [S1]. Repeat for $\mathbf{r}_y^j$ and $\mathbf{r}_z^k$ for $j, k$ from 1 to $d$.
+    where $*$ denotes polynomial convolution [S1]. This is equivalent to the Horner scheme for polynomial evaluation [S1]. Repeat for $\mathbf{r}_y^j$ and $\mathbf{r}_z^k$ for $j, k$ from 1 to $d$ [S1].
 2.  **Compute Inner Sums (Z-direction):** For each pair $(i, j)$, compute the intermediate polynomial $\mathbf{f}_{ij}$ by convolving the polynomial coefficients $f_{ijk}$ with the z-ray powers $\mathbf{r}_z^k$:
     $$ \mathbf{f}_{ij} = \sum_{k=0}^d f_{ijk} \cdot \mathbf{r}_z^k $$
-    Note: The source formula uses $\sum_{k=0}^d$, implying $f_{ijk}$ exists for $k=0$. If the polynomial is strictly degree $d$ in each variable starting from 1, adjust indices accordingly, but the memory reuse argument relies on the sequential access of $f_{ijk}$ [S1].
+    where $\cdot$ denotes scalar multiplication [S1].
 3.  **Compute Middle Sums (Y-direction):** For each $i$, compute the intermediate polynomial $\mathbf{g}_i$ by convolving $\mathbf{f}_{ij}$ with the y-ray powers $\mathbf{r}_y^j$:
     $$ \mathbf{g}_i = \sum_{j=0}^d \mathbf{r}_y^j * \mathbf{f}_{ij} $$
 4.  **Compute Outer Sum (X-direction):** Compute the final univariate polynomial coefficients $\mathbf{f}$ by convolving $\mathbf{g}_i$ with the x-ray powers $\mathbf{r}_x^i$:
     $$ \mathbf{f} = \sum_{i=0}^d \mathbf{r}_x^i * \mathbf{g}_i $$
 
 **Formulas:**
-The core composition formula is:
+The core reordered composition formula is:
 $$ \mathbf{f} = \sum_{i=0}^d \mathbf{r}_x^i * \sum_{j=0}^d \mathbf{r}_y^j * \underbrace{\sum_{k=0}^d f_{ijk} \cdot \mathbf{r}_z^k}_{\mathbf{f}_{ij}} $$
 where $\mathbf{r}_x = [p_x, v_x]$ is the coefficient sequence of the x-component of the ray [S1].
 
 **Parameters:**
-*   $d$: The degree of the polynomial basis. Typical values depend on the volume representation (e.g., tri-cubic filtering implies $d=3$) [S1, S2].
+*   $d$: The polynomial degree parameter. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Register Pressure:** A naive implementation requires too many operations and registers to fit into a GPU framework (e.g., 135 registers for degree 3) [S1]. The convolution structure ensures that no more than one factor $f_{ij}$ and $f_i$ needs to be available at the same time, allowing memory reuse (e.g., reusing the memory slot of $f_{00}$ for $f_{01}$) [S1].
@@ -45,121 +45,56 @@ where $\mathbf{r}_x = [p_x, v_x]$ is the coefficient sequence of the x-component
 ```python
 def compose_power_form(f_coeffs, ray_x, ray_y, ray_z, d):
     """
-    f_coeffs: 3D array [i][j][k] of polynomial coefficients f_ijk
+    f_coeffs: 3D list [i][j][k] of polynomial coefficients f_ijk for 0 <= i,j,k <= d
     ray_x, ray_y, ray_z: tuples (p, v) representing the linear ray components
     d: degree of the polynomial
-    Returns: 1D array of coefficients for the resulting univariate polynomial
+    Returns: 1D list of coefficients for the resulting univariate polynomial f(t)
     """
     
-    # Helper for polynomial convolution of two coefficient arrays
     def convolve(a, b):
-        len_a = len(a)
-        len_b = len(b)
-        result_len = len_a + len_b - 1
-        result = [0.0] * result_len
-        for i in range(len_a):
-            for j in range(len_b):
-                result[i + j] += a[i] * b[j]
-        return result
+        res = [0.0] * (len(a) + len(b) - 1)
+        for i, ca in enumerate(a):
+            for j, cb in enumerate(b):
+                res[i + j] += ca * cb
+        return res
 
-    # Helper for scalar multiplication of polynomial
-    def scale_poly(poly, scalar):
-        return [c * scalar for c in poly]
+    def add_polys(a, b):
+        res = [0.0] * max(len(a), len(b))
+        for i, ca in enumerate(a): res[i] += ca
+        for i, cb in enumerate(b): res[i] += cb
+        return res
 
-    # 1. Compute ray powers incrementally
-    # r_x^0 is [1, 0] if we consider t^0, but typically ray is p + v*t
-    # The source implies r_x = [p_x, v_x] corresponds to the polynomial p_x + v_x*t
-    # r_x^i is the coefficient sequence of (p_x + v_x*t)^i
-    
-    r_x_powers = []
-    r_x_curr = [1.0] # Represents 1 (t^0)
-    r_x_powers.append(r_x_curr)
-    
-    for i in range(1, d + 1):
-        # Convolve previous power with base ray polynomial [p, v]
-        base_poly = [ray_x[0], ray_x[1]]
-        r_x_curr = convolve(r_x_powers[i-1], base_poly)
-        r_x_powers.append(r_x_curr)
+    # 1. Compute ray powers incrementally: r^0 = [1], r^i = r^(i-1) * [p, v]
+    def compute_ray_powers(ray, d):
+        powers = [[1.0]]
+        base = [ray[0], ray[1]]
+        curr = [1.0]
+        for _ in range(d):
+            curr = convolve(curr, base)
+            powers.append(curr)
+        return powers
 
-    r_y_powers = []
-    r_y_curr = [1.0]
-    r_y_powers.append(r_y_curr)
-    for j in range(1, d + 1):
-        base_poly = [ray_y[0], ray_y[1]]
-        r_y_curr = convolve(r_y_powers[j-1], base_poly)
-        r_y_powers.append(r_y_curr)
+    r_x_powers = compute_ray_powers(ray_x, d)
+    r_y_powers = compute_ray_powers(ray_y, d)
+    r_z_powers = compute_ray_powers(ray_z, d)
 
-    r_z_powers = []
-    r_z_curr = [1.0]
-    r_z_powers.append(r_z_curr)
-    for k in range(1, d + 1):
-        base_poly = [ray_z[0], ray_z[1]]
-        r_z_curr = convolve(r_z_powers[k-1], base_poly)
-        r_z_powers.append(r_z_curr)
-
-    # 2. Compute f_ij = sum_{k=0}^d f_ijk * r_z^k
-    # We need to store these to compute g_i. 
-    # To save memory, we can compute g_i on the fly if we iterate carefully,
-    # but the formula suggests a nested structure.
-    # Let's compute all f_ij first.
-    
-    f_ij = [[None for _ in range(d + 1)] for _ in range(d + 1)]
-    
-    for i in range(d + 1):
-        for j in range(d + 1):
-            # Sum over k
-            sum_fij = [0.0]
-            for k in range(d + 1):
-                coeff = f_coeffs[i][j][k]
-                term = scale_poly(r_z_powers[k], coeff)
-                sum_fij = convolve(sum_fij, [0.0]) # Initialize to zero if needed, but here we add
-                # Actually, sum_fij starts as zero polynomial. 
-                # Correction: sum_fij should be initialized to [0.0] and we add terms.
-                # But convolve adds lengths. We need an add_poly function.
-                pass
-            
-            # Redefine sum logic for clarity
-            sum_fij = [0.0]
-            for k in range(d + 1):
-                term = scale_poly(r_z_powers[k], f_coeffs[i][j][k])
-                # Add term to sum_fij
-                new_len = max(len(sum_fij), len(term))
-                if len(sum_fij) < new_len:
-                    sum_fij.extend([0.0] * (new_len - len(sum_fij)))
-                if len(term) < new_len:
-                    term.extend([0.0] * (new_len - len(term)))
-                for idx in range(new_len):
-                    sum_fij[idx] += term[idx]
-            
-            f_ij[i][j] = sum_fij
-
-    # 3. Compute g_i = sum_{j=0}^d r_y^j * f_ij
-    g_i = [None for _ in range(d + 1)]
+    # 2-4. Compute nested sums with memory reuse (only one f_ij and f_i needed at a time)
+    g_i = [None] * (d + 1)
     for i in range(d + 1):
         sum_gi = [0.0]
         for j in range(d + 1):
-            term = convolve(r_y_powers[j], f_ij[i][j])
-            new_len = max(len(sum_gi), len(term))
-            if len(sum_gi) < new_len:
-                sum_gi.extend([0.0] * (new_len - len(sum_gi)))
-            if len(term) < new_len:
-                term.extend([0.0] * (new_len - len(term)))
-            for idx in range(new_len):
-                sum_gi[idx] += term[idx]
+            sum_fij = [0.0]
+            for k in range(d + 1):
+                term = [c * f_coeffs[i][j][k] for c in r_z_powers[k]]
+                sum_fij = add_polys(sum_fij, term)
+            term_gi = convolve(r_y_powers[j], sum_fij)
+            sum_gi = add_polys(sum_gi, term_gi)
         g_i[i] = sum_gi
 
-    # 4. Compute f = sum_{i=0}^d r_x^i * g_i
     final_f = [0.0]
     for i in range(d + 1):
         term = convolve(r_x_powers[i], g_i[i])
-        new_len = max(len(final_f), len(term))
-        if len(final_f) < new_len:
-            final_f.extend([0.0] * (new_len - len(final_f)))
-        if len(term) < new_len:
-            term.extend([0.0] * (new_len - len(term)))
-        for idx in range(new_len):
-            final_f[idx] += term[idx]
-            
+        final_f = add_polys(final_f, term)
     return final_f
 ```
 
@@ -180,7 +115,7 @@ Transforms polynomials from B-spline to Bernstein or Power basis. Chosen as a pr
 *   **Limitations:** Lower numerical stability compared to Bernstein forms, leading to higher MSE [S1]. Not suitable if root finding is required without basis conversion [S1].
 
 ## Background
-The method was proposed in the context of wavelet-based multiresolution isosurface rendering, leveraging convolution operators to reduce computation and register usage [S1]. It builds on the observation that power expressions can be computed incrementally, similar to the Horner scheme [S1]. The approach was developed to address the limitations of naive polynomial evaluation on GPU architectures [S1].
+The method is presented in the context of wavelet-based multiresolution rendering [S1]. It builds on the observation that power expressions can be computed incrementally, similar to the Horner scheme [S1]. The approach was developed to address the limitations of naive polynomial evaluation on GPU architectures [S1].
 
 ## Sources
 [S1] Wavelet-based Multiresolution Isosurface Rendering, https://doi.org/10.2312/vg/vg10/013-020, fetched 2026-10-26

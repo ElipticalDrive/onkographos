@@ -11,7 +11,7 @@ Encoded local offsets is a topology compression scheme that replaces absolute po
 
 **Data Structures:**
 The core structure is `PointerOrData`, which is exactly 1 byte (8 bits) [S1, unofficial]:
-- Bit 0 (1 bit): `leafchild` flag. If set, the remaining 7 bits represent leaf data. If clear, the remaining 7 bits represent a local offset to a child node [S1, unofficial].
+- Bit 0 (1 bit): `leafchild` flag. If set, the remaining 7 bits represent leaf data [S1, unofficial]. If clear, the remaining 7 bits represent a local offset to a child node [S1, unofficial].
 - Bits 1-7 (7 bits): Either the encoded leaf data value or the encoded local offset value $x \in [0, 127]$ [S1, unofficial].
 - Data values are encoded into 7 bits to fit within this structure [S1, unofficial].
 
@@ -20,8 +20,8 @@ The packing process proceeds from fine levels to coarse levels (Level $L-1$ down
 
 1. **Initialize:** Start with the autumnal tree structure [S1, unofficial].
 2. **Iterate Levels:** For each level $l$ from $L-1$ down to 0:
-   a. Identify all parent nodes at level $l$ that have already been placed in memory.
-   b. Identify the subtrees rooted at the children of these parents. These subtrees have already been packed in previous iterations (for finer levels) or are leaf nodes [S1, unofficial].
+   a. Identify all parent nodes at level $l$ that have already been placed in memory [S1, unofficial].
+   b. Identify the subtrees rooted at the children of these parents [S1, unofficial]. These subtrees have already been packed in previous iterations (for finer levels) or are leaf nodes [S1, unofficial].
    c. **Concatenate:** Append the memory blocks of the children's subtrees immediately after their respective parent nodes in the global memory buffer [S1, unofficial].
    d. **Padding:** If the distance (offset) from the parent to the start of a child's subtree is not an exact multiple of the scaling factor $s$ for that level, insert padding bytes between the parent and the child block to align the offset [S1, unofficial].
 3. **Scaling Factor Selection:** For each level, determine the integer scaling factor $s$ [S1, unofficial]:
@@ -53,125 +53,77 @@ Where:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Global memory buffer
-memory = []
+import math
 
-# Tree structure: nodes are objects with 'children' list and 'data'
-# 'children' contains either 'leaf_data' or 'child_node' references
-# 'data' is the value stored in internal nodes
+def pack_tree_topology(nodes_by_level):
+    # nodes_by_level: list of lists, nodes_by_level[l] contains nodes at level l
+    # Each node has a list of children. Children are either leaf nodes or internal nodes.
+    memory = []
+    node_indices = {}  # Maps node object to its start index in memory
 
-def pack_tree(root_node, levels):
-    # levels is a list of lists, where levels[l] contains all nodes at level l
-    # Process from finest (L-1) to coarsest (0)
-    for l in range(len(levels) - 1, -1, -1):
-        current_level_nodes = levels[l]
-        
-        # Determine scaling factor s for this level
-        # First, we need to know the max offset y_max
-        # This requires a preliminary pass or dynamic calculation
-        # For simplicity, assume we calculate y_max based on subtree sizes
-        y_max = calculate_max_offset(current_level_nodes, memory)
-        
-        # Search for optimal s
-        min_padding = infinity
+    # Process levels from finest (L-1) to coarsest (0)
+    for l in range(len(nodes_by_level) - 1, -1, -1):
+        level_nodes = nodes_by_level[l]
+
+        # 1. Calculate y_max for scaling factor selection
+        y_max = 0
+        for node in level_nodes:
+            if node.children:
+                last_child = node.children[-1]
+                y = node_indices[last_child] - (node_indices[node] + 1)
+                if y > y_max:
+                    y_max = y
+
+        # 2. Find optimal s by exhaustive search
+        min_padding = float('inf')
         best_s = 1
-        start_s = ceil(y_max / 127)
-        
+        start_s = math.ceil(y_max / 127) if y_max > 0 else 1
+
         for s in range(start_s, y_max + 1):
             padding = 0
-            for node in current_level_nodes:
+            for node in level_nodes:
                 for child in node.children:
-                    # Calculate required offset y
-                    # This depends on where the child's subtree is currently placed
-                    # In the iterative process, children are already placed if they are leaves
-                    # or if their subtrees were packed in finer levels
-                    child_start_addr = get_address_of(child)
-                    parent_end_addr = get_address_after(node)
-                    y = child_start_addr - parent_end_addr
-                    
-                    # Check if y is representable
-                    if y % s != 0:
-                        padding += (s - (y % s)) % s # Add padding to align to multiple of s
-                    # If y is not a multiple of s, we must pad
-                    # Actually, the algorithm says: "leave some padding space... if desired offsets cannot be encoded exactly"
-                    # So we adjust the placement to make y a multiple of s
-            
+                    y = node_indices[child] - (node_indices[node] + 1)
+                    remainder = y % s
+                    if remainder != 0:
+                        padding += s - remainder
             if padding < min_padding:
                 min_padding = padding
                 best_s = s
-        
         s = best_s
-        
-        # Now perform the packing for this level
-        for node in current_level_nodes:
-            # Node is already in memory from previous steps (or root)
-            # Place children after this node
+
+        # 3. Pack nodes at this level in preorder
+        for node in level_nodes:
+            parent_pos = len(memory)
+            node_indices[node] = parent_pos
+            memory.append(0)  # Placeholder for PointerOrData byte
+
             for child in node.children:
-                if child is a leaf:
-                    # Encode leaf data into 7 bits
-                    encoded_data = encode_data(child.data)
-                    # Append 1 byte: leafchild=1, data=encoded_data
-                    memory.append(0x80 | encoded_data)
-                else:
-                    # Child is a subtree root, already packed in memory
-                    # Calculate current offset
-                    parent_end = len(memory)
-                    child_start = get_address_of(child)
-                    y = child_start - parent_end
-                    
-                    # Calculate required padding to make y a multiple of s
-                    remainder = y % s
-                    if remainder != 0:
-                        padding = s - remainder
-                        memory.extend([0] * padding) # Pad with zeros or specific marker
-                    
-                    # Now y is a multiple of s
-                    y = len(memory) - parent_end
-                    x = y // s
-                    
-                    # Encode offset into 7 bits
-                    # leafchild=0, offset=x
-                    encoded_offset = x & 0x7F
-                    memory.append(encoded_offset)
-                    
-                    # Note: The child's subtree is already in memory, so we don't append it again
-                    # We just record the offset to it
+                child_pos = node_indices[child]
+                y = child_pos - (parent_pos + 1)
 
-def calculate_max_offset(nodes, memory):
-    # Helper to estimate max offset for scaling factor selection
-    # This is a simplification; in practice, it might require a two-pass approach
-    max_y = 0
-    for node in nodes:
-        for child in node.children:
-            if child is not a leaf:
-                # Estimate distance
-                # This is complex because children are interleaved
-                # The source implies an exhaustive search, so we assume y_max is known or estimated
-                pass
-    return max_y
+                # Pad if offset is not a multiple of s
+                remainder = y % s
+                if remainder != 0:
+                    memory.extend([0] * (s - remainder))
 
-def encode_data(data):
-    # Encode data value into 7 bits
-    # Implementation depends on data type
-    return data & 0x7F
+                # Update child position to account for padding
+                child_pos = len(memory)
+                node_indices[child] = child_pos
 
-def get_address_of(node):
-    # Returns the index in 'memory' where the node's PointerOrData byte is stored
-    # This requires tracking node positions during packing
-    pass
+                # Encode offset: leafchild=0, offset=x
+                x = (child_pos - (parent_pos + 1)) // s
+                memory.append(x & 0x7F)
 
-def get_address_after(node):
-    # Returns the index in 'memory' immediately after the node's PointerOrData byte
-    return get_address_of(node) + 1
+    return memory
 ```
 
 ## Subtopics
 
 ### Hierarchical Delta Encoding and Quantization
-A sibling method that focuses on compressing the data values using hierarchical prediction and quantization, rather than the topology encoding described here. It complements the offset encoding by handling the data residuals [S1, unofficial].
+A sibling method that focuses on compressing the data values using hierarchical prediction and quantization, rather than the topology encoding described here [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** The packing process is $O(N)$ where $N$ is the number of nodes, as each node is visited once. The search for the optimal scaling factor $s$ adds a constant factor per level, depending on the range of $s$ [S1, unofficial].
 - **Memory Complexity:** The topology is stored at 0.36 bytes/node for the example quadtree, which is significantly smaller than storing 32-bit pointers [S1, unofficial]. The total memory includes the data values, which are also encoded into 7 bits [S1, unofficial].
 - **Performance:** The method reduces memory size by eliminating pointer indirection and padding. The forested mipmap structure further reduces memory by collapsing coarse levels [S1, unofficial].
 - **Strengths:** Compact representation, random access capability, no pointer indirection overhead [S1, unofficial].
