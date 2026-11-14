@@ -1,0 +1,68 @@
+# Point-based Rendering with Ray Bending
+
+Also called: Controllable Human Motion Synthesis via Point Radiance Fields, Deformed PointNeRF, Point-based Radiance Field Deformation with Ray-Bending, PointNeRF Editing, PointNeRF with Ray Bending
+
+## Overview
+This method synthesizes controllable human motion by deforming a pre-trained point-based radiance field and correcting view-dependent color inconsistencies caused by deformation via ray-bending [S1, unofficial]. It enables physically convincing rendering of deformed scenes by transforming the deformed view direction back to the canonical space before querying the pre-trained model [S1, unofficial]. Unlike methods that twist rays in canonical space or add extra information to features at training, this approach adds a lightweight ray-bending module to the existing point cloud-guided NeRF model, avoiding extra complexity and application limits [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained PointNeRF model (canonical space), a deformed neural point cloud (NPC) $\hat{P}$, and a camera ray defined by origin and deformed view direction $\hat{v}$ in the deformed space.
+*   **Output:** Density $\sigma$ and radiance $r$ for the ray sample point.
+
+**Data Structures:**
+The neural point cloud $P$ is defined as a set of points where each point $i$ has:
+*   $x_i$: 3D location in canonical space.
+*   $f_i$: Neural feature vector.
+*   $\gamma_i$: Scale confidence value in the range $[0, 1]$.
+*   $R_i$: Estimated local rotation matrix (computed during deformation).
+
+**Numbered Steps:**
+
+1.  **Canonical Training:** Build a radiance field from static scenes using PointNeRF [S1, unofficial]. Each point is associated with a neural feature defined as a function of viewing direction.
+2.  **Deformation:** Deform the pose by manipulating points of interest to new positions using a deformation model (e.g., Dynamic Point Field [S1, unofficial]). This produces the deformed point cloud $\hat{P}$ with points $\hat{x}_i$.
+3.  **KD-Tree Construction:** For each frame, build a KD-tree structure for the deformed point cloud $\hat{P}$ to efficiently query $k$-nearest-neighbors [S1, unofficial].
+4.  **Relative Rotation Estimation (Per Point):** For each queried neural point $\hat{c}_x$ in the deformed space:
+    *   Query the KD-tree to extract $k$-nearest-neighbors $\hat{X}$ in deformed space.
+    *   Identify the corresponding point $c_x$ and neighbors $X$ in the canonical space [S1, unofficial].
+    *   Compute the rotation matrix $R$ using Singular Value Decomposition (SVD) on the centered neighbor clusters:
+        $$ U, E, V = \text{SVD}((X - c_x)^T (\hat{X} - \hat{c}_x)) $$
+        $$ R = U V^T $$
+        $$ v = R \hat{v} $$
+        where $v$ is the canonical view direction and $\hat{v}$ is the deformed view direction [S1, unofficial].
+5.  **Rotation Interpolation (Per Ray Sample):** During volumetric ray marching, for a sample point, interpolate the relative rotations using $k$-nearest-neighbors in the NPC to preserve orthogonality in SO(3) [S1, unofficial]:
+    *   Let $R_i$ ($i \in \{1, \dots, k\}$) be the $k$ queried rotation matrices.
+    *   Let $f$ be the mapping from rotation matrix to quaternion.
+    *   Compute quaternions $q_i = f(R_i)$.
+    *   Calculate weights $w_i = d_i^{-1} / \sum_{j=1}^k d_j^{-1}$, where $d_i$ is the distance to the $i$-th neighbor.
+    *   Compute the weighted sum:
+        $$ q = \frac{\sum_{i=1}^k w_i q_i}{\|\sum_{i=1}^k w_i q_i\|} $$
+    *   Final rotation: $R = f^{-1}(q)$ [S1, unofficial].
+6.  **Ray Bending and Rendering:**
+    *   Apply the interpolated rotation $R$ to the deformed view direction $\hat{v}$ to obtain the canonical view direction $v = R \hat{v}$.
+    *   Predict density and radiance using the deformed location $\hat{x}$ and the canonical view direction $v$:
+        $$ (\sigma, r) = \text{Point-NeRF}(\hat{x}, v, x_1, f_1, \gamma_1, \dots, x_k, f_k, \gamma_k) $$
+        where $x_1 \dots x_k$ are the canonical neighbors corresponding to the query [S1, unofficial].
+
+**Parameters:**
+*   $k$: Number of nearest neighbors for SVD and interpolation. Not given in the sources.
+*   Deformation Model: Uses a deformation MLP similar to Dynamic Point Field (DPF) with key points as input [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Specular Materials:** Ray bending is critical for specular materials. Without it, rendering fails to reproduce reflections correctly [S1, unofficial].
+*   **Large Deformation:** Without ray bending, queries may access weakly supervised view-dependent information under large deformation, leading to texture loss [S1, unofficial].
+*   **Orthogonality:** Rotation interpolation must preserve orthogonality in SO(3); simple linear interpolation of rotation matrices is insufficient [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on KD-tree construction ($O(N \log N)$ per frame) and $k$-nearest-neighbor queries during ray marching. SVD computation is constant time per point ($O(k^3)$ or less with optimized SVD).
+*   **Memory Complexity:** Stores the neural point cloud $P$ and the KD-tree structure.
+*   **Strengths:** Decoupled from PointNeRF training; handles fine-level complex deformation; generalizes to other 3D characters besides humans; superior visual quality for specular materials and large deformations compared to no-bending methods [S1, unofficial].
+*   **Limitations:** Requires explicit geometry reconstruction via neural points; relies on accurate deformation model (e.g., DPF) to provide meaningful local rotations [S1, unofficial].
+*   **When to use:** When synthesizing controllable human motion or editing 3D characters with view-dependent effects (specularities) using a point-based radiance field.
+*   **When not to use:** For static scenes without deformation, or when computational resources for per-frame KD-tree construction and SVD are prohibitive.
+
+## Background
+Originating from the paper "Point-Based Radiance Fields for Controllable Human Motion Synthesis" [S1, unofficial], this method addresses the challenge of synthesizing user-controllable human motion in virtual scenes. Previous editable neural radiance field methods allowed naive deformation but struggled with complex 3D human editing like forward kinematics. This approach builds on PointNeRF [S1, unofficial] and Dynamic Point Field (DPF) [S1, unofficial], introducing ray-bending to correct view-dependent inconsistencies caused by deformation. It was developed to provide a more visually plausible and physically convincing rendering of deformed scenes without adding significant complexity to the NeRF model [S1, unofficial].
+
+## Sources
+[S1] Point-Based Radiance Fields for Controllable Human Motion Synthesis, https://doi.org/10.48550/arXiv.2310.03375, fetched 2026-10-29 (unofficial)

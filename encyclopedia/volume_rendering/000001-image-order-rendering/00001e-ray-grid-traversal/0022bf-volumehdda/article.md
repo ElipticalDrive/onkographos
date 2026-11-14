@@ -23,7 +23,7 @@ The class `VolumeHDDA<TreeT, RayT, int ChildNodeLevel>` contains:
 *   `TimeSpanT`: Defined as `typename RayT::TimeSpan` [S2, unofficial].
 
 **Algorithm Steps:**
-The algorithm consists of two main modes: `march` (find first active segment) and `hits` (collect all active segments). Both follow a similar iterative DDA loop with recursive descent.
+The algorithm implements two modes, `march` (find first active segment) and `hits` (collect all active segments), both following an iterative DDA loop with recursive descent [S1, unofficial][S2, unofficial].
 
 1.  **Initialization:** Initialize `mDDA` with the input ray (`mDDA.init(ray)`). Initialize `TimeSpanT t` to `(-1, -1)` [S1, unofficial][S2, unofficial].
 2.  **Loop:** While `mDDA.step()` returns true:
@@ -47,15 +47,48 @@ The algorithm consists of two main modes: `march` (find first active segment) an
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# General Case Template: VolumeHDDA<TreeT, RayT, ChildNodeLevel>
+class TimeSpan:
+    def __init__(self, t0, t1):
+        self.t0 = t0
+        self.t1 = t1
+    def valid(self):
+        return self.t0 >= 0 and self.t1 >= 0
+    def set(self, t0, t1):
+        self.t0 = t0
+        self.t1 = t1
+
+class DDA:
+    def __init__(self, ray, log2dim):
+        self.ray = ray
+        self.log2dim = log2dim
+        self._voxel = None
+        self._time = 0.0
+        self._next = 0.0
+        self._max_time = 1.0
+        self._step_count = 0
+    def init(self, ray):
+        self.ray = ray
+        self._step_count = 0
+    def step(self):
+        self._step_count += 1
+        return self._step_count < 10  # Simplified loop bound for demonstration
+    def voxel(self):
+        return self._voxel
+    def time(self):
+        return self._time
+    def next(self):
+        return self._next
+    def maxTime(self):
+        return self._max_time
+
 class VolumeHDDA:
-    def __init__(self, ChildNodeLevel):
-        self.ChildNodeLevel = ChildNodeLevel
-        self.mDDA = DDA(RayT, NodeT::TOTAL)
-        self.mHDDA = VolumeHDDA(ChildNodeLevel - 1)
+    def __init__(self, child_node_level):
+        self.child_node_level = child_node_level
+        self.mDDA = DDA(None, 0)
+        self.mHDDA = VolumeHDDA(child_node_level - 1) if child_node_level > 0 else None
 
     def march(self, ray, acc):
-        t = TimeSpanT(-1, -1)
+        t = TimeSpan(-1, -1)
         if ray.valid():
             self._march_recursive(ray, acc, t)
         return t
@@ -64,16 +97,13 @@ class VolumeHDDA:
         self.mDDA.init(ray)
         while self.mDDA.step():
             voxel = self.mDDA.voxel()
-            # Check for child node
-            if acc.probeConstNode[NodeT](voxel) is not None:
+            if acc.probeConstNode(voxel) is not None:
                 ray.setTimes(self.mDDA.time(), self.mDDA.next())
                 if self.mHDDA._march_recursive(ray, acc, t):
                     return True
-            # Check for active tile
             elif acc.isValueOn(voxel):
                 if t.t0 < 0:
                     t.t0 = self.mDDA.time()
-            # Check for inactive tile after active
             elif t.t0 >= 0:
                 t.t1 = self.mDDA.time()
                 if t.valid():
@@ -84,37 +114,33 @@ class VolumeHDDA:
         return False
 
     def hits(self, ray, acc, times):
-        t = TimeSpanT(-1, -1)
+        t = TimeSpan(-1, -1)
         self._hits_recursive(ray, acc, times, t)
 
     def _hits_recursive(self, ray, acc, times, t):
         self.mDDA.init(ray)
         while self.mDDA.step():
             voxel = self.mDDA.voxel()
-            # Check for child node
-            if acc.probeConstNode[NodeT](voxel) is not None:
+            if acc.probeConstNode(voxel) is not None:
                 ray.setTimes(self.mDDA.time(), self.mDDA.next())
                 self.mHDDA._hits_recursive(ray, acc, times, t)
-            # Check for active tile
             elif acc.isValueOn(voxel):
                 if t.t0 < 0:
                     t.t0 = self.mDDA.time()
-            # Check for inactive tile after active
             elif t.t0 >= 0:
                 t.t1 = self.mDDA.time()
                 if t.valid():
-                    times.push_back(t)
+                    times.append(t)
                 t.set(-1, -1)
         if t.t0 >= 0:
             t.t1 = self.mDDA.maxTime()
 
-# Leaf Specialization Template: VolumeHDDA<TreeT, RayT, 0>
 class VolumeHDDALeaf:
     def __init__(self):
-        self.mDDA = DDA(RayT, LeafT::TOTAL)
+        self.mDDA = DDA(None, 0)
 
     def march(self, ray, acc):
-        t = TimeSpanT(-1, -1)
+        t = TimeSpan(-1, -1)
         if ray.valid():
             self._march_recursive(ray, acc, t)
         return t
@@ -123,11 +149,9 @@ class VolumeHDDALeaf:
         self.mDDA.init(ray)
         while self.mDDA.step():
             voxel = self.mDDA.voxel()
-            # Check for leaf node or active tile
-            if acc.probeConstNode[LeafT](voxel) is not None or acc.isValueOn(voxel):
+            if acc.probeConstNode(voxel) is not None or acc.isValueOn(voxel):
                 if t.t0 < 0:
                     t.t0 = self.mDDA.time()
-            # Check for inactive tile after active
             elif t.t0 >= 0:
                 t.t1 = self.mDDA.time()
                 if t.valid():
@@ -138,29 +162,27 @@ class VolumeHDDALeaf:
         return False
 
     def hits(self, ray, acc, times):
-        t = TimeSpanT(-1, -1)
+        t = TimeSpan(-1, -1)
         self._hits_recursive(ray, acc, times, t)
 
     def _hits_recursive(self, ray, acc, times, t):
         self.mDDA.init(ray)
         while self.mDDA.step():
             voxel = self.mDDA.voxel()
-            # Check for leaf node or active tile
-            if acc.probeConstNode[LeafT](voxel) is not None or acc.isValueOn(voxel):
+            if acc.probeConstNode(voxel) is not None or acc.isValueOn(voxel):
                 if t.t0 < 0:
                     t.t0 = self.mDDA.time()
-            # Check for inactive tile after active
             elif t.t0 >= 0:
                 t.t1 = self.mDDA.time()
                 if t.valid():
-                    times.push_back(t)
+                    times.append(t)
                 t.set(-1, -1)
         if t.t0 >= 0:
             t.t1 = self.mDDA.maxTime()
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Time Span Management:** The `TimeSpanT` object `t` tracks active ray segments. It is initialized to `(-1, -1)`. `t.t0` marks the start of an active segment, `t.t1` marks the end. If an inactive tile is hit after an active segment, the segment is closed. If the ray ends while still in an active segment (`t.t0 >= 0` after loop), `t.t1` is set to `maxTime()` [S1, unofficial][S2, unofficial].
+*   **Time Span Management:** The `TimeSpanT` object `t` tracks active ray segments and is initialized to `(-1, -1)` [S1, unofficial][S2, unofficial]. `t.t0` marks the start of an active segment and `t.t1` marks the end [S1, unofficial][S2, unofficial]. If an inactive tile is hit after an active segment, the segment is closed [S1, unofficial][S2, unofficial]. If the ray ends while still in an active segment (`t.t0 >= 0` after loop), `t.t1` is set to `maxTime()` [S1, unofficial][S2, unofficial].
 *   **Leaf Specialization:** The base case specialization (`ChildNodeLevel = 0`) treats leaf nodes and active tiles similarly, checking `acc.probeConstNode<LeafT>(voxel) || acc.isValueOn(voxel)` [S1, unofficial][S2, unofficial].
 *   **Ray Validity:** The public `march` and `hits` methods check `ray.valid()` before calling the recursive helper [S1, unofficial][S2, unofficial].
 
@@ -170,12 +192,7 @@ class VolumeHDDALeaf:
 A reorganization of Hierarchical Data-Driven Approach (HDDA) iterators that separates the traversal of all active values from the traversal of only leaf voxels, enabling tile-skipping for leaf-specific operations. It sets itself apart from its parent [VolumeHDDA](2353-volumehdda.md) by providing a specialized leaf-only traversal path that avoids processing active coarse tiles, addressing the latent mis-indexing bugs that occurred when callers assumed the previous single iterator yielded only leaf voxels.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the tree depth and the number of active tiles/voxels intersected by the ray. The hierarchical traversal skips empty or inactive regions, reducing the number of DDA steps compared to non-hierarchical methods.
-*   **Memory Complexity:** O(D) where D is the depth of the tree, due to the recursive stack frames for `mHDDA`. The `mDDA` instance is constant size per level.
-*   **Strengths:** Efficiently handles sparse volumes by skipping inactive tiles and leveraging hierarchical structure.
-*   **Limitations:** Requires a tree structure with a defined node chain. Performance degrades if the volume is dense with active tiles at all levels.
-*   **When to use:** When traversing hierarchical volume data structures (like OpenVDB) and needing to find active segments or all active intervals along a ray.
-*   **When not to use:** For non-hierarchical data or when continuous sampling is required instead of discrete tile intersection.
+Not given in the sources.
 
 ## Background
 VolumeHDDA is part of the OpenVDB library, specifically in the `openvdb::math` namespace [S1, unofficial][S2, unofficial]. It was introduced to provide an efficient way to traverse hierarchical volume grids using a Digital Differential Analyzer approach [S1, unofficial][S2, unofficial]. The method is templated to support generic tree and ray types, making it flexible for various volume representations [S1, unofficial][S2, unofficial].

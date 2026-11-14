@@ -1,0 +1,124 @@
+# Object-NeRF
+
+Also called: ObjectNeRF
+
+## Overview
+Object-NeRF is a composition model that separates and edits objects within a scene using a hybrid voxel-based approach with jointly optimized voxel grid features and MLP parameters [S1]. It introduces a scene branch and object branch to encode geometry and appearance of the scene and objects separately, enabling shifting or addition of objects within the scene [S2]. Unlike standard NeRFs that treat the scene as a monolithic entity, Object-NeRF explicitly models individual instances, allowing for instance-level manipulation [S1, S2].
+
+## How it works
+Object-NeRF builds on the [Voxel-based Representation](10852-voxel-based-representation.md) principles. It extends the standard voxel grid by introducing two distinct decoding branches: one for the background scene and one for foreground objects.
+
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view RGB images, camera poses, and instance segmentation masks (or semantic labels) for each object in the scene [S1, S2].
+*   **Outputs:** A composited RGB image for a target view, and separate density/color fields for the scene and individual objects [S1, S2].
+
+**Data Structures:**
+1.  **Voxel Grid:** A 3D tensor storing feature vectors $\mathbf{f}$ at grid cells. The resolution is a hyperparameter.
+2.  **Scene MLP ($\mathcal{M}_s$):** A small neural network (MLP) that decodes scene features.
+3.  **Object MLP ($\mathcal{M}_o$):** A small neural network (MLP) that decodes object features.
+4.  **Object Activation Latent Codes ($\mathbf{z}_k$):** A learnable latent vector for each object instance $k$ [S1].
+
+**Numbered Steps:**
+1.  **Grid Initialization:** Create a voxel grid of features $\mathbf{f}$ that is jointly optimized with the MLP parameters [S1].
+2.  **Ray Sampling:** For a ray $\mathbf{r}$, sample points $\mathbf{x}$ along the ray. Retrieve the feature vector $\mathbf{f}$ at $\mathbf{x}$ from the grid using trilinear interpolation [S1].
+3.  **Scene Branch Processing:**
+    *   Input the interpolated feature $\mathbf{f}$ and positional encoding of $\mathbf{x}$ into the Scene MLP $\mathcal{M}_s$.
+    *   Output scene density $\sigma_s$ and scene color $\mathbf{c}_s$ [S1, S2].
+4.  **Object Branch Processing:**
+    *   For each object instance $k$, input the interpolated feature $\mathbf{f}$, positional encoding of $\mathbf{x}$, and the object-specific latent code $\mathbf{z}_k$ into the Object MLP $\mathcal{M}_o$.
+    *   Output object density $\sigma_{o,k}$ and object color $\mathbf{c}_{o,k}$ [S1, S2].
+5.  **Compositing:** Combine the scene and object contributions. The final pixel color is derived from the scene and the active objects. The specific compositing formula is not explicitly detailed in the sources, but it relies on the separation of scene and object branches [S1, S2].
+6.  **Loss Calculation:**
+    *   **Photometric Loss:** Use two different photometric losses, one for the foreground (objects) and one for the background (scene) [S1].
+    *   **Mask Loss:** Incorporate segmentation labels with a mask loss term to identify each in-scene object [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def object_nerf_forward(ray_origin, ray_direction, voxel_grid, scene_mlp, object_mlps, object_latents, instance_ids):
+    """
+    ray_origin: (3,)
+    ray_direction: (3,)
+    voxel_grid: 3D tensor of features
+    scene_mlp: MLP for scene
+    object_mlps: List of MLPs for each object
+    object_latents: List of latent codes for each object
+    instance_ids: List of active object IDs for this ray/point
+    """
+    # Sample points along ray
+    points = sample_points(ray_origin, ray_direction)
+    
+    # Interpolate features from voxel grid
+    features = trilinear_interpolate(voxel_grid, points)
+    
+    # Process Scene Branch
+    scene_density, scene_color = scene_mlp(features, points)
+    
+    # Process Object Branches
+    object_contributions = []
+    for obj_id in instance_ids:
+        obj_mlp = object_mlps[obj_id]
+        latent = object_latents[obj_id]
+        # Condition on latent code
+        obj_density, obj_color = obj_mlp(features, points, latent)
+        object_contributions.append((obj_density, obj_color, obj_id))
+        
+    # Composite results
+    # Note: Exact compositing logic (e.g., alpha blending order) is not specified in sources [S1, S2]
+    final_color = composite(scene_color, scene_density, object_contributions)
+    
+    return final_color
+
+def compute_loss(rendered_image, ground_truth_image, rendered_masks, ground_truth_masks):
+    """
+    rendered_image: (H, W, 3)
+    ground_truth_image: (H, W, 3)
+    rendered_masks: (H, W, K) where K is number of objects
+    ground_truth_masks: (H, W, K) binary masks
+    """
+    # Photometric loss for foreground and background [S1]
+    # Assume background mask is derived from complement of object masks
+    background_mask = 1 - sum(rendered_masks)
+    foreground_mask = sum(rendered_masks)
+    
+    photometric_loss = (
+        mse(rendered_image * background_mask, ground_truth_image * background_mask) +
+        mse(rendered_image * foreground_mask, ground_truth_image * foreground_mask)
+    )
+    
+    # Mask loss for object identification [S1]
+    mask_loss = mse(rendered_masks, ground_truth_masks)
+    
+    return photometric_loss + mask_loss
+```
+
+**Parameters:**
+*   **Voxel Grid Resolution:** Not given in the sources.
+*   **Number of Object Latents:** Equal to the number of object instances in the scene [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Instance Segmentation Dependency:** The method requires instance segmentation labels for training [S1, S2].
+*   **Object Addition/Shifting:** The design allows for shifting or adding objects, but the exact mechanism for handling dynamic object counts during inference is not detailed [S2].
+
+## Subtopics
+
+### ObjectSDF
+Uses Signed Distance Functions (SDF) for geometry learning, including an object-SDF and scene-SDF, supervised by semantic labels [S2].
+
+### Fig-NeRF
+Achieves good results for amodal segmentation and object interpolation on datasets like ShapeNet and Gelato [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Evaluated on ScanNet and an in-house ToyDesk dataset [S1].
+*   **Strengths:** Enables object-level editing, shifting, and addition within a scene [S2].
+*   **Limitations:** Requires instance segmentation labels for training [S1, S2].
+
+## Background
+Object-NeRF was created by Yang et al. in September 2021 [S1]. It was introduced as a composition model to separate and edit objects within a scene, addressing the limitation of standard NeRFs that treat scenes as monolithic entities [S1, S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

@@ -1,0 +1,71 @@
+# Diffusion-Based 3D Inpainting
+
+Also called: Inpaint3D
+
+## Overview
+Diffusion-Based 3D Inpainting is a method that utilizes a self-trained 2D inpainting diffusion model to reconstruct missing or masked regions in a 3D scene represented by a radiance field [S1]. It solves the problem of 3D scene completion or object removal by combining explicit reconstruction constraints for visible areas with implicit diffusion priors for occluded areas [S1]. It is distinguished from sibling methods like [Inpainting SDS Loss](11185-inpainting-sds-loss.md) by its specific reliance on a *self-trained* 2D inpainting model rather than a generic pre-trained one, and from [SKED](12268-sked.md) by its focus on distilling 2D inpainting results into a single 3D scene via iterative refinement [S1].
+
+## How it works
+**Inputs:**
+1.  A 3D radiance field representation (e.g., NeRF) initialized from a set of input images.
+2.  Per-view binary masks indicating regions to be inpainted (masked) and regions to be preserved (unmasked).
+3.  A self-trained 2D inpainting diffusion model (Latent Diffusion Model) [S1].
+4.  Optional: Text prompts describing the content to be generated in masked regions [S1].
+
+**Outputs:**
+1.  An optimized 3D radiance field where masked regions are filled with semantically consistent and view-consistent geometry and texture.
+
+**Data Structures:**
+*   **Radiance Field Parameters:** Standard NeRF MLP weights or voxel grid densities/colors.
+*   **Diffusion Model:** Frozen U-Net parameters for noise prediction $\epsilon_\theta$.
+*   **Masks:** Binary tensor $M \in \{0,1\}^{H \times W}$ per view, where 1 indicates masked region.
+
+**Parameters:**
+*   **Reconstruction Weight ($\lambda_{rec}$):** Weight for the unmasked region loss. Not given in the sources.
+*   **SDS Weight ($\lambda_{sds}$):** Weight for the masked region loss. Not given in the sources.
+*   **Diffusion Steps:** Number of denoising steps for the 2D inpainter. Not given in the sources.
+
+**Steps:**
+1.  **Initialization:** Initialize the 3D radiance field from the input images. Initialize the self-trained 2D inpainting diffusion model using a dataset of inpainted images [S1].
+2.  **Sampling:** For each training iteration:
+    a.  Sample a camera pose and render an RGB image $I_{render}$ from the current radiance field.
+    b.  Apply the mask $M$ to separate the image into observed ($I_{obs}$) and masked ($I_{mask}$) regions.
+3.  **Unmasked Supervision:** Compute a reconstruction loss (e.g., L1 or L2) between the rendered unmasked pixels and the ground truth input pixels $I_{gt}$:
+    $$ \mathcal{L}_{rec} = \| (1 - M) \odot I_{render} - (1 - M) \odot I_{gt} \|_1 $$
+4.  **Masked Supervision (SDS):**
+    a.  Encode the masked region of the rendered image (or the full image with masked region zeroed/padded) into latent space.
+    b.  Pass the latent through the frozen 2D inpainting diffusion model to predict noise $\epsilon_\theta$.
+    c.  Compute the Score Distillation Sampling (SDS) loss [S1, S89] based on the difference between the predicted noise and the actual noise added during diffusion. This gradient signal encourages the rendered masked region to match the distribution of the 2D inpainting model.
+    $$ \mathcal{L}_{sds} = \mathbb{E}_{t, \epsilon} \left[ w(t) ( \epsilon_\theta(z_t, t, c) - \epsilon ) \frac{\partial x_0}{\partial \theta} \right] $$
+    where $x_0$ is the reconstructed image from latent $z_t$, and $\theta$ are the radiance field parameters.
+5.  **Optimization:** Update the radiance field parameters by minimizing the combined loss:
+    $$ \mathcal{L}_{total} = \lambda_{rec} \mathcal{L}_{rec} + \lambda_{sds} \mathcal{L}_{sds} $$
+6.  **Refinement:** Iterate steps 2-5 until convergence. The self-trained nature of the 2D model ensures it is specialized for the specific inpainting task, improving consistency [S1].
+
+**Edge Cases and Pitfalls:**
+*   **View Inconsistency:** Standard 2D inpainting may produce inconsistent textures across views. The method relies on the 3D optimization loop to enforce consistency, but large view variations may still cause artifacts [S1].
+*   **Mask Boundaries:** Sharp transitions between masked and unmasked regions can cause visible seams if the diffusion prior does not align with the existing geometry [S1].
+*   **Precision:** The SDS gradient computation requires careful handling of the latent space scaling factors to avoid vanishing or exploding gradients [G].
+
+## Subtopics
+
+### Nerfiller
+Nerfiller focuses on scene completion with arbitrary masks rather than object removal with tight masks [S1]. It utilizes a grid-based prior where images are shuffled into 2×2 grids and fed into 2D inpainting diffusion models to generate 3D consistent outputs [S1]. It further introduces an iterative framework to distill these 2D inpainting results into a single 3D scene [S1].
+
+### InFusion
+InFusion is a 3D Gaussian Splatting (3DGS) inpainting method that integrates depth completion based on diffusion models [S1]. It selects a reference image for inpainting, employs a self-trained depth completion model to predict the depth map of the inpainting region, and projects it back into point clouds for accurate initial completion [S1]. It designs a progressive strategy to resolve complex cases that could not be completed from a single view [S1].
+
+## Operating characteristics
+*   **Time Complexity:** High. Requires multiple forward passes through the radiance field and the diffusion model per iteration. The iterative distillation process (e.g., in Nerfiller) adds further overhead [S1].
+*   **Memory Complexity:** Moderate to High. Requires storing the radiance field, the diffusion model weights (frozen), and intermediate latent states during SDS computation [S1].
+*   **Performance:** Produces high-quality, semantically consistent inpainting results, especially for large missing regions [S1].
+*   **Strengths:** Leverages powerful 2D diffusion priors; self-training allows adaptation to specific inpainting tasks [S1].
+*   **Limitations:** Computationally expensive; sensitive to mask boundaries; may struggle with complex multi-view inconsistencies without additional mechanisms (like the multi-view scoring in MVIPNeRF) [S1].
+*   **When to use:** When high-fidelity semantic completion is required for large masked regions in 3D scenes.
+*   **When not to use:** When real-time performance is critical or when masks are very small and simple geometric interpolation suffices.
+
+## Background
+The method originates from the application of 2D inpainting diffusion models to 3D radiance fields [S1]. It builds on the general framework of Diffusion-Based Guidance for Radiance Field Optimization [8117-diffusion-based-guidance-for-radiance-field-optimization.md]. The specific approach of using a self-trained 2D inpainting model for 3D inpainting is attributed to Inpaint3D [S1]. Recent advancements have also extended these techniques to 3D Gaussian Splatting, such as InFusion [S1].
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

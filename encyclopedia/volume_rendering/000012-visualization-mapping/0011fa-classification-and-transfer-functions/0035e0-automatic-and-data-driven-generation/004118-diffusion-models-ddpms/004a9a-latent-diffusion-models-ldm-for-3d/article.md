@@ -1,0 +1,56 @@
+# Latent Diffusion Models (LDM) for 3D
+Also called: 3D Latent Diffusion, LDM for 3D, Latent Diffusion Models (LDMs)
+
+## Overview
+Latent Diffusion Models (LDM) for 3D perform the diffusion process in a compressed latent space rather than directly in the high-dimensional 3D representation space (e.g., voxel grids or NeRF weights), significantly improving computational efficiency and output quality [S1, S2]. This approach enables the generation of expressive 3D structures, such as neural radiance fields (NeRFs), by learning a prior distribution over latent codes [S2]. It sets itself apart from standard Diffusion Models (DDPMs) by decoupling the high-dimensional data representation from the diffusion process, allowing the use of powerful 2D diffusion priors adapted for 3D latent structures [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D scenes (e.g., NeRFs) represented by latent codes $\{x_i\}$, typically extracted from a pre-trained auto-decoder.
+*   **Outputs:** A denoised latent code $\hat{x}_i$ or a sample from the learned prior distribution $p_\phi(x)$, which can be decoded into a 3D representation (e.g., a mesh or NeRF) [S2].
+
+**Data Structures:**
+*   **Latent Code ($x_i$):** A compressed representation of a 3D scene. In methods like SSDNeRF, this is often a triplane feature grid [S2].
+*   **Diffusion State ($x_i^{(t)}$):** The noisy latent code at time step $t$.
+*   **Denoising Network:** A neural network with parameters $\phi$ that predicts the noise or the clean code given the noisy input and time step [S2].
+
+**Parameters:**
+*   $t$: Diffusion time step, sampled uniformly from $U(0, T)$ [S2].
+*   $T$: Total number of diffusion steps [S2].
+*   $\alpha^{(t)}, \sigma^{(t)}$: Empirical noise schedule functions defining the signal and noise coefficients at step $t$ [S2].
+*   $w^{(t)}$: Empirical time-dependent weighting function for the loss [S2].
+
+**Algorithm Steps:**
+1.  **Latent Extraction (Pre-training):** Train a NeRF auto-decoder to map per-scene latent codes $x_i$ to 3D representations. Extract these codes $\{x_i\}$ as the training data for the LDM [S2].
+2.  **Noising:** For a latent code $x_i$ and a random time step $t$, inject Gaussian noise $\epsilon \sim \mathcal{N}(0, I)$ to create the noisy code:
+    $$x_i^{(t)} = \alpha^{(t)} x_i + \sigma^{(t)} \epsilon$$
+    [S2].
+3.  **Denoising Training:** Train the denoising network $\hat{x}_\phi(x_i^{(t)}, t)$ to predict the clean code $x_i$ (or the noise $\epsilon$) from $x_i^{(t)}$ and $t$. The network is optimized using the simplified L2 denoising loss:
+    $$\mathcal{L}_{diff}(\phi) = \mathbb{E}_{i,t,\epsilon} \left[ \frac{1}{2} w^{(t)} \left\| \hat{x}_\phi(x_i^{(t)}, t) - x_i^{(t)} \right\|^2 \right]$$
+    [S2]. Note: The source formula explicitly shows the squared difference between the prediction and the noisy input, which is equivalent to predicting the noise if the network is parameterized accordingly [S2].
+4.  **Sampling:** To generate a new 3D scene, start with random Gaussian noise $x^{(T)}$ and iteratively denoise using a solver (e.g., DDIM) to obtain $x^{(0)}$ [S2].
+5.  **Decoding:** Pass the generated latent code $x^{(0)}$ through the trained NeRF decoder to obtain the final 3D representation [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Reconstruction Difficulty:** Reconstructing NeRFs from sparse views without a learned prior is exceptionally difficult, limiting training to dense-view settings [S2].
+*   **Two-Stage Dependency:** Traditional LDM for 3D relies on a two-stage training scheme (auto-decoder first, then LDM), which can be unstable or inefficient compared to single-stage approaches [S2].
+
+## Subtopics
+
+### Latent Diffusion Models (LDM)
+A general framework that performs diffusion in a latent space, significantly improving computational efficiency and output quality compared to pixel-space diffusion [S1]. It leverages pre-trained conditional models for stable and efficient synthesis based on text prompts or other conditional inputs (e.g., Stable Diffusion) [S1]. Variants like ControlNet add conditions (canny edge, pose, depth) for fine-grained control, while LoRA allows efficient fine-tuning with minimal overhead [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than direct 3D diffusion due to the reduced dimensionality of the latent space [S1].
+*   **Memory Complexity:** Lower memory footprint as the diffusion process operates on compact latent codes rather than full 3D volumes or large NeRF weights [S1, S2].
+*   **Strengths:** High-quality output, computational efficiency, ability to leverage powerful 2D diffusion priors [S1, S2].
+*   **Limitations:** Requires pre-training of an auto-decoder (in two-stage methods), which may limit flexibility [S2]. Reconstruction from sparse views is challenging without strong priors [S2].
+*   **When to Use:** When generating high-quality 3D assets efficiently, especially when leveraging existing 2D diffusion models or when computational resources are limited relative to the 3D resolution [S1, S2].
+*   **When Not to Use:** When direct 3D generation without a latent prior is required, or when the scene cannot be effectively compressed into a latent space [S2].
+
+## Background
+Latent Diffusion Models were introduced to address the computational bottlenecks of applying diffusion models directly to high-dimensional data [S1]. In the context of 3D, they have been adapted to generate neural fields and other 3D representations by learning priors over latent codes [S2]. The approach has evolved from two-stage training schemes (auto-decoder + LDM) to more unified single-stage approaches like SSDNeRF, which jointly learns the triplane features, NeRF decoder, and diffusion prior [S2].
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+[S2] Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction, https://doi.org/10.1109/iccv51070.2023.00229, fetched 2026-10-29

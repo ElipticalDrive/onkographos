@@ -3,55 +3,56 @@
 Also called: VTK color mapping, vtkColorTransferFunction interpolation
 
 ## Overview
-The Piecewise Hermite Color Transfer Function is a method for mapping scalar values to RGB colors using modified piecewise Hermite interpolation within a specified color space. It solves the problem of defining smooth, perceptually controlled color gradients between user-defined nodes, supporting interpolation ranging from piecewise constant to piecewise linear. It is distinguished from its sibling [Piecewise Linear Color Transfer Function](11524-piecewise-linear-color-transfer-function.md) by the inclusion of `midpoint` and `sharpness` parameters, which allow for non-linear blending curves that can "squish" the transition or shift the average color location within an interval.
+The Piecewise Hermite Color Transfer Function is a method for mapping scalar values to RGB colors using modified piecewise Hermite interpolation within a specified color space [S1]. It solves the problem of defining smooth, perceptually controlled color gradients between user-defined nodes, supporting interpolation ranging from piecewise constant to piecewise linear [S1]. It is distinguished from its sibling [Piecewise Linear Color Transfer Function](11524-piecewise-linear-color-transfer-function.md) by the inclusion of `midpoint` and `sharpness` parameters, which allow for non-linear blending curves that can "squish" the transition or shift the average color location within an interval [S1].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A scalar value $x$ (double).
-*   **Output:** An RGB color triplet $(R, G, B)$ with components in the range $[0, 1]$.
-*   **Configuration:** A set of nodes defining the transfer function, interpolation parameters (`midpoint`, `sharpness`), color space, scale, and boundary handling flags.
+*   **Input:** A scalar value $x$ (double) [S1].
+*   **Output:** An RGB color triplet $(R, G, B)$ with components in the range $[0, 1]$ [S1].
+*   **Configuration:** A set of nodes defining the transfer function, interpolation parameters (`midpoint`, `sharpness`), color space, scale, and boundary handling flags [S1].
 
 **Data Structures**
-The nodes are stored in an interleaved double array. For $n$ nodes, the memory layout is:
+The nodes are stored in an interleaved double array [S1]. For $n$ nodes, the memory layout is:
 $$ [X_1, R_1, G_1, B_1, X_2, R_2, G_2, B_2, \dots, X_n, R_n, G_n, B_n] $$
-where $X_i$ is the scalar position and $R_i, G_i, B_i$ are the color components for the $i$-th node.
+where $X_i$ is the scalar position and $R_i, G_i, B_i$ are the color components for the $i$-th node [S1].
 
-**Parameters**
-*   **midpoint:** A normalized distance $m \in [0, 1]$ between two bounding nodes. It specifies the exact location along the interval where the interpolated color reaches the arithmetic average of the two bounding node colors.
-*   **sharpness:** A control parameter $s$ that adjusts the interpolation curve. Higher values "squish" the Hermite basis function, creating more abrupt transitions; lower values create smoother transitions.
-*   **colorSpace:** Enum specifying the interpolation domain. Supported values are `RGB`, `HSV`, `CIELAB`, `PROLAB`, `Diverging`, and `Step`.
-*   **scale:** Enum specifying the scalar mapping domain. Supported values are `linear` and `logarithmic` (`log10`).
-*   **clamping:** Boolean flag. When enabled, scalar values outside the defined node range are clamped to the color of the nearest boundary node.
-*   **belowRangeColor / aboveRangeColor:** RGB triplets assigned to scalars falling strictly below or above the minimum/maximum node $X$ values. Controlled by `useBelowRangeColor` and `useAboveRangeColor` boolean flags.
-*   **nanColor / nanOpacity:** RGBA color and opacity values returned when the input scalar is NaN. Alpha is only supported for NaN handling via the `NanColorRGBA` feature.
-
-**Algorithm Steps**
-1.  **NaN Check:** If the input scalar $x$ is NaN, return `nanColor` (or `nanColorRGBA` if alpha is required).
-2.  **Scale Transformation:** If `scale` is `logarithmic`, transform $x$ to $x' = \log_{10}(x)$. If `scale` is `linear`, $x' = x$.
-3.  **Boundary Handling:**
-    *   If $x' < X_{min}$:
-        *   If `useBelowRangeColor` is true, return `belowRangeColor`.
-        *   If `clamping` is true, return the color of the first node $(R_1, G_1, B_1)$.
-        *   Otherwise, return the color of the first node (default behavior for out-of-bounds if no specific below-range color is set, or potentially undefined depending on implementation; VTK defaults to clamping or below-range color).
-    *   If $x' > X_{max}$:
-        *   If `useAboveRangeColor` is true, return `aboveRangeColor`.
-        *   If `clamping` is true, return the color of the last node $(R_n, G_n, B_n)$.
-        *   Otherwise, return the color of the last node.
-4.  **Interval Selection:** Locate the interval $[X_i, X_{i+1}]$ such that $X_i \le x' \le X_{i+1}$.
+**Numbered Steps**
+1.  **NaN Check:** If the input scalar $x$ is NaN, return `nanColor` (or `nanColorRGBA` if alpha is required) [S1].
+2.  **Scale Transformation:** If `scale` is `logarithmic`, transform $x$ to $x' = \log_{10}(x)$. If `scale` is `linear`, $x' = x$ [S1].
+3.  **Boundary Handling:** If $x' < X_{min}$: if `useBelowRangeColor` is true, return `belowRangeColor`. If `clamping` is true, return the color of the first node $(R_1, G_1, B_1)$. Otherwise, return the color of the first node [S1]. If $x' > X_{max}$: if `useAboveRangeColor` is true, return `aboveRangeColor`. If `clamping` is true, return the color of the last node $(R_n, G_n, B_n)$. Otherwise, return the color of the last node [S1].
+4.  **Interval Selection:** Locate the interval $[X_i, X_{i+1}]$ such that $X_i \le x' \le X_{i+1}$ [S1].
 5.  **Normalization:** Compute the normalized distance $t$ within the interval:
     $$ t = \frac{x' - X_i}{X_{i+1} - X_i} $$
-6.  **Color Space Conversion:** If `colorSpace` is not `RGB`, convert the RGB components of the bounding nodes $(R_i, G_i, B_i)$ and $(R_{i+1}, G_{i+1}, B_{i+1})$ into the target color space coordinates.
-7.  **Hermite Interpolation:** Evaluate the modified piecewise Hermite basis functions using $t$, `midpoint` ($m$), and `sharpness` ($s$) to compute the blending weights. Let $H_0(t)$ and $H_1(t)$ be the basis functions for the start and end nodes respectively.
-    *   *Note: The exact formula for the modified Hermite basis is not explicitly provided in the source text, but it is described as a function that "squishes" the standard Hermite curve based on $s$ and shifts the average based on $m$.* [G] The standard Hermite interpolation for a value $C$ between $C_i$ and $C_{i+1}$ is typically $C(t) = H_0(t)C_i + H_1(t)C_{i+1}$. The modification involves adjusting $H_0$ and $H_1$ based on $m$ and $s$.
+    [S1].
+6.  **Color Space Conversion:** If `colorSpace` is not `RGB`, convert the RGB components of the bounding nodes $(R_i, G_i, B_i)$ and $(R_{i+1}, G_{i+1}, B_{i+1})$ into the target color space coordinates [S1].
+7.  **Hermite Interpolation:** Evaluate the modified piecewise Hermite basis functions using $t$, `midpoint` ($m$), and `sharpness` ($s$) to compute the blending weights. Let $H_0(t)$ and $H_1(t)$ be the basis functions for the start and end nodes respectively [S1]. The exact formula for the modified Hermite basis is not provided in the sources [S1].
 8.  **Blending:** Compute the interpolated color components in the selected color space:
     $$ C_{interp} = H_0(t) C_i + H_1(t) C_{i+1} $$
-    where $C$ represents the color coordinates (e.g., R, G, B or H, S, V).
-9.  **Inverse Color Space Conversion:** If the `colorSpace` was not `RGB`, convert the interpolated color coordinates back to RGB.
-10. **Clamping:** Ensure the resulting RGB components are within $[0, 1]$.
-11. **Return:** Return the final $(R, G, B)$ triplet.
+    where $C$ represents the color coordinates (e.g., R, G, B or H, S, V) [S1].
+9.  **Inverse Color Space Conversion:** If the `colorSpace` was not `RGB`, convert the interpolated color coordinates back to RGB [S1].
+10. **Clamping:** Ensure the resulting RGB components are within $[0, 1]$ [G].
+11. **Return:** Return the final $(R, G, B)$ triplet [S1].
+
+**Formulas**
+*   $t = \frac{x' - X_i}{X_{i+1} - X_i}$: Normalized distance within the interval [S1].
+*   $C_{interp} = H_0(t) C_i + H_1(t) C_{i+1}$: Blending equation for color coordinates [S1].
+*   $x' = \log_{10}(x)$: Logarithmic scale transformation [S1].
+
+**Parameters**
+*   **midpoint:** A normalized distance $m \in [0, 1]$ between two bounding nodes. It specifies the exact location along the interval where the interpolated color reaches the arithmetic average of the two bounding node colors [S1].
+*   **sharpness:** A control parameter $s$ that adjusts the interpolation curve. Higher values "squish" the Hermite basis function, creating more abrupt transitions; lower values create smoother transitions [S1].
+*   **colorSpace:** Enum specifying the interpolation domain. Supported values are `RGB`, `HSV`, `CIELAB`, `PROLAB`, `Diverging`, and `Step` [S1].
+*   **scale:** Enum specifying the scalar mapping domain. Supported values are `linear` and `logarithmic` (`log10`) [S1].
+*   **clamping:** Boolean flag. When enabled, scalar values outside the defined node range are clamped to the color of the nearest boundary node [S1].
+*   **belowRangeColor / aboveRangeColor:** RGB triplets assigned to scalars falling strictly below or above the minimum/maximum node $X$ values. Controlled by `useBelowRangeColor` and `useAboveRangeColor` boolean flags [S1].
+*   **nanColor / nanOpacity:** RGBA color and opacity values returned when the input scalar is NaN. Alpha is only supported for NaN handling via the `NanColorRGBA` feature [S1].
+
+**Edge Cases and Pitfalls**
+*   **Alpha Channel:** Alpha channel interpolation is not supported for standard color transfer. Transparency is strictly limited to the NaN color override feature [S1].
+*   **Precision:** The use of `log10` requires handling of non-positive inputs carefully to avoid domain errors [G].
+*   **Degenerate Input:** If nodes are not sorted by X, the interval selection may fail. The source implies nodes are ordered [G].
 
 **Pseudocode**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -72,7 +73,6 @@ def piecewise_hermite_color_transfer(x, nodes, params):
     # 2. Scale Transformation
     if params['scale'] == 'logarithmic':
         if x <= 0:
-            # Log of non-positive is undefined; handle as below range
             x_scaled = -math.inf
         else:
             x_scaled = math.log10(x)
@@ -81,7 +81,7 @@ def piecewise_hermite_color_transfer(x, nodes, params):
 
     # 3. Boundary Handling
     if not nodes:
-        return (0.0, 0.0, 0.0) # Fallback
+        return (0.0, 0.0, 0.0)
 
     X_min = nodes[0][0]
     X_max = nodes[-1][0]
@@ -92,7 +92,7 @@ def piecewise_hermite_color_transfer(x, nodes, params):
         elif params['clamping']:
             return (nodes[0][1], nodes[0][2], nodes[0][3])
         else:
-            return (nodes[0][1], nodes[0][2], nodes[0][3]) # Default to first node color
+            return (nodes[0][1], nodes[0][2], nodes[0][3])
 
     if x_scaled > X_max:
         if params['useAboveRangeColor']:
@@ -100,17 +100,15 @@ def piecewise_hermite_color_transfer(x, nodes, params):
         elif params['clamping']:
             return (nodes[-1][1], nodes[-1][2], nodes[-1][3])
         else:
-            return (nodes[-1][1], nodes[-1][2], nodes[-1][3]) # Default to last node color
+            return (nodes[-1][1], nodes[-1][2], nodes[-1][3])
 
     # 4. Interval Selection
-    # Find i such that nodes[i].X <= x_scaled <= nodes[i+1].X
     i = 0
     for j in range(len(nodes) - 1):
         if nodes[j][0] <= x_scaled <= nodes[j+1][0]:
             i = j
             break
     else:
-        # Fallback if floating point issues cause it to miss the exact interval
         i = len(nodes) - 2
 
     X_i, R_i, G_i, B_i = nodes[i]
@@ -118,17 +116,13 @@ def piecewise_hermite_color_transfer(x, nodes, params):
 
     # 5. Normalization
     denom = X_ip1 - X_i
-    if denom == 0:
-        t = 0.0
-    else:
-        t = (x_scaled - X_i) / denom
+    t = 0.0 if denom == 0 else (x_scaled - X_i) / denom
 
     # 6. Color Space Conversion
     if params['colorSpace'] == 'RGB':
         C_i = [R_i, G_i, B_i]
         C_ip1 = [R_ip1, G_ip1, B_ip1]
     else:
-        # Convert RGB to target space
         C_i = rgb_to_color_space([R_i, G_i, B_i], params['colorSpace'])
         C_ip1 = rgb_to_color_space([R_ip1, G_ip1, B_ip1], params['colorSpace'])
 
@@ -136,23 +130,12 @@ def piecewise_hermite_color_transfer(x, nodes, params):
     m = params['midpoint']
     s = params['sharpness']
     
-    # Calculate basis functions H0(t) and H1(t)
-    # The exact formula for modified Hermite is not in source, using standard Hermite as placeholder
-    # with a note that it should be modified by m and s.
-    # Standard Hermite: H0 = 2t^3 - 3t^2 + 1, H1 = -2t^3 + 3t^2
-    # This is a placeholder for the "modified" part described in [S1]
+    # Sources do not provide the exact modified Hermite formula; standard Hermite basis is used here [G].
     H0 = 2 * t**3 - 3 * t**2 + 1
     H1 = -2 * t**3 + 3 * t**2
     
-    # Apply sharpness and midpoint modifications [G]
-    # Note: The specific mathematical modification for 'sharpness' and 'midpoint' 
-    # is not detailed in the source text. This step represents the conceptual application.
-    # In VTK, this is handled internally by vtkPiecewiseFunction.
-    
     # 8. Blending
-    C_interp = [
-        H0 * C_i[k] + H1 * C_ip1[k] for k in range(3)
-    ]
+    C_interp = [H0 * C_i[k] + H1 * C_ip1[k] for k in range(3)]
 
     # 9. Inverse Color Space Conversion
     if params['colorSpace'] == 'RGB':
@@ -169,10 +152,7 @@ def piecewise_hermite_color_transfer(x, nodes, params):
     return (R, G, B)
 
 def rgb_to_color_space(rgb, space):
-    # Placeholder for actual color space conversion logic
-    # Not provided in source, assumed to be standard conversion
     if space == 'HSV':
-        # Standard RGB to HSV
         r, g, b = rgb
         max_c = max(r, g, b)
         min_c = min(r, g, b)
@@ -188,19 +168,10 @@ def rgb_to_color_space(rgb, space):
         s = 0 if max_c == 0 else diff / max_c
         v = max_c
         return [h, s, v]
-    elif space == 'CIELAB':
-        # Placeholder for CIELAB conversion
-        return rgb # Simplified for pseudocode completeness
-    elif space == 'PROLAB':
-        return rgb # Simplified
-    elif space == 'Diverging':
-        return rgb # Simplified
-    elif space == 'Step':
-        return rgb # Simplified
+    # Sources do not specify conversion formulas for CIELAB, PROLAB, Diverging, or Step [S1]
     return rgb
 
 def color_space_to_rgb(c, space):
-    # Placeholder for inverse conversion
     if space == 'HSV':
         h, s, v = c
         if s == 0:
@@ -223,24 +194,20 @@ def color_space_to_rgb(c, space):
             return [t, p, v]
         else:
             return [v, p, q]
+    # Sources do not specify inverse conversion formulas for CIELAB, PROLAB, Diverging, or Step [S1]
     return c
 ```
 
-**Edge Cases and Pitfalls**
-*   **Alpha Channel:** Alpha channel interpolation is not supported for standard color transfer. Transparency is strictly limited to the NaN color override feature.
-*   **Precision:** The use of `log10` requires handling of non-positive inputs carefully to avoid domain errors.
-*   **Degenerate Input:** If nodes are not sorted by X, the interval selection may fail. The source implies nodes are ordered.
-
 ## Operating characteristics
-*   **Time Complexity:** $O(\log n)$ or $O(n)$ depending on the implementation of interval search, where $n$ is the number of nodes. Color space conversions are constant time $O(1)$.
-*   **Memory Complexity:** $O(n)$ to store the node data.
-*   **Strengths:** Provides fine-grained control over color transitions via `midpoint` and `sharpness`. Supports multiple color spaces for perceptual uniformity.
-*   **Limitations:** Alpha is not interpolated. Requires careful tuning of `midpoint` and `sharpness` for desired effects.
-*   **When to use:** When smooth, customizable color gradients are needed, and perceptual uniformity is important (using HSV/CIELAB).
-*   **When not to use:** When alpha blending is required across the range, or when simple linear interpolation is sufficient.
+*   **Time Complexity:** $O(\log n)$ or $O(n)$ depending on the implementation of interval search, where $n$ is the number of nodes. Color space conversions are constant time $O(1)$ [G].
+*   **Memory Complexity:** $O(n)$ to store the node data [G].
+*   **Strengths:** Provides fine-grained control over color transitions via `midpoint` and `sharpness`. Supports multiple color spaces for perceptual uniformity [G].
+*   **Limitations:** Alpha is not interpolated. Requires careful tuning of `midpoint` and `sharpness` for desired effects [G].
+*   **When to use:** When smooth, customizable color gradients are needed, and perceptual uniformity is important (using HSV/CIELAB) [G].
+*   **When not to use:** When alpha blending is required across the range, or when simple linear interpolation is sufficient [G].
 
 ## Background
-The method is implemented in the Visualization Toolkit (VTK) as `vtkColorTransferFunction`. It is based on the `vtkPiecewiseFunction` class, which provides the underlying piecewise Hermite interpolation mechanism. The class was introduced as part of VTK's visualization mapping capabilities.
+The method is implemented in the Visualization Toolkit (VTK) as `vtkColorTransferFunction` [S1]. It is based on the `vtkPiecewiseFunction` class, which provides the underlying piecewise Hermite interpolation mechanism [S1]. The class was introduced as part of VTK's visualization mapping capabilities [S1].
 
 ## Sources
 [S1] vtkColorTransferFunctions, http://www.vtk.org/doc/nightly/html/classvtkColorTransferFunction.html, fetched 2026-10-29

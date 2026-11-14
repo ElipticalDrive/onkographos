@@ -1,0 +1,232 @@
+# 3D Gaussian Splatting Rasterization (GPU)
+
+Also called: GaussianRasterizer, RasterizeGaussians, Gaussian Rasterization (GPU), 3DGS Rasterization
+
+## Overview
+A CUDA-based rasterization pipeline that projects 3D Gaussian splats to 2D, composites colors and depths, and computes exact gradients for all Gaussian parameters via a C++/CUDA backend [S2, unofficial]. It builds on [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by implementing the full tile-based sorting, binning, and rendering logic required for differentiable training [S2, unofficial]. It differs from [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) by relying on explicit tile-based sorting rather than transmittance culling for early exit, and from [Gaussian Splat Projection and Sorting](3369-gaussian-splat-projection-and-sorting.md) by including the complete forward/backward rendering and auxiliary depth passes [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `means3D`: Tensor of shape $[P, 3]$, 3D positions.
+- `scales`: Tensor of shape $[P, 3]$, 3D scales.
+- `rotations`: Tensor of shape $[P, 4]$, quaternions.
+- `opacities`: Tensor of shape $[P]$, scalar opacities.
+- `dc`: Tensor of shape $[N, 1, 3]$, direct colors (zero-degree SH).
+- `shs`: Tensor of shape $[N, K, 3]$, spherical harmonics coefficients.
+- `colors_precomp`: Optional Tensor of shape $[P, 3]$. If provided, `dc` and `shs` are ignored for color [S2, unofficial].
+- `viewmatrix`: $4 \times 4$ view matrix.
+- `projmatrix`: $4 \times 4$ projection matrix.
+- `campos`: Camera position $[3]$.
+- `tanfovx`, `tanfovy`: Tangent of horizontal/vertical FOV.
+- `image_height`, `image_width`: Output resolution.
+- `bg`: Background color $[3]$.
+- `scale_modifier`: Scalar multiplier for scales.
+- `sh_degree`: Active SH degree.
+- `prefiltered`: Boolean.
+- `antialiasing`: Boolean.
+- `inference_only`: Boolean. If True, skips gradient-related buffers and returns only color/radii/invdepths/accum_weights [S2, unofficial].
+- `pixel_weights`: Optional Tensor $[H, W]$. Defaults to ones if None and not `inference_only` [S2, unofficial].
+- `debug`: Boolean. If True, copies args to CPU for error dumping [S2, unofficial].
+
+**Outputs:**
+- `color`: Rendered image $[3, H, W]$.
+- `radii`: Visibility mask $[P]$ (integer, >0 if splat covers pixel).
+- `invdepths`: Inverse depth image $[H, W]$ (optional, depends on mode).
+- `accum_weights`: Accumulated alpha/weights $[H, W]$ (optional).
+- Gradients: `grad_means3D`, `grad_means2D`, `grad_dc`, `grad_sh`, `grad_opacities`, `grad_scales`, `grad_rotations`, `grad_cov3Ds_precomp` [S2, unofficial].
+
+**Data Structures:**
+The C++ backend manages several state buffers allocated on the device:
+1.  `GeometryState`: Size required for $P$ Gaussians. Stores `clamped` (covariances), `means2D` (projected centers), `depths`, `cov3D`, `rgb`, `conic_opacity` (inverse 2D covariance + opacity), `tiles_touched` (tile index per Gaussian), `point_offsets` (prefix sum of tiles), `internal_radii`.
+2.  `BinningState`: Size required for `num_rendered` Gaussians. Stores `point_list_keys_unsorted`, `point_list_unsorted`, `point_list_keys`, `point_list` (sorted indices), `list_sorting_space`, `sorting_size` (temporary storage for CUB).
+3.  `ImageState`: Size `requiredImage(num_pixels, num_tiles)`. Stores `ranges` (start/end indices per tile), `bucket_count`, `bucket_offsets`, `bucket_to_tile`, `accum_alpha`, `n_contrib`, `max_contrib`.
+4.  `SampleState`: Size `bucket_sum`. Stores `T` (transmittance), `ar`, `ard` (auxiliary accumulation buffers).
+
+**Steps:**
+
+1.  **Input Validation & Setup:**
+    - Verify `dc` shape $[N, 1, 3]$ and `shs` shape $[N, K, 3]$ with $N$ matching `means3D` count [S2, unofficial].
+    - If `colors_precomp` is None and `NUM_CHANNELS_3DGS != 3`, raise error [S2, unofficial].
+    - If `inference_only` is True, ensure `pixel_weights` is None or empty [S2, unofficial].
+    - Compute focal lengths: $focal\_y = height / (2.0 \cdot tan\_fovy)$, $focal\_x = width / (2.0 \cdot tan\_fov\_x)$ [S2, unofficial].
+    - Compute tile grid: $tile\_grid.x = \lceil width / BLOCK\_X \rceil$, $tile\_grid.y = \lceil height / BLOCK\_Y \rceil$ [S2, unofficial].
+
+2.  **Preprocessing (Forward):**
+    - Launch `FORWARD::preprocess` kernel. Inputs: $P$, $D$, $M$, `means3D`, `scales`, `scale_modifier`, `rotations`, `opacities`, `dc`, `shs`, `geomState.clamped`, `cov3D_precomp`, `colors_precomp`, `viewmatrix`, `projmatrix`, `cam_pos`, `width`, `height`, `focal_x`, `focal_y`, `tan_fovx`, `tan_fovy`, `radii`, `geomState.means2D`, `geomState.depths`, `geomState.cov3D`, `geomState.rgb`, `geomState.conic_opacity`, `tile_grid`, `geomState.tiles_touched`, `prefiltered`, `antialiasing` [S2, unofficial].
+    - This kernel projects 3D Gaussians to 2D, computes conic matrices, and determines which tiles are touched.
+
+3.  **Binning & Sorting:**
+    - Compute inclusive prefix sum over `geomState.tiles_touched` using CUB `DeviceScan::InclusiveSum`, storing result in `geomState.point_offsets` [S2, unofficial].
+    - Copy last element of `point_offsets` to host variable `num_rendered` [S2, unofficial].
+    - Launch `duplicateWithKeys` kernel. Inputs: $P$, `geomState.means2D`, `geomState.conic_opacity`, `geomState.depths`, `geomState.point_offsets`. Outputs: `binningState.point_list_keys_unsorted`, `binningState.point_list_unsorted` [S2, unofficial].
+    - Compute bit width for radix sort: $bit = \text{getHigherMsb}(tile\_grid.x \cdot tile\_grid.y)$ [S2, unofficial].
+    - Sort pairs using CUB `DeviceRadixSort::SortPairs`. Inputs: `binningState.list_sorting_space`, `binningState.sorting_size`, `binningState.point_list_keys_unsorted`, `binningState.point_list_unsorted`. Outputs: `binningState.point_list_keys`, `binningState.point_list`. Sort key range: $0$ to $32 + bit$ bits. Count: `num_rendered` [S2, unofficial].
+
+4.  **Tile Range Identification:**
+    - Zero out `imgState.ranges` array of size $tile\_grid.x \cdot tile\_grid.y \cdot sizeof(uint2)$ [S2, unofficial].
+    - If `num_rendered > 0`, launch `identifyTileRanges` kernel. Inputs: `num_rendered`, `binningState.point_list_keys`. Output: `imgState.ranges` [S2, unofficial].
+
+5.  **Bucket Counting (Training Only):**
+    - If not `inference_only`, launch `perTileBucketCount` kernel. Inputs: `num_tiles`, `imgState.ranges`. Output: `imgState.bucket_count` [S2, unofficial].
+    - Compute inclusive prefix sum over `imgState.bucket_count` using CUB `DeviceScan::InclusiveSum`, storing result in `imgState.bucket_offsets` [S2, unofficial].
+    - Copy last element of `bucket_offsets` to host variable `bucket_sum` [S2, unofficial].
+    - Allocate `SampleState` buffer of size `bucket_sum` [S2, unofficial].
+
+6.  **Rendering:**
+    - Determine feature pointer: if `colors_precomp` is not None, use it; otherwise use `geomState.rgb` [S2, unofficial].
+    - Launch `FORWARD::render` kernel. Inputs: `tile_grid`, `block`, `imgState.ranges`, `binningState.point_list`, `(inference_only ? nullptr : imgState.bucket_offsets)`, `(inference_only ? nullptr : sampleState.bucket_to_tile)`, `(inference_only ? nullptr : sampleState.T)`, `(inference_only ? nullptr : sampleState.ar)`, `(inference_only ? nullptr : sampleState.ard)`, `width`, `height`, `geomState.means2D`, `feature_ptr`, `geomState.conic_opacity`, `(inference_only ? nullptr : imgState.accum_alpha)`, `(inference_only ? nullptr : imgState.n_contrib)`, `(inference_only ? nullptr : imgState.max_contrib)`, `background`, `out_color`, `(inference_only ? nullptr : geomState.depths)`, `(inference_only ? nullptr : invdepth)`, `pixel_weights`, `accum_weights` [S2, unofficial].
+    - Return `(num_rendered, bucket_sum)` [S2, unofficial].
+
+7.  **Backward Pass:**
+    - Restore saved tensors from context: `colors_precomp`, `means3D`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `dc`, `sh`, `geomBuffer`, `binningBuffer`, `imgBuffer`, `sampleBuffer` [S1, unofficial].
+    - Restructure args for backward C++ call: `bg`, `means3D`, `radii`, `colors_precomp`, `scales`, `rotations`, `scale_modifier`, `cov3Ds_precomp`, `viewmatrix`, `projmatrix`, `tanfovx`, `tanfovy`, `grad_out_color`, `dc`, `sh`, `sh_degree`, `campos`, `geomBuffer`, `num_rendered`, `binningBuffer`, `imgBuffer`, `num_buckets`, `sampleBuffer`, `debug` [S1, unofficial].
+    - Call `_C.rasterize_gaussians_backward(*args)` to compute gradients: `grad_means2D`, `grad_colors_precomp`, `grad_opacities`, `grad_means3D`, `grad_cov3Ds_precomp`, `grad_dc`, `grad_sh`, `grad_scales`, `grad_rotations` [S1, unofficial].
+    - Return gradients in order: `grad_means3D`, `grad_means2D`, `grad_dc`, `grad_sh`, `grad_colors_precomp`, `grad_opacities`, `grad_scales`, `grad_rotations`, `grad_cov3Ds_precomp`, `None` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rasterize_gaussians_forward(
+    means3D, scales, rotations, opacities, dc, shs, colors_precomp,
+    viewmatrix, projmatrix, campos, tanfovx, tanfovy,
+    image_height, image_width, bg, scale_modifier, sh_degree,
+    prefiltered, antialiasing, inference_only, pixel_weights, debug
+):
+    # 1. Validation
+    assert dc.shape == (N, 1, 3) and shs.shape[0] == N
+    if colors_precomp is None and NUM_CHANNELS_3DGS != 3:
+        raise RuntimeError("For non-RGB, provide precomputed Gaussian colors!")
+    
+    # 2. Setup
+    focal_y = image_height / (2.0 * tanfovy)
+    focal_x = image_width / (2.0 * tanfovx)
+    tile_grid_x = (image_width + BLOCK_X - 1) // BLOCK_X
+    tile_grid_y = (image_height + BLOCK_Y - 1) // BLOCK_Y
+    
+    # 3. Preprocess Kernel
+    preprocess_kernel(
+        P=N, D=3, M=shs.shape[1],
+        means3D=means3D, scales=scales, scale_modifier=scale_modifier,
+        rotations=rotations, opacities=opacities, dc=dc, shs=shs,
+        viewmatrix=viewmatrix, projmatrix=projmatrix, cam_pos=campos,
+        width=image_width, height=image_height,
+        focal_x=focal_x, focal_y=focal_y,
+        tan_fovx=tanfovx, tan_fovy=tanfovy,
+        radii=None, # Output
+        means2D=None, # Output
+        depths=None, # Output
+        cov3D=None, # Output
+        rgb=None, # Output
+        conic_opacity=None, # Output
+        tile_grid=(tile_grid_x, tile_grid_y, 1),
+        tiles_touched=None, # Output
+        prefiltered=prefiltered,
+        antialiasing=antialiasing
+    )
+    
+    # 4. Binning
+    point_offsets = cub_inclusive_sum(tiles_touched)
+    num_rendered = point_offsets[-1]
+    
+    point_list_keys_unsorted, point_list_unsorted = duplicate_with_keys(
+        P=N, means2D=means2D, conic_opacity=conic_opacity,
+        depths=depths, point_offsets=point_offsets
+    )
+    
+    bit = get_higher_msb(tile_grid_x * tile_grid_y)
+    point_list_keys, point_list = cub_radix_sort_pairs(
+        keys=point_list_keys_unsorted,
+        values=point_list_unsorted,
+        num_items=num_rendered,
+        num_bits=32 + bit
+    )
+    
+    # 5. Tile Ranges
+    ranges = zero_array(tile_grid_x * tile_grid_y, dtype=uint2)
+    if num_rendered > 0:
+        ranges = identify_tile_ranges(num_rendered, point_list_keys)
+        
+    # 6. Bucket Counting (if training)
+    if not inference_only:
+        bucket_count = per_tile_bucket_count(num_tiles=tile_grid_x * tile_grid_y, ranges=ranges)
+        bucket_offsets = cub_inclusive_sum(bucket_count)
+        bucket_sum = bucket_offsets[-1]
+        sample_state = allocate_buffer(bucket_sum)
+    else:
+        bucket_sum = 0
+        sample_state = None
+        
+    # 7. Render
+    feature_ptr = colors_precomp if colors_precomp is not None else geom_state.rgb
+    color, invdepths, accum_weights = forward_render(
+        tile_grid=(tile_grid_x, tile_grid_y, 1),
+        block=(BLOCK_X, BLOCK_Y, 1),
+        ranges=ranges,
+        point_list=point_list,
+        bucket_offsets=None if inference_only else bucket_offsets,
+        sample_state=sample_state,
+        width=image_width,
+        height=image_height,
+        means2D=means2D,
+        feature_ptr=feature_ptr,
+        conic_opacity=conic_opacity,
+        accum_alpha=None if inference_only else img_state.accum_alpha,
+        n_contrib=None if inference_only else img_state.n_contrib,
+        max_contrib=None if inference_only else img_state.max_contrib,
+        background=bg,
+        out_color=None, # Output
+        depths=None if inference_only else geom_state.depths,
+        invdepth=None if inference_only else invdepths,
+        pixel_weights=pixel_weights,
+        accum_weights=None if inference_only else accum_weights
+    )
+    
+    return color, radii, invdepths, accum_weights
+
+def rasterize_gaussians_backward(
+    grad_out_color, means3D, radii, colors_precomp, scales, rotations,
+    scale_modifier, cov3Ds_precomp, viewmatrix, projmatrix, tanfovx, tanfovy,
+    dc, sh, sh_degree, campos, geomBuffer, num_rendered, binningBuffer,
+    imgBuffer, num_buckets, sampleBuffer, debug
+):
+    # 1. Restructure Args
+    args = (
+        bg, means3D, radii, colors_precomp, scales, rotations,
+        scale_modifier, cov3Ds_precomp, viewmatrix, projmatrix,
+        tanfovx, tanfovy, grad_out_color, dc, sh, sh_degree,
+        campos, geomBuffer, num_rendered, binningBuffer, imgBuffer,
+        num_buckets, sampleBuffer, debug
+    )
+    
+    # 2. Call Backward Kernel
+    (grad_means2D, _, grad_opacities, grad_means3D, _,
+     grad_dc, grad_sh, grad_scales, grad_rotations) = \
+        rasterize_gaussians_backward_kernel(*args)
+        
+    return grad_means3D, grad_means2D, grad_dc, grad_sh, grad_opacities, grad_scales, grad_rotations
+```
+
+## Subtopics
+
+### [FastGS Residual Pyramid Rendering](13487-fastgs-residual-pyramid-rendering.md)
+A multi-scale rendering technique that decomposes the target image into a Laplacian pyramid of Gaussian splats. The coarsest level renders the base image, while subsequent levels render signed residuals (differences) that are upsampled and accumulated to reconstruct the final high-resolution image.
+
+### [MiniGS Auxiliary & Depth Rendering Interface](13963-minigs-auxiliary-depth-rendering-interface.md)
+Validation and dispatch layer for MiniGS-specific rasterizer entry points that return auxiliary statistics for blur-aware splitting and depth back-sampling.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by sorting $O(P \log P)$ and rendering $O(P + H \cdot W)$ per tile [S2, unofficial].
+- **Memory Complexity:** $O(P + H \cdot W)$ for buffers including `GeometryState`, `BinningState`, `ImageState`, and `SampleState` [S2, unofficial].
+- **Performance:** Measured on NVIDIA RTX 4090 [S2, unofficial].
+- **Strengths:** Exact gradients for all parameters; supports auxiliary depth and weight accumulation; efficient tile-based culling [S2, unofficial].
+- **Limitations:** High memory usage for large scenes due to sorting buffers; `inference_only` mode reduces memory but disables gradient computation [S2, unofficial].
+- **When to use:** Standard differentiable rendering for 3DGS training and inference [S2, unofficial].
+- **When not to use:** When memory is constrained and auxiliary statistics are not needed (use `inference_only`); when non-tiled culling is preferred (use sibling methods).
+
+## Background
+Originated from the 3D Gaussian Splatting paper (Kerbl et al., 2023) [S2, unofficial]. Implemented in C++/CUDA for GPU acceleration, integrated into PyTorch via `torch.autograd.Function` [S1, S2, unofficial]. Used in various 3DGS variants including ImprovedGS, MiniGS, and AbsGS [S2, unofficial].
+
+## Sources
+[S1] SorenZhang574/Laplacian-GS, https://github.com/SorenZhang574/Laplacian-GS, fetched 2026-10-27 (unofficial)
+[S2] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)
