@@ -1,0 +1,115 @@
+# Euclidean Projection for Material Constraints
+
+Also called: Clamping to [0, RGB Cube Projection
+
+## Overview
+This method enforces physical validity on material parameters during differentiable rendering optimization by projecting updated values back into their feasible domain after each optimizer step. It specifically addresses the problem of unconstrained gradient updates (e.g., from Adam) driving color or BSDF parameters outside physically plausible ranges, which causes numerical instability or non-physical reflectance. It differs from its siblings by being a post-update constraint enforcement mechanism rather than a solver or training schedule; it builds on [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md) by applying a hard boundary check after the parameter update.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Optimized parameter vector $\theta$ (e.g., RGB albedo or BSDF coefficients) after an Adam update step.
+*   **Output:** Projected parameter vector $\theta'$ constrained to the valid domain.
+
+**Data Structures:**
+*   Parameters are stored as floating-point arrays. For RGB albedo, this is a 3-element vector per mesh or pixel. For BSDF parameters, this is a scalar or vector per material property.
+
+**Steps:**
+1.  Perform the standard optimizer update (e.g., Adam) to compute the new candidate parameter values $\theta_{new}$.
+2.  Apply component-wise Euclidean projection onto the valid interval $[0, 1]^k$, where $k$ is the number of channels or parameters.
+3.  For each component $c_i$ of the parameter vector:
+    *   If $c_i < 0$, set $c_i' = 0$.
+    *   If $c_i > 1$, set $c_i' = 1$.
+    *   Otherwise, $c_i' = c_i$.
+4.  Replace $\theta_{new}$ with $\theta'$ for the next iteration.
+
+**Formula:**
+The projection operator $\Pi_{[0,1]^3}$ for RGB albedo is defined as [S1]:
+$$
+\Pi_{[0,1]^3}(c_i) = \begin{cases} 
+0 & \text{if } c_i < 0 \\
+c_i & \text{if } 0 \le c_i \le 1 \\
+1 & \text{if } c_i > 1 
+\end{cases}
+$$
+for each channel $c_i \in \{r, g, b\}$.
+
+**Parameters:**
+*   **Initial Values:** For RGB albedo, initial values are drawn uniformly at random from $[0, 1]^3$ [S1].
+*   **Valid Range:** $[0, 1]$ for all constrained parameters [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Numerical Instability:** Without projection, unconstrained updates in noisy gradient environments (like path tracing) can accumulate error, leading to non-physical reflectance or invalid configurations [S2, unofficial].
+*   **Precision:** Floating-point errors may result in values slightly outside $[0, 1]$ due to rounding; the projection handles these naturally.
+*   **Degenerate Input:** If the optimizer produces NaN or Inf, the projection may not recover validity; input validation is assumed prior to projection [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def euclidean_projection_rgb_cube(rgb_values):
+    """
+    Projects RGB values onto the [0, 1]^3 cube.
+    
+    Args:
+        rgb_values: A list or array of 3 floats [r, g, b].
+        
+    Returns:
+        A list or array of 3 floats clamped to [0, 1].
+    """
+    clamped = []
+    for val in rgb_values:
+        if val < 0:
+            clamped.append(0.0)
+        elif val > 1.0:
+            clamped.append(1.0)
+        else:
+            clamped.append(val)
+    return clamped
+
+def apply_projection_to_parameters(parameters):
+    """
+    Applies Euclidean projection to all material parameters.
+    Assumes parameters are structured as lists of values to be clamped to [0, 1].
+    
+    Args:
+        parameters: A list of parameter values (scalars or vectors).
+        
+    Returns:
+        A list of projected parameter values.
+    """
+    projected_params = []
+    for param in parameters:
+        # Handle both scalar and vector parameters
+        if isinstance(param, (list, tuple)):
+            projected_params.append(euclidean_projection_rgb_cube(list(param)))
+        else:
+            # Scalar parameter
+            if param < 0.0:
+                projected_params.append(0.0)
+            elif param > 1.0:
+                projected_params.append(1.0)
+            else:
+                projected_params.append(param)
+    return projected_params
+```
+
+## Subtopics
+
+### Parameter Clipping
+Clamping BSDF parameters (roughness, specular transmission, metalness, anisotropy) to $[0, 1]$ to ensure physically plausible behavior and prevent numerical instabilities during optimization [S2, S2, unofficial]. It is chosen when optimizing complex material models like the Principled BSDF where multiple parameters have restricted domains [S2, S2, unofficial]. Unlike RGB projection which targets color space, this applies to general BSDF coefficients [S2, S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(k)$ per parameter vector, where $k$ is the number of components. Negligible overhead compared to the optimizer step and rendering pass.
+*   **Memory Complexity:** $O(1)$ additional memory per parameter.
+*   **Performance:** Ensures stable convergence by preventing divergence due to out-of-bounds values [S1][S2, unofficial]. In RGB albedo estimation, it contributes to rapid convergence, reducing initial RGB error from $0.43 \pm 0.12$ to $0.011 \pm 0.003$ after the first iteration and $0.004 \pm 0.001$ at convergence (within 50 iterations) [S1].
+*   **Strengths:** Simple to implement, guarantees physical validity, prevents numerical instability in noisy gradient settings [S1][S2, unofficial].
+*   **Limitations:** Hard constraints may create non-differentiable points at the boundaries, potentially affecting gradient flow if not handled carefully by the optimizer [G]. It does not smooth the parameter space, only bounds it.
+*   **When to Use:** When optimizing material parameters that must remain within physical bounds (e.g., albedo, BSDF coefficients) and the optimizer may produce out-of-bounds values.
+*   **When Not to Use:** When parameters have non-rectangular constraints or when soft constraints are preferred to maintain differentiability at boundaries.
+
+## Background
+The method originates from differentiable rendering frameworks that optimize material properties from images. It was explicitly described in the context of optimizing 3D scene reconstruction with differentiable ray tracing, where it was used to estimate diffuse albedo from reference photographs [S1]. It is also employed in modern PBR material reconstruction pipelines, such as MRD, to clamp Principled BSDF parameters during optimization [S2, S2, unofficial].
+
+## Sources
+[S1] Optimizing 3D Scene Reconstruction with Differentiable Ray Tracing, https://doi.org/10.31224/5014, fetched 2026-10-29
+[S2] MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding, https://doi.org/10.48550/arXiv.2512.12307, fetched 2026-10-29 (unofficial)

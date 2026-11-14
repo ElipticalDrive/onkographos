@@ -1,0 +1,191 @@
+--- v007.md
++++ v008.md
+@@ -82,86 +82,72 @@
+         self.num_bones = num_bones
+         
+-        # General Voxels (Pretrained)
++        # General Voxel Grid (Pretrained)
+         self.V_g = nn.Parameter(torch.randn(feature_dim, voxel_res, voxel_res, voxel_res))
+-        
+-        # Individual Voxels (Per-subject, zero-init)
++        # Individual Voxel Grid (Per-subject, zero-init)
+         self.V_i = nn.Parameter(torch.zeros(feature_dim, voxel_res, voxel_res, voxel_res))
+-        
+         # Deformation Embedding (Per-subject, zero-init)
+         self.Z = nn.Parameter(torch.zeros(1, 1, 1, 1))
+         
+-        # Pose Refinement Network (Shared)
++        # Pose Refinement Network: predicts ΔΩ from Ω
+         self.pose_refine = nn.Sequential(
+-            nn.Conv3d(1, 64, 3, padding=1),
+-            nn.ReLU(),
++            nn.Conv3d(1, 64, 3, padding=1), nn.ReLU(),
+             nn.Conv3d(64, 1, 3, padding=1)
+         )
+         
+-        # Deformation Network (Shared)
+-        self.deform_net = nn.Sequential(
+-            nn.Conv3d(1, 64, 3, padding=1),
+-            nn.ReLU(),
++        # Deformation Network: maps Z to blend weights volume
++        self.deform_conv = nn.Sequential(
++            nn.Conv3d(1, 64, 3, padding=1), nn.ReLU(),
+             nn.Conv3d(64, num_bones, 3, padding=1)
+         )
+         
+-        # Radiance Field MLP
+-        self.radiance_mlp = nn.Sequential(
+-            nn.Linear(feature_dim * 2 * 20 + 20 + 20 + 20, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 3),
+-            nn.Sigmoid()
+-        )
++        # Radiance Field MLPs
+         self.density_mlp = nn.Sequential(
+-            nn.Linear(feature_dim * 2 * 20 + 20 + 20 + 20, 256),
+-            nn.ReLU(),
++            nn.Linear(feature_dim * 2 * 20 + 20 + 20 + 20, 256), nn.ReLU(),
+             nn.Linear(256, 1)
+         )
++        self.color_mlp = nn.Sequential(
++            nn.Linear(feature_dim * 2 * 20 + 20 + 20 + 20, 256), nn.ReLU(),
++            nn.Linear(256, 3), nn.Sigmoid()
++        )
+ 
+     def positional_encoding(self, x, L):
+-        """Standard positional encoding."""
+-        freq_bands = 2.0 ** torch.linspace(0, L-1, L).to(x.device)
++        freq_bands = 2.0 ** torch.linspace(0, L - 1, L).to(x.device)
+         x = x.unsqueeze(-1) * freq_bands
+-        x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+-        return x.flatten(1)
+-
+-    def refine_pose(self, P, delta_omega):
+-        """Correct initial pose P using delta rotation/translation."""
+-        # P contains joint positions J and rotations Omega
+-        # delta_omega contains delta rotations and translations
+-        # Returns corrected pose P_c = (J, Omega @ delta_omega)
+-        # Simplified implementation for demonstration
+-        P_c = P.clone()
+-        # Apply delta rotation to joints
+-        return P_c
++        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1).flatten(1)
++
++    def refine_pose(self, Omega, delta_omega):
++        # P_c = (J, Ω ⊗ ΔΩ) where ⊗ denotes (R_i · ΔR_i, T_i + ΔT_i)
++        return Omega + delta_omega
++
++    def get_blend_weights(self, Z, query_points):
++        # Map Z to volume via 3D conv layers
++        w_volume = self.deform_conv(Z)
++        # Trilinear interpolation at query_points
++        w_volume = w_volume.unsqueeze(0)
++        query_points = query_points.unsqueeze(0).unsqueeze(0).unsqueeze(0)
++        w = F.grid_sample(w_volume, query_points, mode='trilinear', align_corners=True)
++        return w.squeeze()
+ 
+     def deform_coordinates(self, x_o, P_c, Z):
+-        """Deform observation coordinates to canonical space."""
+-        # Get blend weights from Z via conv layers
+-        w = self.deform_net(Z)
+-        # Apply rigid transformations derived from P_c
++        # T_skel(x, P_c) = Σ_{i=1}^K w^i(x)(R_c^i x + T_c^i)
++        K = self.num_bones
++        N = x_o.shape[0]
+         x_c = torch.zeros_like(x_o)
+-        for i in range(self.num_bones):
+-            # R_c^i, T_c^i derived from P_c
+-            # x_c += w^i(x_o) * (R_c^i @ x_o + T_c^i)
+-            # Note: Exact bone transformation derivation from P_c is not specified in sources
+-            pass
++        w = self.get_blend_weights(Z, x_o)
++        for i in range(K):
++            # R_c^i, T_c^i derived from P_c (exact extraction not specified in sources)
++            R_c_i = torch.eye(3).to(x_o.device)
++            T_c_i = torch.zeros(3).to(x_o.device)
++            x_c += w[i].unsqueeze(0) * (R_c_i @ x_o.T + T_c_i).T
+         return x_c
+ 
+     def interpolate_voxels(self, x_c, V):
+-        """Trilinear interpolation of voxel grid."""
+-        # Normalize coordinates to [-1, 1]
+         x_norm = 2.0 * x_c - 1.0
+-        # Grid sample with trilinear interpolation
+-        v = F.grid_sample(V.unsqueeze(0), x_norm.unsqueeze(0).unsqueeze(0), mode='trilinear', align_corners=True)
++        V = V.unsqueeze(0)
++        x_norm = x_norm.unsqueeze(0).unsqueeze(0).unsqueeze(0)
++        v = F.grid_sample(V, x_norm, mode='trilinear', align_corners=True)
+         return v.squeeze()
+ 
+     def forward(self, rays_o, rays_d, P, Z, t):
+-        """
+-        rays_o: (N_rays, 3)
+-        rays_d: (N_rays, 3)
+-        P: Initial pose
+-        Z: Deformation embedding
+-        t: Timestamp
+-        """
+         # 1. Pose Refinement
+         delta_omega = self.pose_refine(Z)
+@@ -169,10 +155,9 @@
+         
+         # 2. Deformation
+-        # Sample points along rays
+         t_vals = torch.linspace(0, 1, 128).to(rays_o.device)
+         points_o = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(2)
+-        
+-        # Deform to canonical space
+-        points_c = self.deform_coordinates(points_o, P_c, Z)
++        points_o_flat = points_o.view(-1, 3)
++        points_c_flat = self.deform_coordinates(points_o_flat, P_c, Z)
++        points_c = points_c_flat.view(points_o.shape)
+         
+         # 3. Interpolation
+@@ -183,7 +168,7 @@
+         v_cat = torch.cat([v_g, v_i], dim=-1)
+         enc_v = self.positional_encoding(v_cat, L=2)
+-        enc_x = self.positional_encoding(points_o, L=10)
+-        enc_d = self.positional_encoding(rays_d, L=4)
+-        enc_t = self.positional_encoding(t.unsqueeze(1), L=2)
++        enc_x = self.positional_encoding(points_o_flat, L=10)
++        enc_d = self.positional_encoding(rays_d.unsqueeze(1).repeat(1, 128, 1).view(-1, 3), L=4)
++        enc_t = self.positional_encoding(t.unsqueeze(1).repeat(1, 128).view(-1, 1), L=2)
+         
+         input_feat = torch.cat([enc_v, enc_x, enc_d, enc_t], dim=-1)
+@@ -191,10 +176,11 @@
+         # 5. Radiance Field
+         sigma = self.density_mlp(input_feat)
+-        color = self.radiance_mlp(input_feat)
+-        
+-        # 6. Rendering
++        color = self.color_mlp(input_feat)
++        
++        # 6. Volume Rendering
+         delta = t_vals[1:] - t_vals[:-1]
+         alpha = 1.0 - torch.exp(-sigma * delta.unsqueeze(-1))
+-        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha[:, :-1]], dim=1), dim=1)
++        T = torch.exp(-torch.cumsum(sigma * delta.unsqueeze(-1), dim=1))
++        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+         render_color = torch.sum(T * alpha * color, dim=1)
+         
+@@ -210,15 +196,15 @@
+ 
+ ### Neural Voxel Grids
+-Explicit 3D feature grids that replace implicit MLPs for faster optimization. They store learnable features at discrete grid points and use interpolation for continuous queries. Choose when training speed is critical and the scene has a bounded volume. [Link](9326-sparse-and-efficient-representations.md)
++Explicit 3D feature grids that replace implicit MLPs for faster optimization [S1, unofficial]. They store learnable features at discrete grid points and use interpolation for continuous queries [S1, unofficial]. Choose when training speed is critical and the scene has a bounded volume [S1, unofficial]. [Link](9326-sparse-and-efficient-representations.md)
+ 
+ ### Pose Deformation Networks
+-Networks that map observation-space coordinates to a canonical space using skeletal priors. They enable the representation of dynamic humans in a static canonical frame. Choose when dealing with articulated subjects like humans. [Link](11366-dynamic-and-deformable-fields.md)
++Networks that map observation-space coordinates to a canonical space using skeletal priors [S1, unofficial]. They enable the representation of dynamic humans in a static canonical frame [S1, unofficial]. Choose when dealing with articulated subjects like humans [S1, unofficial]. [Link](11366-dynamic-and-deformable-fields.md)
+ 
+ ### Generalizable Radiance Fields
+-Methods that learn a shared representation across multiple instances (e.g., different humans) to enable fast adaptation to new instances. Choose when you need to render novel instances with minimal per-instance training time. [Link](9273-neural-light-field-representations.md)
++Methods that learn a shared representation across multiple instances (e.g., different humans) to enable fast adaptation to new instances [S1, unofficial]. Choose when you need to render novel instances with minimal per-instance training time [S1, unofficial]. [Link](9273-neural-light-field-representations.md)
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Pretraining takes 15-50 minutes on multiple subjects. Fine-tuning for a new subject takes 1-5 minutes (1k-3k iterations) [S1, unofficial]. This is significantly faster than implicit NeRF methods which take hours to days (e.g., HumanNeRF takes 288 hours) [S1, unofficial].
+-- **Memory Complexity:** Requires storing two $160^3$ voxel grids with 6 channels each. This is more memory-intensive than compact MLPs but allows for faster gradient updates due to explicit structure [S1, unofficial].
++- **Time Complexity:** Pretraining takes 15-50 minutes on multiple subjects [S1, unofficial]. Fine-tuning for a new subject takes 1-5 minutes (1k-3k iterations) [S1, unofficial]. This is significantly faster than implicit NeRF methods which take hours to days (e.g., HumanNeRF takes 288 hours) [S1, unofficial].
++- **Memory Complexity:** Requires storing two $160^3$ voxel grids with 6 channels each [S1, unofficial]. This is more memory-intensive than compact MLPs but allows for faster gradient updates due to explicit structure [S1, unofficial].
+ - **Performance:** On ZJU-MoCap, GNeuVox-ZJU achieves PSNR 29.93 in 5 minutes, comparable to HumanNeRF (30.41 PSNR, 288 hours) [S1, unofficial].
+ - **Strengths:** Extremely fast training time; explicit representation allows for easier debugging and modification; generalization across subjects [S1, unofficial].

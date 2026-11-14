@@ -3,180 +3,165 @@
 Also called: Patch-wise depth alignment, Seen-view depth distillation
 
 ## Overview
-This method aligns pseudo-depth maps from a pre-trained Monocular Depth Estimation (MDE) network with NeRF-rendered depth for seen input views, using patch-wise scale and shift parameters to handle local depth inconsistencies [S1, unofficial]. It solves the problem where global scale/shift fitting favors dominant objects, causing ill-fitted depths in less dominant sections of the scene [S1, unofficial]. By computing alignment parameters per patch, it prevents dominant objects from skewing the global alignment and reduces the computational bottleneck of full-image rendering [S1, unofficial].
+This method regularizes a Neural Radiance Field (NeRF) by aligning pseudo-depth maps from a pre-trained monocular depth estimation (MDE) network with the absolute depth rendered from the NeRF for seen input views [S1, unofficial]. It solves the problem that MDE networks output relative depth lacking absolute scale and shift, which makes direct pixel-wise loss insufficient and prone to bias from dominant objects [S1, unofficial]. It sets itself apart from global statistic fitting by computing scale and shift parameters locally on image patches, thereby preserving local depth statistics and reducing the computational cost of full-image rendering [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of seen view images $S$; a pre-trained MDE network $G_\phi$ with parameters $\phi$; a NeRF model $\mathcal{N}$ capable of rendering depth.
-*   **Outputs:** A depth consistency loss term $L_{seen}$ used to update the NeRF model.
+*   **Inputs:** A set of seen view images $S$; a pre-trained MDE network $G_\phi$ with parameters $\phi$; the NeRF model capable of rendering depth $\bar{D}$.
+*   **Outputs:** A depth consistency loss term $L_{seen}$ used to update NeRF parameters.
 
 **Data Structures:**
-*   **Seen Views ($S$):** A set of input images $I_i$ captured from known camera poses.
-*   **Patch ($P$):** A subset of pixels within an image. The specific size or grid structure is not given in the sources [G].
-*   **Scale/Shift Parameters ($w_i, q_i$):** Two scalar values computed per patch to align relative MDE depth to absolute NeRF depth.
-
-**Numbered Steps:**
-1.  For each seen view image $I_i$ in the set of seen views $S$:
-2.  Render the NeRF depth map $\bar{D}_i$ for the view $I_i$ using the current NeRF model $\mathcal{N}$ [S1, unofficial].
-3.  Extract the monocular depth map $D^*_i$ by passing the image through the pre-trained MDE network: $D^*_i = G_\phi(I_i)$ [S1, unofficial].
-4.  Define a set of pixels $P$ within a patch of the image [S1, unofficial].
-5.  Compute the scale $w_i$ and shift $q_i$ for the current patch via least squares minimization between the MDE depth and the NeRF depth:
-    $$ \min_{w_i, q_i} \sum_{p \in P} \| (w_i \cdot D^*_i(p) + q_i) - \bar{D}_i(p) \|^2 $$
-    [S1, unofficial].
-6.  Calculate the loss contribution for the patch using the stop-gradient operator $\text{sg}(\cdot)$ on the MDE output:
-    $$ L_{seen} = \sum_{I_i \in S} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \| $$
-    [S1, unofficial].
-
-**Formulas:**
-*   **Rendered Depth ($\bar{D}_i$):** Computed via volume rendering equation (see Parent).
-*   **MDE Depth ($D^*_i$):** Output of $G_\phi(I_i)$.
-*   **Alignment Loss ($L_{seen}$):**
-    $$ L_{seen} = \sum_{I_i \in S} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \| $$
-    [S1, unofficial].
+*   **Patches:** The image is divided into a set of non-overlapping or overlapping patches. For a specific patch $P$, let $p$ denote a pixel coordinate within $P$.
+*   **Depth Maps:**
+    *   $\bar{D}_i(p)$: The absolute depth rendered by the NeRF for view $I_i$ at pixel $p$.
+    *   $D^*_i(p)$: The relative depth predicted by the MDE network $G_\phi(I_i)$ for view $I_i$ at pixel $p$.
 
 **Parameters:**
-*   **$\text{sg}(\cdot)$:** Stop-gradient operation applied to the monocular depth $D^*_i$ to prevent gradient flow into the MDE network during this loss term [S1, unofficial].
-*   **$w_i, q_i$:** Scale and shift parameters for the current patch, computed via least squares [S1, unofficial].
-*   **Patch Size:** Not given in the sources.
+*   $w_i, q_i$: Scale and shift parameters for the current patch, computed via least squares.
+*   $\text{sg}(\cdot)$: Stop-gradient operator applied to the monocular depth $D^*$ to prevent gradient flow into the pre-trained MDE network during this loss term [S1, unofficial].
+
+**Steps:**
+1.  For each seen view image $I_i$ in the set of seen views $S$:
+    a. Render the NeRF depth map $\bar{D}_i$ for the view.
+    b. Extract the monocular depth map $D^*_i = G_\phi(I_i)$ using the pre-trained MDE network.
+    c. Define a set of pixels $P$ within a patch.
+    d. Compute the scale $w_i$ and shift $q_i$ by minimizing the least squares error between the scaled monocular depth and the rendered depth for pixels in $P$:
+       $$ \min_{w_i, q_i} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \|^2 $$
+       This is solved analytically using the normal equations or a linear solver [S1, unofficial].
+    e. Calculate the loss contribution for this patch using the aligned depth.
+
+2.  Aggregate the loss over all seen views and all patches.
+
+**Formula:**
+The total depth consistency loss is defined as [S1, unofficial]:
+$$ L_{seen} = \sum_{I_i \in S} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \| $$
+Note: The source text uses the norm symbol $\| \cdot \|$ in the formula (Eq. 4) but does not explicitly specify L1 or L2. Given the minimization step uses squared error (L2) for fitting, but the loss formula notation is generic, standard practice in this context often implies L1 or L2. The source text writes $\| \dots \|$ without a power. We retain the notation as provided in the source [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_seen_view_depth_loss(
-    seen_images: List[Image],
+def compute_monocular_depth_regularization_loss(
+    seen_views: List[Image],
     mde_network: Module,
     nerf_model: Module,
-    patch_size: int
+    patch_size: int,
+    lambda_depth: float
 ) -> Tensor:
     """
-    Computes the monocular depth regularization loss on seen views.
+    Computes the monocular depth regularization loss on seen views using patch-wise alignment.
     
     Args:
-        seen_images: List of input images I_i.
+        seen_views: List of input images I_i.
         mde_network: Pre-trained MDE network G_phi.
-        nerf_model: NeRF model capable of rendering depth.
-        patch_size: Size of the square patch P.
+        nerf_model: NeRF model.
+        patch_size: Size of the patches for local scale/shift fitting.
+        lambda_depth: Weight for the depth loss term.
         
     Returns:
-        Scalar loss L_seen.
+        The computed depth regularization loss.
     """
     total_loss = 0.0
     
-    for image in seen_images:
-        # Step 2: Render NeRF depth
-        # Assuming nerf_model.render_depth(image) returns a depth map D_bar_i
-        # with shape (H, W)
-        nerf_depth = nerf_model.render_depth(image)
+    for image in seen_views:
+        # 1. Render NeRF depth
+        # Assume nerf_model.render_depth(image) returns a depth map D_bar
+        rendered_depth = nerf_model.render_depth(image)
         
-        # Step 3: Extract monocular depth map
-        # G_phi returns relative depth D*_i
-        mde_depth = mde_network(image)
+        # 2. Extract monocular depth
+        # G_phi outputs relative depth D*
+        mono_depth = mde_network(image)
         
-        # Get image dimensions
-        H, W = nerf_depth.shape
+        # 3. Process in patches
+        # Divide image into patches P
+        patches = extract_patches(image, patch_size)
+        rendered_patches = extract_patches(rendered_depth, patch_size)
+        mono_patches = extract_patches(mono_depth, patch_size)
         
-        # Step 4 & 5: Iterate over patches
-        # Note: The source does not specify if patches are non-overlapping,
-        # strided, or cover the whole image. We assume a simple grid for implementation.
-        # If the source implies a single patch per image, this loop would run once.
-        # Given "computational bottleneck of full image rendering" comment,
-        # patch-wise likely implies processing subsets or the whole image as one patch?
-        # However, "patch-wise adjustment" usually implies multiple patches.
-        # We will implement a grid of patches.
-        
-        for y in range(0, H, patch_size):
-            for x in range(0, W, patch_size):
-                # Define patch boundaries
-                y_end = min(y + patch_size, H)
-                x_end = min(x + patch_size, W)
-                
-                # Extract patch pixels P
-                # Indices for the patch
-                patch_y_indices = range(y, y_end)
-                patch_x_indices = range(x, x_end)
-                
-                # Extract sub-tensors for the patch
-                # Note: In a real implementation, this would be tensor slicing.
-                # We assume standard tensor indexing.
-                patch_mde = mde_depth[patch_y_indices, :][:, patch_x_indices]
-                patch_nerf = nerf_depth[patch_y_indices, :][:, patch_x_indices]
-                
-                # Step 5: Compute scale w and shift q via least squares
-                # Minimize || w * mde + q - nerf ||^2
-                # Let A = [mde, 1], x = [w, q]^T, b = nerf
-                # x = (A^T A)^-1 A^T b
-                
-                # Flatten patches
-                mde_flat = patch_mde.flatten()
-                nerf_flat = patch_nerf.flatten()
-                
-                # Construct design matrix A
-                # A = [mde_flat, ones]
-                # We use numpy-like operations for clarity, assuming standard math ops
-                ones = torch.ones_like(mde_flat)
-                A = torch.stack([mde_flat, ones], dim=1) # Shape (N, 2)
-                b = nerf_flat # Shape (N,)
-                
-                # Solve least squares
-                # w_q = (A^T A)^-1 A^T b
-                ATA = A.T @ A
-                ATb = A.T @ b
-                try:
-                    w_q = torch.linalg.solve(ATA, ATb)
-                except:
-                    # Fallback for singular matrix, though unlikely with valid depth
-                    w_q = torch.zeros(2)
-                
-                w = w_q[0]
-                q = w_q[1]
-                
-                # Step 6: Calculate loss for this patch
-                # L_patch = || (w * sg(mde) + q) - nerf ||
-                # Apply stop-gradient to MDE depth
-                mde_aligned = w * torch.stop_gradient(patch_mde) + q
-                
-                # L1 loss as per formula (4) in [S1, unofficial]
-                patch_loss = torch.abs(mde_aligned - patch_nerf).sum()
-                
-                total_loss += patch_loss
-                
-    return total_loss
+        for p_idx in range(len(patches)):
+            patch_mono = mono_patches[p_idx]
+            patch_rendered = rendered_patches[p_idx]
+            
+            # 4. Compute scale and shift via least squares
+            # We solve min_w,q sum || (w * sg(mono) + q) - rendered ||^2
+            # Let y = rendered, x = mono (with stop gradient)
+            # w = cov(x,y) / var(x)
+            # q = mean(y) - w * mean(x)
+            
+            # Apply stop-gradient to mono depth for fitting
+            x = patch_mono.detach() 
+            y = patch_rendered.detach()
+            
+            # Flatten patches
+            x_flat = x.flatten()
+            y_flat = y.flatten()
+            
+            # Compute means
+            mean_x = torch.mean(x_flat)
+            mean_y = torch.mean(y_flat)
+            
+            # Compute covariance and variance
+            # cov(x,y) = E[(x - E[x])(y - E[y])]
+            # var(x) = E[(x - E[x])^2]
+            cov_xy = torch.mean((x_flat - mean_x) * (y_flat - mean_y))
+            var_x = torch.mean((x_flat - mean_x) ** 2)
+            
+            # Avoid division by zero
+            if var_x < 1e-8:
+                w = 1.0
+                q = 0.0
+            else:
+                w = cov_xy / var_x
+                q = mean_y - w * mean_x
+            
+            # 5. Calculate loss for this patch
+            # L_seen = sum || (w * sg(D*) + q) - D_bar ||
+            # Note: Source formula uses norm. Assuming L1 or L2. 
+            # Standard implementation often uses L1 for robustness, 
+            # but source minimization was L2. We follow source notation.
+            # The source formula (4) shows || ... ||. 
+            # We will use L1 loss as is common in depth regularization 
+            # unless specified otherwise, but strictly following source 
+            # notation which is ambiguous. 
+            # However, the minimization step explicitly uses squared error.
+            # The loss term itself in Eq 4 is written with ||. 
+            # We will use L1 for the final loss aggregation as is typical 
+            # for "regularization" terms, but note the source ambiguity.
+            # Actually, looking at Eq 4: || (wi sg(D*) + qi) - D_bar ||
+            # It does not have a square. So it is likely L1.
+            
+            aligned_depth = w * patch_mono + q
+            patch_loss = torch.abs(aligned_depth - patch_rendered)
+            
+            total_loss += torch.sum(patch_loss)
+            
+    return lambda_depth * total_loss
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Global vs. Local:** Using global statistics for scale/shift fitting undermines local statistics and favors dominant objects, leading to ill-fitted depths in less dominant sections [S1, unofficial]. Patch-wise adjustment alleviates this.
-*   **Gradient Flow:** The stop-gradient operator must be applied to the MDE output to prevent gradients from flowing into the pre-trained MDE network [S1, unofficial].
-*   **Computational Bottleneck:** The patch-wise approach helps overcome the computational bottleneck of full-image rendering, likely by allowing parallel processing or reducing the complexity of the alignment step [S1, unofficial].
+*   **Global vs. Local Bias:** Global scale/shift fitting favors dominant objects, causing ill-fitted depths in less dominant sections [S1, unofficial]. Patch-wise adjustment alleviates this.
+*   **Gradient Flow:** The stop-gradient operator $\text{sg}(\cdot)$ is critical to prevent gradients from flowing into the pre-trained MDE network, which could destabilize the NeRF training or corrupt the MDE weights if they were being fine-tuned jointly in this specific branch [S1, unofficial].
+*   **Computational Bottleneck:** The patch-wise approach also helps overcome the computational bottleneck of full-image rendering and processing [S1, unofficial].
 
 ## Subtopics
 
 ### Transient-Aware Depth Prior
-This variant incorporates geometric priors from a monocular depth network (DPT) into NeRF training, adjusted for scale/shift and filtered by transient confidence [S2, unofficial]. It is designed for unconstrained images where inter-frame losses cannot be used [S2, unofficial]. It differs from the base method by weighting the depth loss based on transient confidence, applying the prior only to areas without transient objects [S2, unofficial].
-*   **Definition:** Incorporates geometric prior from monocular depth into NeRF, adjusted for scale/shift and filtered by transient confidence [S2, unofficial].
-*   **Steps:**
-    1.  Acquire predicted inverse depth $D^{inv}_i$ from DPT network [S2, unofficial].
-    2.  Learn scale $\eta_i$ and shift $\xi_i$ for each image to align monocular depth with NeRF depth [S2, unofficial].
-    3.  Calculate transient confidence weight $W_{depth}(r)$ from the ratio of candidate density $\sigma^{(c)}_i$ to shared density $\sigma$ [S2, unofficial].
-    4.  Apply depth loss only to areas with low transient confidence (high static confidence) [S2, unofficial].
-*   **Formulas:**
-    *   Aligned Depth: $D^*_i(r) = \frac{1}{\eta_i D^{inv}_i(r) + \xi_i}$ [S2, unofficial].
-    *   Rendered Depth: $\hat{D}_i(r) = \sum_{k=1}^{K} T(t_k) \alpha(\sigma(t_k)\delta_k) t_k$ [S2, unofficial].
-    *   Transient Confidence: $W_{depth}(r) = \sum_{k=1}^{K} T^{(c)}_i(t_k) \alpha(\sigma^{(c)}_i(t_k)\delta_k)$ [S2, unofficial].
-    *   Loss: $L_{depth}(r) = (1 - W_{depth}(r)) \| D^*_i(r) - \hat{D}_i(r) \|_1$ [S2, unofficial].
-*   **Parameters:** $\lambda_d = 0.001$ (weight for depth loss) [S2, unofficial].
-*   **When to Choose:** Use when training on unconstrained image sets with potential transient objects (e.g., moving people, vehicles) where standard depth priors might corrupt the geometry of static structures [S2, unofficial].
+This variant incorporates geometric priors from a monocular depth network (DPT) into NeRF training, adjusted for scale/shift and filtered by transient confidence [S2, unofficial]. It differs from standard seen-view regularization by explicitly handling transient objects (e.g., moving people, vehicles) which violate the static scene assumption of NeRF. It is chosen when training on unconstrained image sets containing transient elements [S2, unofficial].
+*   **Mechanism:** Acquires predicted inverse depth $D^{inv}_i$ from DPT [S2, unofficial]. Learns scale $\eta_i$ and shift $\xi_i$ for each image to align monocular depth with NeRF depth [S2, unofficial]. Calculates transient confidence weight $W_{depth}(r)$ from the ratio of candidate density $\sigma_i^{(c)}$ to shared density $\sigma$ [S2, unofficial]. Applies depth loss only to areas with low transient confidence (high static confidence) [S2, unofficial].
+*   **Formula:** The rendered NeRF depth is $\hat{D}_i(r) = \sum_{k=1}^{K} T(t_k)\alpha(\sigma(t_k)\delta_k)t_k$ [S2, unofficial]. The depth loss is $L_{depth}(r) = (1 - W_{depth}(r)) \| D^*_i(r) - \hat{D}_i(r) \|$, where $D^*_i(r) = \frac{1}{\eta_i D^{inv}_i(r) + \xi_i}$ [S2, unofficial]. The transient confidence weight is $W_{depth}(r) = \sum_{k=1}^{K} T_i(t_k)\alpha(\sigma_i^{(c)}(t_k)\delta_k)$ [S2, unofficial].
+*   **Parameters:** The weight for depth loss $\lambda_d$ is set to 0.001 [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The method involves rendering depth for each seen view and computing least squares per patch. The patch-wise approach reduces the computational bottleneck of full-image rendering compared to global fitting [S1, unofficial].
-*   **Memory Complexity:** Requires storing the MDE depth map and NeRF depth map for each seen view. Patch-wise processing allows for lower memory footprint if patches are processed sequentially.
-*   **Strengths:** Alleviates the issue of dominant objects skewing depth alignment; handles local depth inconsistencies; prevents gradient flow into the MDE network.
-*   **Limitations:** Relies on the quality of the pre-trained MDE network; patch-wise alignment may introduce discontinuities at patch boundaries if not handled carefully (not specified in sources).
-*   **When to Use:** When training NeRFs with seen views and a pre-trained MDE model is available, especially in scenes with varying object sizes or dominant foreground objects.
-*   **When Not to Use:** When real-time performance is critical and patch-wise computation is too slow; when the MDE model is unreliable for the specific scene domain.
+*   **Time Complexity:** The method introduces overhead proportional to the number of seen views and the number of patches. The least squares fitting is $O(N)$ per patch where $N$ is the number of pixels in the patch, which is significantly faster than full-image optimization if patches are small.
+*   **Memory Complexity:** Requires storing the monocular depth maps and rendered depth maps for the patches. The pre-trained MDE network weights are loaded but frozen (or partially frozen), adding to initial memory load.
+*   **Measured Performance:** In [S1, unofficial], this method is part of DaRF, which boosts radiance fields from sparse inputs. In [S2, unofficial], UP-NeRF uses a similar transient-aware prior.
+*   **Strengths:** Handles local depth inconsistencies better than global fitting; reduces computational cost compared to full-image optimization; provides strong geometric priors for sparse view reconstruction.
+*   **Limitations:** Relies on the quality of the pre-trained MDE network; patch-wise fitting may introduce discontinuities at patch boundaries if not smoothed; transient-aware variant requires additional density heads and complexity.
+*   **When to use:** When training NeRF from sparse or unconstrained image sets where geometric priors are needed to resolve ambiguities, and especially when transient objects are present.
+*   **When not to use:** When high-quality dense multi-view stereo is available, as MDE priors may introduce bias; when real-time training is critical and the overhead of MDE inference is prohibitive.
 
 ## Background
-The method was introduced in the paper "DaRF: Boosting Radiance Fields from Sparse Inputs with Monocular Depth Adaptation" [S1, unofficial]. It addresses the limitations of global scale/shift fitting in monocular depth distillation for NeRFs. The patch-wise approach was proposed to handle local depth inconsistencies and reduce computational bottlenecks.
+The method originates from the need to improve NeRF reconstruction quality from sparse or unconstrained input views by leveraging external geometric priors [S1, unofficial][S2, unofficial]. Monocular depth estimation networks have become powerful tools for providing such priors. The specific patch-wise alignment technique was introduced to address the limitations of global scale/shift fitting, which fails to capture local depth variations [S1, unofficial]. The transient-aware variant was developed to handle dynamic scenes within the static NeRF framework [S2, unofficial].
 
 ## Sources
 [S1] DaRF: Boosting Radiance Fields from Sparse Inputs with Monocular Depth Adaptation, https://doi.org/10.48550/arxiv.2305.19201, fetched 2026-10-29 (unofficial)

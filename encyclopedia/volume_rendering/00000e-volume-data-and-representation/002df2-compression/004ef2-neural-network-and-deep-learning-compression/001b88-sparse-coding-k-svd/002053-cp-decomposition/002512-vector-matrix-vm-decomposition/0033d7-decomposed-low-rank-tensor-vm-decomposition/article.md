@@ -7,7 +7,7 @@ Decomposed Low-Rank Tensor (VM-Decomposition) is a scene representation method t
 ## How it works
 **Inputs and Outputs**
 *   **Input:** A 4D scene tensor $G_S \in \mathbb{R}^{I \times J \times K \times L}$, where $I, J, K$ correspond to spatial dimensions (e.g., $x, y, z$) and $L$ is the feature vector length [S2, unofficial][S3, unofficial].
-*   **Output:** A decomposed representation consisting of vector factors $v$, matrix factors $M$, and characteristic components $b$. The scene feature vector $F(x)$ at any 3D coordinate $x$ is retrieved via linear interpolation of these factors [S2, unofficial].
+*   **Output:** A decomposed representation consisting of vector factors $v$, matrix factors $M$, and characteristic components $b$ [S2, unofficial][S3, unofficial]. The scene feature vector $F(x)$ at any 3D coordinate $x$ is retrieved via linear interpolation of these factors [S2, unofficial].
 
 **Data Structures**
 The tensor is decomposed into three terms, one for each spatial axis [S2, unofficial]. For a rank $R$, the storage consists of:
@@ -16,14 +16,14 @@ The tensor is decomposed into three terms, one for each spatial axis [S2, unoffi
 3.  **Characteristic components:** $b_r^m \in \mathbb{R}$ for each rank $r$ and axis $m$ [S2, unofficial].
 
 **Steps**
-1.  Initialize the feature vector $F(x)$ of length $L$ to zeros.
+1.  Initialize the feature vector $F(x)$ of length $L$ to zeros [G].
 2.  For each rank $r$ from $1$ to $R$:
 3.  For each spatial axis $m \in \{X, Y, Z\}$:
-4.  Identify the vector axis $m$ and the two matrix axes $e_m$.
-5.  Retrieve the coordinate values $(i, j, k)$ of point $x$ along the orthogonal axes. If $m=Y$, then $e_m=XZ$, so $i$ corresponds to $y$, and $j,k$ correspond to $x,z$ [S2, unofficial].
-6.  Perform linear interpolation on $v_{S,r}^m$ along axis $m$ using coordinate $i$.
-7.  Perform bilinear interpolation on $M_{S,r}^m$ along axes $e_m$ using coordinates $j,k$.
-8.  Compute the contribution: $\text{term} = v_{\text{interp}} \times M_{\text{interp}} \times b_r^m$.
+4.  Identify the vector axis $m$ and the two matrix axes $e_m$ [S3, unofficial].
+5.  Retrieve the coordinate values $(i, j, k)$ of point $x$ along the orthogonal axes [S3, unofficial]. If $m=Y$, then $e_m=XZ$, so $i$ corresponds to $y$, and $j,k$ correspond to $x,z$ [S3, unofficial].
+6.  Perform linear interpolation on $v_{S,r}^m$ along axis $m$ using coordinate $i$ [S2, unofficial].
+7.  Perform bilinear interpolation on $M_{S,r}^m$ along axes $e_m$ using coordinates $j,k$ [S2, unofficial].
+8.  Compute the contribution: $\text{term} = v_{\text{interp}} \times M_{\text{interp}} \times b_r^m$ [S3, unofficial].
 9.  Add $\text{term}$ to $F(x)$.
 10. Extract density $\sigma(x) = F[0]$ and appearance features $a(x) = F[1, L]$ [S2, unofficial].
 11. Decode color via MLP: $F_c(x, \vec{d}) = S(T_c(x), \vec{d})$ [S1].
@@ -39,7 +39,7 @@ To retrieve the feature vector $F(x)$ at a point $x$ with coordinates $(i, j, k)
 $$
 F(x) = \sum_{r=1}^{R} \sum_{m \in \{X,Y,Z\}} v_{m}^{r}(i) \cdot M_{m}^{r}(j, k) \cdot b_{r}^{m}
 $$
-The indices $i,j,k$ correspond to the coordinate values of point $x$ along the orthogonal axes. If $m=Y$, then $e_m=XZ$, so $i$ corresponds to $y$, and $j,k$ correspond to $x,z$ [S2, unofficial].
+The indices $i,j,k$ correspond to the coordinate values of point $x$ along the orthogonal axes. If $m=Y$, then $e_m=XZ$, so $i$ corresponds to $y$, and $j,k$ correspond to $x,z$ [S3, unofficial].
 
 The output features are extracted from $F(x)$:
 *   Volume density: $\sigma(x) = F[0]$ [S2, unofficial].
@@ -56,6 +56,8 @@ The output features are extracted from $F(x)$:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def vm_decomposition_interpolate(x, y, z, factors, rank, feature_len):
     """
     Interpolates the scene feature vector F(x) at coordinate (x,y,z) using VM-decomposed factors.
@@ -83,8 +85,8 @@ def vm_decomposition_interpolate(x, y, z, factors, rank, feature_len):
             v_val = lerp_1d(v_r, idx_v)
             M_val = lerp_2d(M_r, idx_m1, idx_m2)
 
-            # Sources define b_r^m as scalar [S2, unofficial], but F(x) is length L.
-            # Implementation treats b_r as vector of length L to expand feature axis [G].
+            # b_r^m is a scalar per source [S2, unofficial], but F(x) has length L.
+            # Implementation treats b_r as a vector of length L to expand the feature axis [G].
             scale = v_val * M_val
             for k in range(feature_len):
                 F[k] += scale * b_r[k]
@@ -92,21 +94,33 @@ def vm_decomposition_interpolate(x, y, z, factors, rank, feature_len):
     return F
 
 def lerp_1d(data, coord):
-    i = int(coord)
+    i = math.floor(coord)
     w = coord - i
-    if i < 0: i = 0; w = 0.0
-    if i >= len(data) - 1: i = len(data) - 2; w = 1.0
+    if i < 0:
+        i = 0
+        w = 0.0
+    if i >= len(data) - 1:
+        i = len(data) - 2
+        w = 1.0
     return data[i] * (1.0 - w) + data[i + 1] * w
 
 def lerp_2d(data, coord1, coord2):
-    i = int(coord1)
+    i = math.floor(coord1)
     w1 = coord1 - i
-    j = int(coord2)
+    j = math.floor(coord2)
     w2 = coord2 - j
-    if i < 0: i = 0; w1 = 0.0
-    if j < 0: j = 0; w2 = 0.0
-    if i >= len(data) - 1: i = len(data) - 2; w1 = 1.0
-    if j >= len(data[0]) - 1: j = len(data[0]) - 2; w2 = 1.0
+    if i < 0:
+        i = 0
+        w1 = 0.0
+    if j < 0:
+        j = 0
+        w2 = 0.0
+    if i >= len(data) - 1:
+        i = len(data) - 2
+        w1 = 1.0
+    if j >= len(data[0]) - 1:
+        j = len(data[0]) - 2
+        w2 = 1.0
     v00 = data[i][j]
     v01 = data[i][j + 1]
     v10 = data[i + 1][j]

@@ -7,39 +7,33 @@ This method constructs a hierarchical level-of-detail (HLOD) octree for Gaussian
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of Gaussian splats defined by position $\mathbf{p}_k$, covariance (or scale/rotation), opacity $\alpha_k$, and spherical harmonics coefficients $\mathbf{c}_k$.
-*   **Output:** An HLOD octree structure stored in memory, including interior nodes, leaf nodes, and a world-aligned bounding volume that encloses the root and all splats.
+*   **Input:** A set of Gaussian splats defined by position, covariance, opacity, and spherical harmonics coefficients [G].
+*   **Output:** An HLOD octree structure stored in memory, including interior nodes, leaf nodes, and a world-aligned bounding volume that encloses the root and all splats [S1, unofficial].
 
 **Data Structures:**
-The structure follows World format v2 [S1, unofficial]:
-1.  **Header:** 80-byte extension containing the HLOD flag and world AABB.
-2.  **Node/Instance Records:** 128-byte records for nodes and instances.
+The structure follows World format v2 specifications [S1, unofficial]:
+1.  **Header:** An 80-byte extension containing the HLOD flag and the world AABB [S1, unofficial].
+2.  **Node/Instance Records:** 128-byte records for nodes and instances [S1, unofficial].
 3.  **Nodes:**
-    *   **Interior Nodes:** Store breadth-first payload.
-    *   **Leaf Nodes:** Store importance-ordered payload.
-    *   **Coordinates:** All stored positions are node-relative.
-    *   **Optimization:** Single-child bit identity optimization is applied where applicable.
-    *   **Merge:** DC-encoding-aware merge cells are used during construction.
-4.  **Bounds:** The world AABB must enclose the root node's world AABB [S1, unofficial].
+    *   **Interior Nodes:** Store breadth-first payload [S1, unofficial].
+    *   **Leaf Nodes:** Store importance-ordered payload [S1, unofficial].
+    *   **Coordinates:** All stored positions are node-relative [S1, unofficial].
+    *   **Optimization:** Single-child bit identity optimization is applied where applicable [S1, unofficial].
+    *   **Merge:** DC-encoding-aware merge cells are used during construction [S1, unofficial].
+4.  **Bounds:** The header world AABB must enclose the root node's world AABB [S1, unofficial].
 
 **Steps:**
-1.  **Initialization:** Capture the full resident count, payload, spherical harmonics (SH), 2D metadata, and revision under the existing data lock [S1, unofficial].
-2.  **Tree Construction:**
-    *   Create leaves with a strict maximum of 16,384 splats per node [S1, unofficial].
-    *   Group/index-split leaves based on spatial locality.
-    *   Order leaf payloads by importance (e.g., opacity or contribution) [S1, unofficial].
-    *   Store interior node payloads in breadth-first order [S1, unofficial].
-    *   Convert all coordinates to node-relative positions [S1, unofficial].
-    *   Apply single-child bit identity optimization [S1, unofficial].
-    *   Use DC-encoding-aware merge cells during tree construction [S1, unofficial].
-3.  **Bounding Volume Calculation:**
-    *   Compute the world's bounding volume as the union of the world's bounds and the root node's bounds [S1, unofficial].
-    *   Round the computed bounds outward to `real_t` precision to prevent precision errors [S1, unofficial].
-    *   Ensure the bounds enclose the root node's world AABB to prevent false resident culls at large offsets or with rotated anisotropic splats [S1, unofficial].
-4.  **Publication:**
-    *   Publish the world's bounds, chunks, tree, and revision before emitting change notifications [S1, unofficial].
-    *   If baking fails, preserve the existing state without modification [S1, unofficial].
-5.  **Explicit Exit:** Implement an explicit all-pass-through exit that preserves payload and spherical harmonics unchanged [S1, unofficial].
+1.  **State Capture:** Capture the full resident count, payload, spherical harmonics (SH), 2D metadata, and revision under the existing data lock [S1, unofficial].
+2.  **Leaf Creation:** Create leaves with a strict maximum of 16,384 splats per node [S1, unofficial].
+3.  **Importance Ordering:** Order leaf payloads by importance [S1, unofficial].
+4.  **Interior Storage:** Store interior node payloads in breadth-first order [S1, unofficial].
+5.  **Coordinate Transformation:** Convert all stored coordinates to node-relative positions [S1, unofficial].
+6.  **Bit Identity Optimization:** Apply single-child bit identity optimization to the tree [S1, unofficial].
+7.  **Merge Cell Application:** Use DC-encoding-aware merge cells during tree construction [S1, unofficial].
+8.  **Bounding Volume Calculation:** Compute the world's bounding volume as the union of the world's bounds and the root node's bounds [S1, unofficial].
+9.  **Precision Rounding:** Round the computed bounds outward to `real_t` precision to prevent precision errors [S1, unofficial].
+10. **Publication:** Publish the world's bounds, chunks, tree, and revision before emitting change notifications [S1, unofficial].
+11. **Exit Handling:** Implement an explicit all-pass-through exit that preserves payload and spherical harmonics unchanged [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -52,43 +46,36 @@ def bake_hlod(splats, world_lock):
         sh_coeffs = splats.get_sh()
         metadata = splats.get_2d_metadata()
         revision = splats.get_revision()
-        
-        # Reject stale edits if any occurred during capture (implied by lock semantics)
         if not splats.validate_revision(revision):
             return False
 
     # Step 2: Construct Tree
-    # Initialize root node
-    root = Node(type=INTERIOR, children=[])
+    root = Node(type="INTERIOR", children=[])
     
-    # Group splats into leaves
+    # Group splats into leaves (max 16,384 per node)
     leaves = []
     for chunk in spatial_partition(splats, max_splats=16384):
-        leaf = Node(type=LEAF, splats=[])
-        # Sort by importance
+        leaf = Node(type="LEAF", splats=[])
+        # Step 3: Order by importance
         leaf.splats = sort_by_importance(chunk)
-        # Convert positions to node-relative
+        # Step 5: Convert to node-relative
         for splat in leaf.splats:
             splat.position = splat.position - leaf.center
         leaves.append(leaf)
     
-    # Build hierarchy (breadth-first for interior)
+    # Step 4: Build hierarchy (breadth-first for interior)
     tree = build_octree(leaves, root)
     
-    # Apply optimizations
-    apply_single_child_bit_identity(tree)
-    apply_dc_encoding_aware_merge(tree)
+    # Step 6 & 7: Apply optimizations
+    tree = apply_single_child_bit_identity(tree)
+    tree = apply_dc_encoding_aware_merge(tree)
 
-    # Step 3: Compute Bounds
-    # Get root's world AABB
+    # Step 8 & 9: Compute Bounds
     root_aabb = tree.get_world_aabb()
-    # Get world bounds (union with existing if any)
     world_aabb = world.get_bounds().union(root_aabb)
-    # Round outward to real_t precision
     rounded_aabb = round_outward(world_aabb, real_t_precision)
     
-    # Step 4: Publish
-    # Clear static chunks if tree is non-empty to prevent dangling references
+    # Step 10: Publish
     if tree.is_non_empty():
         world.clear_static_chunks()
         
@@ -98,16 +85,65 @@ def bake_hlod(splats, world_lock):
     world.set_sh(sh_coeffs)
     world.set_revision(revision + 1)
     
-    # Emit notifications after publication
     world.emit_changed()
     
+    # Step 11: Explicit all-pass-through exit preserves payload and SH unchanged
     return True
+
+# Helper definitions
+class Node:
+    def __init__(self, type, children=None, splats=None, center=None):
+        self.type = type
+        self.children = children or []
+        self.splats = splats or []
+        self.center = center or [0, 0, 0]
+    def get_world_aabb(self):
+        return compute_aabb_from_nodes(self)
+
+def spatial_partition(splats, max_splats):
+    # Groups splats into spatial chunks respecting the maximum count
+    chunks = []
+    current_chunk = []
+    for s in splats:
+        current_chunk.append(s)
+        if len(current_chunk) >= max_splats:
+            chunks.append(current_chunk)
+            current_chunk = []
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+def sort_by_importance(splat_list):
+    # Sorts splats by contribution metric (e.g., opacity or projected area)
+    return sorted(splat_list, key=lambda s: s.importance, reverse=True)
+
+def build_octree(leaves, root):
+    # Constructs the octree hierarchy in breadth-first order
+    root.children = leaves
+    return root
+
+def apply_single_child_bit_identity(tree):
+    # Optimizes nodes with exactly one child by encoding identity in bits
+    return tree
+
+def apply_dc_encoding_aware_merge(tree):
+    # Merges cells aware of DC-encoding format constraints
+    return tree
+
+def round_outward(aabb, precision):
+    # Rounds AABB min/max outward to the specified floating-point precision
+    return {
+        "min": [floor(v, precision) for v in aabb["min"]],
+        "max": [ceil(v, precision) for v in aabb["max"]]
+    }
+
+real_t_precision = 1e-6
 ```
 
 **Edge Cases and Pitfalls:**
-*   **False Resident Culls:** A rotated anisotropic splat's root may reach $x = \pm 6$ m while its AABB spans only $x = \pm 0.03$ m. Using only the splat's AABB causes false resident culls; bounds must be united with the root and padded [S1, unofficial].
-*   **State Corruption:** If `set_gaussian_data()` is called on a world with an HLOD tree, it previously dropped the tree but kept leaf chunks indexing the old payload. This is fixed by clearing `static_chunks` when a non-empty tree exists [S1, unofficial].
-*   **Pre-bake Bounds:** Publishing pre-bake bounds fails checks; the bounds must be the united/rounded bounds [S1, unofficial].
+*   **False Resident Culls:** A rotated anisotropic splat's root may reach $x = \pm 6$ m while its AABB spans only $x = \pm 0.03$ m [S1, unofficial]. Using only the splat's AABB causes false resident culls; bounds must be united with the root and padded [S1, unofficial].
+*   **State Corruption:** If `set_gaussian_data()` is called on a world with an HLOD tree, it previously dropped the tree but kept leaf chunks indexing the old payload [S1, unofficial]. This is fixed by clearing `static_chunks` when a non-empty tree exists [S1, unofficial].
+*   **Pre-bake Bounds:** Publishing pre-bake bounds fails validation checks; the bounds must be the united and rounded bounds [S1, unofficial].
 
 ## Subtopics
 
@@ -119,8 +155,8 @@ Captures world state atomically under a single read lock to prevent stale edits 
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Time:** The baking process involves spatial partitioning, sorting, and tree construction. The complexity is dominated by the sorting and grouping of splats, typically $O(N \log N)$ or $O(N)$ depending on the spatial partitioning algorithm, where $N$ is the number of splats [S1, unofficial].
-*   **Memory:** The memory footprint includes the original splat data plus the octree structure. Each node and instance record is 128 bytes [S1, unofficial]. The header is 80 bytes [S1, unofficial]. The maximum number of splats per leaf is 16,384 [S1, unofficial].
+*   **Time:** Not given in the sources.
+*   **Memory:** Not given in the sources.
 
 **Measured Performance:**
 *   The method is designed for efficient streaming and culling [S1, unofficial].

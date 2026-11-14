@@ -1,0 +1,137 @@
+# Metamers Rendered Differentiably (MRD)
+
+## Overview
+Metamers Rendered Differentiably (MRD) is a method for probing the implicit 3D scene understanding of vision models by searching for physically distinct 3D scene parameters that produce identical neural network activations (model metamers) [S1, unofficial]. Unlike pixel-based reconstruction methods, MRD optimizes physical scene parameters (geometry, materials, lighting) against a frozen neural network's latent representations, ensuring reconstructions are grounded in physical descriptions and allowing the decomposition of model activations into specific physical causes [S1, unofficial]. It builds on [Physically Based Differentiable Rendering](14937-physically-based-differentiable-rendering.md) to enable gradient-based optimization through physically based rendering integrators.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $\pi$: Target scene parameters (e.g., geometry, material, lighting) defining the ground-truth scene [S1, unofficial].
+    *   $NN(\cdot)$: A frozen neural network used to extract latent representations from rendered images [S1, unofficial].
+    *   $f(\cdot)$: A physically based differentiable rendering function mapping scene parameters to rendered views [S1, unofficial].
+    *   $\pi'$: Initialized scene parameters (e.g., different shape or material) to be optimized [S1, unofficial].
+*   **Outputs:**
+    *   $\pi'_{opt}$: Optimized scene parameters that constitute a model metamer for the target scene $\pi$ [S1, unofficial].
+
+**Data Structures:**
+*   **Scene Parameters ($\pi, \pi'$):** Structured data defining the 3D scene. This includes geometry (mesh vertices, primitives), material properties (BSDF parameters), and lighting configurations (light positions, intensities, spectra) [S1, unofficial]. The exact layout depends on the specific differentiable renderer used (e.g., Mitsuba3, nvdiffrast, psdr) [S1, unofficial].
+*   **Latent Representations ($z, z'$):** Vectors output by the frozen neural network $NN(\cdot)$ for the rendered images [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Target Rendering:** Sample camera positions on the unit sphere. Render a set of views for the target scene using the differentiable rendering function $f(\pi)$ with the known target parameters $\pi$ [S1, unofficial].
+2.  **Initialization:** Initialize a new scene from a different state $\pi'$ (e.g., a sphere shape instead of a dragon, or different material properties) [S1, unofficial].
+3.  **Candidate Rendering:** Render a set of views for the initialized scene using the differentiable rendering function $f(\pi')$ using the same camera positions as in Step 1 [S1, unofficial].
+4.  **Latent Extraction:** Pass both sets of rendered images (from $\pi$ and $\pi'$) through the frozen neural network $NN(\cdot)$ to obtain latent representations $z = NN(f(\pi))$ and $z' = NN(f(\pi'))$ [S1, unofficial].
+5.  **Loss Computation:** Compute the optimization objective $\mathcal{L}(z, z')$ as the distance (e.g., mean squared error) between the latent representations $z$ and $z'$ [S1, unofficial].
+6.  **Gradient Computation:** Compute the gradient of the latent loss with respect to the optimized scene parameters $\pi'$, i.e., $\frac{\partial \mathcal{L}(z, z')}{\partial \pi'}$ [S1, unofficial]. This involves backpropagating the gradient through the neural network $NN(\cdot)$ and then through the differentiable rendering function $f(\cdot)$ [S1, unofficial].
+7.  **Parameter Update:** Update the scene parameters $\pi'$ using gradient descent while holding other parameters (e.g., lighting) constant if only specific properties are being probed [S1, unofficial].
+8.  **Iteration:** Repeat Steps 2-7 until convergence or a maximum number of iterations is reached [S1, unofficial].
+
+**Formulas:**
+The loss function is defined as the distance between latent representations:
+$$ \mathcal{L}(z, z') = \text{Distance}(z, z') $$
+where $z = NN(f(\pi))$ and $z' = NN(f(\pi'))$ [S1, unofficial]. Common distances include Mean Squared Error (MSE) [S1, unofficial].
+
+The gradient is computed as:
+$$ \frac{\partial \mathcal{L}(z, z')}{\partial \pi'} $$
+This gradient is used to update $\pi'$ via gradient descent [S1, unofficial].
+
+**Parameters:**
+*   $\pi$: Target scene parameters [S1, unofficial].
+*   $\pi'$: Initialized scene parameters [S1, unofficial].
+*   $NN(\cdot)$: Frozen neural network (e.g., CLIP, DINO, ResNet-50, ResNet-50-SIN, LPIPS) [S1, unofficial].
+*   $f(\cdot)$: Physically based differentiable rendering function [S1, unofficial].
+*   Camera positions: Sampled on the unit sphere [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Discontinuities:** Discontinuities arising from changes in lighting or geometric edges can interfere with or bias gradient computation, making convergence challenging [S1, unofficial]. These must be mitigated via techniques such as soft visibility, edge sampling, or regularization, which are active research areas in differentiable rendering [S1, unofficial].
+*   **Convergence:** Ensuring that the optimization finds a true model metamer (a scene that produces the same activation) rather than just a local minimum in the latent space is a key challenge [S1, unofficial].
+*   **Physical Plausibility:** Since MRD optimizes physical scene parameters, the resulting metamers are physically plausible, unlike pixel-based metamers [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mrd_optimize(target_params, init_params, frozen_network, renderer, num_iterations, learning_rate):
+    """
+    Optimizes scene parameters to find a model metamer using MRD.
+    
+    Args:
+        target_params: Known scene parameters pi.
+        init_params: Initial scene parameters pi'.
+        frozen_network: Frozen neural network NN(.).
+        renderer: Physically based differentiable rendering function f(.).
+        num_iterations: Number of optimization steps.
+        learning_rate: Step size for gradient descent.
+        
+    Returns:
+        Optimized scene parameters pi'_opt.
+    """
+    # Step 1: Render target views
+    target_images = renderer.render(target_params)
+    
+    # Step 4: Extract target latents
+    target_latents = frozen_network(target_images)
+    
+    # Current parameters to optimize
+    current_params = init_params.clone()
+    
+    for i in range(num_iterations):
+        # Step 2 & 3: Render candidate views
+        candidate_images = renderer.render(current_params)
+        
+        # Step 4: Extract candidate latents
+        candidate_latents = frozen_network(candidate_images)
+        
+        # Step 5: Compute loss
+        loss = mse_loss(target_latents, candidate_latents)
+        
+        # Step 6: Compute gradient and backpropagate
+        # The gradient is with respect to current_params
+        gradients = compute_gradients(loss, current_params, renderer, frozen_network)
+        
+        # Step 7: Update parameters
+        current_params = current_params - learning_rate * gradients
+        
+    return current_params
+
+def mse_loss(z, z_prime):
+    """Mean Squared Error loss between latent vectors."""
+    return torch.mean((z - z_prime) ** 2)
+
+def compute_gradients(loss, params, renderer, network):
+    """
+    Computes gradients of the loss with respect to scene parameters.
+    This involves backpropagation through the network and the renderer.
+    """
+    # Note: In a real implementation, this would use automatic differentiation
+    # provided by the framework (e.g., PyTorch, JAX) combined with the
+    # differentiable renderer's gradient capabilities.
+    # The gradient flows: Loss -> Latents -> Network -> Images -> Renderer -> Params
+    return torch.autograd.grad(loss, params, retain_graph=True)[0]
+```
+
+## Operating characteristics
+*   **Time Complexity:** The method requires multiple rendering passes per optimization step, one for the target scene and one for the candidate scene. The complexity depends on the complexity of the differentiable renderer and the neural network. Rendering is typically the most expensive operation [S1, unofficial].
+*   **Memory Complexity:** Requires storing the rendered images and the latent representations for both the target and candidate scenes. The memory footprint also includes the gradients during backpropagation [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scaling to larger scenes or higher resolutions will increase the computational cost of rendering and the size of the latent representations [S1, unofficial].
+*   **Strengths:**
+    *   Probes vision models' implicit 3D understanding by finding physically plausible metamers [S1, unofficial].
+    *   Allows decomposition of model activations into specific physical causes (e.g., shape vs. material) [S1, unofficial].
+    *   Reconstructions are grounded in physical scene descriptions [S1, unofficial].
+*   **Limitations:**
+    *   Computationally expensive due to the need for differentiable rendering and backpropagation through the renderer [S1, unofficial].
+    *   Convergence can be challenging due to discontinuities in the rendering process [S1, unofficial].
+    *   Requires a differentiable renderer that supports the specific physical effects being modeled [S1, unofficial].
+*   **When to use:** When the goal is to understand how a vision model represents 3D scene properties (shape, material) and to find physically plausible scenes that elicit the same model response [S1, unofficial].
+*   **When not to use:** When computational resources are limited, or when the goal is simply to reconstruct a scene from images without probing model internals [S1, unofficial].
+
+## Background
+*   **Origin:** MRD was introduced by Benjamin Beilharz and Thomas S. A. Wallis from the Perception Lab, Centre for Cognitive Science, Technical University of Darmstadt, and the Center for Mind, Brain and Behavior (CMBB), Universities of Marburg, Giessen, and Darmstadt, Germany [S1, unofficial].
+*   **Paper:** "MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding" (arXiv:2512.12307v5, 30 Jul 2026) [S1, unofficial].
+*   **History and Development:** The method builds on advances in physically based differentiable rendering (PBDR) using tools like nvdiffrast, Mitsuba3, and psdr, which allow differentiation through path tracing integrators [S1, unofficial]. It addresses the challenge of understanding deep learning models' representations by linking them to physical environmental properties [S1, unofficial].
+*   **Usage:** Applied to probe vision models (CLIP, DINO, ResNet-50, ResNet-50-SIN, LPIPS) for 3D scene understanding, specifically investigating material appearance (BSDF) and shape recovery [S1, unofficial].
+
+## Sources
+[S1] MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding, https://doi.org/10.48550/arXiv.2512.12307, fetched 2026-10-29 (unofficial)

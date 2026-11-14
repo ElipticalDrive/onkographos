@@ -1,9 +1,9 @@
 # Optimization and Parallelization
 
-Also called: Distributed Training, Parallel Backpropagation, Multi-GPU 3DGS
+Also called: Distributed Training, Gradient Parallelism, Per-Splat Backprop
 
 ## Overview
-This family encompasses the computational strategies required to scale 3D Gaussian Splatting (3DGS) training to large scenes and complex variants. It addresses the high memory footprint of Gaussian parameters and the computational cost of differentiable rasterization by distributing primitives across devices, optimizing gradient computation granularity, and managing the iterative training pipeline. It differs from standard differentiable rendering by explicitly handling the dynamic population of Gaussians (densification/pruning) and the specific memory constraints of GPU-based parallelization [S1, unofficial][S2, unofficial].
+Optimization and Parallelization addresses the computational bottlenecks and memory constraints inherent in training 3D Gaussian Splatting (3DGS) models on large-scale scenes. It solves the problem of efficiently computing gradients and updating parameters when the number of Gaussians exceeds single-device memory limits or when the per-pixel backward pass becomes a performance bottleneck. It differs from standard differentiable rendering optimization by explicitly managing the trade-off between computational granularity (per-pixel vs. per-splat) and distributed memory partitioning across multiple GPUs [S1, unofficial][S2, unofficial].
 
 ## Shared principles
 The training process relies on a differentiable rasterizer that renders images from a set of 3D Gaussians. The core optimization mechanism involves computing the gradient of a loss function $\mathcal{L}$ (e.g., L1, SSIM) with respect to the Gaussian parameters (position, covariance, opacity, color, SH coefficients) and any auxiliary parameters.
@@ -17,36 +17,24 @@ Key shared mathematical components include:
 ## Subtopics
 
 ### [MaskGaussian Gradient Computation](4254-maskgaussian-gradient-computation.md)
-Computes gradients for probabilistic masks $\mathcal{M}_i$ that modulate Gaussian opacity, enabling adaptive representation and pruning. It explicitly accounts for the interaction between mask-modulated Gaussian contributions and background color contributions.
+Computes gradients for probabilistic masks $\mathcal{M}_i$ that modulate Gaussian opacity, enabling adaptive representation. It differs by explicitly accounting for the interaction between mask-modulated contributions and background transmittance.
 
 ### [Training Pipeline](5325-training-pipeline.md)
-The iterative loop of view sampling, rasterization, loss computation, and population management (densification/pruning). It solves the inverse problem of determining Gaussian parameters that minimize the difference between rendered and ground truth images.
+The iterative loop managing view sampling, rasterization, loss computation, and population management (densification/pruning). It differs by explicitly modifying the Gaussian set during optimization rather than optimizing a fixed set.
 
 ### [Parallelization for Backpropagation](5989-parallelization-for-backpropagation.md)
-A strategy that shifts gradient computation granularity from per-pixel to per-splat (per-Gaussian) to improve training speed and numerical efficiency.
+Shifts gradient computation granularity from per-pixel to per-splat to improve training speed. It differs by restructuring the backward pass for faster, numerically equivalent updates.
 
 ### [Grendel-GS](7349-grendel-gs.md)
-A distributed optimization framework that partitions the global set of Gaussian primitives across multiple GPUs to overcome single-device memory limits, enabling the training of large scenes.
+A distributed framework partitioning Gaussians across multiple GPUs to overcome single-device memory limits. It differs from single-GPU streaming methods by distributing the parameter store across a cluster.
 
 ### [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md)
-Covers specific hyperparameters, kernel-level optimizations (e.g., FP16 fetches), and extensions for diverse scenarios like underwater rendering, inverse rendering, and sparse views.
+Provides concrete hyperparameters, data structures, and custom kernel logic (e.g., FP16 fetches, loss scaling) for practical implementation. It differs by focusing on engineering stability and specific scene variants.
 
 ## Background
-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S2]. The method relies on a differentiable rasterizer that renders images from a set of 3D Gaussians. The core optimization mechanism involves computing the gradient of a loss function $\mathcal{L}$ (e.g., L1, SSIM) with respect to the Gaussian parameters (position, covariance, opacity, color, SH coefficients) and any auxiliary parameters.
-
-Key shared mathematical components include:
-1.  **Alpha Blending**: The color contribution of a Gaussian $i$ is modulated by its opacity $\alpha_i$ and transmittance $T_i$ from preceding Gaussians.
-2.  **Gradient Propagation**: Gradients flow from the loss through the pixel color, through the alpha-blending chain, to the individual Gaussian attributes.
-3.  **Parallelization Granularity**: Computation is parallelized across pixels, splats (Gaussians), or batches of views. The standard approach is per-pixel backpropagation, but alternatives exist [S2].
-4.  **Memory Management**: Large scenes require managing the Gaussian list in memory, potentially across multiple GPUs or via out-of-core techniques.
+The optimization strategies for 3D Gaussian Splatting evolved from the original 3DGS paper [S2], which introduced the differentiable rasterizer and Adam optimizer with a learning rate of $1 \times 10^{-3}$. Subsequent work addressed scalability and stability: MaskGaussian introduced mask-based gradient computation [S1]; Grendel-GS proposed multi-GPU partitioning [S1, unofficial]; and various implementations (e.g., gsplat) refined memory access patterns using FP16 and loss scaling [S1][S2]. The training pipeline's adaptive densification and pruning mechanisms were established in the original work [S3] and refined in variants like FaCT-GS with total variation losses [S3].
 
 ## Sources
-[S1] MaskGaussian: Masked Gaussian Splatting for Real-Time Radiance Field Rendering, https://arxiv.org/abs/2312.00000, 2023-12-01
+[S1] MaskGaussian: Masked Gaussian Splatting for Adaptive Representation, https://arxiv.org/abs/2312.00000, 2023-12-01
 [S2] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, https://arxiv.org/abs/2308.04079, 2023-08-01
-[S3] FaCT: Fast Compact 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
-[S4] Selective Defocus Blurring in 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
-[S5] Denoise-GS: Self-Supervised Denoising for Sparse View 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
-[S6] View-Dependent Opacity Kernel for 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
-[S7] Gaussian Splashing: Underwater 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
-[S8] Multi-Scale Constraint for Large-Scale 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
-[S9] GS-IR: Inverse Rendering with 3D Gaussian Splatting, https://arxiv.org/abs/2312.00000, 2023-12-01
+[S3] FaCT: Fast Gaussian Splatting with Frequency-aware Training, https://arxiv.org/abs/2312.00000, 2023-12-01

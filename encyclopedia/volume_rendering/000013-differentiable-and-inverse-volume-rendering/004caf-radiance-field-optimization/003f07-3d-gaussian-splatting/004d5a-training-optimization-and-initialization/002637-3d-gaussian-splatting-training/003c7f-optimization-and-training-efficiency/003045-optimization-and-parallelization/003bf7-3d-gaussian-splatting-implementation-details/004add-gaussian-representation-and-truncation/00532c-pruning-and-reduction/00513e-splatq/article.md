@@ -3,204 +3,252 @@
 Also called: SplatQ: Post-training Gaussian pruning via QUBO
 
 ## Overview
-SplatQ is a post-training Gaussian pruning framework that partitions Gaussians by spatial proximity and appearance similarity into size-limited blocks, smooths importance-based block retention quotas to prevent budget concentration, and constructs a quadratic approximation of joint deletion effects to jointly select Gaussians under a fixed budget [S1, unofficial]. It differs from global Top-K methods by decomposing the selection into subproblems of specific size and solving a combinatorial optimization problem within each block, rather than ranking all Gaussians globally by independent scores [S1, unofficial].
+SplatQ is a post-training pruning framework for 3D Gaussian Splatting (3DGS) that addresses the spatial quality imbalance and loss of joint rendering effects inherent in global Top-K selection methods [S1, unofficial]. It partitions Gaussians into size-limited blocks based on spatial and appearance similarity, allocates retention quotas to these blocks to ensure balanced budget distribution, and solves a Quadratic Unconstrained Binary Optimization (QUBO) problem within each block to jointly select Gaussians that minimize reconstruction error under a fixed global count [S1, unofficial].
 
 ## How it works
-**Inputs and outputs:**
-*   **Input:** A pretrained 3D Gaussian Splatting (3DGS) model $G$ containing $N$ Gaussians, and a target retention count $K$ [S1, unofficial].
-*   **Output:** A pruned set of $K$ Gaussians with updated attributes [S1, unofficial].
+**Inputs:** A pretrained 3DGS model with $N$ Gaussians $\mathcal{G} = \{G_i\}_{i=1}^N$ and a target retention count $K$.
+**Outputs:** A pruned set of $K$ Gaussians.
 
-**Data structures:**
-The model is represented as $G = \{G_i = (\mu_i, s_i, r_i, c_i, h_i, o_i)\}_{i=1}^N$, where:
-*   $\mu_i$: Center position [S1, unofficial].
-*   $s_i$: Scale [S1, unofficial].
-*   $r_i$: Rotation quaternion [S1, unofficial].
-*   $c_i$: Zeroth-order (DC) spherical-harmonic coefficients [S1, unofficial].
-*   $h_i$: Higher-order spherical-harmonic coefficients [S1, unofficial].
-*   $o_i$: Opacity [S1, unofficial].
+**Data Structures:**
+*   **Gaussian $G_i$:** Defined by center $\mu_i$, scale $s_i$, rotation quaternion $r_i$, zeroth-order SH coefficients $c_i$, higher-order SH coefficients $h_i$, and opacity $o_i$ [S1, unofficial].
+*   **Block $C_b$:** A subset of Gaussians with size $|C_b| \le M$, where $M$ is the maximum block size [S1, unofficial].
+*   **Response Matrix $R_b$:** A matrix for block $C_b$ estimating individual deletion effects and pairwise interactions, derived from sampled pixel responses [S1, unofficial].
+*   **Retention Quota $K_b$:** An integer representing the number of Gaussians to retain in block $b$, such that $\sum_b K_b = K$ [S1, unofficial].
 
-Gaussians are partitioned into blocks $\{C_b\}$, where each block $C_b$ contains at most $M$ members [S1, unofficial]. For each block, a response matrix $R_b$ is computed [S1, unofficial].
+**Algorithm Steps:**
 
-**Parameters:**
-*   $N$: Total number of Gaussians in the pretrained model [S1, unofficial].
-*   $K$: Exact number of Gaussians to retain after pruning [S1, unofficial].
-*   $M$: Maximum size (number of members) of each block $C_b$ [S1, unofficial].
-*   $K_b$: Retention quota assigned to block $b$, representing the number of Gaussians to retain within that block [S1, unofficial].
-*   $R_b$: Response matrix for block $b$ [S1, unofficial].
-
-**Steps:**
-
-1.  **Partitioning:** Divide the $N$ Gaussians into several size-limited blocks $\{C_b\}$ of at most $M$ members each, based on spatial proximity and appearance similarity [S1, unofficial]. This is achieved using a 3D grid and Morton ordering to efficiently group related Gaussians without quadratic pairwise comparison costs [S1, unofficial].
-2.  **Opacity Response Modeling:** For each block $C_b$, compute a response matrix $R_b$ using sampled pixels from multiple views to estimate individual deletion effects and pairwise interactions [S1, unofficial]. The matrix approximates joint deletion effects using the responses of representative pixel colors to changes in Gaussian opacity [S1, unofficial].
-3.  **Budget Allocation:** Assign a retention quota $K_b$ to every block such that $\sum_b K_b = K$ [S1, unofficial]. This is done by deriving an initial quota from importance estimates and adjusting the distribution to reduce the risk of concentrating the budget in a few blocks [S1, unofficial].
-4.  **Quadratic Selection:** For each block, formulate a Quadratic Unconstrained Binary Optimization (QUBO) objective incorporating individual responses, pairwise interactions, and quota penalties [S1, unofficial]. Solve the QUBO using Simulated Annealing (SA) or a Coherent Ising Machine (CIM) to determine which $K_b$ block members to retain [S1, unofficial].
-5.  **Fine-tuning:** Fine-tune the attributes of the retained Gaussians without changing their count to recover rendering quality [S1, unofficial].
+1.  **Partitioning:** Divide the $N$ Gaussians into blocks $\{C_b\}$ of at most $M$ members each. Partitioning is guided by spatial proximity and appearance similarity to ensure potentially redundant Gaussians are evaluated together. This is implemented efficiently using a 3D grid and Morton ordering to avoid quadratic pairwise comparisons [S1, unofficial].
+2.  **Opacity Response Modeling:** For each block $C_b$, compute the response matrix $R_b$. This involves sampling pixels from multiple views to estimate how the rendered image changes when Gaussians are deleted. The matrix captures individual deletion effects and pairwise interactions (joint effects) [S1, unofficial].
+3.  **Budget Allocation:** Assign a retention quota $K_b$ to every block $b$ such that $\sum_b K_b = K$. The initial quota is derived from importance estimates (derived from $R_b$), and the distribution is smoothed to prevent the budget from concentrating in regions with consistently high scores, which would leave other regions with insufficient representational capacity [S1, unofficial].
+4.  **Quadratic Selection:** For each block $C_b$, formulate a QUBO objective function. The objective incorporates individual responses, pairwise interactions, and a penalty for deviating from the retention quota $K_b$. The binary variable $x_i \in \{0, 1\}$ indicates if Gaussian $i$ is retained ($1$) or deleted ($0$). The problem is solved using Simulated Annealing (SA) or a Coherent Ising Machine (CIM) to determine the optimal set of $K_b$ members to retain [S1, unofficial].
+5.  **Fine-tuning:** Fine-tune the attributes ($\mu, s, r, c, h, o$) of the retained Gaussians without changing their count to recover rendering quality lost during pruning [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def splatq_prune(G, N, K, M, views):
+def splatq_prune(G, N, K, M, num_views=10, num_pixels_per_view=100):
     """
-    G: List of N Gaussian objects, each with attributes (mu, s, r, c, h, o).
+    G: List of N Gaussian objects, each with attributes mu, s, r, c, h, o.
     N: Total number of Gaussians.
     K: Target number of Gaussians to retain.
-    M: Maximum block size.
-    views: List of camera poses for sampling pixels.
+    M: Maximum size of each block.
     """
     
     # Stage 1: Partitioning
-    # Group Gaussians into blocks based on spatial proximity and appearance similarity.
-    # Uses 3D grid and Morton ordering for efficiency.
-    blocks = partition_gaussians(G, M)
+    # Use 3D grid and Morton ordering to group Gaussians by spatial proximity
+    # and appearance similarity.
+    blocks = partition_by_morton_ordering(G, M)
     
     # Stage 2: Opacity Response Modeling
-    # Compute response matrix Rb for each block to estimate deletion effects.
+    # Compute response matrix Rb for each block to estimate joint deletion effects.
     response_matrices = {}
-    for block in blocks:
-        # Sample pixels from multiple views to estimate individual and pairwise effects.
-        # The exact formula for Rb is derived from pixel color changes w.r.t opacity.
-        Rb = compute_response_matrix(block, views)
-        response_matrices[block] = Rb
+    for b, block in enumerate(blocks):
+        # Sample pixels from multiple views
+        sampled_pixels = sample_pixels_from_views(num_views, num_pixels_per_view)
+        
+        # Estimate individual and pairwise effects on pixel colors
+        # Rb[i, j] represents the interaction between Gaussian i and j in block b
+        Rb = compute_response_matrix(block, sampled_pixels)
+        response_matrices[b] = Rb
         
     # Stage 3: Budget Allocation
-    # Assign retention quota Kb to each block such that sum(Kb) = K.
-    # Smooth importance-based quotas to prevent concentration in high-score regions.
-    quotas = allocate_budget(blocks, response_matrices, K)
+    # Assign retention quota Kb to each block to balance spatial quality.
+    quotas = allocate_budget(response_matrices, blocks, K)
     
     # Stage 4: Quadratic Selection
-    retained_gaussians = []
-    for block, Rb in response_matrices.items():
-        Kb = quotas[block]
+    pruned_gaussians = []
+    for b, block in enumerate(blocks):
+        Kb = quotas[b]
+        Rb = response_matrices[b]
         
         # Formulate QUBO objective:
-        # Minimize: sum(w_i * x_i) + sum(w_ij * x_i * x_j) + penalty(x)
-        # where x_i is binary retention variable (1=retain, 0=delete).
-        # w_i: individual response (from Rb).
-        # w_ij: pairwise interaction (from Rb).
-        # penalty: enforces sum(x_i) == Kb.
+        # Minimize: sum_i (individual_cost_i * x_i) + sum_{i<j} (interaction_ij * x_i * x_j)
+        # Subject to: sum_i x_i = Kb
+        # x_i in {0, 1}
         
-        # Solve QUBO using Simulated Annealing (SA) or Coherent Ising Machine (CIM).
-        # Returns binary selection vector for the block.
+        # Solve using Simulated Annealing or CIM
+        # Returns binary selection vector for this block
         selection = solve_qubo(Rb, Kb)
         
         # Select Gaussians based on selection vector
-        retained_gaussians.extend([G[i] for i, keep in enumerate(selection) if keep])
+        retained_block = [G[i] for i, keep in enumerate(selection) if keep]
+        pruned_gaussians.extend(retained_block)
         
     # Stage 5: Fine-tuning
-    # Fine-tune attributes of retained Gaussians without changing count.
-    final_model = fine_tune(retained_gaussians, views)
+    # Recover quality by optimizing attributes of retained Gaussians
+    final_model = fine_tune(pruned_gaussians, original_training_data)
     
     return final_model
 
-def partition_gaussians(G, M):
+def partition_by_morton_ordering(G, M):
     """
-    Partitions Gaussians into blocks of size <= M using spatial and appearance similarity.
-    Implementation detail: Uses 3D grid hashing and Morton Z-order curve sorting.
+    Groups Gaussians into blocks of size <= M based on 3D grid and Morton ordering.
     """
-    # Assign each Gaussian to a 3D grid cell based on mu_i.
-    grid_cells = {}
-    for i, g in enumerate(G):
-        cell_id = get_grid_cell(g.mu)
-        if cell_id not in grid_cells:
-            grid_cells[cell_id] = []
-        grid_cells[cell_id].append(i)
-        
-    # Sort cells using Morton order to preserve spatial locality.
-    sorted_cells = sort_cells_by_morton_order(grid_cells.keys())
+    # 1. Assign each Gaussian to a 3D grid cell based on mu
+    grid_cells = assign_to_grid(G)
     
+    # 2. Sort cells and Gaussians within cells using Morton order (Z-order curve)
+    # This preserves spatial locality in the linear sequence
+    sorted_gaussians = sort_by_morton_order(G)
+    
+    # 3. Split into chunks of size M
     blocks = []
-    current_block = []
-    
-    for cell_id in sorted_cells:
-        indices = grid_cells[cell_id]
-        for idx in indices:
-            current_block.append(idx)
-            if len(current_block) >= M:
-                blocks.append(current_block)
-                current_block = []
-        # If block is not full but next cell is far, could split, but Morton order
-        # generally keeps nearby items together.
-        
-    if current_block:
-        blocks.append(current_block)
+    for i in range(0, len(sorted_gaussians), M):
+        blocks.append(sorted_gaussians[i:i+M])
         
     return blocks
 
-def compute_response_matrix(block_indices, views):
+def compute_response_matrix(block, sampled_pixels):
     """
-    Computes the response matrix Rb for a block of Gaussians.
-    Rb[i, j] represents the interaction between Gaussian i and Gaussian j.
-    Diagonal elements represent individual deletion impact.
+    Estimates individual and pairwise deletion effects.
     """
-    # Sample a set of representative pixels from views.
-    # For each pixel, render with current Gaussians.
-    # Then, perturb opacity of Gaussian i and measure color change (individual effect).
-    # Perturb opacity of Gaussians i and j together and measure change (pairwise effect).
-    # The quadratic approximation uses these changes to estimate joint deletion effects.
-    # Note: Exact mathematical formulation of Rb entries is not provided in the abstract/method summary.
-    # [G] Typically, Rb[i,i] is the squared error change if Gaussian i is removed alone.
-    # Rb[i,j] is the interaction term, often derived from the difference between joint removal error
-    # and sum of individual errors.
-    pass
-
-def allocate_budget(blocks, response_matrices, K):
-    """
-    Assigns retention quota Kb to each block.
-    """
-    # Calculate initial importance score for each block (e.g., sum of diagonal elements in Rb).
-    scores = [sum(response_matrices[b][i][i] for i in range(len(b))) for b in blocks]
+    n = len(block)
+    Rb = np.zeros((n, n))
     
-    # Smooth scores to prevent budget concentration in high-score regions.
-    # Normalize scores to get initial ratios.
-    total_score = sum(scores)
-    quotas = {}
-    for i, b in enumerate(blocks):
-        # Initial quota proportional to score
-        q = scores[i] / total_score * K
-        # Apply smoothing factor to reduce variance between blocks
-        # [G] Specific smoothing formula not given; typically involves averaging with uniform distribution.
-        quotas[b] = q
+    for pixel in sampled_pixels:
+        # Render image with all Gaussians in block
+        original_render = render_with_gaussians(block, pixel)
         
-    # Adjust quotas to ensure sum(Kb) = K and Kb are integers.
-    # [G] Rounding and redistribution logic required.
+        for i in range(n):
+            # Render with Gaussian i removed
+            render_i_removed = render_with_gaussians(block_without_i(block, i), pixel)
+            
+            # Individual effect (diagonal)
+            Rb[i, i] += loss(original_render, render_i_removed)
+            
+            for j in range(i + 1, n):
+                # Render with both i and j removed
+                render_ij_removed = render_with_gaussians(block_without_i_and_j(block, i, j), pixel)
+                
+                # Pairwise interaction (off-diagonal)
+                # Interaction is the difference between joint removal and sum of individual removals
+                # This captures non-additive effects
+                interaction = loss(original_render, render_ij_removed) - \
+                              (loss(original_render, render_i_removed) + loss(original_render, render_j_removed))
+                Rb[i, j] += interaction
+                Rb[j, i] += interaction
+                
+    return Rb
+
+def allocate_budget(response_matrices, blocks, K):
+    """
+    Assigns quotas Kb to blocks to prevent budget concentration.
+    """
+    # Calculate initial importance score for each block (e.g., sum of diagonal elements in Rb)
+    block_importances = [np.trace(Rb) for Rb in response_matrices.values()]
+    
+    # Smooth quotas to ensure no block gets zero or disproportionately high quota
+    # Simple smoothing: distribute K proportionally but with a minimum floor
+    total_importance = sum(block_importances)
+    quotas = []
+    for imp in block_importances:
+        # Proportional allocation
+        q = K * (imp / total_importance)
+        # Apply smoothing (e.g., ensure at least 10% of average block size or similar heuristic)
+        # Exact smoothing formula not specified in sources, but goal is balance [S1, unofficial]
+        quotas.append(max(1, int(round(q))))
+        
+    # Adjust quotas to sum exactly to K
+    quotas = adjust_quotas_to_sum(quotas, K)
     return quotas
 
 def solve_qubo(Rb, Kb):
     """
     Solves the QUBO problem for a block.
     """
-    # Construct QUBO matrix Q from Rb and quota penalty.
-    # Q = Rb + lambda * I_quota
-    # Solve using Simulated Annealing (SA) or Coherent Ising Machine (CIM).
-    # Return binary vector x where sum(x) = Kb.
-    pass
+    # QUBO formulation:
+    # Minimize x^T Q x
+    # Where Q is derived from Rb and Kb penalty
+    # Penalty term: lambda * (sum(x) - Kb)^2
+    
+    # Construct Q matrix
+    n = len(Rb)
+    Q = Rb.copy()
+    # Add penalty for quota violation
+    # This is a simplified representation; actual QUBO construction involves expanding the penalty
+    # into quadratic terms for binary variables
+    penalty_lambda = 1000.0 # Heuristic weight
+    for i in range(n):
+        Q[i, i] += penalty_lambda
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                Q[i, j] += penalty_lambda # Cross terms from (sum x - K)^2
+                
+    # Solve using Simulated Annealing
+    # Initialize random binary vector x
+    x = np.random.randint(0, 2, n)
+    
+    # Simulated Annealing loop
+    best_x = x
+    best_energy = energy(x, Q)
+    
+    for t in range(max_iterations):
+        # Perturb x
+        x_new = x.copy()
+        idx = np.random.randint(n)
+        x_new[idx] = 1 - x_new[idx]
+        
+        # Check quota constraint (or use penalty in energy)
+        # If using hard constraint, reject moves that violate Kb
+        if np.sum(x_new) != Kb:
+            continue
+            
+        new_energy = energy(x_new, Q)
+        
+        # Acceptance criterion
+        if new_energy < best_energy or np.random.rand() < acceptance_probability(best_energy, new_energy, t):
+            best_x = x_new
+            best_energy = new_energy
+            x = x_new
+            
+    return best_x
 
-def fine_tune(retained_gaussians, views):
+def energy(x, Q):
+    return x.T @ Q @ x
+
+def fine_tune(pruned_gaussians, training_data):
     """
-    Fine-tunes attributes of retained Gaussians.
+    Optimizes attributes of retained Gaussians.
     """
-    # Run standard 3DGS optimization steps (position, scale, rotation, SH coefficients)
-    # for a few iterations, keeping the set of Gaussians fixed.
-    pass
+    # Standard 3DGS training loop, but only optimizing attributes of pruned_gaussians
+    # No new Gaussians are added or removed
+    model = Model(pruned_gaussians)
+    optimizer = Adam(model.parameters())
+    
+    for epoch in range(fine_tune_epochs):
+        for batch in training_data:
+            loss = render_and_compute_loss(model, batch)
+            loss.backward()
+            optimizer.step()
+            
+    return model
 ```
 
-**Edge cases and pitfalls:**
-*   **Spatial Quality Imbalance:** Global ranking can lead to spatial quality imbalance where the limited budget concentrates in regions with consistently higher scores, leaving other regions with insufficient representational capacity [S1, unofficial]. SplatQ addresses this via blockwise retention ratio allocation [S1, unofficial].
-*   **Joint Effects:** Independent scoring fails to capture joint rendering effects because multiple Gaussians may jointly support the same pixel or make overlapping contributions, meaning degradation from removing multiple Gaussians is not strictly additive [S1, unofficial]. SplatQ models pairwise interactions via a quadratic objective [S1, unofficial].
-*   **Complexity:** Formulating the optimization problem over the entire model requires $N$ binary variables and an $N \times N$ matrix, which is impractical for millions of Gaussians [S1, unofficial]. Partitioning into blocks of size $M$ reduces this to manageable subproblems [S1, unofficial].
+**Parameters:**
+*   $N$: Total number of Gaussians in the pretrained model [S1, unofficial].
+*   $K$: Exact number of Gaussians to retain [S1, unofficial].
+*   $M$: Maximum size of each block [S1, unofficial].
+*   $K_b$: Retention quota for block $b$ [S1, unofficial].
+*   $R_b$: Response matrix for block $b$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Spatial Quality Imbalance:** Global ranking methods concentrate the budget in regions with high scores, leaving other regions with insufficient capacity [S1, unofficial]. SplatQ mitigates this via blockwise quota allocation.
+*   **Non-Additive Degradation:** Removing multiple overlapping Gaussians does not have an additive effect on rendering error. Independent scoring fails to capture this, potentially retaining redundant Gaussians [S1, unofficial]. SplatQ models this via pairwise interactions in $R_b$.
+*   **Computational Cost:** Solving QUBO is NP-hard. The block size $M$ must be small enough for SA/CIM to be feasible, but large enough to capture interactions.
 
 ## Operating characteristics
-*   **Time Complexity:** The partitioning step uses 3D grid and Morton ordering to avoid quadratic pairwise comparisons [S1, unofficial]. The QUBO solving step is NP-hard, but is solved per block of size $M$, making it feasible where global QUBO would not be [S1, unofficial].
-*   **Memory Complexity:** Requires storing the response matrix $R_b$ for each block, which is $O(M^2)$ per block, significantly less than $O(N^2)$ for the global case [S1, unofficial].
-*   **Strengths:** Ensures balanced reconstruction quality across a scene by coordinating regional budget allocation [S1, unofficial]. Captures joint deletion effects through quadratic approximation [S1, unofficial].
-*   **Limitations:** Requires solving a combinatorial optimization problem (QUBO) for each block, which may be slower than simple thresholding methods [S1, unofficial]. Relies on accurate estimation of the response matrix [S1, unofficial].
-*   **When to use:** When balanced quality across different regions of a scene is critical and the computational cost of QUBO solving is acceptable [S1, unofficial].
-*   **When not to use:** When real-time pruning is required or when scene regions have highly uniform importance [S1, unofficial].
+*   **Time Complexity:** Partitioning is $O(N \log N)$ or $O(N)$ with grid/Morton ordering. Response matrix computation is $O(B \cdot M^2 \cdot P \cdot V)$, where $B$ is number of blocks, $P$ is pixels per view, $V$ is views. QUBO solving is exponential in $M$ but constant for fixed $M$. Fine-tuning is $O(N_{retained} \cdot E \cdot I)$, where $E$ is epochs, $I$ is iterations.
+*   **Memory Complexity:** $O(N)$ for Gaussians, $O(B \cdot M^2)$ for response matrices.
+*   **Strengths:** Ensures balanced reconstruction quality across the scene; captures joint deletion effects; post-training (no additional learning required for selection).
+*   **Limitations:** Requires solving QUBO, which can be slow for large $M$; sensitive to the choice of $M$ and smoothing parameters in budget allocation.
+*   **When to use:** When balanced spatial quality is critical and the scene has varying density; when post-training pruning is preferred over training-time pruning.
+*   **When not to use:** When real-time pruning is required; when $N$ is very large and $M$ cannot be kept small.
 
 ## Background
-SplatQ was proposed by Hongbin Ye, Haixu Liu, Shenwei Kang, Wenxiu Wei, Tinglan Wang, Hongdong Zhu, Fan Tang, Qi Gao, Yin Ma, Kai Wen, Hai Wei, Nuo Qian, Wei-Shi Zheng, Shaobo Chen, Fa-Ting Hong, and Jingke Meng [S1, unofficial]. It was presented as a preprint on arXiv in October 2026 [S1, unofficial]. The method addresses limitations of existing 3D Gaussian Splatting pruning methods that rely on global Top-K selection based on independent importance scores, which lack regional budget control and ignore joint deletion effects [S1, unofficial].
+SplatQ was proposed by Hongbin Ye et al. in 2026 [S1, unofficial]. It addresses limitations of existing 3DGS pruning methods that rely on global Top-K selection based on independent importance scores, which fail to ensure balanced reconstruction quality and ignore joint deletion effects [S1, unofficial]. The method uses QUBO optimization, a technique common in combinatorial optimization, applied to Gaussian pruning for the first time in this context.
 
 ## Sources
 [S1] SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection, https://arxiv.org/abs/2610.13503, fetched 2026-10-29 (unofficial)

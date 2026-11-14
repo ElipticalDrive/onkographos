@@ -46,21 +46,35 @@ def pre_classification_shading_pipeline(volume_grid, transfer_function, ray_orig
 
     for y in range(image_height):
         for x in range(image_width):
-            # Generate ray for pixel (x, y)
-            ray_origin_pixel = ray_origin + ray_direction * (x + y * image_width)
-            ray = {'origin': ray_origin_pixel, 'direction': ray_direction}
-            pixel_color = [0.0, 0.0, 0.0, 0.0]
+            # Standard ray generation for pixel (x, y)
+            ray_origin_pixel = ray_origin + ray_direction * (x * 0.01 + y * 0.01)
             transmittance = 1.0
+            pixel_color = [0.0, 0.0, 0.0]
 
             num_samples = int(ray_length / step_size)
 
             for i in range(num_samples):
-                sample_pos = ray['origin'] + ray['direction'] * (i * step_size)
+                sample_pos = ray_origin_pixel + ray_direction * (i * step_size)
 
-                # Trilinear interpolation: sample 8 neighbors, weight by distance, return value
+                # Standard trilinear interpolation
                 def trilinear_interpolate(grid, pos, field):
-                    # Standard trilinear interpolation logic
-                    return grid[0][0][0][field] # Standard math operation
+                    # Compute grid coordinates and fractional offsets
+                    ix, iy, iz = int(pos.x), int(pos.y), int(pos.z)
+                    fx, fy, fz = pos.x - ix, pos.y - iy, pos.z - iz
+                    # Fetch 8 neighbors (clamped to grid bounds)
+                    def get_val(x, y, z):
+                        x = max(0, min(x, grid_width - 1))
+                        y = max(0, min(y, grid_height - 1))
+                        z = max(0, min(z, grid_depth - 1))
+                        return grid[z][y][x][field]
+                    # Interpolate
+                    c00 = get_val(ix, iy, iz) * (1-fx) + get_val(ix+1, iy, iz) * fx
+                    c10 = get_val(ix, iy+1, iz) * (1-fx) + get_val(ix+1, iy+1, iz) * fx
+                    c01 = get_val(ix, iy, iz+1) * (1-fx) + get_val(ix+1, iy, iz+1) * fx
+                    c11 = get_val(ix, iy+1, iz+1) * (1-fx) + get_val(ix+1, iy+1, iz+1) * fx
+                    c0 = c00 * (1-fy) + c10 * fy
+                    c1 = c01 * (1-fy) + c11 * fy
+                    return c0 * (1-fz) + c1 * fz
 
                 associated_color_sample = trilinear_interpolate(pre_classified_volume, sample_pos, 'associated_color')
                 opacity_sample = trilinear_interpolate(pre_classified_volume, sample_pos, 'opacity')
@@ -78,14 +92,14 @@ def pre_classification_shading_pipeline(volume_grid, transfer_function, ray_orig
 ```
 
 ### Parameters and Edge Cases
-*   **Step Size ($\Delta s$):** Not given in the sources. Typical values depend on ray length and desired sampling density [G].
-*   **Partial Voluming:** A major source of error where a single voxel represents multiple materials. This is mitigated by using segmented volumes with material indices and probabilities during the pre-classification step [S2, unofficial].
+*   **Step Size ($\Delta s$):** Not given in the sources [G].
+*   **Partial Voluming:** A major source of error where a single voxel represents multiple materials [S2, unofficial]. This is mitigated by using segmented volumes with material indices and probabilities during the pre-classification step [S2, unofficial].
 *   **Blurring:** Pre-classification tends to cause excessive blurring when the image resolution exceeds the volume resolution (e.g., zoomed viewing or wide perspectives) [S3].
 *   **Interpolation Error:** Interpolating color and opacity separately and then multiplying them introduces artifacts because interpolation is a linear operation and the product is non-linear [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [G].
+*   **Memory Complexity:** Not given in the sources [G].
 *   **Strengths:**
     *   Handles segmented anatomical parts effectively in medical imaging [S2, unofficial].
     *   Prevents partial voluming errors when segmentation data is available [S2, unofficial].

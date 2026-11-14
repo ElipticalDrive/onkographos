@@ -1,0 +1,113 @@
+# Splat Picking
+
+
+## Overview
+Splat Picking is the method of identifying a specific splat primitive located under a user's cursor (e.g., mouse or touch input) within a volume rendering scene. It solves the problem of interactive selection in splat-based renderers, where the volume is represented as a set of discrete primitives rather than a continuous grid. Unlike standard ray-casting picking which intersects geometric primitives, splat picking must account for the rasterized footprint of splats on the screen. It is distinguished from its sibling [Splat Point Raycasting with Pixel Distance Threshold](14939-splat-point-raycasting-with-pixel-distance-threshold.md) by its focus on sub-frame latency and direct cursor association, often accepting partial success rates in exchange for performance.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The current set of splats (position, scale, orientation, color/density), the camera projection matrix, and the cursor position in Normalized Device Coordinates (NDC) or screen space.
+*   **Output:** The index or identifier of the splat hit, or null if no unique splat is found.
+
+**Data Structures:**
+*   **Splat Buffer:** An array of splat primitives. Each splat $k$ typically contains:
+    *   $\mathbf{p}_k$: 3D position $(x, y, z)$.
+    *   $\mathbf{q}_k$: Quaternion or rotation matrix for orientation.
+    *   $\mathbf{s}_k$: Scale vector $(sx, sy, sz)$.
+    *   $\mathbf{c}_k$: Color or density attributes.
+    *   $id_k$: Unique identifier.
+*   **Cursor Position:** A 2D vector $\mathbf{u} = (u_x, u_y)$ in screen space or NDC $(-1, 1)$.
+
+**Steps:**
+1.  **Transform Splats to Screen Space:** For each splat $k$, compute its screen-space footprint. This involves projecting the splat's center $\mathbf{p}_k$ using the Model-View-Projection (MVP) matrix to get screen coordinates $\mathbf{p}'_k$. The footprint radius $r_k$ is derived from the splat's scale and orientation relative to the view direction [S1, unofficial][S6, unofficial].
+2.  **Filter Candidates:** Identify splats whose screen-space footprint contains the cursor position $\mathbf{u}$. A splat $k$ is a candidate if:
+    $$ (\mathbf{u} - \mathbf{p}'_k)^T \Sigma_k^{-1} (\mathbf{u} - \mathbf{p}'_k) \leq 1 $$
+    where $\Sigma_k$ is the 2D covariance matrix of the splat's projected Gaussian kernel [S1, unofficial][S6, unofficial].
+3.  **Resolve Ambiguity:** If multiple splats overlap the cursor, select the one with the highest opacity/density contribution at $\mathbf{u}$, or the front-most splat in depth order. If no splat is uniquely identified, return null [S1, unofficial].
+4.  **Return Result:** Output the ID of the selected splat.
+
+**Parameters:**
+*   **Threshold:** The distance threshold for screen-space containment. Not given in the sources.
+*   **Latency Target:** < 10 ms p95 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Partial Success:** The method may fail to identify a unique splat for all cursor positions, especially in dense regions where splats overlap significantly. In testing, only 49 out of 200 NDC samples produced a unique-splat hit [S1, unofficial].
+*   **Latency:** The method must complete within the frame budget to maintain interactivity. P95 latency of 5.30 ms was achieved in tests [S1, unofficial].
+*   **Precision:** Floating-point precision in screen-space projection can affect hit accuracy. Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def splat_picking(splats, camera_matrix, cursor_ndc):
+    """
+    Identify a splat under the cursor.
+    splats: List of Splat objects with position, scale, orientation, id.
+    camera_matrix: MVP matrix.
+    cursor_ndc: 2D vector (u_x, u_y) in NDC.
+    Returns: splat_id or None.
+    """
+    candidates = []
+    
+    for splat in splats:
+        # Project splat center to screen space
+        screen_pos = project_to_screen(splat.position, camera_matrix)
+        
+        # Compute screen-space footprint radius
+        # This involves projecting the splat's scale/orientation
+        # into the view plane. Simplified as a radius r.
+        radius = compute_splat_radius(splat, camera_matrix)
+        
+        # Check if cursor is within footprint
+        dist_sq = (cursor_ndc.x - screen_pos.x)**2 + (cursor_ndc.y - screen_pos.y)**2
+        
+        if dist_sq <= radius**2:
+            # Calculate opacity/density at cursor for sorting
+            opacity = compute_opacity_at(splat, cursor_ndc, camera_matrix)
+            candidates.append((splat.id, opacity, screen_pos.z))
+    
+    if not candidates:
+        return None
+    
+    # Select splat with highest opacity (or front-most if tie)
+    # Sorting by opacity descending, then depth ascending
+    candidates.sort(key=lambda x: (-x[1], x[2]))
+    
+    # Return the top candidate
+    return candidates[0][0]
+
+def project_to_screen(position, mvp_matrix):
+    # Standard perspective projection
+    # Returns 2D screen coordinates
+    pass
+
+def compute_splat_radius(splat, camera_matrix):
+    # Compute the effective radius of the splat in screen space
+    # based on its 3D scale, orientation, and distance to camera
+    pass
+
+def compute_opacity_at(splat, cursor_ndc, camera_matrix):
+    # Evaluate the splat's kernel function at the cursor position
+    # Returns the contribution value (e.g., Gaussian value)
+    pass
+```
+
+## Subtopics
+
+### [Splat Point Raycasting with Pixel Distance Threshold](14939-splat-point-raycasting-with-pixel-distance-threshold.md)
+A method to find 3D points from a splat mesh that are close to a camera ray, using a pixel-distance threshold in screen space rather than strict geometric intersection, to handle the discrete nature of splats. Choose this when precise 3D point association is needed despite the discrete splat representation.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of splats, as each splat must be tested against the cursor. Optimizations like spatial indexing (e.g., BVH, grid) can reduce this to $O(\log N)$ or $O(1)$ average case, but are not detailed in the primary source [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ to store splat data.
+*   **Measured Performance:** In tests on a "butterfly" scene with 177 K splats, the p95 latency was 5.30 ms, meeting the < 10 ms target [S1, unofficial].
+*   **Strengths:** Low latency, suitable for real-time interaction.
+*   **Limitations:** Partial success rate; only 49/200 NDC samples yielded a unique hit in testing, indicating issues with ambiguity in dense regions [S1, unofficial].
+*   **When to Use:** Interactive selection in splat-based renderers where sub-frame latency is critical.
+*   **When Not to Use:** When precise, unambiguous selection is required for all cursor positions, or in extremely dense scenes where overlap is severe.
+
+## Background
+Splat Picking was investigated as part of the "splatcarve" project, specifically under Hypothesis H1, aiming to identify a specific splat under the cursor at sub-frame latency. The work was conducted by stevekwon211 and documented in the `stevekwon211/splatcarve` repository [S1, unofficial]. The hypothesis was partially validated, with latency targets met but success rates limited by splat overlap.
+
+## Sources
+[S1] stevekwon211/splatcarve, https://github.com/stevekwon211/splatcarve, fetched 2026-10-27 (unofficial)

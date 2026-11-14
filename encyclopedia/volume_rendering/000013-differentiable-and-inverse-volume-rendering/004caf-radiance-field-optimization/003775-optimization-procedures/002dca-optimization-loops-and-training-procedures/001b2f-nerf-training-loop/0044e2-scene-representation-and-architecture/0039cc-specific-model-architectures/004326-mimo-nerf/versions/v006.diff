@@ -1,0 +1,245 @@
+--- v005.md
++++ v006.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes a set of camera views and their poses as input. For each ray $\mathbf{r}$, it samples $N_c$ coarse points and $N_f$ fine points. The MIMO MLP $f_{\text{MIMO}}$ takes a group of $N_p$ positions $\{\mathbf{x}_i, \dots, \mathbf{x}_j\}$ and the ray direction $\mathbf{d}$ as input, and outputs $N_p$ colors $\{\mathbf{c}_i, \dots, \mathbf{c}_j\}$ and densities $\{\sigma_i, \dots, \sigma_j\}$ [S1].
++The method takes a set of camera views and their poses as input [S1]. For each ray $\mathbf{r}$, it samples $N_c$ coarse points and $N_f$ fine points [S1]. The MIMO MLP $f_{\text{MIMO}}$ takes a group of $N_p$ positions $\{\mathbf{x}_i, \dots, \mathbf{x}_j\}$ and the ray direction $\mathbf{d}$ as input, and outputs $N_p$ colors $\{\mathbf{c}_i, \dots, \mathbf{c}_j\}$ and densities $\{\sigma_i, \dots, \sigma_j\}$ [S1].
+ 
+ **Data Structures:**
+@@ -14,6 +14,6 @@
+ *   **Positional Encoding:** Input positions $\mathbf{x} \in \mathbb{R}^3$ and directions $\mathbf{d} \in \mathbb{S}^2$ are encoded using positional encoding $\gamma(\cdot)$ [Parent, S1]. $\gamma(\mathbf{x})$ is 63-dimensional, $\gamma(\mathbf{d})$ is 27-dimensional [S1].
+ *   **MIMO MLP:**
+-    *   **Density Network:** Takes concatenated encoded positions $\gamma(\mathbf{x}_i), \dots, \gamma(\mathbf{x}_j)$ (total dimension $63 \times N_p$) and applies an 8-layer MLP with ReLU activations, 256 hidden units, and skip connections from input to the 5th layer [S1]. Output is $N_p$ density values $\sigma$.
+-    *   **Color Network:** Takes the output of the last hidden layer of the density network (dimension $256 \times N_p$), concatenates with encoded directions $\gamma(\mathbf{d})$ (dimension $27$), passes through a 1-layer MLP (ReLU, 128 units), and finally a linear layer to produce $N_p$ RGB colors $\mathbf{c}$ [S1].
++    *   **Density Network:** Takes concatenated encoded positions $\gamma(\mathbf{x}_i), \dots, \gamma(\mathbf{x}_j)$ (total dimension $63 \times N_p$) and applies an 8-layer MLP with ReLU activations, 256 hidden units, and skip connections from input to the 5th layer [S1]. Output is $N_p$ density values $\sigma$ [S1].
++    *   **Color Network:** Takes the output of the last hidden layer of the density network (dimension 256), concatenates with encoded directions $\gamma(\mathbf{d})$ (dimension 27), passes through a 1-layer MLP (ReLU, 128 units), and finally a linear layer to produce $N_p$ RGB colors $\mathbf{c}$ [S1].
+     *   Note: The total parameter count increases because the input dimension of the first layer scales with $N_p$, but the hidden layer size remains constant [S1].
+ 
+@@ -36,5 +36,5 @@
+         $$ \mu_{mj}^{mi} = \frac{\sqrt{m_j} \sqrt{R_{\max}}}{\sqrt{R_{m_i}}} $$
+         where $R_{\max} = \max_{m \in \{1, \dots, M\}} R_m$. $R_m$ are scaling factors for reformulated MLPs [S1].
+-6.  **Optimization:** Train using Adam optimizer [S1].
++6.  **Optimization:** Train using Adam optimizer with learning rate $5 \times 10^{-4}$ and batch size 1024 rays [S1].
+ 
+ **Pseudocode:**
+@@ -44,38 +44,33 @@
+ import torch.nn.functional as F
+ 
++def positional_encoding(x, L_freq=10):
++    """
++    x: (..., 3)
++    Returns: (..., 63)
++    """
++    x = x.unsqueeze(-2)
++    freq_bands = 2.0 ** torch.linspace(0, L_freq-1, L_freq).to(x.device)
++    freq_bands = freq_bands.view(1, 1, 1, -1)
++    scaled_x = x * freq_bands * torch.pi
++    pe = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
++    pe = pe.view(*x.shape[:-2], -1)
++    return torch.cat([x.squeeze(-2), pe], dim=-1)
++
+ class MIMO_NeRF(nn.Module):
+     def __init__(self, Np, F=256, L=8):
+         super().__init__()
+         self.Np = Np
+-        # Input dim: 63 * Np for position, 27 for direction (concatenated later)
+-        # Density network: 63*Np -> F -> ... -> F -> 1 (density)
+-        # Skip connections to 5th layer (index 4)
+-        
++        # Density network: 63*Np -> F -> ... -> F -> Np
+         self.density_layers = nn.ModuleList()
+         self.density_layers.append(nn.Linear(63 * Np, F))
+         for _ in range(L - 2):
+             self.density_layers.append(nn.Linear(F, F))
+-        self.density_layers.append(nn.Linear(F, 1)) # Output density
++        self.density_layers.append(nn.Linear(F, Np))
+         
+-        # Color network: F*Np (from last hidden) + 27 (direction) -> 128 -> 3 (RGB)
++        # Color network: F + 27 -> 128 -> 3*Np
+         self.color_layers = nn.ModuleList()
+-        self.color_layers.append(nn.Linear(F * Np + 27, 128))
+-        self.color_layers.append(nn.Linear(128, 3))
++        self.color_layers.append(nn.Linear(F + 27, 128))
++        self.color_layers.append(nn.Linear(128, 3 * Np))
+         
+-        # Scaling factors R for asymmetric weighting
+-        # Example: Np=2 -> R=[1,1]; Np=4 -> R=[1,2]; Np=8 -> R=[1,2,4]
+-        self.R = self._get_R(Np)
+-        
+-    def _get_R(self, Np):
+-        if Np == 2:
+-            return [1, 1]
+-        elif Np == 4:
+-            return [1, 2]
+-        elif Np == 8:
+-            return [1, 2, 4]
+-        else:
+-            # Fallback or error handling for other Np
+-            return [1] * Np
+-
+     def forward(self, x_grouped, d):
+         """
+@@ -89,149 +84,31 @@
+         assert Np == self.Np
+         
+-        # Positional Encoding for all positions in the group
+-        # Assuming gamma function returns 63-dim vector per position
+-        # x_grouped shape: (B, Np, 3) -> gamma -> (B, Np, 63)
+-        gamma_x = positional_encoding(x_grouped, L_freq=10) # (B, Np, 63)
++        gamma_x = positional_encoding(x_grouped) # (B, Np, 63)
++        x_flat = gamma_x.view(B, -1) # (B, 63*Np)
+         
+-        # Reshape for density network input: (B, Np*63)
+-        x_flat = gamma_x.view(B, -1)
+-        
+-        # Density Network
+         h = x_flat
+         for i, layer in enumerate(self.density_layers[:-1]):
+             h = layer(h)
+-            if i == 3: # Skip connection to 5th layer (index 4 in 0-based, but here we are at layer 4 input)
+-                # The source says skip connection from input to every 4th layer.
+-                # In an 8-layer MLP (indices 0..7), skip to layer 4 (index 4)?
+-                # Source: "skip connection from the input to every 4th layer"
+-                # Standard NeRF: skip to 5th layer (index 4).
+-                h = h + x_flat 
++            if i == 3: # Skip connection to 5th layer (index 4)
++                h = h + x_flat
+             h = F.relu(h)
+             
+-        density_head = self.density_layers[-1](h) # (B, 1)
++        densities = self.density_layers[-1](h).view(B, Np, 1) # (B, Np, 1)
+         
+-        # To get per-sample density, we need to process each sample?
+-        # The source says "produce Np outputs... densities".
+-        # The architecture description implies a single MLP processes the group.
+-        # However, standard NeRF MLP outputs 1 sigma.
+-        # MIMO MLP must output Np sigmas.
+-        # The source says: "The network architecture is identical... except for I/O dimensions."
+-        # And: "accept Np inputs... produce Np outputs".
+-        # This implies the hidden layers process the concatenated vector, but the output head
+-        # must produce Np values.
+-        # If the hidden layer is F, and input is 63*Np, the network learns to map the group
+-        # to Np outputs.
++        gamma_d = positional_encoding(d.unsqueeze(1)).squeeze(1) # (B, 27)
++        color_input = torch.cat([h, gamma_d], dim=-1) # (B, F+27)
+         
+-        # Correction based on "produce Np outputs":
+-        # The density head should output Np values.
+-        # Let's adjust the density head to output Np.
+-        # But the source says "Density sigma from linear layer."
+-        # And "Color branch: MLP output converted via linear layer... to RGB".
+-        # If the hidden state h is (B, F), how do we get Np densities?
+-        # The source likely implies that the MLP processes the group jointly.
+-        # A common MIMO approach is to have the final layer output Np * (3+1).
+-        
+-        # Re-reading: "The network architecture is identical to baseline NeRF except for I/O dimensions."
+-        # Baseline: Input 63 -> ... -> 1 (sigma).
+-        # MIMO: Input 63*Np -> ... -> Np (sigma).
+-        # So the last linear layer of density network should be Linear(F, Np).
+-        
+-        # Let's redefine density head for Np outputs
+-        # Note: The source text says "Density sigma from linear layer." singular.
+-        # But the function signature is (R^3)^Np -> (R^+)^Np.
+-        # So the output must be Np.
+-        
+-        # Revised Density Head
+-        # h is (B, F)
+-        # We need (B, Np)
+-        # This requires the network to disentangle the group.
+-        # Or, the hidden layers are larger? No, F=256.
+-        # The source says: "# Params increases... because total dimension of encoded position increases by Np times".
+-        # This confirms input is 63*Np.
+-        # If output is Np, the last layer is Linear(F, Np).
+-        
+-        # Let's assume the density head outputs Np values.
+-        densities = self.density_layers[-1](h) # (B, Np)
+-        
+-        # Color Network
+-        # Input: Last hidden layer of density network (h) + direction
+-        # But h is shared? Or do we need per-sample features?
+-        # Source: "Color Network: Takes ... intermediate feature vector from the density network ... as input."
+-        # If the density network outputs Np densities, the "intermediate feature" is likely the hidden state h (B, F).
+-        # But h is shared for the group.
+-        # How to get Np colors?
+-        # Source: "concatenated with gamma(d)... converted via 1-layer MLP (ReLU) to 128 vector, then linear layer to RGB".
+-        # This describes a single color prediction.
+-        # For MIMO, it must produce Np colors.
+-        # Likely, the color network also takes h (B, F) and d (B, 3) and outputs Np colors?
+-        # Or does it take per-sample features?
+-        # The source says: "accept Np inputs... produce Np outputs... colors and densities".
+-        # And "Color branch: MLP output converted via linear layer... to RGB".
+-        # If the MLP output is h (B, F), and we want Np colors, the final layer must be Linear(F, Np*3).
+-        
+-        # Let's assume the color head outputs Np*3 values.
+-        gamma_d = positional_encoding(d.unsqueeze(1), L_freq=10).squeeze(1) # (B, 27)
+-        # h is (B, F). gamma_d is (B, 27).
+-        # Concat: (B, F+27)
+-        color_input = torch.cat([h, gamma_d], dim=-1)
+-        
+-        # Color layers
+         c = self.color_layers[0](color_input) # (B, 128)
+         c = F.relu(c)
+-        c = self.color_layers[1](c) # (B, Np*3)
++        c = self.color_layers[1](c).view(B, Np, 3) # (B, Np, 3)
+         
+-        colors = c.view(B, Np, 3)
+-        densities = densities.view(B, Np, 1)
+-        
+-        return colors, densities
+-
+-def positional_encoding(x, L_freq=10):
+-    """
+-    x: (..., 3)
+-    Returns: (..., 63)
+-    """
+-    # Standard NeRF PE: sin(2^0 pi x), cos(2^0 pi x), ...
+-    # L_freq bands.
+-    # 2 * L_freq * 3 = 63 => L_freq = 10.5?
+-    # Source says 63-dim. 21 bands * 2 * 3 = 126? No.
+-    # NeRF uses 10 bands for pos, 2 for dir?
+-    # Source: "63-dimensional vector gamma(x)".
+-    # 3 * 2 * 10 = 60. Plus original? 63.
+-    # So L=10 bands + original.
+-    
+-    # Expand x to (..., 1, 3)
+-    x = x.unsqueeze(-2)
+-    
+-    # Frequencies
+-    freq_bands = 2.0 ** torch.linspace(0, L_freq-1, L_freq).to(x.device)
+-    
+-    # (..., 1, 1, L_freq)
+-    freq_bands = freq_bands.view(1, 1, 1, -1)
+-    
+-    # (..., 1, 3, L_freq)
+-    scaled_x = x * freq_bands * torch.pi
+-    
+-    # (..., 1, 3, 2*L_freq)
+-    pe = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+-    
+-    # (..., 3, 2*L_freq) -> (..., 6*L_freq)
+-    pe = pe.view(*x.shape[:-2], -1)
+-    
+-    # Concat original x
+-    # x shape: (..., 3)
+-    # pe shape: (..., 60)
+-    # Result: (..., 63)
+-    return torch.cat([x.squeeze(-2), pe], dim=-1)
++        return c, densities
+ 
+ def compute_loss(colors, densities, gt_colors, alpha, lambda_3d=1.0):
+-    # L_pixel
+     l_pixel = F.mse_loss(colors, gt_colors)
+-    
+-    # L_3D (Simplified placeholder for consistency loss between groups/views)
+-    # Requires multiple reformulations or views.
+-    # Here we assume alpha is computed from densities.
+-    # L_3D = L_color_3D + L_alpha_3D
+-    # See formulas in text.
+-    l_3d = 0.0 # Placeholder for complex consistency loss logic
++    # 3D consistency loss requires multiple reformulated MLPs (M > 1).
++    # The sources do not give a single-network implementation for L_3D.
++    # It is computed between predictions from different reformulations as per the formulas.
++    l_3d = 0.0 # Placeholder for multi-reformulation consistency logic
+     return l_pixel + lambda_3d * l_3d
+ ```
