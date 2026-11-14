@@ -1,189 +1,165 @@
 # Voxel-based Gaussian Splatting
 
-
 ## Overview
-Voxel-based Gaussian Splatting (VoxGS) is a specialized volume representation that places isometric 3D Gaussians at the fixed centroids of a regular 3D voxel grid to enable efficient Computed Tomography (CT) volume extraction and differentiable X-ray rendering [S1, unofficial]. Unlike standard 3D Gaussian Splatting (3DGS) which optimizes primitive positions and uses spherical harmonics for view-dependent color, VoxGS fixes positions and removes color coefficients, retaining only opacity, scale, and rotation to support precise density field extraction and stable optimization in feed-forward reconstruction frameworks [S1, unofficial].
+VoxGS is a volume representation that places isometric 3D Gaussians at the fixed centroids of a regular 3D voxel grid to enable efficient Computed Tomography (CT) volume extraction and differentiable X-ray rendering [S1, unofficial]. It sets itself apart from standard 3D Gaussian Splatting by fixing Gaussian positions and removing spherical harmonic color coefficients, which solves the inaccurate volume extraction and unstable optimization issues that arise when applying original 3DGS to CT data [S1, unofficial]. Unlike discrete 3D voxels, VoxGS supports differentiable rendering, allowing it to leverage X-ray projection constraints during training [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A set of $K$ X-ray projection images, represented as view feature maps $\mathbf{F}_k \in \mathbb{R}^{H \times W \times C}$ for $k=1 \dots K$, and their corresponding projection matrices $\mathbf{P}_k$.
-*   **Output:** A set of $N_p$ 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^{N_p}$, where each Gaussian $g_i$ is defined by fixed position $\boldsymbol{\mu}_i$, opacity $\alpha_i$, scale vector $\mathbf{s}_i$, and rotation vector $\mathbf{r}_i$. The output can also be directly indexed as a CT density volume $V \in \mathbb{R}^{M \times N \times L}$.
+**Inputs and Outputs:**
+*   **Input:** A set of $K$ X-ray projection images, processed into view-specific feature maps $\{\mathbf{F}_1, \dots, \mathbf{F}_K\}$ where $\mathbf{F}_k \in \mathbb{R}^{H \times W \times C}$ [S1, unofficial].
+*   **Output:** A set of $N_p$ 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^{N_p}$ representing the CT volume, and the ability to render differentiable X-ray projections or extract the CT density volume $V \in \mathbb{R}^{M \times N \times L}$ [S1, unofficial].
 
-**Data Structures**
-Each Gaussian $g_i$ stores the following attributes. No spherical harmonics (SH) coefficients are stored [S1, unofficial].
-*   $\boldsymbol{\mu}_i$: Fixed position $(x, y, z)$, where $x \in [1, M], y \in [1, N], z \in [1, L]$. This corresponds to the centroid of voxel grid $V$. Data type: 3 floats.
-*   $\alpha_i$: Opacity. Data type: 1 float.
-*   $\mathbf{s}_i$: Scale vector $(s_x, s_y, s_z)$. Data type: 3 floats.
-*   $\mathbf{r}_i$: Rotation vector (quaternion). Data type: 4 floats.
+**Data Structures:**
+Each Gaussian $g_i$ is defined by the following attributes:
+*   **Position $\mu_i$:** Fixed 3D coordinates $(x, y, z)$ corresponding to the centroid of a voxel in the grid. $x \in [1, M], y \in [1, N], z \in [1, L]$. Stored as 3 floats [S1, unofficial].
+*   **Opacity $\alpha_i$:** Scalar value representing density. Stored as 1 float [S1, unofficial].
+*   **Scale $\mathbf{s}_i$:** 3D vector. Stored as 3 floats [S1, unofficial].
+*   **Rotation $\mathbf{r}_i$:** 4D vector, interpreted as a quaternion. Stored as 4 floats [S1, unofficial].
+*   **Color:** No spherical harmonic (SH) coefficients are stored. Color is not regressed; the representation assumes isotropic density for X-ray attenuation [S1, unofficial].
 
-**Algorithm Steps**
-1.  **Grid Initialization:** Define a regular 3D voxel grid with dimensions $M \times N \times L$. Place $N_p = M \times N \times L$ isometric 3D Gaussians such that the position $\boldsymbol{\mu}_i$ of each Gaussian $g_i$ is fixed at the centroid of the corresponding voxel [S1, unofficial].
-    $$ \boldsymbol{\mu}_i = (x, y, z), \quad x \in [1, M], y \in [1, N], z \in [1, L] \quad (5) $$
-2.  **Feature Query:** For each Gaussian $g_i$ and each view $k \in \{1, \dots, K\}$, query the view-specific feature $\mathbf{F}_k$ at the projected position of the Gaussian. Let $\mathbf{P}_k: \mathbb{R}^3 \to \mathbb{R}^2$ be the projection matrix for the $k$-th view. Compute the interpolated feature $\tilde{\mathbf{F}}_k^i$ using bilinear interpolation:
-    $$ \tilde{\mathbf{F}}_k^i = \text{Interp}(\mathbf{F}_k, \mathbf{P}_k(\boldsymbol{\mu}_i)) \in \mathbb{R}^C \quad (6) $$
-    where $\text{Interp}(\cdot)$ denotes bilinear interpolation.
-3.  **Feature Aggregation:** Aggregate the $K$ queried features for Gaussian $g_i$ using MaxPooling to obtain a single view-invariant feature vector $\mathbf{F}_{max}^i$:
-    $$ \mathbf{F}_{max}^i = \text{MaxPool}(\tilde{\mathbf{F}}_1^i, \tilde{\mathbf{F}}_2^i, \dots, \tilde{\mathbf{F}}_K^i) \in \mathbb{R}^C $$
-4.  **Attribute Regression:** Pass the aggregated feature $\mathbf{F}_{max}^i$ through a prediction Multi-Layer Perceptron (MLP), denoted as $MLPS$, to predict the Gaussian parameters. The output consists of opacity (1 value), scale (3 values), and rotation (4 values):
-    $$ [\alpha_i, \mathbf{s}_i, \mathbf{r}_i] = MLPS(\mathbf{F}_{max}^i) \in \mathbb{R}^{1+3+4} \quad (7) $$
-5.  **Volume Extraction:** To extract the CT density volume $V$, directly index the opacity $\alpha_i$ of the Gaussian at the corresponding voxel position. No trilinear interpolation is required:
-    $$ V(x, y, z) = \alpha_i, \quad \text{where } \boldsymbol{\mu}_i = (x, y, z)^T \quad (8) $$
-6.  **Differentiable X-ray Rendering:** Render X-ray projections by accumulating the Gaussians along rays using a differentiable rasterizer [S1, unofficial]. This allows gradients to flow back to the MLP parameters during training, constraining the predicted volume with X-ray inputs.
+**Numbered Steps:**
+1.  **Grid Initialization:** Define a regular 3D voxel grid with dimensions $M \times N \times L$. Place a 3D Gaussian primitive at the centroid of each voxel. The position $\mu_i$ for each Gaussian $g_i$ is fixed and does not change during optimization [S1, unofficial].
+2.  **Feature Query:** For each Gaussian $g_i$ with fixed position $\mu_i$, and for each view $k \in \{1, \dots, K\}$:
+    *   Project $\mu_i$ to 2D screen coordinates using the projection matrix $\mathbf{P}_k$ of the $k$-th view: $\mathbf{P}_k(\mu_i)$ [S1, unofficial].
+    *   Query the view-specific feature $F_k$ from the feature map $\mathbf{F}_k$ using bilinear interpolation:
+        $$ F_k = \text{Interp}(\mathbf{F}_k, \mathbf{P}_k(\boldsymbol{\mu}_i)) \in \mathbb{R}^C $$
+        where $\text{Interp}(\cdot)$ denotes bilinear interpolation [S1, unofficial].
+3.  **Feature Aggregation:** Aggregate the $K$ queried features for Gaussian $g_i$ using MaxPooling to obtain a single view-invariant feature vector:
+    $$ \mathbf{F}_{max}^i = \text{MaxPool}(F_1^i, F_2^i, \dots, F_K^i) \in \mathbb{R}^C $$
+    [S1, unofficial].
+4.  **Attribute Regression:** Pass the aggregated feature $\mathbf{F}_{max}^i$ through a prediction Multi-Layer Perceptron (MLP), denoted as $MLPS$, to predict the Gaussian parameters:
+    $$ [\alpha_i, \mathbf{s}_i, \mathbf{r}_i] = MLPS(\mathbf{F}_{max}^i) \in \mathbb{R}^{1+3+4} $$
+    The output consists of opacity (1 float), scale (3 floats), and rotation (4 floats) [S1, unofficial].
+5.  **Volume Extraction:** To extract the CT density volume $V$, directly index the opacity $\alpha_i$ of the Gaussian whose position matches the voxel coordinates:
+    $$ V(x, y, z) = \alpha_i \quad \text{where} \quad \boldsymbol{\mu}_i = (x, y, z)^T $$
+    This allows for fast indexing without trilinear interpolation [S1, unofficial].
+6.  **X-ray Rendering:** Render X-ray projections by differentially rasterizing the Gaussians using a rasterizer (e.g., as implemented in [75] in the source context) [S1, unofficial].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def voxgs_decode(view_features, projection_matrices, grid_dims):
+def voxgs_decode_attributes(view_features, projection_matrices, gaussian_positions):
     """
-    Decodes VoxGS attributes from view features.
+    Regress VoxGS attributes from view features.
     
     Args:
         view_features: List of K tensors, each shape (H, W, C).
         projection_matrices: List of K projection matrices P_k.
-        grid_dims: Tuple (M, N, L) defining the voxel grid size.
+        gaussian_positions: Array of shape (N_p, 3), fixed voxel centroids.
         
     Returns:
-        gaussians: List of Gaussian attributes.
+        opacities: Array of shape (N_p,)
+        scales: Array of shape (N_p, 3)
+        rotations: Array of shape (N_p, 4)
     """
-    M, N, L = grid_dims
     K = len(view_features)
+    N_p = gaussian_positions.shape[0]
     C = view_features[0].shape[2]
     
-    gaussians = []
+    # Initialize aggregated features
+    F_max = np.zeros((N_p, C))
     
-    # Iterate over all voxel centroids
-    for x in range(1, M + 1):
-        for y in range(1, N + 1):
-            for z in range(1, L + 1):
-                # Step 1: Fixed position
-                mu = np.array([x, y, z])
-                
-                # Step 2: Query view-specific features
-                view_features_i = []
-                for k in range(K):
-                    P_k = projection_matrices[k]
-                    # Project 3D point to 2D image coordinates
-                    # Note: Implementation of P_k depends on camera model (e.g., pinhole)
-                    # Assuming P_k handles the transformation from world to image plane
-                    proj_coords = project_point(P_k, mu) 
-                    
-                    # Bilinear interpolation
-                    # Interp(F_k, proj_coords)
-                    F_k = view_features[k]
-                    feature_k = bilinear_interpolate(F_k, proj_coords)
-                    view_features_i.append(feature_k)
-                
-                # Step 3: Aggregate features
-                # Stack features along a new axis and apply MaxPool
-                # shape: (K, C) -> (C,)
-                F_max = np.max(view_features_i, axis=0)
-                
-                # Step 4: Regress attributes
-                # MLP is assumed to be defined elsewhere or initialized
-                # Output: [alpha, s_x, s_y, s_z, r_w, r_x, r_y, r_z]
-                params = mlp_predict(F_max)
-                
-                alpha = params[0]
-                s = params[1:4]
-                r = params[4:8]
-                
-                gaussians.append({
-                    'mu': mu,
-                    'alpha': alpha,
-                    's': s,
-                    'r': r
-                })
-                
-    return gaussians
+    for i in range(N_p):
+        mu_i = gaussian_positions[i]
+        view_features_for_gaussian = []
+        
+        for k in range(K):
+            # Project 3D position to 2D
+            # P_k is a 3x3 or 4x4 matrix; assume it maps 3D to 2D homogeneous or similar
+            # Implementation detail: Apply projection matrix to mu_i
+            p_2d = apply_projection(projection_matrices[k], mu_i)
+            
+            # Bilinear interpolation from feature map F_k
+            # Interp(F_k, p_2d)
+            f_k = bilinear_interpolate(view_features[k], p_2d)
+            view_features_for_gaussian.append(f_k)
+            
+        # MaxPool across views
+        # MaxPool(F_1, ..., F_K)
+        F_max[i] = np.max(view_features_for_gaussian, axis=0)
+        
+    # MLP Prediction
+    # [alpha, s, r] = MLPS(F_max)
+    # Assuming MLPS is a standard MLP defined elsewhere
+    predictions = mlp_predict(F_max)
+    
+    # Split predictions
+    opacities = predictions[:, 0]
+    scales = predictions[:, 1:4]
+    rotations = predictions[:, 4:8]
+    
+    return opacities, scales, rotations
 
-def voxgs_extract_volume(gaussians, grid_dims):
+def extract_ct_volume(gaussian_opacities, gaussian_positions, grid_dims):
     """
-    Extracts CT density volume from VoxGS Gaussians.
+    Extract CT volume by indexing opacities at fixed voxel positions.
     
     Args:
-        gaussians: List of Gaussian dicts.
-        grid_dims: Tuple (M, N, L).
+        gaussian_opacities: Array of shape (N_p,)
+        gaussian_positions: Array of shape (N_p, 3), integer voxel indices
+        grid_dims: Tuple (M, N, L)
         
     Returns:
-        volume: 3D numpy array of shape (M, N, L).
+        volume: 3D array of shape (M, N, L)
     """
     M, N, L = grid_dims
     volume = np.zeros((M, N, L))
     
-    for g in gaussians:
-        x, y, z = g['mu']
-        # Direct indexing as per formula (8)
-        # Note: Array indices are 0-based, voxel indices in formula are 1-based
-        volume[x-1, y-1, z-1] = g['alpha']
+    for i in range(len(gaussian_opacities)):
+        x, y, z = gaussian_positions[i]
+        # Direct indexing
+        volume[x, y, z] = gaussian_opacities[i]
         
     return volume
+
+def apply_projection(P, mu_3d):
+    """
+    Apply projection matrix to 3D point to get 2D coordinates.
+    Placeholder for specific projection implementation details not fully specified in source.
+    """
+    # Standard projective transformation
+    # mu_3d is (x, y, z)
+    # P is typically 3x3 or 4x4
+    # Return 2D coordinates (u, v)
+    pass
+
+def bilinear_interpolate(feature_map, uv_coords):
+    """
+    Bilinear interpolation of feature map at uv coordinates.
+    """
+    # Standard bilinear interpolation
+    pass
+
+def mlp_predict(features):
+    """
+    MLP to predict [alpha, s, r] from features.
+    """
+    # Standard MLP forward pass
+    pass
 ```
 
-**Parameters**
-*   $M, N, L$: Voxel grid dimensions. Typical values depend on the desired resolution of the CT volume. Not given in the sources.
-*   $K$: Number of X-ray projections. Not given in the sources.
-*   $C$: Feature dimension of the view feature maps. Not given in the sources.
+**Parameters:**
+*   **Grid Dimensions ($M, N, L$):** Not given in the sources.
+*   **Number of Views ($K$):** Not given in the sources.
+*   **Feature Dimension ($C$):** Not given in the sources.
+*   **MLP Architecture:** Not given in the sources.
 
-**Edge Cases and Pitfalls**
-*   **Optimization Stability:** Directly representing CT with original 3DGS (optimizing positions and using SH) leads to inaccurate volume extraction and unstable optimization in feed-forward frameworks [S1, unofficial]. VoxGS solves this by fixing positions and removing SH coefficients.
-*   **Volume Extraction:** Unlike discrete 3D voxels which may require trilinear interpolation for smooth density fields, VoxGS allows direct indexing of opacity for fast extraction, provided the Gaussians are strictly aligned with the grid [S1, unofficial].
-*   **Isotropic Assumption:** The removal of SH coefficients assumes that X-ray attenuation depends only on isotropic density, similar to modifications in [75] cited in [S1, unofficial].
-
-## Subtopics
-
-### [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md)
-Uses SH for color but distills them to first-order; contrasts with VoxGS which removes SH entirely for density-only representation.
-
-### [Continuous Attenuation Model for 3D Gaussian Splatting](9624-continuous-attenuation-model-for-3d-gaussian-splatting.md)
-Focuses on attenuation modeling; VoxGS uses opacity directly as density.
-
-### [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md)
-Provides analytical gradients for rendering; VoxGS relies on differentiable rasterizers.
-
-### [DAVIGS](12021-davigs.md)
-A differentiable approach; VoxGS is a specific representation within differentiable frameworks.
-
-### [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md)
-Optimizes rendering speed; VoxGS optimizes representation for volume extraction.
-
-### [LangSplat Training Procedure](12438-langsplat-training-procedure.md)
-Training for language-guided splatting; VoxGS is trained on X-ray projections.
-
-### [Content-Aware Texturing for Gaussian Splatting](12606-content-aware-texturing-for-3d-gaussian-splatting.md)
-Adds texture; VoxGS is density-only.
-
-### [Directed Distance Field (DDF) for Gaussian Splatting](12854-directed-distance-field-ddf-for-3d-gaussian-splatting.md)
-Uses DDF; VoxGS uses Gaussian opacity.
-
-### [Gaussian Representation and Truncation](12855-gaussian-representation-and-truncation.md)
-General representation; VoxGS is a truncated, grid-aligned variant.
-
-### [Atomized Proliferation](12924-atomized-proliferation.md)
-Dynamic growth; VoxGS uses fixed grid.
-
-### [DeSplat](12925-desplat.md)
-Deformation; VoxGS is static in position.
-
-### [360 Gaussian Splatting](12929-360-gaussian-splatting.md)
-Panoramic; VoxGS is for CT.
-
-### [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md)
-Storage; VoxGS reduces storage by removing SH.
+**Edge Cases and Pitfalls:**
+*   **Direct 3DGS Application:** Directly representing CT with original 3DGS leads to inaccurate volume extraction and unstable optimization in feed-forward frameworks [S1, unofficial].
+*   **Color Representation:** SH coefficients are removed because X-ray attenuation depends only on isotropic density, not view-dependent color [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Volume extraction is $O(1)$ per voxel due to direct indexing, significantly faster than trilinear interpolation [S1, unofficial]. Rendering complexity depends on the number of Gaussians and rasterization overhead, similar to 3DGS but with fewer attributes per Gaussian.
-*   **Memory Complexity:** Reduced compared to standard 3DGS because spherical harmonics coefficients are omitted. Each Gaussian stores only 10 floats (3 pos, 1 alpha, 3 scale, 4 rot) instead of 10+ floats for SH [S1, unofficial].
-*   **Performance:** X-GRM using VoxGS reconstructs CT volumes within one second from sparse X-ray projections, outperforming SOTA methods in both quality and speed [S1, unofficial].
-*   **Strengths:** Precise volume extraction, stable optimization for feed-forward models, differentiable X-ray rendering.
-*   **Limitations:** Limited to isotropic density representation (no view-dependent color); requires a fixed voxel grid structure.
-*   **When to use:** Sparse-view X-ray CT reconstruction where fast, accurate volume extraction and differentiable rendering are required.
-*   **When not to use:** Applications requiring view-dependent appearance or dynamic scene reconstruction with moving objects.
+*   **Time Complexity:** Volume extraction is $O(1)$ per voxel due to direct indexing, avoiding complex trilinear interpolation [S1, unofficial]. Rendering relies on the efficient rasterization of 3DGS [S1, unofficial].
+*   **Memory Complexity:** Storage per Gaussian is 10 floats (3 for position, 1 for opacity, 3 for scale, 4 for rotation) [S1, unofficial]. No SH coefficients are stored, reducing memory compared to standard 3DGS [S1, unofficial].
+*   **Strengths:** Enables efficient CT volume extraction; supports differentiable X-ray rendering; provides more constraints from X-ray inputs during training; stable optimization for feed-forward frameworks [S1, unofficial].
+*   **Limitations:** Assumes isotropic density (no view-dependent color); positions are fixed, limiting flexibility in shape representation compared to optimizing 3DGS positions [S1, unofficial].
+*   **When to Use:** Sparse-view X-ray to CT reconstruction where differentiable rendering and precise volume extraction are required [S1, unofficial].
+*   **When Not to Use:** Applications requiring view-dependent color or flexible shape deformation beyond the voxel grid [S1, unofficial].
 
 ## Background
-VoxGS was introduced in the paper "X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography" [S1, unofficial]. It addresses the limitations of applying standard 3DGS to CT reconstruction, where optimizing positions and using SH leads to instability and inaccurate volume extraction. By fixing Gaussian positions to voxel centroids and removing color SH coefficients, VoxGS enables efficient, differentiable X-ray rendering and direct CT volume extraction.
+VoxGS was introduced in the paper "X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography" [S1, unofficial]. It was developed to address the limitations of applying standard 3D Gaussian Splatting to CT data, specifically the issues of inaccurate volume extraction and unstable optimization in feed-forward models [S1, unofficial]. The method is part of the X-GRM architecture, which uses a large feed-forward Transformer model to predict CT volumes from sparse X-ray projections [S1, unofficial].
 
 ## Sources
 [S1] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)

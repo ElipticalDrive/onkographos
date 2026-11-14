@@ -6,8 +6,8 @@ The n-Dimensional Sparse Voxel Tree (nD SVT) is a hierarchical data structure th
 
 ## How it works
 ### Inputs and Outputs
-**Input:** A voxelized 3D scene defined on a regular grid of size $N \times N \times N$ voxels, where $N = 2^m$ for $m \ge 1$. Each voxel has coordinates $(X, Y, Z)$ where $X, Y, Z \in [0, 2^m - 1]$ [S1].
-**Output:** An nD SVT data structure representing the scene in $D$ dimensions, where $D > 3$. The structure is linearized using Space Filling Curves (SFCs) such as Morton or Hilbert curves [S1].
+**Input:** A voxelized 3D scene defined on a regular grid of size $N \times N \times N$ voxels, where $N = 2^m$ for $m \ge 1$ [S1]. Each voxel has coordinates $(X, Y, Z)$ where $X, Y, Z \in [0, 2^m - 1]$ [S1].
+**Output:** An nD SVT data structure representing the scene in $D$ dimensions, where $D > 3$ [S1]. The structure is linearized using Space Filling Curves (SFCs) such as Morton or Hilbert curves [S1].
 
 ### Data Structures and Layout
 The nD SVT is defined by the following Backus-Naur Form (BNF) [S1]:
@@ -27,13 +27,13 @@ BIT ::= "0" | "1"
 ```
 
 Where:
-*   $D$ is the dimensionality of the SVT.
-*   $n$ is the number of internal nodes.
-*   $m$ is the number of leaf nodes.
-*   **CHNM** (Child Node Mask): A bitfield of size $2^D$ bits. It indicates which of the $2^D$ possible children in the $D$-dimensional hypercube are present.
-*   **PTS** (Pointer Table): A variable-length array of pointers to child nodes. The number of pointers ranges from 1 to $2^D$, corresponding to the number of set bits in CHNM.
-*   **PT** (Pointer): A pointer to a child node, size $r$ bits.
-*   **HT** (Hash/Type): A bit indicating node type or hash information.
+*   $D$ is the dimensionality of the SVT [S1].
+*   $n$ is the number of internal nodes [S1].
+*   $m$ is the number of leaf nodes [S1].
+*   **CHNM** (Child Node Mask): A bitfield of size $2^D$ bits indicating which of the $2^D$ possible children in the $D$-dimensional hypercube are present [S1].
+*   **PTS** (Pointer Table): A variable-length array of pointers to child nodes. The number of pointers ranges from 1 to $2^D$, corresponding to the number of set bits in CHNM [S1].
+*   **PT** (Pointer): A pointer to a child node, size $r$ bits [S1].
+*   **HT** (Hash/Type): A bit indicating node type or hash information [S1].
 
 **Binary Representation Size:**
 The total size of the data structure in bits is calculated as [S1]:
@@ -43,54 +43,63 @@ $$
 $$
 
 Where:
-*   $\text{CHNM}_{size} = 2^D$ bits.
-*   $\text{PTS}_{size}$ is the total size of all pointers in the structure.
+*   $\text{CHNM}_{size} = 2^D$ bits [S1].
+*   $\text{PTS}_{size}$ is the total size of all pointers in the structure [S1].
 
 ### Coordinate Transformation
 To map $n$-dimensional coordinates to a 1D linear space for traversal and storage, the method uses bit interleaving (Morton code) [S1].
 
 **1. Upscaling (3D to $D$-dimensional):**
-To transform 3D coordinates $(X, Y, Z)$ into a $D$-dimensional coordinate system, the scene is conceptually mapped to a higher-dimensional grid. The specific geometric mapping of the 3D scene into $D$ dimensions is not detailed in the sources, but the linearization relies on the resulting $D$ coordinates [S1].
+To transform 3D coordinates $(X, Y, Z)$ into a $D$-dimensional coordinate system, the scene is conceptually mapped to a higher-dimensional grid [S1]. The specific geometric mapping of the 3D scene into $D$ dimensions is not detailed in the sources, but the linearization relies on the resulting $D$ coordinates [S1].
 
 **2. Linearization (nD to 1D Morton Coordinate):**
-To transform coordinates from $D$ dimensions to a 1D Morton coordinate $M$:
-1.  Extract the binary representation of each of the $D$ coordinates.
-2.  Interleave the bits of these $D$ coordinates to form $M$.
-    *   If each coordinate has $k$ bits, $M$ will have $D \times k$ bits.
-    *   $M \in [0, 2^{D \cdot k} - 1]$ [S1].
-
-**3. De-linearization (1D Morton to nD):**
-To transform from 1D Morton coordinate $M$ back to $D$-dimensional coordinates:
-1.  De-interleave the bits of $M$ into $D$ separate coordinate values [S1].
+To transform coordinates from $D$ dimensions to a 1D Morton coordinate $M$: Interleave bits of the $D$ coordinates [S1]. To transform from 1D Morton coordinate $M$ to $D$-dimensional coordinates: De-interleave bits of $M$ into $D$ coordinates [S1].
+*   If each coordinate has $m$ bits, $M$ will have $D \times m$ bits [S1].
+*   $M \in [0, 2^{D \cdot m} - 1]$ [S1].
 
 ### Parameters
 *   **$D$ (Dimensionality):** The number of dimensions of the SVT. Typical values tested are 3, 4, 5, 6, 7, and 8 [S1].
-    *   CHNM size for 3D SVT: $2^3 = 8$ bits.
-    *   CHNM size for 4D SVT: $2^4 = 16$ bits.
+    *   CHNM size for 3D SVT: $2^3 = 8$ bits [S1].
+    *   CHNM size for 4D SVT: $2^4 = 16$ bits [S1].
     *   CHNM size for 8D SVT: $2^8 = 256$ bits [S1].
-*   **$n$:** Number of internal nodes.
+*   **$n$:** Number of internal nodes [S1].
 *   **$m$:** Number of leaf nodes [S1].
 
 ### Algorithm: Traversal
-Traversal is performed from the root to leaf nodes for all active voxels. The process is parallelized on GPU hardware [S1].
+Traversal is performed in parallel on GPU hardware from the root to leaf nodes for all active voxels [S1]. The number of operations required to process a single node remains constant regardless of SVT dimensionality [S1].
 
-1.  **Initialize:** Start at the root node of the nD SVT.
-2.  **Compute Morton Code:** Calculate the 1D Morton coordinate $M$ for the target voxel based on its $D$-dimensional position.
-3.  **Iterate Bits:** For each level of the tree, extract the relevant bits from $M$ to determine the child index.
-4.  **Check Mask:** Use the CHNM of the current node to check if the target child exists.
-    *   If the bit corresponding to the child index is 0, the path is invalid or the voxel is empty.
-    *   If the bit is 1, follow the corresponding pointer in the PTS array.
-5.  **Advance:** Move to the child node.
-6.  **Termination:** Repeat until a leaf node (LNODE) is reached.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-*Note: The sources state that the number of operations per node remains constant regardless of dimensionality, but the size of the CHNM and PTS arrays grows [S1].*
+```python
+def traverse_nD_SVT(root_node, target_coords, D, m):
+    # Interleave bits of D coordinates to get Morton code M [G]
+    M = interleave_bits(target_coords, D)
+    current_node = root_node
+    
+    for level in range(m):
+        # Extract D bits for this level from M [G]
+        level_bits = extract_bits(M, level * D, D)
+        # Map level_bits to child index
+        child_idx = bits_to_index(level_bits)
+        
+        # Check CHNM mask for existence of child
+        if not (current_node.CHNM >> child_idx) & 1:
+            return None  # Path invalid or voxel empty
+            
+        # Follow pointer in PTS array
+        # PTS contains pointers only for set bits in CHNM
+        pointer_offset = popcount(current_node.CHNM & ((1 << child_idx) - 1))
+        current_node = current_node.PTS[pointer_offset]
+        
+    return current_node  # Leaf node (LNODE) reached
+```
 
 ### Edge Cases and Pitfalls
 *   **Alignment:** Node components must be aligned to 32 bits for GPU-friendliness [S1].
-    *   In 3D and 4D SVTs, reserved bits are required for alignment, increasing the binary size.
+    *   In 3D and 4D SVTs, reserved bits are required for alignment, increasing the binary size [S1].
     *   From 5D SVT onwards, components are naturally aligned to 32 bits. This reduces the binary representation size by 24 bits compared to 3D SVTs and 16 bits compared to 4D SVTs for each node [S1].
 *   **Cache Misses:** As dimensionality increases, the CHNM size grows exponentially. In 7D and 8D, the CHNM length exceeds 64 bits, leading to a higher probability of cache misses and negatively impacting traversal speed [S1].
-*   **Optimal Dimensionality:** There is no single optimal $D$ for all scenes. The optimal dimensionality balances the sharp increase in CHNM size against the reduction in the total number of nodes and pointers. For the tested models, 6D and 7D provided the most compact representations [S1].
+*   **Optimal Dimensionality:** There is no single optimal $D$ for all scenes. The optimal dimensionality balances the sharp increase in CHNM size against the reduction in the total number of nodes and pointers [S1]. For unaligned nodes, compression ratios ranged from 2.02 (6D SVT, Skull model, $4096^3$ resolution) to 2.77 (7D SVT, Porsche model, $128^3$ resolution) [S1]. For aligned nodes, compression ratios ranged from 3.23 to 4.44 compared to the classical 3D SVO [S1].
 
 ## Operating characteristics
 ### Time and Memory Complexity
@@ -116,7 +125,7 @@ The ratio of the binary representation size of the nD SVT to the 3D SVT (without
 When node components are aligned to 32 bits (optimal for GPU), the nD SVT achieves a 3.23 to 4.44 times more compact binary representation compared to the classical 3D SVO [S1].
 
 ### Strengths and Limitations
-*   **Strengths:** Significantly reduced binary size (2x to 4.4x smaller than 3D SVO); reduced tree depth; optimal performance at 6D dimensionality for traversal speed.
+*   **Strengths:** Significantly reduced binary size (2x to 4.4x smaller than 3D SVO); reduced tree depth; optimal performance at 6D dimensionality for traversal speed [S1].
 *   **Limitations:** Increased per-node complexity; poor performance in 7D/8D due to cache misses from large CHNM (>64 bits); requires dimensionality upscaling logic [S1].
 
 ## Background

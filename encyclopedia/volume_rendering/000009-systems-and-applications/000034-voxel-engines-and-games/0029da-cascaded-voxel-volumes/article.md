@@ -12,7 +12,7 @@ Cascaded Voxel Volumes is a spatial partitioning method for Voxelized Global Ill
 **Data Structures:** An array of $N$ volume instances, where each instance contains a 3D texture of fixed resolution $R \times R \times R$ (identical for all cascades) and a transformation matrix defining its world-space position and scale [S1, S2, unofficial].
 
 **Steps:**
-1. **Cascade Setup:** Define $N$ cascades. Cascade 0 is the smallest scale (highest resolution) centered tightly around the camera. Subsequent cascades $i$ have increasing scales $s_i$ (where $s_{i+1} > s_i$) and cover larger volumes of the scene [S1, S2, unofficial].
+1. **Cascade Setup:** Define $N$ cascades. Cascade 0 is the smallest scale (highest resolution) centered tightly around the camera [S1, S2, unofficial]. Subsequent cascades $i$ have increasing scales $s_i$ (where $s_{i+1} > s_i$) and cover larger volumes of the scene [S1, S2, unofficial].
 2. **Voxelization:** For each frame (or staggered frames):
    a. Position each cascade volume in world space centered on the camera, scaled according to $s_i$ [S1, S2, unofficial].
    b. Rasterize scene geometry into the 3D texture of cascade $i$ by projecting geometry onto the orthographic view of the cascade and filling the corresponding voxels [S2, unofficial].
@@ -24,16 +24,14 @@ Cascaded Voxel Volumes is a spatial partitioning method for Voxelized Global Ill
 *   **Cascade Scale:** The physical size of cascade $i$ is proportional to $s_i$ [S1, S2, unofficial].
 *   **Clamping:** Let $P$ be the projected coordinate. The clamped coordinate $P'$ is:
     $$ P' = \text{floor}(P / \Delta) \cdot \Delta $$
-    where $\Delta$ is the world-space voxel size of the cascade [S2, unofficial].
+    where $\Delta$ is the world-space voxel size of the cascade [G].
 
 **Parameters:**
-*   **Number of Cascades ($N$):** Not given in the sources.
-*   **Resolution ($R$):** Identical for all cascades. Not given in the sources.
-*   **Scale Factors ($s_i$):** Increasing values. Not given in the sources.
+The exact number of cascades ($N$), resolution ($R$), and scale factors ($s_i$) are not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Color Swimming:** Moving the camera causes different fragments to be rendered, creating different voxels and visible color shifts [S2, unofficial]. Fixed by clamping projections to voxel-sized increments [S2, unofficial].
-*   **Cascade Edges:** Discontinuities may occur at the boundaries between cascades. A linear interpolation between the two values at the boundary is suggested as a potential solution [S2, unofficial].
+*   **Cascade Edges:** Discontinuities may occur at the boundaries between cascades [S2, unofficial]. A linear interpolation between the two values at the boundary is suggested as a potential solution [S2, unofficial].
 *   **Voxels Behind Eye:** Some voxels remain behind the eye because objects in front of the eye may still receive indirect color from objects behind the eye [S2, unofficial].
 
 ## Subtopics
@@ -43,7 +41,7 @@ A specific implementation variant where multiple 3D textures create cascades tha
 
 ## Operating characteristics
 *   **Time Complexity:** Staggering updates reduces per-frame computational load by updating cascades across multiple frames [S1, unofficial]. Exact complexity formulas are not given in the sources.
-*   **Memory Complexity:** Memory usage scales with the number of cascades and fixed resolution, but exact complexity is not given in the sources [S1, S2, unofficial].
+*   **Memory Complexity:** Memory usage scales with the number of cascades and fixed resolution, but exact complexity is not given in the sources.
 *   **Performance:** Used in 'The Tomorrow Children' on PS4 for efficient coverage of large scenes [S1, unofficial]. NVIDIA's VXGI in Unreal Engine 4 uses this because specular reflections lose quality at greater distances, justifying high resolution near the player [S1, unofficial].
 *   **Strengths:** High resolution near the player; efficient coverage of large scenes [S1, S2, unofficial].
 *   **Limitations:** Potential for aliasing/color swimming if not clamped; discontinuities at cascade boundaries [S1, S2, unofficial].

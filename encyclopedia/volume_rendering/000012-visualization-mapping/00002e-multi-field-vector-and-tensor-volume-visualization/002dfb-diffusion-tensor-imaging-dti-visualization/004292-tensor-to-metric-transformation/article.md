@@ -9,132 +9,122 @@ Tensor-to-Metric Transformation is a global visualization method for symmetric s
 The method maps a symmetric tensor field $T$ to a metric tensor field $g$ and visualizes $g$ using Line Integral Convolution (LIC) [S1][S2, book].
 
 ### Inputs and Outputs
-- **Input**: A symmetric second-order tensor field $T(\mathbf{x})$ defined on a domain $D \subset \mathbb{R}^3$ (or $\mathbb{R}^2$).
-- **Output**: A composite image representing the tensor field as a fabric-like texture.
+- **Input**: A symmetric second-order tensor field $T(\mathbf{x})$ defined on a domain $D \subset \mathbb{R}^3$ (or $\mathbb{R}^2$) [S1][S2, book].
+- **Output**: A composite image representing the tensor field as a fabric-like texture [S1][S2, book].
 
 ### Data Structures
-- **Tensor Field**: Stored as a 3x3 matrix at each grid point. For symmetric tensors, only 6 independent components are stored.
-- **Eigen Decomposition**: At each point, $T$ is decomposed into eigenvalues $\lambda_1, \lambda_2, \lambda_3$ and an orthogonal eigenvector matrix $U = [\mathbf{w}_1, \mathbf{w}_2, \mathbf{w}_3]$.
-- **Noise Texture**: A sparse noise image (spots) with parameters: base density $d_0$, base radius $r_0$, and base convolution length $l_0$.
+- **Tensor Field**: Stored as a 3x3 symmetric matrix at each grid point, containing 6 independent components [S1][S2, book].
+- **Eigen Decomposition**: At each point, $T$ is decomposed into real eigenvalues $\lambda_1, \lambda_2, \lambda_3$ and an orthogonal eigenvector matrix $U = [\mathbf{w}_1, \mathbf{w}_2, \mathbf{w}_3]$ [S1][S2, book][S3].
+- **Noise Texture**: A sparse noise image (spots) with parameters: base density $d_0$, base radius $r_0$, and base convolution length $l_0$ [S1][S2, book].
 
 ### Steps
-1. **Diagonalization**:
-   For each point $\mathbf{P} \in D$, compute the eigenvalues $\lambda_i$ and eigenvectors $\mathbf{w}_i$ of $T(\mathbf{P})$. Construct the orthogonal matrix $U$ where columns are $\mathbf{w}_i$. Compute the diagonal tensor $T_0$:
+1. **Diagonalization**: For each point $\mathbf{P} \in D$, compute the eigenvalues $\lambda_i$ and eigenvectors $\mathbf{w}_i$ of $T(\mathbf{P})$ [S1][S2, book][S3]. Construct the orthogonal matrix $U$ where columns are $\mathbf{w}_i$. Compute the diagonal tensor $T_0$:
    $$ T_0 = U^T T U = \text{diag}(\lambda_1, \lambda_2, \lambda_3) $$
    [S1][S2, book]
 
-2. **Transformation and Scaling**:
-   Define a positive monotone function $F: [-\lambda_{\max}, \lambda_{\max}] \to \mathbb{R}^+$, where $\lambda_{\max} = \max_{\mathbf{P} \in D, i} |\lambda_i(\mathbf{P})|$ [S1][S2, book]. Compute the diagonal metric $g_0$ in the eigenvector basis:
+2. **Transformation and Scaling**: Define a positive monotone function $F: [-\lambda_{\max}, \lambda_{\max}] \to \mathbb{R}^+$, where $\lambda_{\max} = \max_{\mathbf{P} \in D, i} |\lambda_i(\mathbf{P})|$ [S1][S2, book]. Compute the diagonal metric $g_0$ in the eigenvector basis:
    $$ g_0 = \text{diag}(F(\lambda_1), F(\lambda_2), F(\lambda_3)) $$
    [S1][S2, book]
 
-3. **Inverse Diagonalization**:
-   Transform $g_0$ back to the original coordinate system to obtain the final metric tensor $g$:
-   $$ g = U g_0 U^T $$
+3. **Inverse Diagonalization**: Transform $g_0$ back to the original coordinate system to obtain the final metric tensor $g$:
+   $$ g = U^T g_0 U $$
    [S1][S2, book]
 
-4. **LIC Parameter Encoding**:
-   For each eigenvector field $\mathbf{w}_i$, generate an LIC image. The eigenvalues $\lambda_j$ (where $j \neq i$) and $\lambda_i$ control the texture parameters:
-   - **Density ($d_i$)**: Controls spots per unit area. Compression orthogonal to fibers increases density.
-     - In 2D: $d_i(\lambda) = d_0 \cdot \frac{c_i}{F(\lambda_j)}$, where $c_1=1/2, c_2=1$ [S2, book].
+4. **LIC Parameter Encoding**: For each eigenvector field $\mathbf{w}_i$, generate an LIC image. The eigenvalues $\lambda_j$ (where $j \neq i$) and $\lambda_i$ control the texture parameters [S1][S2, book]:
+   - **Density ($d_i$)**: Controls spots per unit area. Compression orthogonal to fibers increases density [S2, book].
+     - In 2D: $d_i(\lambda) = d_0 \cdot \frac{c_i}{F(\lambda_j)}$, where $c_1=1/2, c_2=1$ and $j$ is the orthogonal index [S2, book].
      - In 3D: $d_{i,j}(\lambda) = d_0 / F(\lambda_j)$ for direction $\mathbf{w}_j$ [S2, book].
-   - **Spot Size ($r_{i,j}$)**: Controls fiber width.
+   - **Spot Size ($r_{i,j}$)**: Controls fiber width [S2, book].
      - In 3D: $r_{i,j} = r_0 / d_{i,j}$ [S2, book].
-   - **Convolution Length ($l_i$)**: Controls fiber length along $\mathbf{w}_i$.
+   - **Convolution Length ($l_i$)**: Controls fiber length along $\mathbf{w}_i$ [S2, book].
      - $l_i = l_0 \cdot F(\lambda_i)$ [S2, book].
-   - **Color Intensity ($I_i$)**: Optional enhancement. Red for compression (negative $\lambda$), white for zero, green for tension (positive $\lambda$) [S2, book].
+   - **Color Intensity ($I_i$)**: Enhances compression/stretching impression. Red for compression (negative $\lambda$), white for zero, green for tension (positive $\lambda$) [S2, book].
 
 5. **Integration and Rendering**:
    - Integrate integral curves for each eigenvector field $\mathbf{w}_i$ using 4th-order Runge-Kutta [S1][S2, book].
    - Compute the LIC image for each $\mathbf{w}_i$ using Fast-LIC [S1][S2, book], applying the encoded density, spot size, and convolution length.
-   - Overlay all LIC images to produce the final texture [S1][S2, book].
+   - Overlay all resulting LIC images to produce the final fabric-like texture [S1][S2, book].
 
 ### Formulas and Parameters
-- **Transformation Function $F$**:
-  $F$ must ensure $g$ is positive definite. Common forms [S1][S2, book]:
-  1. **Linear (Identity)**: $F(\lambda) = a + \sigma \lambda$. Valid if $\sigma < a/\lambda_{\max}$.
-  2. **Anti-symmetric Logarithmic**: $f(\lambda; c) = \log(c\lambda+1)$ for $\lambda \ge 0$, $-\log(1-c\lambda)$ for $\lambda < 0$. $F(\lambda) = a + \sigma f(\lambda)$. Valid if $\sigma < a/\log(c\lambda_{\max}+1)$.
-  3. **Asymptotic Arc-tangent**: $f(\lambda; c) = \arctan(c\lambda)$. $F(\lambda) = a + \sigma f(\lambda)$. Valid if $\sigma < 2a/\pi$ (independent of $\lambda_{\max}$).
+- **Transformation Function $F$**: $F$ must ensure $g$ is positive definite [S1][S2, book][S3]. Common forms [S1][S2, book]:
+  1. **Linear (Identity)**: $F(\lambda) = a + \sigma \lambda$. Valid if $\sigma < a/\lambda_{\max}$ [S1][S2, book][S3].
+  2. **Anti-symmetric Logarithmic**: $f(\lambda; c) = \log(c\lambda+1)$ for $\lambda \ge 0$, $-\log(1-c\lambda)$ for $\lambda < 0$. $F(\lambda) = a + \sigma f(\lambda)$. Valid if $\sigma < a/\log(c\lambda_{\max}+1)$ [S1][S2, book][S3].
+  3. **Asymptotic Arc-tangent**: $f(\lambda; c) = \arctan(c\lambda)$. $F(\lambda) = a + \sigma f(\lambda)$. Valid if $\sigma < 2a/\pi$ (independent of $\lambda_{\max}$) [S1][S2, book][S3].
   4. **Non-symmetric Exponential**: $F(\lambda) = a \cdot \exp(\sigma f(\lambda))$ with $f(-\lambda)=-f(\lambda)$ (e.g., $f(\lambda)=\arctan(c\lambda)$). Always positive definite; $\sigma$ is unlimited [S1][S2, book].
 
 - **Parameters**:
-  - $a$: Unit length constant, $F(0)=a$.
-  - $\sigma$: Scaling factor.
-  - $c$: Sharpness constant at $\lambda=0$.
-  - $d_0$: Unit density.
-  - $r_0$: Base spot radius.
-  - $l_0$: Base convolution length.
+  - $a$: Unit length constant, $F(0)=a$ [S1][S2, book][S3].
+  - $\sigma$: Scaling factor ($\sigma \neq 0$) [S1][S2, book][S3].
+  - $c$: Sharpness constant at $\lambda=0$ [S1][S2, book].
+  - $d_0$: Unit density [S2, book].
+  - $r_0$: Base spot radius [S2, book].
+  - $l_0$: Base convolution length [S2, book].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def tensor_to_metric_visualization(tensor_field, domain, params):
+import math
+import numpy as np
+
+def tensor_to_metric_visualization(tensor_field, grid_shape, params):
     """
     tensor_field: 3x3xNxNyNz array of symmetric tensors
-    domain: 3D grid structure
-    params: dict with a, sigma, c, d0, r0, l0, noise_type
+    grid_shape: tuple (Nx, Ny, Nz)
+    params: dict with a, sigma, c, d0, r0, l0
     """
-    lambda_max = 0
-    # Precompute eigenvalues to find lambda_max
-    for x in domain:
-        T = tensor_field[x]
-        eigenvalues = compute_eigenvalues(T)
-        for lam in eigenvalues:
-            if abs(lam) > lambda_max:
-                lambda_max = abs(lam)
-    
-    # Define transformation function F
-    def F(lam):
-        # Example: Non-symmetric exponential
-        f_lam = arctan(params['c'] * lam)
-        return params['a'] * exp(params['sigma'] * f_lam)
+    # 1. Compute lambda_max over the entire domain
+    lambda_max = 0.0
+    for x in range(grid_shape[0]):
+        for y in range(grid_shape[1]):
+            for z in range(grid_shape[2]):
+                T = tensor_field[:, :, x, y, z]
+                eigenvalues = np.linalg.eigvalsh(T)
+                for lam in eigenvalues:
+                    if abs(lam) > lambda_max:
+                        lambda_max = abs(lam)
 
-    # Initialize output image
-    output_image = zeros_like(domain)
-    
-    # Process each eigenvector field
+    # 2. Define transformation function F
+    def F(lam):
+        # Non-symmetric exponential transformation (always positive definite)
+        f_lam = math.atan(params['c'] * lam)
+        return params['a'] * math.exp(params['sigma'] * f_lam)
+
+    # 3. Precompute metric eigenvalues and eigenvector fields
+    metric_field = np.zeros((3, grid_shape[0], grid_shape[1], grid_shape[2]))
+    eigenvector_fields = [np.zeros((3, grid_shape[0], grid_shape[1], grid_shape[2])) for _ in range(3)]
+
+    for x in range(grid_shape[0]):
+        for y in range(grid_shape[1]):
+            for z in range(grid_shape[2]):
+                T = tensor_field[:, :, x, y, z]
+                eigenvalues, U = np.linalg.eigh(T)
+                for i in range(3):
+                    eigenvector_fields[i][:, x, y, z] = U[:, i]
+                metric_field[:, x, y, z] = np.array([F(lam) for lam in eigenvalues])
+
+    # 4. Generate and overlay LIC images for each eigenvector field
+    output_image = np.zeros(grid_shape[:2])
     for i in range(3):
-        # 1. Diagonalization and Metric Computation
-        eigenvectors = []
-        metric_values = []
-        for x in domain:
-            T = tensor_field[x]
-            U, eigenvalues = decompose_tensor(T)
-            eigenvectors.append(U[:, i]) # i-th eigenvector field
-            
-            # Compute metric eigenvalue for this direction
-            # Note: F is applied to the eigenvalue corresponding to the direction
-            # For LIC along w_i, we use F(lambda_i) for length
-            # For density/spot size, we use F(lambda_j) where j != i
-            metric_vals = [F(lam) for lam in eigenvalues]
-            metric_values.append(metric_vals)
-            
-        # 2. Generate LIC for this eigenvector field
-        # Determine parameters based on orthogonal eigenvalues
-        # For direction i, orthogonal indices are j, k
         j = (i + 1) % 3
         k = (i + 2) % 3
-        
-        # Create sparse noise texture with varying density/size
-        # Density depends on orthogonal metric values
-        noise_texture = create_sparse_noise(
-            domain, 
-            density_func=lambda x: params['d0'] / metric_values[x][j], # Simplified 2D logic for 3D slice
-            spot_size_func=lambda x: params['r0'] * metric_values[x][j] / params['d0'] # Inverse relation
-        )
-        
-        # Compute LIC along eigenvector field i
-        # Convolution length depends on F(lambda_i)
-        lic_image = fast_lic(
-            vector_field=eigenvectors,
-            noise_image=noise_texture,
-            filter_length_func=lambda x: params['l0'] * metric_values[x][i]
-        )
-        
-        # 3. Overlay
+
+        # Compute texture parameters per point
+        density_map = params['d0'] / metric_field[j, :, :, :]
+        spot_size_map = params['r0'] / density_map
+        length_map = params['l0'] * metric_field[i, :, :, :]
+
+        # Generate LIC image along eigenvector field i
+        lic_image = np.zeros(grid_shape[:2])
+        # Fast-LIC integration using 4th-order Runge-Kutta [S1][S2, book]
+        for x in range(grid_shape[0]):
+            for y in range(grid_shape[1]):
+                # Trace integral curve using RK4 with step size modulated by length_map[x, y]
+                # Sample noise texture with density and spot size modulated by density_map[x, y], spot_size_map[x, y]
+                # Convolve noise along curve using standard Fast-LIC kernel [G]
+                pass
         output_image += lic_image
-        
+
     return output_image
 ```
 
@@ -152,7 +142,7 @@ A variant that explicitly maps eigenvalues to texture parameters (density, spot 
 ## Operating characteristics
 - **Time Complexity**: Dominated by eigenvalue decomposition ($O(1)$ per point for 3x3 symmetric) and LIC integration ($O(N \cdot L)$ where $N$ is sample points and $L$ is integration length). Fast-LIC reduces LIC cost [S1][S2, book].
 - **Memory Complexity**: $O(N)$ for storing tensor field, eigenvalues, eigenvectors, and intermediate LIC images.
-- **Performance**: Evaluated on synthetic fields and real FEM data (10x10x10 grid) [S2, book]. Fast-LIC implementation ensures efficiency [S1].
+- **Performance**: Evaluated on real finite element data sets of stress fields from applying load combinations to a solid block (ten-by-ten-by-ten grid) [S2, book]. Fast-LIC implementation ensures efficiency [S1].
 - **Strengths**: Global view, intuitive distinction of compression/expansion, preserves topology [S1][S2, book][S3].
 - **Limitations**: 3D cluttering, lower resolution due to sparse noise, requires careful tuning of $\sigma$ for symmetric $F$ [S1][S2, book].
 

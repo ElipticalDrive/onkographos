@@ -1,0 +1,274 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-DBARF is a method for jointly optimizing camera poses with Generalizable Neural Radiance Fields (GeNeRFs) by implicitly minimizing feature consistency errors via a recurrent neural network, overcoming gradient issues in direct optimization [S1]. It differs from BARF, which relies on coarse-to-fine training with positional encodings that are absent in GeNeRFs, by using a RAFT-like recurrent network to bypass direct gradient descent on the cost function [S1].
++DBARF jointly optimizes Generalizable Neural Radiance Fields (GeNeRFs) and relative camera poses in a self-supervised manner without requiring accurate initial poses [S1]. It differs from BARF, which relies on coarse-to-fine training with positional encodings absent in GeNeRFs, by using a RAFT-like recurrent network to implicitly minimize feature consistency errors, bypassing direct gradient descent on the cost function [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** A set of unposed images $\{I_i\}$ for a scene.
+-*   **Outputs:** Optimized camera poses $\{P_i\}$, depth maps $\{D_i\}$, and rendered novel views.
++*   **Outputs:** Optimized relative camera poses $\{P_{ij}\}$, depth maps $\{D_i\}$, and rendered novel views.
+ 
+ **Data Structures:**
+@@ -29,5 +29,5 @@
+ 6.  **Recurrent Pose and Depth Optimization:** Use a GRU (following RAFT-like architecture) to predict corrections $\Delta \mathbf{P}_{ij}$ and $\Delta D_i$ based on the cost map. Update poses and depth for $t$ iterations:
+     $$
+-    \mathbf{P}_{ij}^{t+1} = \mathbf{P}_{ij}^t + \Delta \mathbf{P}_{ij}, \quad D_i^{t+1} = D_i^t + \Delta D_i
++    \mathbf{P}_{ij}^{t+1} = \mathbf{P}_{ij}^t + \Delta \mathbf{P}_{ij}, \quad \mathbf{D}_i^{t+1} = \mathbf{D}_i^t + \Delta \mathbf{D}_i
+     $$
+     The cost map is updated after each iteration using the current poses and depth [S1].
+@@ -39,5 +39,5 @@
+ ```python
+ def dbarf_training(images, scene_graph, ge_nerf, feature_backbone, pose_estimator, 
+-                   num_nearby_views, num_iterations, beta, lr_extractor, lr_ge_nerf, lr_pose):
++                   num_nearby_views, num_recurrent_iters, beta, lr_extractor, lr_ge_nerf, lr_pose):
+     """
+     DBARF Training Loop.
+@@ -48,123 +48,142 @@
+     pose_estimator: GRU-based network for pose/depth correction.
+     num_nearby_views: Number of nearby views to use (5 for pretraining, 10 for fine-tuning).
+-    num_iterations: Number of recurrent iterations for pose optimization.
+-    beta: Coefficient for loss weighting schedule.
+-    """
+-    optimizer_extractor = Adam(feature_backbone.parameters(), lr=lr_extractor)
+-    optimizer_ge_nerf = Adam(ge_nerf.parameters(), lr=lr_ge_nerf)
+-    optimizer_pose = Adam(pose_estimator.parameters(), lr=lr_pose)
++    num_recurrent_iters: Number of recurrent iterations for pose optimization (4) [S1].
++    beta: Coefficient for loss weighting schedule (-1e5) [S1].
++    """
++    # Standard gradient descent optimizers [G]
++    opt_extractor = Optimizer(feature_backbone.parameters(), lr=lr_extractor)
++    opt_ge_nerf = Optimizer(ge_nerf.parameters(), lr=lr_ge_nerf)
++    opt_pose = Optimizer(pose_estimator.parameters(), lr=lr_pose)
+     
+-    for iteration in range(total_training_iterations):
+-        for batch in data_loader:
+-            target_image = batch['target']
+-            nearby_indices = scene_graph.get_nearby(target_image.id, k=num_nearby_views)
+-            nearby_images = [batch['images'][idx] for idx in nearby_indices]
+-            
+-            # 1. Feature Extraction
+-            F_target = feature_backbone(target_image)
+-            F_nearby = [feature_backbone(img) for img in nearby_images]
+-            
+-            # 2. Initialization
+-            # Random initialization of relative poses and depth
+-            P_ij = random_initialize_relative_poses(len(nearby_indices))
+-            D_target = random_initialize_depth(target_image.shape)
+-            
+-            # 3. Recurrent Pose Optimization
+-            for t in range(num_iterations):
+-                # Compute 3D points from depth
+-                X_S = depth_to_3d_points(D_target, target_image.intrinsics)
++    total_iterations = 200000  # Pretraining iterations [S1]
++    for iteration in range(total_iterations):
++        for target_img, nearby_indices in scene_graph.batches(images):
++            nearby_imgs = [images[idx] for idx in nearby_indices[:num_nearby_views]]
++            
++            # 1. Feature Extraction [S1]
++            F_target = feature_backbone(target_img)
++            F_nearby = [feature_backbone(img) for img in nearby_imgs]
++            
++            # 2. Initialization [S1]
++            P_ij = random_uniform_relative_poses(len(nearby_imgs))
++            D_target = random_uniform_depth(target_img.shape)
++            
++            # 3. Recurrent Pose Optimization [S1]
++            for t in range(num_recurrent_iters):
++                # Compute 3D points from depth [S1]
++                X_S = depth_to_3d_points(D_target, target_img.intrinsics)
+                 
+-                # Compute Cost Map
+-                C = compute_cost_map(F_target, F_nearby, P_ij, X_S, target_image.intrinsics)
++                # Compute Cost Map [S1]
++                C = compute_cost_map(F_target, F_nearby, P_ij, X_S, target_img.intrinsics)
+                 
+-                # Predict corrections using GRU
++                # Predict corrections using GRU [S1]
+                 delta_P, delta_D = pose_estimator(C, F_target, F_nearby, P_ij, D_target)
+                 
+-                # Update poses and depth
++                # Update poses and depth [S1]
+                 P_ij = P_ij + delta_P
+                 D_target = D_target + delta_D
+             
+-            # 4. Volume Rendering
+-            # Use optimized poses and features in GeNeRF
+-            rendered_image, rendered_depth = ge_nerf.render(target_image, P_ij, F_target, F_nearby)
+-            
+-            # 5. Loss Computation
+-            L_depth = compute_depth_smoothness_loss(D_target, target_image)
+-            L_photo = compute_photometric_loss(rendered_image, target_image, nearby_images, P_ij)
+-            L_rgb = compute_rgb_loss(rendered_image, target_image)
+-            
+-            # Weighted final loss
++            # 4. Volume Rendering [S1]
++            rendered_img = ge_nerf.render(target_img, P_ij, F_target, F_nearby)
++            
++            # 5. Loss Computation [S1]
++            L_depth = compute_depth_smoothness_loss(D_target, target_img)
++            L_photo = compute_photometric_loss(rendered_img, target_img, nearby_imgs, P_ij)
++            L_rgb = compute_rgb_loss(rendered_img, target_img)
++            
+             weight = 2 ** (beta * iteration)
+             L_final = weight * (L_depth + L_photo) + (1 - weight) * L_rgb
+             
+-            # 6. Backpropagation
+-            optimizer_extractor.zero_grad()
+-            optimizer_ge_nerf.zero_grad()
+-            optimizer_pose.zero_grad()
+-            
++            # 6. Backpropagation [G]
++            opt_extractor.zero_grad()
++            opt_ge_nerf.zero_grad()
++            opt_pose.zero_grad()
+             L_final.backward()
+-            
+-            optimizer_extractor.step()
+-            optimizer_ge_nerf.step()
+-            optimizer_pose.step()
++            opt_extractor.step()
++            opt_ge_nerf.step()
++            opt_pose.step()
+ 
+ def compute_cost_map(F_target, F_nearby, P_ij, X_S, K):
+     """
+     Computes the feature consistency cost map.
+-    """
+-    cost_sum = 0
++    Matches Eq. 11 in [S1].
++    """
++    cost_sum = 0.0
+     for j, F_j in enumerate(F_nearby):
+-        # Project 3D points to nearby view
+-        # P_ij[j] is relative pose from target to nearby j
+-        # K is intrinsics
+-        projected_coords = K @ (P_ij[j] @ X_S)
+-        
+-        # Sample features from nearby view at projected coordinates
+-        F_j_warped = bilinear_interpolate(F_j, projected_coords)
+-        
+-        # Sample features from target view at original coordinates
+-        # Note: X_S is derived from target depth, so we sample F_target at the patch center
+-        # The formula uses S(u_i) which is the patch centered on u_i
++        # Project 3D points to nearby view coordinates [S1]
++        proj_coords = K @ (P_ij[j] @ X_S)
++        # Sample features from nearby view using bilinear interpolation [S1]
++        F_j_warped = bilinear_interpolate(F_j, proj_coords)
++        # Sample features from target view patch [S1]
+         F_target_patch = bilinear_interpolate(F_target, X_S)
+-        
+-        # Compute difference
+-        diff = norm(F_j_warped - F_target_patch)
+-        cost_sum += diff
+-    
++        # Compute L2 norm difference [S1]
++        cost_sum += norm(F_j_warped - F_target_patch)
+     return cost_sum / len(F_nearby)
+ 
+ def compute_depth_smoothness_loss(D, I):
+     """
+-    Edge-aware depth smoothness loss.
+-    """
+-    dD_x = gradient_x(D)
+-    dD_y = gradient_y(D)
+-    dI_x = gradient_x(I)
+-    dI_y = gradient_y(I)
+-    
++    Edge-aware depth smoothness loss. Matches Eq. 13 in [S1].
++    """
++    dD_x, dD_y = gradient(D, axis=0), gradient(D, axis=1)
++    dI_x, dI_y = gradient(I, axis=0), gradient(I, axis=1)
+     return abs(dD_x) * exp(-abs(dI_x)) + abs(dD_y) * exp(-abs(dI_y))
+ 
+-def compute_photometric_loss(rendered_image, target_image, nearby_images, P_ij):
+-    """
+-    Warped photometric loss.
+-    """
+-    alpha = 0.85 # Typical value for SSIM weight
+-    loss_sum = 0
+-    count = 0
+-    
+-    for j, nearby_img in enumerate(nearby_images):
+-        # Warp nearby image to target view using P_ij
+-        warped_img = warp_image(nearby_img, P_ij[j], target_image.intrinsics)
+-        
+-        # SSIM Loss
+-        ssim_loss = 1 - ssim(warped_img, target_image)
+-        
+-        # L1 Loss
+-        l1_loss = norm(warped_img - target_image)
+-        
+-        loss_sum += alpha * (1 - ssim_loss) / 2 + (1 - alpha) * l1_loss
+-        count += 1
+-        
+-    return loss_sum / count
++def compute_photometric_loss(rendered_img, target_img, nearby_imgs, P_ij):
++    """
++    Warped photometric loss. Matches Eq. 14 in [S1].
++    """
++    alpha = 0.85
++    loss_sum = 0.0
++    for j, nearby_img in enumerate(nearby_imgs):
++        # Warp nearby image to target view using P_ij [S1]
++        warped_img = warp_image(nearby_img, P_ij[j], target_img.intrinsics)
++        # SSIM Loss [S1]
++        ssim_val = structural_similarity(warped_img, target_img)
++        # L1 Loss [S1]
++        l1_val = norm(warped_img - target_img)
++        loss_sum += alpha * (1 - ssim_val) / 2 + (1 - alpha) * l1_val
++    return loss_sum / len(nearby_imgs)
++
++def compute_rgb_loss(rendered_img, target_img):
++    """
++    Photometric error between rendered and ground truth.
++    """
++    return norm(rendered_img - target_img)
++
++# Helper definitions [G]
++def bilinear_interpolate(feature_map, coords):
++    return feature_map[coords]
++
++def gradient(tensor, axis):
++    return tensor[1:] - tensor[:-1] if axis == 0 else tensor[:, 1:] - tensor[:, :-1]
++
++def norm(tensor):
++    return sqrt(sum(p**2 for p in tensor.flatten()))
++
++def warp_image(img, pose, intrinsics):
++    return img
++
++def structural_similarity(a, b):
++    return 1.0
++
++def random_uniform_relative_poses(n):
++    return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]] * n
++
++def random_uniform_depth(shape):
++    return [[1.0]*shape[1] for _ in range(shape[0])]
++
++def depth_to_3d_points(depth, intrinsics):
++    return depth
++
++class Optimizer:
++    def __init__(self, params, lr):
++        self.params = params
++        self.lr = lr
++    def zero_grad(self):
++        pass
++    def step(self):
++        for p in self.params:
++            if p.grad is not None:
++                p -= self.lr * p.grad
+ ```
+ 
+@@ -176,5 +195,5 @@
+ *   **Pose Update Iterations:** 4 per batch [S1].
+ *   **Training Iterations:** 200,000 pretraining, 60,000 fine-tuning [S1].
+-*   **Beta Coefficient:** $-1 \times 10^{-5}$ (Note: Source says $-1e5$, but context implies a small negative number for annealing, likely $-1e-5$ or similar. The source text explicitly states $\beta = -1e5$. However, $2^{-100000}$ is effectively 0. Given the formula $2^{\beta \cdot t}$, if $\beta$ is negative, the weight on photometric loss decays. If $\beta = -1e5$, it decays instantly. It is highly probable the source meant $-1e-5$ or the formula is different. We stick to the source value but note the potential typo. Actually, looking at standard annealing, $\beta$ is often small. Let's assume the source text is correct as written: $\beta = -1e5$ [S1].)
++*   **Beta Coefficient:** $-1 \times 10^{5}$ [S1].
+ 
+ **Edge Cases and Pitfalls:**

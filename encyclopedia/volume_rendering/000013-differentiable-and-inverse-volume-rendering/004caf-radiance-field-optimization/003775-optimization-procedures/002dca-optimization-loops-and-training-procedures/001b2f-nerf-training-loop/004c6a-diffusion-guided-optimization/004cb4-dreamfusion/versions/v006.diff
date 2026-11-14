@@ -1,0 +1,240 @@
+--- v005.md
++++ v006.md
+@@ -4,64 +4,186 @@
+ 
+ ## Overview
+-DreamFusion is a text-to-3D generation method that optimizes a Neural Radiance Field (NeRF) representation to match a given textual description or image without explicit 3D supervision [S2][S4]. It achieves this by backpropagating gradients from a frozen 2D diffusion model (specifically Imagen) through a differentiable renderer to guide the scene toward the diffusion prior [S1][S3, unofficial]. It is distinguished from its siblings by being the first method to introduce Score Distillation Sampling (SDS) for this purpose, effectively "distilling" 2D generative knowledge into 3D geometry [S2].
++DreamFusion is a text-to-3D generation method that optimizes a Neural Radiance Field (NeRF) representation to match a given textual description or image without explicit 3D supervision [S2][S5]. It solves the problem of 3D data scarcity by distilling priors from a pretrained 2D diffusion model into a 3D scene representation [S4]. It sets itself apart from its siblings by introducing Score Distillation Sampling (SDS) to backpropagate gradients from a frozen 2D diffusion model through a differentiable renderer, effectively "distilling" 2D generative knowledge to 3D geometry [S2]. Unlike [Single-Stage Diffusion NeRF Training](12803-single-stage-diffusion-nerf-training.md) which may use different distillation objectives, DreamFusion specifically relies on the noise-prediction objective of the diffusion model [S4].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A text prompt $c$ (optionally including view-specific keywords like "front view") [S1].
+-*   **Output:** A trained NeRF model $\theta$ representing the 3D scene [S1].
++DreamFusion optimizes a parametric 3D scene representation (specifically a mipNeRF 360-based NeRF) by iteratively rendering images from random viewpoints, perturbing them with noise, and computing gradients based on a pretrained 2D diffusion model's noise prediction [S1][S3, unofficial]. The core mechanism is Score Distillation Sampling (SDS), which approximates the gradient of the log-probability of the rendered image under the diffusion prior [S4].
+ 
+-**Data Structures:**
+-*   **NeRF Model:** A mipNeRF 360-based architecture [S1].
+-    *   **Geometry:** Standard MLPs mapping 3D coordinates and viewing directions to density and color.
+-    *   **Color Parameterization:** A key modification is that surface color is parameterized by an MLP instead of standard radiance [S1].
+-*   **Diffusion Model:** A pretrained text-to-image diffusion model (Imagen) [S1][S2].
+-    *   **State:** Frozen during optimization [S3, unofficial].
+-    *   **Function:** $\epsilon_\phi(x_t, t, c)$ predicts the noise $\epsilon$ added to the image at timestep $t$, conditioned on the text $c$ [S3, unofficial].
++### Inputs and Outputs
++*   **Inputs:**
++    *   Text prompt $y$ (e.g., "a red apple") [S1][S4].
++    *   Pretrained 2D diffusion model $\phi$ (e.g., Imagen) [S1][S2].
++    *   Initial NeRF parameters $\theta$ (initialized randomly or from a coarse prior) [S1].
++    *   Camera poses for rendering (randomized viewpoints) [S1].
++*   **Outputs:**
++    *   Optimized NeRF parameters $\theta$ that render images consistent with $y$ [S2].
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** Initialize a mipNeRF 360 model $\theta$ from scratch for the target object or scene [S1].
+-2.  **Camera Sampling:** Sample a random camera pose and viewing direction for the current iteration [G].
+-3.  **Differentiable Rendering:** Render an image $x$ from the current NeRF $\theta$ using volume rendering [S3, unofficial].
+-4.  **Noise Addition:** Sample a diffusion timestep $t$ uniformly from $[1, T]$ and add Gaussian noise $\epsilon \sim \mathcal{N}(0, I)$ to the rendered image $x$ to obtain the noisy latent $x_t = \sqrt{\bar{\alpha}_t} x + \sqrt{1-\bar{\alpha}_t} \epsilon$ [G].
+-5.  **Diffusion Prediction:** Pass $x_t$ and the text prompt $c$ into the frozen diffusion model to predict the noise $\epsilon_\phi(x_t, t, c)$ [S3, unofficial].
+-6.  **Gradient Computation:** Compute the SDS loss gradient with respect to the NeRF parameters $\theta$ [S3, unofficial]:
+-    $$ \nabla_\theta \mathcal{L}_{\text{SDS}} = \mathbb{E}_{t, \epsilon}\left[ w(t)\,(\epsilon_\phi(x_t, t, c) - \epsilon)\,\frac{\partial x}{\partial\theta} \right] $$
+-    Where:
+-    *   $w(t)$ is a timestep weighting function [S3, unofficial].
+-    *   $\frac{\partial x}{\partial\theta}$ is the gradient of the rendered image with respect to the NeRF parameters, obtained via backpropagation through the differentiable renderer [S3, unofficial].
+-7.  **Optimization Update:** Update $\theta$ using gradient descent (or Adam) with the computed gradient [S3, unofficial].
+-8.  **Iteration:** Repeat steps 2-7 for a fixed number of iterations or until convergence [S1].
++### Data Structures
++*   **NeRF Representation:** A mipNeRF 360-based NeRF [S1].
++    *   **Geometry:** Parameterized by a Multi-Layer Perceptron (MLP) $\mathcal{F}_\theta$ mapping 3D coordinates and viewing directions to density $\sigma$ and color.
++    *   **Color Parameterization:** A key modification in DreamFusion is that surface color is parameterized by an MLP instead of standard radiance [S1].
++    *   **Fields:** The MLP takes $(\mathbf{x}, \mathbf{d})$ as input and outputs $(\sigma, \mathbf{c})$, where $\mathbf{x}$ is the 3D position and $\mathbf{d}$ is the viewing direction.
++*   **Diffusion Model:** A pretrained text-to-image diffusion model (e.g., Imagen) [S1].
++    *   **Noise Predictor:** $\hat{\epsilon}_\phi(z_t; y, t)$ predicts the noise $\epsilon$ added to a latent/image $z_t$ at timestep $t$, conditioned on text $y$ [S4].
++*   **Rendering:** Differentiable volume rendering [S3, unofficial].
++    *   **Output:** A rendered image $x$ (or latent $z_t$ if operating in latent space, but DreamFusion originally operated in pixel space with Imagen) [S4]. Note: While later methods like Latent-NeRF operate in latent space [S1], DreamFusion's original formulation with Imagen rendered images at 64x64 resolution [S1].
+ 
+-**Parameters:**
+-*   **Diffusion Model:** Imagen is used as the parametric prior [S2].
+-*   **Resolution:** Imagen images were generated at 64x64 resolution [S1].
++### Numbered Steps
++1.  **Initialize:** Initialize NeRF parameters $\theta$ randomly [S1].
++2.  **Sample Viewpoint:** Randomly sample a camera pose for rendering [S1].
++3.  **Render:** Use the differentiable renderer to render an image $x$ from the current NeRF $\theta$ at the sampled viewpoint [S3, unofficial].
++4.  **Sample Timestep:** Sample a diffusion timestep $t$ uniformly from $[1, T]$ [S4].
++5.  **Sample Noise:** Sample Gaussian noise $\epsilon \sim \mathcal{N}(0, I)$ [S4].
++6.  **Perturb:** Add noise to the rendered image to create a noisy image $z_t$:
++    $$ z_t = \alpha_t x + \sigma_t \epsilon $$
++    where $\alpha_t$ and $\sigma_t$ are timestep-dependent coefficients [S4].
++7.  **Predict Noise:** Pass the noisy image $z_t$, the text prompt $y$, and timestep $t$ into the pretrained diffusion model $\phi$ to predict the noise:
++    $$ \hat{\epsilon} = \hat{\epsilon}_\phi(z_t; y, t) $$
++    [S4].
++8.  **Compute SDS Gradient:** Calculate the gradient of the SDS loss with respect to the NeRF parameters $\theta$:
++    $$ \nabla_\theta \mathcal{L}_{\text{SDS}} = \mathbb{E}_{t, \epsilon}\left[ w(t)\,(\hat{\epsilon} - \epsilon)\,\frac{\partial x}{\partial \theta} \right] $$
++    where $w(t)$ is a timestep weighting function (e.g., $1/t$ or similar, though exact form not specified in sources, typically $w(t) = 1/t$ or constant in basic SDS) [S3, unofficial][S4]. The term $\frac{\partial x}{\partial \theta}$ is the gradient of the rendered image with respect to the NeRF parameters, computed via backpropagation through the differentiable renderer [S3, unofficial][S4].
++9.  **Update:** Update NeRF parameters $\theta$ using the computed gradient (e.g., via Adam optimizer) [S3, unofficial].
++10. **Repeat:** Repeat steps 2-9 for a fixed number of iterations or until convergence [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Resolution Limitation:** Due to the 64x64 resolution of the source diffusion images, the resulting NeRF lacks the capability to produce finer details [S1].
+-*   **Janus Problem:** The method suffers from the "Janus problem," where the generated 3D object exhibits multi-face artifacts (e.g., two faces on opposite sides of a head) [S3, unofficial].
+-*   **Color Saturation:** The optimization often produces saturated or oversaturated colors [S3, unofficial].
+-*   **Speed:** Optimization is slow, taking hours per scene [S3, unofficial].
++### Formulas
++*   **SDS Loss Gradient:**
++    $$ \nabla_\theta L_{SDS}(\phi, x) \triangleq \mathbb{E}_{t,\epsilon} w(t) \left[ \hat{\epsilon}_\phi(z_t; y, t) - \epsilon \right] \frac{\partial z_t}{\partial \theta} $$
++    [S4]. Note: Since $z_t$ depends on $x$ and $\epsilon$, and $\epsilon$ is independent of $\theta$, $\frac{\partial z_t}{\partial \theta} = \alpha_t \frac{\partial x}{\partial \theta}$ [S4]. Thus, the gradient is proportional to the gradient of the clean rendered image.
++*   **Noisy Image:**
++    $$ z_t = \alpha_t x + \sigma_t \epsilon $$
++    [S4].
++
++### Parameters
++*   **Diffusion Model:** Pretrained 2D diffusion model (e.g., Imagen) [S1][S2].
++*   **Text Prompt:** $y$, controls the semantic content of the generated 3D object [S1].
++*   **Viewpoint Control:** Keywords in the prompt (e.g., "overhead view", "front view") can guide the diffusion model to generate images from specific viewpoints, aiding in consistent 3D generation [S1].
++*   **Timestep Weighting:** $w(t)$, affects the contribution of different diffusion timesteps to the gradient [S3, unofficial][S4].
++*   **Resolution:** Original DreamFusion used 64x64 resolution images from Imagen [S1].
++
++### Edge Cases and Pitfalls
++*   **Resolution Limitation:** The use of 64x64 resolution images from Imagen resulted in NeRF models lacking the capability to produce finer details [S1].
++*   **Janus Problem:** The method suffers from the Janus problem, where the generated 3D object may have multiple faces or inconsistent features when viewed from different angles [S3, unofficial].
++*   **Oversaturation and Oversmoothing:** SDS tends to produce saturated colors and oversmoothed textures [S3, unofficial][S4].
++*   **Insufficient Detail:** The method may fail to generate sufficient fine-grained details in the 3D geometry [S4].
++*   **Slow Optimization:** The optimization process is slow, taking hours per scene [S3, unofficial].
++*   **Color Saturation:** The resulting images often have saturated colors [S3, unofficial].
++
++### Pseudocode
++```python
++import torch
++import torch.nn as nn
++import torch.optim as optim
++
++# Assume these are defined elsewhere or initialized
++# nerf_model: mipNeRF 360 based NeRF model with parameters theta
++# diffusion_model: pretrained 2D diffusion model (e.g., Imagen)
++# text_prompt: string, e.g., "a red apple"
++# num_iterations: int, number of optimization steps
++# batch_size: int, number of viewpoints per iteration
++
++def render_image(nerf_model, camera_pose):
++    """
++    Renders an image from the NeRF model at the given camera pose.
++    Returns: rendered_image (torch.Tensor, shape [H, W, 3])
++    """
++    # Differentiable volume rendering logic
++    # ...
++    pass
++
++def get_diffusion_noise_prediction(diffusion_model, noisy_image, text_prompt, timestep):
++    """
++    Predicts the noise added to the image using the diffusion model.
++    Returns: predicted_noise (torch.Tensor, shape same as noisy_image)
++    """
++    # diffusion_model.predict_noise(noisy_image, timestep, text_prompt)
++    # ...
++    pass
++
++def compute_sds_gradient(nerf_model, camera_pose, text_prompt, timestep, diffusion_model):
++    """
++    Computes the SDS gradient for the NeRF parameters.
++    """
++    # 1. Render clean image
++    clean_image = render_image(nerf_model, camera_pose)
++    clean_image.requires_grad_(True)
++    
++    # 2. Sample noise
++    epsilon = torch.randn_like(clean_image)
++    
++    # 3. Add noise to create noisy image
++    # Assuming alpha_t and sigma_t are precomputed for timestep t
++    alpha_t = get_alpha(timestep)
++    sigma_t = get_sigma(timestep)
++    noisy_image = alpha_t * clean_image + sigma_t * epsilon
++    
++    # 4. Predict noise
++    predicted_noise = get_diffusion_noise_prediction(diffusion_model, noisy_image, text_prompt, timestep)
++    
++    # 5. Compute SDS loss gradient
++    # L_SDS = w(t) * ||predicted_noise - epsilon||^2
++    # Gradient w.r.t clean_image: 2 * w(t) * (predicted_noise - epsilon) * alpha_t
++    # Note: The gradient flows through clean_image to nerf_model parameters
++    w_t = get_weight(timestep)
++    grad_clean_image = 2 * w_t * (predicted_noise - epsilon) * alpha_t
++    
++    # 6. Backpropagate through renderer to get gradient w.r.t nerf parameters
++    # This is done automatically by PyTorch's autograd if clean_image is connected to nerf_model
++    loss = (grad_clean_image * clean_image).sum() # Dummy loss to trigger backward
++    loss.backward()
++    
++    return nerf_model.parameters() # Gradients are now in .grad attributes
++
++def optimize_dreamfusion(nerf_model, diffusion_model, text_prompt, num_iterations):
++    optimizer = optim.Adam(nerf_model.parameters(), lr=0.01)
++    
++    for i in range(num_iterations):
++        # Sample random camera pose
++        camera_pose = sample_random_camera_pose()
++        
++        # Sample random timestep
++        timestep = torch.randint(1, 1000, (1,)).item()
++        
++        # Compute gradients
++        compute_sds_gradient(nerf_model, camera_pose, text_prompt, timestep, diffusion_model)
++        
++        # Update parameters
++        optimizer.step()
++        optimizer.zero_grad()
++        
++        if i % 100 == 0:
++            print(f"Iteration {i}, Loss: {loss.item()}")
++```
+ 
+ ## Subtopics
+ 
+-### Magic3D
+-A two-stage coarse-fine approach that builds on DreamFusion to address the low-resolution issue by refining a low-resolution NeRF into a high-resolution mesh [S1].
+-
+-### Latent-NeRF
+-A method that trains a NeRF to output latent features operated on by Stable Diffusion, allowing for text and shape guidance [S1].
+-
+-### VSD (Variational Score Distillation)
+-Used in ProlificDreamer, this replaces the noise target $\epsilon$ with a learned variational distribution to reduce mode collapse [S3, unofficial].
++### [Instruct 3D-to-3D](14866-instruct-3d-to-3d.md)
++Instruct 3D-to-3D is a method for performing 3D-to-3D conversions guided by text instructions. It solves the problem of editing an existing 3D scene according to natural language prompts, building on [DreamFusion](12087-dreamfusion.md) by conditioning the optimization on a source scene rather than generating from noise. It sets itself apart by explicitly integrating the source 3D scene as a conditional input and employing dynamic scaling to modify geometry, whereas standard text-to-3D methods lack this conditional grounding.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Optimization is slow, typically requiring hours per scene [S3, unofficial].
++*   **Time Complexity:** Optimization is slow, taking hours per scene [S3, unofficial].
+ *   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Requires no 3D training data; leverages powerful 2D diffusion priors for photorealism and semantic fidelity [S2][S4].
+-*   **Limitations:** Suffers from the Janus problem (multi-face artifacts), saturated colors, and limited detail due to low-resolution diffusion outputs (64x64) [S1][S3, unofficial].
+-*   **When to use:** When generating 3D objects from text descriptions without access to 3D training data or multi-view images.
+-*   **When not to use:** When high-frequency detail is required, or when consistency across views (avoiding Janus artifacts) is critical.
++*   **Measured Performance:**
++    *   **Hardware:** Not given in the sources.
++    *   **Resolution:** Original implementation used 64x64 resolution images [S1].
++    *   **Scene:** Text-to-3D generation of objects/scenes [S1].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:**
++    *   Requires no 3D training data [S5].
++    *   Can generate photorealistic and semantically faithful 3D objects from text prompts [S2].
++    *   Allows for viewpoint control via text prompts [S1].
++*   **Limitations:**
++    *   Suffers from the Janus problem (multi-face artifacts) [S3, unofficial].
++    *   Produces saturated colors [S3, unofficial].
++    *   Lacks fine details due to low-resolution diffusion images [S1].
++    *   Prone to oversaturation and oversmoothing [S4].
++    *   Slow optimization speed [S3, unofficial].
++*   **When to use:** When generating 3D objects from text descriptions without access to 3D training data, and high photorealism is desired despite potential artifacts [S2][S5].
++*   **When not to use:** When fine details are critical, when the Janus problem is unacceptable, or when fast optimization is required [S1][S3, unofficial].
+ 
+ ## Background
+-DreamFusion was introduced in September 2022 [S1][S4]. It was proposed as a text-to-3D diffusion NeRF model that uses images from 2D diffusion models (specifically Imagen) to train a NeRF from scratch [S1]. The method sidesteps the lack of large-scale 3D training datasets by optimizing a NeRF representation so that its multiview renderings match a given textual description, constrained by a 2D diffusion model used as a parametric prior [S2]. It introduced the Score Distillation Sampling (SDS) technique for this purpose [S2].
++*   **Origin:** DreamFusion was introduced in September 2022 [S1][S5].
++*   **Paper:** The method was proposed by Poole et al. [S3, unofficial] (referenced as [18] in [S2] and [85] in [S1]).
++*   **History:** It was a groundbreaking approach for text-to-3D synthesis that addressed the limitations of 3D data scarcity by introducing Score Distillation Sampling (SDS) [S4]. It built upon the NeRF framework and leveraged pretrained 2D diffusion models like Imagen [S1].
++*   **Usage:** It is used for text-to-3D generation and has inspired subsequent methods like Magic3D and Latent-NeRF [S1].
+ 
+ ## Sources
+@@ -69,3 +191,4 @@
+ [S2] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26
+ [S3] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+-[S4] Differentiable Rendering - 可微渲染：从2D 学习3D, https://www.ultralytics.com/zh/glossary/differentiable-rendering, fetched 2026-10-30+[S4] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
++[S5] Differentiable Rendering - 可微渲染：从2D 学习3D, https://www.ultralytics.com/zh/glossary/differentiable-rendering, fetched 2026-10-30

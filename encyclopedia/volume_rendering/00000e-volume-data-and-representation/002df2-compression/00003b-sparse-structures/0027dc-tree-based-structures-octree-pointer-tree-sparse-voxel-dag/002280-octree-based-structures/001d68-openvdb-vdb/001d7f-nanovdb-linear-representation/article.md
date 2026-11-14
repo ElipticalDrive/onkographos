@@ -3,11 +3,11 @@
 Also called: Linear VDB, NanoVDB, NanoVDB Museth, Open-VDB GPU Port, VDB / NanoVDB
 
 ## Overview
-NanoVDB is a linear, GPU-optimized implementation of the OpenVDB sparse voxel structure that eliminates CPU-dependent memory pointers, enabling compact memory copying via `memcpy` and efficient voxel retrieval on the GPU [S1][S2, unofficial]. It solves the problem of transferring and sampling large, sparse volumetric datasets on graphics hardware by serializing the tree topology and data into a single contiguous memory block, supporting 0th to 3rd order interpolation and gradient computation [S1]. Unlike its parent OpenVDB, which supports dynamic modification, NanoVDB is immutable and optimized strictly for retrieval, offering a 4–6× memory footprint reduction through variable bit-rate quantization [S2, unofficial].
+NanoVDB is a linear, GPU-optimized implementation of the OpenVDB sparse voxel structure that eliminates CPU-dependent memory pointers, enabling compact memory copying via `memcpy` and efficient voxel retrieval on the GPU [S1][S2, unofficial]. It solves the problem of transferring and sampling large, sparse volumetric datasets on graphics hardware by serializing the tree topology and data into a single contiguous memory block, supporting 0th to 3rd order interpolation and gradient computation [S1]. Unlike its parent OpenVDB, which supports dynamic modification, NanoVDB is immutable and optimized strictly for retrieval [S1], offering a 4–6× memory footprint reduction through variable bit-rate quantization [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** An OpenVDB grid (or equivalent sparse voxel structure) containing active voxels and tree topology.
+*   **Input:** An OpenVDB grid containing active voxels and tree topology.
 *   **Output:** A linear, 32-byte aligned memory buffer containing the serialized NanoVDB structure, ready for GPU transfer [S1].
 
 **Data Structures and Layout:**
@@ -19,18 +19,15 @@ The NanoVDB structure is a shallow B+tree serialized into a single continuous bl
 
 **Key Encoding (Build Algorithm):**
 The conversion process involves constructing 64-bit keys from voxel coordinates $(x, y, z)$ to map sparse voxels into the linear structure [S4].
-
-1.  **Step 2 (Coordinate Encoding):** A 64-bit key is constructed from signed coordinates:
-    *   Lower 21 bits (blue): Signed $x$ coordinate, right-shifted by 12 bits.
-    *   Next 21 bits (purple): Signed $y$ coordinate, right-shifted by 12 bits.
-    *   Upper 21 bits (green): Signed $z$ coordinate, right-shifted by 12 bits.
-    *   *Note:* The remaining bits are reserved or zeroed in this intermediate step [S4].
-
-2.  **Step 5 (Final Key Construction):** A unique 64-bit key is constructed for the final hash table entry:
-    *   Lower 9 bits (gray): Offset local into leaf nodes ($2^9 = 512 = 8^3$).
-    *   Next 12 bits (blue): Local offsets into lower nodes ($2^{12} = 4096 = 16^3$).
-    *   Next 15 bits (purple): Local offsets into upper nodes ($2^{15} = 32768 = 32^3$).
-    *   Upper 28 bits (green): Tile ID into the hash table of the root node.
+1.  **Step 2 (Coordinate Encoding):** A 64-bit key is constructed from signed coordinates [S4]:
+    *   Lower 21 bits (blue): Signed $x$ coordinate, right-shifted by 12 bits [S4].
+    *   Next 21 bits (purple): Signed $y$ coordinate, right-shifted by 12 bits [S4].
+    *   Upper 21 bits (green): Signed $z$ coordinate, right-shifted by 12 bits [S4].
+2.  **Step 5 (Final Key Construction):** A unique 64-bit key is constructed for the final hash table entry [S4]:
+    *   Lower 9 bits (gray): Offset local into leaf nodes ($2^9 = 512 = 8^3$) [S4].
+    *   Next 12 bits (blue): Local offsets into lower nodes ($2^{12} = 4096 = 16^3$) [S4].
+    *   Next 15 bits (purple): Local offsets into upper nodes ($2^{15} = 32768 = 32^3$) [S4].
+    *   Upper 28 bits (green): Tile ID into the hash table of the root node [S4].
     *   *Constraint:* The 28-bit tile ID limits the root hash table to $2^{28} = 268,435,456$ entries [S4].
 
 **Conversion and Serialization Steps:**
@@ -45,83 +42,66 @@ The conversion process involves constructing 64-bit keys from voxel coordinates 
 
 ```python
 def convert_openvdb_to_nanovdb(openvdb_grid):
-    """
-    Converts an OpenVDB grid to a linear NanoVDB memory buffer.
-    """
-    # 1. Validate input
+    """Converts an OpenVDB grid to a linear NanoVDB memory buffer."""
     if not is_valid_openvdb(openvdb_grid):
         raise ValueError("Invalid OpenVDB grid")
 
-    # 2. Serialize Tree Topology
-    # Flatten the shallow B+tree (root -> 32^3 -> 16^3 -> 8^3 leaves)
-    # into a linear array of nodes.
     linear_nodes = serialize_tree(openvdb_grid.root)
-
-    # 3. Quantize Leaf Values
-    # Apply variable bit-rate quantization to active voxels in leaf nodes
-    quantized_leaves = quantize_values(linear_nodes.leaves, bits_per_value=8) # Typical value [S2, unofficial]
-
-    # 4. Dither Quantization Noise
-    # Randomize noise to prevent banding artifacts
+    quantized_leaves = quantize_values(linear_nodes.leaves)
     dithered_leaves = apply_dithering(quantized_leaves)
 
-    # 5. Construct Linear Memory Buffer
-    # Allocate 32-byte aligned memory
     buffer_size = calculate_buffer_size(linear_nodes, dithered_leaves)
     buffer = allocate_aligned_memory(buffer_size, alignment=32)
 
-    # Copy topology and data into buffer
     copy_topology_to_buffer(linear_nodes, buffer)
-    copy_quantized_data_to_buffer(dithered_leaves, buffer)
+    copy_quantized_data_to_buffer(dithered_leaves, buffer, len(linear_nodes) * 8)
 
     return buffer
 
+def is_valid_openvdb(grid):
+    return grid is not None and hasattr(grid, 'root')
+
 def serialize_tree(root_node):
-    """
-    Flattens the VDB tree into a linear structure.
-    VDB is a shallow B+tree: unbounded root, internal nodes 32^3 and 16^3, leaves 8^3.
-    """
     nodes = []
-    
-    # Process Root
-    # Root entries are either child pointers or tile values
     for entry in root_node.entries:
         if entry.is_child_pointer:
-            # Recursively process child nodes (32^3 or 16^3)
-            child_nodes = serialize_tree(entry.child)
-            nodes.extend(child_nodes)
+            nodes.extend(serialize_tree(entry.child))
         else:
-            # Store tile value directly
-            nodes.append(TileNode(value=entry.tile_value))
-            
-    return nodes
+            nodes.append({'type': 'tile', 'value': entry.tile_value})
+    return {'topology': nodes, 'leaves': []}
 
-def quantize_values(leaves, bits_per_value=8):
-    """
-    Applies variable bit-rate quantization to leaf voxel values.
-    """
+def quantize_values(leaves):
     quantized = []
     for leaf in leaves:
         for voxel in leaf.active_voxels:
-            # Quantize float value to integer representation
-            q_val = round(voxel.value * (2**bits_per_value - 1))
-            quantized.append(q_val)
+            quantized.append(round(voxel.value * 255))
     return quantized
 
 def apply_dithering(values):
-    """
-    Adds random noise to quantized values to randomize quantization error.
-    """
     dithered = []
     for val in values:
-        noise = random.uniform(-0.5, 0.5)
-        dithered.append(val + noise)
+        dithered.append(val + ((val % 2) * 0.5 - 0.25))
     return dithered
+
+def calculate_buffer_size(topology, leaves):
+    return len(topology) * 8 + len(leaves) * 4
+
+def allocate_aligned_memory(size, alignment=32):
+    return bytearray(size)
+
+def copy_topology_to_buffer(topology, buffer):
+    for i, node in enumerate(topology):
+        buffer[i * 8 : (i + 1) * 8] = node['value'].to_bytes(8, 'little')
+
+def copy_quantized_data_to_buffer(leaves, buffer, topology_size):
+    offset = topology_size
+    for i, leaf in enumerate(leaves):
+        buffer[offset + i * 4 : offset + (i + 1) * 4] = leaf.to_bytes(4, 'little')
 ```
 
 **Parameters:**
 *   **Alignment:** 32 bytes [S1].
-*   **Quantization Bits:** Not explicitly fixed in sources, but described as "variable bit-rate" [S2, unofficial]. Typical implementations use 8-bit or lower for significant compression [S2, unofficial].
+*   **Quantization Bits:** Not explicitly fixed in sources, but described as "variable bit-rate" [S2, unofficial].
 *   **Interpolation Order:** Supports 0th to 3rd order interpolation [S1].
 
 **Edge Cases and Pitfalls:**
@@ -133,7 +113,7 @@ def apply_dithering(values):
 ## Subtopics
 
 ### [NanoVDB Volume Loading and GPU Transfer](4997-nanovdb-volume-loading-and-gpu-transfer.md)
-This method describes the process of reading a NanoVDB volume file from disk, validating its data type, and transferring the raw voxel data to GPU memory for rendering. It solves the problem of bridging the gap between the CPU-side NanoVDB linear representation and the GPU-side compute buffers required by ray marching or splatting kernels. It is distinct from general VDB loading because it operates on the linear, contiguous memory layout defined in [NanoVDB Linear Representation](1527-nanovdb-linear-representation.md), allowing for direct `memcpy`-style transfers without complex tree traversal on the CPU.
+This method describes the process of reading a NanoVDB volume file from disk, validating its data type, and transferring the raw voxel data to GPU memory for rendering. It solves the problem of bridging the gap between the CPU-side NanoVDB linear representation and the GPU-side compute buffers required by ray marching or splatting kernels. It is distinct from general VDB loading because it operates on the linear, contiguous memory layout defined in [NanoVDB Linear Representation](1527-nanovdb-linear-representation.md), allowing for direct `memcpy`-style transfers without complex tree traversal on the CPU [G].
 
 ### [Accelerated Sparse Convolutional Operators](9795-accelerated-sparse-convolutional-operators.md)
 Accelerated Sparse Convolutional Operators are a set of GPU-optimized CUDA kernels designed to perform stencil-based convolutions on sparse voxel data stored in the NanoVDB format. The method solves the performance bottleneck of applying 3D convolutional filters to sparse grids by adapting the computational strategy to the local occupancy density and feature depth of the input data. It sets itself apart from generic sparse convolution libraries (like SpConv v2) by leveraging the inherent spatial locality of NanoVDB's linear indexing scheme and utilizing NVIDIA tensor cores for dense sub-blocks, thereby achieving higher compute bandwidth utilization on specific sparsity patterns.
@@ -142,7 +122,7 @@ Accelerated Sparse Convolutional Operators are a set of GPU-optimized CUDA kerne
 A serialized memory layout for NanoVDB, unlike OpenVDB, which supports trailing optional blind data (e.g., ML features) or separate memory blocks [S4]. The layout is strictly linear and 32-byte aligned [S1]. The 64-bit key breakdown for voxel coordinates in build algorithm step 2 encodes signed x, y, z coordinates right-shifted 12 bits into 21-bit fields each [S4]. In step 5, the 64-bit key encodes local offsets into leaf ($2^9$), lower ($2^{12}$), and upper ($2^{15}$) nodes, plus a 28-bit tile ID into the root hash table [S4]. The 28-bit tile ID imposes a limit of $2^{28}$ entries in the root hash table, though this is extremely unlikely to be exceeded since each entry corresponds to a child node of the root spanning an index domain of size $4096^3$ voxels [S4].
 
 ## Operating characteristics
-*   **Time Complexity:** Retrieval is $O(1)$ for active voxels due to the linear hash table lookup [S3]. Conversion from OpenVDB is linear with respect to the number of active voxels and tree nodes [S4].
+*   **Time Complexity:** Conversion from OpenVDB is linear with respect to the number of active voxels and tree nodes [S4].
 *   **Memory Complexity:** Memory footprint is reduced by 4–6× compared to OpenVDB representations [S2, unofficial]. The linear layout allows for efficient `memcpy` transfers, reducing CPU-GPU transfer overhead [S1].
 *   **Measured Performance:** Fast, low-overhead, and on-the-fly decompression during rendering [S1]. Works well in incoherent Monte Carlo path tracing contexts [S1].
 *   **Strengths:**

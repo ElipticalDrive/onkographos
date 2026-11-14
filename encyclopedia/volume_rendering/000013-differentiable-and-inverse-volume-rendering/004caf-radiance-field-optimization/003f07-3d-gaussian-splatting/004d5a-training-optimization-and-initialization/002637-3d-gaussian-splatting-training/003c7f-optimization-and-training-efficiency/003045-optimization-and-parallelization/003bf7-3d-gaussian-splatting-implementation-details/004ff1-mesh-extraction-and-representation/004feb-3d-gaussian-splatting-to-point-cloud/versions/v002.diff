@@ -1,0 +1,478 @@
+--- v001.md
++++ v002.md
+@@ -1,270 +1,233 @@
+ # 3D Gaussian Splatting to Point Cloud
+ 
+-Also called: 3DGS-to-PC, Gaussian Splatting to Dense Point Clouds
++Also called: 3DGS to Point Cloud Conversion, 3DGS-to-PC, Gaussian Splatting Point Cloud Generation, Gaussian Splatting to Dense Point Clouds
+ 
+ ## Overview
+-This method converts a trained 3D Gaussian Splatting (3DGS) scene representation into a dense, standard point cloud (PLY format) that visually approximates the original radiance field, enabling compatibility with general 3D software that does not support Gaussian primitives [S1, unofficial]. It differs from standard 3DGS rendering by explicitly sampling discrete points from the continuous Gaussian distributions rather than rasterizing splats, and it optionally reconstructs a mesh via Poisson surface reconstruction [S1, unofficial].
++This method converts a trained 3D Gaussian Splatting (3DGS) scene into a dense, high-quality point cloud that approximates the original volumetric representation, enabling compatibility with standard 3D software that lacks native 3DGS support [S1, unofficial]. It distinguishes itself from sibling methods like [SuGaR Mesh Extraction](12580-sugar-mesh-extraction.md) by focusing on faithful point cloud generation from the original optimized Gaussians rather than learning a new explicit representation, optionally incorporating rendered camera views to weight contributions and filter surface proximity [S1, unofficial].
+ 
+ ## How it works
+-The method transforms the parametric Gaussian representation (position, covariance, opacity, spherical harmonics) into a discrete set of 3D points with associated colors and normals.
+-
+-### Inputs and Outputs
+-**Inputs:**
+-- A saved 3DGS scene (typically a `.ply` or `.bin` file containing Gaussian parameters).
+-- Camera poses and intrinsics (COLMAP `transforms.json` or similar) used for color rendering [S1, unofficial].
+-- Configuration settings (see `GaussPointCloudSettings` below).
+-
+-**Outputs:**
+-- A PLY file containing points, colors, and optionally normals.
+-- Optionally, a PLY mesh file if `generate_mesh` is enabled.
+-
+-### Data Structures
+-The configuration is encapsulated in a `GaussPointCloudSettings` structure. The fields and their default values are:
+-
+-| Field | Type | Default | Description |
+-|-------|------|---------|-------------|
+-| `renderer_type` | str | "cuda" | "cuda" or "python" |
+-| `num_points` | int | 10,000,000 | Total target point count |
+-| `exact_num_points` | bool | False | Force exact count (slower) |
+-| `no_prioritise_visible_gaussians` | bool | False | Disable visibility weighting |
+-| `visibility_threshold` | float | 0.05 | Min contribution to include Gaussian |
+-| `surface_distance_std` | float | None | Std devs from surface to cull |
+-| `clean_pointcloud` | bool | False | Remove outliers via Open3D |
+-| `generate_mesh` | bool | False | Enable Poisson meshing |
+-| `poisson_depth` | int | 10 | Poisson reconstruction depth |
+-| `laplacian_iterations` | int | 10 | Mesh smoothing iterations |
+-| `camera_skip_rate` | int | 0 | Cameras to skip per render |
+-| `no_render_colours` | bool | False | Skip color rendering |
+-| `colour_quality` | str | "high" | "tiny", "low", "medium", "high", "ultra", "original" |
+-| `bounding_box_min` | list | None | Min XYZ bounds |
+-| `bounding_box_max` | list | None | Max XYZ bounds |
+-| `no_calculate_normals` | bool | False | Skip normal calculation |
+-| `mahalanobis_distance_std` | float | 2.0 | Max Mahalanobis distance for sampling |
+-| `min_opacity` | float | 0.0 | Min opacity threshold |
+-| `cull_gaussian_sizes` | float | 0.0 | % of largest Gaussians to remove |
+-| `max_sh_degrees` | int | 3 | Spherical harmonics degree |
+-| `quiet` | bool | False | Suppress output |
+-| `device` | str | "cuda" | Compute device |
+-
+-The output data is structured as `PointCloudData`:
+-- `points`: `torch.Tensor` of shape `(N, 3)`
+-- `colors`: `torch.Tensor` of shape `(N, 3)`
+-- `normals`: `torch.Tensor` of shape `(N, 3)` (if calculated)
+-
+-### Steps
+-
+-1. **Pre-filtering Gaussians**
+-   - Filter Gaussians based on `min_opacity`.
+-   - If `cull_gaussian_sizes` > 0, remove the top `cull_gaussian_sizes` percentage of Gaussians sorted by size (largest first).
+-   - If `bounding_box_min` or `bounding_box_max` are set, exclude Gaussians whose centers fall outside these bounds.
+-   - If `surface_distance_std` is set, cull Gaussians that are more than `surface_distance_std` standard deviations away from the predicted scene surfaces [S1, unofficial].
+-
+-2. **Visibility Weighting**
+-   - Calculate the visibility/contribution of each remaining Gaussian.
+-   - If `no_prioritise_visible_gaussians` is False, assign a sampling weight to each Gaussian proportional to its visibility. Gaussians contributing more to the final image receive more samples.
+-   - Discard Gaussians with visibility below `visibility_threshold` [S1, unofficial].
+-
+-3. **Point Sampling**
+-   - For each selected Gaussian, sample points from a Multivariate Normal distribution defined by the Gaussian's mean (position) and covariance matrix.
+-   - Reject samples where the Mahalanobis distance from the center exceeds `mahalanobis_distance_std`.
+-   - Continue sampling until the total number of points approaches `num_points`. If `exact_num_points` is True, adjust sampling to match the count exactly (computationally more expensive) [S1, unofficial].
+-
+-4. **Color Rendering**
+-   - If `no_render_colours` is False, render colors for the sampled points.
+-   - Determine the resolution for rendering based on `colour_quality`:
+-     - `tiny`: 180px
+-     - `low`: 360px
+-     - `medium`: 720px
+-     - `high`: 1280px
+-     - `ultra`: 1920px
+-     - `original`: Native resolution
+-   - Use the specified `renderer_type` ("cuda" or "python") to project the points onto the camera views and interpolate colors using the Gaussian's spherical harmonics coefficients.
+-   - If `camera_skip_rate` > 0, skip every N-th camera during rendering to save time [S1, unofficial].
+-
+-5. **Normal Calculation**
+-   - If `no_calculate_normals` is False, compute normals for each point. This is typically done by analyzing the local neighborhood or using the Gaussian's orientation parameters [S1, unofficial].
+-
+-6. **Post-processing (Optional)**
+-   - If `clean_pointcloud` is True, use Open3D to remove statistical outliers from the point cloud.
+-   - If `generate_mesh` is True, perform Poisson surface reconstruction on the point cloud using `poisson_depth` and apply `laplacian_iterations` of smoothing [S1, unofficial].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Input:** A 3DGS scene file (PLY or splat format) containing Gaussian parameters (means $\mathbf{p}_i$, scales, rotations, colors, opacities, and Spherical Harmonics coefficients), and optionally camera transforms (COLMAP or transform files) for color rendering.
++*   **Output:** A Point Cloud file (PLY) containing points, colors, and optionally normals. Optionally, a mesh (PLY) if mesh generation is enabled.
++
++**Data Structures:**
++The implementation uses a `GaussPointCloudSettings` configuration and internal Gaussian storage.
++*   `GaussPointCloudSettings`: A named tuple or configuration object containing:
++    *   `renderer_type` (str): 'cuda' or 'python'.
++    *   `num_points` (int): Total target points (Default: 10,000,000).
++    *   `exact_num_points` (bool): Enforce exact count (Default: False).
++    *   `prioritise_visible_gaussians` (bool): Weight sampling by visibility (Default: True).
++    *   `mahalanobis_distance_std` (float): Max distance for sampling (Default: 2.0).
++    *   `visibility_threshold` (float): Min contribution to include Gaussian (Default: 0.05).
++    *   `min_opacity` (float): Min opacity filter (Default: 0.0).
++    *   `cull_gaussian_sizes` (float): Percentage of largest Gaussians to remove (Default: 0.0).
++    *   `bounding_box_min` / `bounding_box_max` (list): Spatial filters.
++    *   `surface_distance_std` (float): Threshold for surface culling (Default: Disabled).
++    *   `generate_mesh` (bool): Enable mesh output (Default: False).
++    *   `no_calculate_normals` (bool): Skip normal calculation (Default: False).
++    *   `colour_quality` (str): 'tiny', 'low', 'medium', 'high', 'ultra', 'original' (Default: 'high').
++*   `PointCloudData`: A named tuple containing:
++    *   `points` (torch.Tensor): Shape $(N, 3)$.
++    *   `colours` (torch.Tensor): Shape $(N, 3)$.
++    *   `normals` (torch.Tensor): Shape $(N, 3)$, if calculated.
++
++**Steps:**
++
++1.  **Load and Validate Gaussians:**
++    Load Gaussian parameters from the input file. Validate covariance matrices to ensure they are positive semidefinite. If invalid (due to floating-point errors), clamp them or remove the Gaussian [S1, unofficial].
++    *   Compute eigenvalues of the covariance matrix $\Sigma_i$.
++    *   If any eigenvalue $< \epsilon$, clamp or cull the Gaussian [S1, unofficial].
++
++2.  **Pre-Sampling Culling:**
++    Filter Gaussians based on user-defined constraints before sampling:
++    *   **Opacity:** Remove Gaussians where $\alpha_i < \text{min\_opacity}$ [S1, unofficial].
++    *   **Bounding Box:** Remove Gaussians where $\mathbf{p}_i$ is outside $[\text{bounding\_box\_min}, \text{bounding\_box\_max}]$ [S1, unofficial].
++    *   **Size:** Remove the largest $\text{cull\_gaussian\_sizes}$ fraction of Gaussians based on their surface area [S1, unofficial].
++    *   **Visibility (Optional):** If `prioritise_visible_gaussians` is True, render the scene from provided camera views to compute the total contribution (visibility) of each Gaussian. Remove Gaussians with total contribution $< \text{visibility\_threshold}$ [S1, unofficial].
++
++3.  **Calculate Sampling Weights:**
++    Determine the number of points to sample from each Gaussian.
++    *   Compute the surface area $A_i$ of the Gaussian ellipsoid using its eigenvalues $\lambda_1, \lambda_2, \lambda_3$ (where $a=\sqrt{\lambda_1}, b=\sqrt{\lambda_2}, c=\sqrt{\lambda_3}$):
++        $$
++        A_i \approx 4\pi \left( \frac{a^p b^p + a^p c^p + b^p c^p}{3} \right)^{1/p}, \quad p=1.6075
++        $$
++    *   Calculate magnitude $M_i$:
++        $$
++        M_i = \sqrt{A_i} \times C_i
++        $$
++        where $C_i$ is the visibility contribution (if enabled) or opacity $\alpha_i$ (if disabled) [S1, unofficial].
++
++4.  **Sample Points:**
++    For each remaining Gaussian $i$:
++    *   Determine the number of samples $n_i$ proportional to $M_i$, normalized to sum to `num_points`.
++    *   If `exact_num_points` is False, use a fixed number of attempts (e.g., 5) per Gaussian; if True, use more attempts (e.g., 100) to ensure exact counts [S1, unofficial].
++    *   Sample points $\mathbf{x}$ from the multivariate normal distribution $\mathcal{N}(\mathbf{p}_i, \Sigma_i)$.
++    *   Reject samples where the Mahalanobis distance $d_M = \sqrt{(\mathbf{x} - \mathbf{p}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{p}_i)}$ exceeds `mahalanobis_distance_std` (Default: 2.0) [S1, unofficial].
++    *   Add the mean $\mathbf{p}_i$ as a point for every Gaussian [S1, unofficial].
++
++5.  **Color and Normal Assignment:**
++    *   **Colors:** If `no_render_colours` is False, render the scene using the selected `renderer_type` ('cuda' or 'python') at the resolution defined by `colour_quality` [S1, unofficial]. Map the rendered colors to the generated points. If rendering is skipped, original Gaussian colors are used (may appear inconsistent) [S1, unofficial].
++    *   **Normals:** If `no_calculate_normals` is False, compute normals for each point. Normals can be derived from the gradient of the density field or estimated from the local orientation of the Gaussian covariance matrix [S1, unofficial].
++
++6.  **Post-Processing (Optional):**
++    *   **Clean Point Cloud:** If `clean_pointcloud` is True, remove outliers using Open3D [S1, unofficial].
++    *   **Mesh Generation:** If `generate_mesh` is True:
++        *   Identify surface Gaussians using `surface_distance_std` [S1, unofficial].
++        *   Cull non-surface Gaussians.
++        *   Generate a separate point cloud with a fixed average of 25 points per surface Gaussian, capped at half the total requested points [S1, unofficial].
++        *   Apply Poisson Surface Reconstruction with `poisson_depth` (Default: 10) [S1, unofficial].
++        *   Apply Laplacian smoothing with `laplacian_iterations` (Default: 10) [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+ import torch
+-import math
+ import numpy as np
+ 
+-# Helper functions from source [S1, unofficial]
+-def focal2fov(focal, pixels):
+-    return 2 * math.atan(pixels / (2 * focal))
+-
+-def getProjectionMatrix(znear, zfar, fovX, fovY):
+-    tanHalfFovY = math.tan((fovY / 2))
+-    tanHalfFovX = math.tan((fovX / 2))
+-    top = tanHalfFovY * znear
+-    bottom = -top
+-    right = tanHalfFovX * znear
+-    left = -right
+-    P = torch.zeros(4, 4)
+-    z_sign = 1.0
+-    P[0, 0] = 2.0 * znear / (right - left)
+-    P[1, 1] = 2.0 * znear / (top - bottom)
+-    P[0, 2] = (right + left) / (right - left)
+-    P[1, 2] = (top + bottom) / (top - bottom)
+-    P[3, 2] = z_sign
+-    P[2, 2] = z_sign * zfar / (zfar - znear)
+-    P[2, 3] = -(zfar * znear) / (zfar - znear)
+-    return P
+-
+-def sample_points_from_gaussians(gaussians, num_samples, mahalanobis_std):
++def convert_3dgs_to_pointcloud(gaussians, settings):
+     """
+-    Samples points from a batch of Gaussians.
+-    gaussians: dict with 'means' (N,3), 'covariances' (N,3,3), 'opacities' (N,)
+-    Returns: points (M,3), valid_mask (M,)
++    Convert 3DGS to Point Cloud.
++    gaussians: Dict with keys 'xyz', 'scales', 'rots', 'colors', 'opacities', 'sh_coeffs', 'covariances'
++    settings: GaussPointCloudSettings object
+     """
+-    # Implementation detail: Sample from MultivariateNormal
+-    # Reject if Mahalanobis distance > mahalanobis_std
+-    # This is a placeholder for the actual sampling logic which involves
+-    # Cholesky decomposition of covariance and rejection sampling.
+-    pass
+-
+-def render_colors(points, cameras, gaussians, renderer_type, resolution):
+-    """
+-    Renders colors for points using the Gaussian Splatting rasterizer.
+-    """
+-    if renderer_type == "cuda":
+-        # Use CUDA rasterization settings
+-        pass
+-    elif renderer_type == "python":
+-        # Use Python-based rasterization
+-        pass
+-
+-def convert_3dgs_to_pcd(settings, scene_data, camera_data):
+-    """
+-    Main conversion function.
+-    """
+-    # 1. Pre-filtering
+-    valid_indices = []
+-    for i, g in enumerate(scene_data.gaussians):
+-        if g.opacity < settings.min_opacity:
+-            continue
+-        if settings.bounding_box_min is not None:
+-            if not all(g.mean >= settings.bounding_box_min):
+-                continue
+-        if settings.bounding_box_max is not None:
+-            if not all(g.mean <= settings.bounding_box_max):
+-                continue
+-        # Add to valid list
+-        valid_indices.append(i)
+-    
+-    # Cull by size
++    # 1. Load and Validate
++    xyz = gaussians['xyz']
++    covariances = gaussians['covariances']
++    opacities = gaussians['opacities']
++    
++    # Validate positive semidefiniteness
++    valid_mask = validate_covariances(covariances)
++    xyz = xyz[valid_mask]
++    covariances = covariances[valid_mask]
++    opacities = opacities[valid_mask]
++    
++    # 2. Pre-Sampling Culling
++    if settings.min_opacity > 0:
++        valid_mask = valid_mask & (opacities > settings.min_opacity)
++        
++    if settings.bounding_box_min is not None:
++        valid_mask = valid_mask & (xyz > settings.bounding_box_min).all(dim=1)
++    if settings.bounding_box_max is not None:
++        valid_mask = valid_mask & (xyz < settings.bounding_box_max).all(dim=1)
++        
+     if settings.cull_gaussian_sizes > 0:
+-        sizes = [scene_data.gaussians[i].size for i in valid_indices]
+-        num_to_cull = int(len(valid_indices) * settings.cull_gaussian_sizes)
++        sizes = compute_gaussian_sizes(covariances)
++        num_to_cull = int(len(sizes) * settings.cull_gaussian_sizes)
+         if num_to_cull > 0:
+-            # Sort by size descending and remove top N
+-            sorted_indices = sorted(range(len(valid_indices)), key=lambda k: sizes[k], reverse=True)
+-            valid_indices = [valid_indices[i] for i in range(num_to_cull, len(valid_indices))]
+-
+-    # 2. Visibility Weighting
+-    # Calculate visibility for each valid Gaussian
+-    visibilities = calculate_visibility(scene_data.gaussians[valid_indices], camera_data)
+-    
+-    # Filter by visibility threshold
+-    visible_indices = [valid_indices[i] for i, v in enumerate(visibilities) if v >= settings.visibility_threshold]
+-    
+-    # 3. Point Sampling
+-    # Determine weights for sampling
+-    if not settings.no_prioritise_visible_gaussians:
+-        weights = torch.tensor(visibilities, dtype=torch.float32)
+-        weights = weights / weights.sum()
++            largest_indices = torch.argsort(sizes, descending=True)[:num_to_cull]
++            valid_mask = valid_mask.clone()
++            valid_mask[largest_indices] = False
++            
++    xyz = xyz[valid_mask]
++    covariances = covariances[valid_mask]
++    opacities = opacities[valid_mask]
++    
++    if len(xyz) == 0:
++        raise Exception("No Gaussians remain after culling.")
++        
++    # 3. Visibility Calculation (Optional)
++    contributions = None
++    if settings.prioritise_visible_gaussians:
++        if settings.transform_path is None:
++            raise Exception("Camera poses required for visibility weighting.")
++        contributions = compute_visibility(xyz, covariances, settings)
++        if contributions is not None:
++            valid_mask = valid_mask & (contributions > settings.visibility_threshold)
++            xyz = xyz[valid_mask]
++            covariances = covariances[valid_mask]
++            opacities = opacities[valid_mask]
++            contributions = contributions[valid_mask]
++            
++    # 4. Calculate Weights
++    if contributions is None:
++        contributions = opacities
++        
++    surface_areas = compute_surface_area(covariances)
++    magnitudes = torch.sqrt(surface_areas) * contributions
++    
++    # Normalize magnitudes to sum to num_points
++    total_mag = magnitudes.sum()
++    if total_mag > 0:
++        num_samples_per_gaussian = (magnitudes / total_mag) * settings.num_points
+     else:
+-        weights = torch.ones(len(visible_indices)) / len(visible_indices)
+-    
+-    # Sample points
++        num_samples_per_gaussian = torch.ones_like(magnitudes) * (settings.num_points / len(magnitudes))
++        
++    # 5. Sample Points
+     all_points = []
+     all_colors = []
+-    all_normals = []
+-    
+-    target_count = settings.num_points
+-    current_count = 0
+-    
+-    # Loop until target count is reached or all Gaussians exhausted
+-    while current_count < target_count:
+-        # Sample Gaussian index based on weights
+-        idx = torch.multinomial(weights, 1).item()
+-        gaussian = scene_data.gaussians[visible_indices[idx]]
+-        
+-        # Sample points from this Gaussian
+-        # Note: In practice, sample multiple points per Gaussian to fill the bucket
+-        samples = sample_points_from_gaussians(
+-            {'means': gaussian.mean.unsqueeze(0), 
+-             'covariances': gaussian.covariance.unsqueeze(0)}, 
+-            num_samples=100, # Batch size for sampling
+-            mahalanobis_std=settings.mahalanobis_distance_std
+-        )
+-        
+-        if len(samples) > 0:
+-            all_points.append(samples)
+-            current_count += len(samples)
+-            
+-            # Render colors for these points
+-            if not settings.no_render_colours:
+-                # Map color quality to resolution
+-                color_res_map = {"tiny": 180, "low": 360, "medium": 720, "high": 1280, "ultra": 1920, "original": None}
+-                res = color_res_map.get(settings.colour_quality)
+-                
+-                # Render colors
+-                colors = render_colors(samples, camera_data, scene_data, settings.renderer_type, res)
+-                all_colors.append(colors)
+-            
+-            # Calculate normals
+-            if not settings.no_calculate_normals:
+-                normals = calculate_normals(samples, scene_data)
+-                all_normals.append(normals)
+-    
+-    # Combine results
++    
++    for i in range(len(xyz)):
++        mean = xyz[i]
++        cov = covariances[i]
++        n_samples = int(num_samples_per_gaussian[i].item())
++        if n_samples < 1:
++            n_samples = 1
++            
++        # Sample from Multivariate Normal
++        samples = torch.distributions.MultivariateNormal(mean, cov).sample((n_samples,))
++        
++        # Mahalanobis distance filtering
++        diff = samples - mean
++        # Compute inverse covariance for Mahalanobis distance
++        try:
++            inv_cov = torch.linalg.inv(cov)
++            dist_sq = (diff @ inv_cov * diff).sum(dim=1)
++            mask = dist_sq <= (settings.mahalanobis_distance_std ** 2)
++            samples = samples[mask]
++        except:
++            # Fallback if singular
++            pass
++            
++        all_points.append(samples)
++        
++        # Color assignment
++        if not settings.no_render_colours:
++            # Render color for this point (simplified: use original color or render)
++            # In practice, this is done via rasterization for all points at once
++            pass
++        else:
++            # Use original Gaussian color
++            color = eval_sh(settings.max_sh_degree, gaussians['sh_coeffs'][i], dirs=None) # Simplified
++            all_colors.append(color.expand(len(samples), -1))
++            
++    # Concatenate all points
+     points = torch.cat(all_points, dim=0)
+-    colors = torch.cat(all_colors, dim=0) if all_colors else None
+-    normals = torch.cat(all_normals, dim=0) if all_normals else None
+-    
+-    # 4. Post-processing
++    
++    # 6. Post-Processing
+     if settings.clean_pointcloud:
+-        # Use Open3D to remove outliers
+-        import open3d as o3d
+-        pcd = o3d.geometry.PointCloud()
+-        pcd.points = o3d.utility.Vector3dVector(points.cpu().numpy())
+-        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+-        points = torch.tensor(pcd.points, dtype=points.dtype)
+-        if colors is not None:
+-            # Re-render or map colors if needed after cleaning
+-            pass
+-    
++        points = remove_outliers(points)
++        
+     if settings.generate_mesh:
+-        # Poisson surface reconstruction
+-        # ...
+-        pass
+-        
+-    return PointCloudData(points=points, colors=colors, normals=normals)
++        mesh = poisson_reconstruction(points, settings.poisson_depth)
++        mesh = laplacian_smooth(mesh, settings.laplacian_iterations)
++        
++    return PointCloudData(points=points, colours=compute_colors(points, settings), normals=compute_normals(points, settings))
++
++def compute_surface_area(covariances):
++    """Compute approximate surface area of ellipsoids defined by covariances."""
++    eigvals = torch.linalg.eigvals(covariances).real
++    a = torch.sqrt(eigvals[:, 0])
++    b = torch.sqrt(eigvals[:, 1])
++    c = torch.sqrt(eigvals[:, 2])
++    p = 1.6075
++    radicand = (torch.pow(a*b, p) + torch.pow(a*c, p) + torch.pow(b*c, p)) / 3.0
++    surface_area = 4.0 * torch.pi * torch.pow(radicand, 1.0/p)
++    return surface_area
++
++def validate_covariances(covariances, epsilon=1e-6):
++    """Check if covariances are positive semidefinite."""
++    eigvals = torch.linalg.eigvals(covariances).real
++    return (eigvals >= -epsilon).all(dim=1)
+ ```
+ 
+-### Parameters and Edge Cases
+-- **`num_points`**: Default 10,000,000. Higher values increase memory usage and processing time.
+-- **`exact_num_points`**: If True, the algorithm ensures the output has exactly `num_points`, which may require oversampling and discarding, increasing runtime [S1, unofficial].
+-- **`mahalanobis_distance_std`**: Default 2.0. Points further than this distance from the Gaussian center are rejected. Lower values result in tighter, more concentrated point clouds [S1, unofficial].
+-- **`colour_quality`**: Affects rendering resolution. "original" uses the native camera resolution, which is slowest but highest quality [S1, unofficial].
+-- **Edge Case**: If `no_render_colours` is True, the resulting point cloud will have arbitrary or default colors, as colors are not computed [S1, unofficial].
+-- **Edge Case**: If `camera_skip_rate` > 0, colors may be inaccurate if cameras are not in a linear trajectory, as fewer views are used for interpolation [S1, unofficial].
+-
+ ## Operating characteristics
+-- **Time Complexity**: Dominated by the sampling and rendering steps. Rendering colors for millions of points across multiple camera views is the most expensive operation. Using `cuda` renderer is significantly faster than `python` [S1, unofficial].
+-- **Memory Complexity**: Proportional to `num_points` and the number of Gaussians. Storing points, colors, and normals for 10M points requires significant VRAM/RAM.
+-- **Scaling**: Performance scales linearly with `num_points` and the number of Gaussians. `exact_num_points` adds overhead.
+-- **Strengths**: Produces high-quality, dense point clouds that closely mimic the original 3DGS scene. Compatible with standard 3D software.
+-- **Limitations**: Computationally intensive for large scenes. Colors may be inaccurate if `camera_skip_rate` is high or if `colour_quality` is low. Mesh generation is optional and may not capture fine details [S1, unofficial].
++*   **Time Complexity:** Dominated by the visibility rendering step if enabled, which is $O(N \cdot C \cdot R)$ where $N$ is the number of Gaussians, $C$ is the number of cameras, and $R$ is the resolution. Sampling is $O(N \cdot K)$ where $K$ is the average samples per Gaussian.
++*   **Memory Complexity:** $O(N + P)$ where $P$ is the number of generated points. Storing the full point cloud requires significant memory for large `num_points` (e.g., 10M points).
++*   **Performance:** The CUDA renderer is significantly faster than the Python renderer. Color quality settings ('tiny' to 'ultra') directly impact rendering time.
++*   **Strengths:** Produces high-quality point clouds that closely mimic the original 3DGS appearance. Flexible culling and sampling strategies allow for noise reduction and density control.
++*   **Limitations:** The resulting point cloud is not a true surface representation; it is a volumetric sampling. Mesh generation is an additional step and may not be perfect for complex geometries. Requires camera poses for optimal color weighting.
+ 
+ ## Background
+-The method was introduced by Lewis Stuart in 2025 as part of the "3DGS-to-PC" project, addressing the need for compatibility between 3D Gaussian Splatting scenes and general 3D handling software that does not support Gaussian primitives [S1, unofficial]. The work was presented at ICCV 2025 Workshop on 3D-VAST [S1, unofficial].
++The method originates from the need to bridge the gap between specialized 3DGS renderers and general-purpose 3D software that supports standard point clouds or meshes. The primary source is an unofficial implementation by Lewis-Stuart, presented in the context of 3DGS-to-PC conversion tools [S1, unofficial]. It builds on the principles of 3DGS, where the scene is represented as a collection of anisotropic Gaussians [S1, unofficial].
+ 
+ ## Sources

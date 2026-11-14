@@ -1,26 +1,24 @@
 # Hybrid and Diffusion Representations
-
-Also called: Feed-forward 3DGS generation, Diffusion-based 3DGS synthesis
-
 ## Overview
-Hybrid and Diffusion Representations address the problem of generating 3D Gaussian Splatting (3DGS) primitives from single images or text prompts without iterative per-scene optimization. Unlike sibling methods that refine an initial guess via gradient descent, these approaches map inputs directly to explicit Gaussian parameters using neural networks. [TriplaneGaussian](7558-triplanegaussian.md) employs a hybrid architecture combining sparse point clouds with dense tri-plane feature encoding, while [GaussianDiffusion](9190-gaussiandiffusion.md) utilizes a 3D diffusion model operating on a voxelized Gaussian representation to ensure multi-view consistency.
-
+Hybrid and Diffusion Representations address the challenge of synthesizing 3D Gaussian Splatting (3DGS) representations from single images or text prompts without iterative optimization, thereby amortizing reconstruction costs and enabling near-real-time sampling [S1]. This family distinguishes itself from sibling methods like [Adaptive Gaussian Refinement](11448-adaptive-gaussian-refinement.md) by decoupling spatial structure generation from attribute encoding via parallel decoders or by leveraging learned diffusion priors to solve multi-view inconsistency and spurious geometry issues [S1].
 ## Shared principles
-The family shares the goal of direct synthesis, bypassing the slow iterative densification and optimization loops typical of standard 3DGS training. Both primary methods decouple the spatial structure of the scene from the attribute prediction, using intermediate representations (point clouds or voxel grids) to regularize the output. They both aim to solve the "Janus problem" (multi-view inconsistency) and the generation of "floaters" (spurious geometry), though they employ different mechanisms: spatial feature aggregation versus structured noise injection in diffusion space.
-
+Not given in the sources.
 ## Subtopics
 
 ### [TriplaneGaussian](7558-triplanegaussian.md)
-A feed-forward method that generates 3DGS from a single image by projecting a sparse point cloud onto a tri-plane feature grid. It decouples spatial structure from attribute encoding, enabling efficient generation without iterative optimization. Choose this when low-latency single-image reconstruction is required.
+TriplaneGaussian is a feed-forward method that generates 3DGS from a single input image by decoupling the generation of spatial structure (point cloud) and attribute encoding (tri-plane) via parallel transformer-based decoders. It leverages the geometric regularity of a tri-plane to encode Gaussian attributes, improving fidelity and consistency compared to point-cloud-only approaches.
 
 ### [GaussianDiffusion](9190-gaussiandiffusion.md)
-A method that trains a 3D diffusion model on a GaussianCube (voxelized Gaussian) representation. It addresses multi-view inconsistency via structured noise and reduces floaters via variational constraints. Choose this when high-fidelity generation from text or image conditions with strict multi-view consistency is needed.
+GaussianDiffusion trains a 3D diffusion model based on a GaussianCube representation to synthesize 3D Gaussian fields directly. It solves the "Janus problem" (multi-view inconsistency) and spurious geometry ("floaters") by incorporating structured noises from multiple viewpoints and using variational 3DGS principles.
 
 ### Text2Immersion
-A scene generation method similar to LucidDreamer but with outlier removal and two-stage optimization [S1]. The process first removes outliers in the point cloud, then performs 3DGS optimization in two stages: training coarse 3DGS and refinement [S1].
+#### definition
+- [S1] A scene generation method similar to LucidDreamer but with outlier removal and two-stage optimization.
+#### step
+- [S1] A process removes outliers in the point cloud.
+- [S1] 3DGS optimization has two stages: training coarse 3DGS and refinement.
 
 ## Background
-The concept of generating 3DGS directly from inputs emerged as a solution to the computational cost of per-scene optimization. TriplaneGaussian leverages the efficiency of tri-plane representations (common in NeRFs) applied to Gaussian splatting [S1]. GaussianDiffusion adapts diffusion models, traditionally used for images, to the structured space of 3D Gaussians via voxelization [S1]. Text2Immersion represents an earlier approach involving iterative refinement with outlier removal [S1].
-
+Not given in the sources.
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

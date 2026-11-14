@@ -22,9 +22,9 @@ This method renders voxel data using a two-level grid structure (top-level grid 
 
 **Steps:**
 
-1. **Data Synchronization:** Identify bricks that have changed since the last frame. Send these bricks to a staging buffer on the GPU. The budget is capped at 8192 bricks (512KB) per frame [S1, unofficial].
-2. **Commit Kernel:** Execute a GPU kernel to copy data from the staging buffer to the final destination 3D image buffer. This utilizes `clEnqueueCopyBufferToImage` (or equivalent) which reformats data during the copy [S1, unofficial].
-3. **Ray Traversal:** For each pixel, trace a primary ray through the screen plane. Use Amanatides and Woo’s 3D-DDA traversal algorithm to step through the top-level grid [S1, unofficial]. The traversal function `TraceRay` returns the hit voxel index or 0 if the ray leaves the scene, along with the intersection normal [S1, unofficial].
+1. **Data Synchronization:** Identify bricks that have changed since the last frame [S1, unofficial]. Send these bricks to a staging buffer on the GPU [S1, unofficial]. The budget is capped at 8192 bricks (512KB) per frame [S1, unofficial].
+2. **Commit Kernel:** Execute a GPU kernel to copy data from the staging buffer to the final destination 3D image buffer [S1, unofficial]. This utilizes `clEnqueueCopyBufferToImage` (or equivalent) which reformats data during the copy [S1, unofficial].
+3. **Ray Traversal:** For each pixel, trace a primary ray through the screen plane [S1, unofficial]. Use Amanatides and Woo’s 3D-DDA traversal algorithm to step through the top-level grid [S1, unofficial]. The traversal function `TraceRay` returns the hit voxel index or 0 if the ray leaves the scene, along with the intersection normal [S1, unofficial].
 4. **Shading:** Shade the hit voxel using precalculated values for 6 unique hemispheres (corresponding to the 6 unique normals of axis-aligned voxels), integrated over a skydome [S1, unofficial].
 5. **Optional Diffuse Bounce:** Perform a single diffuse bounce by distributing rays over the hemisphere using blue noise with limited length [S1, unofficial].
 
@@ -41,7 +41,7 @@ BRICK_BYTES = 512
 MAX_BRICKS_PER_FRAME = 8192
 
 def synchronize_bricks(changed_bricks, staging_buffer):
-    # Sources do not specify the exact API call for CPU-to-staging transfer.
+    # Sources do not specify the exact API call for CPU-to-staging transfer [S1, unofficial].
     pass
 
 def commit_to_gpu(staging_buffer, destination_3d_image):

@@ -1,0 +1,322 @@
+--- v003.md
++++ v004.md
+@@ -1,39 +1,47 @@
+ # Radiative Gaussian Splatting
+ 
+-Also called: Radiative Gaussians, R²-Gaussian
++Also called: Radiative Gaussians
+ 
+ ## Overview
+-Radiative Gaussian Splatting adapts 3D Gaussian Splatting (3DGS) for tomographic reconstruction by replacing view-dependent color and opacity with a view-independent scalar central density $\rho_i$ [S1]. It models isotropic density fields to estimate the 3D distribution of density $\sigma(\mathbf{x})$ from X-ray projections, solving the problem of reconstructing volumetric data from 2D attenuation measurements [S1]. Unlike standard 3DGS, which uses spherical harmonics for view-dependent appearance, this method removes angular dependence because X-ray attenuation depends only on the integrated density along the ray path [S1].
++Radiative Gaussian Splatting adapts the 3D Gaussian Splatting (3DGS) framework to model isotropic density fields for tomographic reconstruction, replacing the view-dependent color and opacity attributes of standard 3DGS with a learnable central density parameter [S1]. It solves the problem of reconstructing a 3D density volume $\sigma(\mathbf{x})$ from a set of 2D X-ray projections $\{I_i\}_{i=1}^N$ captured at different angles, enabling both differentiable rendering of synthetic projections and direct extraction of a discrete density volume [S1]. Unlike standard 3DGS, which optimizes for RGB appearance, this method optimizes for physical consistency with X-ray attenuation, treating anisotropic effects like Compton scattering as noise rather than modeling them explicitly [S1].
+ 
+ ## How it works
+-**Inputs:** A set of $N$ X-ray projection images $\{I_i\}_{i=1}^N$ captured from different angles [S1].
+-**Outputs:** A discrete 3D density volume $\sigma(\mathbf{x})$ and/or rendered X-ray projections [S1].
++**Inputs:**
++*   A set of $N$ X-ray projection images $\{I_i\}_{i=1}^N$, typically logarithmic projections where pixel values represent density integrals along ray paths [S1].
++*   Camera poses (extrinsic and intrinsic matrices) corresponding to the $N$ projection angles [S1].
++*   Initial sparse point cloud from Structure-from-Motion (SfM) [S1].
++
++**Outputs:**
++*   A set of $M$ learnable 3D Gaussian kernels $\mathcal{G}_3 = \{G_{3i}\}_{i=1}^M$ [S1].
++*   A reconstructed 3D density volume $\sigma(\mathbf{x})$ [S1].
+ 
+ **Data Structures:**
+-The scene is represented by a set of $M$ 3D Gaussian kernels $\mathcal{G}_3 = \{G_{3i}\}_{i=1}^M$ [S1]. Each kernel $G_{3i}$ is defined by:
+-*   $\rho_i \in \mathbb{R}$: Central density (scalar).
+-*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+-*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
+-*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix.
+-*   The covariance matrix is $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [S1].
++Each Gaussian kernel $G_{3i}$ is defined by the following learnable parameters:
++*   $\mathbf{p}_i \in \mathbb{R}^3$: Position (mean) of the Gaussian [S1].
++*   $\rho_i \in \mathbb{R}$: Central density scalar [S1].
++*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix [S1].
++*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix [S1].
++*   The covariance matrix is decomposed as $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [S1].
+ 
+-**Algorithm Steps:**
++**Rendering Pipeline:**
++The rendering process transforms 3D Gaussians into a 2D representation suitable for alpha-compositing, similar to the geometric projection in standard 3DGS [S1].
+ 
+-1.  **Initialization:** Initialize $M$ sparse Gaussians using Structure-from-Motion (SfM) points derived from the input projections [S1].
+-2.  **Ray Space Transformation:** Transform 3D Gaussians into ray space to align viewing rays with the coordinate axis, enhancing computational efficiency [S1].
+-3.  **Projection:** Project 3D Gaussians onto the 2D image plane to obtain 2D Gaussians $G_{2i}$ [S1]. The projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
++1.  **Transformation:** Transform 3D Gaussians into ray space. This aligns viewing rays with a coordinate axis (typically the Z-axis) to enhance computational efficiency [S1].
++2.  **Projection:** Project the 3D Gaussians onto the image plane to obtain 2D Gaussians $G_{2i}$. The projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
+     $$ \mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T $$
+-    [S1]
+-    The 2D Gaussian retains the central density but omits the third row and column of position and covariance relative to the 3D kernel [S1].
+-4.  **Density Normalization:** Compute the normalized density $\hat{\rho}_i$ for compositing:
++    The projected 2D Gaussian retains the central density $\rho_i$ but omits the third row and column of the position and covariance matrices relative to the ray space [S1].
++3.  **Normalization:** Compute the normalized density $\hat{\rho}_i$ for the 2D Gaussian:
+     $$ \hat{\rho}_i = \rho_i \frac{\sqrt{2\pi |\mathbf{\hat{\Sigma}}_i|}}{|\mathbf{\hat{\Sigma}}_i|} $$
+-    [S1]
+-5.  **Rendering (Differentiable Radiative Rasterization):** Render the X-ray projection by compositing the 2D Gaussians using alpha-blending [S1]. The rendered intensity $I_{\text{rendered}}$ is computed by summing the contributions of sorted Gaussians along the ray:
+-    $$ I_{\text{rendered}} = \sum_{i=1}^M c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    [S1]
+-    Where $\alpha_i$ is derived from the radiative intensity and spatial extent [S1]. For X-ray tomography, the "color" $c_i$ is typically unity or related to the source intensity, and the attenuation is modeled via the density $\rho_i$ [S1].
+-6.  **Optimization:** Optimize kernel parameters ($\rho_i, \mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i$) using photometric losses (L1, DSSIM) between rendered and real projections, plus Total Variation (TV) regularization on the density volume [S1].
+-7.  **Adaptive Control:** Dynamically densify Gaussians during training based on gradient magnitude or position error to improve scene representation [S1].
+-8.  **Volume Retrieval:** Retrieve the final 3D density volume using a differentiable voxelizer [S1].
++    *Note: The source formula for $\hat{\rho}_i$ contains a dimensional inconsistency in the denominator ($|\mathbf{\hat{\Sigma}}_i|$ vs $\sqrt{|\mathbf{\hat{\Sigma}}_i|}$). Standard 2D Gaussian normalization involves $\sqrt{|\mathbf{\hat{\Sigma}}_i|}$. The source text explicitly writes $\rho_i * (2\pi|\mathbf{\hat{\Sigma}}_i|)^{1/2} / |\mathbf{\hat{\Sigma}}_i|$ [S1]. This implementation detail is preserved as written in the source, though it may require verification against standard Gaussian definitions.* [S1].
++4.  **Composition:** Render the synthetic X-ray projection $I_{rgb}$ (or density projection) by compositing the 2D Gaussians using alpha-blending [S1].
++
++**Optimization:**
++The kernel parameters are optimized using photometric losses and regularization:
++1.  **Loss Functions:** Minimize the difference between rendered projections and real X-ray projections using L1 loss and DSSIM (Deep Structure Similarity) [S1].
++2.  **Regularization:** Apply Total Variation (TV) regularization on the density volume to enforce smoothness and structural integrity [S1].
++3.  **Adaptive Control:** Use an adaptive control strategy to dynamically densify Gaussians during training, improving scene representation where needed [S1].
++
++**Volume Retrieval:**
++After optimization, the final 3D density volume is retrieved using a differentiable voxelizer, which aggregates the contributions of the 3D Gaussians into a discrete grid [S1].
+ 
+ **Pseudocode:**
+@@ -42,131 +50,140 @@
+ import numpy as np
+ 
+-def radiative_gaussian_splatting(projections, num_gaussians, num_iterations):
++def radiative_gaussian_splatting(projections, poses, initial_points):
+     """
+-    Reconstructs a 3D density volume from X-ray projections using Radiative Gaussians.
++    Main training loop for Radiative Gaussian Splatting.
+     
+     Args:
+         projections: List of N 2D arrays (X-ray images).
+-        num_gaussians: M, number of 3D Gaussian kernels.
+-        num_iterations: Number of optimization steps.
++        poses: List of N camera pose matrices (extrinsic/intrinsic).
++        initial_points: Initial 3D points from SfM.
+         
+     Returns:
+-        density_volume: 3D array representing sigma(x).
++        gaussians: List of Gaussian parameters.
++        volume: Reconstructed 3D density volume.
+     """
+-    # 1. Initialization using SfM points [G]
+-    positions = np.random.randn(num_gaussians, 3)
+-    scales = np.ones((num_gaussians, 3))
+-    rotations = np.tile(np.eye(3).reshape(1, 3, 3), (num_gaussians, 1, 1))
+-    densities = np.ones(num_gaussians)
++    # 1. Initialization
++    # Initialize M Gaussians from SfM points
++    # Each Gaussian has: p (pos), rho (density), R (rot), S (scale)
++    gaussians = initialize_gaussians_from_sfm(initial_points)
+     
+-    # 2. Optimization Loop
+-    for step in range(num_iterations):
+-        rendered_projections = []
++    # 2. Training Loop
++    for epoch in range(num_epochs):
++        for i, (proj_img, pose) in enumerate(zip(projections, poses)):
++            # A. Forward Pass: Render
++            # Transform 3D Gaussians to ray space
++            ray_space_gaussians = transform_to_ray_space(gaussians, pose)
++            
++            # Project to 2D
++            # Compute projected covariance: Sigma_hat = J * W * Sigma * W^T * J^T
++            # J is Jacobian of projection, W is rotation part of extrinsic
++            projected_gaussians = project_to_2d(ray_space_gaussians)
++            
++            # Compute normalized density for 2D Gaussian
++            # Note: Source formula for rho_hat is specific
++            for g in projected_gaussians:
++                det_Sigma_hat = np.linalg.det(g.Sigma_hat)
++                # Source formula: rho_hat = rho * sqrt(2*pi*|Sigma_hat|) / |Sigma_hat|
++                # This simplifies to rho * sqrt(2*pi) / sqrt(|Sigma_hat|)
++                # However, we follow the source text literally if it implies a specific bias correction
++                # Standard 2D Gaussian integral is sqrt((2pi)^2 |Sigma|). 
++                # The source writes: rho_i * (2pi|Sigma_hat|)^{1/2} / |Sigma_hat|
++                # Let's implement exactly as cited [S1]:
++                g.rho_hat = g.rho * np.sqrt(2 * np.pi * det_Sigma_hat) / det_Sigma_hat
++            
++            # Composite to get rendered image
++            rendered_img = alpha_blend(projected_gaussians)
++            
++            # B. Loss Calculation
++            # Photometric losses
++            l1_loss = np.mean(np.abs(rendered_img - proj_img))
++            ssim_loss = compute_dssim(rendered_img, proj_img)
++            
++            # Total Variation on density volume (requires voxelization or grid query)
++            # For efficiency, TV might be computed on a sparse grid or sampled points
++            tv_loss = compute_total_variation(gaussians)
++            
++            total_loss = l1_loss + ssim_loss + lambda_tv * tv_loss
++            
++            # C. Backward Pass & Update
++            gradients = compute_gradients(total_loss, gaussians)
++            update_parameters(gaussians, gradients)
++            
++            # D. Adaptive Control
++            # Densify Gaussians based on gradient magnitude or visibility
++            gaussians = adaptive_densify(gaussians, projected_gaussians)
++            
++    # 3. Volume Retrieval
++    # Differentiable voxelization
++    volume = differentiable_voxelizer(gaussians)
++    
++    return gaussians, volume
++
++def transform_to_ray_space(gaussians, pose):
++    """
++    Transforms 3D Gaussians into ray space.
++    Aligns viewing rays with the coordinate axis.
++    """
++    # Extract rotation W and translation T from pose
++    # Transform positions: p' = W^T * (p - T)
++    # Transform covariance: Sigma' = W^T * Sigma * W
++    transformed = []
++    for g in gaussians:
++        p_prime = np.dot(g.R_extrinsic.T, g.p - g.t_extrinsic) # Simplified
++        Sigma_prime = np.dot(np.dot(g.R_extrinsic.T, g.Sigma), g.R_extrinsic)
++        transformed.append(Gaussian(p=p_prime, Sigma=Sigma_prime, rho=g.rho))
++    return transformed
++
++def project_to_2d(ray_space_gaussians):
++    """
++    Projects 3D Gaussians in ray space to 2D image plane.
++    """
++    projected = []
++    for g in ray_space_gaussians:
++        # Compute Jacobian J of the projection
++        # For perspective projection, J depends on focal length and depth
++        J = compute_jacobian(g.p, g.focal_length)
+         
+-        for proj_idx, projection in enumerate(projections):
+-            # Get camera pose for this projection [G]
+-            extrinsic = np.eye(4)
+-            extrinsic[:3, :3] = np.random.rand(3, 3)
+-            W = extrinsic[:3, :3]
+-            J = np.array([[1, 0, 0], [0, 1, 0]]) # Affine projection Jacobian [G]
+-            
+-            # 3. Project 3D Gaussians to 2D
+-            covs_3d = rotations @ (scales[:, :, np.newaxis] * scales[:, np.newaxis, :]) @ rotations.transpose(0, 2, 1)
+-            temp = W @ covs_3d @ W.T
+-            covs_2d = J @ temp @ J.T
+-            
+-            # 4. Compute Normalized Density for Alpha
+-            det_covs = np.linalg.det(covs_2d)
+-            det_covs = np.maximum(det_covs, 1e-8)
+-            rho_hat = densities * np.sqrt(2 * np.pi * det_covs) / det_covs
+-            
+-            # 5. Rasterization (Alpha Compositing)
+-            rendered = rasterize_2d_gaussians(rho_hat, covs_2d, positions, J, W)
+-            rendered_projections.append(rendered)
+-            
+-        # 6. Loss Calculation
+-        loss_render = compute_l1_loss(rendered_projections, projections)
+-        density_vol = voxelize_gaussians(densities, positions, covs_3d)
+-        loss_tv = compute_tv(density_vol)
+-        total_loss = loss_render + 0.1 * loss_tv
++        # Compute projected 2D covariance
++        # Sigma_hat = J * Sigma_3D * J^T
++        Sigma_hat = np.dot(np.dot(J, g.Sigma), J.T)
+         
+-        # 7. Gradient Descent Update
+-        gradients = compute_gradients(total_loss, densities, positions, scales, rotations)
+-        densities -= 0.01 * gradients['densities']
+-        positions -= 0.01 * gradients['positions']
+-        scales -= 0.01 * gradients['scales']
+-        rotations -= 0.01 * gradients['rotations']
+-        
+-        # 8. Adaptive Control (Densification)
+-        densify_gaussians(positions, densities, gradients)
++        # Extract 2D parameters (omit Z components)
++        # Position: (x, y)
++        # Covariance: 2x2 matrix
++        projected.append(Gaussian2D(
++            pos_2d=g.p[:2],
++            Sigma_hat=Sigma_hat[:2, :2],
++            rho=g.rho
++        ))
++    return projected
+ 
+-    # 9. Final Volume Retrieval
+-    final_volume = voxelize_gaussians(densities, positions, covs_3d)
+-    return final_volume
+-
+-def initialize_sfm(projections):
+-    """Extract initial 3D points from projections using standard SfM pipeline [G]."""
+-    return np.random.randn(100, 3)
+-
+-def get_extrinsic(proj_idx):
+-    """Return camera extrinsic matrix for projection index [G]."""
+-    return np.eye(4)
+-
+-def get_projection_jacobian(extrinsic):
+-    """Compute 2x3 Jacobian of affine projection approximation [G]."""
+-    return np.array([[1, 0, 0], [0, 1, 0]])
+-
+-def compute_l1_loss(rendered, target):
+-    """Compute L1 photometric loss [G]."""
+-    return np.mean(np.abs(np.array(rendered) - np.array(target)))
+-
+-def compute_tv(volume):
+-    """Compute Total Variation regularization on density volume [G]."""
+-    return np.mean(np.abs(np.diff(volume, axis=0))) + np.mean(np.abs(np.diff(volume, axis=1)))
+-
+-def compute_gradients(loss, densities, positions, scales, rotations):
+-    """Compute numerical gradients for optimization [G]."""
+-    eps = 1e-5
+-    grad_d = np.zeros_like(densities)
+-    grad_p = np.zeros_like(positions)
+-    grad_s = np.zeros_like(scales)
+-    grad_r = np.zeros_like(rotations)
+-    # Simplified gradient computation for demonstration
+-    return {'densities': grad_d, 'positions': grad_p, 'scales': grad_s, 'rotations': grad_r}
+-
+-def densify_gaussians(positions, densities, gradients):
+-    """Split or clone Gaussians based on gradient magnitude [G]."""
++def alpha_blend(projected_gaussians):
++    """
++    Composites 2D Gaussians using alpha blending.
++    """
++    # Sort Gaussians by depth (not needed in ray space if aligned, but standard rasterization order applies)
++    # For each pixel, accumulate color/density
++    # I = sum(T_i * alpha_i * rho_hat_i)
++    # where T_i is transmittance
+     pass
+-
+-def rasterize_2d_gaussians(rho_hat, covs_2d, positions, J, W):
+-    """Render 2D Gaussians using alpha compositing [G]."""
+-    # Standard differentiable rasterizer handles sorting, bounding boxes, and blending
+-    return np.zeros((100, 100))
+-
+-def voxelize_gaussians(densities, positions, covs_3d):
+-    """Differentiable voxelizer to retrieve 3D density volume [G]."""
+-    # Sum contributions of all 3D Gaussians to a 3D grid
+-    return np.zeros((50, 50, 50))
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Anisotropic Effects:** Real-world X-ray projections contain minor anisotropic physical effects like Compton scattering. These are not explicitly modeled and are treated as noise [S1].
+-*   **Mesh Extraction:** Standard 3DGS opacity is empirically designed for RGB rendering, leading to challenges when extracting 3D meshes. Radiative Gaussians use central density, which is more suitable for volumetric representation but requires careful thresholding for mesh extraction [S1].
+-*   **Precision:** The determinant calculation in the normalization step can suffer from numerical instability if the projected Gaussian is degenerate (near-zero area). Guard against division by zero [S1].
+ 
+ ## Subtopics
+ 
+ ### Radiative Gaussian Point Cloud Representation
+-A variant where the representation is explicitly defined as a set of radiative Gaussian point clouds $\mathcal{G}_x$ for X-ray novel view synthesis [S2]. It includes a radiative feature vector $\mathbf{f}_i \in \mathbb{R}^{N_f}$ in addition to position, covariance, and opacity $\alpha_i$ [S2]. The formulation is $\mathcal{G}_x = \{G(\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i, \alpha_i, \mathbf{f}_i) \mid i = 1, \dots, N_p\}$ [S2]. This variant excludes view direction dependence, matching the isotropic nature of X-ray imaging, and avoids complex Spherical Harmonics computations, making forward/backward passes faster than original 3DGS [S2].
++A variant used for X-ray novel view synthesis [S2]. It defines the set of radiative Gaussian point clouds $\mathcal{G}_x$ using position $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, and a radiative feature vector $\mathbf{f}_i \in \mathbb{R}^{N_f}$ [S2]. Unlike the density-only model in [S1], this representation includes a feature vector and opacity, potentially allowing for view-independent color or material properties encoded in $\mathbf{f}_i$, while still excluding view direction dependence to match the isotropic nature of X-ray imaging [S2]. The forward and backward processes are faster than original 3DGS as it avoids complex spherical harmonic computations [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(M)$ per pixel, where $M$ is the number of Gaussians, similar to 3DGS [G]. Optimization involves backpropagation through the rasterizer and voxelizer [G].
+-*   **Memory Complexity:** $O(M)$ to store Gaussian parameters [G]. The density volume requires $O(V)$ memory where $V$ is the voxel grid size [G].
+-*   **Performance:** Faster than concurrent works using simplified isotropic Gaussians due to the flexibility of anisotropic covariance [S1]. Faster than original 3DGS for X-ray tasks because it avoids Spherical Harmonics [S2].
+-*   **Strengths:** Suitable for tomographic reconstruction and X-ray novel view synthesis. Provides a direct 3D density volume [S1].
+-*   **Limitations:** Does not model anisotropic physical effects like Compton scattering [S1]. Mesh extraction from the density field requires post-processing [S1].
++*   **Time Complexity:** Rendering is $O(M)$ per pixel, where $M$ is the number of Gaussians, similar to standard 3DGS. Optimization involves densification steps which increase $M$ over time.
++*   **Memory Complexity:** Stores $M$ Gaussians, each with position (3), density (1), rotation (9), and scale (9) parameters, totaling roughly 22 floats per Gaussian.
++*   **Performance:** The method is designed for tomographic reconstruction. It is faster than concurrent work using simplified isotropic Gaussians due to the use of general anisotropic covariance [S1]. The radiative Gaussian point cloud variant is faster than original 3DGS by avoiding spherical harmonics [S2].
++*   **Strengths:** Enables differentiable tomographic reconstruction; allows extraction of 3D density volumes; handles anisotropic structures better than isotropic variants [S1].
++*   **Limitations:** Does not explicitly model physical effects like Compton scattering, treating them as noise [S1]; standard 3DGS opacity is not suitable for mesh extraction, though radiative Gaussians address this by using density [S1].
++*   **When to use:** When the goal is tomographic reconstruction from X-ray projections or novel view synthesis of X-ray data [S1, S2].
++*   **When not to use:** When view-dependent appearance (e.g., specular highlights) is required for visible light rendering [S1].
+ 
+ ## Background
+-Radiative Gaussian Splatting was introduced to address the limitations of standard 3DGS in tomographic reconstruction [S1]. Standard 3DGS uses view-dependent color and opacity, which are inappropriate for X-ray imaging where attenuation depends on isotropic density [S1]. The method was developed to provide a flexible kernel-based representation using general anisotropic Gaussians, offering more precision than simplified isotropic approaches [S1]. It builds on the 3DGS framework [23] but adapts the rasterization and optimization for X-ray physics [S1].
++Radiative Gaussian Splatting was introduced to bridge the gap between differentiable rendering and tomographic reconstruction [S1]. Standard 3DGS uses view-dependent color and opacity, which are not physically meaningful for X-ray attenuation that depends on isotropic density [S1]. The method was developed to allow the use of efficient Gaussian splatting rasterization for X-ray data, enabling both 2D image rendering and 3D volume reconstruction [S1]. It builds on the 3DGS framework [23] but modifies the attribute representation and loss functions [S1].
+ 
+ ## Sources

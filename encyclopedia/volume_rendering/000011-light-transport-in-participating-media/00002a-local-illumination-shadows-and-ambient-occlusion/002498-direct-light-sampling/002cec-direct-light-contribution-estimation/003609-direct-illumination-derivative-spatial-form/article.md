@@ -1,18 +1,18 @@
 # Direct Illumination Derivative (Spatial Form)
-Also called: Differential Direct Illumination, Spatial-form direct-illumination integral derivative
+Also called: Differential Direct Illumination, Spatial-form direct-illumination integral derivative [S1, unofficial]
 
 ## Overview
-This method computes the derivative of the direct illumination integral with respect to scene parameters $\pi$ by differentiating the surface integral directly over the evolving surface geometry. It is distinguished from the Material-Form variant by integrating over the physical surface domain $L(\pi)$, which depends on $\pi$, thereby requiring the estimation of a boundary term that accounts for the motion of the integration domain's edge.
+This method computes the derivative of the direct illumination integral with respect to scene parameters $\pi$ by differentiating the surface integral directly over the evolving surface geometry [S1, unofficial]. It is distinguished from the Material-Form variant by integrating over the physical surface domain $L(\pi)$, which depends on $\pi$, thereby requiring the estimation of a boundary term that accounts for the motion of the integration domain's edge [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Scene parameter $\pi$; fixed observer points $\boldsymbol{y}, \boldsymbol{y}' \in M_{obj}$; surface $L(\pi)$ emitting/reflecting light.
-*   **Output:** $\frac{\partial I_{direct}}{\partial \pi}$, the derivative of direct illumination.
+*   **Input:** Scene parameter $\pi$; fixed observer points $\boldsymbol{y}, \boldsymbol{y}' \in M_{obj}$; surface $L(\pi)$ emitting/reflecting light [S1, unofficial].
+*   **Output:** $\frac{\partial I_{direct}}{\partial \pi}$, the derivative of direct illumination [S1, unofficial].
 
 **Data Structures:**
-*   Surface parameterization $\boldsymbol{x}(\boldsymbol{u})$ for $\boldsymbol{u} \in D \subset \mathbb{R}^2$.
-*   Geometric term $G(\boldsymbol{x} \leftrightarrow \boldsymbol{y})$.
-*   Visibility function $V(\boldsymbol{x}, \boldsymbol{y})$.
+*   Surface parameterization $\boldsymbol{x}(\boldsymbol{u})$ for $\boldsymbol{u} \in D \subset \mathbb{R}^2$ [S1, unofficial].
+*   Geometric term $G(\boldsymbol{x} \leftrightarrow \boldsymbol{y})$ [S1, unofficial].
+*   Visibility function $V(\boldsymbol{x}, \boldsymbol{y})$ [S1, unofficial].
 
 **Assumptions:**
 1.  **A.1:** For all $\boldsymbol{x} \in L(\pi)$, there exists a surface parameterization such that $\boldsymbol{x}$ has zero tangential velocity with respect to $\pi$ [S1, unofficial].
@@ -20,31 +20,22 @@ This method computes the derivative of the direct illumination integral with res
 
 **Formulas:**
 The direct illumination integral in spatial form is defined as [S1, unofficial]:
-$$
-I_{direct} = \int_{L(\pi)} f_{direct}(\boldsymbol{x}) \, dA(\boldsymbol{x})
-$$
+$$I_{direct} = \int_{L(\pi)} f_{direct}(\boldsymbol{x}) \, dA(\boldsymbol{x})$$
 where
-$$
-f_{direct}(\boldsymbol{x}) := L_e(\boldsymbol{x} \to \boldsymbol{y}) f_s(\boldsymbol{x} \to \boldsymbol{y} \to \boldsymbol{y}') G(\boldsymbol{x} \leftrightarrow \boldsymbol{y})
-$$
+$$f_{direct}(\boldsymbol{x}) := L_e(\boldsymbol{x} \to \boldsymbol{y}) f_s(\boldsymbol{x} \to \boldsymbol{y} \to \boldsymbol{y}') G(\boldsymbol{x} \leftrightarrow \boldsymbol{y})$$
 and $G$ is the geometric term [S1, unofficial].
 
-Applying the transport relation (Eq. 11 in [S1, unofficial]) to the surface integral yields the derivative [S1, unofficial]:
-$$
-\frac{\partial I_{direct}}{\partial \pi} = \int_{L(\pi)} \frac{\partial f_{direct}}{\partial \pi} \, dA + \int_{\partial L(\pi)} f_{direct} \, V_{\partial L} \, d\ell
-$$
-where:
-*   The first term is the interior derivative.
-*   The second term is the boundary integral over $\partial L(\pi)$, the boundary of the evolving surface.
-*   $V_{\partial L}$ is the velocity of the boundary $\partial L(\pi)$ in the direction normal to the boundary within the surface [S1, unofficial].
+Applying the transport relation to the surface integral yields a derivative composed of an interior term and a boundary term [S1, unofficial]:
+$$\frac{\partial I_{direct}}{\partial \pi} = \int_{L(\pi)} \frac{\partial f_{direct}}{\partial \pi} \, dA + \int_{\partial L(\pi)} f_{direct} \, V_{\partial L} \, d\ell$$
+where the first term is the interior derivative, the second term is the boundary integral over $\partial L(\pi)$, and $V_{\partial L}$ is the velocity of the boundary $\partial L(\pi)$ in the direction normal to the boundary within the surface [S1, unofficial].
 
 **Steps:**
-1.  Evaluate the integrand $f_{direct}(\boldsymbol{x})$ at each point $\boldsymbol{x}$ on the surface $L(\pi)$.
-2.  Compute the partial derivative of the integrand with respect to $\pi$, $\frac{\partial f_{direct}}{\partial \pi}$, assuming fixed spatial coordinates (consistent with Assumption A.1).
-3.  Integrate $\frac{\partial f_{direct}}{\partial \pi}$ over the surface area $L(\pi)$.
-4.  Identify the boundary curve $\partial L(\pi)$ where the surface domain ends or changes topology.
-5.  Compute the boundary velocity $V_{\partial L}$ and integrate $f_{direct}$ along $\partial L(\pi)$ weighted by this velocity.
-6.  Sum the interior and boundary integrals to obtain the total derivative.
+1.  Evaluate the integrand $f_{direct}(\boldsymbol{x})$ at each point $\boldsymbol{x}$ on the surface $L(\pi)$ [S1, unofficial].
+2.  Compute the partial derivative of the integrand with respect to $\pi$, $\frac{\partial f_{direct}}{\partial \pi}$, assuming fixed spatial coordinates (consistent with Assumption A.1) [S1, unofficial].
+3.  Integrate $\frac{\partial f_{direct}}{\partial \pi}$ over the surface area $L(\pi)$ [S1, unofficial].
+4.  Identify the boundary curve $\partial L(\pi)$ where the surface domain ends or changes topology [S1, unofficial].
+5.  Compute the boundary velocity $V_{\partial L}$ and integrate $f_{direct}$ along $\partial L(\pi)$ weighted by this velocity [S1, unofficial].
+6.  Sum the interior and boundary integrals to obtain the total derivative [S1, unofficial].
 
 **Pitfalls:**
 *   Discontinuities in $f_{direct}$ arise from the geometric term $G$ due to discontinuous surface normals (sharp edges) and visibility boundaries (silhouette edges) [S1, unofficial].
@@ -53,17 +44,17 @@ where:
 ## Subtopics
 
 ### Material-Form Direct Illumination Integral
-This variant reformulates the integral over a reference configuration $B$ independent of $\pi$, using a Jacobian $J(\boldsymbol{p})$ to map to the physical surface. It allows differentiation using the Reynolds transport relation without estimating the costly boundary term of the spatial form, as the domain $B$ is static. It is chosen when the boundary term in the spatial form is prohibitive to compute [S1, unofficial].
+This variant reformulates the integral over a reference configuration $B$ independent of $\pi$, using a Jacobian $J(\boldsymbol{p})$ to map to the physical surface [S1, unofficial]. It allows differentiation using the Reynolds transport relation without estimating the costly boundary term of the spatial form, as the domain $B$ is static [S1, unofficial]. It is chosen when the boundary term in the spatial form is prohibitive to compute [S1, unofficial].
 
 ## Operating characteristics
-*   **Complexity:** The method requires evaluating a boundary integral over $\partial L(\pi)$. In complex scenes, identifying and integrating over this boundary is computationally expensive [S1, unofficial].
-*   **Strengths:** Directly differentiates the physical surface integral; conceptually straightforward for simple geometries.
+*   **Complexity:** The method requires evaluating a boundary integral over $\partial L(\pi)$ [S1, unofficial]. In complex scenes, identifying and integrating over this boundary is computationally expensive [S1, unofficial].
+*   **Strengths:** Directly differentiates the physical surface integral; conceptually straightforward for simple geometries [S1, unofficial].
 *   **Limitations:** The boundary term is difficult to estimate accurately and efficiently for complex, evolving surfaces with sharp edges or silhouette changes [S1, unofficial].
-*   **When to use:** Simple scenes where the boundary $\partial L(\pi)$ is easy to identify and integrate.
+*   **When to use:** Simple scenes where the boundary $\partial L(\pi)$ is easy to identify and integrate [S1, unofficial].
 *   **When not to use:** Complex scenes where the boundary term estimation cost is prohibitive; use the Material-Form variant instead [S1, unofficial].
 
 ## Background
-Originated in the context of path-space differentiable rendering, specifically in the work by Zhang, Miller, Yan, Gkioulekas, and Zhao (2020) [S1, unofficial]. It builds upon transport relations for surface integrals and addresses the challenges of differentiating integrals over domains that depend on parameters.
+Originated in the context of path-space differentiable rendering, specifically in the work by Zhang, Miller, Yan, Gkioulekas, and Zhao (2020) [S1, unofficial]. It builds upon transport relations for surface integrals and addresses the challenges of differentiating integrals over domains that depend on parameters [S1, unofficial].
 
 ## Sources
 [S1] Path-Space Differentiable Rendering, https://core.ac.uk/download/541724175.pdf, fetched 2026-10-29 (unofficial)
