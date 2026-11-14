@@ -1,0 +1,229 @@
+# Opacity-Weighted Trilinear Interpolation Volume Rendering
+
+Also called: Proposed visualization algorithm, Opacity-weighted color interpolation, Normal-vector-based lighting on resampled points
+
+## Overview
+Opacity-Weighted Trilinear Interpolation Volume Rendering is a direct volume ray casting method that improves visual accuracy and reduces computational cost by deferring lighting calculations to the resampling point rather than the voxel corners [S1]. Unlike standard methods that interpolate pre-shaded voxel colors (causing Mach band artifacts and color distortion at material interfaces), this method interpolates opacity, normals, and opacity-weighted material colors separately, then applies the Phong lighting model directly to the interpolated normal at the sample position [S1]. It is specifically designed to mitigate "color confusion" at multi-material interfaces where transparent media incorrectly influence voxel color values [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A 3D scalar volume grid $V$ where each voxel $j$ has a scalar value, a medium type, and associated optical properties (base material color $\mathbf{C}_m^j$, opacity $\alpha^j$, and gradient $\mathbf{F}^j$). Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), ray bounds $[t_{near}, t_{far}]$, and lighting parameters (light direction $\mathbf{L}$, half-vector $\mathbf{H}$, coefficients $k_a, k_d, k_s$, shininess $n$) [S1].
+*   **Output**: A 2D image where each pixel $(x,y)$ contains the accumulated color $\mathbf{C}_{out}$ [S1].
+
+**Data Structures**
+*   **Voxel Data**: For each voxel corner $j \in \{1, \dots, 8\}$ of the unit cube containing the sample point:
+    *   $\alpha^j$: Scalar opacity (range 0–1).
+    *   $\mathbf{C}_m^j$: RGB material color vector (range 0–1).
+    *   $\mathbf{F}^j$: 3D gradient vector (amplitude and direction) used for normal estimation.
+*   **Ray State**:
+    *   $\alpha_{acc}$: Accumulated opacity (scalar, initialized to 0).
+    *   $\mathbf{C}_{acc}$: Accumulated color (RGB vector, initialized to $(0,0,0)$).
+    *   $t$: Current ray parameter.
+
+**Numbered Steps**
+
+1.  **Initialization**: Read the volume data file to retrieve voxel scalar values, medium types, and derived properties ($\alpha^j, \mathbf{C}_m^j, \mathbf{F}^j$) for all voxels [S1]. Define the computational domain (ray bounds) for the current pixel [S1].
+2.  **Pixel Validation**: Check if the current pixel $(x,y)$ is valid. If not, skip to the next pixel [S1].
+3.  **Ray Marching Loop**: While the remaining transparency $(1 - \alpha_{acc})$ is greater than a threshold (e.g., $1/255$) and the ray is within bounds:
+    a.  **Sample Position**: Determine the resampling point $S$ on the ray at parameter $t$ [S1].
+    b.  **Identify Neighbors**: Identify the 8 surrounding voxel corners $j=1,\dots,8$ that enclose point $S$ [S1].
+    c.  **Opacity Interpolation**: Calculate the opacity $\alpha_S$ at $S$ using trilinear interpolation of the 8 voxel opacities [S1]:
+        $$ \alpha_S = f_{\text{Trilinear}}(\alpha^j_S) $$
+        where $f_{\text{Trilinear}}$ denotes the standard trilinear interpolation function over the 8 corners [S1].
+    d.  **Normal Vector Calculation**:
+        i.  Calculate the gradient $\mathbf{F}^j$ at each voxel corner $j$ (if not precomputed) [S1].
+        ii. Normalize the gradients: $\mathbf{n}^j = \text{normalize}(\mathbf{F}^j)$ [S1].
+        iii. Interpolate the normalized gradients using trilinear interpolation to get the raw normal at $S$: $\mathbf{N}_{raw}(S) = f_{\text{Trilinear}}(\mathbf{n}^j)$ [S1].
+        iv. Normalize the result to obtain the final normal vector $\mathbf{N}(S)$:
+            $$ \mathbf{N}(S) = \text{normalize}(\mathbf{N}_{raw}(S)) $$
+            [S1].
+    e.  **Opacity-Weighted Color Interpolation**: Calculate the material color $\tilde{\mathbf{C}}_m(S)$ at $S$ by first weighting each voxel's material color by its opacity, then interpolating [S1]:
+        $$ \tilde{\mathbf{C}}_m(S) = f_{\text{Trilinear}}(\alpha^j \mathbf{C}_m^j) $$
+        Note: The source formula uses $\alpha^j \mathbf{C}_m^j$ inside the interpolation function [S1]. This step ensures that transparent voxels contribute less to the color average, preventing "color confusion" at interfaces [S1].
+    f.  **Lighting Calculation**: Compute the shaded color $\tilde{\mathbf{C}}_a(S)$ at the resampling point $S$ using the Phong lighting model with the interpolated normal $\mathbf{N}(S)$ and the interpolated material color $\tilde{\mathbf{C}}_m(S)$ [S1]:
+        $$ \tilde{\mathbf{C}}_a(S) = (k_a + k_d (\mathbf{L}(S) \cdot \mathbf{N}(S))) \tilde{\mathbf{C}}_m(S) + k_s (\mathbf{H}(S) \cdot \mathbf{N}(S))^n $$
+        where:
+        *   $k_a, k_d, k_s$ are ambient, diffuse, and specular coefficients [S1].
+        *   $\mathbf{L}(S)$ is the light direction vector at $S$ [S1].
+        *   $\mathbf{H}(S)$ is the half-vector between the view direction and light direction at $S$ [S1].
+        *   $n$ is the shininess exponent [S1].
+    g.  **Compositing**: Accumulate the sample color into the pixel buffer using front-to-back compositing [S1]:
+        $$ \mathbf{C}_{acc} \leftarrow \mathbf{C}_{acc} + (1 - \alpha_{acc}) \cdot \tilde{\mathbf{C}}_a(S) \cdot \alpha_S $$
+        $$ \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha_S $$
+        [S1].
+    h.  **Advance Ray**: Increment $t$ by the step size $\Delta t$ [S1].
+4.  **Final Output**: Assign $\mathbf{C}_{acc}$ to the pixel color $\mathbf{C}_{out}$ [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def opacity_weighted_trilinear_volume_rendering(volume_data, camera, light_params, threshold=1/255):
+    """
+    volume_data: dict or object containing voxel properties.
+                 Access voxel j (corner of unit cube) properties:
+                 - alpha[j]: scalar opacity
+                 - color_m[j]: RGB vector (0-1)
+                 - grad[j]: 3D gradient vector
+    camera: object with method get_ray(x, y) -> (origin, direction)
+            and method get_bounds(ray) -> (t_near, t_far)
+    light_params: dict with keys 'ka', 'kd', 'ks', 'n', 'L', 'H'
+                  (L and H are vectors, potentially dependent on position)
+    threshold: float, early termination threshold for transparency
+    """
+    
+    # Helper: Trilinear interpolation of 8 values given weights w[0..7]
+    # w[i] is the weight of corner i. Sum of w[i] should be 1.0.
+    def trilinear_interpolate(values, weights):
+        result = 0.0
+        for i in range(8):
+            result += weights[i] * values[i]
+        return result
+
+    # Helper: Vector normalization
+    def normalize(v):
+        mag = sqrt(v.x**2 + v.y**2 + v.z**2)
+        if mag == 0:
+            return (0, 0, 0)
+        return (v.x/mag, v.y/mag, v.z/mag)
+
+    # Helper: Dot product
+    def dot(v1, v2):
+        return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z
+
+    # Helper: Vector addition
+    def add(v1, v2):
+        return (v1.x+v2.x, v1.y+v2.y, v1.z+v2.z)
+
+    # Helper: Scalar multiplication
+    def scale(v, s):
+        return (v.x*s, v.y*s, v.z*s)
+
+    # Helper: Vector subtraction
+    def sub(v1, v2):
+        return (v1.x-v2.x, v1.y-v2.y, v1.z-v2.z)
+
+    # Helper: Phong lighting
+    def phong_lighting(material_color, normal, L, H, ka, kd, ks, n):
+        # Diffuse term: kd * (L . N)
+        diff = kd * max(0, dot(L, normal))
+        # Specular term: ks * (H . N)^n
+        spec = ks * max(0, dot(H, normal))**n
+        # Ambient term: ka
+        ambient = ka
+        
+        # Total intensity
+        intensity = ambient + diff + spec
+        
+        # Apply to material color
+        return scale(material_color, intensity)
+
+    # Iterate over all pixels
+    for y in range(image_height):
+        for x in range(image_width):
+            # 1. Define Ray
+            origin, direction = camera.get_ray(x, y)
+            t_near, t_far = camera.get_bounds(origin, direction)
+            
+            # 2. Initialize Accumulators
+            acc_alpha = 0.0
+            acc_color = (0.0, 0.0, 0.0)
+            
+            # 3. Ray Marching Loop
+            t = t_near
+            while t < t_far and (1.0 - acc_alpha) > threshold:
+                
+                # Get sample position S
+                S = add(origin, scale(direction, t))
+                
+                # Find the 8 surrounding voxel corners and their weights
+                # This depends on the grid structure. Assuming a regular grid.
+                # voxel_coords: list of 8 voxel indices or coordinates
+                # weights: list of 8 interpolation weights (sum to 1)
+                voxel_corners, weights = get_surrounding_voxels_and_weights(S, volume_data.grid)
+                
+                # 4. Interpolate Opacity
+                alphas = [volume_data.get_alpha(vc) for vc in voxel_corners]
+                alpha_S = trilinear_interpolate(alphas, weights)
+                
+                # 5. Interpolate Normal
+                # Get gradients at corners
+                grads = [volume_data.get_grad(vc) for vc in voxel_corners]
+                # Normalize gradients first
+                norm_grads = [normalize(g) for g in grads]
+                # Interpolate normalized gradients
+                raw_normal_x = trilinear_interpolate([ng.x for ng in norm_grads], weights)
+                raw_normal_y = trilinear_interpolate([ng.y for ng in norm_grads], weights)
+                raw_normal_z = trilinear_interpolate([ng.z for ng in norm_grads], weights)
+                raw_normal = (raw_normal_x, raw_normal_y, raw_normal_z)
+                # Normalize result
+                normal_S = normalize(raw_normal)
+                
+                # 6. Interpolate Opacity-Weighted Color
+                # Get base material colors
+                base_colors = [volume_data.get_color_m(vc) for vc in voxel_corners]
+                # Weight each color by its opacity
+                weighted_colors = [scale(base_colors[i], alphas[i]) for i in range(8)]
+                # Interpolate the weighted colors
+                interp_color_x = trilinear_interpolate([wc.x for wc in weighted_colors], weights)
+                interp_color_y = trilinear_interpolate([wc.y for wc in weighted_colors], weights)
+                interp_color_z = trilinear_interpolate([wc.z for wc in weighted_colors], weights)
+                material_color_S = (interp_color_x, interp_color_y, interp_color_z)
+                
+                # 7. Lighting Calculation
+                # Get light vectors at S (assuming they might vary, e.g., point light)
+                L_S = light_params['L'] # Or computed from S
+                H_S = light_params['H'] # Or computed from S
+                
+                shaded_color_S = phong_lighting(
+                    material_color_S, 
+                    normal_S, 
+                    L_S, 
+                    H_S, 
+                    light_params['ka'], 
+                    light_params['kd'], 
+                    light_params['ks'], 
+                    light_params['n']
+                )
+                
+                # 8. Compositing
+                # C_out += (1 - alpha_acc) * C_sample * alpha_sample
+                term = scale(shaded_color_S, (1.0 - acc_alpha) * alpha_S)
+                acc_color = add(acc_color, term)
+                acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha_S
+                
+                # Advance
+                t += volume_data.step_size
+                
+            # 9. Store Result
+            image[x, y] = acc_color
+
+    return image
+```
+
+**Parameters**
+*   **Viewport Size**: 800 × 800 pixels (used in the source implementation) [S1].
+*   **Light Source**: White point light source with unit intensity [S1].
+*   **RGB Range**: Simplified from 0–255 to 0–1 in the operation interface [S1].
+*   **Threshold**: $1/255$ for early termination based on remaining transparency [S1].
+*   **Lighting Coefficients**: $k_a, k_d, k_s$ (ambient, diffuse, specular) and $n$ (shininess) are used but specific values are not provided in the source notes, only that they are part of the Phong model [S1].
+
+**Edge Cases and Pitfalls**
+*   **Color Confusion**: In methods where voxel color is not opacity-weighted, transparent media influence voxel color too strongly, creating intermediate colors at material interfaces. This method avoids that by weighting colors by opacity before interpolation [S1].
+*   **Mach Bands**: Standard methods that interpolate shading values (pre-shaded colors) suffer from Mach band artifacts. This method avoids this by interpolating normals and colors separately, then applying lighting at the resampling point [S1].
+*   **Gradient Normalization**: The normal vector calculation requires normalizing the gradients of the 8 voxel corners *before* trilinear interpolation, and then normalizing the interpolated result again. Failure to normalize the interpolated result can lead to incorrect lighting directions [S1].
+
+## Operating characteristics
+*   **Computational Cost**: The method reduces lighting model calculations by 7 times compared to the "current method" (which calculates lighting 8 times per voxel for 8 corners), saving 85% of the calculation amount for the lighting part [S1]. The "current method" calculates lighting for each voxel corner, then interpolates the resulting colors. This method calculates lighting only once per sample point [S1].
+*   **Performance**: Implemented on a CPU single-thread (Intel Core i3-4010U) with AMD Radeon R5 M230 graphics [S1]. No other acceleration technologies (like GPU or early ray termination beyond the transparency threshold) were used in the cited experiment [S1].
+*   **Strengths**: Improves rendering accuracy, avoids color distortion and Mach band artifacts, and prevents color confusion at multi-material interfaces [S1].
+*   **Limitations**: The source notes do not provide specific timing benchmarks or memory complexity metrics beyond the relative reduction in lighting calculations [S1].
+
+## Background
+*   **Origin**: The method was proposed in a 2024 paper published in *AIP Advances* (DOI: 10.1063/5.0226283) [S1].
+*   **Context**: It was developed for the visualization of explosion field data, aiming to improve the accuracy of image rendering compared to existing volume rendering techniques that suffered from color distortion and artifacts [S1].
+*   **Comparison**: It is contrasted with a "current method" that interpolates shading values after voxel-level lighting, which causes Mach bands and color confusion [S1].
+
+## Sources
+[S1] A volume rendering visualization method oriented to explosion field features, https://doi.org/10.1063/5.0226283, fetched 2026-10-26

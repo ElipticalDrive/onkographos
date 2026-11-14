@@ -3,52 +3,66 @@
 Also called: Directed Distance Function, ray-query oracle
 
 ## Overview
-The Directed Distance Field (DDF) is a neural field that maps a ray (defined by origin $\mathbf{x}$ and direction $\mathbf{d}$) to the distance $t$ to the first surface along $\mathbf{d}$ and a visibility value $\xi$ [S1, unofficial]. It serves as a constant-time, constant-memory ray oracle for secondary rays (shadows, ambient occlusion, global illumination) in 3D Gaussian Splatting scenes, eliminating the need for mesh extraction or BVH traversal [S1, unofficial]. Unlike BVH-based Gaussian tracing, which scales linearly with scene size, or sphere-traced Signed Distance Fields (SDFs), which require iterative evaluations, the DDF answers any ray query in a single forward pass with fixed memory usage [S1, unofficial].
+The Directed Distance Field (DDF) is a neural implicit representation that serves as a constant-time, constant-memory ray oracle for 3D Gaussian Splatting (3DGS) scenes [S1, unofficial]. It maps a ray (defined by origin $\mathbf{x}$ and direction $\mathbf{d}$) to the distance $t$ to the first surface and a visibility probability $\xi$, enabling secondary ray queries such as shadows, ambient occlusion, and global illumination without iterative sphere tracing or bounding volume hierarchy (BVH) traversal [S1, unofficial]. Unlike sibling methods that scale with the number of Gaussians, the DDF’s query cost and memory footprint remain flat regardless of scene size, making it suitable for large-scale captures where traditional ray-tracing primitives become prohibitive [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** Ray origin $\mathbf{x} \in \mathbb{R}^3$ and unit direction $\mathbf{d} \in S^2$.
-*   **Output:** Tuple $(t, \xi)$, where $t$ is the distance to the first surface and $\xi \in [0, 1]$ is the probability that the ray hits the scene [S1, unofficial]. The hit point is $\mathbf{x} + t\mathbf{d}$ when $\xi$ is high [S1, unofficial].
 
-**Data Structures**
-The DDF is implemented as a neural network with a fixed memory footprint of approximately 52 MB, independent of the number of Gaussians [S1, unofficial].
+### Inputs and Outputs
+*   **Input:** A ray defined by origin $\mathbf{x} \in \mathbb{R}^3$ and unit direction $\mathbf{d} \in S^2$.
+*   **Output:** A tuple $(t, \xi)$, where $t \in \mathbb{R}^+$ is the distance to the first surface along $\mathbf{d}$, and $\xi \in [0, 1]$ is the probability that the ray intersects the scene geometry [S1, unofficial]. The hit point is computed as $\mathbf{x} + t\mathbf{d}$ when $\xi$ is high [S1, unofficial].
+
+### Data Structures
+The DDF is implemented as a neural field with a fixed memory footprint of approximately 52 MB, independent of the number of Gaussians in the scene [S1, unofficial].
+
 1.  **Multiresolution Hash Grid (Point Encoding):**
-    *   Levels: 16
-    *   Features per level: 2
-    *   Entries per level: $2^{19}$ (524,288)
-    *   Base resolution: 16
-    *   Growth factor: 1.5
-    *   Bounding box: Normalized object box [S1, unofficial].
-    *   Parameter count: ~13 million [S1, unofficial].
+    *   **Structure:** A hash table mapping coordinate features to a latent vector.
+    *   **Levels:** 16 levels.
+    *   **Entries per Level:** $2^{19}$ (524,288).
+    *   **Base Resolution:** 16.
+    *   **Growth Factor:** 1.5.
+    *   **Features per Entry:** 2 (concatenated into a 2D vector per level).
+    *   **Bounding Box:** A normalized box bounding the object/scene.
+    *   **Parameter Count:** ~13 million parameters.
 2.  **Directional Encoding:**
-    *   Four sinusoidal bands [S1, unofficial].
-3.  **MLP (Network):**
-    *   Architecture: Two-layer MLP
-    *   Width: 64
-    *   Input: Concatenated hash grid features and directional encoding.
-    *   Output: Scalar $t$ and scalar $\xi$.
-    *   Parameter count: ~8,000 [S1, unofficial].
+    *   **Method:** Sinusoidal positional encoding.
+    *   **Bands:** 4 sinusoidal bands.
+3.  **Multilayer Perceptron (MLP):**
+    *   **Architecture:** 2 layers.
+    *   **Width:** 64 neurons per layer.
+    *   **Input:** Concatenated hash grid features (from point $\mathbf{x}$) and directional encoding (from $\mathbf{d}$).
+    *   **Output:** Two scalars: distance $t$ and visibility $\xi$.
+    *   **Parameter Count:** ~8,000 parameters.
 
-**Training Procedure**
-The DDF is trained using Adam optimizer for 30,000 steps with a batch size of 16,384 rays [S1, unofficial].
-*   **Learning Rate:** $3 \times 10^{-3}$, decayed by cosine schedule to 5% of initial value [S1, unofficial].
-*   **Loss Function:**
-    $$L = \text{ClampedL1}(t_{pred}, t_{target}) + 0.3 \cdot \text{BCE}(\xi_{pred}, \xi_{target})$$
-    The L1 term is clamped to a maximum value (box scale) to prevent far-away surfaces from dominating the loss [S1, unofficial].
-*   **Self-Consistency Loss:** To sharpen thin features, for a ray hitting at distance $t$, a point is sampled shifted forward by distance $s$ along the ray. The DDF evaluated at this shifted point must predict distance $t-s$ [S1, unofficial]. 30% of each training batch consists of these ray-march shifted points [S1, unofficial].
-*   **Supervision Sources:**
-    1.  **GS-Rendered Depth:** Provides primary camera rays. However, this supervision is blurry and loses thin features (e.g., mug handles, animal legs) because narrow structures are averaged away in soft Gaussians [S1, unofficial].
-    2.  **Clean Distance Supervision:** Obtained by sphere-tracing a neural surface (e.g., NeuS) fit to the images or ray-casting ground-truth meshes. This recovers thin geometry significantly better than GS depth [S1, unofficial].
-    3.  **Secondary Rays:** Rays starting on the surface and pointing in various directions are used to teach visibility for shadows and ambient occlusion [S1, unofficial].
-    *   *Note:* Learning directly from images via volume-rendering color loss does not help recover thin parts, as most sampled rays land on background and the gradient signal is weak [S1, unofficial]. Step-by-step tracing supervision is unstable due to sequential gradient issues [S1, unofficial].
+### Training Procedure
 
-**Querying (Inference)**
-Inference uses reduced precision and a compiled forward pass [S1, unofficial].
-1.  **Primary Ray:** Evaluate $f(\mathbf{x}, \mathbf{d})$ at the camera origin to get distance and visibility.
-2.  **Shadow Ray:** Offset a surface point along its normal, evaluate $f$ toward the light source. If the returned hit distance is less than the distance to the light, the point is in shadow [S1, unofficial].
-3.  **Ambient Occlusion:** Evaluate $f$ along a set of directions over the hemisphere and average the hit flag $\xi$ [S1, unofficial]. This requires a constant number of evaluations per ray, unlike sphere tracing which requires many steps [S1, unofficial].
+#### Supervision Data
+The DDF is trained using samples of the form $(\mathbf{x}, \mathbf{d}, t_{target}, \xi_{target})$. Three sources of supervision are used [S1, unofficial]:
+1.  **GS-Rendered Depth:** Primary rays from the camera provide coarse depth targets.
+2.  **Neural Surface Sphere Tracing:** A neural surface (e.g., NeuS) fit to the same images is sphere-traced to provide clean distance targets, which recover thin features lost in Gaussian depth.
+3.  **Ground-Truth Mesh Ray-Casting:** For evaluation or upper-bound training, rays are cast against ground-truth meshes.
 
-**Pseudocode**
+Additionally, **Self-Consistency Loss** is applied to sharpen thin features. For a ray hitting at distance $t$, a point shifted forward by distance $s$ along the ray is sampled. The DDF evaluated at this shifted point must predict distance $t-s$ [S1, unofficial].
+
+#### Loss Function
+The total loss $L$ is a combination of distance and visibility terms [S1, unofficial]:
+
+$$ L = \text{ClampedL1}(t_{pred}, t_{target}) + \lambda \cdot \text{BCE}(\xi_{pred}, \xi_{target}) $$
+
+*   $\text{ClampedL1}$: L1 loss on distance, clamped to a maximum value (box scale) to prevent far-away surfaces from dominating.
+*   $\text{BCE}$: Binary Cross-Entropy loss on the hit flag $\xi$.
+*   $\lambda$: Weight for the visibility loss, set to 0.3.
+
+#### Optimization Parameters
+*   **Optimizer:** Adam.
+*   **Batch Size:** 16,384 rays.
+*   **Learning Rate:** $3 \times 10^{-3}$, decayed by cosine schedule to 5% of initial value.
+*   **Training Steps:** 30,000.
+*   **Data Augmentation:** 30% of each batch is replaced with ray-march shifted points for self-consistency supervision.
+*   **Hardware:** Single NVIDIA A100 GPU.
+*   **Inference:** Reduced precision with a compiled forward pass (e.g., via `tinycudann`) [S1, unofficial].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -56,199 +70,183 @@ import torch
 import torch.nn as nn
 import math
 
-class DDF:
-    def __init__(self, num_levels=16, features_per_level=2, 
-                 num_entries=2**19, base_resolution=16, growth_factor=1.5, 
-                 mlp_width=64, num_dir_bands=4):
+class DirectedDistanceField:
+    """
+    Implementation of the Directed Distance Field (DDF) for Gaussian Splatting.
+    Maps ray origin x and direction d to distance t and visibility xi.
+    """
+    def __init__(self, num_levels=16, level_size=2**19, base_resolution=16, 
+                 growth_factor=1.5, features_per_level=2, num_directional_bands=4, 
+                 mlp_width=64, mlp_layers=2):
         """
-        Initializes the Directed Distance Field.
+        Initialize the DDF network.
         """
+        super().__init__()
         self.num_levels = num_levels
+        self.level_size = level_size
         self.features_per_level = features_per_level
-        self.num_entries = num_entries
-        self.base_resolution = base_resolution
-        self.growth_factor = growth_factor
+        self.num_directional_bands = num_directional_bands
         self.mlp_width = mlp_width
-        self.num_dir_bands = num_dir_bands
+        self.mlp_layers = mlp_layers
         
-        # Multiresolution Hash Grid Encoding (simplified representation)
-        # In practice, this uses a hash table mapping coordinates to feature vectors.
-        # Here we simulate the structure for clarity of dimensions.
-        # Total parameters: num_levels * num_entries * features_per_level
-        self.hash_grid = nn.Embedding(num_levels * num_entries, features_per_level)
-        
-        # Directional Encoding: Sinusoidal bands
-        # Input dim: 3 (x,y,z) -> Output dim: 2 * num_dir_bands * 3
-        self.dir_encoding_dim = 2 * num_dir_bands * 3
-        
-        # MLP: Input = (features_per_level * num_levels) + dir_encoding_dim
-        input_dim = (features_per_level * num_levels) + self.dir_encoding_dim
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, mlp_width),
-            nn.ReLU(),
-            nn.Linear(mlp_width, mlp_width),
-            nn.ReLU(),
-            nn.Linear(mlp_width, 2) # Output: t, xi
+        # Multiresolution Hash Grid Encoding
+        # Note: In practice, this uses a CUDA kernel (e.g., tinycudann) for 
+        # efficient hashing and interpolation. Here we simulate the structure.
+        self.hash_grid = nn.EmbeddingBag(
+            num_embeddings=num_levels * level_size, 
+            embedding_dim=features_per_level, 
+            mode='sum'
         )
         
-    def encode_direction(self, d):
-        """
-        Encodes direction d using sinusoidal bands.
-        d: (..., 3)
-        """
-        # Standard positional encoding for directions
-        # freq_bands = 1, 2, 4, 8 (4 bands)
-        # For each band b, sin(2^b * pi * d) and cos(2^b * pi * d)
-        bands = torch.tensor([1.0, 2.0, 4.0, 8.0], device=d.device)
-        scaled_d = d.unsqueeze(-1) * (bands * math.pi).unsqueeze(0) # (..., 3, 4)
-        sin_vals = torch.sin(scaled_d)
-        cos_vals = torch.cos(scaled_d)
-        encoded = torch.cat([sin_vals, cos_vals], dim=-1) # (..., 3, 8)
-        return encoded.flatten(start_dim=-2) # (..., 24)
-
-    def encode_point(self, x):
-        """
-        Encodes point x using multiresolution hash grid.
-        x: (..., 3)
-        Returns: (..., num_levels * features_per_level)
-        """
-        # Normalize x to [0, 1] range for grid indexing
-        # In the actual implementation (tinycudann), this involves hashing 
-        # coordinates to table indices and interpolating.
-        # Here we assume a placeholder for the hash grid lookup logic.
-        # The hash grid maps 3D coordinates to feature vectors across 16 levels.
+        # Directional Encoding (Sinusoidal)
+        # 4 bands means 8 frequencies (sin/cos) per dimension? 
+        # Source says "4 sinusoidal bands". Typically implies 4 frequencies.
+        # Assuming standard positional encoding: 2 * num_bands * 3 dims = 24 features.
+        # However, source says "4 sinusoidal bands" for direction. 
+        # We will assume a standard sinusoidal encoder for 3D direction.
+        self.directional_encoder = SinusoidalEncoder(bands=num_directional_bands)
         
-        # Simplified: Assume we have a function that returns features for each level
-        # Real implementation requires CUDA kernels for hash table access.
-        # We simulate the output shape.
-        # Let's assume we have a dummy lookup for the sake of valid Python structure
-        # representing the dimensionality.
-        
-        # Note: In a real implementation, this would call the tinycudann hash grid.
-        # We cannot implement the actual hash table in pure Python efficiently,
-        # but we define the interface.
-        
-        # For the purpose of this article, we assume `hash_grid_lookup` exists
-        # and returns the concatenated features from all levels.
-        features = self.hash_grid_lookup(x) 
-        return features
-
-    def hash_grid_lookup(self, x):
-        """
-        Placeholder for the actual multiresolution hash grid lookup.
-        In the source [S1, unofficial], this is implemented via tinycudann.
-        It returns a tensor of shape (..., 16 * 2) = (..., 32).
-        """
-        # This function would interface with the C++/CUDA hash grid.
-        # We return a dummy tensor of the correct shape to ensure the code 
-        # is structurally valid Python, though it does not perform the 
-        # actual neural field computation.
-        batch_size = x.shape[:-1]
-        return torch.zeros(*batch_size, self.num_levels * self.features_per_level, device=x.device)
+        # MLP
+        layers = []
+        input_dim = (num_levels * features_per_level) + self.directional_encoder.output_dim
+        for i in range(mlp_layers):
+            layers.append(nn.Linear(input_dim, mlp_width))
+            layers.append(nn.ReLU())
+            input_dim = mlp_width
+        layers.append(nn.Linear(mlp_width, 2)) # Output: t, xi
+        self.mlp = nn.Sequential(*layers)
 
     def forward(self, x, d):
         """
-        Forward pass of the DDF.
-        x: (..., 3) Ray origins
-        d: (..., 3) Ray directions (unit vectors)
-        Returns: t (distance), xi (visibility)
+        Query the DDF.
+        Args:
+            x: Tensor of shape (N, 3), ray origins.
+            d: Tensor of shape (N, 3), ray directions (unit vectors).
+        Returns:
+            t: Tensor of shape (N,), distance to surface.
+            xi: Tensor of shape (N,), visibility probability.
         """
-        # 1. Encode direction
-        d_enc = self.encode_direction(d)
+        # 1. Encode Point x using Multiresolution Hash Grid
+        # The hash grid maps coordinates to features across multiple resolutions.
+        # For implementation, this typically involves:
+        # - Normalizing x to [0, 1] or within the bounding box.
+        # - For each level l, computing grid coordinates and hashing to table index.
+        # - Interpolating features from the 8 corners of the grid cell.
+        # - Summing/concatenating features from all levels.
+        # 
+        # Since standard PyTorch does not have a built-in multiresolution hash grid,
+        # we assume a helper function `hash_grid_encode` exists or is implemented 
+        # via CUDA. Here we denote the output feature vector.
+        point_features = hash_grid_encode(x, self.num_levels, self.level_size, 
+                                          self.features_per_level, self.base_resolution, 
+                                          self.growth_factor)
         
-        # 2. Encode point
-        x_enc = self.encode_point(x)
+        # 2. Encode Direction d using Sinusoidal Bands
+        direction_features = self.directional_encoder(d)
         
-        # 3. Concatenate features
-        combined = torch.cat([x_enc, d_enc], dim=-1)
+        # 3. Concatenate Features
+        combined_features = torch.cat([point_features, direction_features], dim=-1)
         
         # 4. Pass through MLP
-        out = self.mlp(combined)
+        output = self.mlp(combined_features)
         
         # 5. Extract t and xi
-        t = out[..., 0]
-        xi = torch.sigmoid(out[..., 1]) # Ensure xi is in [0, 1]
+        t = output[:, 0]
+        xi = torch.sigmoid(output[:, 1]) # Ensure xi is in [0, 1]
         
         return t, xi
 
-    def compute_loss(self, t_pred, t_target, xi_pred, xi_target):
-        """
-        Computes the training loss.
-        """
-        # Clamped L1 loss for distance
-        # Clamp to box scale (assumed to be 1.0 for normalized object)
-        max_dist = 1.0
-        l1_loss = torch.clamp(torch.abs(t_pred - t_target), max=max_dist).mean()
-        
-        # Binary Cross Entropy for visibility
-        bce_loss = nn.functional.binary_cross_entropy(xi_pred, xi_target)
-        
-        # Weighted sum
-        loss = l1_loss + 0.3 * bce_loss
-        return loss
+class SinusoidalEncoder(nn.Module):
+    def __init__(self, bands=4):
+        super().__init__()
+        self.bands = bands
+        # 4 bands -> 4 frequencies. Each frequency has sin and cos.
+        # 3 dimensions * 4 frequencies * 2 (sin/cos) = 24 features.
+        self.output_dim = 3 * bands * 2
 
-    def query_shadow(self, surface_point, normal, light_direction, light_distance):
-        """
-        Queries if a point is in shadow.
-        """
-        # Offset surface point along normal
-        offset_point = surface_point + normal * 1e-3
-        
-        # Evaluate DDF towards light
-        t, xi = self.forward(offset_point, light_direction)
-        
-        # If hit distance is less than light distance, it's in shadow
-        is_shadow = (t < light_distance) & (xi > 0.5)
-        return is_shadow
+    def forward(self, x):
+        # x shape: (N, 3)
+        # Frequencies: 2^0, 2^1, 2^2, 2^3
+        frequencies = torch.tensor([2**i for i in range(self.bands)], dtype=x.dtype, device=x.device)
+        # Expand x to (N, 3, 1) and frequencies to (1, 1, bands)
+        # Result: (N, 3, bands)
+        scaled_x = x.unsqueeze(-1) * frequencies.unsqueeze(0).unsqueeze(0)
+        # Compute sin and cos
+        sin_vals = torch.sin(scaled_x)
+        cos_vals = torch.cos(scaled_x)
+        # Concatenate along last dim: (N, 3, 2*bands) -> (N, 6*bands)
+        encoded = torch.cat([sin_vals, cos_vals], dim=-1).view(x.shape[0], -1)
+        return encoded
 
-    def query_ao(self, surface_point, normal, num_samples=16):
-        """
-        Queries ambient occlusion.
-        """
-        # Generate random directions in hemisphere
-        # Simplified: assume we have a function to generate hemisphere samples
-        directions = sample_hemisphere(surface_point, normal, num_samples)
-        
-        # Evaluate DDF for each direction
-        t, xi = self.forward(surface_point.expand(num_samples, -1), directions)
-        
-        # Average hit flag
-        ao = xi.mean()
-        return ao
+def hash_grid_encode(x, num_levels, level_size, features_per_level, base_resolution, growth_factor):
+    """
+    Placeholder for the actual multiresolution hash grid encoding.
+    In the source, this is implemented via tinycudann or similar CUDA kernel.
+    This function simulates the output dimensionality.
+    """
+    # The output of the hash grid encoding is a vector of size:
+    # num_levels * features_per_level
+    # For the DDF: 16 levels * 2 features = 32 features.
+    # Note: The actual implementation involves hashing coordinates to indices 
+    # and interpolating between grid vertices.
+    N = x.shape[0]
+    # Return dummy features of the correct size for the MLP input
+    return torch.zeros(N, num_levels * features_per_level, device=x.device)
+
+def compute_loss(t_pred, xi_pred, t_target, xi_target, clamp_scale=1.0, lambda_bce=0.3):
+    """
+    Compute the DDF training loss.
+    """
+    # Clamped L1 loss on distance
+    l1_error = torch.abs(t_pred - t_target)
+    clamped_l1 = torch.clamp(l1_error, max=clamp_scale)
+    loss_l1 = torch.mean(clamped_l1)
+    
+    # BCE loss on visibility
+    loss_bce = torch.nn.functional.binary_cross_entropy(xi_pred, xi_target)
+    
+    # Total loss
+    loss = loss_l1 + lambda_bce * loss_bce
+    return loss
 ```
 
-## Subtopics
-
-### Supervision Strategies
-The choice of supervision (GS depth vs. clean neural surface distance) critically impacts the recovery of thin features. Clean distance supervision is required for thin geometry, while GS depth is insufficient [S1, unofficial].
-
-### Hash Grid vs. Sinusoidal Encoding
-Multiresolution hash grids significantly outperform sinusoidal MLPs in geometry reconstruction (Chamfer distance drop from 0.187 to 0.117) while reducing MLP parameters from 397k to 8k [S1, unofficial].
-
-### Mesh-Free Pipeline
-The DDF can be trained without ground-truth meshes by using a neural surface (e.g., NeuS) fit to images, achieving 75.5% shadow-ray agreement compared to 94.8% for mesh-trained upper bounds [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Thin Feature Loss:** Supervising solely on 3DGS-rendered depth blurs thin parts (e.g., mug handles, animal legs) because soft Gaussians average narrow structures. Clean distance supervision (from neural surfaces or meshes) is required to recover these features [S1, unofficial].
+*   **Compact Objects:** For compact objects where Gaussian depth already captures geometry, clean distance supervision may not help and can hurt if the sphere-traced point cloud is noisy, causing "fattening" [S1, unofficial].
+*   **Direct Image Supervision:** Learning directly from volume-rendered color loss does not recover thin parts because most sampled rays hit the background, providing a weak gradient signal for distance output [S1, unofficial].
+*   **Ray Origin Dependency:** The DDF is accurate primarily for ray origins on or near the surface. Rays starting far from the surface (e.g., ground plane below an object) may report false occlusion [S1, unofficial].
+*   **Ambient Occlusion Accuracy:** Ambient occlusion (21.3 dB) is weaker than shadows (30.3 dB) because averaging many rays accumulates small per-ray errors [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Constant time per ray query ($O(1)$). The DDF requires a single forward pass, whereas sphere tracing an SDF requires multiple iterations [S1, unofficial].
-*   **Memory Complexity:** Constant memory ($O(1)$) with respect to scene size. The DDF uses a fixed 52 MB regardless of the number of Gaussians [S1, unofficial].
-*   **Performance:**
-    *   **Speed:** 26 to 72 times faster than sphere tracing an equivalent neural SDF [S1, unofficial].
-    *   **Scaling:** Unlike BVH-over-Gaussians, DDF latency is flat as the number of Gaussians increases. BVH latency rises by ~9x from 5K to 1M Gaussians [S1, unofficial].
-    *   **Comparison to BVH:** On small scenes (< few thousand Gaussians), RT-core BVH is faster per ray. At real scene scales (hundreds of thousands to millions of Gaussians), DDF becomes competitive or faster, especially with CUDA-fused kernels (tinycudann) [S1, unofficial].
-    *   **Comparison to Rasterization:** For sparse queries (1K-10K rays), DDF is 600+ times faster than re-rasterizing. At full frame (1M rays), DDF ties rasterization (4.81 ms vs 4.45 ms) due to frame buffer write bounds [S1, unofficial].
-*   **Quality:**
-    *   **Shadows:** Reproduces reference ray-traced shadows at 30.3 dB [S1, unofficial].
-    *   **Ambient Occlusion:** Reproduces AO at 21.3 dB. AO is weaker than shadows because averaging many rays accumulates small per-ray errors [S1, unofficial].
-    *   **Geometry:** Clean distance supervision improves Chamfer distance from 0.082 to 0.065 (21% drop) compared to GS depth [S1, unofficial].
-*   **Strengths:** Constant time and memory, no mesh required, no RT-core hardware dependency, works for moving scenes [S1, unofficial].
-*   **Limitations:**
-    *   **Thin Features:** Requires clean distance supervision; GS depth blurs thin parts [S1, unofficial].
-    *   **AO Quality:** Weaker than shadows due to error accumulation [S1, unofficial].
-    *   **Generalization:** Accurate only for ray origins near the surface. Rays starting far from the surface (e.g., ground plane) may report false occlusion [S1, unofficial].
-    *   **Mesh-Free Limit:** Without a mesh, normals are soft, leading to gentler shading [S1, unofficial].
+
+### Time and Memory Complexity
+*   **Time Complexity:** $O(1)$ per ray query. The DDF requires a single forward pass through the network, regardless of the number of Gaussians $N$ [S1, unofficial].
+*   **Memory Complexity:** $O(1)$. The field size is fixed at ~52 MB, independent of scene size [S1, unofficial].
+
+### Measured Performance
+*   **Speed vs. SDF:** The DDF is 26 to 72 times faster than sphere tracing an equivalent neural Signed Distance Field (SDF) [S1, unofficial].
+*   **Speed vs. BVH:** 
+    *   On small scenes (few thousand Gaussians), an RT-core BVH is faster per ray due to hardware optimization.
+    *   On large scenes (hundreds of thousands to millions of Gaussians), the DDF becomes competitive or faster. At 1M Gaussians, the DDF (with `tinycudann`) achieves 0.005 µs/ray vs. 0.009 µs/ray for RT-core BVH [S1, unofficial].
+    *   BVH latency rises by ~9x from 5K to 1M Gaussians, while DDF latency remains flat [S1, unofficial].
+*   **Speed vs. Rasterization:** For sparse queries (1K-10K rays), the DDF is 600+ times faster than re-rasterizing with `gsplat`. At a full frame (1M rays), it ties rasterization (4.81 ms vs. 4.45 ms) because rasterization is bound by frame buffer writing [S1, unofficial].
+*   **Quality:** 
+    *   Shadows: 30.3 dB PSNR against reference ray tracer.
+    *   Ambient Occlusion: 21.3 dB PSNR.
+    *   Geometry: Chamfer distance improves from 0.082 to 0.065 (21% drop) with clean distance supervision [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** Constant time and memory; no RT-core hardware required; mesh-free pipeline; recovers thin features with clean supervision; scales to millions of Gaussians.
+*   **Limitations:** Ambient occlusion quality is lower than shadows; accuracy degrades for ray origins far from the training surface; mesh-free version is limited by the smoothness of the underlying neural surface [S1, unofficial].
 
 ## Background
-The Directed Distance Field (DDF) was introduced to address the limitation of 3D Gaussian Splatting (3DGS), which rasterizes images but cannot trace secondary rays for global illumination [S1, unofficial]. The method uses multiresolution hash grid encoding from [8] (tinycudann) to create a compact neural field [S1, unofficial]. It enables a mesh-free pipeline for global illumination in Gaussian Splatting scenes, distilling the scene geometry into a constant-time ray oracle [S1, unofficial].
+
+### Origin and History
+The Directed Distance Field for Gaussian Splatting was introduced in the paper "Directed Distance Fields for Constant-Time Ray Queries on Gaussian Splatting" [S1, unofficial]. It addresses the limitation of 3DGS rasterization, which only supports camera rays, by distilling the Gaussian scene into a neural field that acts as a secondary-ray oracle. The method utilizes multiresolution hash grid encoding from `tinycudann` [S1, unofficial] to achieve high performance and compact memory usage.
+
+### Usage
+The DDF is used as a secondary-ray oracle for global illumination tasks, including shadows and ambient occlusion, in 3D Gaussian Splatting renderers. It enables mesh-free pipelines where geometry is inferred directly from images via Gaussian splatting and neural surface fitting, avoiding the need for explicit mesh reconstruction [S1, unofficial].
 
 ## Sources
+
 [S1] Directed Distance Fields for Constant-Time Ray Queries on Gaussian Splatting, https://arxiv.org/abs/2606.00817v1, fetched 2026-10-26 (unofficial)

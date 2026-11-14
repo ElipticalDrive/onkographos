@@ -1,0 +1,110 @@
+# Color and Normal Weighted Interpolation
+
+Also called: Volume rendering method based on color weighted interpolation and normal vector interpolation
+
+## Overview
+Color and Normal Weighted Interpolation is a volume rendering technique designed to reduce per-resampling-point computational cost by minimizing expensive lighting calculations and relying on interpolated attributes [S1]. It solves the problem of high computational load in direct volume ray casting, specifically for visualizing complex explosion fields and shock waves, by reducing the number of lighting operations from eight to one per sample point [S1]. Unlike standard trilinear interpolation which may suffer from interface color confusion, this method improves display accuracy of microstructures and corrects interface artifacts without affecting the rendering of translucent media [S1].
+
+## How it works
+The method operates on the principle that a continuous function must be approximated from discrete samples, but optimizes the evaluation pipeline by decoupling lighting from interpolation [S1].
+
+**Inputs and Outputs**
+*   **Input**: A 3D data field containing multiple media types (e.g., steel bars, projectiles, air, concrete) represented by discrete grid values. The data field is mapped to a coordinate system for ray casting.
+*   **Output**: A 2D image with corrected interface colors and accurate microstructure display [S1].
+
+**Data Structures**
+The source describes a data field with dimensions such as $439 \times 439 \times 439$ [S1]. The data contains media type identifiers:
+*   Media Type 1: Steel bars
+*   Media Type 2: Projectile
+*   Media Type 3: Air
+*   Media Type 4: Concrete [S1]
+
+**Parameters**
+*   **Default Opacities**: Air = 0, Projectile = 1.0, Steel bars = 1.0, Concrete = adjustable [S1].
+*   **Evaluation Metrics**: Image mean ($U$), standard deviation ($Std$), image entropy ($H$), and mean gradient ($G$) are used to quantitatively analyze visual quality [S1].
+
+**Algorithm Steps**
+For each resampling point along the ray, the method performs three sequential calculations: transfer function calculation, lighting model calculation, and interpolation calculation [S1].
+
+1.  **Lighting Calculation Limit**: The method restricts the lighting model calculation to exactly one operation per resampling point. This is a significant reduction from previous methods that required eight lighting calculations [S1].
+2.  **Interpolation Operations**: The method performs exactly seven interpolation operations per resampling point. These interpolations cover:
+    *   Color
+    *   Opacity
+    *   Normal vector [S1]
+3.  **Transfer Function**: Applied to map the interpolated scalar/vector attributes to color and opacity values [S1].
+
+**Pseudocode**
+The following pseudocode illustrates the per-resampling point logic described in the source. Note that specific interpolation kernels (e.g., trilinear vs. weighted) are not detailed in the source beyond the count of operations, so the interpolation step is generalized based on the stated requirements [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_resampling_point(ray_origin, ray_direction, grid_data, transfer_function):
+    """
+    Renders a single resampling point using Color and Normal Weighted Interpolation.
+    
+    Args:
+        ray_origin: 3D vector, origin of the ray.
+        ray_direction: 3D vector, direction of the ray.
+        grid_data: Structure containing the 3D volume data (e.g., 439x439x439).
+        transfer_function: Function mapping scalar/vector inputs to color/opacity.
+        
+    Returns:
+        color: 3D vector, final color for this sample.
+        opacity: float, final opacity for this sample.
+    """
+    # 1. Determine resampling position along the ray
+    # [G] Standard ray marching step; specific step size not given in source.
+    position = ray_origin + ray_direction * step_size
+    
+    # 2. Perform exactly seven interpolation operations
+    # The source specifies interpolations for color, opacity, and normal vector.
+    # [G] The exact weighting function for "Color and Normal Weighted Interpolation" 
+    # is not explicitly defined in the provided text, only the count of operations.
+    # We assume standard weighted interpolation based on distance to grid nodes.
+    
+    # Interpolate Normal Vector (1 operation implied or part of the 7)
+    # [G] Source states "seven interpolation operations... covering color, opacity, normal vector".
+    # It does not specify the exact breakdown (e.g., 3 for color, 1 for opacity, 3 for normal).
+    # We perform the interpolations as a block.
+    interpolated_color = interpolate_attribute(position, grid_data, attribute_type='color')
+    interpolated_opacity = interpolate_attribute(position, grid_data, attribute_type='opacity')
+    interpolated_normal = interpolate_attribute(position, grid_data, attribute_type='normal')
+    
+    # [G] The source mentions "Color weighted interpolation and normal vector interpolation".
+    # This implies the weights might be derived from color or normal similarity, 
+    # but the exact formula is not provided. We proceed with the count constraint.
+    
+    # 3. Perform exactly one lighting model calculation
+    # [G] The specific lighting model (e.g., Phong, Blinn-Phong) is not named.
+    # We assume a standard lighting model using the interpolated normal.
+    lighting_value = calculate_lighting(interpolated_normal, ray_direction)
+    
+    # 4. Transfer function calculation
+    # [G] The transfer function maps the interpolated attributes and lighting to final color/opacity.
+    final_color, final_opacity = transfer_function(
+        interpolated_color, 
+        interpolated_opacity, 
+        lighting_value
+    )
+    
+    return final_color, final_opacity
+```
+
+**Edge Cases and Pitfalls**
+*   **Dynamic Simulation**: Continuous body rendering of multiple data files for animation remains slow. The method requires further efficiency improvements for dynamic simulation visualization [S1].
+*   **Large Data Sets**: Rendering a single 10-million-grid data file takes hundreds of seconds [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The method reduces computational load by limiting lighting calculations to one per resampling point and performing seven interpolations. Previous methods required eight lighting calculations [S1].
+*   **Measured Performance**: On an i3-4010U CPU (1.70 GHz, 8 GB RAM, R5 M230 GPU, Win7 64-bit), rendering times for five data groups ranged from 8.93 s to 144.00 s. This represents an improvement rate of 31% to 39% over the previous method [S1].
+*   **Resource Usage**: CPU occupancy is approximately 30% and memory occupancy is approximately 60% during cut-away map drawing and visualization angle rotation [S1].
+*   **Scalability**: Rendering time increases smoothly with file size and number of meshes (tens of thousands to tens of millions). The method shows scalability potential for larger datasets [S1].
+*   **Strengths**: Improves visualization efficiency without GPU acceleration or parallel computing. Corrects interface color confusion and improves microstructure display accuracy [S1].
+*   **Limitations**: Still slow for continuous animation of large datasets (hundreds of seconds per 10-million-grid file). Requires further efficiency improvements for dynamic simulation [S1].
+
+## Background
+The method was proposed in a 2024 study published in *AIP Advances* [S1]. It was developed to address the visualization needs of explosion field computational domains, specifically for phenomena such as rigid projectile penetration into reinforced concrete, concrete splashing, and stress wave propagation [S1]. The method was evaluated using objective indicators (image mean, standard deviation, entropy, mean gradient) and subjective visual effects [S1].
+
+## Sources
+[S1] A volume rendering visualization method oriented to explosion field features, https://doi.org/10.1063/5.0226283, fetched 2026-10-26

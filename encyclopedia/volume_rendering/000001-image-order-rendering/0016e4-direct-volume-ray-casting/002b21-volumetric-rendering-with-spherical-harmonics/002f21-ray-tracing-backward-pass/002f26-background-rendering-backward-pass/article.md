@@ -1,0 +1,157 @@
+# Background Rendering Backward Pass
+
+Also called: Background Backpropagation, Background Rendering Kernel (Backward)
+
+## Overview
+The Background Rendering Backward Pass computes the gradients for the background rendering component of a volume renderer, specifically backpropagating through the concentric sphere sampling and trilinear interpolation steps [S1, unofficial]. It handles RGB gradient normalization and accumulates gradients for the background voxel grid, ray origins/directions, and optionally sparsity losses [S2, unofficial]. It is distinct from the foreground ray tracing backward pass by operating on the background sphere samples rather than the scene geometry, and it serves as the final gradient accumulation step for rays that have fully transmitted through the foreground volume [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `grid`: Sparse voxel grid specification (`SparseGridSpec`) containing background color and density data [S1, unofficial].
+*   `rgb_gt`: Ground truth RGB tensor [S1, unofficial].
+*   `rgb_out`: Rendered output RGB tensor [S1, unofficial].
+*   `rays`: Ray specification (`RaysSpec`) containing ray origins, directions, and bounds [S1, unofficial].
+*   `opt`: Render options, including `use_background` flag and `grad_out_is_rgb` boolean [S1, S2, unofficial].
+*   `log_transmit`: Logarithm of accumulated transmittance per ray [S1, unofficial].
+*   `accum`: Accumulated color from foreground samples per ray [S1, unofficial].
+*   `sparsity_loss`: Boolean flag indicating if sparsity loss gradient should be computed [S1, unofficial].
+*   `grads`: Output tensor to store computed gradients [S1, unofficial].
+
+**Outputs:**
+*   Gradients for the background grid data (color and sigma/density) stored in `grads` [S1, unofficial].
+
+### Data Structures
+*   `SparseGridSpec`: Defines the layout of the sparse voxel grid. The exact internal layout is not specified in the sources, but it supports trilinear interpolation (`trilerp`) and its backward variant (`trilerp_backward_bg_one`) [S1, unofficial].
+*   `SingleRaySpec`: A structure created to hold ray-specific data (origin, direction, bounds) for the background backward function [S2, unofficial].
+
+### Parameters
+*   `use_background`: Boolean flag controlling whether the background rendering backward pass is executed [S1, unofficial].
+*   `TRACE_RAY_BG_CUDA_THREADS`: Number of CUDA threads per block for the background rendering kernel. Typical value is not explicitly given, but block sizing uses `CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_BG_CUDA_THREADS)` where `Q` is the number of rays [S1, unofficial].
+*   `grad_out_is_rgb`: Boolean flag determining if the gradient output is an RGB residual or a direct gradient [S2, unofficial].
+*   `sparsity_loss`: Boolean flag to enable Cauchy sparsity loss gradient calculation [S1, unofficial].
+
+### Steps
+1.  **Initialization**: Initialize `total_color = 0` [S1, unofficial].
+2.  **Early Exit Check**: For each ray identified by `ray_id`, check if `log_transmit[ray_id] < -25.0`. If true, the thread returns early, as the ray is effectively fully occluded or transparent [S1, S2, unofficial].
+3.  **Gradient Output Calculation**:
+    *   Calculate the residual: `resid = rgb_gt - rgb_out` [S2, unofficial].
+    *   If `grad_out_is_rgb` is true, compute `norm_factor = 2.0 / (3.0 * Q)` where `Q` is the number of rays, and set `grad_out = resid * norm_factor` [S2, unofficial].
+    *   Otherwise, set `grad_out = grad_output` (direct gradient) [S2, unofficial].
+4.  **Background Bounds and Specification**: Create a `SingleRaySpec` for the current ray and determine the background bounds (start and end points on the concentric sphere) [S2, S1, unofficial].
+5.  **Color Accumulation and Gradient Computation**:
+    *   Loop through the background sampling steps (similar to the forward pass) [S1, unofficial].
+    *   For each RGB channel `i`:
+        *   Sample the background color `color` at the current sample point using trilinear interpolation from the grid [S1, unofficial].
+        *   Update `total_color`: `total_color += fmaxf(color, 0.0f) * grad_out[i]` [S1, unofficial].
+        *   If `color > 0`, compute the color gradient contribution: `curr_grad_color = C0 * weight * grad_out[i]`, where `C0` is a constant (likely related to SH basis or normalization, exact value not given) and `weight` is the blending weight calculated as in the forward pass [S1, unofficial].
+        *   Backpropagate the color gradient to the background grid using `trilerp_backward_bg_one` with `curr_grad_color` [S1, unofficial].
+6.  **Accumulation Update**: Update the accumulated color for the ray: `accum -= weight * total_color` [S1, unofficial].
+7.  **Sparsity Loss Gradient (Optional)**:
+    *   If `sparsity_loss` is true, compute the gradient for sigma (density):
+        $$ \text{curr\_grad\_sigma} = \text{ray.world\_step} \times (\text{invr\_last} - \text{invr\_mid}) \times (\text{total\_color} \times \exp(\text{log\_transmit}) - \text{accum}) $$
+        where `invr_last` and `invr_mid` are inverse radius terms from the sampling scheme [S1, unofficial].
+    *   Add the Cauchy sparsity loss gradient to `curr_grad_sigma`:
+        $$ \text{curr\_grad\_sigma} += \text{sparsity\_loss} \times \frac{4 \times \sigma}{1 + 2 \times (\sigma \times \sigma)} $$
+        where $\sigma$ is the density at the sample point [S1, unofficial].
+    *   Backpropagate `curr_grad_sigma` to the background grid using `trilerp_backward_bg_one` [S1, unofficial].
+8.  **Final Backward Call**: Call `render_background_backward` with the grid, `grad_out`, `ray_spec`, options, `log_transmit[ray_id]`, `accum[ray_id]`, `sparsity_loss`, and `grads` [S1, S2, unofficial]. This function aggregates the gradients computed in the loop into the final output tensor [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the CUDA kernel launch and kernel logic
+# Note: This is a simplified representation of the kernel logic described in [S1, S2, unofficial]
+
+def render_background_backward_kernel(grid, rgb_gt, rgb_out, rays, opt, log_transmit, accum, sparsity_loss, grads):
+    Q = number_of_rays
+    threads_per_block = TRACE_RAY_BG_CUDA_THREADS
+    blocks = CUDA_N_BLOCKS_NEEDED(Q, threads_per_block)
+    
+    # Launch kernel
+    # render_background_kernel<<<blocks, threads_per_block>>>(...)
+    pass
+
+def render_background_kernel(grid, rgb_gt, rgb_out, rays, opt, log_transmit, accum, sparsity_loss, grads):
+    ray_id = blockIdx.x * blockDim.x + threadIdx.x
+    if ray_id >= Q:
+        return
+
+    # Early exit if ray is fully transparent/occluded
+    if log_transmit[ray_id] < -25.0:
+        return
+
+    # Calculate gradient output
+    resid = rgb_gt[ray_id] - rgb_out[ray_id]
+    if opt.grad_out_is_rgb:
+        norm_factor = 2.0 / (3.0 * Q)
+        grad_out = resid * norm_factor
+    else:
+        grad_out = grad_output # Assuming grad_output is passed or derived from resid
+
+    # Create ray spec and find background bounds
+    ray_spec = create_single_ray_spec(rays[ray_id])
+    bg_bounds = find_background_bounds(ray_spec)
+
+    total_color = 0.0
+    # Loop through background samples (similar to forward pass)
+    # The exact number of samples and loop structure is not fully detailed, 
+    # but it iterates over the background sphere segments.
+    for sample in bg_samples:
+        # Sample color from grid
+        color = trilerp(grid, sample.position)
+        
+        # Accumulate color for gradient calculation
+        # fmaxf ensures non-negative color contribution
+        total_color += fmaxf(color, 0.0) * grad_out
+
+        # Compute weight as in forward pass (not detailed here)
+        weight = compute_weight(sample, log_transmit[ray_id])
+
+        # Backpropagate color gradient
+        if color > 0:
+            # C0 is a constant, likely 1.0 or related to SH basis normalization
+            C0 = 1.0 
+            curr_grad_color = C0 * weight * grad_out
+            trilerp_backward_bg_one(grid, sample.position, curr_grad_color)
+
+        # Update accum (for forward consistency check or further backprop)
+        accum[ray_id] -= weight * total_color
+
+    # Sparsity loss gradient
+    if sparsity_loss:
+        # Formula from [S1, unofficial]
+        # invr_last and invr_mid are inverse radius terms
+        curr_grad_sigma = ray_spec.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit[ray_id]) - accum[ray_id])
+        
+        # Cauchy sparsity loss gradient
+        sigma = trilerp(grid, sample.position) # Density at sample
+        curr_grad_sigma += sparsity_loss * (4.0 * sigma / (1.0 + 2.0 * (sigma * sigma)))
+        
+        trilerp_backward_bg_one(grid, sample.position, curr_grad_sigma)
+
+    # Final accumulation into grads tensor
+    # The exact aggregation logic is handled by render_background_backward function
+    render_background_backward(grid, grad_out, ray_spec, opt, log_transmit[ray_id], accum[ray_id], sparsity_loss, grads)
+```
+
+### Edge Cases and Pitfalls
+*   **Early Exit Condition**: If `log_transmit[ray_id] < -25.0`, the kernel returns early. This prevents unnecessary computation for rays that are effectively fully transparent or occluded, but ensures gradients are not computed for these rays [S1, S2, unofficial].
+*   **Precision**: The use of `fmaxf(color, 0.0f)` suggests that negative color values are clamped to zero during gradient accumulation, which may impact gradient flow for negative values [S1, unofficial].
+*   **CUDA Errors**: CUDA errors are checked after kernel launch via `CUDA_CHECK_ERRORS` macro [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Linear with respect to the number of rays $Q$ and the number of background samples per ray. The kernel launch uses `CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_BG_CUDA_THREADS)` blocks [S1, unofficial].
+*   **Memory Complexity**: Linear with respect to the number of rays for `log_transmit` and `accum` tensors. The grid memory access is sparse, depending on the voxel occupancy [S1, unofficial].
+*   **Strengths**: Efficiently handles background gradients using sparse voxel grids and early exit conditions. Integrates sparsity loss gradients directly into the backward pass [S1, S2, unofficial].
+*   **Limitations**: Dependent on the efficiency of the trilinear interpolation and its backward pass. The early exit condition may lead to uncoordinated thread execution if many rays are fully transparent/occluded [S1, S2, unofficial].
+*   **When to Use**: When using spherical harmonic background modeling in volume rendering, specifically when gradients for the background component are needed for optimization [S1, S2, unofficial].
+*   **When Not to Use**: If background rendering is disabled (`use_background = false`) or if a simpler background model (e.g., constant color) is used [S1, unofficial].
+
+## Background
+The Background Rendering Backward Pass is part of the PyTorch sparse voxel volume extension library, specifically associated with the Plenoxels and NeRF-Factory projects [S1, unofficial]. It was developed by Alex Yu (alexyu99126@gmail.com) as part of the `lib.plenoxel` package [S1, unofficial]. The implementation is designed to support differentiable volume rendering with spherical harmonics, allowing for end-to-end training of 3D scenes using sparse voxel representations [S1, S2, unofficial]. It is used in conjunction with the Ray Tracing Backward Pass to compute full gradients for volume rendering models [S1, unofficial].
+
+## Sources
+[S1] kakaobrain/nerf-factory, https://github.com/kakaobrain/nerf-factory, fetched 2026-10-26 (unofficial)
+[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

@@ -2,29 +2,29 @@
 
 
 ## Overview
-Ray Buffer Reordering is a GPU kernel primitive that compacts a list of active rays by moving them from a current buffer to a next buffer, effectively removing terminated rays. It solves the problem of maintaining a dense, contiguous list of alive rays for subsequent volume rendering steps, such as ray marching or feature sampling. It sets itself apart from its siblings by using a double-buffering strategy with atomic counters to assign new indices, ensuring thread-safe reordering without requiring a prior sort or global reduction.
+Ray Buffer Reordering is a GPU kernel primitive that compacts a list of active rays by moving them from a current buffer to a next buffer, effectively removing terminated rays [S1, unofficial]. It solves the problem of maintaining a dense, contiguous list of alive rays for subsequent volume rendering steps, such as ray marching or feature sampling [S1, unofficial]. It sets itself apart from its siblings by using a double-buffering strategy with atomic counters to assign new indices, ensuring thread-safe reordering without requiring a prior sort or global reduction [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: `alive_indices` array of size $2 \times B$, containing ray indices. Indices $< 0$ denote terminated rays.
-- Input: `B`, the batch size or number of rays.
-- Input: `c_index`, the index of the current buffer (0 or 1).
-- Output: `alive_indices` array of size $2 \times B$, with compacted alive rays in the next buffer.
-- Output: `counter`, an atomic counter tracking the number of compacted rays.
+- Input: `alive_indices` array of size $2 \times B$, containing ray indices. Indices $< 0$ denote terminated rays [S1, unofficial].
+- Input: `B`, the batch size or number of rays [S1, unofficial].
+- Input: `c_index`, the index of the current buffer (0 or 1) [S1, unofficial].
+- Output: `alive_indices` array of size $2 \times B$, with compacted alive rays in the next buffer [S1, unofficial].
+- Output: `counter`, an atomic counter tracking the number of compacted rays [S1, unofficial].
 
 **Data Structures:**
-- `alive_indices`: A flat array of integers. The layout is double-buffered: indices $[0, B-1]$ correspond to buffer 0, and $[B, 2B-1]$ correspond to buffer 1.
-- `counter`: A single integer value, atomically incremented.
+- `alive_indices`: A flat array of integers. The layout is double-buffered: indices $[0, B-1]$ correspond to buffer 0, and $[B, 2B-1]$ correspond to buffer 1 [S1, unofficial].
+- `counter`: A single integer value, atomically incremented [S1, unofficial].
 
 **Steps:**
-1. Reset the atomic counter to 0.
-2. Determine the next buffer index: $n\_index = (c\_index + 1) \pmod 2$.
-3. Update the global state to reflect the new current buffer index.
-4. For each ray $i$ in $[0, B-1]$:
-   a. Read the ray index from the current buffer: $src\_idx = alive\_indices[i \times 2 + c\_index]$.
-   b. If $src\_idx \ge 0$ (ray is alive):
-      i. Atomically increment the counter to get a unique destination index $dest\_idx$.
-      ii. Write the source index to the next buffer at $dest\_idx$: $alive\_indices[dest\_idx \times 2 + n\_index] = src\_idx$.
+1. Reset the atomic counter to 0 [S1, unofficial].
+2. Determine the next buffer index: $n\_index = (c\_index + 1) \pmod 2$ [S1, unofficial].
+3. Update the global state to reflect the new current buffer index [S1, unofficial].
+4. For each ray $i$ in $[0, B-1]$: [S1, unofficial]
+   a. Read the ray index from the current buffer: $src\_idx = alive\_indices[i \times 2 + c\_index]$ [S1, unofficial].
+   b. If $src\_idx \ge 0$ (ray is alive): [S1, unofficial]
+      i. Atomically increment the counter to get a unique destination index $dest\_idx$ [S1, unofficial].
+      ii. Write the source index to the next buffer at $dest\_idx$: $alive\_indices[dest\_idx \times 2 + n\_index] = src\_idx$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -37,10 +37,9 @@ def ray_buffer_reorder(alive_indices, B, c_index, counter):
     # Step 2: Determine next index
     n_index = (c_index + 1) % 2
     
-    # Step 3: Update current index state (assumed to be a global variable or passed by reference)
-    # In a real kernel, this might be a separate atomic store or a simple assignment if single-threaded
-    # Here we assume the caller manages the state update or it's done via atomicAdd(0, 0) for synchronization
-    # For the purpose of this method, we focus on the reordering logic
+    # Step 3: Update current index state
+    # In a real kernel, this updates the global state variable tracking the active buffer
+    # self.current_index[None] = n_index  # Handled by caller or separate kernel launch
     
     # Step 4: Iterate and reorder
     for i in range(B):
@@ -49,46 +48,49 @@ def ray_buffer_reorder(alive_indices, B, c_index, counter):
         
         if src_idx >= 0:
             # Atomically increment counter to get destination index
-            dest_idx = atomic_add(counter, 1)
+            dest_idx = atomic_add(counter, 1)  # hardware atomic intrinsic [G]
             
             # Write to next buffer
             alive_indices[dest_idx * 2 + n_index] = src_idx
 ```
 
 **Parameters:**
-- $B$: Batch size. Typical values depend on the scene and GPU memory, often in the range of thousands to millions.
-- $c\_index$: 0 or 1.
+- $B$: Batch size. Typical values depend on the scene and GPU memory, often in the range of thousands to millions [S1, unofficial].
+- $c\_index$: 0 or 1 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Atomic operations on integers are precise. No floating-point issues.
-- **Boundaries:** Ensure $B$ does not exceed half the size of `alive_indices`.
-- **Degenerate Input:** If all rays are terminated ($src\_idx < 0$), the counter remains 0, and the next buffer is empty.
+- **Precision:** Atomic operations on integers are precise. No floating-point issues [G].
+- **Boundaries:** Ensure $B$ does not exceed half the size of `alive_indices` [G].
+- **Degenerate Input:** If all rays are terminated ($src\_idx < 0$), the counter remains 0, and the next buffer is empty [S1, unofficial].
 
 ## Subtopics
 
+### [Structure of Arrays (SoA) Ray Buffer](5453-structure-of-arrays-soa-ray-buffer.md)
+The Structure of Arrays (SoA) Ray Buffer is a memory layout strategy for ray data optimized for GPU coalesced access, storing ray properties in separate contiguous arrays per attribute. It solves the problem of inefficient memory bandwidth utilization in ray tracing by ensuring that threads in a warp access contiguous memory locations for the same attribute, rather than strided access across interleaved structures. It sets itself apart from its siblings by explicitly managing the trade-off between memory footprint (via conditional graylization) and computational throughput, whereas variants like SSE Packet Architecture focus on SIMD register packing for CPU or hybrid execution. Choose it when memory bandwidth is the primary bottleneck and ray attributes are frequently accessed in parallel.
+
 ## Operating characteristics
 **Time and Memory Complexity:**
-- Time: $O(B)$, where $B$ is the number of rays. Each ray is processed once.
-- Memory: $O(B)$ for the double-buffered `alive_indices` array.
+- Time: $O(B)$, where $B$ is the number of rays. Each ray is processed once [G].
+- Memory: $O(B)$ for the double-buffered `alive_indices` array [G].
 
 **Measured Performance:**
-- Performance depends on the GPU's atomic operation throughput and memory bandwidth. For large $B$, the atomic contention on `counter` can become a bottleneck.
+- Performance depends on the GPU's atomic operation throughput and memory bandwidth [G]. For large $B$, the atomic contention on `counter` can become a bottleneck [G].
 
 **Scaling:**
-- Scales linearly with $B$.
+- Scales linearly with $B$ [G].
 
 **Strengths and Limitations:**
-- **Strengths:** Simple, thread-safe, no sorting required.
-- **Limitations:** Atomic contention on the counter can reduce performance for very large $B$. Requires double the memory for the buffer.
+- **Strengths:** Simple, thread-safe, no sorting required [G].
+- **Limitations:** Atomic contention on the counter can reduce performance for very large $B$. Requires double the memory for the buffer [G].
 
 **When to Use:**
-- Use when compacting rays is a frequent operation and the number of alive rays is significant.
+- Use when compacting rays is a frequent operation and the number of alive rays is significant [G].
 
 **When Not to Use:**
-- Avoid if memory is extremely constrained or if the number of alive rays is very small, as the overhead of atomic operations may outweigh the benefits.
+- Avoid if memory is extremely constrained or if the number of alive rays is very small, as the overhead of atomic operations may outweigh the benefits [G].
 
 ## Background
-Ray Buffer Reordering is a technique used in GPU-based volume rendering and ray tracing to manage the state of active rays. It is commonly found in implementations of neural radiance fields (NeRF) and other ray-marching algorithms where efficient management of alive rays is crucial for performance. The specific implementation described here is derived from unofficial sources related to Taichi-based NGP renderers.
+Ray Buffer Reordering is a technique used in GPU-based volume rendering and ray tracing to manage the state of active rays [G]. It is commonly found in implementations of neural radiance fields (NeRF) and other ray-marching algorithms where efficient management of alive rays is crucial for performance [G]. The specific implementation described here is derived from unofficial sources related to Taichi-based NGP renderers [S1, unofficial].
 
 ## Sources
 [S1] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)

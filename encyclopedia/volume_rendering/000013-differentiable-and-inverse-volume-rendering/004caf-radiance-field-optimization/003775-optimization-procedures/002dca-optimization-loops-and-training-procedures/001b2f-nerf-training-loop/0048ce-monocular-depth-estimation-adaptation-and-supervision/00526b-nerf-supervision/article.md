@@ -1,0 +1,108 @@
+# NeRF-Supervision
+
+Also called: RGB-sensor-only self-supervised pipeline for dense descriptors
+
+## Overview
+NeRF-Supervision is a method for generating dense correspondence datasets to train object-centric visual descriptors using only RGB images and Neural Radiance Fields (NeRFs) [S1]. It solves the problem of obtaining ground-truth dense correspondences for thin, reflective, or ambiguous objects where traditional RGB-D sensors and Multi-View Stereo (MVS) fail [S1]. Unlike MVS, which relies on patch-based photometric consistency, NeRF-Supervision uses the NeRF's density field to sample correspondences probabilistically, handling ambiguity via a "distribution-of-depths" formulation rather than a single depth map [S1].
+
+## How it works
+The method consists of three stages: (a) optimizing a NeRF from RGB images, (b) generating dense correspondence data from the NeRF's density field, and (c) training a descriptor model on this data [S1].
+
+**Inputs and Outputs:**
+*   **Input:** A set of RGB images $I$ of an object.
+*   **Output:** A dataset of correspondence tuples $(I_s, u_s, I_t, u_t)$ used to train a descriptor network [S1].
+*   **Parameters:** $w, h$ are image width and height; $d$ is the descriptor dimensionality [S1].
+
+**Data Structures:**
+*   **NeRF:** A neural network parameterized by $\theta$ that maps a 3D position $\mathbf{x}$ and view direction $\mathbf{d}$ to color $\mathbf{c}$ and volume density $\sigma$.
+*   **Correspondence Tuple:** $(I_s, u_s, I_t, u_t)$ where $I_s, I_t \in \mathbb{R}^{w \times h \times 3}$ are RGB images and $u_s, u_t \in \mathbb{R}^2$ are pixel coordinates [S1].
+
+**Algorithm:**
+1.  **NeRF Optimization:** Collect RGB images of the object and optimize a NeRF [S1].
+2.  **Correspondence Generation:** Use the trained NeRF's density field to generate dense correspondences. This involves sampling rays that intersect the same 3D point in space. The method reformulates correspondence via a distribution-of-depths formulation, leveraging the density field to handle ambiguity [S1].
+3.  **Descriptor Training:** Train a model $f_\theta$ to estimate dense object descriptors using the generated dataset [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_correspondence_dataset(nerf_model, images, num_samples):
+    """
+    Generates dense correspondence tuples from a trained NeRF.
+    
+    Args:
+        nerf_model: Trained NeRF model with density field.
+        images: List of RGB images of the object.
+        num_samples: Number of correspondence pairs to generate.
+        
+    Returns:
+        dataset: List of tuples (I_s, u_s, I_t, u_t).
+    """
+    dataset = []
+    for _ in range(num_samples):
+        # Sample two rays that intersect the same 3D point
+        # This is done by sampling a 3D point from the NeRF's density field
+        # and back-projecting to pixel coordinates in different views
+        point_3d = sample_point_from_density(nerf_model)
+        
+        # Find pixel coordinates in image s and t that correspond to point_3d
+        # This requires knowing the camera poses for the images
+        u_s = backproject_to_pixel(point_3d, images[0].camera_pose)
+        u_t = backproject_to_pixel(point_3d, images[1].camera_pose)
+        
+        # Extract RGB patches or full images at these coordinates
+        I_s = images[0]
+        I_t = images[1]
+        
+        dataset.append((I_s, u_s, I_t, u_t))
+        
+    return dataset
+
+def train_descriptor_model(dataset, descriptor_dim):
+    """
+    Trains a dense descriptor model using the generated dataset.
+    
+    Args:
+        dataset: List of correspondence tuples.
+        descriptor_dim: Dimensionality of the descriptor vector.
+        
+    Returns:
+        model: Trained descriptor network.
+    """
+    # Initialize descriptor network f_theta
+    model = DescriptorNetwork(descriptor_dim)
+    
+    # Train using standard supervised learning loss
+    # The loss minimizes the distance between descriptors of corresponding points
+    for (I_s, u_s, I_t, u_t) in dataset:
+        desc_s = model(I_s, u_s)
+        desc_t = model(I_t, u_t)
+        loss = cosine_distance(desc_s, desc_t)
+        model.update(loss)
+        
+    return model
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ambiguity:** The density field sampling handles ambiguity better than MVS, but thin or highly reflective objects may still pose challenges if the NeRF optimization fails to capture the geometry accurately [S1].
+*   **View Direction:** The NeRF must take view direction as input for color prediction to handle reflective objects [S1].
+
+## Subtopics
+
+### Dense Correspondence Models
+Models trained with NeRF-Supervision outperform off-the-shelf learned descriptors by 106% (PCK@3px metric) and MVS-supervised baselines by 29% [S1].
+
+### Robot Manipulation
+The method enables robots to perform accurate 6-DoF pick and place of thin and reflective objects like forks and whisks [S1].
+
+## Operating characteristics
+*   **Performance:** Dense correspondence models trained with this method outperform off-the-shelf learned descriptors by 106% (PCK@3px metric) and outperform MVS-supervised baselines by 29% [S1].
+*   **Strengths:** Handles reflective objects (unlike RGB-D pipelines) and ambiguity (unlike MVS) [S1].
+*   **Limitations:** Requires a trained NeRF, which can be computationally expensive to optimize [S1].
+*   **Use Cases:** Particularly useful for thin and reflective objects where traditional methods fail [S1].
+
+## Background
+NeRF-Supervision was introduced by Lin Yen-Chen, Tsung-Yi Lin, Pete Florence, Jonathan T. Barron, Alberto Rodriguez, and Phillip Isola in 2022 [S1]. It addresses the long-standing problem of designing robust visual descriptors invariant to scale, illumination, and pose, which is challenging for thin, reflective objects [S1].
+
+## Sources
+[S1] NeRF-Supervision: Learning Dense Object Descriptors from Neural Radiance Fields, https://arxiv.org/abs/2203.01913v2, fetched 2026-10-26

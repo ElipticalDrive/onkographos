@@ -7,40 +7,40 @@ Two-Pass Ray Marching Volume Rendering is a GPU-based direct volume rendering te
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** 3D volume dataset (scalar field), camera parameters (position, orientation, projection), volume bounding box dimensions, number of marching steps, and a transfer function mapping scalar values to RGBA.
+*   **Inputs:** 3D volume dataset (scalar field), camera parameters (position, orientation, projection), volume bounding box dimensions, number of marching steps, and a transfer function mapping scalar values to RGBA [S1, unofficial][S2, unofficial].
 *   **Outputs:** 2D image with accumulated color and opacity.
 
 **Data Structures:**
-1.  **Bounding Box Geometry:** A cube (or box) geometry representing the volume extent. Must support double-sided rendering or separate front/back face culling [S2, unofficial].
+1.  **Bounding Box Geometry:** A cube (or box) geometry representing the volume extent [S2, unofficial][S3, unofficial].
 2.  **Offscreen Render Targets (FBOs):** Two 2D textures (`FrontfaceTexture`, `BackfaceTexture`) storing the 3D world coordinates of the ray entry and exit points for each screen pixel [S3, unofficial].
-    *   **Format:** `GL_RGBA16F_ARB` (or equivalent high-precision floating point format like `FloatType` in WebGL) to preserve coordinate precision [S3, unofficial][S2, unofficial].
-    *   **Dimensions:** Match the screen resolution (e.g., `window.innerWidth` x `window.innerHeight`) [S2, unofficial].
+    *   **Format:** `GL_RGBA16F_ARB` (or equivalent high-precision floating-point format like `FloatType` in WebGL) [S3, unofficial][S2, unofficial].
+    *   **Dimensions:** Match the screen resolution (`window.innerWidth` × `window.innerHeight`) [S2, unofficial].
     *   **Wrapping/Filtering:** `ClampToEdgeWrapping`, `LinearFilter` [S2, unofficial].
-3.  **Volume Data Texture:** A 3D texture (`volumeTex`) storing the scalar field.
-    *   **Format:** `RedFormat` or `AlphaFormat` with `FloatType` or normalized integer types [S1, unofficial][S2, unofficial].
-    *   **Layout:** If the data length does not fit a power-of-two or rectangular 2D texture approximation, it is padded with zeros [S2, unofficial].
-4.  **Transfer Function Texture:** A 1D texture (`transferFuncTex`) mapping scalar values to RGBA.
+3.  **Volume Data Texture:** A 3D texture (`volumeTex`) storing the scalar field [S1, unofficial].
+    *   **Format:** `RedFormat` or `AlphaFormat` with `FloatType` [S1, unofficial].
+    *   **Layout:** If the data length does not fit a rectangular texture, it is padded with zeros to the next power-of-two or rectangular dimension [S2, unofficial].
+4.  **Transfer Function Texture:** A 1D texture (`transferFuncTex`) mapping scalar values to RGBA [S1, unofficial].
     *   **Size:** Typically $8 \times 256$ pixels [S2, unofficial].
     *   **Format:** `RGBAFormat` [S2, unofficial].
-    *   **Content:** Linear gradient where the x-axis represents the normalized scalar value and the y-axis (or single row) stores the interpolated color and opacity [S2, unofficial].
+    *   **Content:** Linear gradient where the x-axis represents the normalized scalar value and the single row stores the interpolated color and opacity [S2, unofficial].
 
 **Numbered Steps:**
 
 1.  **Initialization:**
     *   Create an OpenGL Framebuffer Object (FBO) or WebGL `WebGLRenderTarget` [S2, unofficial][S3, unofficial].
-    *   Generate two 2D textures (`FrontfaceTexture`, `BackfaceTexture`) attached to the FBO color attachments. Initialize them with high-precision floating-point format (e.g., `GL_RGBA16F_ARB`) [S3, unofficial].
-    *   Load the 3D volume data into a 3D texture. Compute `dataMin` and `dataMax` if not provided, and normalize voxel values to $[0, 1]$ or $[-1, 1]$ depending on the transfer function implementation [S1, unofficial][S2, unofficial].
+    *   Generate two 2D textures (`FrontfaceTexture`, `BackfaceTexture`) attached to the FBO color attachments [S3, unofficial].
+    *   Load the 3D volume data into a 3D texture. Compute `dataMin` and `dataMax` if not provided, and normalize voxel values to $[0, 1]$ [S1, unofficial][S2, unofficial].
     *   Generate the 1D transfer function texture from user-defined control points (color and opacity stops) [S1, unofficial][S2, unofficial].
 
 2.  **First Pass (Boundary Rasterization):**
     *   Bind the FBO.
     *   **Render Back Face:** Enable face culling to cull `GL_FRONT` faces. Render the bounding box geometry. The fragment shader outputs the world position of the back-facing surface intersection for each pixel. Store this in `BackfaceTexture` [S3, unofficial].
     *   **Render Front Face:** Enable face culling to cull `GL_BACK` faces. Render the same bounding box geometry. The fragment shader outputs the world position of the front-facing surface intersection. Store this in `FrontfaceTexture` [S3, unofficial].
-    *   *Note:* The vertex shader typically transforms the box vertices to world space, and the fragment shader interpolates the position. Since the box is convex and viewed from outside, the front face gives the entry point ($t_{near}$) and the back face gives the exit point ($t_{far}$) [S3, unofficial].
+    *   *Note:* The vertex shader transforms the box vertices to world space, and the fragment shader interpolates the position [G]. Since the box is convex and viewed from outside, the front face gives the entry point and the back face gives the exit point [S3, unofficial].
 
 3.  **Second Pass (Ray Marching and Compositing):**
-    *   Unbind the FBO (render to screen/default framebuffer).
-    *   Render a fullscreen quad (or the entire screen) using a raycasting fragment shader [S1, unofficial][S3, unofficial].
+    *   Unbind the FBO (render to screen/default framebuffer) [G].
+    *   Render a fullscreen quad using a raycasting fragment shader [S1, unofficial][S3, unofficial].
     *   **Shader Logic:**
         *   For each pixel, sample `FrontfaceTexture` at the current texture coordinate to get `startPos` (entry point) [S3, unofficial].
         *   Sample `BackfaceTexture` at the current texture coordinate to get `endPos` (exit point) [S3, unofficial].
@@ -51,8 +51,8 @@ Two-Pass Ray Marching Volume Rendering is a GPU-based direct volume rendering te
         *   Initialize current position $P = \text{startPos}$ [S3, unofficial].
         *   **Loop** for $i = 0$ to $\text{steps}-1$:
             *   Sample the volume texture at $P$ to get scalar value $v$ [S3, unofficial].
-            *   Sample the transfer function texture at $v$ to get color $C_{src}$ and opacity $\alpha_{src}$ [S3, unofficial].
-            *   Apply **Front-to-Back Compositing** (standard volume rendering equation):
+            *   Sample the transfer function texture at $v$ to get color $C_{src}$ and opacity $\alpha_{src}$ [S3, unofficial]. *(Note: Evidence [S3, unofficial] specifies sampling the TF at the volume's alpha channel: `texture1D(transferFuncTex, texture3D(volumeTex, ...).a)`)*.
+            *   Apply **Front-to-Back Compositing**:
                 $$ C_{acc} = C_{acc} + C_{src} \cdot \alpha_{src} \cdot (1 - A_{acc}) $$
                 $$ A_{acc} = A_{acc} + \alpha_{src} \cdot (1 - A_{acc}) $$
                 *(Note: Some implementations use `mix(dest.rgb, src.rgb, src.a)` which implies $C_{new} = C_{old}(1-\alpha) + C_{src}\alpha$, equivalent to the above if $C_{old}$ is background color 0) [S3, unofficial].*
@@ -62,17 +62,64 @@ Two-Pass Ray Marching Volume Rendering is a GPU-based direct volume rendering te
         *   Output $C_{acc}$ as the final fragment color [S3, unofficial].
 
 **Parameters:**
-*   `steps`: Number of marching steps per ray. Default: 50 [S2, unofficial]. Higher values improve quality but reduce performance.
+*   `steps`: Number of marching steps per ray. Default: 50 [S2, unofficial]. Higher values improve quality but reduce performance [S2, unofficial].
 *   `alphaCorrection`: Opacity correction factor applied during compositing. Default: 0.2 [S2, unofficial].
 *   `resolution`: Resolution of the 1D transfer function texture. Typical value: 255 [S1, unofficial].
 *   `dataMin` / `dataMax`: Min/max of the volume dataset for normalization [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The first pass textures must use high-precision formats (e.g., `GL_RGBA16F_ARB` or `FloatType`) to avoid artifacts in ray positioning, especially for large volumes or distant cameras [S3, unofficial][S2, unofficial].
-*   **Culling:** Correct face culling (`GL_FRONT` vs `GL_BACK`) is critical. If culling is disabled or incorrect, the entry/exit points will be swapped or invalid [S3, unofficial].
-*   **Missing Data:** If the ray does not intersect the volume (e.g., outside the bounding box), the first pass may output undefined or zero values. The second pass should handle this by checking if `startPos` and `endPos` are valid or if the ray length is zero [S3, unofficial].
+*   **Precision:** The first pass textures must use high-precision formats (e.g., `GL_RGBA16F_ARB` or `FloatType`) to preserve coordinate precision [S3, unofficial][S2, unofficial].
+*   **Culling:** Correct face culling (`GL_FRONT` vs `GL_BACK`) is critical to correctly determine entry and exit points [S3, unofficial].
 *   **Cutting Planes:** If cutting planes are used, the bounding box rasterization must be modified or additional logic added to clip the ray segment. The `u_enableCut` uniform and plane parameters must be updated before rendering [S1, unofficial].
 *   **Auto-Clear:** If rendering additional elements (like cutting plane visuals) after the raycaster, `renderer.autoClear` must be set to `false` to prevent the framebuffer from being cleared between passes or elements [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_two_pass_volume(camera, volume_data, transfer_function, steps=50):
+    # Initialization
+    rt_texture = create_render_target(screen_width, screen_height, format=GL_RGBA16F_ARB)
+    volume_tex = create_3d_texture(volume_data, format=GL_RED, type=GL_FLOAT)
+    tf_tex = create_1d_texture(transfer_function, size=(8, 256), format=GL_RGBA)
+    
+    # Pass 1: Boundary Rasterization
+    bind_fbo(rt_texture)
+    enable_cull_face(GL_FRONT)
+    render_bounding_box(side=GL_BACK, output=rt_texture.backface_texture)
+    enable_cull_face(GL_BACK)
+    render_bounding_box(side=GL_FRONT, output=rt_texture.frontface_texture)
+    unbind_fbo()
+    
+    # Pass 2: Ray Marching
+    for y in range(screen_height):
+        for x in range(screen_width):
+            start_pos = sample_2d(rt_texture.frontface_texture, x, y)
+            end_pos = sample_2d(rt_texture.backface_texture, x, y)
+            ray_vec = end_pos - start_pos
+            ray_len = length(ray_vec)
+            step_size = ray_len / steps
+            
+            acc_color = vec4(0.0)
+            acc_alpha = 0.0
+            cur_pos = start_pos
+            
+            for i in range(steps):
+                vol_val = sample_3d(volume_tex, cur_pos)
+                # Sample TF at volume alpha as per [S3, unofficial]
+                tf_sample = sample_1d(tf_tex, vol_val.a)
+                src_color = tf_sample.rgb
+                src_alpha = tf_sample.a
+                
+                acc_color.rgb = mix(acc_color.rgb, src_color, src_alpha)
+                acc_color.a = mix(acc_color.a, 1.0, src_alpha)
+                
+                if acc_color.a > 0.99 or length(cur_pos - start_pos) >= ray_len:
+                    break
+                cur_pos += step_size * normalize(ray_vec)
+                
+            write_pixel(x, y, acc_color)
+```
 
 ## Subtopics
 
@@ -83,16 +130,16 @@ Specialized for light field displays, decoupling 3D ray-casting from 2D post-pro
 Supports arbitrary clip regions by assembling valid clip intervals in the first pass and integrating only over remaining segments in the second pass.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of marching steps. The two-pass structure adds a constant overhead of one full-screen rasterization pass.
-*   **Memory Complexity:** $O(N)$ for the two offscreen textures (entry/exit points) plus $O(V)$ for the 3D volume texture and $O(T)$ for the transfer function texture, where $V$ is the volume data size and $T$ is the transfer function resolution [S3, unofficial][S2, unofficial].
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of marching steps. The two-pass structure adds a constant overhead of one full-screen rasterization pass [G].
+*   **Memory Complexity:** $O(W \times H)$ for the two offscreen textures (entry/exit points) plus $O(V)$ for the 3D volume texture and $O(T)$ for the transfer function texture, where $W \times H$ is the screen resolution, $V$ is the volume data size, and $T$ is the transfer function resolution [S3, unofficial][S2, unofficial].
 *   **Performance:** Reduces fragment shader complexity compared to single-pass raycasting by offloading intersection tests to the rasterizer [S3, unofficial]. However, it incurs the cost of two render passes and texture memory bandwidth for reading/writing the intermediate textures [S3, unofficial].
 *   **Strengths:** Simple implementation, leverages hardware rasterization for robust boundary detection, supports early ray termination effectively [S3, unofficial].
 *   **Limitations:** Fixed number of steps may lead to aliasing or slow convergence; high-precision textures increase memory usage; not suitable for dynamic volumes that change every frame without careful texture management [S2, unofficial][S3, unofficial].
-*   **When to Use:** Static or slowly changing volumes where simplicity and robustness of boundary detection are prioritized over maximum performance or adaptive step sizes.
-*   **When Not to Use:** Real-time applications with very large volumes requiring adaptive step sizes or sparse data structures (consider [Half-angle slicing](1255-half-angle-slicing.md) or [Multi-pass GPU Ray-Casting with Early Ray Termination](7009-multi-pass-gpu-ray-casting-with-early-ray-termination.md) for more advanced optimizations).
+*   **When to Use:** Static or slowly changing volumes where simplicity and robustness of boundary detection are prioritized over maximum performance or adaptive step sizes [G].
+*   **When Not to Use:** Real-time applications with very large volumes requiring adaptive step sizes or sparse data structures (consider [Half-angle slicing](1255-half-angle-slicing.md) or [Multi-pass GPU Ray-Casting with Early Ray Termination](7009-multi-pass-gpu-ray-casting-with-early-ray-termination.md) for more advanced optimizations) [G].
 
 ## Background
-The method originates from the work of Krüger and Westermann (2003), who introduced a two-pass GPU-based volume rendering technique using OpenGL Framebuffer Objects (FBOs) to store ray start and end positions [S3, unofficial]. This approach was popularized in the NVIDIA CUDA SDK and subsequent WebGL implementations (e.g., INTMeshVolumeRendering in Three.js) as a standard technique for direct volume rendering on consumer graphics hardware [S2, unofficial][S3, unofficial]. It builds on the principles of image-order rendering and direct volume ray casting, adapting them to the constraints of GPU rasterization pipelines [S1, unofficial][S2, unofficial].
+The method originates from the work of Krüger and Westermann (2003), who introduced a two-pass GPU-based volume rendering technique using OpenGL Framebuffer Objects (FBOs) to store ray start and end positions [S3, unofficial]. It is implemented in the NVIDIA CUDA SDK and WebGL implementations (e.g., INTMeshVolumeRendering in Three.js) [S2, unofficial][S3, unofficial]. It builds on the principles of image-order rendering and direct volume ray casting, adapting them to the constraints of GPU rasterization pipelines [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] SubairProject1/Volume-Rendering-Visualization-Project, https://github.com/SubairProject1/Volume-Rendering-Visualization-Project, fetched 2026-10-26 (unofficial)

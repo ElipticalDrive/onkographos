@@ -1,12 +1,12 @@
 # Rigid Body Transformation (SE3)
 
-Also called: SE(3) transformation, Euclidean rigid body motion, 3D rigid transform
+Also called: SE(3) transformation, Rigid transformation, Euclidean transformation
 
 ## Overview
-Rigid Body Transformation (SE3) applies a rotation and translation to 3D points or vectors without altering their relative distances or angles, preserving the shape of the object. It solves the problem of unifying rotation and translation into a single linear operation, which is essential for composing complex camera poses and scene transforms in volume rendering. It differs from [Rotation Transformation](2279-rotation-transformation.md) and [Translation Transformation](2281-translation-transformation.md) by combining both operations into a single $4 \times 4$ matrix multiplication rather than separating them into sequential vector additions and rotations.
+Rigid Body Transformation (SE3) maps 3D points and vectors between coordinate systems (e.g., camera to world) without altering their intrinsic geometry, preserving distances and angles. It is distinguished from its siblings by its foundational role as the mathematical group $SE(3)$ underlying all pose adjustments; while [Rotation Transformation](2279-rotation-transformation.md) and [Translation Transformation](2281-translation-transformation.md) handle specific components, SE3 combines them into a single invertible operation, and [Pose Recentering](1786-pose-recentering.md) uses it to shift the origin.
 
 ## Shared principles
-The family operates on the Special Euclidean group SE(3), which consists of all rigid transformations in 3D space. A rigid transformation $T$ is defined by a rotation matrix $R \in SO(3)$ and a translation vector $t \in \mathbb{R}^3$.
+The family operates on the Special Euclidean group $SE(3)$, which consists of all rigid transformations in 3D space. A rigid transformation $T$ is defined by a rotation matrix $R \in SO(3)$ and a translation vector $t \in \mathbb{R}^3$.
 
 To perform these operations linearly, points and vectors are represented in homogeneous coordinates. A 3D point $p = (x, y, z)$ is represented as $p_h = (x, y, z, 1)^T$, while a direction vector $v = (x, y, z)$ is represented as $v_h = (x, y, z, 0)^T$. The distinction is critical: appending 1 allows translation to affect the position, while appending 0 ensures translation does not affect the direction.
 
@@ -95,35 +95,31 @@ This property ensures that the conjugate of the rotation is the exact inverse, a
 ## Subtopics
 
 ### [Camera Coordinate Homogenization and Rigid Transformation](4005-camera-coordinate-homogenization-and-rigid-transformation.md)
-This method applies a rigid body transformation to 3D points or vectors using homogeneous coordinates and matrix multiplication. It solves the problem of unifying translation and rotation into a single linear operation, which is essential for composing complex camera poses and scene transforms in volume rendering. It differs from [3D Coordinate Transformation (Translation + Rotation)](6721-3d-coordinate-transformation-translation-rotation.md) by combining rotation and translation into a single $4 \times 4$ matrix multiplication rather than separating them into sequential vector additions and rotations.
+This method converts 3D points and direction vectors into homogeneous coordinates and applies a rigid body transformation (rotation and translation) to map them between coordinate systems, such as from camera space to world space. It differs from its sibling [Scene-Related Transforms](11646-scene-related-transforms.md) by explicitly handling the distinction between points and vectors via the homogeneous fourth component, ensuring translation affects positions but not directions, whereas siblings may handle scene-relative adjustments without this strict separation.
 
 ### [Scene-Related Transforms](11646-scene-related-transforms.md)
-Scene-related transforms are a class of imaging transforms that operate primarily on 3D scenes rather than on specific objects extracted from them. They facilitate the transformation of information between scene, object, and view coordinate spaces. This family is distinct from structure-related transforms, which focus on individual objects.
+Scene-related transforms are a class of imaging transforms that operate primarily on scenes, as opposed to structure-related transforms which operate on objects extracted from scenes. They facilitate the transformation of information between scene, object, and view spaces, assuming the orientation and position relative to the scene or object coordinate system are known. This article builds on [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md).
 
-#### RigidXform
-**Definition**
-A transformation structure that maps a volume's local cell space to world metres by applying a uniform cell scale, a rotation, and a translation [S1, unofficial].
+### RigidXform
+#### definition
+- [S1, unofficial] A transformation structure that maps a volume's local cell space to world metres by applying a uniform cell scale, a rotation, and a translation.
+#### step
+- [S1, unofficial] Construct RigidXform from a Pose by dequantising the quaternion, renormalising it, and rejecting if the orientation is zero.
+#### parameter
+- [S1, unofficial] cell_size_m: uniform scale factor converting local cells to world metres.
+#### pitfall
+- [S1, unofficial] The stored rotation is normalised, ensuring the conjugate is the exact inverse of the rotation.
 
-**Step**
-Construct RigidXform from a Pose by dequantising the quaternion, renormalising it, and rejecting if the orientation is zero [S1, unofficial].
-
-**Parameter**
-`cell_size_m`: uniform scale factor converting local cells to world metres [S1, unofficial].
-
-**Pitfall**
-The stored rotation is normalised, ensuring the conjugate is the exact inverse of the rotation [S1, unofficial].
-
-#### SE(3) Camera Transformation
-**Definition**
-Applies an SE(3) transformation to a batch of camera-to-world matrices, preserving the scale of the rotation part [S2, unofficial].
-
-**Step**
-1. Validate inputs: matrix must be 4x4, camtoworlds must be Nx4x4 [S2, unofficial].
-2. Apply transformation using einsum: `camtoworlds = np.einsum('nij, ki -> nkj', camtoworlds, matrix)` [S2, unofficial].
-3. Normalize the rotation part to ensure pure SE(3) (no scaling): compute `scaling = np.linalg.norm(camtoworlds[:, 0, :3], axis=1)`, then divide `camtoworlds[:, :3, :3]` by `scaling[:, None, None]` [S2, unofficial].
+### SE(3) Camera Transformation
+#### definition
+- [S2, unofficial] Applies an SE(3) transformation to a batch of camera-to-world matrices, preserving the scale of the rotation part.
+#### step
+- [S2, unofficial] Validate inputs: matrix must be 4x4, camtoworlds must be Nx4x4.
+- [S2, unofficial] Apply transformation using einsum: camtoworlds = np.einsum('nij, ki -> nkj', camtoworlds, matrix).
+- [S2, unofficial] Normalize the rotation part to ensure pure SE(3) (no scaling): compute scaling = np.linalg.norm(camtoworlds[:, 0, :3], axis=1), then divide camtoworlds[:, :3, :3] by scaling[:, None, None].
 
 ## Background
-Rigid body transformations are fundamental in computer graphics and robotics for representing the pose of objects and cameras. The mathematical framework of SE(3) provides a consistent way to handle both rotation and translation. In volume rendering, these transformations are used to map points from local coordinate systems (such as voxel grids) to world coordinates or camera coordinates. The use of homogeneous coordinates allows for efficient composition of multiple transformations through matrix multiplication, which is crucial for performance in real-time rendering and large-scale scene processing.
+The mathematical foundation of rigid body transformations in 3D space is rooted in the Special Euclidean group $SE(3)$. In the context of modern volume rendering and 3D reconstruction, specific implementations like `RigidXform` have been developed to handle the mapping between local voxel spaces and world coordinates efficiently [S1, unofficial]. Similarly, batched SE(3) transformations are utilized in Gaussian Splatting frameworks to adjust camera poses during optimization [S2, unofficial].
 
 ## Sources
 [S1] T03 — Fixture worlds, rays, and integer brushes, https://github.com/deranjer/spall/pull/4, fetched 2026-10-25 (unofficial)

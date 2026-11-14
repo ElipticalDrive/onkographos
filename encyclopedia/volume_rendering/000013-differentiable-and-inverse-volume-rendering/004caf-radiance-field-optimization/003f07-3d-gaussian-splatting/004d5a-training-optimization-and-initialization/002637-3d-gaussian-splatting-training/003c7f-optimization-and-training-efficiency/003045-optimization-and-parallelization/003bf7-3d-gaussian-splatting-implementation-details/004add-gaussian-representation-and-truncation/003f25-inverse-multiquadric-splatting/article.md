@@ -3,153 +3,159 @@
 Also called: 3DIQS, Inverse Multiquadric
 
 ## Overview
-Inverse Multiquadric Splatting is a differentiable rendering technique that replaces the standard Gaussian radial basis function with an inverse multiquadric function to define the spatial decay of a 3D Gaussian primitive's contribution to a pixel [S1]. It differs from standard Gaussian Splatting by using a heavier-tailed decay profile, which requires a specific correction factor applied to the covariance matrix to maintain visual fidelity and training stability [S1].
+Inverse Multiquadric Splatting is a rasterization technique that replaces the standard Gaussian radial basis function with an inverse multiquadric function to modulate the opacity contribution of 3D Gaussians. It solves the problem of over-saturation and artifacts in high-opacity regions by providing a different decay profile for the splat weights. It differs from its siblings by using a rational function ($1/(x^2+1)$) rather than an exponential ($e^{-x^2}$) or raised cosine kernel, requiring a specific correction factor for the covariance matrix to maintain visual consistency with the underlying Gaussian distribution.
 
 ## How it works
-**Inputs:**
-*   3D Gaussian parameters: mean $\mu$, 3D covariance $\Sigma$ (parameterized by scale and rotation), and opacity $\omega$.
-*   Camera projection matrix and Jacobian $J$ for screen-space projection.
-*   Pixel coordinates $p$ within the splat's bounding box.
-
-**Outputs:**
-*   Alpha value $\alpha$ for the pixel.
-*   Gradients $\frac{\partial L}{\partial \mu}$, $\frac{\partial L}{\partial \Sigma}$, and $\frac{\partial L}{\partial \omega}$ for backpropagation.
+**Inputs and Outputs:**
+*   **Input:** 3D Gaussian parameters (mean $\mu$, covariance $\Sigma$), camera projection parameters, and the 2D projected conic matrix $C' = (\Sigma')^{-1}$ (represented as symmetric matrix entries $a, b, c$ and offset $w$).
+*   **Output:** Screen-space alpha value $\alpha$ for each pixel covered by the splat, and gradients $\frac{\partial L}{\partial \mu}, \frac{\partial L}{\partial \Sigma}$ for backpropagation.
 
 **Data Structures:**
-*   `conic` (or `con_o`): A 4-element vector representing the inverse 2D covariance matrix (conic matrix) $C = \Sigma'^{-1}$ and the opacity weight. Layout: `[x, y, z, w]` corresponding to $\begin{bmatrix} C_{11} & C_{12} \\ C_{12} & C_{22} \end{bmatrix}$ and $\omega$.
-*   `d`: 2D displacement vector $p - \mu_{2D}$.
+The method operates on the 2D conic matrix $C'$, which is the inverse of the projected 2D covariance matrix $\Sigma'$. In the CUDA implementation, this is stored as a symmetric 2x2 matrix plus an offset:
+*   `con_o.x`: $C'_{00}$ (element $a$)
+*   `con_o.y`: $C'_{01}$ (element $b$)
+*   `con_o.z`: $C'_{11}$ (element $c$)
+*   `con_o.w`: Opacity weight $\omega$ (or pre-computed opacity term)
 
 **Parameters:**
-*   `correctionFactor`: A scalar multiplier applied to the covariance matrices. Value: $1.38$ [S1].
-*   `ellipse_threshold`: The upper bound for culling. Value: $9.0$ [S1].
+*   `correctionFactor`: A scalar multiplier applied to the 3D covariance matrix $\Sigma$ before projection and to the 2D covariance matrix $\Sigma'$ after projection. Value: $1.38$ [S1].
+*   `ellipse_max`: The upper bound for the squared Mahalanobis distance in screen space. Value: $9.0$ [S1].
 *   `alpha_max`: The maximum clamped alpha value. Value: $0.99$ [S1].
 
-**Steps:**
+**Step-by-Step Method:**
 
-1.  **Covariance Correction:** Multiply the 3D covariance matrix $\Sigma$ by `correctionFactor` ($1.38$) before projection [S1].
-2.  **Projection:** Project the corrected 3D Gaussian to 2D screen space to obtain the 2D mean $\mu_{2D}$ and 2D covariance $\Sigma'$. Compute the conic matrix $C = \Sigma'^{-1}$ [S1].
-3.  **Culling:** Calculate the ellipse term (squared Mahalanobis distance):
-    $$ \text{ellipse} = d^T C d = C_{11} d_x^2 + C_{22} d_y^2 + 2 C_{12} d_x d_y $$
-    If $\text{ellipse} \le 0$ or $\text{ellipse} \ge 9.0$, skip the splat [S1].
-4.  **Alpha Computation:** Compute the inverse multiquadric weight $w$ and the final alpha $\alpha$:
-    $$ w = \frac{1}{\text{ellipse} + 1} $$
-    $$ \alpha = \min(0.99, \omega \cdot w) $$
-    [S1]
+1.  **Covariance Correction:**
+    Multiply the 3D covariance matrix $\Sigma$ by `correctionFactor` ($1.38$) before projecting it to 2D space. After projection, multiply the resulting 2D covariance matrix $\Sigma'$ by `correctionFactor` [S1].
 
-**Pseudocode (Forward Pass):**
+2.  **Compute Squared Ellipse Distance ($E$):**
+    Calculate the squared Mahalanobis distance (ellipse term) for a pixel at screen coordinates $(x, y)$ relative to the Gaussian center $(\mu'_x, \mu'_y)$. Let $d_x = x - \mu'_x$ and $d_y = y - \mu'_y$.
+    $$ E = C'_{00} d_x^2 + 2 C'_{01} d_x d_y + C'_{11} d_y^2 $$
+    In code, this is computed as:
+    ```python
+    ellipse = con_o.x * d.x * d.x + 2.0 * con_o.y * d.x * d.y + con_o.z * d.y * d.y
+    ```
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+3.  **Boundary Checks:**
+    *   If $E \le 0$, skip the splat (continue). [S1]
+    *   If $E \ge 9.0$, skip the splat (continue). This limits the effective radius of the splat. [S1]
 
-```python
-def inverse_multiquadric_splat_forward(conic, opacity, d_x, d_y):
-    """
-    conic: tuple (C11, C12, C22, w_opacity)
-    opacity: float (omega)
-    d_x, d_y: float (displacement from mean)
-    """
-    C11, C12, C22, w_opacity = conic
+4.  **Compute Weight ($w$) and Alpha ($\alpha$):**
+    The inverse multiquadric weight $w$ is defined as:
+    $$ w = \frac{1}{E + 1} $$
+    The final alpha is the product of the base opacity weight `con_o.w` and the weight $w$, clamped to `alpha_max`:
+    $$ \alpha = \min(0.99, \text{con\_o.w} \times w) $$
+    Note: The source defines the 3D function as $\frac{1}{\frac{1}{\xi}(d_M)^2 + 1}$ but the implementation uses $\xi=1$ implicitly in the 2D splat formula $w = \frac{1}{E+1}$ [S1].
+
+5.  **Backward Pass (Gradients):**
+    Compute gradients with respect to the loss $L$.
     
-    # Calculate ellipse term (Mahalanobis distance squared)
-    ellipse = C11 * d_x * d_x + C22 * d_y * d_y + 2.0 * C12 * d_x * d_y
-    
-    # Culling
-    if ellipse <= 0.0 or ellipse >= 9.0:
-        return None, None
+    *   **Gradient w.r.t. Alpha:**
+        $$ \frac{\partial L}{\partial \alpha} $$ (provided by upstream loss function)
         
-    # Compute inverse multiquadric weight
-    # w = 1 / (ellipse + 1)
-    inv_quad = 1.0 / (ellipse + 1.0)
-    
-    # Compute alpha
-    alpha = min(0.99, w_opacity * inv_quad)
-    
-    return alpha, inv_quad
-```
+    *   **Gradient w.r.t. Weight $G$ (where $G = w$):**
+        $$ \frac{\partial L}{\partial G} = \text{con\_o.w} \times \frac{\partial L}{\partial \alpha} $$
+        
+    *   **Gradient w.r.t. Ellipse $E$:**
+        $$ \frac{\partial L}{\partial E} = \frac{\partial L}{\partial G} \times \frac{\partial G}{\partial E} $$
+        Since $G = (E+1)^{-1}$, $\frac{\partial G}{\partial E} = -(E+1)^{-2}$.
+        $$ \frac{\partial L}{\partial E} = -\frac{\text{con\_o.w} \times \frac{\partial L}{\partial \alpha}}{(E+1)^2} $$
+        
+    *   **Gradient w.r.t. Mean $(\mu'_x, \mu'_y)$:**
+        Using the chain rule through $E$:
+        $$ \frac{\partial E}{\partial d_x} = 2 C'_{00} d_x + 2 C'_{01} d_y $$
+        $$ \frac{\partial E}{\partial d_y} = 2 C'_{01} d_x + 2 C'_{11} d_y $$
+        $$ \frac{\partial L}{\partial d_x} = \frac{\partial L}{\partial E} \times \frac{\partial E}{\partial d_x} $$
+        $$ \frac{\partial L}{\partial d_y} = \frac{\partial L}{\partial E} \times \frac{\partial E}{\partial d_y} $$
+        
+        The code implementation simplifies this. Let `ellipsepow` be $\frac{\partial L}{\partial E}$.
+        $$ \frac{\partial L}{\partial d_x} = \text{ellipsepow} \times (C'_{00} d_x + C'_{01} d_y) $$
+        $$ \frac{\partial L}{\partial d_y} = \text{ellipsepow} \times (C'_{01} d_x + C'_{11} d_y) $$
+        
+        These gradients are accumulated into `dL_dmean2D` scaled by the Jacobian of the projection (`ddelx_dx`, `ddely_dy`) [S1].
 
-**Pseudocode (Backward Pass):**
+    *   **Gradient w.r.t. Conic Matrix ($C'$):**
+        $$ \frac{\partial L}{\partial C'_{00}} = \frac{\partial L}{\partial E} \times d_x^2 $$
+        $$ \frac{\partial L}{\partial C'_{01}} = \frac{\partial L}{\partial E} \times 2 d_x d_y $$
+        $$ \frac{\partial L}{\partial C'_{11}} = \frac{\partial L}{\partial E} \times d_y^2 $$
+        
+        The code accumulates these into `dL_dconic2D`. Note that `dL_dconic2D` stores the gradient w.r.t the conic matrix entries directly [S1].
 
-The gradient of the loss $L$ with respect to the inverse quadric term $G$ (where $G = \frac{1}{\text{ellipse} + 1}$) is first computed from the gradient w.r.t alpha:
-$$ \frac{\partial L}{\partial G} = \omega \cdot \frac{\partial L}{\partial \alpha} $$
-[S1]
-
-The gradients with respect to the displacement components $d_x$ and $d_y$ are:
-$$ \frac{\partial L}{\partial d_x} = \frac{\partial L}{\partial G} \cdot \frac{-2}{(\text{ellipse} + 1)^2} \cdot (C_{11} d_x + C_{12} d_y) $$
-$$ \frac{\partial L}{\partial d_y} = \frac{\partial L}{\partial G} \cdot \frac{-2}{(\text{ellipse} + 1)^2} \cdot (C_{12} d_x + C_{22} d_y) $$
-[S1]
-
-The gradients with respect to the conic matrix entries are derived from the chain rule through the ellipse term. Let $E = \text{ellipse} + 1$.
-$$ \frac{\partial L}{\partial C_{11}} = \frac{\partial L}{\partial G} \cdot \frac{-2}{E^2} \cdot d_x^2 $$
-$$ \frac{\partial L}{\partial C_{22}} = \frac{\partial L}{\partial G} \cdot \frac{-2}{E^2} \cdot d_y^2 $$
-$$ \frac{\partial L}{\partial C_{12}} = \frac{\partial L}{\partial G} \cdot \frac{-2}{E^2} \cdot 2 d_x d_y $$
-[S1]
-
-Note: The `correctionFactor` ($1.38$) must also be applied to the gradients of the 3D covariance matrix during the backpropagation step from 2D conic to 3D covariance, as the forward pass scaled the covariance by this factor [S1].
-
-**Pseudocode (Backward Pass):**
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def inverse_multiquadric_splat_backward(conic, opacity, d_x, d_y, dL_dalpha):
+def inverse_multiquadric_splat_forward(con_o, d_x, d_y):
     """
-    conic: tuple (C11, C12, C22, w_opacity)
-    opacity: float (omega)
-    d_x, d_y: float (displacement from mean)
-    dL_dalpha: float (gradient of loss w.r.t alpha)
+    con_o: tuple (a, b, c, w) representing conic matrix [a, b; b, c] and opacity weight w
+    d_x, d_y: pixel offset from Gaussian center
+    Returns: alpha, ellipse
     """
-    C11, C12, C22, w_opacity = conic
+    a, b, c, w = con_o
     
-    ellipse = C11 * d_x * d_x + C22 * d_y * d_y + 2.0 * C12 * d_x * d_y
+    # Compute squared ellipse distance E
+    ellipse = a * d_x * d_x + 2.0 * b * d_x * d_y + c * d_y * d_y
     
-    # Precompute common terms
-    E = ellipse + 1.0
-    dL_dG = w_opacity * dL_dalpha
-    ellipse_pow_term = -2.0 * dL_dG / (E * E)
+    # Boundary checks
+    if ellipse <= 0.0 or ellipse >= 9.0:
+        return 0.0, ellipse
+        
+    # Compute weight and alpha
+    # Correction factor is applied to covariance before this step, 
+    # so we use the pre-corrected conic matrix.
+    weight = 1.0 / (ellipse + 1.0)
+    alpha = min(0.99, w * weight)
     
-    # Gradients w.r.t displacement (d_x, d_y)
-    # These are used to update the 2D mean
-    dL_ddx = ellipse_pow_term * (C11 * d_x + C12 * d_y)
-    dL_ddy = ellipse_pow_term * (C12 * d_x + C22 * d_y)
+    return alpha, ellipse
+
+def inverse_multiquadric_splat_backward(con_o, d_x, d_y, dL_dalpha):
+    """
+    Returns gradients: dL_da, dL_db, dL_dc, dL_dmean_x, dL_dmean_y
+    """
+    a, b, c, w = con_o
     
-    # Gradients w.r.t conic matrix entries
-    # dL/dC11
-    dL_dC11 = ellipse_pow_term * d_x * d_x
-    # dL/dC22
-    dL_dC22 = ellipse_pow_term * d_y * d_y
-    # dL/dC12 (note: ellipse has 2*C12, so gradient is doubled relative to C12 alone if treating C12 as independent, 
-    # but here we follow the source structure which updates the symmetric matrix entries directly)
-    # Source uses: halfellipsepow * d.x * d.y for off-diagonal accumulation in atomicAdd context
-    # The formula derived from source code:
-    # dG/dC12 = -2/(E^2) * 2 * d_x * d_y
-    # So dL/dC12 = dL_dG * (-4 * d_x * d_y / E^2)
-    # However, source code snippet 29-31 shows:
-    # atomicAdd(&dL_dconic2D[global_id].y, halfellipsepow * d.x * d.y)
-    # where halfellipsepow = 0.5 * ellipsepow
-    # ellipsepow = -dL_dG * 2 / E^2
-    # So contribution is (-dL_dG * 2 / E^2) * 0.5 * d_x * d_y = -dL_dG * d_x * d_y / E^2
-    # This implies the source code treats the off-diagonal term accumulation carefully.
-    # We will stick to the explicit formula derivation from Eq 31/32 in S1 for clarity, 
-    # but note the code implementation details.
+    ellipse = a * d_x * d_x + 2.0 * b * d_x * d_y + c * d_y * d_y
     
-    # Explicit gradients for conic matrix (inverse covariance)
-    # dL/dC11
-    grad_C11 = -2.0 * dL_dG * d_x * d_x / (E * E)
-    # dL/dC22
-    grad_C22 = -2.0 * dL_dG * d_y * d_y / (E * E)
-    # dL/dC12
-    grad_C12 = -4.0 * dL_dG * d_x * d_y / (E * E)
+    # If out of bounds, gradients are zero
+    if ellipse <= 0.0 or ellipse >= 9.0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+        
+    # Gradient w.r.t. weight G (where G = 1/(E+1))
+    # dL/dG = w * dL/dalpha
+    dL_dG = w * dL_dalpha
     
-    return dL_ddx, dL_ddy, grad_C11, grad_C12, grad_C22
+    # Gradient w.r.t. Ellipse E
+    # dG/dE = -1 / (E+1)^2
+    # dL/dE = dL/dG * dG/dE
+    denom_sq = (ellipse + 1.0) ** 2
+    dL_dE = -dL_dG / denom_sq
+    
+    # Gradient w.r.t. Mean (d_x, d_y)
+    # dE/d_d_x = 2*a*d_x + 2*b*d_y
+    # dE/d_d_y = 2*b*d_x + 2*c*d_y
+    dL_d_d_x = dL_dE * (2.0 * a * d_x + 2.0 * b * d_y)
+    dL_d_d_y = dL_dE * (2.0 * b * d_x + 2.0 * c * d_y)
+    
+    # Gradient w.r.t. Conic Matrix entries (a, b, c)
+    # dE/da = d_x^2
+    # dE/db = 2*d_x*d_y
+    # dE/dc = d_y^2
+    dL_da = dL_dE * (d_x * d_x)
+    dL_db = dL_dE * (2.0 * d_x * d_y)
+    dL_dc = dL_dE * (d_y * d_y)
+    
+    return dL_da, dL_db, dL_dc, dL_d_d_x, dL_d_d_y
 ```
 
 ## Operating characteristics
-*   **Complexity:** Same asymptotic time and memory complexity as standard Gaussian Splatting per pixel, as it replaces only the radial decay function evaluation.
-*   **Performance:** The inverse multiquadric function involves a division and addition, similar in cost to the Gaussian exponential, but avoids the `exp` function call, potentially offering slight performance gains or parity depending on hardware [S1].
-*   **Strengths:** The heavier tails of the inverse multiquadric function can provide better coverage for large or anisotropic primitives, potentially reducing artifacts in regions with sparse sampling or large depth variations [S1].
-*   **Limitations:** Requires the specific correction factor ($1.38$) to match the visual density of standard Gaussians; without it, the splats may appear too diffuse or too sharp [S1].
+*   **Time Complexity:** Same as standard Gaussian splatting, $O(N)$ where $N$ is the number of pixels covered by Gaussians. The inverse multiquadric function involves one division and one addition per pixel, comparable to the exponential function's cost in hardware.
+*   **Memory Complexity:** No additional memory overhead compared to standard Gaussian splatting.
+*   **Strengths:** The inverse multiquadric function has heavier tails than the Gaussian, which can help in representing large, diffuse structures. The rational function form is numerically stable.
+*   **Limitations:** The choice of `correctionFactor` (1.38) is empirical and specific to this implementation. The hard cutoff at $E=9$ may introduce artifacts if not handled carefully during densification.
+*   **When to use:** When standard Gaussian splatting exhibits over-saturation or artifacts in high-opacity regions, or when a different decay profile is desired for specific visual effects.
 
 ## Background
-Inverse Multiquadric Splatting was introduced in the DARB-Splatting paper, which generalizes splatting using decaying anisotropic radial basis functions [S1]. It is one of several alternative radial basis functions explored to improve the flexibility of 3D Gaussian Splatting beyond the standard Gaussian kernel [S1].
+Inverse Multiquadric Splatting was introduced in the context of generalizing splatting with decaying anisotropic radial basis functions. It is part of the DARB-Splatting framework, which explores various RBFs for volume rendering and Gaussian Splatting. The method modifies the CUDA rasterizer to support this specific kernel [S1].
 
 ## Sources
 [S1] DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions, https://doi.org/10.1109/WACV61042.2026.00438, fetched 2026-10-30

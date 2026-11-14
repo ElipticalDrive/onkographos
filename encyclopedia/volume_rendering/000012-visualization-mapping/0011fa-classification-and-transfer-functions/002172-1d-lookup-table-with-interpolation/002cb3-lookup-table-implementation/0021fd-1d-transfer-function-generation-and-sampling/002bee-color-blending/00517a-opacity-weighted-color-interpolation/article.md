@@ -1,0 +1,149 @@
+# Opacity Weighted Color Interpolation
+
+Also called: Color Calculation at Resampling Points, Opacity-Weighted Trilinear Color Interpolation, Opacity-weighted voxel color interpolation, Trilinear Opacity-Weighted Color Interpolation
+
+## Overview
+Opacity Weighted Color Interpolation is a technique used during the resampling phase of volume rendering to calculate the material color at a specific point within a voxel. It solves the problem of "color bleeding" or interface confusion that occurs when color and opacity are interpolated independently, particularly at boundaries between materials with differing opacities [S1][S2, unofficial]. Unlike standard trilinear interpolation which treats color and opacity as separate vectors, this method multiplies each vertex's color by its opacity before interpolation, ensuring that transparent regions do not incorrectly influence the color of opaque neighbors [S1][S2, unofficial].
+
+## How it works
+**Inputs:**
+- Scalar field values at the 8 vertices of a voxel.
+- Color Transfer Function (CTF) mapping scalar values to RGB colors.
+- Opacity Transfer Function (OTF) mapping scalar values to opacity $\alpha$.
+- Lighting model parameters (e.g., Blinn-Phong coefficients) [S1].
+
+**Outputs:**
+- Weighted material color $\tilde{C}_m(S)$ at the resampling point $S$.
+- Opacity $\alpha(S)$ at the resampling point $S$ (interpolated independently or via standard trilinear interpolation of raw opacities) [S1].
+
+**Data Structures:**
+- Voxel vertices: 8 points, each storing a scalar value $v_j$ ($j=1..8$).
+- Vertex attributes:
+  - Material color $C_m(S)_j$: RGB vector computed via CTF and lighting model.
+  - Opacity $\alpha_j$: Scalar value computed via OTF.
+
+**Steps:**
+1. **Vertex Color and Opacity Calculation:** For each of the 8 voxel vertices $j$, compute the material color $C_m(S)_j$ and opacity $\alpha_j$ using the respective transfer functions and lighting model [S1].
+   - The material color $C_m(S)_j$ is derived from the scalar value at vertex $j$ using the CTF and a lighting model (e.g., Blinn-Phong) [S1].
+   - The opacity $\alpha_j$ is derived from the scalar value at vertex $j$ using the OTF [S1].
+
+2. **Opacity Weighting:** For each vertex $j$, compute the weighted color $\tilde{C}_j$ by multiplying the material color by the opacity:
+   $$ \tilde{C}_j = \alpha_j C_m(S)_j $$
+   This step ensures that transparent vertices contribute less to the interpolated color, preventing "bleeding" from transparent regions into opaque ones [S2, unofficial].
+
+3. **Trilinear Interpolation:** Compute the final weighted material color $\tilde{C}_m(S)$ at the resampling point $S$ by performing trilinear interpolation on the weighted colors $\tilde{C}_j$ of the 8 vertices [S1]:
+   $$ \tilde{C}_m(S) = f_{\text{Trilinear}}(\alpha_j C_m(S)_j) $$
+   where $j=1..8$ [S1].
+
+4. **Final Color Composition:** The final color at the resampling point is typically composed using the interpolated opacity $\alpha(S)$ and the weighted color $\tilde{C}_m(S)$ in the volume rendering equation (e.g., Eq. 11 in [S1]), often involving accumulation along the ray [S1]. Note that $\alpha(S)$ itself is usually interpolated independently via standard trilinear interpolation of the raw opacities $\alpha_j$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def opacity_weighted_color_interpolation(voxel_vertices, scalar_values, ctf, otf, lighting_model):
+    """
+    Calculate the weighted material color at a resampling point within a voxel.
+    
+    Args:
+        voxel_vertices: List of 8 3D coordinates defining the voxel corners.
+        scalar_values: List of 8 scalar values at the voxel corners.
+        ctf: Function mapping scalar value to RGB color vector.
+        otf: Function mapping scalar value to opacity scalar.
+        lighting_model: Function computing reflected light color given normal, view, light vectors, and base color.
+        
+    Returns:
+        weighted_color: RGB vector representing the opacity-weighted color at the resampling point.
+        interpolated_opacity: Scalar opacity at the resampling point.
+    """
+    # Step 1: Calculate vertex colors and opacities
+    vertex_colors = []
+    vertex_opacities = []
+    
+    for i in range(8):
+        s = scalar_values[i]
+        
+        # Calculate material color using CTF and lighting model
+        # Note: The exact lighting calculation depends on the specific model (e.g., Blinn-Phong)
+        # and requires normal vectors and light/view directions at the vertex.
+        # Assuming these are available or computed from the scalar field gradient.
+        base_color = ctf(s)
+        material_color = lighting_model(base_color, ...) # Placeholder for lighting specifics [G]
+        
+        # Calculate opacity using OTF
+        opacity = otf(s)
+        
+        vertex_colors.append(material_color)
+        vertex_opacities.append(opacity)
+        
+    # Step 2: Apply opacity weighting to vertex colors
+    weighted_vertex_colors = []
+    for i in range(8):
+        # Multiply color by opacity
+        weighted_color = vertex_opacities[i] * vertex_colors[i]
+        weighted_vertex_colors.append(weighted_color)
+        
+    # Step 3: Trilinear interpolation of weighted colors
+    # Assuming resampling point S is defined by fractional coordinates (u, v, w) in [0, 1]
+    # This function performs standard trilinear interpolation on the 8 weighted colors
+    weighted_color = trilinear_interpolate(weighted_vertex_colors, u, v, w)
+    
+    # Step 4: Trilinear interpolation of raw opacities (for final compositing)
+    interpolated_opacity = trilinear_interpolate(vertex_opacities, u, v, w)
+    
+    return weighted_color, interpolated_opacity
+
+def trilinear_interpolate(values, u, v, w):
+    """
+    Perform trilinear interpolation on 8 values.
+    values: List of 8 values (RGB vectors or scalars).
+    u, v, w: Fractional coordinates in [0, 1].
+    """
+    # Interpolate along x-axis
+    c000 = values[0]
+    c100 = values[1]
+    c010 = values[2]
+    c110 = values[3]
+    c001 = values[4]
+    c101 = values[5]
+    c011 = values[6]
+    c111 = values[7]
+    
+    # Linear interpolation along x
+    c00 = c000 * (1 - u) + c100 * u
+    c01 = c010 * (1 - u) + c110 * u
+    c10 = c001 * (1 - u) + c101 * u
+    c11 = c011 * (1 - u) + c111 * u
+    
+    # Linear interpolation along y
+    c0 = c00 * (1 - v) + c01 * v
+    c1 = c10 * (1 - v) + c11 * v
+    
+    # Linear interpolation along z
+    result = c0 * (1 - w) + c1 * w
+    
+    return result
+```
+
+**Parameters:**
+- Trilinear interpolation weights: Determined by the resampling point's position within the voxel.
+- CTF/OTF: User-defined or automatically generated transfer functions.
+
+**Edge Cases and Pitfalls:**
+- **Color Bleeding:** Independent interpolation of color and opacity causes color bleeding, where transparent regions incorrectly influence opaque neighbors (e.g., bone classified opaque white surrounded by transparent red flesh results in incorrect blended colors) [S2, unofficial].
+- **Interface Confusion:** Without opacity weighting, interfaces between materials with different colors and opacities can produce intermediate colors that do not correspond to any actual material (e.g., orange at a red/green interface) [S1].
+- **Darkening Artifacts:** Independent interpolation can also lead to darkening artifacts in volumetric datasets [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The method adds a constant-time multiplication step per vertex before the standard trilinear interpolation, which is $O(1)$ per resampling point. The overall complexity remains dominated by the ray casting or resampling process.
+- **Memory Complexity:** No additional memory is required beyond storing the vertex colors and opacities, which are already needed for standard interpolation.
+- **Performance:** The method is computationally efficient as it avoids complex per-pixel logic. It reduces image entropy, indicating a reduction in visual "chaos" and interface confusion [S1]. In tests, image entropy was reduced by 14.15% in Group A (plate-like entities) and 5.68% in Group B (jet invasion) [S1].
+- **Strengths:** Prevents color bleeding and interface confusion, leading to more physically plausible and visually clear results [S1][S2, unofficial].
+- **Limitations:** Requires accurate computation of vertex colors and opacities. The effectiveness depends on the quality of the transfer functions and lighting model [S1].
+
+## Background
+Opacity Weighted Color Interpolation was introduced to address limitations in standard volume rendering techniques where color and opacity are interpolated separately. It is particularly relevant in the visualization of explosion fields and other complex volumetric data where material interfaces are critical [S1]. The technique is based on the principle that color should be weighted by opacity before interpolation to prevent transparent regions from affecting the color of opaque regions [S2, unofficial].
+
+## Sources
+[S1] A volume rendering visualization method oriented to explosion field features, https://doi.org/10.1063/5.0226283, fetched 2026-10-26
+[S2] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

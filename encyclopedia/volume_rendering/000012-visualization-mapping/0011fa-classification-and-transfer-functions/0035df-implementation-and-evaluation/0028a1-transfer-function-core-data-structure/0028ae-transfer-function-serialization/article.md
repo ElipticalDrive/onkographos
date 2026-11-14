@@ -3,7 +3,7 @@
 Also called: JSON Volume Preset Configuration, Volume Transfer Function Preset, bone.json/muscle.json preset, loadTransferFunction, saveTransferFunction
 
 ## Overview
-Transfer Function Serialization converts an in-memory transfer function data structure into a persistent JSON format and reconstructs it upon loading [S1, S2, unofficial]. It stores volume rendering transfer function parameters, including color and opacity controls, Gaussian objects, and lighting settings, in a JSON file for runtime loading [S2, unofficial]. It is distinguished from its parent, the Transfer Function Core Data Structure, by its focus on I/O persistence rather than runtime evaluation.
+Transfer Function Serialization converts an in-memory transfer function data structure into a persistent JSON format and reconstructs it upon loading [S1, unofficial][S2, unofficial]. It stores volume rendering transfer function parameters, including color and opacity controls, Gaussian objects, and lighting settings, in a JSON file for runtime loading [S2, unofficial]. It is distinguished from its parent, the Transfer Function Core Data Structure, by its focus on I/O persistence rather than runtime evaluation [G].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,11 +11,11 @@ Transfer Function Serialization converts an in-memory transfer function data str
 *   **Output:** A JSON string or file representing the serialized state.
 
 **Data Structures:**
-Two distinct JSON schemas are observed in the sources [S1, S2, unofficial].
+Two distinct JSON schemas are observed in the sources [S1, unofficial][S2, unofficial].
 
 1.  **Schema A (C++/General):**
     *   `resolution`: `int`
-    *   `alphaArray`: Object with `encoding` ("BASE64") and `data` (string) [S1, unofficial].
+    *   `alphaArray`: Object with `encoding` (`"BASE64"`) and `data` (string) [S1, unofficial].
     *   `colorControls`: Array of objects `{ "position": float, "color": vec3f }` [S1, unofficial].
     *   `opacityControl`: Array of objects `{ "position": vec2f }` [S1, unofficial].
     *   `gaussianObjects`: Array of objects `{ "mean": float, "sigma": float, "heightFactor": float }` [S1, unofficial].
@@ -29,7 +29,7 @@ Two distinct JSON schemas are observed in the sources [S1, S2, unofficial].
     *   `ambient`: `float` [S2, unofficial].
     *   `diffuse`: `float` [S2, unofficial].
     *   `shade`: `bool` [S2, unofficial].
-    *   `interpolation`: `bool` (e.g., "phong", "gouraud") [S2, unofficial].
+    *   `interpolation`: `bool` or string (e.g., `"phong"`, `"gouraud"`) [S2, unofficial].
 
 **Numbered Steps:**
 
@@ -66,7 +66,7 @@ def serialize_transfer_function(tf_data, schema="A"):
     """
     if schema == "A":
         # 1. Alpha Array: Encode to Base64 [S1, unofficial]
-        alpha_bytes = tf_data["alpha_array"].tobytes()
+        alpha_bytes = tf_data["alpha_array"] if isinstance(tf_data["alpha_array"], bytes) else bytes(tf_data["alpha_array"])
         alpha_b64 = base64.b64encode(alpha_bytes).decode("utf-8")
 
         # 2. Color Controls: Store position and color (vec3) [S1, unofficial]
@@ -181,15 +181,15 @@ def deserialize_transfer_function(json_str, schema="A"):
 *   **Alpha Array Size:** Gaussian objects may require the alpha array size to match the resolution [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Human-readable format; supports complex configurations including Gaussian objects and lighting parameters [S1, S2, unofficial].
+*   **Time Complexity:** Not given in the sources [G].
+*   **Memory Complexity:** Not given in the sources [G].
+*   **Strengths:** Human-readable format; supports complex configurations including Gaussian objects and lighting parameters [S1, unofficial][S2, unofficial].
 *   **Limitations:** Base64 encoding increases file size; parsing overhead for large alpha arrays [S1, unofficial].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **When to use:** Not given in the sources [G].
+*   **When not to use:** Not given in the sources [G].
 
 ## Background
-Transfer function serialization is a common practice in volume rendering applications to allow users to save and load custom transfer functions [S1, S2, unofficial].
+Transfer function serialization is a common practice in volume rendering applications to allow users to save and load custom transfer functions [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)

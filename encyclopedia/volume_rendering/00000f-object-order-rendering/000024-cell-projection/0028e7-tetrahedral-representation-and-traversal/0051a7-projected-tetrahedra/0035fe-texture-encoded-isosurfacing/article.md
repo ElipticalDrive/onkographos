@@ -9,7 +9,7 @@ Texture-Encoded Isosurfacing is a GPU-based technique for extracting isosurfaces
 **Inputs:** Unstructured tetrahedral grid, scalar field values at vertices, and an isosurface threshold $T$ [S1, unofficial][S2, unofficial].
 **Outputs:** Rasterized image containing the isosurface [S1, unofficial][S2, unofficial].
 **Data Structures:** A 2D checkerboard texture initialized with a checkerboard pattern; for smooth or multiple isosurfaces, it stores shading values and requires further partitioning of the texture domain [S1, unofficial][S2, unofficial]. A stencil buffer for visibility management [S1, unofficial][S2, unofficial].
-**Parameters:** Isosurface threshold $T$. Texture resolution is not specified in the sources.
+**Parameters:** Isosurface threshold $T$ [S1, unofficial][S2, unofficial]. Texture resolution is not specified in the sources [S1, unofficial][S2, unofficial].
 **Formulas:** Not given in the sources.
 **Steps:**
 1. **Decomposition:** Apply the decomposition step of the PT algorithm to divide tetrahedra into smaller tetrahedra instead of triangles [S1, unofficial][S2, unofficial].
@@ -22,13 +22,10 @@ Texture-Encoded Isosurfacing is a GPU-based technique for extracting isosurfaces
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def texture_encoded_isosurfacing(tetrahedra, scalar_field, threshold, mvp_matrix, checkerboard_texture):
-    """
-    Extracts isosurface from tetrahedral grid using texture encoding.
-    """
+def texture_encoded_isosurfacing(tetrahedra, scalar_field, threshold, mvp_matrix, checkerboard_texture, screen_width, screen_height):
     # Initialize buffers
-    stencil_buffer = [0] * (screen_width * screen_height)  # [G] Standard buffer initialization
-    color_buffer = [0] * (screen_width * screen_height)    # [G] Standard buffer initialization
+    stencil_buffer = [0] * (screen_width * screen_height)
+    color_buffer = [0] * (screen_width * screen_height)
 
     # Pass 1: Set stencil buffer using XOR operations
     for tet in tetrahedra:
@@ -106,7 +103,7 @@ pixel = (0, 0)  # [G] Loop variable placeholder for rasterization context
 *   **Multiple Isosurfaces:** Handling multiple isosurfaces requires further partitioning of the texture domain and storing additional shading values, which increases complexity [S1, unofficial][S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
 *   **Memory Complexity:** Depends on the size of the checkerboard texture and the number of tetrahedra [S1, unofficial][S2, unofficial].
 *   **Performance:** The algorithm runs in two passes and renders an average of 5 to 7 triangles per tetrahedron [S1, unofficial][S2, unofficial].
 *   **Strengths:** Renders fewer faces per tetrahedron and leverages 2D texturing hardware for intersection computation [S1, unofficial][S2, unofficial].

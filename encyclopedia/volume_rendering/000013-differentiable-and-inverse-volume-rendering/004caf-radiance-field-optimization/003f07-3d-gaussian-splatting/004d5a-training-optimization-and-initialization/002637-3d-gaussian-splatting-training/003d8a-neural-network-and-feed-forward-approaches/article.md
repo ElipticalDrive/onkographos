@@ -1,255 +1,36 @@
 # Neural Network and Feed-Forward Approaches
 
-Also called: Feed-forward 3DGS, Generalizable 3D Gaussian Splatting, Neural 3DGS Priors
+Also called: Feed-forward 3DGS, Neural 3DGS, Generalizable 3D Gaussian Splatting
 
 ## Overview
-This family encompasses methods that replace or augment the iterative per-scene gradient descent optimization of standard 3D Gaussian Splatting with neural networks. These approaches either directly regress Gaussian parameters from input views in a single forward pass (feed-forward) or use neural networks to provide geometric priors, feature representations, or regularization constraints during training. They are distinguished from [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) by their reliance on learned generalizable priors or explicit neural scene representations rather than purely differentiable rendering gradients for parameter fitting.
+This family encompasses methods that replace or augment the iterative per-scene gradient descent optimization of standard 3D Gaussian Splatting with neural networks. It solves the latency and computational cost of per-scene training by either regressing Gaussian parameters directly from input images (feed-forward) or using neural priors to guide the optimization process. It differs from [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) by eliminating or reducing the need for scene-specific iterative updates, and from [Physical Parameter Optimization](4111-physical-parameter-optimization.md) by relying on learned data-driven priors rather than physical constraints alone.
 
 ## Shared principles
-The core mechanism involves integrating a neural network component into the 3D Gaussian Splatting pipeline. This integration typically takes one of two forms:
-1.  **End-to-End Regression:** A network $f_{\theta}$ maps input multi-view images and camera parameters directly to Gaussian primitives $\{\mathbf{\mu}_i, \mathbf{R}_i, \mathbf{s}_i, \alpha_i, \mathbf{c}_i\}$, bypassing the optimization loop [S1, unofficial][S2].
-2.  **Neural Priors/Features:** A neural network (e.g., MLP, U-Net, or Transformer) predicts auxiliary information such as Unsigned Distance Functions (UDFs) for geometric constraints or high-dimensional feature vectors for distillation from 2D foundation models [S1, unofficial].
-
-Common technical requirements include:
-*   **Differentiable Rendering:** The predicted Gaussians must be rasterized using standard 3D Gaussian Splatting rasterization to compute losses against ground truth images or features [S1, unofficial].
-*   **Generalization:** The network is trained on a dataset of scenes to learn a prior that generalizes to unseen scenes, unlike per-scene optimization [S2].
-*   **Voxelization/Sampling:** For 3D backbones (e.g., Point Transformers, U-Nets), 3D Gaussians are often voxelized by sampling their center locations $\mathbf{\mu}$ to ensure compatibility with sparse grid structures [S1, unofficial].
+The core mechanism involves a neural network that maps input data (typically multi-view images or sparse views) to 3D Gaussian parameters or features.
+1.  **Input Representation:** Inputs are usually a set of $N$ images $\{I_1, \dots, I_N\}$ with known camera parameters.
+2.  **Feature Extraction:** A backbone (e.g., ResNet, Transformer) extracts 2D features.
+3.  **Geometric Aggregation:** Methods often use cost volumes or attention mechanisms to aggregate multi-view information. For cost volumes, similarity is computed between reference and target view features at discrete depth levels:
+    $$ C(x, y, d) = \text{Similarity}(F_r(x, y), F_t(x', y')) $$
+    where $(x', y')$ is the projected pixel in the target view for depth $d$.
+4.  **Parameter Regression:** A decoder (e.g., U-Net, MLP) predicts Gaussian properties $\{\mathbf{\mu}_i, \mathbf{R}_i, \mathbf{s}_i, \alpha_i, \mathbf{c}_i\}$ or high-dimensional feature vectors $\mathcal{F}$.
+5.  **Differentiable Rendering:** During training, predicted Gaussians are rasterized using the standard 3DGS rasterizer. The rendered output is compared to ground truth (images, depth, or feature maps) to compute loss and update network weights.
 
 ## Subtopics
 
 ### [MVSplat](9213-mvsplat.md)
-MVSplat is a feed-forward deep neural network that directly regresses 3D Gaussian Splatting parameters from sparse multi-view images in a single pass, bypassing the per-scene gradient descent optimization loop required by standard 3DGS. It builds upon PixelSplat by combining multi-view feature extraction through transformers and cost volumes, which are then processed by a U-Net. Unlike standard 3DGS which relies on iterative optimization to fit Gaussians to a specific scene, MVSplat learns a generalizable prior that maps input views directly to scene representation, enabling fast inference and cross-scene generalization.
-
-**Inputs and Outputs:**
-*   **Input:** A set of $N$ sparse multi-view images and their corresponding camera parameters (intrinsics and extrinsics).
-*   **Output:** A set of 3D Gaussian primitives, each defined by position $\mathbf{\mu}$, covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, and spherical harmonic coefficients for color $\mathbf{c}$.
-
-**Data Structures:**
-The method utilizes a U-Net architecture to process features. The internal data structure involves:
-1.  **Multi-view Features:** Extracted via a transformer encoder.
-2.  **Cost Volume:** A 3D tensor representing matching costs across views, used to provide geometry cues.
-3.  **Voxel Grid:** A sparse 3D grid where features are lifted and processed.
-
-**Steps:**
-1.  **Feature Extraction:** Extract multi-view features from the input images using a transformer-based encoder. This step generalizes features between views, similar to the epipolar transformer in PixelSplat.
-2.  **Cost Volume Construction:** Construct a cost volume that aggregates matching information across the input views. This provides geometric cues for depth estimation.
-3.  **U-Net Processing:** Pass the multi-view features and cost volume through a U-Net decoder. The U-Net processes the combined information to predict Gaussian parameters.
-4.  **Parameter Regression:** The network outputs the parameters for the 3D Gaussians. This includes predicting one Gaussian primitive per occupied voxel in a sparse 3D voxel grid, ensuring scene-adaptive primitive allocation.
-5.  **Rendering:** The predicted Gaussians are rasterized using standard 3D Gaussian Splatting rasterization to generate novel views.
-
-**Formulas:**
-The core regression can be viewed as a function $f_{\theta}$ parameterized by the network weights $\theta$:
-$$ \{\mathbf{\mu}_i, \mathbf{R}_i, \mathbf{s}_i, \alpha_i, \mathbf{c}_i\}_{i=1}^M = f_{\theta}(\{I_j, \mathbf{K}_j, \mathbf{t}_j\}_{j=1}^N) $$
-where $I_j$ is the $j$-th input image, $\mathbf{K}_j$ and $\mathbf{t}_j$ are the intrinsic and extrinsic parameters, and $M$ is the number of predicted Gaussians.
-
-**Parameters:**
-*   Number of input views $N$: Typically sparse (e.g., 2-4 views).
-*   Network depth and width: Determined by the U-Net architecture.
-
-**Edge Cases and Pitfalls:**
-*   **Sparse Input:** Performance may degrade if the number of input views is too low, as the cost volume may lack sufficient geometric cues.
-*   **Camera Pose Accuracy:** The method assumes known camera poses. Errors in pose estimation can lead to incorrect Gaussian placement.
-*   **Generalization:** While it generalizes across scenes, it may struggle with out-of-distribution scenes not seen during training.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def mvsplat_forward(input_images, camera_params):
-    """
-    Forward pass of MVSplat.
-    
-    Args:
-        input_images: List of N images, shape (N, H, W, 3)
-        camera_params: List of N camera parameters, each containing intrinsics and extrinsics
-        
-    Returns:
-        gaussians: List of M Gaussian primitives, each with position, rotation, scale, opacity, and color
-    """
-    # Step 1: Feature Extraction
-    # Extract multi-view features using a transformer encoder
-    features = transformer_encoder(input_images, camera_params)
-    
-    # Step 2: Cost Volume Construction
-    # Construct a cost volume from the extracted features
-    cost_volume = construct_cost_volume(features)
-    
-    # Step 3: U-Net Processing
-    # Process features and cost volume through a U-Net
-    unet_output = unet_decoder(features, cost_volume)
-    
-    # Step 4: Parameter Regression
-    # Regress Gaussian parameters from the U-Net output
-    # This involves predicting one Gaussian per occupied voxel in a sparse 3D grid
-    gaussians = regress_gaussians(unet_output, camera_params)
-    
-    return gaussians
-```
+MVSplat is a feed-forward deep neural network that directly regresses 3D Gaussian Splatting parameters from sparse multi-view images in a single pass. It distinguishes itself by building upon PixelSplat, combining multi-view feature extraction through transformers and cost volumes, processed by a U-Net. Unlike per-scene optimization, it learns a prior that generalizes to unseen scenes, enabling immediate reconstruction without iterative training. See [MVSplat](9213-mvsplat.md) for implementation details.
 
 ### [VRP-UDF Training & Rendering Setup](14646-vrp-udf-training-rendering-setup.md)
-This method integrates a neural network-based volume rendering prior that learns Unsigned Distance Functions (UDFs) to guide the optimization of 3D Gaussian Splatting [Parent](9526-neural-network-and-feed-forward-approaches.md). It solves the problem of inaccurate surface reconstruction in thin structures and depth errors caused by ill-defined UDF fields near surfaces, which are common in standard volume rendering frameworks. Unlike [MVSplat](9213-mvsplat.md), which focuses on differentiable rendering from multi-view stereo, this approach explicitly decouples the geometric prior (UDF) from the radiance field, using the UDF to constrain Gaussian placement and refinement.
-
-The method employs a joint training pipeline where a UDF network and a color network are trained alongside 3D Gaussians. The UDF provides a dense, unbiased geometric prior, while the Gaussians handle high-frequency appearance details.
-
-### Inputs and Outputs
-*   **Inputs:** Multi-view images, camera poses, and ground truth depth maps (or UDF values) for initialization.
-*   **Outputs:** Optimized 3D Gaussian parameters (position, scale, rotation, opacity, spherical harmonics coefficients) and the trained UDF/Color networks.
-
-### Data Structures
-The core data structures are Multi-Layer Perceptrons (MLPs) and 3D Gaussian primitives.
-
-**MLP Architectures:**
-All MLPs use 256 hidden units.
-1.  **$f_{w1}$ (Weight Network):** 3 layers.
-2.  **$f_{w2}$ (Weight Network):** 6 layers, includes skip connections.
-3.  **$f_u$ (UDF Network):** 8 layers, includes skip connections.
-4.  **$f_c$ (Color Network):** 2 layers.
-
-**3D Gaussians:**
-Standard 3D Gaussian Splatting representation: mean position $\mu$, covariance $\Sigma$ (parameterized by scale $s$ and rotation $q$), opacity $\alpha$, and spherical harmonics coefficients $c_{lm}$.
-
-### Numbered Steps
-1.  **Network Initialization:**
-    Initialize $f_{w1}$, $f_{w2}$, $f_u$, and $f_c$ with the specified layer counts and hidden units. Initialize 3D Gaussians from the input point cloud or sparse reconstruction.
-
-2.  **Training Schedule:**
-    *   **Phase 1 (Iterations 0–9,000):** Train the Gaussian Splatting method only. Do not activate the UDF prior.
-    *   **Phase 2 (Iterations 9,000–20,000):** Begin training the UDFs ($f_u$) and Color network ($f_c$) alongside the Gaussians.
-    *   **Phase 3 (Iterations 20,000–30,000):** Refine Gaussians using the UDF prior.
-
-3.  **UDF Constraint and Activation:**
-    The UDF network $f_u(\mathbf{x})$ outputs the unsigned distance to the surface. To enforce non-negativity, apply the Softplus activation function after the final layer of $f_u$:
-    $$ f_u(\mathbf{x}) = \text{Softplus}(MLP_{f_u}(\mathbf{x})) $$
-    where $\text{Softplus}(z) = \ln(1 + e^z)$.
-
-4.  **Color Network Input Modification:**
-    When querying the color network $f_c$, do **not** include normal vectors in the input. The input to $f_c$ consists only of the spatial coordinates $\mathbf{x}$ and potentially view direction $\mathbf{d}$.
-    *   *Reason:* Normals are ambiguous at the zero-level set of a UDF due to non-differentiability. Including them introduces noise during optimization [S1, unofficial].
-
-5.  **Ray Casting and Sampling (Refinement Phase):**
-    During the final 10,000 iterations:
-    *   Cast rays through the camera frustum.
-    *   Use a batch size of 2,048 rays per batch.
-    *   Sample 64 points along each ray.
-    *   Evaluate the UDF $f_u$ at these points to guide the density and position of Gaussians.
-
-6.  **Loss Functions:**
-    Minimize rendering errors between predicted images and ground truth. Metrics include:
-    *   Depth L1 distance.
-    *   Mask errors (Cross Entropy and L1 distance).
-    *   Peak Diff-L1: The L1 error between the sampled point with maximum rendering weight and the true surface along each ray.
-
-### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def train_vrp_udf_gaussian(num_iterations=30000, start_udf_iter=9000, 
-                           refine_start_iter=20000, batch_size=2048, 
-                           samples_per_ray=64):
-    # Initialize networks
-    f_w1 = MLP(layers=3, hidden=256)
-    f_w2 = MLP(layers=6, hidden=256, skip_connections=True)
-    f_u  = MLP(layers=8, hidden=256, skip_connections=True)
-    f_c  = MLP(layers=2, hidden=256)
-    
-    # Initialize Gaussians from sparse reconstruction
-    gaussians = initialize_gaussians_from_point_cloud()
-    
-    # Optimizers
-    opt_gaussians = Adam(gaussians.parameters())
-    opt_f_u = Adam(f_u.parameters())
-    opt_f_c = Adam(f_c.parameters())
-    
-    # Learning rate schedulers for f_u and f_c follow previous works [1], [24]
-    # Exact values not specified in source [S1, unofficial]
-    
-    for iteration in range(1, num_iterations + 1):
-        # Sample rays
-        rays = sample_rays(batch_size=batch_size)
-        
-        # Sample points along rays
-        points = sample_points_along_rays(rays, num_samples=samples_per_ray)
-        
-        # Forward pass through UDF
-        # Apply Softplus to enforce non-negative UDF output
-        udf_values = f_u(points)
-        udf_values = softplus(udf_values)
-        
-        # Forward pass through Color Network
-        # Note: Normals are NOT included in input to f_c
-        # Inputs: spatial coordinates, view direction
-        colors = f_c(points, view_directions=rays.directions)
-        
-        # Render image using Gaussian Splatting and UDF prior
-        # The UDF guides the density/opacity of Gaussians
-        rendered_image = render_gaussians_with_udf_prior(
-            gaussians=gaussians, 
-            rays=rays, 
-            udf_values=udf_values,
-            colors=colors
-        )
-        
-        # Compute Loss
-        # Ground truth images and depths are available
-        loss = compute_rendering_loss(rendered_image, ground_truth_image)
-        loss += compute_depth_loss(rendered_depth, ground_truth_depth)
-        
-        # Backpropagation
-        if iteration < start_udf_iter:
-            # Phase 1: Train only Gaussians
-            opt_gaussians.zero_grad()
-            loss.backward()
-            opt_gaussians.step()
-        else:
-            # Phase 2 & 3: Train Gaussians, UDF, and Color Network
-            opt_gaussians.zero_grad()
-            opt_f_u.zero_grad()
-            opt_f_c.zero_grad()
-            
-            loss.backward()
-            
-            opt_gaussians.step()
-            opt_f_u.step()
-            opt_f_c.step()
-            
-            # Refine Gaussians using UDF constraints in final phase
-            if iteration >= refine_start_iter:
-                refine_gaussians_with_udf(gaussians, f_u, points)
-
-def softplus(x):
-    return log(1 + exp(x))
-```
-
-### Parameters
-*   **$f_{w1}$:** 3 layers, 256 hidden units.
-*   **$f_{w2}$:** 6 layers, 256 hidden units, skip connections.
-*   **$f_u$:** 8 layers, 256 hidden units, skip connections.
-*   **$f_c$:** 2 layers, 256 hidden units.
-*   **Total Iterations:** 30,000.
-*   **UDF Start Iteration:** 9,000.
-*   **Refinement Batch Size:** 2,048 rays.
-*   **Samples per Ray:** 64.
-*   **Learning Rate:** Follows previous works [1], [24] (exact values not given in [S1, unofficial]).
-
-### Edge Cases and Pitfalls
-1.  **Ill-defined UDF near surfaces:** Random hierarchical sampling can cause rendering inaccuracies near surfaces. This is a common issue in volume rendering frameworks, even theoretically unbiased ones like NeuS [S1, unofficial].
-2.  **Premature Flipping:** Excessively large convergence parameters (e.g., NeuralUDF's flip factor) can cause the UDF to flip into an SDF before the true surface, leading to depth rendering errors [S1, unofficial].
-3.  **Normal Ambiguity:** Including normal vectors in the color network input causes instability because normals are undefined/ambiguous at the UDF zero-level set [S1, unofficial].
+VRP-UDF integrates a neural network-based volume rendering prior into the 3DGS pipeline to learn Unsigned Distance Functions (UDFs) and guide optimization. It distinguishes itself by using a learned prior to resolve ambiguities in thin structures and surface reconstruction, addressing inaccuracies caused by random hierarchical sampling and ill-defined UDF fields near surfaces. See [VRP-UDF Training & Rendering Setup](14646-vrp-udf-training-rendering-setup.md) for implementation details.
 
 ### GS-Net
-- [S1, unofficial] A 3D neural network that predicts high-dimensional feature vectors for optimized 3D Gaussians, using Q-Render to efficiently render these features into 2D maps for distillation from 2D foundation models.
-- [S1, unofficial] Given optimized 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$, a 3D neural network predicts a set of $C$-dimensional Gaussian features $\mathcal{F} = \{f_i\}_{i=1}^N$ where $f_i \in \mathbb{R}^C$.
-- [S1, unofficial] Use Q-Render to transform predicted Gaussian features into rendered feature maps.
-- [S1, unofficial] Train the 3D neural network to minimize the rendering loss between the rendered feature maps and target 2D feature maps extracted from CLIP’s vision encoder.
-- [S1, unofficial] Voxelize 3D Gaussians by sampling their center location $\mu$ to ensure compatibility with typical 3D backbones like Point Transformer v3 (PTv3) and MinkUnet.
-- [S1, unofficial] Perform de-voxelization steps to convert predicted voxel features into predicted Gaussian features $\mathcal{F}$.
-- [S1, unofficial] Unlike methods that force per-scene feature optimization, GS-Net predicts features in a generalizable manner using a 3D neural network.
+GS-Net is a 3D neural network that predicts high-dimensional feature vectors for optimized 3D Gaussians, using Q-Render to efficiently render these features into 2D maps for distillation from 2D foundation models [S1, unofficial]. Given optimized 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$, a 3D neural network predicts a set of $C$-dimensional Gaussian features $\mathcal{F} = \{f_i\}_{i=1}^N$ where $f_i \in \mathbb{R}^C$ [S1, unofficial]. It uses Q-Render to transform predicted Gaussian features into rendered feature maps [S1, unofficial]. The 3D neural network is trained to minimize the rendering loss between the rendered feature maps and target 2D feature maps extracted from CLIP’s vision encoder [S1, unofficial]. To ensure compatibility with typical 3D backbones like Point Transformer v3 (PTv3) and MinkUnet, 3D Gaussians are voxized by sampling their center location $\mu$ [S1, unofficial]. De-voxelization steps convert predicted voxel features into predicted Gaussian features $\mathcal{F}$ [S1, unofficial]. Unlike methods that force per-scene feature optimization, GS-Net predicts features in a generalizable manner using a 3D neural network [S1, unofficial].
 
 ### Masked Auto Encoder for Generalizable 3DGS
-- [S2] Using a masked autoencoder to learn a generalizable 3D Gaussian splatting-based representation.
+This approach uses a masked autoencoder to learn a generalizable 3D Gaussian splatting-based representation [S2]. It combines a masked autoencoder with a 3D transformer-based architecture to create a generalized representation capable of reconstructing unseen scenes and supporting transfer learning [S2].
 
 ## Background
-The shift from per-scene optimization to neural network-based approaches in 3D Gaussian Splatting addresses the computational bottleneck of iterative gradient descent, which can take hours or days per scene [S2]. Feed-forward methods like MVSplat adapt multi-view stereo (MVS) techniques, such as cost volumes and transformers, to directly predict Gaussian parameters, enabling real-time inference [S1, unofficial][S2]. Neural priors, such as UDFs, are integrated to improve geometric fidelity, particularly for thin structures and surface accuracy, where standard Gaussian splatting may suffer from depth errors or ill-defined fields [Parent](9526-neural-network-and-feed-forward-approaches.md). Feature distillation methods like GS-Net leverage 2D foundation models (e.g., CLIP) by rendering high-dimensional features from 3D Gaussians, allowing for semantic understanding and generalizable representations [S1, unofficial]. The use of masked autoencoders further explores self-supervised learning for generalizable 3DGS representations [S2].
+Standard 3D Gaussian Splatting requires per-scene optimization, which is computationally expensive and slow. Neural network approaches emerged to provide generalizable solutions. MVSplat adapts multi-view stereo techniques (like PixelSplat) to 3DGS [S1, unofficial][S2]. VRP-UDF addresses surface reconstruction ambiguities in 3DGS by incorporating UDF priors [S1, unofficial]. GS-Net enables high-dimensional feature distillation from 2D foundation models (like CLIP) into 3DGS using quantile rendering [S1, unofficial]. Masked Autoencoders have been adapted for 3DGS to learn generalizable representations [S2].
 
 ## Sources
 [S1] Quantile Rendering: Efficiently Embedding High-dimensional Feature on 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2512.20927, fetched 2026-10-26 (unofficial)

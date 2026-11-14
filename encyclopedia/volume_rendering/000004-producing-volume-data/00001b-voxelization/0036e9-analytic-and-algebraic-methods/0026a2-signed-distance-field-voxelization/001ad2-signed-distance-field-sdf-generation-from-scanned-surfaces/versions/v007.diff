@@ -1,0 +1,269 @@
+--- v006.md
++++ v007.md
+@@ -4,124 +4,170 @@
+ 
+ ## Overview
+-This method converts a triangulated surface mesh (typically from 3D scanning) into a 3D Signed Distance Field (SDF) stored as a texture or grid [S2, unofficial]. It solves the problem of representing explicit, potentially noisy or complex scanned geometry as an implicit function suitable for raymarching, isosurfacing, or volume rendering [S3, unofficial]. Unlike [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md), which processes depth slices, this method operates directly on geometric primitives (triangles) to compute exact Euclidean distances [S1]. It differs from [Signed Distance Field from Mesh](1327-signed-distance-field-from-mesh.md) by explicitly handling the conversion to a bounded 3D texture domain with specific boundary shell logic [S3, unofficial].
++This method generates a voxelized Signed Distance Field (SDF) from a scanned triangulated surface mesh by computing the minimum Euclidean distance from each grid point to the mesh geometry [S1][S3, unofficial][S4, unofficial]. It differs from [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md) by evaluating distance directly against geometric primitives rather than projecting slices, making it suitable for inputs from upstream reconstruction pipelines where calibrated camera poses are unavailable [S1]. Unlike [Dense Volume SDF Generation](4499-dense-volume-sdf-generation.md) which may use hierarchical structures, this approach typically samples a uniform grid directly against the raw mesh triangles [S3, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   A triangulated mesh (e.g., PLY format) containing vertices and triangles [S1].
+-*   Grid resolution $N$ (e.g., $N=128$ for tetrahedral grids to preserve detail) [S1].
+-*   Texture boundary parameters: `textureBoundary` (default $0.5$) and `textureShell` (default $0.05$) [S3, unofficial].
+-
+-**Outputs:**
+-*   A 3D texture/grid where each voxel stores the signed distance to the mesh surface [S1]. In GPU implementations, this is stored in the red channel of a fragment shader output [S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A triangulated surface mesh, typically in PLY format, containing vertices and triangles [S1]. The mesh must be closed (holes filled) to ensure correct signed distance representation [S3, unofficial].
++*   **Output:** A 3D texture or grid where each voxel stores the signed Euclidean distance to the nearest point on the mesh surface [S1][S3, unofficial]. The sign is negative inside the mesh and positive outside [S1][S3, unofficial]. In GPU implementations, this is often stored in the red channel of a fragment shader output [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Mesh:** Stored as a 1D array of vertices with a fixed stride (e.g., 16384 bytes per vertex in GPU implementations) [S2, unofficial].
+-*   **Grid:** A 3D array indexed by integer coordinates `pos` derived from normalized texture coordinates, typically mapped from $[0, 1]$ to $[-1, 1]$ [S2, unofficial][S3, unofficial].
++*   **Mesh:** Stored as a 1D array of vertices with a stride (e.g., 16384 bytes per vertex in some GPU implementations) [S2, unofficial].
++*   **Grid/Texture:** A 3D texture with resolution $N \times N \times N$ (or derived from 2D UV mapping as $res \times res \times res^2$) [S2, S3, unofficial]. The domain is bounded by texture coordinates in the $[0, 1]$ range, representing a $1 \times 1 \times 1$ cube [S3, unofficial].
++*   **Parameters:**
++    *   `textureBoundary`: Defines the box centered at origin bounded by $|x| \le (0.5, 0.5, 0.5)$ [S3, unofficial].
++    *   `textureShell`: A small value (e.g., $0.05$) defining a boundary region around the texture where distance values might be invalid [S3, unofficial].
+ 
+-**Steps:**
+-1.  **Pre-processing:** Close any holes in the input mesh (e.g., the 5 holes in the Stanford Bunny) to ensure correct topological containment and distance representation [S3, unofficial].
+-2.  **Grid Initialization:** Define the bounding box centered at the origin, bounded by $|x| \le \text{textureBoundary}$ (typically a $1 \times 1 \times 1$ cube) [S3, unofficial].
+-3.  **Distance Computation:** For each voxel center $x$ in the grid:
+-    *   Iterate through all triangles in the mesh [S2, unofficial].
+-    *   Compute the Euclidean distance $d$ from $x$ to the triangle surface using a routine like `dist3d` or `udTriangle` [S1][S2, unofficial].
+-    *   Update the minimum distance: $D(x) = \min(D(x), d)$ [S2, unofficial].
+-    *   Assign sign: negative for interior points, positive for exterior points [S1].
+-4.  **Boundary Handling (Texture Lookup):** When evaluating the distance field at runtime or for boundary points, apply the following logic to handle points outside the valid texture region [S3, unofficial]:
+-    *   Calculate difference: $d_i = |x| - \text{textureBoundary} + \text{textureShell}$ [S3, unofficial].
+-    *   If the point is outside the 3D texture space, calculate the distance as the L2 norm of the positive components: $res = \| \max(d_i + \text{textureShell}, 0) \|_2$ [S3, unofficial].
+-    *   If the point is inside the texture space (check if $c = \max(d_{i_x}, \max(d_{i_y}, d_{i_z})) < 0$):
+-        *   Adjust coordinate: $x' = x + \text{textureBoundary}$ [S3, unofficial].
+-        *   Lookup the pre-computed distance from the 3D texture: $res = \text{lookupTexture}(\text{texture}, x')$ [S3, unofficial].
+-    *   Return $res$ [S3, unofficial].
++**Algorithm Steps:**
++
++1.  **Pre-processing:** Close any holes in the input mesh to ensure topological correctness for signed distance calculation [S3, unofficial].
++2.  **Grid Initialization:** For each voxel in the 3D grid, determine its 3D position $\mathbf{x}$ in the normalized space $[-1, 1]$ or $[0, 1]$ depending on the implementation [S2, S3, unofficial].
++3.  **Distance Calculation:** Compute the signed distance $\phi(\mathbf{x})$ for each grid point.
++    *   **Sign Determination:** The sign is negative inside the surface and positive outside [S1]. This can be determined by the closest triangle's face normal or a point-in-mesh test [S3, unofficial][S4, unofficial].
++    *   **Magnitude:** Compute the minimum Euclidean distance from $\mathbf{x}$ to the mesh surface. This involves iterating through all triangles and finding the closest point on each triangle to $\mathbf{x}$ [S2, S3, unofficial].
++    *   **Boundary Handling:** If the point $\mathbf{x}$ is outside the defined 3D texture space, calculate the distance to the texture boundary using the `textureShell` [S3, unofficial]:
++        $$ d_i = |\mathbf{x}| - \text{textureBoundary} + \text{textureShell} $$
++        $$ \text{res} = \| \max(d_i + \text{textureShell}, 0) \|_2 $$
++    *   **Interior Lookup:** If the point is inside the texture space (specifically, if the maximum component $c = \max(d_{i_x}, \max(d_{i_y}, d_{i_z})) < 0$), adjust the coordinate and lookup the pre-computed distance from the texture [S3, unofficial]:
++        $$ \mathbf{x}' = \mathbf{x} + \text{textureBoundary} $$
++        $$ \text{res} = \text{lookupTexture}(\text{texture}, \mathbf{x}') $$
+ 
+ **Pseudocode:**
++
+ ```python
+-import math
+-
+-class Vec3:
+-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+-    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
+-    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
+-    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+-    def dot(self, o): return self.x*o.x + self.y*o.y + self.z*o.z
+-    def cross(self, o): return Vec3(self.y*o.z-self.z*o.y, self.z*o.x-self.x*o.z, self.x*o.y-self.y*o.x)
+-    def length(self): return math.sqrt(self.dot(self))
+-
+-def compute_triangle_distance(p, v0, v1, v2):
+-    """Computes unsigned Euclidean distance from point p to triangle v0-v1-v2."""
+-    e1, e2 = v1 - v0, v2 - v0
+-    n = e1.cross(e2)
+-    n_len = n.length()
+-    if n_len == 0: return p.length()
+-    n = n * (1.0 / n_len)
+-    d = n.dot(p - v0)
+-    if d > 0:
+-        u, v, w = e1.dot(e1), e2.dot(e2), e1.dot(e2)
+-        a, b = (p - v0).dot(e1), (p - v0).dot(e2)
+-        denom = u * v - w * w
+-        yb = (a * v - b * w) / denom
+-        xb = (b * u - a * w) / denom
+-        if yb >= 0 and xb >= 0 and yb + xb <= 1: return abs(d)
+-        return min((p - v0).length(), (p - v1).length(), (p - v2).length())
+-    return abs(d)
+-
+-def generate_sdf(mesh, resolution, texture_boundary=0.5, texture_shell=0.05):
+-    """Generates a 3D SDF grid from a triangulated mesh."""
+-    grid_size = resolution ** 3
+-    sdf_grid = [10000.0] * grid_size
+-    for z in range(resolution):
+-        for y in range(resolution):
+-            for x in range(resolution):
+-                coord_x = (x / resolution) * 2.0 - 1.0
+-                coord_y = (y / resolution) * 2.0 - 1.0
+-                coord_z = (z / resolution) * 2.0 - 1.0
+-                pos = Vec3(coord_x * texture_boundary, coord_y * texture_boundary, coord_z * texture_boundary)
+-                min_dist = 10000.0
+-                for tri in mesh.triangles:
+-                    d = compute_triangle_distance(pos, tri.v0, tri.v1, tri.v2)
+-                    if d < min_dist: min_dist = d
+-                idx = x + y * resolution + z * resolution * resolution
+-                sdf_grid[idx] = min_dist
++def generate_sdf(mesh, grid_resolution):
++    """
++    Generates a Signed Distance Field from a triangulated mesh.
++    
++    Args:
++        mesh: A mesh object with vertices and triangles.
++        grid_resolution: The resolution N of the N x N x N grid.
++        
++    Returns:
++        A 3D array of shape (N, N, N) containing signed distances.
++    """
++    # Pre-processing: Close holes in the mesh [S3, unofficial]
++    closed_mesh = close_mesh_holes(mesh)
++    
++    # Initialize grid
++    N = grid_resolution
++    sdf_grid = np.zeros((N, N, N))
++    
++    # Define boundary parameters [S3, unofficial]
++    texture_boundary = 0.5
++    texture_shell = 0.05
++    
++    # Iterate over all voxels
++    for z in range(N):
++        for y in range(N):
++            for x in range(N):
++                # Map grid index to 3D position in [-1, 1] range [S2, unofficial]
++                pos = (np.array([x, y, z]) / N) * 2.0 - 1.0
++                
++                # Calculate signed distance
++                dist = compute_signed_distance(pos, closed_mesh)
++                
++                # Handle boundary conditions if necessary [S3, unofficial]
++                # This step is often handled during lookup in GPU shaders,
++                # but for CPU generation, we clamp or compute boundary distance.
++                if is_outside_texture_space(pos, texture_boundary, texture_shell):
++                    dist = compute_boundary_distance(pos, texture_boundary, texture_shell)
++                
++                sdf_grid[x, y, z] = dist
++                
+     return sdf_grid
+ 
+-def evaluate_sdf(x, sdf_texture, texture_boundary=0.5, texture_shell=0.05):
+-    """Evaluates SDF at point x with boundary handling."""
+-    di = [abs(x[i]) - texture_boundary + texture_shell for i in range(3)]
+-    if any(di[i] + texture_shell > 0 for i in range(3)):
+-        res = math.sqrt(sum(max(di[i] + texture_shell, 0.0) ** 2 for i in range(3)))
++def compute_signed_distance(point, mesh):
++    """
++    Computes the signed Euclidean distance from a point to the mesh.
++    
++    Args:
++        point: A 3D vector (x, y, z).
++        mesh: A closed triangulated mesh.
++        
++    Returns:
++        The signed distance (negative inside, positive outside).
++    """
++    min_dist = float('inf')
++    is_inside = False
++    
++    # Iterate through all triangles [S2, unofficial]
++    for triangle in mesh.triangles:
++        # Compute distance to triangle [S2, unofficial]
++        d = distance_to_triangle(point, triangle)
++        if d < min_dist:
++            min_dist = d
++            # Determine sign based on closest triangle's normal or point-in-mesh test [S3, unofficial][S4, unofficial]
++            if is_point_inside_mesh(point, mesh):
++                is_inside = True
++                
++    # Sign is negative inside, positive outside [S1]
++    if is_inside:
++        return -min_dist
+     else:
+-        x_adjusted = [x[i] + texture_boundary for i in range(3)]
+-        tex_coord = [(x_adjusted[i] / (2.0 * texture_boundary)) + 0.5 for i in range(3)]
+-        res = sdf_texture.lookup(tex_coord).r
+-    return res
++        return min_dist
++
++def distance_to_triangle(point, triangle):
++    """
++    Computes the Euclidean distance from a point to a triangle.
++    """
++    # Implementation of point-to-triangle distance [S2, unofficial]
++    # This involves projecting the point onto the triangle plane
++    # and checking if the projection lies within the triangle bounds.
++    # If outside, compute distance to edges and vertices.
++    pass
++
++def is_point_inside_mesh(point, mesh):
++    """
++    Determines if a point is inside a closed mesh.
++    """
++    # Ray casting or winding number algorithm [S3, unofficial][S4, unofficial]
++    pass
++
++def is_outside_texture_space(point, boundary, shell):
++    """
++    Checks if a point is outside the defined texture space boundary.
++    """
++    di = np.abs(point) - boundary + shell
++    return np.any(di > 0)
++
++def compute_boundary_distance(point, boundary, shell):
++    """
++    Computes distance to the texture boundary [S3, unofficial].
++    """
++    di = np.abs(point) - boundary + shell
++    return np.linalg.norm(np.maximum(di + shell, 0))
+ ```
+ 
+ **Parameters:**
+-*   `textureBoundary`: Defines the box centered at origin bounded by $|x| \le 0.5$. Represents the full $1 \times 1 \times 1$ cube containing the texture [S3, unofficial].
+-*   `textureShell`: A small value (default $0.05$) defining a boundary region around the texture where distance values might be invalid. It should be as small as possible to maximize the valid lookup region [S3, unofficial].
+-*   `shell_voxels`: (Variant specific) The shell half-thickness in voxels. Default $1.5$. Must be $\ge \sqrt{3}/2 \approx 0.866$ to prevent holes [S4, unofficial].
++*   **Resolution:** For tetrahedral grids, resolution was increased to $N=128$ to avoid losing detail [S1].
++*   **textureShell:** A small value (e.g., $0.05$) deduced by trial and error to define a boundary region around the texture where distance values might be invalid [S3, unofficial]. It should be as small as possible to maximize the valid lookup region.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Holes:** Open meshes (e.g., Stanford Bunny with 5 holes) must be closed before conversion to ensure correct interior/exterior sign assignment [S3, unofficial].
+-*   **Boundary Accuracy:** The `textureShell` value is not universal and must be adjusted for different textures to balance avoiding invalid boundary data and maximizing the valid lookup area [S3, unofficial].
+-*   **Scanner Noise:** The accuracy of the resulting SDF depends heavily on the surface scanner quality and the accuracy of the signed distance computation routine [S1].
+-*   **Resolution:** Low resolution may lose detail. For complex meshes, resolution may need to be increased (e.g., $N=128$) [S1].
++*   **Holes:** The mesh must be closed; holes in the mesh (e.g., the 5 holes in the Stanford Bunny) lead to incorrect distance representation [S3, unofficial].
++*   **Boundary Values:** The `textureShell` value is not universal and must be adjusted for different textures to balance between avoiding invalid boundary data and maximizing the valid lookup area [S3, unofficial].
++*   **Accuracy:** The accuracy of the extraction depends on the surface scanner and the accuracy of the signed distance computation [S1].
+ 
+ ## Subtopics
+ 
++### [Signed Distance Field from Mesh](1327-signed-distance-field-from-mesh.md)
++This method converts an explicit triangle mesh into a voxelized Signed Distance Field (SDF) where each voxel stores the signed Euclidean distance to the nearest point on the mesh surface. The sign is negative inside the mesh and positive outside, determined by the closest triangle's face normal or a point-in-mesh test. It differs from [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md) by evaluating distance directly against geometric primitives rather than projecting slices, making it suitable for inputs from upstream reconstruction pipelines where calibrated camera poses are unavailable.
++
++### [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md)
++Slice-based SDF Voxelization computes a Signed Distance Field (SDF) for a triangulated surface mesh by iterating over a 3D grid, determining inside/outside status via ray-casting parity on 2D slices, and sampling the exact mesh distance at each voxel center. It differs from [Signed Distance Field from Mesh](1327-signed-distance-field-from-mesh.md) by explicitly using 2D slice intersections to determine topological containment rather than relying on global distance field propagation or hierarchical structures for sign determination.
++
+ ### Shell SDF
+-An unsigned distance field minus a shell half-thickness [S4, unofficial]. Negative within `shell_voxels` of any triangle, positive beyond [S4, unofficial]. Works on open, non-manifold, self-intersecting, and inconsistently wound meshes [S4, unofficial]. Extracts a thin solid around every triangle: two walls around an open sheet, and an outer surface plus an inner one for a closed solid [S4, unofficial]. Default `shell_voxels` is $1.5$, must be $\ge \sqrt{3}/2$ and $< \text{trunc\_dist}$ [S4, unofficial]. This is the unsigned offset field from Xu & Barbic, 'Signed Distance Fields for Polygon Soup Meshes' (GI 2014), before their interior-component removal step [S4, unofficial].
++An unsigned distance field minus a shell half-thickness. Negative within `shell_voxels` of any triangle, positive beyond. Works on open, non-manifold, self-intersecting, and inconsistently wound meshes. Extracts a thin solid around every triangle: two walls around an open sheet, and an outer surface plus an inner one for a closed solid [S4, unofficial].
++*   **Parameter:** `shell_voxels`: The shell half-thickness in voxels. Default value is $1.5f$. Must be $\ge \sqrt{3}/2$ ($0.866$) to prevent holes between voxels. Must be $<$ `trunc_dist` [S4, unofficial].
++*   **History:** This is the unsigned offset field from Xu & Barbic, 'Signed Distance Fields for Polygon Soup Meshes' (GI 2014), before their interior-component removal step [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N^3 \cdot T)$, where $N$ is the grid resolution and $T$ is the number of triangles [G].
+-*   **Memory Complexity:** $O(N^3)$ to store the 3D texture/grid [G].
+-*   **Performance:** Measured on standard meshes like the Stanford Bunny (35,947 vertices, 69,451 triangles) and automobile parts (156,229 vertices, 312,458 triangles) [S1].
+-*   **Strengths:** Provides exact Euclidean distances to the mesh surface, enabling high-quality rendering and isosurfacing [S3, unofficial].
+-*   **Limitations:** Computationally intensive for large meshes. Sensitive to mesh quality (holes, normals) [S3, unofficial]. Boundary handling requires careful tuning of `textureShell` [S3, unofficial].
+-*   **When to use:** When exact distance to a scanned mesh is required for raymarching or implicit surface reconstruction [G].
+-*   **When not to use:** For real-time applications with very high triangle counts where approximate methods are preferred, or when the mesh is not closed and topological containment is ambiguous [G].
++*   **Time Complexity:** $O(N^3 \cdot T)$, where $N$ is the grid resolution and $T$ is the number of triangles in the mesh [S2, S3, unofficial]. This is computationally expensive for high-resolution grids and complex meshes.
++*   **Memory Complexity:** $O(N^3)$ for storing the 3D texture [S3, unofficial].
++*   **Performance:** For the Stanford Bunny mesh (35,947 vertices, 69,451 triangles) and an automobile part mesh (156,229 vertices, 312,458 triangles), the method requires significant computational resources [S1].
++*   **Strengths:** Provides exact geometric distance to the mesh surface, allowing for high-quality rendering of implicit surfaces [S3, unofficial].
++*   **Limitations:** Computationally intensive for large meshes and high resolutions. Accuracy depends on the quality of the scanned surface and the precision of the distance calculation [S1]. The need to close holes in the mesh adds a pre-processing step [S3, unofficial].
+ 
+ ## Background
+-The method originates from the need to represent complex scanned surfaces (like the Stanford Bunny) as implicit distance functions for rendering and simulation [S3, unofficial]. Early implementations used tools like `MeshDistance` from the GEL (GEometry and Linear algebra) framework to sample distances into 3D textures [S3, unofficial]. The approach was popularized in the context of GPU raymarching, where distance fields allow for efficient scene representation [S2, unofficial]. The specific boundary handling algorithm (Algorithm 4.1) was detailed in academic work on GPU ray marching of distance fields [S3, unofficial]. The Shell SDF variant was introduced by Xu & Barbic in 'Signed Distance Fields for Polygon Soup Meshes' (GI 2014) to handle non-manifold meshes [S4, unofficial].
++This method originates from the need to represent complex scanned surfaces as implicit functions for rendering and simulation [S1][S3, unofficial]. The Stanford Bunny mesh, a standard test case with 35,947 vertices and 69,451 triangles, is frequently used to demonstrate this technique [S1][S3, unofficial]. The approach was implemented using tools like MeshDistance from the GEL (GEometry and Linear algebra) framework [S3, unofficial]. It is used in computer graphics for ray marching and implicit surface rendering [S2, S3, unofficial].
+ 
+ ## Sources
