@@ -1,0 +1,58 @@
+# Pruning and Reduction
+
+Also called: Gaussian Pruning, Gaussian Reduction, Vertex Pruning
+
+## Overview
+Pruning and Reduction methods remove redundant or low-impact 3D Gaussian primitives from a trained or training model to reduce memory footprint and rendering latency while preserving visual fidelity. Unlike sibling methods that focus on spatial truncation or kernel shape modification, this family focuses on the *selection* and *removal* of existing primitives based on geometric redundancy, visibility, or optimization-based importance scores.
+
+## Shared principles
+All methods in this family operate on the standard 3D Gaussian primitive $g$ defined by:
+*   **Mean ($\mu$):** The 3D center position.
+*   **Covariance ($\Sigma$):** A $3 \times 3$ positive-definite matrix defining the shape, orientation, and scale. Often parameterized as $\Sigma = R S S^T R^T$, where $R$ is a rotation matrix and $S$ is a scaling matrix.
+*   **Opacity ($\alpha$ or $\omega$):** A scalar value in $[0, 1]$ representing the maximum density or transparency at the center.
+*   **Color ($c$):** Appearance, typically represented by Spherical Harmonics (SH) coefficients.
+
+The rendering contribution of a Gaussian at a pixel is determined by its 2D projected covariance $\Sigma'$ and the Mahalanobis distance $E$ from the pixel center to $\mu'$:
+$$ E = (\mathbf{x} - \mu')^T (\Sigma')^{-1} (\mathbf{x} - \mu') $$
+The spatial response $R$ is typically $R = \exp(-\frac{1}{2} E)$. The final alpha is $\alpha = \omega \cdot R$.
+
+Pruning criteria generally rely on one or more of the following metrics:
+1.  **Opacity Threshold:** Removing Gaussians where $\alpha < \tau_{\alpha}$ [G].
+2.  **Geometric Redundancy:** Removing vertices or primitives that are spatially coincident or collinear [S1, unofficial].
+3.  **Visibility:** Removing Gaussians occluded by others from all training viewpoints [S2].
+4.  **Optimization Impact:** Removing Gaussians that contribute minimally to the loss function or rendering error [S2].
+
+## Subtopics
+
+### [Vertex-level Pruning in Mixed-Primitive Gaussian Splatting](13983-vertex-level-pruning-in-mixed-primitive-gaussian-splatting.md)
+*   **What it is:** A refinement mechanism for mixed-primitive Gaussian splatting that removes redundant vertices from Gaussian triangles and lines during training to reduce storage and representation complexity.
+*   **Distinction:** Unlike standard 3D Gaussian Splatting which only performs primitive-level opacity pruning, this method dynamically simplifies the geometric primitives themselves by converting triangles to lines or ellipses, and lines to ellipses, based on vertex proximity and collinearity.
+*   **When to choose:** Use when working with mixed-primitive representations (triangles, lines, ellipses) where surface reconstruction fidelity is prioritized and geometric redundancy needs to be minimized.
+*   **Link:** [Vertex-level Pruning in Mixed-Primitive Gaussian Splatting](13983-vertex-level-pruning-in-mixed-primitive-gaussian-splatting.md)
+
+### [SplatQ](14415-splatq.md)
+*   **What it is:** A post-training Gaussian pruning framework that partitions Gaussians by spatial proximity and appearance similarity into size-limited blocks, smooths importance-based block retention quotas to prevent budget concentration, and constructs a quadratic approximation of joint deletion effects to jointly select Gaussians under a fixed budget.
+*   **Distinction:** It differs from global Top-K methods by decomposing the selection into subproblems of specific size and solving a combinatorial optimization problem within each block, rather than ranking all Gaussians globally by independent scores.
+*   **When to choose:** Use when a strict, fixed number of Gaussians ($K$) must be retained after training, and joint deletion effects (interactions between Gaussians) are significant.
+*   **Link:** [SplatQ](14415-splatq.md)
+
+### Vertex Pruning
+*   **Definition:** A pruning mechanism designed to support mixed-primitive-based learning, as standard pruning is incompatible with mixed primitives [S1, unofficial].
+*   **Step:** Prune vertices of the mixed primitives to optimize the representation [S1, unofficial].
+
+### Gaussian Reduction with Learnable Mask
+*   **Definition:** A method to reduce the number of Gaussians using a learnable mask during optimization, targeting small-sized kernels for removal [S2].
+*   **Step:** Apply binary masks $M$ to the opacities and scale attributes of the kernels at every densification step [S2]. Use residual vector quantization with $L$ stages of vector quantization for geometric attributes like scale and rotation [S2]. Represent view-dependent colors via a grid-based neural field using hash grids for input positions, features, and view direction, fed into an MLP [S2].
+*   **Formula:** The end-to-end loss is: $L = L_{ren} + \lambda_m L_m + L_r + L_s$, where $L_{ren}$ is L1+SSIM loss, $L_m$ is masking loss ($\frac{1}{N} \sum \sigma(m_n)$), and $L_r, L_s$ are rotation and scale objective functions [S2].
+*   **Parameter:** $\epsilon$: Masking threshold for the sigmoid function in the learnable mask [S2]. $\lambda_m$: Weight for the masking loss term, typically $5 \times 10^{-4}$ [S2].
+
+### 3DGS Visibility Pruning
+*   **Definition:** Application of visibility-based pruning to 3D Gaussian Splatting, using Gaussian centroids as reference points for visibility calculation [S2].
+*   **Step:** Represent each Gaussian kernel by its centroid position, scaling matrix $S$, and rotation matrix $R$ defining the covariance $\Sigma$ [S2]. Use the Gaussian centroids as the 3D points $p_i$ in the visibility mask computation algorithm [S2].
+
+## Background
+Pruning in 3D Gaussian Splatting emerged as a solution to the high memory and computational costs associated with the large number of Gaussians required for high-fidelity novel view synthesis. Early 3DGS implementations relied on opacity-based pruning during training, where Gaussians with opacity below a threshold were removed [G]. As the field evolved, more sophisticated methods were developed to address the limitations of simple opacity thresholds, such as the loss of geometric detail and the inability to handle mixed primitives. Vertex-level pruning was introduced to support mixed-primitive representations, allowing for the simplification of geometric structures like triangles and lines [S1, unofficial]. Post-training pruning methods like SplatQ were developed to allow for strict model compression without retraining, addressing the issue of spatial quality imbalance in global ranking methods [S1, unofficial]. Visibility-based pruning leverages the fact that many Gaussians are occluded in training views and thus contribute little to the learned representation [S2]. Learnable mask approaches integrate pruning directly into the optimization loop, allowing the model to learn which primitives are essential for the final reconstruction [S2].
+
+## Sources
+[S1] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)
+[S2] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26

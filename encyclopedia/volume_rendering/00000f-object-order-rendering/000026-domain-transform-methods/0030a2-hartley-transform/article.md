@@ -8,18 +8,18 @@ The Hartley Transform is a real-valued integral transform that maps a real input
 The method follows the three-stage pipeline of [Domain-transform methods](28-domain-transform-methods.md): Global Transformation, Slice Extraction, and Inverse Transformation [G].
 
 **Inputs and Outputs**
-*   **Input:** A 3D scalar volume $f(x, y, z)$ with dimensions $N_x \times N_y \times N_z$.
-*   **Output:** A 2D projection image $I(u, v)$ corresponding to a viewing direction.
+*   **Input:** A 3D scalar volume $f(x, y, z)$ with dimensions $N_x \times N_y \times N_z$ [G].
+*   **Output:** A 2D projection image $I(u, v)$ corresponding to a viewing direction [G].
 
 **Data Structures**
-*   **Volume:** 3D array of real numbers.
-*   **Spectrum:** 3D array of real numbers $H(\omega_1, \omega_2, \omega_3)$.
-*   **Slice:** 2D array of real numbers $I(u, v)$.
+*   **Volume:** 3D array of real numbers [G].
+*   **Spectrum:** 3D array of real numbers $H(\omega_1, \omega_2, \omega_3)$ [G].
+*   **Slice:** 2D array of real numbers $I(u, v)$ [G].
 
 **Numbered Steps**
-1.  **Global Transformation:** Compute the 3D Discrete Hartley Transform (DHT) of the volume. The 1D DHT for a sequence $h_k$ of length $N$ is applied separably along each dimension.
-2.  **Slice Extraction:** Define a 2D plane passing through the origin of the frequency domain and perpendicular to the viewing direction vector $V$. Resample the 3D spectrum onto this 2D plane to obtain the 2D slice $I(u, v)$. Interpolation is required as the plane rarely coincides with the integer lattice [G]. The output resolution must satisfy the Nyquist criterion to prevent aliasing [G].
-3.  **Inverse Transformation:** Compute the 2D Inverse Discrete Hartley Transform (IDHT) of the slice $I(u, v)$ to generate the final projection image.
+1.  **Global Transformation:** Compute the 3D Discrete Hartley Transform (DHT) of the volume [G]. The 1D DHT for a sequence $h_k$ of length $N$ is applied separably along each dimension [G].
+2.  **Slice Extraction:** Define a 2D plane passing through the origin of the frequency domain and perpendicular to the viewing direction vector $V$ [G]. Resample the 3D spectrum onto this 2D plane to obtain the 2D slice $I(u, v)$ [G]. Interpolation is required as the plane rarely coincides with the integer lattice [G]. The output resolution must satisfy the Nyquist criterion to prevent aliasing [G].
+3.  **Inverse Transformation:** Compute the 2D Inverse Discrete Hartley Transform (IDHT) of the slice $I(u, v)$ to generate the final projection image [G].
 
 **Formulas**
 *   Forward transform: $H(f) = \int_{-\infty}^{\infty} h(t)(\cos ft + \sin ft)dt$ [S1, unofficial].
@@ -34,11 +34,11 @@ The method follows the three-stage pipeline of [Domain-transform methods](28-dom
 
 **Parameters**
 *   **Scaling:** $1/N$ for the inverse transform [S1, unofficial].
-*   **Interpolation:** Not given in the sources.
-*   **Zero-padding factor:** Not given in the sources.
+*   **Interpolation:** Not given in the sources. [G]
+*   **Zero-padding factor:** Not given in the sources. [G]
 
 **Edge Cases and Pitfalls**
-*   **Boundary Artifacts:** The transform assumes periodic boundary conditions. Discontinuities at volume boundaries cause high-frequency artifacts, mitigated by zero-padding the volume and applying vignetting correction [G].
+*   **Boundary Artifacts:** The transform assumes periodic boundary conditions [G]. Discontinuities at volume boundaries cause high-frequency artifacts, mitigated by zero-padding the volume and applying vignetting correction [G].
 *   **Aliasing:** Insufficient output resolution violates the Nyquist criterion, causing aliasing [G].
 *   **Fixed Parameters:** Once transformed, parameters like opacity and lighting cannot be changed interactively, as the transformation is linear and global [G].
 
@@ -52,13 +52,13 @@ A theorem stating that the 1-D Hartley transform of a projection of an object at
 
 ## Operating characteristics
 *   **Time Complexity:** Dominated by the 3D DHT and 2D IDHT, typically $O(N^3 \log N)$ using fast algorithms [G].
-*   **Memory Complexity:** $O(N^3)$ for the 3D spectrum.
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
+*   **Memory Complexity:** $O(N^3)$ for the 3D spectrum [G].
+*   **Measured Performance:** Not given in the sources. [G]
+*   **Scaling:** Not given in the sources. [G]
 *   **Strengths:** Avoids complex number overhead; maintains real-valued data throughout the pipeline; supports the projection-slice theorem [S1, unofficial].
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Limitations:** Not given in the sources. [G]
+*   **When to use:** Not given in the sources. [G]
+*   **When not to use:** Not given in the sources. [G]
 
 ## Background
 The Hartley transform was introduced by R.V.L. Hartley in 1942 as a real-valued alternative to the Fourier transform [S1, unofficial]. It has been applied in computer-aided tomographic (CAT) scanners and other signal processing applications [S1, unofficial].

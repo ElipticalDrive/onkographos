@@ -3,116 +3,104 @@
 Also called: Initialization Policy, OTS Initialization
 
 ## Overview
-The 3DGS Initialization Policy defines the deterministic starting configuration for the set of 3D Gaussian primitives in a scene, solving the problem of arbitrary initial placement by providing a reproducible baseline for optimization [S1]. It sets apart from heuristic or random initialization strategies by using a fixed power-law scaling for the initial opacity/OTS weight and a uniform random distribution within a bounding volume [S1].
+The 3DGS Initialization Policy defines the strategy for seeding the initial set of $N$ 3D Gaussian primitives before optimization begins. It addresses the problem of sparse or incorrect initial geometry, which can lead to poor convergence or artifacts in the final radiance field. Unlike dynamic densification strategies that spawn primitives during training based on view-space gradients, this policy acts once before optimization using the initial scene geometry or random distribution. It sets apart from standard random initialization by potentially incorporating specific opacity scaling laws derived from order-independent transparency (OTS) formulations [S1].
 
 ## How it works
-The method initializes a set of $N$ Gaussians within a defined spatial volume [S1]. The core of the policy is the uniform assignment of opacity (or OTS weight) derived from the total number of Gaussians, ensuring that the initial integrated opacity of the scene is consistent regardless of $N$ [S1].
-
 **Inputs and Outputs:**
-*   **Input:** Total number of Gaussians $N$; scene bounding box (typically a unit cube centered at the origin for synthetic scenes); rendering method type (`3dgs` or `ots`) [S1].
-*   **Output:** A set of $N$ Gaussian primitives, each with position $\mathbf{p}$, covariance $\Sigma$, opacity $\alpha$, and other attributes (color, rotation) [S1].
+*   **Input:** A set of initial 3D points (e.g., from Structure-from-Motion [S1]) or a bounding volume (e.g., unit cube [S1]); the total number of Gaussians $N$.
+*   **Output:** A set of $N$ 3D Gaussians with initialized position $\mathbf{p}_i$, rotation $q_i$, scale $\mathbf{s}_i$, and opacity $\alpha_i$.
 
 **Data Structures:**
-Each Gaussian primitive stores:
-*   $\mathbf{p} \in \mathbb{R}^3$: Position (randomly sampled) [S1].
-*   $\Sigma \in \mathbb{R}^{3 \times 3}$: Covariance matrix (initialized to identity or small random perturbation, though specific covariance initialization is not detailed in the primary source, standard 3DGS practice implies isotropic or small random scales) [G].
-*   $\alpha \in [0, 1]$: Opacity (uniformly calculated) [S1].
-*   Other attributes (SH coefficients, rotation quaternion) are initialized to neutral values (e.g., zero rotation, uniform color) or random values depending on the specific implementation, but the policy specifically mandates uniform opacity [S1].
+Each Gaussian $i$ is defined by:
+*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+*   Rotation $q_i \in \mathbb{R}^4$ (unit quaternion)
+*   Scale $\mathbf{s}_i \in \mathbb{R}^3$
+*   Opacity $\alpha_i \in [0, 1]$
+*   Appearance parameters (e.g., spherical harmonic coefficients $h_i$)
 
 **Steps:**
-1.  **Define Bounding Volume:** For standard synthetic scenes (e.g., Nerf-Synthetic), define a unit cube centered at the scene origin [S1].
-2.  **Sample Positions:** Generate $N$ random positions $\mathbf{p}_i$ uniformly distributed within the bounding volume for $i = 1 \dots N$ [S1].
-3.  **Calculate Uniform Value:** Compute the initial opacity/OTS weight $\alpha$ for all Gaussians using a power function of $N$ [S1].
-4.  **Initialize Attributes:** Assign the calculated $\alpha$ to all $N$ Gaussians [S1].
-
-**Formula:**
-The opacity $\alpha$ is given by:
-$$
-\alpha = 2 N^{\beta}
-$$
-where:
-*   $N$ is the total number of Gaussians [S1].
-*   $\beta = 0.35$ for standard 3DGS [S1].
-*   $\beta = 0.55$ for OTS-based methods [S1].
+1.  **Determine Initial Geometry:**
+    *   For synthetic scenes (e.g., Nerf-Synthetic), initialize positions randomly within a unit cube centered at the scene origin [S1].
+    *   For real-world scenes, initialize positions using the sparse Structure-from-Motion (SfM) point cloud [S1].
+2.  **Set Opacity/Weight:**
+    *   Initialize all Gaussians with a uniform opacity value. This value is derived from a power function of the total number of Gaussians $N$ [S1].
+    *   The scaling factor depends on the rendering formulation:
+        *   For standard 3DGS: $2 \cdot N^{0.35}$ [S1].
+        *   For OTS-based methods: $2 \cdot N^{0.55}$ [S1].
+    *   Note: The source states "all Gaussians were initialized to the same opacity / OTS weight" [S1]. The exact mapping of this scalar to $\alpha_i \in [0,1]$ is not explicitly defined in the provided text, but it implies a uniform initialization strategy [S1].
+3.  **Set Rotation and Scale:**
+    *   Rotations are typically initialized randomly or aligned with camera views [G].
+    *   Scales are initialized based on the local point density or a fixed initial radius [G].
+4.  **Initialize Appearance:**
+    *   Spherical harmonic coefficients are typically initialized to zero or random small values [G].
 
 **Parameters:**
-*   $N$: Total number of Gaussians. Typical values cited are 4k, 12k, 36k, 100k, 500k, 1m, and 5m [S1].
-*   Bounding Box: Unit cube (for Nerf-Synthetic) [S1].
+*   $N$: Total number of Gaussians. Typical values include 4k, 12k, 36k, 100k, 500k, 1m, 5m [S1].
+*   Scaling Exponent: 0.35 for 3DGS, 0.55 for OTS-based methods [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import random
-
-def initialize_gaussians(N, bbox_min, bbox_max, method_type):
+def initialize_gaussians(N, scene_type="synthetic"):
     """
-    Initialize N Gaussians with uniform opacity based on the 3DGS/OTS policy.
+    Initialize N 3D Gaussians based on the 3DGS Initialization Policy.
     
     Args:
         N (int): Total number of Gaussians.
-        bbox_min (list): Min coordinates of the bounding box [x, y, z].
-        bbox_max (list): Max coordinates of the bounding box [x, y, z].
-        method_type (str): '3dgs' or 'ots' to determine the exponent.
+        scene_type (str): 'synthetic' for Nerf-Synthetic style, 'real' for SfM-based.
         
     Returns:
-        dict: Dictionary containing initialized attributes.
+        positions (N, 3): Initial 3D positions.
+        opacities (N,): Initial opacity values.
     """
-    # Step 1: Sample N random positions uniformly within the bounding box
-    positions = []
-    for _ in range(N):
-        x = random.uniform(bbox_min[0], bbox_max[0])
-        y = random.uniform(bbox_min[1], bbox_max[1])
-        z = random.uniform(bbox_min[2], bbox_max[2])
-        positions.append([x, y, z])
-    
-    # Step 2: Determine exponent beta based on the method
-    beta = 0.35 if method_type == '3dgs' else 0.55
-    
-    # Step 3: Calculate uniform opacity/OTS weight
-    alpha = 2.0 * (N ** beta)
-    
-    # Step 4: Initialize attributes
-    # Rotations initialized to identity quaternion [G]
-    rotations = [[1.0, 0.0, 0.0, 0.0] for _ in range(N)]
-    # Scales initialized to small random values [G]
-    scales = [[random.uniform(0.01, 0.1) for _ in range(3)] for _ in range(N)]
-    # Colors initialized to neutral values [G]
-    colors = [[1.0, 1.0, 1.0] for _ in range(N)]
-    
-    return {
-        'positions': positions,
-        'opacities': [alpha] * N,
-        'rotations': rotations,
-        'scales': scales,
-        'colors': colors
-    }
-```
+    if scene_type == "synthetic":
+        # Initialize positions randomly in a unit cube around origin
+        positions = np.random.uniform(-0.5, 0.5, (N, 3))
+    elif scene_type == "real":
+        # Initialize positions from SfM point cloud
+        # If SfM points < N, sample with replacement or pad; if > N, subsample
+        # Not given in the sources.
+        pass
+    else:
+        raise ValueError("Unknown scene type")
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** For very large $N$ (e.g., 1m, 5m), the value $\alpha$ exceeds 1.0. Standard float32 represents the magnitude correctly, but rendering backends may require clamping or normalization depending on their opacity formulation [S1].
-*   **Boundary Conditions:** The policy specifies a unit cube for Nerf-Synthetic; adapting to other bounding boxes requires adjusting the uniform sampling bounds accordingly [S1].
-*   **Degenerate Input:** $N=0$ is invalid as the formula requires $N \ge 1$ [S1].
+    # Determine opacity scaling factor based on method
+    if scene_type == "synthetic":
+        # Standard 3DGS uses 2 * N^0.35
+        scale_factor = 2 * (N ** 0.35)
+    else:
+        # OTS-based methods use 2 * N^0.55
+        scale_factor = 2 * (N ** 0.55)
+
+    # Initialize all opacities to the same value
+    # Note: The source does not specify how scale_factor maps to [0,1]
+    # It is assumed to be a weight or pre-sigmoid value.
+    opacities = np.full(N, scale_factor)
+
+    return positions, opacities
+```
 
 ## Subtopics
 
+### [DART (Distance-Aware Replication on Tangent-planes)](12512-dart-distance-aware-replication-on-tangent-planes.md)
+DART is a pre-processing initialization method for 3D Gaussian Splatting that enriches a sparse Structure-from-Motion (SfM) point cloud by generating additional samples on local tangent planes. It addresses the problem of sparse seeding in scene peripheries and low-texture regions by assigning disk radii that grow with the point’s distance from a robust scene center. Unlike dynamic densification strategies that spawn primitives during training based on view-space gradients, DART acts once before optimization using only the initial SfM geometry, making it independent of the backbone’s densification dynamics.
+
 ### Geometric Correction via Neural Gaussians
-A strategy to maximize overlap between cells and emitted neural Gaussians by dynamically aligning cell geometry with Gaussian properties [S2]. It involves three steps: (1) Dynamically defining the cell's quaternion as a weighted average of the quaternions associated with its emitted Gaussians [S2]. (2) Periodically updating cell centers using the formula $\mathbf{x}_n = \frac{\sum_{k=1}^K \boldsymbol{\mu}_{n,k}}{K}$, where $\mathbf{x}_n$ is the cell center, $K$ is the number of Gaussians in the cell, and $\boldsymbol{\mu}_{n,k}$ is the mean of the k-th Gaussian in cell n [S2]. (3) Learning the three-dimensional covariances and positions of first-layer cells in accordance with the updates to the second-layer Gaussians, leveraging the differentiability of cell scales [S2].
+A strategy to maximize overlap between cells and emitted neural Gaussians by dynamically aligning cell geometry with Gaussian properties [S2]. It involves: 1. Dynamically defining the cell's quaternion as a weighted average of the quaternions associated with its emitted Gaussians [S2]. 2. Periodically updating cell centers using the formula: $\mathbf{x}_n = \frac{\sum_{k=1}^K \boldsymbol{\mu}_{n,k}}{K}$, where $\mathbf{x}_n$ is the cell center, $K$ is the number of Gaussians in the cell, and $\boldsymbol{\mu}_{n,k}$ is the mean of the k-th Gaussian in cell n [S2]. 3. Learning the three-dimensional covariances and positions of first-layer cells in accordance with the updates to the second-layer Gaussians, leveraging the differentiability of cell scales [S2].
 
 ### Gaussian Pruning (Monocular)
-A strategy that prunes randomly initialised 3D Gaussians to prevent incorrect initial geometry for other views, enhancing camera tracking performance in monocular SLAM [S3, unofficial]. On the TUM RGB-D dataset with monocular input, this pruning reduces the average ATE RMSE from 46.6 cm without pruning to 3.96 cm across the f1/desk, f2/xyz, and f3/office sequences [S3, unofficial].
+Prunes randomly initialised 3D Gaussians to prevent incorrect initial geometry for other views, enhancing camera tracking performance in monocular SLAM [S3, unofficial]. On TUM RGB-D (Mono), ATE RMSE drops from 46.6 cm (w/o pruning) to 3.96 cm (Ours) on average across f1/desk, f2/xyz, f3/office [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Initialization is $O(N)$ for sampling positions and computing opacity [S1].
-*   **Memory Complexity:** $O(N)$ to store the Gaussian attributes [S1].
-*   **Performance:** The policy provides a reproducible baseline [S1]. The choice of exponent affects the initial opacity, which influences convergence speed and final quality [S1]. OTS methods require a higher exponent ($\beta=0.55$) compared to standard 3DGS ($\beta=0.35$) due to different image formation solutions [S1].
-*   **Strengths:** Simple, deterministic, and reproducible [S1]. Ensures consistent initial conditions across experiments [S1].
-*   **Limitations:** Does not account for scene geometry or structure [S1]. Relies on subsequent densification to adapt to the scene [S1].
-*   **When to use:** Standard initialization for 3DGS and OTS-based methods, particularly for synthetic scenes like Nerf-Synthetic [S1].
-*   **When not to use:** If the scene has significant structure that could be exploited for better initial placement, such as using point cloud data from SfM [S1].
+*   **Time Complexity:** Initialization is $O(N)$ for random placement or $O(N \log N)$ if sorting SfM points [G].
+*   **Memory Complexity:** $O(N)$ to store the initial Gaussian parameters.
+*   **Strengths:** Provides a stable starting point for optimization. OTS-based initialization may better handle order-independent transparency requirements [S1].
+*   **Limitations:** Random initialization in synthetic scenes may not capture scene structure well. SfM-based initialization depends on the quality of the sparse reconstruction [S1].
+*   **When to use:** Use for standard 3DGS training on synthetic data (unit cube) or real-world data (SfM). Use OTS scaling for methods requiring order-independent transparency [S1].
 
 ## Background
-The initialization policy was introduced in the context of evaluating whether 3D Gaussian Splatting requires accurate volumetric rendering [S1]. It was adopted from the original 3DGS codebase for training on Nerf-Synthetic datasets [S1]. The policy was adapted for OTS-based methods to account for their different image formation solutions, leading to the distinct exponents for opacity calculation [S1].
+The 3DGS Initialization Policy originates from the original 3D Gaussian Splatting paper and subsequent analyses of its training dynamics [S1]. The specific power-law scaling for opacity ($2 \cdot N^{0.35}$ vs $2 \cdot N^{0.55}$) was introduced in the context of comparing 3DGS with Order-Independent Transparency (OTS) based methods [S1]. The policy is designed to ensure that the initial set of Gaussians provides adequate coverage of the scene without over-constraining the optimization process [S1].
 
 ## Sources
 [S1] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26

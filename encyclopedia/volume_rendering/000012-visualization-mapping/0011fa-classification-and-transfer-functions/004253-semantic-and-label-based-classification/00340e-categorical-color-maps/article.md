@@ -3,12 +3,12 @@
 Also called: Discrete Coloring, Interpret Values As Categories
 
 ## Overview
-Categorical color maps are a visualization technique for rendering data arrays containing discrete enumerations (e.g., element types, gear types) rather than continuous scalar intensities [S1]. They solve the problem that traditional interpolated color transfer functions are cumbersome for discrete data, where interpolation causes "color bleeding" between distinct semantic regions [S1]. Unlike continuous methods, this approach uses exact matching against a lookup table to assign deterministic colors, ensuring visual consistency for semantic labels [S1].
+Categorical color maps are a visualization technique for rendering data arrays containing discrete enumerations (e.g., element types, gear types) rather than continuous scalar intensities [S1]. They solve the problem that traditional interpolated color transfer functions are tedious and cumbersome for discrete data [S1]. Unlike continuous methods, this approach uses exact matching against a lookup table to assign deterministic colors [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A discrete identifier $k$ (integer or floating-point) representing a semantic class label [S1, 7160-categorical-color-maps.md].
-*   **Output:** A deterministic color vector $(r, g, b)$ and an opacity mask (fully opaque for valid labels, transparent/NaN-colored for invalid ones) [S1, 4667-semantic-label-colormap-generation.md].
+*   **Input:** A discrete identifier $k$ (integer or floating-point) representing a semantic class label [S1].
+*   **Output:** A deterministic color vector $(r, g, b)$; invalid labels are rendered with a designated NaN color [S1].
 
 **Data Structures:**
 The method relies on two parallel arrays of equal length $N$:
@@ -21,7 +21,7 @@ The method relies on two parallel arrays of equal length $N$:
     a. Iterate through the Annotations list to find an index $i$ such that $k == v_i$ [S1].
     b. If a match is found, retrieve the color $(r_i, g_i, b_i)$ from IndexedColors at index $i$ [S1].
     c. If no exact match is found, assign the designated NaN color [S1].
-3.  Render the element with the assigned color and full opacity [S1].
+3.  Render the element with the assigned color [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -77,12 +77,12 @@ def categorical_color_map(data_value, annotations, indexed_colors, nan_color):
 *   **Legend Rendering:** The color legend switches to a mode that renders swatches with annotations for each value in the lookup table, rather than a continuous gradient bar [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per element, where $N$ is the number of defined categories, due to linear search through the lookup table. This can be optimized to $O(1)$ using a hash map or direct indexing if the domain of discrete IDs is small and dense [G].
-*   **Memory Complexity:** $O(N)$ to store the Annotations and IndexedColors arrays, where $N$ is the number of categories [S1].
-*   **Strengths:** Eliminates interpolation artifacts between discrete classes; provides explicit control over color assignment for semantic labels; simplifies legend generation for non-continuous data [S1].
-*   **Limitations:** Requires exact matching, which is sensitive to floating-point precision errors [S1]; not suitable for continuous scalar fields where interpolation is desired [S1].
-*   **When to use:** When visualizing data with discrete enumerations (e.g., material types, cell phases) where distinct colors are required for each category [S1].
-*   **When not to use:** For continuous scalar data where smooth transitions are expected [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Eliminates the need for tedious continuous control points for discrete data; provides explicit control over color assignment for semantic labels; simplifies legend generation by rendering swatches with annotations [S1].
+*   **Limitations:** Requires exact matching, which is sensitive to floating-point precision errors [S1].
+*   **When to use:** When visualizing data with discrete enumerations where distinct colors are required for each category [S1].
+*   **When not to use:** Not given in the sources.
 
 ## Background
 Categorical color maps were introduced in ParaView as part of its color map and transfer function system to handle discrete data more elegantly than continuous transfer functions [S1]. The feature allows users to treat numerical values as enumerations rather than scalars, addressing the tediousness of using multiple control points for discrete steps [S1].

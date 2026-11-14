@@ -11,8 +11,8 @@ Text-to-Transfer Function (T2TF) is a method for designing transfer functions (T
 *   **Output:** Optimized TF parameters $\phi$, comprising control point locations, density values $\sigma_\phi$, and color values $\mathbf{c}_\phi$ [S1].
 
 **Data Structures**
-The TF parameters $\phi$ are represented as piecewise linear functions. The structure is defined as follows:
-1.  **Control Points:** Defined by relative spacing parameters. These are unconstrained real numbers transformed via softplus to ensure non-negativity, then cumulatively summed to get absolute positions. These positions are normalized such that the first control point maps to the minimum value of $f$ and the last to the maximum value of $f$ [S1].
+The TF parameters $\phi$ are represented as piecewise linear functions [S1]. The structure is defined as follows:
+1.  **Control Points:** Defined by relative spacing parameters [S1]. These are unconstrained real numbers transformed via softplus to ensure non-negativity, then cumulatively summed to get absolute positions [S1]. These positions are normalized such that the first control point maps to the minimum value of $f$ and the last to the maximum value of $f$ [S1].
 2.  **Density ($\sigma_\phi$):** Unconstrained values mapped to the range $[0, 255]$ via a hyperbolic tangent nonlinearity: $\sigma = 127.5 \cdot \tanh(x) + 127.5$ [S1].
 3.  **Color ($\mathbf{c}_\phi$):** Unconstrained RGB values mapped to the range $[0, 1]$ via a hyperbolic tangent nonlinearity: $\mathbf{c} = 0.5 \cdot \tanh(x) + 0.5$ [S1].
 
@@ -33,7 +33,7 @@ The TF parameters $\phi$ are represented as piecewise linear functions. The stru
 The optimization loop proceeds as follows [S1]:
 
 1.  **Initialization:**
-    *   Initialize color parameters $\mathbf{c}_\phi$ randomly in $[0.3, 0.7]$.
+    *   Initialize color parameters $\mathbf{c}_\phi$ randomly in $[0.3, 0.7]$ [S1].
     *   Initialize density parameters $\sigma_\phi$ such that the average transmittance $T_N$ at a fixed viewpoint $V_0$ is approximately $\rho = 0.05$. This is done by initializing density inversely proportional to the estimated density of the scalar field (approximated via volume histogram) and adjusting via gradient descent [S1].
 
 2.  **Optimization Loop** (for $i = 1$ to $N$):
@@ -68,17 +68,23 @@ The optimization loop proceeds as follows [S1]:
 *   **Naive CLIP Maximization:** Maximizing CLIP score alone often emphasizes transparent materials and background; contrastive loss with negative prompts is required for realistic, dense renderings [S1].
 *   **Irrelevant Density:** Without regularization, TFs may place high density in occluded regions, confusing editing; L1 density regularization mitigates this [S1].
 
+## Subtopics
+
+### CLIP-based Text Optimization
+A text-to-drawing optimization pipeline that combines DiffBMP with a CLIP image-text encoder to optimize primitive parameters based on semantic similarity [S2, unofficial]. It duplicates the DiffBMP output raster, applies data augmentation via perspective transformation, cropping, and resizing, and minimizes the negative cosine similarity between the augmented output images and the input text prompt [S2, unofficial]. It adds the cosine similarity with negative prompts to the loss [S2, unofficial]. It uses the CLIP model for image-text similarity computation [S2, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** Dominated by backpropagation through the volume renderer. Performance scales with volume size.
+*   **Time Complexity:** Dominated by backpropagation through the volume renderer [S1]. Performance scales with volume size.
 *   **Measured Performance:** ~0.5s per gradient step for the 'Visible Male' volume (single pose); ~2s per step for 'Rayleigh-Taylor instability' (single pose) [S1]. With 3 poses and 300 steps, total optimization time is several minutes [S1].
 *   **Memory Complexity:** Not explicitly given, but relies on storing intermediate states for AD or adjoint variables [G].
 *   **Strengths:** Produces interpretable, editable TFs; handles semantic descriptions intuitively; contrastive loss yields more realistic colors and thickness than naive CLIP maximization [S1].
 *   **Limitations:** Not interactive (seconds per step); assumes desired features are visible at arbitrary camera poses (may fail for highly localized, view-specific features) [S1].
-*   **When to use:** When a user wants to explore or isolate specific semantic structures in a known volumetric dataset using natural language.
-*   **When not to use:** When interactive speed is required, or when the target features are not view-invariant.
+*   **When to use:** When a user wants to explore or isolate specific semantic structures in a known volumetric dataset using natural language [S1].
+*   **When not to use:** When interactive speed is required, or when the target features are not view-invariant [S1].
 
 ## Background
-T2TF was introduced in the paper "Text-based transfer function design for semantic volume rendering" published at IEEE Visualization 2024 [S1]. It builds on the combination of vision-language models (CLIP) and differentiable volume rendering. The method addresses the under-constrained nature of semantic volume rendering by introducing contrastive learning and density priors, drawing inspiration from prior work on neural volume rendering priors (e.g., Lombardi et al. [22]) and background augmentation (Jain et al. [11]). It is used on datasets from Open Scientific Visualization Datasets and OpenVisus, including the Visible Male CT scan and Rayleigh-Taylor instability simulations [S1].
+T2TF was introduced in the paper "Text-based transfer function design for semantic volume rendering" published at IEEE Visualization 2024 [S1]. It builds on the combination of vision-language models (CLIP) and differentiable volume rendering [S1]. The method addresses the under-constrained nature of semantic volume rendering by introducing contrastive learning and density priors, drawing inspiration from prior work on neural volume rendering priors (e.g., Lombardi et al. [22]) and background augmentation (Jain et al. [11]) [S1]. It is used on datasets from Open Scientific Visualization Datasets and OpenVisus, including the Visible Male CT scan and Rayleigh-Taylor instability simulations [S1].
 
 ## Sources
 [S1] Text-based transfer function design for semantic volume rendering, https://doi.org/10.1109/vis55277.2024.00047, fetched 2026-10-26
+[S2] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

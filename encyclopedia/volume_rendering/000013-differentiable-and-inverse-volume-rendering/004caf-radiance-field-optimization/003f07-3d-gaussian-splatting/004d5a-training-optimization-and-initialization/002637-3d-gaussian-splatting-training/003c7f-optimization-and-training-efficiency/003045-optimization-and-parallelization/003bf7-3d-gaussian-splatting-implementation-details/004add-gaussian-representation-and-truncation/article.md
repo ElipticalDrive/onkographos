@@ -1,67 +1,63 @@
 # Gaussian Representation and Truncation
 
-Also called: Gaussian Splatting Primitive Management, 3DGS Densification and Pruning, Gaussian Optimization Strategies
+Also called: Gaussian Splatting Primitives, 3D Gaussian Primitives, Gaussian Splats
 
 ## Overview
-Gaussian Representation and Truncation encompasses the mechanisms for managing the lifecycle of 3D Gaussian primitives during the training of radiance field models, specifically addressing how Gaussians are initialized, densified (split/cloned), pruned, and truncated during rendering. It solves the problem of balancing scene representation fidelity with computational efficiency by dynamically adjusting the number and size of Gaussians to match scene complexity. It differs from its siblings by focusing on the *optimization dynamics* and *structural constraints* of the Gaussian primitives themselves, rather than the rendering kernel function (e.g., Inverse Multiquadric Splatting), the truncation threshold logic (e.g., Opacity-Independent Truncation), or the acceleration structures (e.g., DDF).
+This family defines the fundamental 3D Gaussian primitive used in differentiable volume rendering and its associated optimization, truncation, and management strategies. It solves the problem of representing complex 3D scenes as a set of anisotropic ellipsoids that can be efficiently rasterized and optimized via gradient descent. It differs from sibling methods by focusing on the *definition* of the primitive (covariance, opacity, position) and the *lifecycle* of these primitives (truncation, pruning, atomization, voxelization) rather than the rasterization kernel itself (e.g., [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md)) or the rendering pipeline (e.g., [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md)).
 
 ## Shared principles
-The family shares the core data structure of a 3D Gaussian defined by mean position $\mu$, covariance matrix $\Sigma$ (parameterized by scale $s$ and rotation $q$), opacity $\alpha$, and color $c$ (often represented by spherical harmonics coefficients). The optimization process typically involves an iterative loop where Gaussians are:
-1.  **Projected:** $\Sigma$ is projected to 2D using the camera Jacobian to form $\Sigma'$.
-2.  **Rasterized:** Contributions are accumulated along rays or via screen-space splatting.
-3.  **Evaluated:** Loss is computed against ground truth images.
-4.  **Updated:** Gradients update $\mu, \Sigma, \alpha, c$.
-5.  **Managed:** Densification (splitting/cloning) and pruning occur based on gradients, opacity, and geometric constraints.
+All methods in this family operate on a 3D Gaussian primitive $g$ defined by:
+*   **Mean ($\mu$):** The 3D center position.
+*   **Covariance ($\Sigma$):** A $3 \times 3$ positive-definite matrix defining the shape, orientation, and scale. Often parameterized as $\Sigma = R S S^T R^T$, where $R$ is a rotation matrix and $S$ is a scaling matrix.
+*   **Opacity ($\alpha$ or $\omega$):** A scalar value in $[0, 1]$ representing the maximum density or transparency at the center.
+*   **Color ($c$):** Appearance, typically represented by Spherical Harmonics (SH) coefficients.
 
-Key shared mathematical concepts include the Mahalanobis distance for spatial decay, the exponential opacity model $\alpha = \omega \exp(-\frac{1}{2} d^T C d)$, and the use of opacity thresholds for culling.
+The rendering contribution of a Gaussian at a pixel is determined by its 2D projected covariance $\Sigma'$ and the Mahalanobis distance $E$ from the pixel center to $\mu'$:
+$$ E = (\mathbf{x} - \mu')^T (\Sigma')^{-1} (\mathbf{x} - \mu') $$
+The spatial response $R$ is typically $R = \exp(-\frac{1}{2} E)$. The final alpha is $\alpha = \omega \cdot R$.
 
 ## Subtopics
 
 ### [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md)
-Replaces the standard Gaussian kernel with an inverse multiquadric radial basis function to provide slower, algebraic decay, solving tailing artifacts. It requires specific corrections to the covariance matrix scaling (factor 1.38) and gradient computations.
+Replaces the Gaussian exponential kernel with an inverse multiquadric function ($1/(E+1)$) to modulate opacity. It solves over-saturation in high-opacity regions. Choose when standard Gaussians cause halo artifacts.
 
 ### [Opacity-Independent Gaussian Truncation](10266-opacity-independent-gaussian-truncation.md)
-Decouples the truncation threshold from the Gaussian's opacity scalar, checking the unnormalized Gaussian response against the threshold before applying opacity. This allows for consistent truncation at fewer standard deviations (e.g., 1σ or 2σ) and enables gradient flow for near-zero opacity Gaussians.
+Decouples the spatial truncation threshold from the opacity parameter. It solves the issue where low-opacity Gaussians are culled before contributing gradients. Choose when aggressive culling is needed without losing gradient flow for transparent surfaces.
 
 ### [Directed Distance Field (DDF) for Gaussian Splatting](12854-directed-distance-field-ddf-for-gaussian-splatting.md)
-Uses a neural implicit representation (Multiresolution Hash Grid + MLP) as a constant-time ray oracle for secondary rays (shadows, AO), enabling global illumination without BVH or mesh extraction.
+Uses a neural implicit field (hash grid + MLP) to provide constant-time ray-surface queries for Gaussians. It solves the lack of efficient secondary ray support (shadows, GI) in explicit splatting. Choose for global illumination or shadow casting.
 
 ### [Atomized Proliferation](12924-atomized-proliferation.md)
-Constrains fine-detail Gaussians into "Atom Gaussians" (isotropic spheroids) and prioritizes their proliferation, while merging large smooth surfaces. It uses a warm-up strategy for aggressive initial densification followed by merging, stabilizing the Gaussian count.
+Constrains fine-detail Gaussians into uniform "Atom Gaussians" and uses a warm-up split schedule. It solves noisy meshes and unstable densification. Choose for high-fidelity geometry reconstruction.
 
 ### [Voxel-based Gaussian Splatting](13071-voxel-based-gaussian-splatting.md)
-Fixes Gaussian positions to a regular voxel grid and removes view-dependent color, solving instability in CT extraction. It regresses attributes from transformer tokens, enabling direct volume extraction via indexing.
+Fixes Gaussian positions to a regular 3D voxel grid and removes SH coefficients. It solves inaccurate volume extraction for CT/X-ray data. Choose for medical imaging or volumetric data.
 
 ### [Gaussian Voxel Kernel Functions (GVKF)](13979-gaussian-voxel-kernel-functions-gvkf.md)
-Replaces discrete opacity values with Gaussian kernel functions decoded from feature vectors via MLPs, enabling continuous scene representation and direct mesh extraction with reduced memory usage.
-
-### [Vertex-level Pruning in Mixed-Primitive Gaussian Splatting](13983-vertex-level-pruning-in-mixed-primitive-gaussian-splatting.md)
-Extends truncation logic to the vertex level within mixed-primitive frameworks (triangles, lines, ellipses), converting primitives to simpler forms based on vertex proximity and collinearity.
+Replaces discrete opacity with Gaussian kernel functions decoded from voxel features. It solves memory overhead and enables direct mesh extraction. Choose for memory-efficient surface reconstruction.
 
 ### [3D Gaussian Particle Approximation of VDB Datasets](14723-3d-gaussian-particle-approximation-of-vdb-datasets.md)
-Converts OpenVDB volumetric datasets into non-overlapping 3D Gaussian particles for memory-efficient, lossy representation with LOD support, rendered via forward ray marching using NVIDIA OptiX.
+Converts OpenVDB volumes to non-overlapping Gaussian particles accelerated by OptiX. It solves real-time rendering of large sparse volumetric data. Choose for scientific visualization of VDB data.
 
 ### [Pruning and Reduction](14909-pruning-and-reduction.md)
-General strategies for reducing Gaussian count, including learnable masks and residual vector quantization for geometric attributes.
+Removes redundant Gaussians based on opacity, geometric degeneracy, or rendering impact. It solves storage and rendering efficiency issues. Choose for compression or deployment.
 
 ### POG (Potentially Over-large Gaussians)
-POG is a variant of Gaussian growth that identifies potentially over-large Gaussians to address blurring and needle-like artifacts. It improves LPIPS slightly but degrades PSNR significantly compared to Hard Gaussians (HG) because it overgrows already learned areas, making them susceptible to redundant Gaussians [S1]. On Tanks&Temples, POG yields PSNR 26.26, SSIM 0.879, LPIPS 0.121, whereas HG yields PSNR 26.36, SSIM 0.880, LPIPS 0.126 [S1].
+POG is a pruning strategy that identifies and removes potentially over-large Gaussians to reduce redundancy. [S1]
+- [S1] Tanks&Temples ablation results: POG yields PSNR 26.26, SSIM 0.879, LPIPS 0.121; HG yields PSNR 26.36, SSIM 0.880, LPIPS 0.126.
+- [S1] POG (Eq. 8) improves LPIPS slightly but degrades PSNR significantly. POG overgrows already learned areas, making them susceptible to redundant Gaussians, which causes PSNR degradation. HG (Eq. 9) avoids this.
 
 ### AtomGS
-AtomGS introduces Atomized Proliferation, constraining ellipsoid Gaussians of various sizes into uniformly-sized Atom Gaussians to enhance fine feature representation [S2, unofficial]. It retains larger anisotropic Gaussians for backgrounds and uses a progressive split schedule [S2, unofficial]. It also employs Geometry-Guided Optimization with an Edge-Aware Normal Loss, integrating weights from a 2D edge detector into the curvature map to constrain Gaussian positioning on flat surfaces while allowing flexibility for irregular areas [S2, unofficial]. During pruning, it merges Gaussians covering large, less detailed surfaces, resulting in a similar or reduced Gaussian count compared to original 3DGS while retaining competitive quality [S2, unofficial]. Unlike standard 3DGS which freely drifts and splits, AtomGS provides precise guidance for 3D geometry optimization [S2, unofficial].
-
-### Gaussian Reduction with Learnable Mask
-This method reduces the number of Gaussians using a learnable mask during optimization, targeting small-sized kernels for removal [S3]. Binary masks $M$ are applied to opacities and scale attributes at every densification step:
-$$ M_n = \text{sg}(\mathbb{1}[\sigma(m_n) > \epsilon] - \sigma(m_n)) + \sigma(m_n) $$
-$$ \hat{s}_n = M_n s_n, \quad \hat{o}_n = M_n o_n $$
-where $\epsilon$ is the masking threshold, $\text{sg}(\cdot)$ is the stop-gradient operator, $\mathbb{1}$ is the indicator function, and $\sigma(\cdot)$ is the sigmoid function [S3]. Residual vector quantization with $L$ stages is used for geometric attributes (scale, rotation), and view-dependent colors are represented via a grid-based neural field using hash grids [S3]. The end-to-end loss is:
-$$ L = L_{ren} + \lambda_m L_m + L_r + L_s $$
-where $L_{ren}$ is L1+SSIM loss, $L_m = \frac{1}{N} \sum_{n=1}^N \sigma(m_n)$ is the masking loss, and $L_r, L_s$ are rotation and scale objective functions [S3]. The weight $\lambda_m$ is typically $5 \times 10^{-4}$ [S3].
+AtomGS is a training optimization that uses Atomized Proliferation and Geometry-Guided Optimization. [S2, unofficial]
+- [S2, unofficial] Atomized Proliferation: Constrain ellipsoid Gaussians of various sizes into uniformly-sized Atom Gaussians. Apply a progressive split schedule to provide better coverage of scene details, emphasizing densification in accordance with scene details.
+- [S2, unofficial] Atomized Proliferation: Retain larger anisotropic Gaussians to represent the background or geometric areas with few features, while smaller anisotropic Gaussians are constrained into Atom Gaussians.
+- [S2, unofficial] Geometry-Guided Optimization: Integrate weights derived from a 2D edge detector into the curvature map to compute an Edge-Aware Normal Loss, imposing stricter constraints on Gaussian positioning aligned with flat surfaces while allowing flexibility for irregularly shaped areas.
+- [S2, unofficial] Pruning: During the subsequent pruning phase, merge Gaussians covering large, less detailed surfaces, resulting in a similar or even reduced number of Gaussians compared to original 3DGS while retaining competitive rendering quality.
+- [S2, unofficial] Unlike standard 3DGS which freely drifts and splits, AtomGS provides precise guidance on where to focus Gaussians for better 3D geometry optimization, balancing visual and geometric accuracy by refining underlying geometry alignment.
 
 ## Background
-3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023 [G]. The original method used a fixed set of Gaussians initialized from Structure-from-Motion (SfM) points, with densification based on position gradients and opacity thresholds. Subsequent research has explored various ways to optimize this representation, including modifying the kernel function (Inverse Multiquadric), changing truncation logic (Opacity-Independent), using neural fields for attributes (GVKF, DDF), and constraining geometry (AtomGS, Voxel-based). The field continues to evolve with methods for compression, mixed primitives, and volumetric data integration.
+The 3D Gaussian Splatting representation was introduced by Kerbl et al. in 2023 [G]. It has since been extended by numerous works to address limitations in geometry, memory, and rendering capabilities, as detailed in the subtopics above.
 
 ## Sources
 [S1] Pushing Rendering Boundaries: Hard Gaussian Splatting, https://arxiv.org/abs/2412.04826v1, fetched 2026-10-26
 [S2] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)
-[S3] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26

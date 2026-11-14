@@ -7,8 +7,8 @@ The pool proposer is a trainable neural network component used in NeRF-ID to gen
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of $N_c = 64$ coarse features, denoted as $\mathbf{F}_{coarse} \in \mathbb{R}^{N_c \times D}$, where $D$ is the feature dimension (typically 256) [S1, unofficial].
-*   **Output:** A set of $N_f = 128$ proposed sample positions (and associated features) $\mathbf{P} \in \mathbb{R}^{N_f \times D}$ [S1, unofficial].
+*   **Input:** A set of $N_c = 64$ coarse features, denoted as $\mathbf{F}_{coarse} \in \mathbb{R}^{N_c \times D}$, where $D = 256$ is the feature dimension [S1, unofficial].
+*   **Output:** A set of $N_f = 128$ proposed sample features $\mathbf{P} \in \mathbb{R}^{N_f \times D}$ [S1, unofficial].
 
 **Data Structures:**
 The proposer consists of a single bottleneck fully connected (FC) layer and a positional encoding module [S1, unofficial].
@@ -16,10 +16,10 @@ The proposer consists of a single bottleneck fully connected (FC) layer and a po
 *   **Positional Encoding:** Sinusoidal positional encoding $\gamma(\cdot)$ applied to the input features [S1, unofficial].
 
 **Steps:**
-1.  **Positional Encoding:** Apply sinusoidal positional encoding $\gamma(\cdot)$ to the input coarse features $\mathbf{F}_{coarse}$. The encoding includes sinusoidal functions at increasing frequencies [S1, unofficial].
+1.  **Positional Encoding:** Apply sinusoidal positional encoding $\gamma(\cdot)$ to the input coarse features $\mathbf{F}_{coarse}$ [S1, unofficial].
 2.  **Summation:** Sum the encoded features with the original coarse features: $\mathbf{F}_{sum} = \mathbf{F}_{coarse} + \gamma(\mathbf{F}_{coarse})$ [S1, unofficial].
 3.  **Bottleneck Projection:** Pass $\mathbf{F}_{sum}$ through the bottleneck fully connected layer: $\mathbf{F}_{out} = \mathbf{F}_{sum} W$ [S1, unofficial].
-4.  **Proposal Generation:** The output $\mathbf{F}_{out}$ constitutes the features for the $N_f = 128$ proposed samples [S1, unofficial]. The positions are derived from the feature space or mapped back to spatial coordinates as per the NeRF-ID sampling strategy [S1, unofficial].
+4.  **Proposal Generation:** The output $\mathbf{F}_{out}$ constitutes the features for the $N_f = 128$ proposed samples [S1, unofficial]. The exact method for mapping these features back to spatial coordinates is not given in the sources.
 
 **Parameters:**
 *   $N_c = 64$: Number of coarse samples [S1, unofficial].
@@ -33,15 +33,15 @@ The proposer consists of a single bottleneck fully connected (FC) layer and a po
 ## Subtopics
 
 ### MLPMix Proposer
-The MLPMix proposer is an alternative trainable proposer architecture that uses a mixing mechanism instead of pooling [S1, unofficial]. It is preferred over the Transformer proposer due to the Transformer's inferior performance on specific scenes (Blender: Ficus, Blender: Lego, LLFF-NeRF: T-Rex) and unstable training curves [S1, unofficial]. MLPMix and Pool are generally on par, but Pool has higher variance [S1, unofficial].
+The MLPMix proposer is an alternative trainable proposer architecture that uses a mixing mechanism instead of pooling [S1, unofficial]. It is preferred over the Transformer proposer due to the Transformer's inferior performance on specific scenes (Blender: Ficus, Blender: Lego, LLFF-NeRF: T-Rex) and unstable training curves [S1, unofficial]. MLPMix and Pool are generally on par, but Pool has higher variance [S1, unofficial]. Choose MLPMix over Pool when lower variance and consistent performance across challenging scenes are required [S1, unofficial].
 
 ## Operating characteristics
-*   **Complexity:** The most expensive operations are applied to each of the $N_c = 64$ coarse features before the bottleneck. The bottleneck is a single $256 \times 256$ FC layer [S1, unofficial].
+*   **Complexity:** The most expensive operations are applied to each of the $N_c = 64$ coarse features before the bottleneck [S1, unofficial]. The bottleneck is a single $256 \times 256$ FC layer [S1, unofficial].
 *   **Performance:** Pool and MLPMix tend to be the best performing proposers, but Pool has higher variance and is significantly worse on Blender: Materials and Blender: Mic scenes compared to MLPMix [S1, unofficial].
 *   **Cost:** The additional FC layer application on $N_c = 64$ vectors is negligible compared to the 8 FC layers in the NeRF backbone applied to $N_c + N_c + N_f = 2048$ vectors [S1, unofficial]. The Transformer proposer is more expensive due to the lack of pooling operations [S1, unofficial].
 
 ## Background
-The pool proposer architecture was introduced in the context of NeRF-ID (NeRF with Importance Sampling) as part of a comparison between different trainable proposer architectures (Transformer, Pool, and MLPMix) [S1, unofficial]. It builds on the original NeRF architecture [S1, unofficial].
+The pool proposer architecture was introduced in the context of NeRF-ID (NeRF with Importance Sampling) as part of a comparison between different trainable proposer architectures (Transformer, Pool, and MLPMix) [S1, unofficial]. The training procedure used differs slightly from the original NeRF, employing smaller batch sizes, fewer iterations (around 1.2 billion rays), and ensuring each ray passes through the center of its pixel rather than the corner [S1, unofficial].
 
 ## Sources
 [S1] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
