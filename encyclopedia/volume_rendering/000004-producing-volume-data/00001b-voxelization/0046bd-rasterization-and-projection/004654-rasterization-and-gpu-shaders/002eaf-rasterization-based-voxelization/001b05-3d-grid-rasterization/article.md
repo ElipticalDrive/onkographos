@@ -11,7 +11,7 @@ Also called: Grid-Snapped Voxelization
 *   **Output:** A 3D voxel grid representing occupancy. This can be a compact bit-packed array (1 bit per voxel) or a 3D texture storing RGBA data [S4, unofficial][S3, unofficial].
 
 **Data Structures:**
-*   **Voxel Grid Storage:** A `std::vector<uint32_t>` of size $(N_x \times N_y \times N_z) / 32$, where each `uint32_t` stores 32 voxels (1 bit per voxel). Memory order is linear in X, then Y, then Z [S4, unofficial].
+*   **Voxel Grid Storage:** A `std::vector<uint32_t>` of size $(N_x \times N_y \times N_z) / 32$, where each `uint32_t` stores 32 voxels (1 bit per voxel) [S4, unofficial].
 *   **3D Texture:** A `rgba16f` 3D texture where each voxel stores RGBA 16-bit floating point values [S3, unofficial].
 *   **Hash Table (CPU variant):** A hash table mapping `VoxelCoord` (struct with int x, y, z) to occupancy, using a hash function $H = x \cdot 73856093 \oplus y \cdot 19349663 \oplus z \cdot 83492791$ [S1, unofficial].
 
@@ -23,28 +23,28 @@ Also called: Grid-Snapped Voxelization
 **Steps:**
 
 1.  **Compute Grid Dimensions:**
-    Find the bounding box of the mesh vertices ($minCoords, maxCoords$). Calculate `voxelSize` as $\min(\text{boundingBoxSize}) / \text{resolution}$ [S4, unofficial]. Round the number of voxels in each dimension up to the nearest multiple of 32 using `makeMultipleOf32` [S4, unofficial]. Calculate `minCorner` and `maxCorner` based on the bounding box center and the rounded voxel count:
+    Find the bounding box of the mesh vertices ($minCoords, maxCoords$) [S5, unofficial]. Calculate `voxelSize` as $\min(\text{boundingBoxSize}) / \text{resolution}$ [S4, unofficial]. Round the number of voxels in each dimension up to the nearest multiple of 32 using `makeMultipleOf32` [S4, unofficial]. Calculate `minCorner` and `maxCorner` based on the bounding box center and the rounded voxel count:
     $$ \text{minCorner} = \text{boundingBoxCenter} - 0.5 \times (\text{roundedNbVoxels} \times \text{voxelSize}) $$
     [S4, unofficial]
 
 2.  **Initialize Storage:**
-    Allocate the 3D texture or bit-packed array. If using the GPU rasterization approach with 3D textures, allocate three temporary textures for projections: $xProjTextureId$, $yProjTextureId$, and $zProjTextureId$ [S4, unofficial].
+    Allocate the 3D texture or bit-packed array [S4, unofficial]. If using the GPU rasterization approach with 3D textures, allocate three temporary textures for projections: $xProjTextureId$, $yProjTextureId$, and $zProjTextureId$ [S4, unofficial].
 
 3.  **X-Axis Projection (YZ Plane):**
     *   Allocate $xProjTextureId$ with dimensions $(N_y, N_z, N_x/32)$ [S4, unofficial].
     *   For each slice index `sliceX` from 0 to $N_x$ with step 32:
-        *   Bind the slice `sliceX/32` of the texture to the framebuffer color attachment.
+        *   Bind the slice `sliceX/32` of the texture to the framebuffer color attachment [S4, unofficial].
         *   Set viewport to $(N_y, N_z)$ [S4, unofficial].
         *   Clear buffer.
         *   Set up orthographic projection:
             $$ \text{viewProj} = \text{ortho}(minY, maxY, minZ, maxZ, x, x + 32 \times \text{voxelSize}) $$
             Apply rotation: $\text{rot} = \text{rotate}(-90^\circ, \text{x-axis}) \times \text{rotate}(90^\circ, \text{z-axis})$ [S4, unofficial].
-        *   Render the mesh. The fragment shader writes to the texture. For bit-packed storage, use additive blending or logic operations to set bits [S4, unofficial].
+        *   Render the mesh. The fragment shader writes to the texture [S4, unofficial]. For bit-packed storage, use additive blending or logic operations to set bits [S4, unofficial].
 
 4.  **Y-Axis Projection (XZ Plane):**
     *   Allocate $yProjTextureId$ with dimensions $(N_x, N_z, N_y/32)$ [S4, unofficial].
     *   For each slice index `sliceY` from 0 to $N_y$ with step 32:
-        *   Bind the slice `sliceY/32` of the texture to the framebuffer.
+        *   Bind the slice `sliceY/32` of the texture to the framebuffer [S4, unofficial].
         *   Set viewport to $(N_x, N_z)$ [S4, unofficial].
         *   Clear buffer.
         *   Set up orthographic projection:
@@ -55,7 +55,7 @@ Also called: Grid-Snapped Voxelization
 5.  **Z-Axis Projection (XY Plane):**
     *   Allocate $zProjTextureId$ with dimensions $(N_x, N_y, N_z/32)$ [S4, unofficial].
     *   For each slice index `sliceZ` from 0 to $N_z$ with step 32:
-        *   Bind the slice `sliceZ/32` of the texture to the framebuffer.
+        *   Bind the slice `sliceZ/32` of the texture to the framebuffer [S4, unofficial].
         *   Set viewport to $(N_x, N_y)$ [S4, unofficial].
         *   Clear buffer.
         *   Set up orthographic projection:
@@ -64,7 +64,7 @@ Also called: Grid-Snapped Voxelization
         *   Render the mesh.
 
 6.  **Combine Projections (Optional/Alternative):**
-    If using a single final texture (e.g., $zProjTextureId$ as the output), a "Compile Projections" pass may be used. Bind $xProjTextureId$ and $yProjTextureId$ to texture units. For each slice `sliceZ`, draw a triangle strip to combine X and Y projections into the Z texture using a fragment shader that checks occupancy from all three views [S4, unofficial].
+    If using a single final texture (e.g., $zProjTextureId$ as the output), a "Compile Projections" pass may be used [S4, unofficial]. Bind $xProjTextureId$ and $yProjTextureId$ to texture units [S4, unofficial]. For each slice `sliceZ`, draw a triangle strip to combine X and Y projections into the Z texture using a fragment shader that checks occupancy from all three views [S4, unofficial].
 
 7.  **Retrieve Result:**
     Bind the final texture (e.g., $zProjTextureId$) and read the texture data into a CPU buffer using `glGetTexImage` with format `GL_RGBA_INTEGER` and type `GL_UNSIGNED_INT_8_8_8_8` [S4, unofficial].
@@ -75,100 +75,75 @@ The following pseudocode represents the CPU-based intersect scanline method, whi
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def voxelize_mesh_cpu(verts, faces, grid_size):
     # 1. Compute grid parameters
-    min_coords = np.min(verts, axis=0)
-    max_coords = np.max(verts, axis=0)
-    bounding_box_size = max_coords - min_coords
-    voxel_size = np.min(bounding_box_size) / grid_size
+    min_coords = [min(v[i] for v in verts) for i in range(3)]
+    max_coords = [max(v[i] for v in verts) for i in range(3)]
+    bounding_box_size = [max_coords[i] - min_coords[i] for i in range(3)]
+    voxel_size = min(bounding_box_size) / grid_size
     
-    # Round dimensions to multiple of 32 for bit-packing compatibility
-    nb_voxels = np.ceil(bounding_box_size / voxel_size)
-    nb_voxels_rounded = np.ceil(nb_voxels / 32) * 32
+    nb_voxels = [math.ceil(bounding_box_size[i] / voxel_size) for i in range(3)]
+    nb_voxels_rounded = [math.ceil(n / 32) * 32 for n in nb_voxels]
     
-    min_corner = (min_coords + max_coords) / 2 - 0.5 * (nb_voxels_rounded * voxel_size)
+    min_corner = [(min_coords[i] + max_coords[i]) / 2 - 0.5 * (nb_voxels_rounded[i] * voxel_size) for i in range(3)]
     
-    # 2. Initialize hash table for occupied voxels
     occupied_voxels = set()
     
-    # 3. Process each triangle
     for i in range(0, len(faces), 3):
         p0 = verts[faces[i]]
         p1 = verts[faces[i+1]]
         p2 = verts[faces[i+2]]
         
-        # Iterate through three axes to project onto 2D planes
         for ax2 in range(3):
             ax0 = (ax2 + 1) % 3
             ax1 = (ax2 + 2) % 3
             
-            # Extract 2D coordinates for the projection plane
-            t = np.array([
-                [p0[ax0], p0[ax2]],
-                [p1[ax0], p1[ax2]],
-                [p2[ax0], p2[ax2]]
-            ])
+            t = [[p0[ax0], p0[ax2]], [p1[ax0], p1[ax2]], [p2[ax0], p2[ax2]]]
+            t.sort(key=lambda v: v[1])
             
-            # Sort vertices by y-coordinate (ax1)
-            t = t[np.argsort(t[:, 1])]
+            start = int(math.floor((t[0][1] - min_corner[ax1]) / voxel_size))
+            mid = int(math.floor((t[1][1] - min_corner[ax1]) / voxel_size))
+            end = int(math.floor((t[2][1] - min_corner[ax1]) / voxel_size))
             
-            # Calculate voxel row indices
-            start = int(np.floor((t[0][1] - min_corner[ax1]) / voxel_size[ax1]))
-            mid = int(np.floor((t[1][1] - min_corner[ax1]) / voxel_size[ax1]))
-            end = int(np.floor((t[2][1] - min_corner[ax1]) / voxel_size[ax1]))
+            start = max(0, min(start, nb_voxels_rounded[ax1] - 1))
+            mid = max(0, min(mid, nb_voxels_rounded[ax1] - 1))
+            end = max(0, min(end, nb_voxels_rounded[ax1] - 1))
             
-            # Clamp to grid bounds
-            start = np.clip(start, 0, nb_voxels_rounded[ax1] - 1)
-            mid = np.clip(mid, 0, nb_voxels_rounded[ax1] - 1)
-            end = np.clip(end, 0, nb_voxels_rounded[ax1] - 1)
-            
-            # Scanline fill for lower half (start to mid)
             scan_line_half(start, mid, t, voxel_size, min_corner, ax0, ax1, ax2, occupied_voxels)
-            
-            # Scanline fill for upper half (mid to end)
-            # Note: vertices order reversed for upper half to maintain consistent winding/intersection logic
-            t_upper = np.array([t[2], t[1], t[0]])
+            t_upper = [t[2], t[1], t[0]]
             scan_line_half(mid, end, t_upper, voxel_size, min_corner, ax0, ax1, ax2, occupied_voxels)
 
     return occupied_voxels
 
+def lerp(a, b, t, val_a, val_b):
+    if a == b: return val_a
+    alpha = (t - a) / (b - a)
+    return [val_a[i] + alpha * (val_b[i] - val_a[i]) for i in range(len(val_a))]
+
 def scan_line_half(row_start, row_end, t, voxel_size, min_corner, ax0, ax1, ax2, occupied_voxels):
     for y_idx in range(row_start, row_end):
-        # Calculate world y-coordinate for the row
-        y = (y_idx + 1) * voxel_size[ax1] + min_corner[ax1]
+        y = (y_idx + 1) * voxel_size + min_corner[ax1]
         
-        # Interpolate x and z coordinates of triangle edges at world y
-        # Edge t0-t1
-        t3 = lerp(t[0][1], t[1][1], y, 
-                  [t[0][0], t[0][2]], 
-                  [t[1][0], t[1][2]])
-        # Edge t0-t2
-        t4 = lerp(t[0][1], t[2][1], y, 
-                  [t[0][0], t[0][2]], 
-                  [t[2][0], t[2][2]])
+        t3 = lerp(t[0][1], t[1][1], y, [t[0][0], t[0][2]], [t[1][0], t[1][2]])
+        t4 = lerp(t[0][1], t[2][1], y, [t[0][0], t[0][2]], [t[2][0], t[2][2]])
         
-        # Ensure t3 is left of t4
         if t3[0] > t4[0]:
             t3, t4 = t4, t3
             
-        # Calculate voxel column indices
-        line_start = int(np.floor(t3[0] / voxel_size[ax0]))
-        line_end = int(np.floor(t4[0] / voxel_size[ax0]))
+        line_start = int(math.floor(t3[0] / voxel_size))
+        line_end = int(math.floor(t4[0] / voxel_size))
         
-        # Clamp to grid bounds
-        line_start = np.clip(line_start, 0, 1024) # Assuming max grid size
-        line_end = np.clip(line_end, 0, 1024)
+        line_start = max(0, min(line_start, 1024))
+        line_end = max(0, min(line_end, 1024))
         
         for x_idx in range(line_start, line_end):
-            # Construct 3D voxel coordinate
-            voxel = VoxelCoord(
-                x=int(np.floor((x_idx + 1) * voxel_size[ax0] + min_corner[ax0]) / voxel_size[ax0]),
-                y=y_idx,
-                z=int(np.floor((x_idx + 1) * voxel_size[ax2] + min_corner[ax2]) / voxel_size[ax2]) # Simplified mapping
-            )
-            # In actual implementation, z is derived from the projection plane logic
-            # Here we assume the 2D projection maps back to 3D indices correctly
-            occupied_voxels.add(voxel)
+            x = (x_idx + 1) * voxel_size + min_corner[ax0]
+            z = lerp(t3[0], t4[0], x, [t3[1], 0.0], [t4[1], 0.0])
+            z_idx = int(math.floor(z / voxel_size))
+            
+            occupied_voxels.add((x_idx, y_idx, z_idx))
 ```
 
 **Edge Cases and Pitfalls:**
@@ -202,25 +177,25 @@ A pixelization routine that transforms variable-resolution unstructured mesh val
 A vertex shader that generates a full-screen quad to process each voxel slice, outputting non-normalized voxel coordinates for the fragment shader [S4, unofficial].
 
 #### Steps
-1.  Define quad corners: `const vec2 corners[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));`
-2.  Calculate voxel coordinate: `texelCoord = vec3(corner * gridSize.xy, slice);` where `corner` is selected by `gl_VertexID`.
-3.  Set clip space position: `gl_Position = vec4(corner*2-1, 0, 1);`
+1.  Define quad corners: `const vec2 corners[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));` [S4, unofficial].
+2.  Calculate voxel coordinate: `texelCoord = vec3(corner * gridSize.xy, slice);` where `corner` is selected by `gl_VertexID` [S4, unofficial].
+3.  Set clip space position: `gl_Position = vec4(corner*2-1, 0, 1);` [S4, unofficial].
 
 #### Layout
 *   Input: `uniform uint slice` defining the current Z-slice index being processed.
 *   Input: `uniform vec3 gridSize` defining the voxel grid dimensions.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \times V)$ where $N$ is the number of triangles in the mesh and $V$ is the number of slices (proportional to grid resolution). Each slice renders the entire mesh [S4, unofficial].
-*   **Measured Performance:** On an Intel HD 4400 with a Suzanne model (31,000 vertices): $64^3$ grid takes 2 ms; $128^3$ takes 9 ms; $256^3$ takes 10 ms; $512^3$ takes 120 ms. A 1,000,000 vertex model at $128^3$ takes 45 ms [S4, unofficial].
-*   **Scaling:** Performance scales linearly with the number of triangles and the number of slices (resolution).
+*   **Time Complexity:** $O(N \times V)$ where $N$ is the number of triangles in the mesh and $V$ is the number of slices (proportional to grid resolution) [S4, unofficial].
+*   **Measured Performance:** On an Intel HD 4400 with a Suzanne model (31,000 vertices): $64^3$ grid takes 2 ms; $128^3$ takes 9 ms; $256^3$ takes 10 ms; $512^3$ takes 120 ms [S4, unofficial].
+*   **Scaling:** Performance scales linearly with the number of triangles and the number of slices (resolution) [S4, unofficial].
 *   **Strengths:** Leverages GPU hardware rasterization for speed; compact 1-bit-per-voxel storage format reduces memory usage [S4, unofficial].
 *   **Limitations:** Precision glitches on some hardware; triangles outside the grid bounds are ignored; requires multiple passes for 3D coverage [S3, unofficial][S4, unofficial].
 *   **When to use:** When fast occupancy grid generation is needed for global illumination or collision detection, and surface reconstruction is not required [S1, unofficial].
 *   **When not to use:** When high-precision surface reconstruction (dual vertices) is needed, or when the mesh is highly sparse and CPU-based bounding box checks are more efficient [S1, unofficial].
 
 ## Background
-3D Grid Rasterization is a technique used in voxel global illumination (VXGI) and real-time voxelization. It was popularized by NVIDIA's VXGI research, which uses voxelization as a preprocessing step for cone tracing [S3, unofficial]. The specific GPU-based rasterization approach using multiple orthogonal projections and 3D textures is implemented in various open-source projects and engines [S4, unofficial][S3, unofficial]. The CPU-based scanline variant is derived from the o-voxel algorithm by Jianfeng Xiang, which focuses on efficient occupancy detection [S1, unofficial].
+3D Grid Rasterization is a technique used in voxel global illumination (VXGI) and real-time voxelization [S3, unofficial][S4, unofficial]. It was popularized by NVIDIA's VXGI research, which uses voxelization as a preprocessing step for cone tracing [S3, unofficial]. The specific GPU-based rasterization approach using multiple orthogonal projections and 3D textures is implemented in various open-source projects and engines [S4, unofficial]. The CPU-based scanline variant is derived from the o-voxel algorithm by Jianfeng Xiang, which focuses on efficient occupancy detection [S1, unofficial].
 
 ## Sources
 [S1] yuyujunjun/mesh-voxelize, https://github.com/yuyujunjun/mesh-voxelize, fetched 2026-10-26 (unofficial)

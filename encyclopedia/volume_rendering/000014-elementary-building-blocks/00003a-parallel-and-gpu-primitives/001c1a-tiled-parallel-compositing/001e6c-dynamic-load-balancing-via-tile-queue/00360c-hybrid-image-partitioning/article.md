@@ -10,98 +10,92 @@ Hybrid Image Partitioning is a dynamic load balancing scheme for parallel volume
 - Image plane dimensions.
 - Number of processors $P$.
 - Volume dataset.
-- Ray tracing parameters (e.g., early termination threshold, adaptive sampling region size $w_{max}$) [S1].
+- Ray tracing parameters [S1].
 
 **Outputs:**
 - Rendered image.
 
 **Data Structures:**
-- **Image Plane:** Divided into $P$ contiguous rectangular blocks of comparable size.
-- **Image Tiles:** Each block is divided into fixed-size square image tiles.
-- **Task Queues:** One queue per processor. Each queue contains the image tiles assigned to that processor. The queues are distributed; processor $i$ manages its own queue and can access the queue of processor $(i+1) \pmod P$ [S1].
+- **Image Plane:** Divided into $P$ contiguous rectangular blocks of comparable size [S1].
+- **Image Tiles:** Each block is divided into fixed-size square image tiles [S1].
+- **Task Queues:** One queue per processor, distributed across the system [S1]. Each queue contains the image tiles assigned to that processor [S1].
 
 **Steps:**
-1. **Static Partitioning:** Divide the image plane into $P$ contiguous rectangular blocks of comparable size.
-2. **Tiling:** Divide each image block into fixed-size square image tiles.
-3. **Assignment:** Statically assign each image block to one processor. Each processor initializes its local task queue with the tiles in its assigned block.
-4. **Initial Processing:** Each processor begins ray tracing the tiles in its assigned block in scan line order.
-5. **Dynamic Grabbing:** When a processor finishes all tiles in its assigned block, it grabs an unprocessed image tile from the next processor in scan line order (processor $(i+1) \pmod P$) that has not yet finished its block.
-6. **Continuation:** Processors continue to grab tiles from other processors' queues until all tiles are completed.
+1. **Static Partitioning:** Divide the image plane into $P$ contiguous rectangular blocks of comparable size [S1].
+2. **Tiling:** Divide each image block into fixed-size square image tiles [S1].
+3. **Assignment:** Statically assign each image block to one processor [S1]. Each processor initializes its local task queue with the tiles in its assigned block [S1].
+4. **Initial Processing:** Each processor begins ray tracing the tiles in its assigned block in scan line order [S1].
+5. **Dynamic Grabbing:** When a processor finishes all tiles in its assigned block, it grabs an unprocessed image tile from the next processor in scan line order that has not yet finished its block [S1].
+6. **Continuation:** Processors continue to grab tiles from other processors' queues until all tiles are completed [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hybrid_image_partitioning(image_plane, volume, P):
+def hybrid_image_partitioning(image_plane, volume, P, tile_size):
     # Step 1: Static Partitioning
     # Divide image plane into P contiguous rectangular blocks
-    blocks = partition_image_plane(image_plane, P)
-    
+    width, height = image_plane
+    blocks = []
+    for i in range(P):
+        left = i * width // P
+        right = (i + 1) * width // P
+        blocks.append((left, 0, right - left, height))
+        
     # Step 2: Tiling
     # Divide each block into fixed-size square image tiles
-    # Tile size is a parameter, e.g., 16x16 pixels
-    tile_size = 16
     queues = []
     for i in range(P):
-        tiles = divide_into_tiles(blocks[i], tile_size)
+        tiles = []
+        left, top, w, h = blocks[i]
+        for y in range(top, top + h, tile_size):
+            for x in range(left, left + w, tile_size):
+                tiles.append((x, y, tile_size, tile_size))
         queues.append(tiles)
         
-    # Step 3 & 4: Assignment and Initial Processing
-    # Each processor i manages queue i
-    def processor_task(i):
+    # Step 3: Assignment
+    # Each processor statically assigned an image block (queue)
+    block_done = [False] * P
+    
+    # Step 4 & 5: Initial Processing and Dynamic Grabbing
+    def processor_work(i):
         while True:
-            # Try to grab a tile from own queue first
-            tile = queues[i].pop_front()
-            
-            # If own queue is empty, try next processor's queue
-            if tile is None:
+            tile = None
+            # Process own block first
+            if queues[i]:
+                tile = queues[i].pop(0)
+            # When own block is done, grab from next processor
+            else:
+                block_done[i] = True
                 next_proc = (i + 1) % P
-                # Check if next processor is done
-                if not is_processor_done(next_proc):
-                    tile = queues[next_proc].pop_front()
+                if not block_done[next_proc] and queues[next_proc]:
+                    tile = queues[next_proc].pop(0)
             
-            # If no tile available, check if all work is done
             if tile is None:
-                if all_queues_empty():
+                # Check termination
+                if all(len(q) == 0 for q in queues) and all(block_done):
                     break
-                else:
-                    continue # Wait or yield
+                continue # Yield/wait
             
             # Ray trace the tile
             ray_trace_tile(tile, volume)
             
-            # Mark processor as done if own queue was the last source
-            # Note: Logic for 'is_processor_done' depends on tracking
-            # which processor owns which tiles. 
-            # Simplified: A processor is 'done' if its own queue is empty
-            # AND it has not grabbed any tiles from others? 
-            # The source says "grabs... from next processor... that has not yet finished its block".
-            # This implies a state of 'finished block' per processor.
-            
-    # Launch P processors
+    # Step 6: Continuation
+    # Processors continue grabbing until all tiles completed
     for i in range(P):
-        spawn_thread(processor_task, i)
+        processor_work(i)
 
-def is_processor_done(proc_id):
-    # A processor is done if its own block is fully processed
-    # This requires tracking progress. 
-    # In the hybrid scheme, a processor is considered 'done' with its block
-    # when its local queue is empty AND it has not taken work from others?
-    # Actually, the source says: "grabs... from next processor... that has not yet finished its block".
-    # This implies we need to know if the next processor has finished its *own* block.
-    # Let's assume a flag or counter.
-    return processor_block_finished[proc_id]
-
-def all_queues_empty():
-    return all(len(q) == 0 for q in queues)
+def ray_trace_tile(tile, volume):
+    # Standard ray marching for the given tile region
+    pass
 ```
 
 **Parameters:**
-- **Tile Size:** Fixed-size square tiles. The size must be large enough to minimize overlapping voxel accesses but small enough to allow dynamic load balancing [S1]. Not given in the sources.
+- **Tile Size:** Fixed-size square tiles. The exact pixel dimensions are not given in the sources [S1].
 - **$w_{max}$:** Size of adaptive image sampling regions in pixels. Rays are cast only from the four corner pixels of each region [S1]. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Centralized Bottleneck:** Centralized dynamic partitioning becomes a bottleneck as processor count increases. This method avoids that by distributing queue management [S1].
+- **Centralized Bottleneck:** Centralized dynamic partitioning becomes a bottleneck as processor count increases. This method avoids that by distributing queue management across processors (one queue per processor) [S1].
 - **Pixel Sharing in Adaptive Sampling:** Adaptive image sampling creates dependencies between adjacent tiles because they share corner pixel values. If adjacent tiles are processed by different processors, synchronization or replicated computation is required. The hybrid scheme minimizes this by keeping spatially adjacent tiles with the same processor initially [S1].
 - **Boundary Conditions:** When a processor grabs from the next processor, it must ensure the next processor has not finished its block. If the next processor has finished, it may have already grabbed from the one after it. The source specifies grabbing from the "next processor in scan line order that has not yet finished its block" [S1].
 
@@ -118,7 +112,7 @@ Ray Queue Scheduling is a dynamic load balancing method for distributed volume r
 - **Strengths:** Good load distribution compared to static schemes; reduced overlapping voxel accesses compared to interleaved schemes; avoids centralized bottleneck [S1].
 - **Limitations:** Synchronization overhead for adaptive image sampling if adjacent tiles are processed by different processors (though minimized) [S1].
 - **When to use:** When image complexity varies significantly across the image plane and viewing position, and when overlapping voxel accesses are a concern [S1].
-- **When not:** When a centralized queue is feasible and scalable, or when adaptive sampling dependencies are too costly to manage [S1].
+- **When not:** Not given in the sources.
 
 ## Background
 Originated in 1992 by researchers at the University of North Carolina at Chapel Hill, presented at the 1992 Workshop on Volume Visualization [S1]. The method was implemented on the DASH architecture [S1]. It addresses the limitations of static contiguous partitioning (poor load distribution) and static interleaved partitioning (excessive overlapping voxel accesses) [S1].

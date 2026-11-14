@@ -1,0 +1,135 @@
+# Voxel Mipmap Generation
+
+Also called: Multi-Resolution Voxshot Generation, Voxel Mip Pass, Voxel Mipmapping
+
+## Overview
+Voxel Mipmap Generation creates a hierarchy of downsampled voxel representations from a primary volume buffer to enable rendering at varying scales or distances [S1, S2, unofficial]. It differs from [Atlas Mipmapping](2639-atlas-mipmapping.md) by operating on a contiguous 3D voxel grid rather than 2D texture atlases, and from [GPU 3D Mip Chain Generation](5067-gpu-3d-mip-chain-generation.md) by often employing specific compute shader passes or CPU-side accumulation loops for the downsampling step [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A source voxel volume buffer (Level 0) containing visible cylinder voxels or a full volume [S1, S2, unofficial].
+*   **Output:** A series of downsampled voxel buffers (Levels 1 to $N$) [S1, S2, unofficial].
+
+**Data Structures:**
+*   **Voxel Buffer:** A 3D array of color values. In the CPU implementation, voxels are stored in a linearized format where a voxel at $(x, y, z)$ is accessed via an index calculated as $((x \cdot 2 + i) \cdot \text{count}[2] \cdot 2) + ((y \cdot 2 + j) \cdot \text{count}[0] \cdot \text{count}[2] \cdot 4) + (z \cdot 2 + k)$ [S1, unofficial]. The stride factors (2, 4) suggest specific packing or channel interleaving [S1, unofficial].
+*   **Mip Chain:** A sequence of buffers where Level $m$ has dimensions $\lfloor \text{Level}_{m-1} / 2 \rfloor$ [S1, S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Check if continuous voxelization is enabled; if not, skip generation [S2, unofficial].
+    *   Bind the source voxel volume for reading [S2, unofficial].
+    *   Set the initial destination resolution (e.g., $256 \gg 1 = 128$) [S2, unofficial].
+    *   Copy visible voxels from the display buffer to Level 0 [S1, unofficial].
+
+2.  **Downsampling Loop (for $m = 1$ to $N$):**
+    *   **Dimension Halving:** Reduce the dimensions of the current level by half: $\text{count}[0] \leftarrow \text{count}[0]/2$, $\text{count}[1] \leftarrow \text{count}[1]/2$, $\text{count}[2] \leftarrow \text{count}[2]/2$ [S1, unofficial].
+    *   **Sampling:** For each voxel $(x, y, z)$ at Level $m$, identify the corresponding $2 \times 2 \times 2$ block of 8 voxels in Level $m-1$. The source coordinates are centered at $(x \cdot 2, y \cdot 2, z \cdot 2)$ [S1, unofficial].
+    *   **Accumulation:** Sum the Red, Green, and Blue components of the 8 source samples [S1, unofficial].
+        $$ \text{rgb}_c = \sum_{i=0}^{1} \sum_{j=0}^{1} \sum_{k=0}^{1} C_{m-1}(x \cdot 2 + i, y \cdot 2 + j, z \cdot 2 + k)_c $$
+        where $c \in \{R, G, B\}$ [S1, unofficial].
+    *   **Averaging:** Divide the sum by 3 per channel. Note: The source code explicitly divides by 3, which is likely a typo for 8 or specific to a 3-channel normalization, but is implemented as `/3` [S1, unofficial].
+        $$ \text{rgb}_c = \text{rgb}_c / 3 $$
+    *   **Clamping:** Clamp each channel value to the maximum range (e.g., 255) [S1, unofficial].
+    *   **Write:** Store the result in Level $m$ [S1, unofficial].
+
+3.  **GPU Implementation Details (Compute Shader):**
+    *   Dispatch a compute shader (`VOXEL_MIPMAP_PASS_COMPUTE_SHADER`) [S2, unofficial].
+    *   Pass uniforms: source mip level index, destination mip resolution [S2, unofficial].
+    *   Calculate work groups: $\lceil \text{dstMipRes} / 4.0 \rceil$ for X, Y, Z dimensions [S2, unofficial].
+    *   Insert memory barriers before and after the dispatch to ensure texture fetch and image write coherence [S2, unofficial].
+    *   Halve the destination resolution for the next iteration [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_voxel_mipmaps(source_volume, max_levels):
+    """
+    Generates mip levels for a voxel volume.
+    source_volume: 3D array of voxels (x, y, z) -> (r, g, b)
+    max_levels: integer, total number of mip levels to generate
+    """
+    mip_chain = [source_volume]
+    
+    # Check if continuous voxelization is enabled [S2, unofficial]
+    if not is_continuous_voxelization_enabled():
+        return mip_chain
+
+    current_level = source_volume
+    current_res = get_resolution(current_level)
+    
+    for m in range(1, max_levels):
+        # Halve dimensions [S1, unofficial]
+        new_res = [d // 2 for d in current_res]
+        
+        # Create new level buffer [S1, unofficial]
+        next_level = create_buffer(new_res)
+        
+        # Iterate over each voxel in the new level [S1, unofficial]
+        for x in range(new_res[0]):
+            for y in range(new_res[1]):
+                for z in range(new_res[2]):
+                    # Sum RGB components from 2x2x2 block in previous level [S1, unofficial]
+                    rgb_sum = [0, 0, 0]
+                    for i in range(2):
+                        for j in range(2):
+                            for k in range(2):
+                                src_x = x * 2 + i
+                                src_y = y * 2 + j
+                                src_z = z * 2 + k
+                                color = current_level[src_x, src_y, src_z]
+                                rgb_sum[0] += color.r
+                                rgb_sum[1] += color.g
+                                rgb_sum[2] += color.b
+                    
+                    # Average by dividing by 3 [S1, unofficial]
+                    # Note: Source code uses /3, likely a typo for /8 or specific normalization [S1, unofficial]
+                    r = rgb_sum[0] / 3
+                    g = rgb_sum[1] / 3
+                    b = rgb_sum[2] / 3
+                    
+                    # Clamp to 255 [S1, unofficial]
+                    r = min(r, 255)
+                    g = min(g, 255)
+                    b = min(b, 255)
+                    
+                    next_level[x, y, z] = Color(r, g, b)
+        
+        mip_chain.append(next_level)
+        current_level = next_level
+        current_res = new_res
+        
+        # Insert memory barrier if using GPU [S2, unofficial]
+        insert_memory_barrier()
+
+    return mip_chain
+```
+
+**Parameters:**
+*   `MIPMAP_LEVELS`: Total number of levels. In [S2, unofficial], the loop runs up to `MIPMAP_LEVELS - 2`.
+*   `dstMipRes`: Initial destination resolution, often half the source (e.g., 128 if source is 256) [S2, unofficial].
+*   `ContinousVoxelizationPass`: Boolean flag to enable/disable the pass [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Division Error:** The source code divides by 3 instead of 8 (the number of samples in a $2 \times 2 \times 2$ block) [S1, unofficial]. This results in incorrect color averaging unless compensated by other pipeline stages [S1, unofficial].
+*   **Boundary Conditions:** When dimensions are odd, halving may result in truncation. The sampling logic assumes even alignment or specific padding [S1, unofficial].
+*   **Precision:** Accumulating 8 uint8 values into a sum can exceed 255, requiring intermediate integer types before division [S1, unofficial].
+
+## Subtopics
+
+### [Voxel Mipmap Generation via Clipmap](13505-voxel-mipmap-generation-via-clipmap.md)
+Uses a clipmap data structure to store voxel mip levels, optimizing for streaming and memory locality compared to a full pyramid. Choose this when memory bandwidth is a bottleneck or for large, sparse volumes.
+
+## Operating characteristics
+*   **Time Complexity:** $O(V)$ where $V$ is the total number of voxels in the pyramid. Each level processes half the voxels of the previous one, forming a geometric series.
+*   **Memory Complexity:** $O(V_0)$ where $V_0$ is the size of the base level. The total memory for the chain is $V_0 + V_0/8 + V_0/64 + \dots \approx 1.14 V_0$.
+*   **Performance:** The GPU implementation uses compute shaders with work groups of size 4, dispatching $\lceil \text{Res}/4 \rceil^3$ groups [S2, unofficial]. This allows for parallel processing of voxels.
+*   **Strengths:** Enables LOD rendering for voxel volumes; reduces fill rate requirements for distant objects.
+*   **Limitations:** The specific averaging bug (div by 3) may require post-processing correction [S1, unofficial]. Memory bandwidth can be high for large volumes.
+
+## Background
+The method originates from implementations in volumetric display systems and voxel cone tracing engines. The CPU-based "voxshot" approach is documented in the Multivox project [S1, unofficial], while the GPU compute shader variant is found in the Voxel-Cone-Tracing repository [S2, unofficial].
+
+## Sources
+[S1] Multivox: Volumetric Display, https://github.com/AncientJames/multivox, fetched 2026-10-26 (unofficial)
+[S2] maritim/Voxel-Cone-Tracing, https://github.com/maritim/Voxel-Cone-Tracing, fetched 2026-10-26 (unofficial)

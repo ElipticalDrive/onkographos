@@ -1,49 +1,56 @@
 # Ray-Polar Section Intersection
 Also called: Polar Hit Detection, polarHit
 ## Overview
-Determines whether a ray intersects a polar section of a spherical voxel grid, where polar sections are defined within the XY plane [S1, unofficial]. It differs from [Azimuthal Hit Detection](3885-azimuthal-hit-detection.md) by operating on the polar coordinate boundaries (Y-axis projection) rather than azimuthal ones (Z-axis projection), and from [Ray-Ray Intersection](7624-ray-ray-intersection.md) by utilizing precomputed grid boundary vectors rather than solving for arbitrary line-line crossings.
+Determines whether a ray intersects a polar section of a spherical voxel grid, where polar sections are defined within the XY plane [S1, unofficial]. It differs from [Azimuthal Hit Detection](3885-azimuthal-hit-detection.md) by operating on the polar coordinate boundaries (Y-axis projection) rather than azimuthal ones (Z-axis projection), and from [Ray-Ray Intersection](7624-ray-ray-intersection.md) by utilizing precomputed grid boundary vectors rather than solving for arbitrary line-line crossings [G].
 ## How it works
-**Inputs**: A ray segment (defined by origin $P_1$ and vector $\vec{v}$), the current polar voxel index $i$, the spherical voxel grid data (including `pMaxPolar` boundary definitions and `centerToPolarBound` mappings), and traversal parameters ($t$, $max\_t$, collinear times).
-**Outputs**: Boolean or status indicating a polar hit, with updated intersection parameters.
+**Inputs**: A ray segment (defined by origin $P_1$ and direction vector $\vec{v}$), the current polar voxel index $i$, the spherical voxel grid data (including `pMaxPolar` boundary definitions and `centerToPolarBound` mappings), and traversal parameters ($t$, $max\_t$, collinear times) [S1, unofficial].
+**Outputs**: Boolean or status indicating a polar hit, with updated intersection parameters [S1, unofficial].
 
 **Data Structures**:
-- `BoundVec3`: A 3D vector structure. For polar calculations, the Z component is explicitly set to 0.0.
-- `LineSegment`: Defined by points $P1$ and $P2$.
-- `ray_segment`: Contains $P_1$ (origin) and $\vec{v}$ (direction vector).
+- `BoundVec3`: A 3D vector structure where the Z component is explicitly set to 0.0 for polar calculations [S1, unofficial].
+- `LineSegment`: Defined by points $P1$ and $P2$ [S1, unofficial].
+- `ray_segment`: Contains $P_1$ (origin) and $\vec{v}$ (direction vector) [S1, unofficial].
 
 **Steps**:
 1.  **Retrieve Boundary Points**:
-    Let $P_{1, i}$ be `grid.pMaxPolar(i).P1` and $P_{2, i}$ be `grid.pMaxPolar(i).P2`.
-    Let $P_{1, i+1}$ be `grid.pMaxPolar(i+1).P1` and $P_{2, i+1}$ be `grid.pMaxPolar(i+1).P2`.
+    Let $P_{1, i}$ be `grid.pMaxPolar(i).P1` and $P_{2, i}$ be `grid.pMaxPolar(i).P2` [S1, unofficial].
+    Let $P_{1, i+1}$ be `grid.pMaxPolar(i+1).P1` and $P_{2, i+1}$ be `grid.pMaxPolar(i+1).P2` [S1, unofficial].
     Construct 2D vectors in the XY plane (Z=0):
     $$ \vec{p}_{one} = (P_{1, i}, P_{2, i}, 0.0) $$
     $$ \vec{p}_{two} = (P_{1, i+1}, P_{2, i+1}, 0.0) $$
 
 2.  **Retrieve Center-to-Bound Vectors**:
-    Let $\vec{u}_{min}$ be the vector pointed to by `grid.centerToPolarBound(i)`.
-    Let $\vec{u}_{max}$ be the vector pointed to by `grid.centerToPolarBound(i+1)`.
+    Let $\vec{u}_{min}$ be the vector pointed to by `grid.centerToPolarBound(i)` [S1, unofficial].
+    Let $\vec{u}_{max}$ be the vector pointed to by `grid.centerToPolarBound(i+1)` [S1, unofficial].
 
 3.  **Calculate Displacement Vectors**:
-    Let $\vec{w}_{min} = \vec{p}_{one} - ray\_segment.P_1$.
-    Let $\vec{w}_{max} = \vec{p}_{two} - ray\_segment.P_1$.
+    Let $\vec{w}_{min} = \vec{p}_{one} - ray\_segment.P_1$ [S1, unofficial].
+    Let $\vec{w}_{max} = \vec{p}_{two} - ray\_segment.P_1$ [S1, unofficial].
 
 4.  **Calculate Perpendicular Components (2D Cross Products)**:
-    These values represent the signed area of parallelograms formed by the vectors in the XY plane.
-    $$ perp\_uv\_min = u_{min}.x \cdot \vec{v}.y - u_{min}.y \cdot \vec{v}.x $$
-    $$ perp\_uv\_max = u_{max}.x \cdot \vec{v}.y - u_{max}.y \cdot \vec{v}.x $$
+    These values represent the signed area of parallelograms formed by the vectors in the XY plane [G].
+    $$ perp\_uv\_min = u_{min}.x \cdot v.y - u_{min}.y \cdot v.x $$
+    $$ perp\_uv\_max = u_{max}.x \cdot v.y - u_{max}.y \cdot v.x $$
     $$ perp\_uw\_min = u_{min}.x \cdot w_{min}.y - u_{min}.y \cdot w_{min}.x $$
     $$ perp\_uw\_max = u_{max}.x \cdot w_{max}.y - u_{max}.y \cdot w_{max}.x $$
-    $$ perp\_vw\_min = \vec{v}.x \cdot w_{min}.y - \vec{v}.y \cdot w_{min}.x $$
-    $$ perp\_vw\_max = \vec{v}.x \cdot w_{max}.y - \vec{v}.y \cdot w_{max}.x $$
+    $$ perp\_vw\_min = v.x \cdot w_{min}.y - v.y \cdot w_{min}.x $$
+    $$ perp\_vw\_max = v.x \cdot w_{max}.y - v.y \cdot w_{max}.x $$ [S1, unofficial]
 
 5.  **Invoke Generalized Angular Hit Logic**:
-    Pass the calculated perpendicular components to `angularHit` along with grid context, ray data, and traversal state.
-    $$ angularHit(grid, ray, perp\_uv\_min, perp\_uv\_max, perp\_uw\_min, perp\_uw\_max, perp\_vw\_min, perp\_vw\_max, ray\_segment, collinear\_times, t, max\_t, ray.direction().y(), grid.sphereCenter().y(), grid.pMaxPolar(), i) $$
+    Pass the calculated perpendicular components to `angularHit` along with grid context, ray data, and traversal state [S1, unofficial].
 
 **Pseudocode**:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class BoundVec3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __sub__(self, other):
+        return BoundVec3(self.x - other.x, self.y - other.y, self.z - other.z)
+
 def ray_polar_section_intersection(grid, ray, current_polar_voxel, ray_segment, collinear_times, t, max_t):
     # 1. Retrieve boundary points for current and next polar voxel
     p1_curr = grid.pMaxPolar(current_polar_voxel).P1
@@ -64,56 +71,32 @@ def ray_polar_section_intersection(grid, ray, current_polar_voxel, ray_segment, 
     w_max = p_two - ray_segment.P1()
 
     # 5. Calculate perpendicular components (2D cross products in XY plane)
-    # perp_uv: cross product of u and ray vector v
-    perp_uv_min = u_min.x * ray_segment.vector().y - u_min.y * ray_segment.vector().x
-    perp_uv_max = u_max.x * ray_segment.vector().y - u_max.y * ray_segment.vector().x
+    v = ray_segment.vector()
+    perp_uv_min = u_min.x * v.y - u_min.y * v.x
+    perp_uv_max = u_max.x * v.y - u_max.y * v.x
 
-    # perp_uw: cross product of u and w
     perp_uw_min = u_min.x * w_min.y - u_min.y * w_min.x
     perp_uw_max = u_max.x * w_max.y - u_max.y * w_max.x
 
-    # perp_vw: cross product of ray vector v and w
-    perp_vw_min = ray_segment.vector().x * w_min.y - ray_segment.vector().y * w_min.x
-    perp_vw_max = ray_segment.vector().x * w_max.y - ray_segment.vector().y * w_max.x
+    perp_vw_min = v.x * w_min.y - v.y * w_min.x
+    perp_vw_max = v.x * w_max.y - v.y * w_max.x
 
     # 6. Call generalized angular hit function
-    # Note: ray.direction().y() and grid.sphereCenter().y() are passed as specific context
-    return angularHit(
-        grid, ray,
-        perp_uv_min, perp_uv_max,
-        perp_uw_min, perp_uw_max,
-        perp_vw_min, perp_vw_max,
-        ray_segment, collinear_times, t, max_t,
-        ray.direction().y(),
-        grid.sphereCenter().y(),
-        grid.pMaxPolar(),
-        current_polar_voxel
-    )
+    # The angularHit helper is not detailed in the sources.
+    # It processes the perpendicular components to determine the hit.
+    # return angularHit(grid, ray, perp_uv_min, perp_uv_max, perp_uw_min, perp_uw_max, 
+    #                   perp_vw_min, perp_vw_max, ray_segment, collinear_times, t, max_t, 
+    #                   ray.direction().y(), grid.sphereCenter().y(), grid.pMaxPolar(), current_polar_voxel)
 ```
 
 **Edge Cases and Pitfalls**:
--   **Collinearity**: The `angularHit` function handles collinear cases via `collinear_times` [S1, unofficial].
--   **Precision**: The calculation relies on double-precision floating-point arithmetic for the cross products to maintain accuracy in boundary detection [S1, unofficial].
--   **Boundary Conditions**: The method assumes valid voxel indices; accessing `current_polar_voxel + 1` requires bounds checking against the grid size [S1, unofficial].
-
-## Subtopics
-
-### [Azimuthal Hit Detection](3885-azimuthal-hit-detection.md)
-Handles intersections in the XZ plane. Choose when traversing azimuthal boundaries.
-
-### [Ray-Ray Intersection](7624-ray-ray-intersection.md)
-General line-line intersection. Choose when no grid structure is available.
+Not given in the sources.
 
 ## Operating characteristics
--   **Time Complexity**: $O(1)$ per polar voxel step, as it involves a fixed number of arithmetic operations and one function call.
--   **Memory Complexity**: $O(1)$ auxiliary space.
--   **Strengths**: Efficiently reduces 3D spherical boundary intersection to 2D planar geometry.
--   **Limitations**: Specific to spherical grids with polar sections defined in the XY plane.
--   **When to use**: During spherical volume rendering traversal when crossing polar boundaries.
--   **When not**: For azimuthal boundaries or non-spherical grids.
+Not given in the sources.
 
 ## Background
-Originated in the Spherical Volume Rendering (SVR) algorithm [S1, unofficial]. The method is part of a family of techniques that decompose complex 3D intersection tests into 2D geometric operations within specific coordinate planes, leveraging the symmetry of spherical grids.
+The method is implemented in the Spherical Volume Rendering (SVR) algorithm repository [S1, unofficial].
 
 ## Sources
 [S1] spherical-volume-rendering/svr-algorithm, https://github.com/spherical-volume-rendering/svr-algorithm, fetched 2026-10-24 (unofficial)

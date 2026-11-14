@@ -1,0 +1,59 @@
+# Data Layout and Storage
+
+
+## Overview
+Data Layout and Storage defines the memory organization, serialization, and runtime management of 3D Gaussian Splat attributes (position, scale, rotation, opacity, and spherical harmonics) to enable efficient GPU rendering and optimization [G]. It solves the problem of translating high-level splat representations into contiguous, cache-friendly structures suitable for batched processing, while supporting dynamic scene growth and cross-platform data transfer [G]. It is distinguished from sibling methods by focusing on the raw memory layout and buffer management infrastructure rather than the rendering algorithm itself ([GSPull](2773-gspull.md)), error-based densification ([Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md)), or specific network architectures ([GS-W Network Architecture](5927-gs-w-network-architecture.md)) [G].
+
+## Shared principles
+Builds on [Gaussian Data Structure](2273-gaussian-data-structure.md) [G]. The family operates on a Structure-of-Arrays (SoA) paradigm, where each attribute type is stored in a separate contiguous linear buffer [5568-splat-data-buffer-layout.md]. Rotations are stored as $N \times 4$ floats in scalar-last order $(x, y, z, w)$ [S1, unofficial]. Opacities are stored as $N$ floats [S1, unofficial]. Spherical Harmonics coefficients are stored as $N \times D \times 3$ floats, with indexing $idx = ((i \times D) + d) \times 3 + c$ [5570-spherical-harmonics-coefficient-layout.md]. Dynamic scene management supports incremental `append` operations and dynamic buffer resizing [6907-dynamic-gaussian-splatting-scene-management.md]. Scales are stored in log-space [5568-splat-data-buffer-layout.md]. When writing to buffers, linear values are converted to log-space via $\log()$ [S1, unofficial].
+
+## Subtopics
+
+### [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md)
+Defines the foundational SoA memory organization for all splat attributes. It serves as the base for other layout methods. Choose when implementing raw buffer population for GPU shaders.
+
+### [Spherical Harmonics Coefficient Layout](5570-spherical-harmonics-coefficient-layout.md)
+Details the specific indexing and flat buffer structure for SH coefficients, ensuring contiguous access for color data. Choose when optimizing SH coefficient retrieval in shaders.
+
+### [Covariance Splat Reading](6840-covariance-splat-reading.md)
+Handles the decoding of Gaussian parameters from compressed texture storage into a structured `CovSplat` representation for rasterization. Choose when working with texture-based splat storage.
+
+### [Dynamic Gaussian Splatting Scene Management](6907-dynamic-gaussian-splatting-scene-management.md)
+Manages the runtime lifecycle of splat data structures, including capacity growth and batched updates, enabling real-time scene evolution. Choose for dynamic or streaming scenes.
+
+### [WASM Data Packing](7761-wasm-data-packing.md)
+Manages memory allocation and serialization of splat attributes into WebAssembly linear memory for GPU upload or WASM-side processing, handling power-of-2 capacity alignment. Choose for web-based or WASM-targeted renderers.
+
+### [VastGaussian](6000-vastgaussian.md)
+Optimizes large-scale storage and rendering. Choose for massive scene datasets requiring hierarchical or compressed storage.
+
+### [SLAM and Tracking](6236-slam-and-tracking.md)
+Integrates tracking data into the splat layout. Choose when maintaining spatial consistency across camera poses.
+
+### [Spherical Harmonics Representation](10084-spherical-harmonics-representation.md)
+Defines the mathematical basis and coefficient ordering for color representation. Choose when implementing or modifying the SH evaluation pipeline.
+
+### [7D Gaussian Splatting](11462-7d-gaussian-splatting.md)
+Extends the standard 3D Gaussian parameterization. Choose when requiring additional degrees of freedom for complex geometry or appearance.
+
+### [Deformation and Dynamic Modeling](11474-deformation-and-dynamic-modeling.md)
+Handles time-varying attributes within the storage structure. Choose for animating or simulating dynamic scenes.
+
+### [Deformable Radial Kernel (DRK) Parametrization](13703-deformable-radial-kernel-drk-parametrization.md)
+Modifies the radial kernel function for adaptive splat shapes. Choose when standard isotropic or anisotropic kernels are insufficient.
+
+#### Log-Scale Storage
+Scales are stored internally in log-space. When writing to buffers, linear values are converted to log-space via $\log()$. When reading for rendering or optimization, log-space values are converted to linear via $\exp()$ [S1, unofficial]. Linear scale is recovered from stored log-scale: $s_{linear} = \exp(s_{log})$ [S1, unofficial]. Conversion logic is not explicitly detailed in the sources [G].
+
+#### Rotation Quaternion Ordering
+For each splat $i$, the quaternion components are written sequentially to indices $i \times 4 + 0$ through $i \times 4 + 3$ [S1, unofficial]. Rotations are stored as 4-component quaternions in scalar-last order $(x, y, z, w)$ within a `FloatBuffer` of size $N \times 4$ [S1, unofficial].
+
+#### GaussianSplatWorld v2 Format
+A file format for storing HLOD Gaussian splat worlds, extending v1 with HLOD flags, extended headers, and strict bounds validation rules [S2, unofficial]. The header's world AABB must enclose the root node's world AABB. During load, validate header bounds: refuse if non-finite, negative size, or failing to enclose the root's world AABB [S2, unofficial]. Perform bounds validation using double precision to avoid floating-point edge cases [S2, unofficial]. World importer version is 4 (3 handles v1->v2 bake, 4 handles header-bounds rule). PLY/SPZ importer versions remain unchanged from v1 [S2, unofficial]. Header contains an 80-byte extension block. Each node/instance record is exactly 128 bytes [S2, unofficial]. Data is organized into bounded, non-overlapping sections [S2, unofficial]. Disjoint noncanonical ordering is permitted in the file layout [S2, unofficial]. Malformed headers containing NaN, infinite position/size, negative size, zero size, half extent, disjoint bounds, one float ULP inside the root's low edge, or widened positive controls must be rejected or handled safely [S2, unofficial].
+
+## Background
+The Structure-of-Arrays layout for 3D Gaussian Splatting was introduced in the original 3DGS paper [G]. Subsequent implementations, such as JSplat [S1, unofficial] and the `gsplat` ecosystem, refined the storage for GPU efficiency, introducing log-scale storage for stability and specific quaternion orderings. The GaussianSplatWorld v2 format was developed to support Hierarchical Level of Detail (HLOD) in large-scale scenes, adding strict validation rules to prevent corruption from malformed data [S2, unofficial]. Dynamic scene management techniques evolved to support real-time updates, moving beyond static initialization to support incremental appending and buffer resizing [G].
+
+## Sources
+[S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)
+[S2] gaussian_splatting: HLOD S1a: .gsplatworld v2 node table and the world-aligned octree bake (Refs #1131), https://github.com/klausi3D/godotGS/pull/1149, fetched 2026-10-27 (unofficial)

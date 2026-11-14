@@ -3,153 +3,126 @@
 Also called: Adding extra points, Point densification via extent-based calculation
 
 ## Overview
-This method supplements an initial sparse 3D point cloud with additional Gaussian points to enable the representation of tiny objects and handle camera motion blur, which sparse inputs alone fail to model [S1]. It distinguishes itself from sibling methods by using a volume-based extent calculation to determine the number of points and mandating color interpolation from neighbors rather than random initialization to ensure high-fidelity reconstruction [S1].
+This method supplements an initial sparse point cloud with additional 3D Gaussian points to enable the representation of tiny objects and handle camera motion blur, which sparse representations typically fail to model [S1]. It distinguishes itself from standard initialization by dynamically calculating the number of required points based on the spatial extent of the existing cloud and ensuring high-fidelity reconstruction by interpolating color features from neighbors rather than random initialization [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A sparse 3D point cloud $P$ containing $N$ points, where each point has a position $\mathbf{p}_i \in \mathbb{R}^3$ and a color feature $\mathbf{c}_i \in \mathbb{R}^3$.
-*   **Output:** An augmented point cloud $P'$ containing the original points plus $N_p$ new points with interpolated color features.
+**Inputs:**
+*   $P$: The initial sparse point cloud, where each point $p_i$ has a position $\mathbf{q}_i \in \mathbb{R}^3$.
+*   $c$: Stability constant, typically $1.1$ [S1].
+*   $N_{max}$: Maximum number of supplementing points, typically $200,000$ [S1].
+
+**Outputs:**
+*   $N_p$: The calculated number of points to add.
+*   $P_{new}$: The set of $N_p$ new 3D Gaussian points, including their positions and interpolated colors.
 
 **Data Structures:**
-The point cloud is represented as a list of structures. Each element contains:
-*   `position`: A 3D vector $(x, y, z)$.
-*   `color`: A 3D vector $(r, g, b)$.
-*   (Other Gaussian parameters such as scale, rotation, and opacity are assumed to be initialized to standard defaults or inherited from the parent initialization method, as specific values for the *new* points are not detailed in the source beyond color [S1]).
+*   The point cloud is represented as a list of points. Each point contains a position vector $\mathbf{q} = [x, y, z]^T$.
+*   Color features are stored as a vector (e.g., RGB or spherical harmonics coefficients) associated with each point.
 
-**Parameters:**
-*   $c$: Stability constant, set to $1.1$ [S1].
-*   $N_{max}$: Maximum number of supplementing points, set to $200,000$ [S1].
-
-**Algorithm:**
-1.  **Calculate Extent:** Determine the bounding box of the existing point cloud $P$.
-    *   Find $Q_{min} = [\min(x), \min(y), \min(z)]$, the component-wise minimum of all point positions.
-    *   Find $Q_{max} = [\max(x), \max(y), \max(z)]$, the component-wise maximum of all point positions.
-    *   Calculate the volume $V = \text{prod}(Q_{max} - Q_{min}) = (x_{max}-x_{min})(y_{max}-y_{min})(z_{max}-z_{min})$.
-2.  **Determine Number of Points:** Calculate the number of points to add $N_p$ using the formula:
+**Steps:**
+1.  **Calculate Extent:** Determine the bounding box of the current point cloud $P$.
+    *   Find $Q_{min} \in \mathbb{R}^3$, where each component is the minimum value of the corresponding coordinate across all points in $P$.
+    *   Find $Q_{max} \in \mathbb{R}^3$, where each component is the maximum value of the corresponding coordinate across all points in $P$.
+2.  **Calculate Volume:** Compute the volume of the bounding box using the product of the dimensions:
+    $$ V = \text{prod}(Q_{max} - Q_{min}) = (Q_{max,x} - Q_{min,x}) \times (Q_{max,y} - Q_{min,y}) \times (Q_{max,z} - Q_{min,z}) $$
+3.  **Determine Number of Points:** Calculate the number of supplementing points $N_p$ using the formula:
     $$ N_p = \min\left(\frac{V}{c^3}, N_{max}\right) $$
-    where $\text{prod}(\cdot)$ returns the product of all values in the vector argument [S1].
-3.  **Generate New Points:** Create $N_p$ new points. The source does not specify the spatial distribution strategy (e.g., uniform grid, random within bounds) for the positions of these new points, only that they are added to the cloud [S1]. [G: In practice, these are typically distributed uniformly within the bounding box or via Poisson disk sampling to avoid clustering, but the source text does not explicitly define this step.]
-4.  **Interpolate Colors:** For each new point, calculate its color by interpolating from neighboring points in the original cloud $P$. The source explicitly states that randomly initializing colors leads to inferior quality and that interpolation is required for valid features [S1]. [G: Standard nearest-neighbor or inverse-distance weighting interpolation is implied by "interpolating colors from neighboring points," but the exact kernel or neighbor count is not specified in the source.]
-5.  **Merge:** Combine the original points $P$ and the new points $P_{new}$ to form the final augmented cloud $P'$.
+    Where $c = 1.1$ [S1].
+4.  **Generate Positions:** Distribute $N_p$ new points within the bounding box defined by $Q_{min}$ and $Q_{max}$. The source does not specify the exact spatial distribution algorithm (e.g., uniform random, grid-based), only that they are added to the point cloud [S1].
+5.  **Interpolate Colors:** For each new point, initialize its color features by interpolating from neighboring points in the existing cloud $P$.
+    *   *Pitfall:* Do not randomly initialize color features. Random initialization leads to inferior reconstruction quality [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def supplement_points_for_motion_blur(points, c=1.1, n_max=200000):
+def supplement_points_for_motion_blur(point_cloud, c=1.1, n_max=200000):
     """
     Supplements a sparse point cloud with additional points to handle camera motion blur.
     
     Args:
-        points: List of dicts or objects with 'position' (vec3) and 'color' (vec3).
-        c: Stability constant (default 1.1).
-        n_max: Maximum number of points to add (default 200,000).
+        point_cloud: List of points, each with a 'pos' attribute (numpy array of shape (3,)).
+        c: Stability constant.
+        n_max: Maximum number of points to add.
         
     Returns:
-        augmented_points: List of points including original and new interpolated points.
+        new_points: List of new point dictionaries with 'pos' and 'color'.
     """
-    if not points:
+    if not point_cloud:
         return []
 
-    # 1. Calculate Extent
-    positions = [p['position'] for p in points]
+    # Step 1: Calculate Extent
+    positions = [p['pos'] for p in point_cloud]
+    positions_array = np.array(positions)
     
-    # Extract x, y, z components
-    xs = [pos[0] for pos in positions]
-    ys = [pos[1] for pos in positions]
-    zs = [pos[2] for pos in positions]
+    q_min = np.min(positions_array, axis=0)
+    q_max = np.max(positions_array, axis=0)
     
-    q_min = [min(xs), min(ys), min(zs)]
-    q_max = [max(xs), max(ys), max(zs)]
+    # Step 2: Calculate Volume
+    # prod() returns the product of all values in the vector
+    volume = np.prod(q_max - q_min)
     
-    # Volume calculation: prod(Q_max - Q_min)
-    dx = q_max[0] - q_min[0]
-    dy = q_max[1] - q_min[1]
-    dz = q_max[2] - q_min[2]
-    volume = dx * dy * dz
-    
-    # 2. Determine Number of Points
+    # Step 3: Determine Number of Points
     n_p = min(volume / (c ** 3), n_max)
     n_p = int(n_p)
     
     if n_p == 0:
-        return points
-        
-    # 3. Generate New Points
-    # Note: Source does not specify spatial distribution logic for new points.
-    # [G] Placeholder for spatial generation (e.g., uniform random within bounds).
-    new_positions = generate_spatial_points(n_p, q_min, q_max) 
+        return []
+
+    # Step 4: Generate Positions
+    # Note: The source does not specify the exact distribution method.
+    # We assume uniform random distribution within the bounding box for implementation.
+    # [G] Uniform random sampling within the bounding box is a standard approach 
+    # when specific distribution is not defined.
+    new_positions = np.random.uniform(low=q_min, high=q_max, size=(n_p, 3))
     
-    # 4. Interpolate Colors
-    # Note: Source mandates interpolation from neighbors but does not specify the kernel.
-    # [G] Placeholder for color interpolation logic.
-    new_colors = interpolate_colors(new_positions, points)
-    
-    # 5. Merge
-    augmented_points = list(points)
+    # Step 5: Interpolate Colors
+    # Note: The source does not specify the interpolation kernel or neighbor count.
+    # We assume a simple inverse-distance weighting from the nearest neighbors.
+    # [G] Inverse-distance weighting is a standard interpolation method.
+    new_points = []
     for i in range(n_p):
-        new_point = {
-            'position': new_positions[i],
-            'color': new_colors[i]
-            # Other Gaussian parameters (scale, rotation, opacity) would be initialized here
-            # based on the parent method's defaults.
-        }
-        augmented_points.append(new_point)
+        new_pos = new_positions[i]
         
-    return augmented_points
-
-def generate_spatial_points(n, q_min, q_max):
-    """
-    [G] Helper to generate spatial coordinates. 
-    Source does not define this. Typical implementation: uniform random sampling.
-    """
-    import random
-    points = []
-    for _ in range(n):
-        x = random.uniform(q_min[0], q_max[0])
-        y = random.uniform(q_min[1], q_max[1])
-        z = random.uniform(q_min[2], q_max[2])
-        points.append([x, y, z])
-    return points
-
-def interpolate_colors(new_positions, existing_points):
-    """
-    [G] Helper to interpolate colors.
-    Source does not define this. Typical implementation: nearest neighbor.
-    """
-    import math
-    colors = []
-    for new_pos in new_positions:
-        min_dist = float('inf')
-        best_color = existing_points[0]['color']
+        # Calculate distances to all existing points
+        dists = np.linalg.norm(positions_array - new_pos, axis=1)
         
-        for p in existing_points:
-            dist = math.sqrt(
-                (new_pos[0] - p['position'][0])**2 +
-                (new_pos[1] - p['position'][1])**2 +
-                (new_pos[2] - p['position'][2])**2
-            )
-            if dist < min_dist:
-                min_dist = dist
-                best_color = p['color']
-        colors.append(best_color)
-    return colors
+        # Avoid division by zero
+        dists = np.maximum(dists, 1e-8)
+        
+        # Weights are inverse of distance
+        weights = 1.0 / dists
+        
+        # Normalize weights
+        weights = weights / np.sum(weights)
+        
+        # Interpolate color (assuming 'color' is a numpy array of shape (3,) or (K,))
+        # Assuming colors are stored in 'color' attribute
+        existing_colors = np.array([p['color'] for p in point_cloud])
+        new_color = np.dot(weights, existing_colors)
+        
+        new_points.append({
+            'pos': new_pos,
+            'color': new_color
+        })
+        
+    return new_points
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Sparse Input Failure:** Directly using a sparse point cloud without this densification results in objects being represented by too few points or failing to model tiny objects entirely [S1].
-*   **Color Initialization:** Randomly initializing color features for added points leads to inferior reconstruction quality (lower PSNR and SSIM) compared to interpolation [S1].
-*   **Precision:** The volume calculation $V$ can be large; ensure floating-point precision is maintained during the division by $c^3$ to avoid truncation errors before the `min` operation [S1].
+*   **Sparse Representation Failure:** Directly using a sparse point cloud without densification results in objects being represented by a small number of points or failing to model tiny objects entirely [S1].
+*   **Color Initialization:** Randomly initializing color features for added points leads to inferior reconstruction quality compared to interpolating colors from neighboring points [S1].
+*   **Precision:** The volume calculation involves floating-point arithmetic. Ensure that $Q_{max} - Q_{min}$ is computed with sufficient precision to avoid negative volumes due to numerical errors (though physically impossible, it may occur in degenerate cases).
 
 ## Operating characteristics
-*   **Time Complexity:** The calculation of $N_p$ is $O(N)$ where $N$ is the number of initial points (to find min/max). The interpolation step is $O(N_p \cdot N)$ if naive nearest-neighbor is used, or $O(N_p \log N)$ with spatial indexing. The source does not provide specific timing benchmarks for this step alone, but notes that the overall method is more efficient than prior works generating kernels [S1].
-*   **Memory Complexity:** Increases the point cloud size by $N_p$. With $N_{max} = 200,000$, the memory overhead is bounded by this constant plus the original cloud size.
-*   **Performance:** Ablation studies show that using this method with interpolated colors yields a PSNR of 23.73 and SSIM of 0.7474, compared to 23.46/0.7411 for random colors and 23.34/0.7374 for no extra points [S1].
-*   **Strengths:** Enables the representation of tiny objects and handles camera motion blur effectively, which sparse Gaussians alone cannot do [S1].
-*   **Limitations:** Requires careful color interpolation; random initialization fails [S1]. The spatial distribution of new points is not defined in the source, which may affect uniformity [S1].
+*   **Time Complexity:** The calculation of $N_p$ is $O(N)$ where $N$ is the number of points in the initial cloud, due to finding min/max. Generating positions is $O(N_p)$. Interpolating colors is $O(N_p \cdot N)$ if naive nearest-neighbor search is used, or $O(N_p \log N)$ with spatial indexing.
+*   **Memory Complexity:** $O(N_p)$ for storing the new points.
+*   **Performance:** Interpolating color features for extra points yields higher PSNR (23.73) and SSIM (0.7474) compared to randomly initializing colors (PSNR 23.46, SSIM 0.7411) or adding no extra points (PSNR 23.34, SSIM 0.7374) [S1].
+*   **Strengths:** Enables the representation of tiny objects and handles camera motion blur effectively.
+*   **Limitations:** Requires careful interpolation to maintain quality; random initialization degrades performance.
 
 ## Background
-This technique was introduced in the paper "Deblurring 3D Gaussian Splatting" by B. Lee et al. [S1]. It addresses the limitation of standard 3D Gaussian Splatting, which struggles to model camera motion blur due to the sparse nature of the initial point cloud [S1]. The method is part of a broader approach to deblurring Gaussian splats by supplementing the geometric representation.
+This method is part of the "Deblurring 3D Gaussian Splatting" approach proposed by B. Lee et al. [S1]. It addresses the limitation of standard 3D Gaussian Splatting, which hardly models camera motion blur, by densifying the point cloud based on the spatial extent of the scene.
 
 ## Sources
 [S1] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26

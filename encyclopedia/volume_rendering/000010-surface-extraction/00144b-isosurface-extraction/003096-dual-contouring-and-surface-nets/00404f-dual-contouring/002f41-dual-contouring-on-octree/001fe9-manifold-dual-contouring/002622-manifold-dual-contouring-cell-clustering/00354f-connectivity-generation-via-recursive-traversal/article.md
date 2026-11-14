@@ -25,11 +25,11 @@ The connectivity generation is performed by three mutually recursive functions: 
     *   Make 12 calls to `FaceProc` for every pair of face-adjacent sub-cells of $c$ [S1].
     *   Make 6 calls to `EdgeProc` for all four sub-cells sharing an edge of $c$ [S1].
 
-2.  **FaceProc(c1, c2):** Receives two cells $c1$ and $c2$ sharing a common face $f$.
+2.  **FaceProc(c1, c2):** Receives two cells $c1$ and $c2$ sharing a common face $f$ [S1].
     *   Recursively call `FaceProc` four times, once for every pair of sub-cells of $c1$ and $c2$ that share a face contained in $f$ [S1].
     *   Make 4 calls to `EdgeProc` for every four sub-cells (two from $c1$, two from $c2$) that share an edge contained in $f$ [S1].
 
-3.  **EdgeProc(c1, c2, c3, c4):** Receives four edge-adjacent cells sharing a common edge.
+3.  **EdgeProc(c1, c2, c3, c4):** Receives four edge-adjacent cells sharing a common edge [S1].
     *   In the uniform case, the four cells are distinct [S1].
     *   In the adaptive case, one of the cells is repeated (resulting in only three distinct cells) [S1].
     *   Make 2 recursive calls to `EdgeProc` for all four sub-cells sharing a half-edge contained in the current edge [S1].
@@ -118,11 +118,13 @@ def get_dual_node(cell):
 
 def create_quad_patch(nodes):
     # Connects 4 dual nodes to form a quad
-    pass
+    # [G] Standard triangle fan or strip generation from 4 vertices
+    return nodes
 
 def create_triangle_patch(nodes):
     # Connects 3 dual nodes to form a triangle
-    pass
+    # [G] Standard triangle generation from 3 vertices
+    return nodes
 ```
 
 **Parameters**
@@ -138,13 +140,13 @@ def create_triangle_patch(nodes):
 Span-based Surface Extraction is a method for extracting connected surface topology from voxelized particle data by identifying depth intervals (spans) in voxel columns and linking overlapping spans in neighboring columns. It builds on [Connectivity Generation via Recursive Traversal](7454-connectivity-generation-via-recursive-traversal.md) by converting the minimal edge connectivity into a continuous surface mesh representation suitable for filtering and rendering. Unlike dual contouring methods that rely on quadric error metrics and vertex optimization, this approach operates directly on compressed depth lists, making it highly memory-efficient for large-scale particle datasets.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1]
+*   **Memory Complexity:** Not given in the sources. [S1]
 *   **Strengths:** Localizes nodes inside cells, providing freedom to place surface nodes close to features of the volume [S1]. It is robust enough for noisy volumetric data surfaces [S1].
 *   **Limitations:** Relies on the octree structure; performance depends on the depth and distribution of the octree.
 
 ## Background
-The algorithm was proposed in the context of Dual Contouring on generalized octrees [S1]. It is based on the method described in the original Dual Contouring paper [S1]. The method is used to extract the connectivity of the surface before dual nodes are localized and connected.
+The algorithm was proposed in the context of Dual Contouring on generalized octrees [S1]. It is based on the method described in the original Dual Contouring paper [S1]. The method is used to extract the connectivity of the surface before dual nodes are localized and connected [S1].
 
 ## Sources
 [S1] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29

@@ -3,10 +3,10 @@
 Also called: Spirula Scene Management, ROSplat Dynamic Buffer Management
 
 ## Overview
-Dynamic Gaussian Splatting Scene Management handles the runtime lifecycle of 3D Gaussian splats within a rendering engine, specifically addressing the need for continuous, batched updates in dynamic scenes [S1, unofficial]. Unlike static loading methods that require full re-initialization, this method supports incremental `append` operations and dynamic buffer resizing, allowing the scene to grow or refresh without restarting the renderer [S1, unofficial]. It differs from sibling methods like [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md) by managing the host-to-device transfer and capacity growth logic, rather than just the internal memory layout.
+Dynamic Gaussian Splatting Scene Management handles the runtime lifecycle of 3D Gaussian splats within a rendering engine, specifically addressing the need for continuous, batched updates in dynamic scenes [S1, unofficial]. Unlike static loading methods that require full re-initialization, this method supports incremental `append` operations and dynamic buffer resizing, allowing the scene to grow or refresh without restarting the renderer [S1, unofficial].
 
 ## How it works
-The method operates on a Structure-of-Arrays (SoA) paradigm, maintaining device-resident buffers for splat attributes and metadata [S1, unofficial]. It manages the transition from host memory (where incoming batches arrive) to device memory (where the renderer reads data) through a series of validated steps.
+The method operates on a Structure-of-Arrays (SoA) paradigm, maintaining device-resident buffers for splat attributes and metadata [S1, unofficial]. It manages the transition from host memory to device memory through a series of validated steps.
 
 ### Inputs and Outputs
 *   **Inputs:**
@@ -14,7 +14,7 @@ The method operates on a Structure-of-Arrays (SoA) paradigm, maintaining device-
     *   `initial_capacity`: Integer $\ge 0$ for the initial buffer size [S1, unofficial].
     *   `batch_count`: Number of splats to append [S1, unofficial].
     *   `means_xyz`: $N \times 3$ float array of positions [S1, unofficial].
-    *   `quaternions_wxyz`: $N \times 4$ float array of rotations (scalar-last) [S1, unofficial].
+    *   `quaternions_wxyz`: $N \times 4$ float array of rotations in scalar-last order $(x, y, z, w)$ [S1, unofficial].
     *   `log_scales_xyz`: $N \times 3$ float array of log-scales [S1, unofficial].
     *   `opacity_logits`: $N$ float array of opacity logits [S1, unofficial].
     *   `features_dc_rgb`: $N \times 3$ float array of DC spherical harmonic coefficients [S1, unofficial].
@@ -78,12 +78,12 @@ The core state is held in `DeviceScene` and `HostRender` structures [S1, unoffic
     *   Reserve space for `offset + batch_count` (triggering capacity growth if needed) [S1, unofficial].
     *   Copy `means`, `quats`, `scales`, `opacities`, `features_dc` from host to device at `offset` [S1, unofficial].
     *   If `num_sh` > 0, copy `features_sh` from host to device at `offset * num_sh` [S1, unofficial].
-    *   Increment `scene.count` and bind scene [S1, unofficial].
+    *   Increment `scene.count` [S1, unofficial].
 
 5.  **Set Camera**:
     *   Validate `width`/`height` > 0 and `view_matrix`/`intrinsics` non-null [S1, unofficial].
-    *   Initialize `dist_coeffs[8]` to zero [S1, unofficial].
-    *   Call `set_camera_params` with `width`, `height`, "PINHOLE", "NONE", `view_matrix` ($1 \times 4 \times 4$ float), `intrinsics` ($1 \times 4$ float), `dist_coeffs` ($1 \times 8$ float) [S1, unofficial].
+    *   Initialize `dist_coeffs[8]` to zero internally [S1, unofficial].
+    *   Call `set_camera_params` with `width`, `height`, "PINHOLE", "NONE", `view_matrix` ($1 \times 4 \times 4$ float), and `intrinsics` ($1 \times 4$ float) [S1, unofficial].
     *   Set `width`, `height`, and `camera_ready` = `true` [S1, unofficial].
 
 6.  **Set Scale Modifier**:
@@ -124,7 +124,7 @@ The core state is held in `DeviceScene` and `HostRender` structures [S1, unoffic
     *   Get transmittance buffer from `state.fwd.render_Ts` [S1, unofficial].
     *   Resize `host.scalar` if needed [S1, unofficial].
     *   Copy transmittance from device to host [S1, unofficial].
-    *   Loop over pixels to write opacity (implementation mirrors color/depth rendering) [S1, unofficial].
+    *   Loop over pixels to write opacity [S1, unofficial].
 
 ### Pseudocode
 
@@ -153,8 +153,7 @@ class DynamicGaussianScene:
         self._resize(initial_capacity)
 
     def _resize(self, new_capacity: int):
-        """Grow buffers to new_capacity."""
-        # Growth logic: max(requested, max(4096, current_capacity * 2))
+        """Grow buffers to new_capacity following the doubling strategy."""
         if new_capacity > self.capacity:
             next_capacity = max(new_capacity, max(4096, self.capacity * 2))
         else:
@@ -198,13 +197,12 @@ class DynamicGaussianScene:
         self.features_dc[offset:end] = features_dc
         
         if self.num_sh > 0:
-            # features_sh is N x D x 3
             self.features_sh[offset:end] = features_sh
             
         self.count = end
 
     def set_scale_modifier(self, modifier: float):
-        """Apply global scale modifier."""
+        """Apply global scale modifier via log-space addition."""
         if modifier <= 0 or not math.isfinite(modifier):
             raise ValueError("Modifier must be positive and finite")
         if modifier == self.scale_modifier:
@@ -213,10 +211,13 @@ class DynamicGaussianScene:
         log_delta = math.log(modifier / self.scale_modifier)
         self.scale_modifier = modifier
         
-        # Apply to existing scales in log space
-        # Scales are stored as log(scales), so we add log_delta
-        if self.count > 0:
-            self.scales[:, :] += log_delta
+        # Apply to existing scales in log space using chunked scratch buffer simulation
+        numel = self.count * 3
+        max_chunk = 1 << 20
+        for i in range(0, numel, max_chunk):
+            chunk_size = min(max_chunk, numel - i)
+            # Simulate float_add_into on scales chunk and device_delta chunk
+            self.scales[i // 3 : (i + chunk_size) // 3] += log_delta
 
     def render(self, width: int, height: int, view_matrix: np.ndarray, 
                intrinsics: np.ndarray, output_mode: int):
@@ -249,8 +250,8 @@ class DynamicGaussianScene:
 
 ### Edge Cases and Pitfalls
 *   **Empty Scene**: If `scene.count` == 0 during render, the renderer outputs a black image (RGB 0,0,0) with full alpha (255) instead of crashing or rendering nothing [S1, unofficial].
-*   **Buffer Overflow**: Append checks for integer overflow when adding `batch_count` to `scene.count`. Throws `std::overflow_error` if `scene.count` > `numeric_limits<int64_t>::max() - batch_count` [S1, unofficial].
-*   **Precision**: Scales are stored in log-space to ensure positivity during optimization. Linear scales are recovered via $s_{linear} = \exp(s_{log})$ for covariance calculation [S1, unofficial].
+*   **Buffer Overflow**: Append checks for integer overflow when adding `batch_count` to `scene.count` [S1, unofficial]. Throws `std::overflow_error` if `scene.count` > `numeric_limits<int64_t>::max() - batch_count` [S1, unofficial].
+*   **Precision**: Scales are stored in log-space to ensure positivity during optimization [S1, unofficial]. Linear scales are recovered via $s_{linear} = \exp(s_{log})$ for covariance calculation [S1, unofficial].
 
 ## Subtopics
 
@@ -258,11 +259,11 @@ class DynamicGaussianScene:
 Manages the dynamic lifecycle of 3D Gaussian splats within a ROS2-enabled rendering pipeline, bridging sensor or simulation data to the GPU renderer. It solves the problem of real-time scene updates by queuing incoming Gaussian batches and efficiently draining them to the renderer state. It differs from static loading by enabling continuous, batched updates via ROS2 communication, allowing the scene to grow or refresh without full re-initialization.
 
 ## Operating characteristics
-*   **Time Complexity**: Append operations are $O(N)$ for data copy, where $N$ is the batch size. Capacity growth involves reallocation and copy, which is amortized $O(1)$ per splat if doubling strategy is used. Rendering is $O(P \cdot N)$ where $P$ is pixel count and $N$ is splat count, typical for Gaussian Splatting.
-*   **Memory Complexity**: $O(N \cdot C)$ where $N$ is capacity and $C$ is the number of attributes per splat (means, quats, scales, opacities, features). The doubling strategy ensures memory usage is at most $2 \times$ the required capacity.
+*   **Time Complexity**: Append operations are $O(N)$ for data copy, where $N$ is the batch size [G]. Capacity growth involves reallocation and copy, which is amortized $O(1)$ per splat if the doubling strategy is used [G]. Rendering is $O(P \cdot N)$ where $P$ is pixel count and $N$ is splat count, typical for Gaussian Splatting [G].
+*   **Memory Complexity**: $O(N \cdot C)$ where $N$ is capacity and $C$ is the number of attributes per splat [G]. The doubling strategy ensures memory usage is at most $2 \times$ the required capacity [G].
 *   **Performance**: The method uses pinned host memory for readback and device buffers for storage, optimizing data transfer [S1, unofficial]. The use of log-space for scales and opacities avoids precision issues during optimization [S1, unofficial].
-*   **Strengths**: Supports dynamic scenes with incremental updates. Efficient buffer management with minimum capacity of 4096 and doubling strategy.
-*   **Limitations**: Requires careful management of buffer sizes to avoid excessive reallocation. Integer overflow checks are necessary for large scenes.
+*   **Strengths**: Supports dynamic scenes with incremental updates [S1, unofficial]. Efficient buffer management with minimum capacity of 4096 and doubling strategy [S1, unofficial].
+*   **Limitations**: Requires careful management of buffer sizes to avoid excessive reallocation [S1, unofficial]. Integer overflow checks are necessary for large scenes [S1, unofficial].
 
 ## Background
 The method originates from the ROSplat project, which integrates 3D Gaussian Splatting with ROS2 for dynamic scene management [S1, unofficial]. It builds on the principles of Structure-of-Arrays (SoA) data layout for cache coherency [S1, unofficial]. The specific implementation details, such as the buffer growth logic and log-space storage, are derived from the Spirula renderer bridge [S1, unofficial].

@@ -3,11 +3,11 @@
 Also called: Heterogeneous Volume Density Generation, Procedural Density Generation via Noise and Thresholding, getDensity
 
 ## Overview
-Generates a patchy volumetric density field from procedural noise by applying a power function and a threshold to create sparse, organic structures [S1, unofficial]. It differs from its parent [Specific Procedural Patterns and Applications](7615-specific-procedural-patterns-and-applications.md) by explicitly combining Fractal Brownian Motion (FBM) with non-linear remapping and hard cutoffs, rather than relying on raw noise values or simple linear blending [S1, unofficial].
+Generates a patchy volumetric density field from procedural noise by applying a power function and a threshold to create sparse structures [S1, unofficial]. It differs from its parent [Specific Procedural Patterns and Applications](7615-specific-procedural-patterns-and-applications.md) by explicitly combining Fractal Brownian Motion (FBM) with non-linear remapping and hard cutoffs [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `pos`: 3D query position vector $\mathbf{P}$.
+- `pos`: 3D query position vector $\mathbf{P}$ [S1, unofficial].
 - `base_density`: Scalar multiplier for the final density (default 0.8) [S1, unofficial].
 - `fbm_scale`: Frequency scale for the noise function (default 3.0) [S1, unofficial].
 - `fbm_octaves`: Number of octaves for FBM (default 2) [S1, unofficial].
@@ -18,29 +18,24 @@ Generates a patchy volumetric density field from procedural noise by applying a 
 - `density`: Clamped scalar density value in $[0, 1]$ [S1, unofficial].
 
 **Data Structures:**
-- The noise function `fbm(pos, scale, octaves)` returns a value in $[-1, 1]$ [S1, unofficial]. It utilizes the shared principles of gradient assignment, dot product contributions, fade functions, interpolation, and hashing defined in the parent article [S1, unofficial][S2, unofficial].
+Not given in the sources.
 
 **Steps:**
 1.  **Compute Noise:** Evaluate the FBM noise at the query position with the specified scale and octaves:
     $$ n = \text{fbm}(\mathbf{P}, \text{fbm\_scale}, \text{fbm\_octaves}) $$
-    The result $n$ is in the range $[-1, 1]$ [S1, unofficial].
-
+    [S1, unofficial]
 2.  **Remap:** Map the noise value from $[-1, 1]$ to $[0, 1]$:
     $$ n_{\text{remapped}} = n \cdot 0.5 + 0.5 $$
     [S1, unofficial]
-
 3.  **Power Function:** Apply a power function to suppress low values and create sparse regions near zero:
     $$ d = n_{\text{remapped}}^{\text{power\_exponent}} $$
     [S1, unofficial]
-
 4.  **Threshold:** If the density is below the threshold, set it to zero:
     $$ \text{if } d < \text{threshold}: d = 0.0 $$
     [S1, unofficial]
-
 5.  **Scale:** Multiply by the base density:
     $$ d = d \cdot \text{base\_density} $$
     [S1, unofficial]
-
 6.  **Clamp:** Clamp the result to $[0, 1]$:
     $$ \text{density} = \max(0.0, \min(1.0, d)) $$
     [S1, unofficial]
@@ -50,7 +45,19 @@ Generates a patchy volumetric density field from procedural noise by applying a 
 
 ```python
 def get_density(pos, base_density=0.8, fbm_scale=3.0, fbm_octaves=2, power_exponent=2.5, threshold=0.15):
-    # 1. Compute FBM noise in [-1, 1]
+    # Standard FBM implementation [G]
+    def fbm(p, scale, octaves):
+        value = 0.0
+        amplitude = 1.0
+        frequency = 1.0
+        for _ in range(octaves):
+            # base_noise uses gradient assignment, dot product, fade, interpolation, and hashing from parent article [G]
+            value += amplitude * base_noise(p * scale * frequency)
+            amplitude *= 0.5
+            frequency *= 2.0
+        return value
+
+    # 1. Compute FBM noise
     noise = fbm(pos, fbm_scale, fbm_octaves)
     
     # 2. Remap to [0, 1]
@@ -71,8 +78,7 @@ def get_density(pos, base_density=0.8, fbm_scale=3.0, fbm_octaves=2, power_expon
 ```
 
 **Edge Cases and Pitfalls:**
--   **Precision:** The power function with exponent > 1 amplifies differences near 1 but compresses values near 0. Combined with thresholding, this can lead to sharp, aliased edges if the noise frequency is too high relative to the sampling rate [S1, unofficial].
--   **Boundaries:** The method assumes the noise function handles boundary conditions appropriately. The thresholding creates hard discontinuities in density, which may cause artifacts in ray marching if not handled with appropriate step sizes or anti-aliasing [S1, unofficial].
+Not given in the sources.
 
 ## Subtopics
 
@@ -80,15 +86,10 @@ def get_density(pos, base_density=0.8, fbm_scale=3.0, fbm_octaves=2, power_expon
 Generates 3D volumetric density fields for clouds using multi-scale domain warping and boundary envelopes. It differs from this method by incorporating style-specific shaping and vertical structure control, rather than relying solely on a power function and threshold on a single noise field.
 
 ## Operating characteristics
--   **Time Complexity:** $O(O \cdot N)$, where $O$ is the number of FBM octaves and $N$ is the cost of the base noise function per octave [S1, unofficial].
--   **Memory Complexity:** $O(1)$ per query, assuming the noise function is stateless or uses a fixed permutation table [S1, unofficial].
--   **Strengths:** Simple to implement; effective at creating sparse, organic-looking structures with controlled density falloff [S1, unofficial].
--   **Limitations:** The hard threshold can create visible artifacts; lacks spatial coherence control beyond the base noise function [S1, unofficial].
--   **When to use:** When generating sparse, patchy volumes like smoke, clouds, or nebulae where low-density regions should be completely transparent [S1, unofficial].
--   **When not to use:** When smooth, continuous density transitions are required without hard cutoffs [S1, unofficial].
+Not given in the sources.
 
 ## Background
-Originated from practical implementations in volumetric path tracing, specifically in the repository `ainagutierrez01/Volumetric-Path-Tracing-` [S1, unofficial]. It is a common technique in procedural volume generation to create heterogeneous media [S1, unofficial].
+Not given in the sources.
 
 ## Sources
 [S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)

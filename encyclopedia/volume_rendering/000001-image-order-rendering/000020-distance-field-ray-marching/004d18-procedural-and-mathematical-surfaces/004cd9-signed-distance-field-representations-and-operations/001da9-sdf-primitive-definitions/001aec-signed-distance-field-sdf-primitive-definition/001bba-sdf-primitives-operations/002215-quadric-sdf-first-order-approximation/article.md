@@ -1,154 +1,102 @@
 # Quadric SDF (First-Order Approximation)
 ## Overview
-Computes an approximate signed distance from a query point to a quadric surface defined by a general quadratic equation using a first-order Taylor approximation [S1, unofficial]. It enables ray marching of complex implicit surfaces without solving higher-order polynomials, distinguishing itself from exact SDF primitives by trading geometric precision for computational speed and algebraic simplicity [S1, unofficial].
+Computes an approximate signed distance from a query point to a general quadric surface defined by a quadratic implicit equation, using a first-order Taylor approximation [S1, unofficial]. It differs from exact SDF primitives (like spheres or boxes) by handling arbitrary second-order surfaces (ellipsoids, hyperboloids, paraboloids) at the cost of geometric accuracy, trading precision for the ability to model complex algebraic shapes without analytical distance formulas [S1, unofficial].
 ## How it works
-**Inputs:** Query point $v = (x, y, z)$; quadric coefficients $a, b, c, d, e, f, g, h, i, j$ defining the surface $ax^2 + by^2 + cz^2 + dxy + eyz + fzx + gx + hy + iz + j = 0$ [S1, unofficial].
-**Outputs:** Approximate signed distance $d_{approx}$ and optionally the normalized gradient vector [S1, unofficial].
+**Inputs:**
+- Query point $v = (x, y, z)$.
+- Quadric coefficients: $a, b, c, d, e, f, g, h, i, j$. These define the surface $ax^2 + by^2 + cz^2 + dxy + eyz + fzx + gx + hy + iz + j = 0$ [S1, unofficial].
+
+**Outputs:**
+- Approximate signed distance $d_{approx}$.
+- (Optional) Normal vector $n$ at the closest point approximation.
 
 **Data Structures:**
-- Coefficients: 10 floating-point values ($a$ through $j$).
-- Point: 3 floating-point values ($x, y, z$).
+- Coefficients stored as 10 floating-point values.
+- Point $v$ as a 3D vector.
 
 **Steps:**
 1. Evaluate the implicit function value $f_0$ at $v$:
    $$f_0 = ax^2 + by^2 + cz^2 + dxy + eyz + fzx + gx + hy + iz + j$$
-2. Compute the gradient components $\nabla f = (dx, dy, dz)$:
+2. Compute the gradient components (partial derivatives) at $v$:
    $$dx = \frac{\partial f}{\partial x} = 2ax + dy + fz + g$$
    $$dy = \frac{\partial f}{\partial y} = 2by + ez + dx + h$$
    $$dz = \frac{\partial f}{\partial z} = 2cz + fx + ey + i$$
-   *Note: The source code uses `d` for the $xy$ coefficient and `dx` for the x-gradient component, which is a naming collision in the original implementation but mathematically distinct [S1, unofficial].*
+   *Note: The source code uses `d` for the $xy$ term coefficient in the gradient calculation for $dx$ and $dy$, and `f` for the $zx$ term in $dx$ and $dz$, and `e` for the $yz$ term in $dy$ and $dz$ [S1, unofficial].*
 3. Compute the gradient magnitude $f_1$:
    $$f_1 = \sqrt{dx^2 + dy^2 + dz^2}$$
-4. Return the signed distance estimate:
+4. Return the approximate signed distance:
    $$d_{approx} = \frac{f_0}{f_1}$$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def quadric_sdf_first_order(x, y, z, a, b, c, d, e, f, g, h, i, j):
+def quadric_sdf_approx(x, y, z, a, b, c, d, e, f, g, h, i, j):
     # 1. Evaluate implicit function f0
     f0 = (a * x * x + b * y * y + c * z * z +
           d * x * y + e * y * z + f * z * x +
           g * x + h * y + i * z + j)
     
     # 2. Compute gradient components
-    # Note: 'd' is the xy coefficient, 'dx_grad' is the x-gradient
-    dx_grad = 2 * a * x + d * y + f * z + g
-    dy_grad = 2 * b * y + e * z + d * x + h
-    dz_grad = 2 * c * z + f * x + e * y + i
+    # dx/dx = 2ax + dy + fz + g
+    grad_x = 2 * a * x + d * y + f * z + g
+    # dy/dy = 2by + ez + dx + h
+    grad_y = 2 * b * y + e * z + d * x + h
+    # dz/dz = 2cz + fx + ey + i
+    grad_z = 2 * c * z + f * x + e * y + i
     
     # 3. Compute gradient magnitude
-    f1 = math.sqrt(dx_grad**2 + dy_grad**2 + dz_grad**2)
+    grad_mag = math.sqrt(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z)
     
-    # 4. Return distance estimate
-    # Guard against division by zero or near-zero gradient [G]
-    if f1 < 1e-8:
-        return f0
-    return f0 / f1
+    # 4. Return approximate distance
+    # Guard against division by zero [G]
+    if grad_mag < 1e-12:
+        return 0.0 # Or handle as error/undefined
+    return f0 / grad_mag
 
 def quadric_normal(x, y, z, a, b, c, d, e, f, g, h, i, j):
-    dx_grad = 2 * a * x + d * y + f * z + g
-    dy_grad = 2 * b * y + e * z + d * x + h
-    dz_grad = 2 * c * z + f * x + e * y + i
-    
-    mag = math.sqrt(dx_grad**2 + dy_grad**2 + dz_grad**2)
-    if mag < 1e-8:
+    grad_x = 2 * a * x + d * y + f * z + g
+    grad_y = 2 * b * y + e * z + d * x + h
+    grad_z = 2 * c * z + f * x + e * y + i
+    grad_mag = math.sqrt(grad_x * grad_x + grad_y * grad_y + grad_z * grad_z)
+    if grad_mag < 1e-12:
         return (0.0, 0.0, 0.0) # Undefined normal [G]
-    return (dx_grad / mag, dy_grad / mag, dz_grad / mag)
+    return (grad_x / grad_mag, grad_y / grad_mag, grad_z / grad_mag)
 ```
 
 **Parameters:**
-- $a, b, c, d, e, f, g, h, i, j$: Coefficients of the general quadric equation [S1, unofficial].
+- $a, b, c$: Coefficients of squared terms $x^2, y^2, z^2$.
+- $d, e, f$: Coefficients of cross terms $xy, yz, zx$.
+- $g, h, i$: Coefficients of linear terms $x, y, z$.
+- $j$: Constant term.
+- Typical values depend on the specific quadric shape being modeled.
 
 **Edge Cases and Pitfalls:**
-- **Zero Gradient:** If the gradient magnitude $f_1$ is near zero (e.g., at critical points or far from the surface), the distance estimate becomes unstable or incorrect due to division by a small number [S1, unofficial]. A guard for $f_1 < \epsilon$ is required [G].
-- **Approximation Error:** The method is a first-order approximation [S1, unofficial]. It is not exact for curved surfaces, potentially leading to jitter or incorrect convergence in ray marching if the step size is not adapted [S1, unofficial].
+- **Gradient Near Zero:** If the gradient magnitude is near zero (e.g., at critical points like the vertex of a paraboloid or far from the surface where the function is flat), the division by $f_1$ becomes unstable, leading to incorrect or infinite distance estimates [S1, unofficial].
+- **Signed Distance Accuracy:** This is an approximation. The sign is determined by the sign of $f_0$, but the magnitude is only accurate to first order. It may not be a true Euclidean distance, which can cause artifacts in ray marching (e.g., overshooting or jittering) if the step size is not adjusted [S1, unofficial].
+- **Degenerate Quadrics:** If the quadratic form is degenerate (e.g., representing parallel planes or a line), the gradient behavior may be singular or non-uniform, requiring specific handling [S1, unofficial].
 
 ## Subtopics
+
+### [Principal Axis Transformation for Quadratic Surfaces](4071-principal-axis-transformation-for-quadratic-surfaces.md)
+Diagonalizes the quadratic form matrix of a general quadratic function to identify principal curvatures and axes. This method maps a generic quadratic surface to a standard prototype (paraboloid or hyperbolic paraboloid) to enable optimal, error-bounded triangulation of its zero-level set. It is chosen when exact geometric analysis or mesh generation is required rather than just ray marching distance queries.
+
+### Freeform Surfaces via Quadric Perturbation
+Represents complex 3D geometry using a continuous real-valued describing function $F(X) \ge 0$, where $X=(x_1,x_2,x3)$ [S2]. The object is the closed subset of Euclidean space where the function is non-negative [S2]. It allows visualization of both the surface and internal structure [S2]. The base surface is a quadric $F(x,y,z) \ge 0$, and freeform shapes are created by adding perturbation functions $R_i(x,y,z)$, which are cubes of perturbing quadrics $Q_i$ clamped to zero where $Q_i < 0$ [S2]. This reduces object construction to quadric surface deformation rather than approximation by primitives (polygons or B-spline patches) [S2]. Estimating the maximum value of the combined function requires calculating the maximum of the perturbation function on the same interval, based on the inequality $\max[Q + R] \le \max[Q] + \max[R]$ [S2].
+
 ## Operating characteristics
+- **Time Complexity:** $O(1)$ per query. Involves a constant number of arithmetic operations (10 multiplications, 9 additions, 1 square root for distance; 1 square root for normal).
+- **Memory Complexity:** $O(1)$ storage for coefficients.
+- **Measured Performance:** Fast enough for real-time ray marching on GPUs, as demonstrated in the reference implementation [S1, unofficial].
+- **Scaling:** Performance is independent of resolution or scene complexity, as it is a point-wise evaluation.
+- **Strengths:** Handles arbitrary quadric surfaces (ellipsoids, hyperboloids, etc.) without needing complex analytical SDF derivations. Simple to implement.
+- **Limitations:** Approximate distance. Not a true Euclidean distance, which can lead to inaccuracies in ray marching convergence or normal estimation. Unstable near critical points where the gradient vanishes.
+- **When to use:** When modeling complex algebraic surfaces that are quadrics, and high precision is not critical, or as a fallback when no exact SDF is available.
+- **When not to use:** When exact Euclidean distance is required for correct ray marching behavior (e.g., in constructive solid geometry with smooth blending), or when the surface has regions with vanishing gradients.
+
 ## Background
-Originated from the implementation in the `FunctionRenderer` project by Leesan-haruki, which implements John C. Hart's 1995 ray marching algorithm for SDFs [S1, unofficial]. The method is a practical adaptation of the gradient-based distance approximation for general quadrics, allowing them to be used in the same ray marching framework as basic primitives like spheres [S1, unofficial].
+The method is described in an unofficial GitHub repository "FunctionRenderer" by Leesan-haruki, which implements a ray tracer using SDFs [S1, unofficial]. The concept of using implicit functions for geometric modeling, including quadrics, has roots in computer graphics literature, such as John C. Hart's 1995 work on analytic distance fields [S1, unofficial]. The specific first-order approximation for general quadrics is a practical technique to extend SDF ray marching beyond basic primitives. The related concept of freeform surfaces via quadric perturbation is described in a paper on GPU-based volume-oriented rendering of functionally defined objects [S2].
 
 ## Sources
 [S1] Leesan-haruki/FunctionRenderer, https://github.com/Leesan-haruki/FunctionRenderer, fetched 2026-10-26 (unofficial)
-
-
-# Quadric SDF (First-Order Approximation)
-## Overview
-Computes an approximate signed distance from a query point to a quadric surface defined by a general quadratic equation using a first-order Taylor approximation [S1, unofficial]. It enables ray marching of complex implicit surfaces without solving higher-order polynomials, distinguishing itself from exact SDF primitives by trading geometric precision for computational speed and algebraic simplicity [S1, unofficial].
-## How it works
-**Inputs:** Query point $v = (x, y, z)$; quadric coefficients $a, b, c, d, e, f, g, h, i, j$ defining the surface $ax^2 + by^2 + cz^2 + dxy + eyz + fzx + gx + hy + iz + j = 0$ [S1, unofficial].
-**Outputs:** Approximate signed distance $d_{approx}$ and optionally the normalized gradient vector [S1, unofficial].
-
-**Data Structures:**
-- Coefficients: 10 floating-point values ($a$ through $j$).
-- Point: 3 floating-point values ($x, y, z$).
-
-**Steps:**
-1. Evaluate the implicit function value $f_0$ at $v$:
-   $$f_0 = ax^2 + by^2 + cz^2 + dxy + eyz + fzx + gx + hy + iz + j$$
-2. Compute the gradient components $\nabla f = (dx, dy, dz)$:
-   $$dx = \frac{\partial f}{\partial x} = 2ax + dy + fz + g$$
-   $$dy = \frac{\partial f}{\partial y} = 2by + ez + dx + h$$
-   $$dz = \frac{\partial f}{\partial z} = 2cz + fx + ey + i$$
-   *Note: The source code uses `d` for the $xy$ coefficient and `dx` for the x-gradient component, which is a naming collision in the original implementation but mathematically distinct [S1, unofficial].*
-3. Compute the gradient magnitude $f_1$:
-   $$f_1 = \sqrt{dx^2 + dy^2 + dz^2}$$
-4. Return the signed distance estimate:
-   $$d_{approx} = \frac{f_0}{f_1}$$
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import math
-
-def quadric_sdf_first_order(x, y, z, a, b, c, d, e, f, g, h, i, j):
-    # 1. Evaluate implicit function f0
-    f0 = (a * x * x + b * y * y + c * z * z +
-          d * x * y + e * y * z + f * z * x +
-          g * x + h * y + i * z + j)
-    
-    # 2. Compute gradient components
-    # Note: 'd' is the xy coefficient, 'dx_grad' is the x-gradient
-    dx_grad = 2 * a * x + d * y + f * z + g
-    dy_grad = 2 * b * y + e * z + d * x + h
-    dz_grad = 2 * c * z + f * x + e * y + i
-    
-    # 3. Compute gradient magnitude
-    f1 = math.sqrt(dx_grad**2 + dy_grad**2 + dz_grad**2)
-    
-    # 4. Return distance estimate
-    # Guard against division by zero or near-zero gradient [G]
-    if f1 < 1e-8:
-        return f0
-    return f0 / f1
-
-def quadric_normal(x, y, z, a, b, c, d, e, f, g, h, i, j):
-    dx_grad = 2 * a * x + d * y + f * z + g
-    dy_grad = 2 * b * y + e * z + d * x + h
-    dz_grad = 2 * c * z + f * x + e * y + i
-    
-    mag = math.sqrt(dx_grad**2 + dy_grad**2 + dz_grad**2)
-    if mag < 1e-8:
-        return (0.0, 0.0, 0.0) # Undefined normal [G]
-    return (dx_grad / mag, dy_grad / mag, dz_grad / mag)
-```
-
-**Parameters:**
-- $a, b, c, d, e, f, g, h, i, j$: Coefficients of the general quadric equation [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Zero Gradient:** If the gradient magnitude $f_1$ is near zero (e.g., at critical points or far from the surface), the distance estimate becomes unstable or incorrect due to division by a small number [S1, unofficial]. A guard for $f_1 < \epsilon$ is required [G].
-- **Approximation Error:** The method is a first-order approximation [S1, unofficial]. It is not exact for curved surfaces, potentially leading to jitter or incorrect convergence in ray marching if the step size is not adapted [S1, unofficial].
-
-## Subtopics
-## Operating characteristics
-## Background
-Originated from the implementation in the `FunctionRenderer` project by Leesan-haruki, which implements John C. Hart's 1995 ray marching algorithm for SDFs [S1, unofficial]. The method is a practical adaptation of the gradient-based distance approximation for general quadrics, allowing them to be used in the same ray marching framework as basic primitives like spheres [S1, unofficial].
-
-## Sources
-[S1, unofficial] Leesan-haruki/FunctionRenderer, https://github.com/Leesan-haruki/FunctionRenderer, fetched 2026-10-26 (unofficial)
+[S2] GPU-based volume-oriented rendering of functionally defined objects, https://doi.org/10.21279/1454-864x-18-i2-005, fetched 2026-10-26
