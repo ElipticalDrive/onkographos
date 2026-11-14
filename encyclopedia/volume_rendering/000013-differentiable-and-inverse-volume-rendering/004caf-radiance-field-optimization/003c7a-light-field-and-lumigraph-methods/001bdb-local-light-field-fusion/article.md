@@ -3,115 +3,51 @@
 Also called: LFLF, Layered Light Field Fusion
 
 ## Overview
-Local Light Field Fusion (LLFF) is a method designed to produce photorealistic novel views for well-sampled, forward-facing scenes by predicting a discretized frustum-sampled RGB$\alpha$ grid (Multiplane Image or MPI) for each input view [S1]. It differs from its siblings, such as [Neural Lumigraph Rendering](7369-neural-lumigraph-rendering.md) and [Instant Neural Opacity Light Fields](11565-instant-neural-opacity-light-fields.md), by explicitly generating per-view MPI representations that are subsequently blended, rather than optimizing a single global implicit field or using a fixed light field parameterization [S1].
+Local Light Field Fusion (LLFF) is a method designed for producing photorealistic novel views for well-sampled, forward-facing scenes [S1]. It differs from its siblings by predicting a discretized frustum-sampled RGB$\alpha$ grid (Multiplane Image or MPI) for each input view using a 3D convolutional network, then rendering novel views by alpha compositing and blending nearby MPIs [S1]. Unlike [Neural Lumigraph Rendering](7369-neural-lumigraph-rendering.md) which may optimize a separate network per scene, LLFF uses a single trained network to predict the MPIs directly from input images [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of $N$ input images with known camera poses (intrinsics and extrinsics) for a forward-facing scene.
-*   **Output:** Novel views rendered from arbitrary camera positions within the forward-facing capture volume.
+**Inputs:** A set of low-resolution input images from a forward-facing capture.
+**Outputs:** High-resolution novel view images.
 
 **Data Structures:**
-The core data structure is the Multiplane Image (MPI) [52], which consists of $K$ depth planes. For each input view $v$, an MPI is predicted. Each plane $k$ contains:
-*   Color $\mathbf{c}_{v,k} \in \mathbb{R}^3$
-*   Alpha $\alpha_{v,k} \in [0, 1]$
-*   Disparity $d_k$ (fixed per plane, shared across views for a scene, or predicted per view depending on implementation; the source implies a frustum-sampled grid per view).
+*   **MPI (Multiplane Image):** A discretized frustum-sampled RGB$\alpha$ grid. For each input view, the network predicts a set of planes, each containing RGB color values and an opacity ($\alpha$) value at specific depth intervals within the camera frustum [S1].
+*   **3D Convolutional Network:** A trained neural network that takes an input image and outputs the parameters for the MPI planes [S1].
 
 **Steps:**
-1.  **Network Prediction:** A trained 3D convolutional neural network takes the input image $I_v$ and its camera pose as input. The network predicts the color and alpha channels for $K$ depth planes, forming the MPI $M_v$ for view $v$ [S1].
-2.  **Disparity Limiting:** The method relies on a "sampling guideline" that limits the disparity between input views. The source specifies a limit of 64 pixels of disparity between input views [S1].
-3.  **Blending:** To render a novel view, the system identifies the $N$ nearest input views. It retrieves their corresponding MPIs.
-4.  **Alpha Compositing:** The novel view is rendered by alpha compositing the planes from the nearby MPIs. The blending weights are determined by the proximity of the novel viewpoint to the input viewpoints [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def render_novel_view(novel_pose, input_images, input_poses, network, K, disparity_limit):
-    """
-    Renders a novel view by blending MPIs from nearby input views.
-    """
-    # 1. Identify nearby input views based on camera pose distance
-    # and ensure disparity constraint is met
-    nearby_indices = get_nearby_views(novel_pose, input_poses, disparity_limit=64)
-    
-    # 2. Predict MPIs for nearby views if not already cached
-    nearby_mpi_list = []
-    for idx in nearby_indices:
-        # Network predicts K planes of (color, alpha)
-        mpi = network.predict_mpi(input_images[idx], input_poses[idx])
-        nearby_mpi_list.append(mpi)
-        
-    # 3. Blend MPIs to render the novel view
-    # This involves alpha compositing the planes from multiple MPIs
-    # weighted by the view's proximity to the novel viewpoint
-    novel_color = blend_mpi(novel_pose, nearby_mpi_list)
-    
-    return novel_color
-
-def blend_mpi(novel_pose, mpi_list):
-    """
-    Alpha composites multiple MPIs to form the final image.
-    """
-    # Initialize transmittance and color
-    T = 1.0
-    C = np.zeros(3)
-    
-    # For each depth plane k from front to back
-    for k in range(len(mpi_list[0].planes)):
-        # Get color and alpha for this plane from each nearby MPI
-        # Interpolate/project these planes to the novel viewpoint
-        colors = []
-        alphas = []
-        
-        for mpi in mpi_list:
-            # Project plane k to novel view
-            c_proj, a_proj = project_plane(mpi.planes[k], novel_pose, mpi.camera_pose)
-            colors.append(c_proj)
-            alphas.append(a_proj)
-            
-        # Weighted average of colors and alphas based on view proximity
-        # (Implementation detail: specific weighting function not provided in source)
-        # [G] Assuming a simple distance-weighted average for blending
-        weights = compute_view_weights(novel_pose, [m.camera_pose for m in mpi_list])
-        weights = weights / np.sum(weights)
-        
-        avg_alpha = np.sum([w * a for w, a in zip(weights, alphas)])
-        avg_color = np.sum([w * c for w, c in zip(weights, colors)])
-        
-        # Standard alpha compositing step
-        # C_new = C_old * T + avg_color * avg_alpha
-        # T_new = T_old * (1 - avg_alpha)
-        C = C * T + avg_color * avg_alpha
-        T = T * (1 - avg_alpha)
-        
-    return C
-```
+1.  **Input Preparation:** Collect a set of input images from a forward-facing scene. Ensure the disparity between input views does not exceed 64 pixels, as this is the sampling guideline provided by the method [S1].
+2.  **MPI Prediction:** Pass each input image through the trained 3D convolutional network. The network predicts the RGB and $\alpha$ values for the discretized frustum-sampled planes for that specific view [S1].
+3.  **Novel View Rendering:** To render a novel viewpoint:
+    a. Identify the nearby input views whose predicted MPIs are relevant to the novel viewpoint.
+    b. Warp or project the MPIs from these nearby input views into the coordinate system of the novel viewpoint.
+    c. Perform alpha compositing of the warped MPIs to combine the color and opacity information [S1].
+    d. Blend the results from the different MPIs to produce the final image [S1].
 
 **Parameters:**
-*   **Disparity Limit:** 64 pixels. The method is designed to not exceed this disparity between input views to ensure correct geometry estimation [S1].
-*   **Number of Planes ($K$):** Not given in the sources.
+*   **Disparity Limit:** The method provides a sampling guideline not to exceed 64 pixels of disparity between input views [S1].
 
 **Edge Cases and Pitfalls:**
 *   **High Disparity:** The method frequently fails to estimate correct geometry in datasets with up to 400-500 pixels of disparity between views, as it exceeds the 64-pixel guideline [S1].
-*   **Blending Artifacts:** Blending between different scene representations (MPIs) for rendering different views can result in perceptually distracting inconsistencies and repeated edges [S1].
-*   **Artifacts:** The method exhibits banding artifacts on shiny object edges and ghosting artifacts in complex geometry (e.g., ship masts, Lego gears) [S1].
+*   **Inconsistency:** Blending between different scene representations (MPIs) for rendering different views can result in perceptually-distracting inconsistency and repeated edges [S1].
+*   **Artifacts:** The method exhibits banding artifacts on object edges and ghosting artifacts in complex geometry (e.g., masts, internal structures) [S1].
 
 ## Subtopics
 
-### Multiplane Image (MPI)
-A representation of a scene as a set of depth planes with associated color and alpha values. It sets itself apart by allowing efficient rendering via alpha compositing. Choose it when efficient view synthesis from a few views is required. [52]
+### Neural Lumigraph Rendering
+A sibling method that also optimizes a separate network per scene. It is chosen when per-scene optimization is feasible and higher consistency is required than LLFF can provide. See [Neural Lumigraph Rendering](7369-neural-lumigraph-rendering.md).
+
+### Instant Neural Opacity Light Fields
+A sibling method focusing on instant rendering capabilities. It is chosen when speed of inference is critical. See [Instant Neural Opacity Light Fields](11565-instant-neural-opacity-light-fields.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Fast training/inference. Can process a small input dataset in under 10 minutes [S1].
-*   **Memory Complexity:** High storage requirements. Produces a large 3D voxel grid (MPI) for every input image, resulting in enormous storage requirements (over 15GB for one "Realistic Synthetic" scene) [S1].
-*   **Scaling:** Does not scale well to scenes with large disparities (>64 pixels) [S1].
-*   **Strengths:** Fast processing time; produces photorealistic results for well-sampled forward-facing scenes; captures fine details in geometry and appearance (e.g., non-Lambertian reflectance) [S1].
-*   **Limitations:** High memory usage; inconsistent geometry in high-disparity scenes; blending artifacts; fails to capture fine details compared to some volumetric methods in specific cases (e.g., Microphone grille) [S1].
-*   **When to use:** Forward-facing captures of real scenes with well-sampled input views (low disparity) [S1].
-*   **When not to use:** Scenes with large disparities between views; applications with strict memory constraints [S1].
+*   **Time Complexity:** LLFF is significantly faster than methods that optimize a separate network per scene. It can process a small input dataset in under 10 minutes, whereas other single-scene methods take at least 12 hours [S1].
+*   **Memory Complexity:** LLFF produces a large 3D voxel grid for every input image, resulting in enormous storage requirements. For example, it requires over 15GB for one "Realistic Synthetic" scene [S1]. In contrast, methods like NeRF require only ~5MB for network weights [S1].
+*   **Strengths:** Fast processing time; capable of recovering fine details in geometry and appearance (e.g., non-Lambertian reflectance, fine rigging) for well-sampled forward-facing scenes [S1].
+*   **Limitations:** High storage requirements; fails with high disparity (>64 pixels); perceptual inconsistencies due to blending; artifacts like banding and ghosting [S1].
+*   **When to use:** When fast processing of well-sampled, forward-facing scenes is required and storage is not a constraint.
+*   **When not to use:** For scenes with large baseline disparities, or when storage efficiency and view consistency are critical.
 
 ## Background
-Local Light Field Fusion (LLFF) was introduced as a method for novel view synthesis, specifically targeting forward-facing scenes. It was compared against baselines such as Scene Representation Networks (SRN) and Neural Volumes (NV) in the context of the NeRF paper [S1]. The method leverages the Multiplane Image (MPI) representation [52] and uses a 3D convolutional network to predict per-view MPIs. It is distinct from global implicit representations like NeRF by its explicit, per-view layered structure [S1].
+Local Light Field Fusion (LLFF) was introduced as a method for view synthesis, specifically targeting forward-facing captures of real scenes [S1]. It was compared against baselines such as Scene Representation Networks (SRN) and Neural Volumes (NV) [S1]. SRN is limited by selecting only a single depth and color per camera ray, while NV is limited by its explicit 128$^3$ voxel grid [S1]. LLFF was shown to outperform these baselines in qualitative and quantitative metrics for suitable scenes, although it suffered from storage and consistency issues [S1].
 
 ## Sources
 [S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27

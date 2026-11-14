@@ -3,96 +3,201 @@
 Also called: Cached Monte Carlo Integration, Optimized Monte Carlo Integration, Variable Caching Integrator
 
 ## Overview
-The Optimized Monte Carlo Integrator is a method for computing radiance scattered inside a homogeneous participating medium from a collimated light source towards the camera, specifically targeting real-time rendering applications [S1]. It solves the problem of redundant geometric traversal by caching segment data and using importance sampling proportional to geometry-dependent transmittance [S1]. It sets itself apart from standard ray marching by avoiding repeated box outline traversal and from Delta Tracking by relying on analytic integration of unoccluded single scattering within a bounded box geometry [S1].
+The Optimized Monte Carlo Integrator is a method for computing radiance scattered inside a homogeneous, box-shaped participating medium from a collimated light source towards the camera [S1]. It solves the problem of redundant geometric traversal in single-scattering Monte Carlo integration by caching segment-specific variables, allowing samples to be drawn proportional to transmittance without repeated boundary checks [S1]. Unlike standard ray marching, it delivers significant performance improvements by precomputing the geometry of the medium into trapezoid-shaped segments and using a cumulative histogram for efficient segment selection [S1].
 
 ## How it works
-The method computes single-scattering radiance in a box-shaped medium. It assumes a collimated light source (e.g., distant star or gobo-masked light) and a camera ray. The core innovation is the decomposition of the medium's geometry into trapezoidal segments and the caching of integration variables to allow efficient importance sampling [S1].
+**Inputs and Outputs:**
+*   **Inputs:** Camera ray origin $p_o$ and direction $\omega_o$; collimated light direction $\omega_i$ and intensity $L_i$; medium extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s$; phase function $f(\omega_i, \omega_o)$; box geometry (defined by entry/exit points for light and camera rays).
+*   **Outputs:** Estimated radiance $L$ at the camera ray origin.
 
-### Inputs and Outputs
-*   **Inputs**: Camera ray origin $p_o$ and direction $\omega_o$; Light direction $\omega_i$; Medium extinction coefficient $\sigma_t$; Medium scattering coefficient $\sigma_s$; Phase function $f(\omega_i, \omega_o)$; Light intensity $L_i$; Number of samples $N_{sample}$; Box geometry defined by entry and exit points for light and camera rays.
-*   **Outputs**: Estimated radiance $L$ at the camera pixel.
+**Data Structures:**
+*   **Segment Cache Matrix $K$:** A matrix where each row $s$ corresponds to a trapezoid segment formed by connecting the light ray exit point to the camera ray exit point across the box edges. Each row contains four cached values [S1]:
+    *   $K_{s,1}$: Upper bound integral part, $1 - E_u$ (transmittance factor).
+    *   $K_{s,2}$: Slope, $\sigma_t c$ (where $c$ is a geometric constant derived from the segment).
+    *   $K_{s,3}$: Size of the segment along the camera ray, $t_{C,B} - t_{C,S}$ (distance between box boundary intersections).
+    *   $K_{s,4}$: Starting position along the camera ray, $t_{C,S}$.
+*   **Cumulative Histogram $H$:** An array storing the cumulative probabilities of selecting each segment.
+*   **Multiplicative Weights $D$:** An array storing the inverse probability of each segment.
+*   **Summands $M$:** An array storing the scaled previous CDF values for coordinate transformation.
 
-### Data Structures
-The method relies on a cached matrix $K$ storing precomputed values for each trapezoidal segment $k$. The matrix $K$ has dimensions $N_{segments} \times 4$.
-*   $K_{k,1}$: Upper bound integral part, value $1 - E_u$.
-*   $K_{k,2}$: Slope, value $\sigma_t c$ (where $c$ is a geometric constant related to the segment).
-*   $K_{k,3}$: Size of segment along camera ray, value $t_{C,B} - t_{C,S}$.
-*   $K_{k,4}$: Starting position along the camera ray, value $t_{C,S}$.
+**Numbered Steps:**
 
-Additionally, a cumulative distribution histogram $H$ and a multiplicative weight array $D$ are stored for segment selection.
+1.  **Geometry Traversal and Caching:**
+    Traverse the edges of the box from corner to corner to connect the incident light exit point and the outgoing camera exit point. This decomposes the medium geometry into a set of trapezoid-shaped segments [S1]. For each segment $s$, compute and cache the values $K_{s,1}, K_{s,2}, K_{s,3}, K_{s,4}$ as defined above [S1].
 
-### Steps
-
-1.  **Geometry Traversal and Segment Decomposition**:
-    Traverse the edges of the box from corner to corner to connect the incident light exit points and outgoing camera exit points. This decomposes the medium into trapezoid-shaped segments [S1].
-
-2.  **Cache Unoccluded Integration Values**:
-    For each segment $k$, compute and cache the values in matrix $K$ as defined above. This involves calculating the analytic integration of unoccluded single scattering for the segment [S1].
-
-3.  **Build Cumulative Histogram**:
-    Compute the probability of selecting segment $k$, denoted $G_k$, as the ratio of the segment's transmittance contribution $T_k$ to the total transmittance $T_{total}$:
+2.  **Probability Calculation:**
+    Compute the probability $G_k$ of selecting segment $k$ based on its contribution to the total transmittance:
     $$ G_k = \frac{T_k}{T_{total}} $$
-    Sum probabilities to build the cumulative histogram $H$:
+    where $T_k$ is the transmittance associated with segment $k$ and $T_{total}$ is the sum of transmittances over all segments [S1].
+
+3.  **Histogram Construction:**
+    Build the cumulative distribution function (CDF) histogram $H$ by summing the probabilities:
     $$ H_k \leftarrow \sum_{i=1}^k G_i $$
+    Initialize $H_0 = 0$ [S1].
+
+4.  **Weight and Summand Computation:**
     Compute the multiplicative weight $D_k$ as the inverse probability:
     $$ D_k = \frac{1}{G_k} $$
-    Compute the summand $M_k$ using the previous CDF histogram value:
+    Compute the summand $M_k$ using the previous histogram value:
     $$ M_k \leftarrow -H_{k-1} \cdot D_k $$
-    (Note: $H_0 = 0$) [S1].
+    [S1].
 
-4.  **Segment Selection**:
+5.  **Segment Selection:**
     For each sample $j$ from $1$ to $N_{sample}$:
-    a. Draw a random value $r$ from a uniform distribution:
-       $$ r \leftarrow \xi\left(\frac{k}{N_{sample}}\right) $$
-       where $\xi$ is a uniform random number in $[0, 1]$ [S1].
-    b. Find the selected segment $s$ by comparing $r$ against the step functions of the histogram $H$:
-       $$ s \leftarrow \text{step}(H_1, r) + \text{step}(H_2, r) $$
-       (This implies a binary search or linear scan through the histogram steps to find the interval containing $r$) [S1].
+    a. Draw a random value from a uniform distribution:
+       $$ r \leftarrow \xi\left(\frac{j}{N_{sample}}\right) $$
+       where $\xi$ generates a uniform random number in $[0, 1]$ [S1].
+    b. Find the selected segment $s$ by comparing $r$ against the step functions of the histogram:
+       $$ s \leftarrow \text{step}(H_1, r) + \text{step}(H_2, r) + \dots $$
+       (In practice, this is a binary search or linear scan through $H$ to find the first $k$ where $H_k \ge r$) [S1].
 
-5.  **Transform Sample in Segment Coordinates**:
-    Map the random value $r$ to the local coordinate system of the selected segment $s$:
+6.  **Coordinate Transformation:**
+    Transform the random sample $r$ into the local coordinates of the selected segment $s$:
     $$ r_s \leftarrow r \cdot D_s + M_s $$
-    This $r_s$ represents the normalized position within the segment's transmittance distribution [S1].
+    [S1].
 
-6.  **Sample Distance**:
-    Sample the distance $t$ along the camera ray according to the importance sampling distribution derived from the analytic integration (as detailed in the source's Sec. 5.1, which matches the geometry-dependent transmittance) [S1].
+7.  **Distance Sampling:**
+    Sample the distance $t$ along the camera ray within the segment using importance sampling that matches the geometry-dependent transmittance distribution (as detailed in the source's Sec. 5.1, which involves inverting the analytic integration algorithm) [S1]. The specific distance is derived from $r_s$ and the cached segment parameters [S1].
 
-7.  **Accumulate Visibility**:
-    In the integration loop, accumulate only the visibility term $V$. The exponential transmittance function is cancelled by the probability density function (PDF) of the importance sampling.
-    $$ V_{total} \leftarrow V_{total} + V(p_o - t \omega_o) $$
-    where $V(p_o - t \omega_o)$ is the visibility of the point at distance $t$ from the camera origin [S1].
+8.  **Visibility Accumulation:**
+    Accumulate the visibility $V_{total}$ in an integration loop. Because the exponential transmittance function is cancelled by the probability density function (PDF) of the importance sampling, only the visibility term needs to be accumulated [S1]:
+    $$ V_{total} = V_{total} + V(p_o - t \omega_o) $$
+    where $V(\cdot)$ represents the visibility (occlusion) at the sampled point [S1].
 
-8.  **Compute Final Radiance**:
-    Re-weight the total visibility to compute the final radiance:
+9.  **Final Radiance Computation:**
+    Compute the final radiance $L$ by re-weighting the total visibility:
     $$ L = \frac{1}{N_{sample}} \sigma_s f(\omega_i, \omega_o) V_{total} T_{total} L_i $$
-    where $T_{total}$ is the total transmittance factor [S1].
+    [S1].
 
-### Parameters
-*   $N_{sample}$: Number of Monte Carlo samples. Typical values depend on the desired noise level and real-time constraints [S1].
-*   Target Application: Real-time rendering [S1].
+**Pseudocode:**
 
-### Edge Cases and Pitfalls
-*   **Single Scattering Limitation**: The method is derived for single scattering. The source notes that only in the single-scattering case does a ratio estimator with the same importance sampling scheme yield the same integration algorithm [S1].
-*   **Box Geometry**: The method assumes a box-shaped medium. The decomposition into trapezoids relies on connecting box corners. If the medium is not box-shaped, this specific decomposition does not apply [S1].
-*   **Collimated Light**: The method is optimized for collimated light sources. Non-collimated lights may require different handling [S1].
-*   **Precision**: The cancellation of the exponential function by the PDF requires careful implementation to avoid numerical instability, though the source does not specify exact precision requirements [S1].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimized_monte_carlo_integrator(camera_ray_origin, camera_ray_dir, light_dir, light_intensity, 
+                                     sigma_t, sigma_s, phase_function, box_geometry, num_samples):
+    # Step 1: Geometry Traversal and Caching
+    # Decompose box into trapezoid segments connecting light exit to camera exit
+    segments = decompose_box_into_segments(camera_ray_origin, camera_ray_dir, light_dir, box_geometry)
+    
+    # Cache K values for each segment
+    K = []
+    for seg in segments:
+        # K_s,1: Upper bound integral part (1 - E_u)
+        # K_s,2: Slope (sigma_t * c)
+        # K_s,3: Size along camera ray (t_C,B - t_C,S)
+        # K_s,4: Starting position along camera ray (t_C,S)
+        k_vals = compute_segment_cache_values(seg, sigma_t)
+        K.append(k_vals)
+        
+    # Step 2: Probability Calculation
+    # Compute T_k for each segment (transmittance contribution)
+    T_k = [compute_segment_transmittance(seg, K[i]) for i, seg in enumerate(segments)]
+    T_total = sum(T_k)
+    
+    # Compute G_k
+    G_k = [t / T_total for t in T_k]
+    
+    # Step 3: Histogram Construction
+    H = []
+    cumulative = 0.0
+    for g in G_k:
+        cumulative += g
+        H.append(cumulative)
+        
+    # Step 4: Weight and Summand Computation
+    D = [1.0 / g for g in G_k]
+    M = []
+    for k in range(len(H)):
+        if k == 0:
+            prev_h = 0.0
+        else:
+            prev_h = H[k-1]
+        M.append(-prev_h * D[k])
+        
+    # Step 5-9: Sampling Loop
+    V_total = 0.0
+    
+    for j in range(num_samples):
+        # Draw random value
+        r = random_uniform()
+        
+        # Find segment s
+        s = 0
+        for k in range(len(H)):
+            if H[k] >= r:
+                s = k
+                break
+                
+        # Transform sample
+        r_s = r * D[s] + M[s]
+        
+        # Sample distance t using importance sampling (Sec 5.1 logic)
+        # This inverts the analytic integration for the segment
+        t = sample_distance_importance(r_s, K[s])
+        
+        # Accumulate visibility
+        # V(p_o - t * omega_o) checks occlusion at the sampled point
+        visibility = compute_visibility(camera_ray_origin - t * camera_ray_dir, box_geometry)
+        V_total += visibility
+        
+    # Final Radiance
+    L = (1.0 / num_samples) * sigma_s * phase_function(light_dir, camera_ray_dir) * V_total * T_total * light_intensity
+    
+    return L
+
+def decompose_box_into_segments(cam_origin, cam_dir, light_dir, box):
+    # Connect incident light exit point to outgoing camera exit point
+    # by traversing box edges from corner to corner
+    # Returns list of trapezoid segment definitions
+    pass
+
+def compute_segment_cache_values(seg, sigma_t):
+    # K_s,1 = 1 - E_u
+    # K_s,2 = sigma_t * c
+    # K_s,3 = t_C,B - t_C,S
+    # K_s,4 = t_C,S
+    pass
+
+def compute_segment_transmittance(seg, K_vals):
+    # Compute T_k based on analytic integration of unoccluded single scattering
+    pass
+
+def sample_distance_importance(r_s, K_vals):
+    # Invert the analytic integration algorithm to find distance t
+    # based on r_s and cached segment parameters
+    pass
+
+def compute_visibility(point, box):
+    # Return 1.0 if point is inside box and unoccluded, 0.0 otherwise
+    pass
+```
+
+**Parameters:**
+*   $N_{sample}$: Number of Monte Carlo samples. Typical values depend on desired quality and performance constraints; real-time applications may use lower counts [S1].
+*   $\sigma_t, \sigma_s$: Extinction and scattering coefficients of the homogeneous medium [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Segments:** If the box geometry results in zero-area trapezoids or zero transmittance $T_k$, $G_k$ becomes zero, leading to division by zero in $D_k$. Guard against this by skipping segments with $T_k \approx 0$ [S1].
+*   **Precision:** The cancellation of the exponential function by the PDF requires careful numerical implementation to avoid loss of precision in the visibility accumulation [S1].
+*   **Boundary Conditions:** The method assumes a finite box-shaped medium. For infinite or non-box media, the geometry traversal and caching strategy does not apply directly [S1].
 
 ## Subtopics
 
 ### Rushmeier's Zonal-Monte Carlo Method
-A variant where the zonal method is used in a first pass to compute source radiances, followed by a Monte Carlo second pass in the rendering step to handle anisotropy for the single scattering approximation, accounting for one extra directional bounce [S2].
+A variant that uses the zonal method in a first pass to compute source radiances, followed by a Monte Carlo second pass in the rendering step to handle anisotropy for the single scattering approximation, accounting for one extra directional bounce [S2].
 
 ## Operating characteristics
-*   **Performance**: Delivers performance improvements over ray marching by avoiding repeated traversal of the box outline [S1].
-*   **Complexity**: The complexity is dominated by the geometry traversal (once) and the Monte Carlo sampling ($N_{sample}$ steps). The caching reduces per-sample geometric cost to constant time after histogram construction [S1].
-*   **Memory**: Requires storage for the cached matrix $K$ and histograms $H, D$, proportional to the number of trapezoidal segments [S1].
-*   **Strengths**: Efficient for real-time rendering of box-shaped media with collimated light; reduces redundant computations [S1].
-*   **Limitations**: Limited to single scattering; requires box-shaped geometry; assumes collimated light [S1].
-*   **When to use**: Real-time applications involving box-shaped participating media and collimated light sources (e.g., light shafts in AR/VR) [S1].
-*   **When not to use**: Multiple scattering scenarios; non-box geometries; non-collimated lights [S1].
+*   **Time Complexity:** $O(N_{sample} \cdot S)$, where $S$ is the number of segments. The geometry traversal is performed once and cached, making per-sample cost low (primarily random number generation and visibility check) [S1].
+*   **Memory Complexity:** $O(S)$ to store the cache matrix $K$, histogram $H$, weights $D$, and summands $M$ [S1].
+*   **Performance:** Delivers significant performance improvements over ray marching for real-time rendering applications, particularly in mixed reality and AR setups where additive lighting effects are needed [S1].
+*   **Strengths:** Efficient for collimated light sources and box-shaped homogeneous media; avoids redundant geometric calculations [S1].
+*   **Limitations:** Limited to single-scattering approximation; specific to box-shaped media and collimated lights; not directly applicable to heterogeneous media or complex light sources without modification [S1].
+*   **When to Use:** Real-time rendering of light shafts in homogeneous media with collimated illumination (e.g., sunlight through windows) [S1].
+*   **When Not to Use:** Multiple scattering scenarios, heterogeneous media, or non-collimated light sources [S1].
 
 ## Background
-The method was introduced in the paper "Collimated Whole Volume Light Scattering in Homogeneous Finite Media" [S1]. It is designed for mixed reality and real-time rendering applications, such as optical see-through AR headsets, where virtual light shafts are rendered as additive lighting effects [S1]. The technique builds on analytic integration of unoccluded single scattering and importance sampling strategies [S1]. Rushmeier's Zonal-Monte Carlo Method is an earlier related approach mentioned in surveys of participating media rendering [S2].
+The Optimized Monte Carlo Integrator was introduced in the paper "Collimated Whole Volume Light Scattering in Homogeneous Finite Media" [S1]. It was developed to address the computational cost of ray marching in real-time rendering applications, specifically targeting mixed reality and optical see-through AR headsets [S1]. The method builds on the analytic integration of unoccluded single scattering and importance sampling techniques [S1]. Rushmeier's Zonal-Monte Carlo Method, a related approach, was earlier suggested by Rushmeier [S2] as part of a broader survey on participating media rendering techniques [S2].
 
 ## Sources
 [S1] Collimated Whole Volume Light Scattering in Homogeneous Finite Media, https://doi.org/10.1109/tvcg.2021.3135764, fetched 2026-10-27

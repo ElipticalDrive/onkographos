@@ -3,127 +3,142 @@
 Also called: Base transport kernel decomposition, Heterogeneity model
 
 ## Overview
-This method models light transport in non-exponential, heterogeneous participating media by decomposing the medium description into an explicit 3D macroscopic density field $\sigma(\mathbf{x})$ and a 1D base transport kernel $T_{\text{base}}(t)$ that captures statistical correlations [S1]. It solves the difficulty of numerically evaluating the ensemble-averaged path integral for heterogeneous media by reducing the transport kernel to a function of macroscopic optical depth, allowing practical rendering while preserving non-exponential behavior [S1]. It differs from fully homogenized models (like [Larsen and Vasques](link)) by allowing arbitrary spatial distribution of correlations, and from general heterogeneous models by assuming statistical homogeneity of the underlying correlations [S1].
+This method models light transport in non-exponential, heterogeneous participating media by decomposing the medium description into an explicit 3D macroscopic density field $\sigma(\mathbf{x})$ and a 1D base transport kernel $T_{\text{base}}(t)$ that captures statistical correlations [S1]. It solves the problem of rendering heterogeneous media with non-exponential attenuation by reducing the complex ensemble-averaged transport kernel to a function of the macroscopic optical depth alone [S1]. Unlike the fully homogenized model of Larsen and Vasques, which assumes identical statistics everywhere, this method allows for arbitrary spatial distribution of the macroscopic density while assuming the underlying correlation structure is statistically homogeneous [S1].
 
 ## How it works
-The method computes the ensemble-averaged transport kernel $\tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1})$ for a segment between positions $\mathbf{x}_i$ and $\mathbf{x}_{i+1}$ using the macroscopic optical depth and the relative location of the endpoints with respect to the volume boundary $\partial\mathcal{V}$ and interior $\mathcal{V}$ [S1].
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   Macroscopic extinction coefficient field $\sigma(\mathbf{x})$ [S1].
+    *   Base transport kernel functions $\text{ff}(t)$, $\text{pf}(t)$, and $\text{pp}(t)$ [S1].
+    *   Two spatial points $\mathbf{x}_i$ and $\mathbf{x}_{i+1}$ defining a segment [S1].
+*   **Output:**
+    *   The transport kernel value $\tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1})$ for the segment [S1].
 
-**Inputs and Outputs**
-*   **Inputs**:
-    *   Positions $\mathbf{x}_i, \mathbf{x}_{i+1} \in \mathbb{R}^3$.
-    *   Macroscopic extinction coefficient field $\sigma(\mathbf{x})$.
-    *   Base kernel functions $\text{ff}(t), \text{f}(t), \text{pf}(t), \text{pp}(t)$ (pre-computed or tabulated).
-*   **Outputs**:
-    *   Scalar transport kernel value $\tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1})$.
+**Data Structures:**
+The base kernel functions are typically stored as 1D lookup tables or parametric functions mapping optical depth $t$ to a scalar value [S1]. The macroscopic density $\sigma(\mathbf{x})$ is a 3D field (e.g., a voxel grid or analytical function) [S1].
 
-**Data Structures**
-The base kernel functions are typically stored as 1D lookup tables or parametric functions mapping optical depth $t \in [0, \infty)$ to kernel values. The macroscopic density $\sigma(\mathbf{x})$ is a 3D scalar field.
+**Definitions:**
+*   $\tau(\mathbf{x}_i, \mathbf{x}_{i+1})$: The macroscopic optical depth between $\mathbf{x}_i$ and $\mathbf{x}_{i+1}$, calculated as $\int_0^{\|\mathbf{x}_{i+1}-\mathbf{x}_i\|} \sigma(\mathbf{x}_s) ds$ [S1].
+*   $\partial\mathcal{V}$: The boundary of the volume [S1].
+*   $\mathcal{V}$: The interior of the volume [S1].
+*   $\text{ff}(t)$: Base kernel for boundary-to-boundary segments, defined as $\langle \text{Tr}(t) \rangle$ [S1].
+*   $\text{pf}(t)$: Base kernel for mixed segments, defined as $\langle \text{Tr}(t)\rho_\mu(\mathbf{x}_t) \rangle$ [S1].
+*   $\text{pp}(t)$: Base kernel for interior-to-interior segments, defined as $\langle \text{Tr}(t) \sigma_{\mu}(\mathbf{x}_t) \rho_{\mu}(\mathbf{x}_t) \rangle$ [S1]. Note that $\text{pp}(t)$ acts as a PDF [S1].
 
-**Steps**
-1.  **Calculate Macroscopic Optical Depth**: Compute the macroscopic optical depth $\tau_i$ between $\mathbf{x}_i$ and $\mathbf{x}_{i+1}$ along the straight line segment connecting them:
-    $$ \tau_i = \tau(\mathbf{x}_i, \mathbf{x}_{i+1}) = \int_0^{|\mathbf{x}_{i+1} - \mathbf{x}_i|} \sigma(\mathbf{x}_i + s \cdot \frac{\mathbf{x}_{i+1} - \mathbf{x}_i}{|\mathbf{x}_{i+1} - \mathbf{x}_i|}) \, ds $$
-    [S1]
+**Steps:**
+1.  Calculate the macroscopic optical depth $\tau_i = \tau(\mathbf{x}_i, \mathbf{x}_{i+1})$ by integrating the macroscopic extinction coefficient $\sigma(\mathbf{x})$ along the segment from $\mathbf{x}_i$ to $\mathbf{x}_{i+1}$ [S1].
+2.  Determine the location of the endpoints $\mathbf{x}_i$ and $\mathbf{x}_{i+1}$ relative to the volume boundary $\partial\mathcal{V}$ and interior $\mathcal{V}$ [S1].
+3.  Select the appropriate base function based on the endpoint locations:
+    *   If $\mathbf{x}_i \in \partial\mathcal{V}$ and $\mathbf{x}_{i+1} \in \partial\mathcal{V}$, select $\text{ff}$ [S1].
+    *   If $\mathbf{x}_i \in \mathcal{V}$ and $\mathbf{x}_{i+1} \in \mathcal{V}$, select $\text{pp}$ [S1].
+    *   Otherwise (one point on boundary, one in interior), select $\text{pf}$ [S1].
+4.  Evaluate the selected base function at the calculated optical depth $\tau_i$ to obtain the transport kernel value $\tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1})$ [S1].
 
-2.  **Determine Endpoint Locations**: Check the location of $\mathbf{x}_i$ and $\mathbf{x}_{i+1}$ relative to the volume boundary $\partial\mathcal{V}$ and interior $\mathcal{V}$:
-    *   If a point is on the boundary, it is in $\partial\mathcal{V}$.
-    *   If a point is inside the medium, it is in $\mathcal{V}$.
-    [S1]
-
-3.  **Select Base Function**: Choose the appropriate base function based on the location logic:
-    *   $\text{ff}(\tau_i)$ if $\mathbf{x}_i \in \partial\mathcal{V}$ AND $\mathbf{x}_{i+1} \in \partial\mathcal{V}$.
-    *   $\text{pp}(\tau_i)$ if $\mathbf{x}_i \in \mathcal{V}$ AND $\mathbf{x}_{i+1} \in \mathcal{V}$.
-    *   $\text{pf}(\tau_i)$ otherwise (mixed boundary/interior).
-    [S1]
-
-4.  **Evaluate Kernel**: Return the value of the selected base function at $\tau_i$.
-    $$ \tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1}) = \tilde{T}_{\text{base}}(\tau_i) $$
-    [S1]
-
-**Formulas**
-The base kernel functions are defined as ensemble averages over realizations $\mu$ [S1]:
-$$ \text{ff}(t) = \langle \text{Tr}(t) \rangle $$
-$$ \text{f}(t) = \langle \text{Tr}(\sigma_\mu(\mathbf{x}_t)) \rangle $$
-$$ \text{pf}(t) = \langle \text{Tr}(t)\rho_\mu(\mathbf{x}_t) \rangle $$
-$$ \text{pp}(t) = \langle \text{Tr}(t) \sigma_{\mu}(\mathbf{x}_t) \rho_{\mu}(\mathbf{x}_t) \rangle $$
-where $\text{Tr}(t)$ is the transmittance for a realization, and $\rho_\mu$ is related to the free-flight PDF [S1].
-
-The final transport kernel is:
-$$ \tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1}) = \begin{cases} \text{ff}(\tau_i) & \text{if } \mathbf{x}_i \in \partial\mathcal{V} \wedge \mathbf{x}_{i+1} \in \partial\mathcal{V} \\ \text{pp}(\tau_i) & \text{if } \mathbf{x}_i \in \mathcal{V} \wedge \mathbf{x}_{i+1} \in \mathcal{V} \\ \text{pf}(\tau_i) & \text{else} \end{cases} $$
-[S1]
-
-**Parameters**
-*   $\sigma(\mathbf{x})$: Macroscopic extinction coefficient. Represents large-scale heterogeneous variation. Determines local stretching of the base medium [S1].
-
-**Pitfalls**
-*   The function $\text{pp}$ is a PDF, so it incurs a Jacobian factor of $\sigma(\mathbf{x}_{i+1})$ from the transformation. This factor cancels the division by $\sigma$ from the equivalent of Eq 22, resulting in a simple transport kernel [S1]. Implementers must ensure this cancellation is handled correctly if deriving $\text{pp}$ from first principles rather than using the pre-defined base kernel [S1].
-*   The method assumes statistical homogeneity of correlations throughout the medium. If correlations vary spatially, the 1D base kernel assumption may not hold [S1].
-
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_transport_kernel(x_i, x_next, sigma_field, boundary_test, base_kernel_ff, base_kernel_pf, base_kernel_pp):
+def compute_transport_kernel(x_i, x_next, sigma_field, base_kernel_ff, base_kernel_pf, base_kernel_pp):
     """
     Computes the non-exponential transport kernel for a segment.
     
     Args:
-        x_i: Position vector (3D)
-        x_next: Next position vector (3D)
-        sigma_field: Function sigma(x) returning macroscopic extinction
-        boundary_test: Function is_boundary(x) returning True if x is on boundary, False if in interior
-        base_kernel_ff: Function ff(tau) for boundary-to-boundary
-        base_kernel_pf: Function pf(tau) for mixed
-        base_kernel_pp: Function pp(tau) for interior-to-interior
+        x_i: Start point of the segment.
+        x_next: End point of the segment.
+        sigma_field: Function or data structure providing macroscopic extinction coefficient sigma(x).
+        base_kernel_ff: Function evaluating ff(t).
+        base_kernel_pf: Function evaluating pf(t).
+        base_kernel_pp: Function evaluating pp(t).
         
     Returns:
-        Float: Transport kernel value
+        The transport kernel value T(x_i, x_next).
     """
-    # Step 1: Calculate macroscopic optical depth
-    # Approximate integral using numerical quadrature or analytical solution if sigma is simple
-    # For implementation, assume a helper function exists or use simple midpoint rule
-    direction = x_next - x_i
-    length = norm(direction)
-    if length == 0:
-        return 1.0 # Zero distance, full transmission
+    # Step 1: Calculate macroscopic optical depth tau_i
+    # Integrate sigma(x) along the segment from x_i to x_next.
+    # For a uniform sigma, this is sigma * distance.
+    # For a heterogeneous sigma, numerical integration (e.g., trapezoidal rule) is required.
+    tau_i = integrate_sigma(x_i, x_next, sigma_field)
     
-    # Simple numerical integration for optical depth
-    # In practice, this might be more sophisticated
-    num_samples = 10
-    tau = 0.0
-    for k in range(num_samples):
-        t = (k + 0.5) / num_samples
-        point = x_i + t * direction
-        sigma_val = sigma_field(point)
-        tau += sigma_val * (length / num_samples)
-        
-    # Step 2: Determine endpoint locations
-    is_xi_boundary = boundary_test(x_i)
-    is_xnext_boundary = boundary_test(x_next)
+    # Step 2: Determine location of endpoints
+    # is_boundary(x) returns True if x is on the volume boundary, False if in interior.
+    # This depends on the specific volume definition.
+    on_boundary_i = is_boundary(x_i)
+    on_boundary_next = is_boundary(x_next)
     
-    # Step 3 & 4: Select base function and evaluate
-    if is_xi_boundary and is_xnext_boundary:
-        return base_kernel_ff(tau)
-    elif not is_xi_boundary and not is_xnext_boundary:
-        return base_kernel_pp(tau)
+    # Step 3: Select base function and evaluate
+    if on_boundary_i and on_boundary_next:
+        # Boundary-to-Boundary
+        kernel_value = base_kernel_ff(tau_i)
+    elif not on_boundary_i and not on_boundary_next:
+        # Interior-to-Interior
+        # Note: pp is a PDF, but the Jacobian factor sigma(x_next) is handled by the 
+        # path integral formulation (cancels division by sigma), so we return the raw pp value.
+        kernel_value = base_kernel_pp(tau_i)
     else:
-        return base_kernel_pf(tau)
+        # Mixed (Boundary-to-Interior or Interior-to-Boundary)
+        kernel_value = base_kernel_pf(tau_i)
+        
+    return kernel_value
+
+def integrate_sigma(x_start, x_end, sigma_field):
+    """
+    Computes the macroscopic optical depth between two points.
+    Assumes a simple linear path. For implementation, sample sigma along the line.
+    """
+    # Placeholder for numerical integration logic [G]
+    # Example: sample N points along the segment, sum sigma(x) * delta_t
+    return 0.0 # Not given in the sources. Implement numerical integration of sigma(x) along the segment.
+
+def is_boundary(x):
+    """
+    Checks if point x is on the volume boundary.
+    """
+    # Placeholder for boundary check logic [G]
+    return False # Not given in the sources. Implement based on volume geometry.
 ```
+
+**Parameters:**
+*   $\sigma(\mathbf{x})$: Macroscopic extinction coefficient. Represents large-scale heterogeneous variation. Determines the local stretching of the base medium [S1].
+*   Base kernel functions ($\text{ff}, \text{pf}, \text{pp}$): Derived from the statistical properties of the micro-scale fluctuations. For statistically homogeneous media, these are functions of distance $t$ only [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Jacobian Factor:** The function $\text{pp}(t)$ is a PDF. When transforming variables, it incurs a Jacobian factor of $\sigma(\mathbf{x}_{i+1})$. This factor cancels the division by $\sigma$ from the equivalent of Eq 22 in the source, resulting in the simple transport kernel form used here [S1].
+*   **Statistical Homogeneity Assumption:** The method assumes that while the macroscopic density $\sigma(\mathbf{x})$ varies, the underlying correlations (captured by the base kernels) are the same throughout the medium. If correlations vary spatially, this decomposition is invalid [S1].
 
 ## Subtopics
 
 ### Heterogeneous Decomposition
-A specific application of the base transport kernel decomposition where the medium is described by a heterogeneous macroscopic density $\sigma(\mathbf{x})$ and a 1D transport kernel $T_{\text{base}}(t)$ that captures only correlations, assuming statistical homogeneity of correlations throughout the medium [S1]. This model lies between the fully homogenized model of Larsen and Vasques (identical statistics everywhere) and the general heterogeneous model (no assumptions about correlation distribution) [S1]. It is chosen when the medium has large-scale density variations but consistent small-scale correlation statistics [S1].
+This variant explicitly refers to the decomposition of the medium description into a heterogeneous macroscopic density $\sigma(\mathbf{x})$ and a 1D transport kernel $T_{\text{base}}(t)$ [S1]. It assumes statistical homogeneity of correlations throughout the medium, meaning the base kernels depend only on distance [S1]. This model lies between the fully homogenized model of Larsen and Vasques (identical statistics everywhere) and the general heterogeneous model (no assumptions about correlation distribution) [S1].
 
 ## Operating characteristics
-*   **Time Complexity**: The evaluation of the transport kernel is $O(1)$ if the base kernel functions are pre-computed lookup tables or simple analytical functions, plus the cost of computing the macroscopic optical depth $\tau_i$. Computing $\tau_i$ requires integrating $\sigma(\mathbf{x})$ along the segment, which is $O(N)$ where $N$ is the number of samples in the integration [S1].
-*   **Memory Complexity**: $O(V)$ for storing the 3D macroscopic density field $\sigma(\mathbf{x})$, plus $O(K)$ for storing the 1D base kernel tables, where $K$ is the number of entries in the tables [S1].
-*   **Strengths**: Reduces the complex 3D heterogeneous non-exponential problem to a 1D kernel lookup, making it practical to estimate numerically or derive analytically [S1]. Allows easy superposition of density variations and correlation models [S1].
-*   **Limitations**: Relies on the assumption of statistical homogeneity of correlations. If correlations are not homogeneous, the 1D base kernel may not accurately represent the medium [S1].
-*   **When to use**: When rendering heterogeneous media with non-exponential attenuation where the small-scale correlation statistics are uniform, but the large-scale density varies [S1].
-*   **When not to use**: When the medium has spatially varying correlation statistics that cannot be captured by a single 1D base kernel [S1].
+**Time and Memory Complexity:**
+The method reduces the transport kernel to 1D, making it practical to estimate numerically or derive analytically [S1]. The evaluation of the kernel is $O(1)$ if the base kernels are precomputed lookup tables or simple functions, plus the cost of integrating $\sigma(\mathbf{x})$ along the segment [S1]. Memory usage depends on the storage of $\sigma(\mathbf{x})$ and the base kernel tables [S1].
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+The method scales with the complexity of the macroscopic density field $\sigma(\mathbf{x})$ and the accuracy of the numerical integration of optical depth [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables practical rendering of heterogeneous media with non-exponential attenuation. Separates explicit density variations from statistical fluctuations, allowing for "plug-in" correlation functions [S1].
+*   **Limitations:** Relies on the assumption of statistical homogeneity of correlations. If correlations vary spatially, the model is inaccurate [S1].
+
+**When to Use:**
+Use when rendering heterogeneous media where the macroscopic density varies significantly, but the micro-scale statistical properties (correlations) are uniform throughout the volume [S1].
+
+**When Not to Use:**
+Do not use if the medium's correlation structure varies spatially, or if a fully homogenized model (Larsen and Vasques) is sufficient and simpler [S1].
 
 ## Background
-The method was introduced in "A radiative transfer framework for non-exponential media" [S1]. It addresses the difficulty of numerically evaluating the path integral for non-exponential media by decomposing the medium into a 1D transport kernel and a 3D density field [S1]. The approach is motivated by the desire to combine the benefits of fully homogenized models (like Larsen and Vasques) and general heterogeneous models, providing a middle ground that supports heterogeneous media while maintaining practical rendering methods [S1].
+**Origin:**
+The method was introduced in "A radiative transfer framework for non-exponential media" [S1].
+
+**History and Development:**
+The work positions itself between the fully homogenized model of Larsen and Vasques and general heterogeneous models, seeking a middle ground that combines the benefits of both [S1]. It was motivated by the difficulty of numerically rendering the path integral form for non-exponential media and the need to support heterogeneous media widely used in graphics [S1].
+
+**Where it is Used:**
+Rendering of participating media with non-exponential attenuation, particularly in heterogeneous environments [S1].
 
 ## Sources
 [S1] A radiative transfer framework for non-exponential media, https://doi.org/10.1145/3272127.3275103, fetched 2026-11-08

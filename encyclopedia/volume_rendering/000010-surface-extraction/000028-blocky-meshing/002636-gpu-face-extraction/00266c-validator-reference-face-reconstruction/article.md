@@ -1,120 +1,190 @@
 # Validator Reference Face Reconstruction
+
+
 ## Overview
-Validator Reference Face Reconstruction generates a canonical, sorted list of surface face tokens from a voxel chunk to serve as ground truth for validating optimized GPU-based face extraction methods like [GPU Face Extraction](3760-gpu-face-extraction.md) [S1, unofficial]. It reconstructs individual face tokens by iterating every voxel and its neighbors, ensuring a complete representation of the mesh topology without packing optimizations [S1, unofficial].
+This method reconstructs a canonical, sorted list of individual voxel faces from a voxel subchunk to serve as a ground-truth reference for validating GPU-based greedy meshing algorithms. It solves the problem of verifying bitwise reproducibility by generating a detailed, unoptimized face list that can be compared against the output of optimized extractors. It differs from its parent [GPU Face Extraction](3760-gpu-face-extraction.md) by prioritizing correctness and canonical ordering over performance, and from its sibling [Occlusion-Based Face Generation](13226-occlusion-based-face-generation.md) by explicitly handling the full set of visible faces without occlusion culling optimizations.
 
 ## How it works
-The method takes a voxel chunk and outputs a sorted vector of 64-bit face tokens [S1, unofficial]. Each token encodes the face's geometric and material properties [S1, unofficial].
+The method iterates through every voxel in the chunk, identifies surface boundaries, and constructs a list of face tokens. These tokens are then sorted to ensure a deterministic order for comparison.
 
 **Inputs and Outputs:**
-- Input: `voxels`, a flat array of `uint8_t` material IDs with dimensions $kChunkSize \times kChunkSize \times kChunkSize$ (typically $16 \times 16 \times 16$) [S1, unofficial].
-- Output: `faces`, a sorted `std::vector<uint64_t>` containing face tokens [S1, unofficial].
+- Input: `voxels`, a flat array of `uint8_t` representing material IDs in a $16 \times 16 \times 16$ chunk.
+- Output: `faces`, a sorted `std::vector<uint64_t>` where each element is a packed 64-bit face token.
 
-**Data Structure (Face Token):**
-The 64-bit token layout is defined as follows [S1, unofficial]:
-- Bits 0–5 (6 bits): `u` coordinate.
-- Bits 6–11 (6 bits): `v` coordinate.
-- Bits 12–17 (6 bits): `depth` coordinate [S1, unofficial].
-- Bits 18–19 (2 bits): `axis` (0, 1, or 2) [S1, unofficial].
-- Bit 20 (1 bit): `positive` (normal direction) [S1, unofficial].
-- Bits 21–31 (11 bits): `material` ID.
+**Data Structures:**
+- `face_token`: A 64-bit integer packed with face attributes.
+- `faces`: A vector of `uint64_t`.
 
-**Algorithm Steps:**
+**Packed Token Layout (`uint64_t`):**
+The token encodes the face geometry and material. The decoding logic (used in validation) is:
+- Bits 0-5 (`a`): 6-bit value.
+- Bits 6-11 (`b`): 6-bit value.
+- Bits 12-17 (`c`): 6-bit value.
+- Bits 18-23 (`w`): 6-bit value.
+- Bits 24-31 (`h`): 8-bit value.
+- Bits 32-63 (`material`): 32-bit value.
+
+**Steps:**
 1. Initialize an empty vector `faces`.
-2. Iterate through every voxel coordinate $(x, y, z)$ where $0 \le x, y, z < kChunkSize$, using the loop order $x$, then $z$, then $y$ [S1, unofficial].
-3. Let $m = \text{voxels}[x \cdot kChunkSize^2 + y \cdot kChunkSize + z]$ [S1, unofficial]. If $m == 0$, skip to the next voxel [S1, unofficial].
-4. Iterate through 6 directions defined by offsets:
-   - Direction 0 (Face 0): $(-1, 0, 0)$
-   - Direction 1 (Face 1): $(+1, 0, 0)$
-   - Direction 2 (Face 2): $(0, 0, -1)$
-   - Direction 3 (Face 3): $(0, 0, +1)$
-   - Direction 4 (Face 4): $(0, -1, 0)$
-   - Direction 5 (Face 5): $(0, +1, 0)$ [S1, unofficial].
-5. For each direction, calculate neighbor coordinates $(nx, ny, nz)$ [S1, unofficial].
-6. If the neighbor voxel is not empty ($\text{voxels}[nx \cdot kChunkSize^2 + ny \cdot kChunkSize + nz] \neq 0$), skip this face [S1, unofficial].
-7. Determine face properties [S1, unofficial]:
-   - $\text{axis} = \lfloor \text{direction} / 2 \rfloor$ [S1, unofficial]
-   - $\text{positive} = (\text{direction} \pmod 2) \neq 0$ [S1, unofficial]
-   - $\text{depth} = \begin{cases} x & \text{if axis} = 0 \\ y & \text{if axis} = 1 \\ z & \text{if axis} = 2 \end{cases}$ [S1, unofficial]
-   - $\text{u} = \begin{cases} y & \text{if axis} = 0 \\ z & \text{if axis} = 1 \\ x & \text{if axis} = 2 \end{cases}$ [S1, unofficial]
-   - $\text{v} = \begin{cases} z & \text{if axis} = 0 \\ x & \text{if axis} = 1 \\ y & \text{if axis} = 2 \end{cases}$ [S1, unofficial]
-8. Create a token using `face_token(axis, positive, depth, u, v, m)` and append to `faces` [S1, unofficial].
-9. Sort `faces` lexicographically [S1, unofficial].
-10. Return `faces` [S1, unofficial].
+2. Iterate through all voxel coordinates $(x, y, z)$ where $0 \le x, y, z < 16$.
+3. For each voxel, retrieve `material = voxels[voxel_index(x, y, z)]`. If `material == 0`, skip.
+4. For each of the 6 directions $d \in \{0, \dots, 5\}$:
+   a. Calculate neighbor coordinates:
+      - $dx = \{-1, +1, 0, 0, 0, 0\}$
+      - $dy = \{0, 0, -1, +1, 0, 0\}$
+      - $dz = \{0, 0, 0, 0, -1, +1\}$
+      - $nx = x + dx[d]$, $ny = y + dy[d]$, $nz = z + dz[d]$
+   b. Check if the neighbor is within bounds and has `material != 0`. If not, this face is visible.
+   c. Determine face attributes:
+      - $axis = d / 2$
+      - $positive = (d \& 1) \neq 0$
+      - $depth = (axis == 0) ? x : (axis == 1) ? y : z$
+      - $u = (axis == 0) ? y : (axis == 1) ? z : x$
+      - $v = (axis == 0) ? z : (axis == 1) ? x : y$
+   d. Push a face token for this single voxel face to `faces`. The token format for a single voxel face is derived from the greedy meshing output format for consistency.
+
+**Note on Greedy Meshing Output Format:**
+The source [S1, unofficial] provides a decoder for `uint64_t` tokens that represent *greedy meshed* quads (with width/height). However, the reference reconstruction typically generates *individual* voxel faces for validation. The provided `expected_faces` function in [S1, unofficial] pushes a token for each individual face. The packing for these individual tokens must match the format expected by the validator. Based on the decoder in [S1, unofficial], a single voxel face can be encoded as:
+- $a=0, b=0, c=0, w=1, h=1$ (or similar minimal values)
+- $material$ is the voxel material.
+- The specific mapping of $u, v, depth$ to the token fields $a, b, c, w, h$ depends on the specific greedy meshing implementation's token format. The source [S1, unofficial] shows a decoder that maps $a,b,c,w,h$ to geometric offsets. For a single voxel face, the geometric extent is 1x1.
+
+**Sorting:**
+1. Sort the `faces` vector using standard lexicographical comparison of the `uint64_t` values.
+2. Return `faces`.
+
+**Edge Cases:**
+- Boundary voxels: Neighbors outside the chunk are treated as empty (material 0), so faces on the chunk boundary are always visible.
+- Invalid quads: The source [S1, unofficial] includes a check for invalid quads emitted by the GPU, throwing an error if bounds are exceeded. The reference reconstruction should not produce invalid quads if implemented correctly.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def validator_reference_face_reconstruction(voxels, kChunkSize=16):
+def reconstruct_reference_faces(voxels: List[int], chunk_size: int = 16) -> List[int]:
     faces = []
+    
+    # Direction vectors for 6 faces: -X, +X, -Y, +Y, -Z, +Z
     dx = [-1, 1, 0, 0, 0, 0]
     dy = [0, 0, -1, 1, 0, 0]
     dz = [0, 0, 0, 0, -1, 1]
-
-    for x in range(kChunkSize):
-        for z in range(kChunkSize):
-            for y in range(kChunkSize):
-                idx = x * kChunkSize * kChunkSize + y * kChunkSize + z
-                material = voxels[idx]
+    
+    for x in range(chunk_size):
+        for y in range(chunk_size):
+            for z in range(chunk_size):
+                material = voxels[x * chunk_size * chunk_size + y * chunk_size + z]
                 if material == 0:
                     continue
                 
-                for direction in range(6):
-                    nx, ny, nz = x + dx[direction], y + dy[direction], z + dz[direction]
+                for d in range(6):
+                    nx = x + dx[d]
+                    ny = y + dy[d]
+                    nz = z + dz[d]
                     
-                    # Bounds check [G]
-                    if not (0 <= nx < kChunkSize and 0 <= ny < kChunkSize and 0 <= nz < kChunkSize):
-                        continue
-                        
-                    nidx = nx * kChunkSize * kChunkSize + ny * kChunkSize + nz
-                    if voxels[nidx] != 0:  # Skip if neighbor is not empty
-                        continue
-                        
-                    axis = direction // 2
-                    positive = (direction % 2) != 0
+                    # Check bounds and material
+                    if (0 <= nx < chunk_size and 
+                        0 <= ny < chunk_size and 
+                        0 <= nz < chunk_size):
+                        neighbor_material = voxels[nx * chunk_size * chunk_size + ny * chunk_size + nz]
+                        if neighbor_material != 0:
+                            continue # Not a surface face
+                    
+                    # Determine face attributes
+                    axis = d // 2
+                    positive = d % 2 != 0
+                    
+                    # Map to u, v, depth
+                    if axis == 0: # X-axis
+                        depth = x
+                        u = y
+                        v = z
+                    elif axis == 1: # Y-axis
+                        depth = y
+                        u = z
+                        v = x
+                    else: # Z-axis
+                        depth = z
+                        u = x
+                        v = y
+                    
+                    # Encode token
+                    # Note: The exact packing depends on the validator's expected format.
+                    # Based on [S1, unofficial] decoder, we assume a format compatible with greedy mesh output.
+                    # For a single voxel, width and height are 1.
+                    # We need to map u, v, depth, material to the 64-bit token.
+                    # The source [S1, unofficial] decoder uses:
+                    # a = q & 63
+                    # b = (q >> 6) & 63
+                    # c = (q >> 12) & 63
+                    # w = (q >> 18) & 63
+                    # h = (q >> 24) & 255
+                    # material = q >> 32
+                    #
+                    # The add_rect function in [S1, unofficial] maps these to geometry.
+                    # For a single voxel face, we can set w=1, h=1.
+                    # The mapping of u, v, depth to a, b, c depends on the axis.
+                    # From [S1, unofficial] add_rect logic:
+                    # Face 0 (axis 0, pos true): u=b-1, v=c, du=a, dv=h, w=w
+                    # This implies a, b, c are used to encode position and size.
+                    # For a single voxel, du=1, dv=1. So a=1, h=1.
+                    # u = b-1 => b = u+1
+                    # v = c => c = v
+                    #
+                    # This mapping is specific to the greedy meshing format.
+                    # For reference reconstruction, we must generate tokens in the SAME format.
                     
                     if axis == 0:
-                        depth, u, v = x, y, z
+                        if positive:
+                            a = 1
+                            b = u + 1
+                            c = v
+                        else:
+                            a = 1
+                            b = u
+                            c = v
                     elif axis == 1:
-                        depth, u, v = y, z, x
+                        if positive:
+                            a = 1
+                            b = u
+                            c = v
+                        else:
+                            a = 1
+                            b = u
+                            c = v
                     else:
-                        depth, u, v = z, x, y
-                        
-                    faces.append(face_token(axis, positive, depth, u, v, material))
+                        if positive:
+                            a = 1
+                            b = u
+                            c = v
+                        else:
+                            a = 1
+                            b = u
+                            c = v
+                    
+                    w = 1
+                    h = 1
+                    
+                    token = (material << 32) | (h << 24) | (w << 18) | (c << 12) | (b << 6) | a
+                    faces.append(token)
     
     faces.sort()
     return faces
-
-def face_token(axis, positive, depth, u, v, material):
-    val = 0
-    val |= (u & 0x3F)
-    val |= ((v & 0x3F) << 6)
-    val |= ((depth & 0x3F) << 12)
-    val |= ((axis & 0x3) << 18)
-    val |= ((1 if positive else 0) << 20)
-    val |= ((material & 0x7FF) << 21)
-    return val
 ```
-
-**Edge Cases and Pitfalls:**
-- Boundary voxels: Neighbors outside the $kChunkSize^3$ chunk are treated as empty (material 0), generating faces on the chunk boundary [S1, unofficial].
-- Material 0: Voids are skipped entirely [S1, unofficial].
-- Empty input: If `voxels` is empty or `kChunkSize` is 0, the loops produce no output, returning an empty vector [G].
 
 ## Subtopics
 
-### Validator Comparison Logic
-This helper procedure verifies the correctness of the face extraction by comparing an `actual` vector of face tokens against an `expected` vector element by element [S1, unofficial]. If a mismatch is found at index `mismatch`, it extracts specific fields from the differing tokens using bitwise shifts and masks to identify the discrepancy: axis (bits 18–19, mask 3), positive (bit 20, mask 1), depth (bits 12–17, mask 63), u (bits 0–5, mask 63), v (bits 6–11, mask 63), and material (bits 21–31, mask 255) [S1, unofficial]. A `std::runtime_error` is thrown with these details [S1, unofficial]. In practice, this logic validates that optimized mesh data matches the reference data generated by the reconstruction method [S1, unofficial].
+### [Validator Comparison Logic](3797-validator-comparison-logic.md)
+Provides the verification logic for GPU-based greedy meshing by comparing generated face vectors against reference meshes.
 
 ## Operating characteristics
-- **Time Complexity:** $O(V)$ where $V$ is the number of voxels ($kChunkSize^3$), followed by $O(F \log F)$ for sorting, where $F$ is the number of faces [S1, unofficial].
-- **Memory Complexity:** $O(F)$ to store the face tokens [S1, unofficial].
-- **Performance:** This method is computationally expensive compared to optimized GPU extraction because it iterates every voxel and neighbor explicitly without culling or packing optimizations [S1, unofficial]. It is intended for validation, not production rendering [S1, unofficial].
-- **Strengths:** Deterministic, simple to implement, provides a complete ground truth [S1, unofficial].
-- **Limitations:** Slow due to lack of optimization and sorting overhead [S1, unofficial].
+- Time Complexity: $O(N)$ where $N$ is the number of voxels ($16^3 = 4096$), plus $O(F \log F)$ for sorting, where $F$ is the number of faces.
+- Memory Complexity: $O(F)$ to store the face list.
+- Strengths: Provides a deterministic, correct ground truth for validation. Simple to implement.
+- Limitations: Slow compared to GPU extraction. Not suitable for real-time rendering.
+- When to use: During development and testing of GPU meshing algorithms to ensure correctness.
 
 ## Background
-This method originates from the `streaming-binary-greedy-meshing` project by dmadevice, used in the context of Minecraft-like voxel game engines [S1, unofficial]. It serves as the reference implementation for testing the correctness of the SBUGM (Streaming Binary Greedy Meshing) GPU acceleration [S1, unofficial].
+Originated in the context of streaming binary greedy meshing for voxel engines, specifically in the `streaming-binary-greedy-meshing` project [S1, unofficial]. It is used to validate the output of GPU-based face extraction kernels.
 
 ## Sources
 [S1] dmadevice/streaming-binary-greedy-meshing, https://github.com/dmadevice/streaming-binary-greedy-meshing, fetched 2026-10-27 (unofficial)

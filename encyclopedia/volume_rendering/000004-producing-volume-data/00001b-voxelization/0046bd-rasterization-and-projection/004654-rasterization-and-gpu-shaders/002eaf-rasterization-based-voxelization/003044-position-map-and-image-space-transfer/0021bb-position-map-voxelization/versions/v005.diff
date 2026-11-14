@@ -1,0 +1,238 @@
+--- v004.md
++++ v005.md
+@@ -4,128 +4,147 @@
+ 
+ ## Overview
+-Position Map Voxelization is a post-processing step that converts a 2D position map—containing world-space coordinates of previously identified surface points—into a 3D volume texture by marking active voxels [S1, unofficial]. It distinguishes itself from sibling methods by explicitly filling the primary voxel and its 8 immediate neighbors to ensure connectivity and fill gaps, rather than relying solely on the precise rasterization of the surface geometry [S1, unofficial].
++Position Map Voxelization is a post-processing step that converts a 2D position map (containing world-space positions of surface fragments) into a 3D volume texture by mapping those positions to voxel indices and marking the primary voxel and its 8 immediate neighbors as active [S1, unofficial]. It differs from direct rasterization methods by decoupling surface identification from volume population, allowing for gap-filling connectivity via neighbor marking [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 2D image texture (`positionMap`) storing `vec4` world-space positions, where the alpha channel indicates validity (active surface point) [S1, unofficial].
+-*   **Output:** A 3D image texture (`volume`) storing 8-bit values (typically `r8` format) indicating active voxels [S1, unofficial].
++*   **Input:** A 2D image texture `positionMap` (binding point 1, format `rgba32f`) storing `vec4` world-space positions. The alpha channel indicates validity (active voxels) [S1, unofficial].
++*   **Output:** A 3D image texture `volume` (binding point 0, format `r8`) storing 8-bit voxel indicators [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `positionMap`: `layout(binding=1, rgba32f) uniform image2D`. Stores `vec4` where `xyz` is world position and `a` is a validity flag [S1, unofficial].
+-*   `volume`: `layout(binding=0, r8) uniform image3D`. Stores 8-bit values. Although the shader writes `vec4(1)`, the format truncates this to `1.0` (integer 1) [S1, unofficial].
++*   `positionMap`: `layout(binding=1, rgba32f) uniform image2D`. Each texel stores `(x, y, z, alpha)` where `xyz` is world position and `alpha > 0` indicates an active surface point [S1, unofficial].
++*   `volume`: `layout(binding=0, r8) uniform image3D`. Stores voxel activity status [S1, unofficial].
+ 
+ **Parameters:**
+-*   `stepSize`: The distance in world units to step to reach neighbor voxels. Used to offset the position before indexing [S1, unofficial].
+-*   `voxelDim`: The resolution of the volume along each axis (assumed uniform for the formula below) [S1, unofficial].
+-*   `xBounds`, `yBounds`, `zBounds`: The bounding box of the volume in world space, defined as $[min, max]$ for each axis [S1, unofficial].
++*   `voxelDim`: Resolution of the volume (assumed uniform across axes for the formula) [S1, unofficial].
++*   `xBounds`, `yBounds`, `zBounds`: Volume bounds defined as pairs `(min, max)` for each axis [S1, unofficial].
++*   `stepSize`: Distance in world units to offset positions when calculating neighbor voxels [S1, unofficial].
+ 
+ **Steps:**
+-1.  Bind the voxelization shader, the `positionMap` texture (binding point 1), and the `volume` texture (binding point 0) [S1, unofficial].
++1.  Bind the voxelizer shader, the `positionMap` as a read-only image texture at binding point 1, and the `volume` as a read-write image texture at binding point 0 [S1, unofficial].
+ 2.  Bind a full-screen quad VAO and load identity matrices for projection, view, and model matrices [S1, unofficial].
+-3.  Disable depth testing, depth mask, culling, and color mask to allow direct writes to the volume texture without overwriting concerns [S1, unofficial].
+-4.  Render the full-screen quad. For each fragment:
+-    a.  Read the world-space position from the position map: `worldPos = imageLoad(positionMap, ivec2(gl_FragCoord.xy))` [S1, unofficial].
+-    b.  Check if the voxel is active by testing the alpha channel: `if (worldPos.a > 0)` [S1, unofficial].
+-    c.  If active, convert `worldPos.xyz` to voxel indices $(x, y, z)$ using the formula below and store a white color `vec4(1)` in the volume texture at that index [S1, unofficial].
+-    d.  For each of the 8 neighbors defined by the sign combinations of $(\pm 1, \pm 1, \pm 1)$:
+-        i.  Calculate the neighbor's world position: $pos_{neighbor} = worldPos.xyz + stepSize \times \text{normalize}(vec3(dx, dy, dz))$, where $(dx, dy, dz)$ is the current sign combination [S1, unofficial].
+-        ii. Convert $pos_{neighbor}$ to voxel indices and store `vec4(1)` in the volume texture at that index [S1, unofficial].
++3.  Disable depth testing, depth mask, culling, and color mask to prevent incorrect overwrites during the update [S1, unofficial].
++4.  Draw the full-screen quad, triggering the fragment shader for each pixel [S1, unofficial].
+ 5.  Generate mipmaps for the 3D volume texture [S1, unofficial].
+-6.  Unbind textures and shader, and reset OpenGL state (enable depth test, culling, depth mask, color mask) [S1, unofficial].
++6.  Unbind textures, shader, and VAO, and reset OpenGL state (enable depth test, culling, depth mask, color mask) [S1, unofficial].
+ 
+-**Formula:**
+-The conversion from world position $pos = (pos.x, pos.y, pos.z)$ to voxel indices $(x, y, z)$ for a volume of dimension `voxelDim` and bounds $[xBounds, yBounds, zBounds]$ is:
++**Fragment Shader Logic:**
++For each fragment corresponding to a texel in `positionMap`:
++1.  Load the world-space position: `worldPos = imageLoad(positionMap, ivec2(gl_FragCoord.xy))` [S1, unofficial].
++2.  Check if the voxel is active by testing `worldPos.a > 0` [S1, unofficial].
++3.  If active, calculate the voxel index using the conversion formula and store `vec4(1)` (truncated to `1.0` in `r8`) in the volume texture at that index [S1, unofficial].
++4.  For each of the 8 neighbors defined by sign combinations of $(\pm 1, \pm 1, \pm 1)$:
++    *   Calculate the neighbor's world position: `neighborPos = worldPos.xyz + stepSize * normalize(vec3(dx, dy, dz))` where `dx, dy, dz \in \{-1, 1\}` [S1, unofficial].
++    *   Calculate the neighbor's voxel index using the conversion formula.
++    *   Store `vec4(1)` in the volume texture at the neighbor's index [S1, unofficial].
++
++**Index Conversion Formula:**
++Given volume bounds $[x_{min}, x_{max}]$, $[y_{min}, y_{max}]$, $[z_{min}, z_{max}]$ and resolution `voxelDim`, the voxel indices $(x, y, z)$ are calculated as:
+ 
+ $$
+-x = \text{voxelDim} \times \frac{pos.x - xBounds.x}{xBounds.y - xBounds.x}
++x = \text{voxelDim} \times \frac{pos.x - x_{min}}{x_{max} - x_{min}}
+ $$
+ 
+ $$
+-y = \text{voxelDim} \times \frac{pos.y - yBounds.x}{yBounds.y - yBounds.x}
++y = \text{voxelDim} \times \frac{pos.y - y_{min}}{y_{max} - y_{min}}
+ $$
+ 
+ $$
+-z = \text{voxelDim} \times \frac{pos.z - zBounds.x}{zBounds.y - zBounds.x}
++z = \text{voxelDim} \times \frac{pos.z - z_{min}}{z_{max} - z_{min}}
+ $$
+ 
+-The function returns `ivec3(x, y, z)`. Standard integer truncation or floor is implied by the return type `ivec3` in typical GLSL implementations [G].
++The function returns `ivec3(x, y, z)` [S1, unofficial]. Standard integer truncation or floor is implied by the return type `ivec3` in typical GLSL implementations [G].
+ 
+ **Pseudocode:**
++
+ ```python
+-# Fragment Shader Logic for Position Map Voxelization
++def position_map_voxelization(position_map, volume, voxel_dim, bounds, step_size):
++    """
++    position_map: 2D array of vec4 (world_pos, alpha)
++    volume: 3D array of float (r8 format)
++    voxel_dim: int, resolution of the volume
++    bounds: dict with keys 'x', 'y', 'z', each containing (min, max)
++    step_size: float, world distance to step for neighbors
++    """
++    # Disable depth testing, culling, etc.
++    disable_depth_test()
++    disable_depth_mask()
++    disable_culling()
++    disable_color_mask() # Or set to write only specific channels if supported
+ 
+-# Uniforms/Inputs
+-# positionMap: image2D (binding 1, rgba32f)
+-# volume: image3D (binding 0, r8)
+-# voxelDim: int
+-# xBounds: vec2 (min, max)
+-# yBounds: vec2 (min, max)
+-# zBounds: vec2 (min, max)
+-# stepSize: float
++    # Bind shaders and textures
++    bind_shader(voxelizer_shader)
++    bind_image_texture(position_map, binding=1, access=READ_ONLY)
++    bind_image_texture(volume, binding=0, access=READ_WRITE)
++    bind_full_screen_quad()
+ 
+-def calculateVoxelIndex(pos: vec3) -> ivec3:
+-    x = voxelDim * (pos.x - xBounds.x) / (xBounds.y - xBounds.x)
+-    y = voxelDim * (pos.y - yBounds.x) / (yBounds.y - yBounds.x)
+-    z = voxelDim * (pos.z - zBounds.x) / (zBounds.y - zBounds.x)
+-    return ivec3(int(x), int(y), int(z)) # Truncation implied
++    # Draw full-screen quad
++    draw_full_screen_quad()
+ 
+-def main():
+-    # 1. Read world position from position map
+-    worldPos = imageLoad(positionMap, ivec2(gl_FragCoord.xy))
++    # Generate mipmaps for the volume
++    generate_mipmaps(volume)
++
++    # Reset state
++    enable_depth_test()
++    enable_depth_mask()
++    enable_culling()
++    enable_color_mask()
++    unbind_all()
++
++def voxelizer_fragment_shader(position_map, volume, voxel_dim, bounds, step_size):
++    """
++    Called for each fragment corresponding to a texel in position_map
++    """
++    # 1. Read world-space position
++    frag_coord = get_frag_coord() # gl_FragCoord.xy
++    world_pos_data = image_load(position_map, ivec2(frag_coord))
++    world_pos = world_pos_data.xyz
++    alpha = world_pos_data.w
++
++    # 2. Check if active
++    if alpha > 0:
++        # 3. Convert to voxel index and store
++        voxel_idx = calculate_voxel_index(world_pos, voxel_dim, bounds)
++        image_store(volume, voxel_idx, vec4(1.0))
++
++        # 4. Mark 8 neighbors
++        for dx in [-1, 1]:
++            for dy in [-1, 1]:
++                for dz in [-1, 1]:
++                    # Calculate neighbor world position
++                    direction = normalize(vec3(dx, dy, dz))
++                    neighbor_pos = world_pos + step_size * direction
++                    
++                    # Convert to voxel index and store
++                    neighbor_idx = calculate_voxel_index(neighbor_pos, voxel_dim, bounds)
++                    image_store(volume, neighbor_idx, vec4(1.0))
++
++def calculate_voxel_index(pos, voxel_dim, bounds):
++    """
++    Convert world position to voxel index
++    """
++    x = voxel_dim * (pos.x - bounds['x'][0]) / (bounds['x'][1] - bounds['x'][0])
++    y = voxel_dim * (pos.y - bounds['y'][0]) / (bounds['y'][1] - bounds['y'][0])
++    z = voxel_dim * (pos.z - bounds['z'][0]) / (bounds['z'][1] - bounds['z'][0])
+     
+-    # 2. Check validity
+-    if worldPos.a > 0:
+-        col = vec4(1.0) # White color, truncated to 1.0 in r8 format
+-        
+-        # 3. Mark primary voxel
+-        primaryIndex = calculateVoxelIndex(worldPos.xyz)
+-        imageStore(volume, primaryIndex, col)
+-        
+-        # 4. Mark 8 neighbors
+-        # Sign combinations for dx, dy, dz: (-1,-1,-1), (-1,-1,1), ..., (1,1,1)
+-        signs = [
+-            (-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1),
+-            (1, -1, -1), (1, -1, 1), (1, 1, -1), (1, 1, 1)
+-        ]
+-        
+-        for dx, dy, dz in signs:
+-            neighborPos = worldPos.xyz + stepSize * normalize(vec3(dx, dy, dz))
+-            neighborIndex = calculateVoxelIndex(neighborPos)
+-            imageStore(volume, neighborIndex, col)
++    # Truncate to integer
++    return ivec3(int(x), int(y), int(z))
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The position map uses `rgba32f` to preserve world-space accuracy [S1, unofficial]. Insufficient precision in the position map will lead to incorrect voxel indexing.
+-*   **Boundary Conditions:** The formula assumes the volume bounds are correctly set. If a world position falls outside the bounds, the resulting voxel index may be negative or exceed `voxelDim`, leading to out-of-bounds memory access in `imageStore`. The sources do not specify explicit clamping logic [S1, unofficial].
+-*   **Neighbor Offset:** The use of `stepSize * normalize(...)` for neighbors assumes a uniform voxel grid. If the grid is non-uniform, this approach will incorrectly offset the neighbor positions [S1, unofficial].
++*   **Precision:** Insufficient precision in the position map leads to incorrect voxel indexing [S1, unofficial].
++*   **Boundary Conditions:** Positions outside the volume bounds result in negative or out-of-bounds indices. Explicit clamping is often required [G].
++*   **Aliasing:** Solid voxelization of closed polygonal models may exhibit aliasing effects, appearing as prolonged lines where some voxels are missing at the rasterization stage [S1, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** $O(N)$, where $N$ is the number of pixels in the position map (screen resolution). Each active pixel triggers 9 writes to the volume texture (1 primary + 8 neighbors) [S1, unofficial].
+-*   **Memory:** The position map requires $W \times H \times 16$ bytes (for `rgba32f`). The volume texture requires $X \times Y \times Z \times 1$ byte (for `r8`) [S1, unofficial].
+-
+-**Measured Performance:**
+-*   Not given in the sources.
+-
+-**Scaling:**
+-*   Scales linearly with screen resolution for the position map read. The volume texture writes are bounded by the volume resolution.
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Ensures connectivity by filling neighbors, reducing gaps in the voxelized surface [S1, unofficial]. Leverages GPU parallelism for fast voxelization [S1, unofficial].
+-*   **Limitations:** The fixed `stepSize` for neighbors may not adapt to varying surface curvature or density. Out-of-bounds indices are not handled in the provided sources [S1, unofficial].
+-
+-**When to use it and when not:**
+-*   Use when connectivity and gap-filling are critical for subsequent volume rendering steps (e.g., ray marching) [S1, unofficial].
+-*   Do not use if precise surface representation without neighbor filling is required, or if the volume bounds are not well-defined [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of texels in the position map, as each texel triggers a constant number of volume writes (1 primary + 8 neighbors).
++*   **Memory Complexity:** $O(V)$ where $V$ is the volume of the 3D texture. The position map requires $O(W \times H)$ memory.
++*   **Performance:** Performance depends on the resolution of the position map and the volume. The use of image store operations allows for parallel writing but may cause contention if multiple fragments write to the same voxel (though the operation is idempotent for binary activity).
++*   **Strengths:** Ensures connectivity by marking neighbors; decouples surface rasterization from volume population.
++*   **Limitations:** Requires a pre-generated position map; neighbor marking may over-approximate the surface, filling gaps but potentially adding false voxels.
++*   **When to use:** When connectivity is critical and the position map is already available.
++*   **When not to use:** When memory bandwidth is a bottleneck and the position map is very large, or when precise surface representation without neighbor filling is required.
+ 
+ ## Background
+-**Origin:**
+-The method is described in the context of a cloud renderer implementation, specifically as a "second voxelizer" pass that updates the position map and generates mipmaps for the volume texture [S1, unofficial].
+-
+-**History and Development:**
+-The technique is part of a broader family of rasterization-based voxelization methods that use image-space transfer mechanisms [S1, unofficial].
+-
+-**Where it is used:**
+-Used in real-time cloud rendering applications where efficient voxelization of surface geometry is required for subsequent volume rendering techniques like cone tracing [S1, unofficial].
++Position Map Voxelization is used in cloud rendering and other volume visualization applications where surface-based voxelization is preferred for efficiency or simplicity. It is part of a family of methods that use image-space techniques to populate volume data.
+ 
+ ## Sources

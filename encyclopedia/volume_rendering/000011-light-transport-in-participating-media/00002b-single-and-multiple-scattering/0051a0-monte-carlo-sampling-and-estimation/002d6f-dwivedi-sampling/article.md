@@ -1,96 +1,106 @@
 # Dwivedi Sampling
 
-Also called: Biasing Random Walk
+Also called: Biasing Random Walk, Slab Approximation Sampling
 
 ## Overview
-Dwivedi sampling is a variance reduction technique for Monte Carlo light transport in participating media, specifically designed for high-scattering and isotropic scenarios [S1]. It improves convergence by biasing the random walk probability distributions to exit the medium as quickly as possible, operating on the premise that paths close to the boundary contribute more significantly to the final image than paths deep within the volume [S1][S2, unofficial]. Unlike standard distance sampling which treats the medium uniformly, Dwivedi sampling approximates the local geometry as a slab to analytically estimate the likelihood of exit, thereby reducing the number of "lost" paths that wander uselessly inside the object [S2, unofficial].
+Dwivedi Sampling is a variance reduction technique for Monte Carlo light transport in participating media that biases the random walk to exit the medium as quickly as possible [S1]. It operates on the principle that paths close to the boundary contribute more significantly to the final image than those deep within the volume, particularly in high-scattering scenarios [S1]. Unlike standard distance sampling which treats the medium uniformly, Dwivedi Sampling approximates the local geometry as a slab to analytically estimate the light field, thereby reducing the number of "lost" paths that terminate deep inside opaque or highly scattering objects [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Current scattering vertex position $\mathbf{x}$, incoming direction $\omega_i$, medium properties (extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$), and the geometric boundary of the participating object.
-*   **Outputs:** A sampled distance to the next interaction $s$ and/or a sampled outgoing direction $\omega_o$, along with the associated probability density function (PDF) value $p(s)$ or $p(\omega_o)$ for importance weighting.
+**Inputs:**
+*   Current scattering vertex position $\mathbf{x}$ and direction $\omega_i$.
+*   Local extinction coefficient $\sigma_t(\mathbf{x})$.
+*   Local scattering coefficient $\sigma_s(\mathbf{x})$ and absorption coefficient $\sigma_a(\mathbf{x})$.
+*   Phase function $p(\omega_i, \omega_o)$.
+*   Geometric boundary information (to determine thickness).
+
+**Outputs:**
+*   Next scattering vertex position $\mathbf{x}'$.
+*   Next direction $\omega_o$.
+*   Weight correction factor for the path throughput.
 
 **Data Structures:**
-*   **Slab Approximation:** A local geometric representation defined by the entry point $\mathbf{x}_{in}$ and exit point $\mathbf{x}_{out}$ of the probe ray passing through $\mathbf{x}$. The thickness $T$ is the distance $|\mathbf{x}_{out} - \mathbf{x}_{in}|$.
-*   **Sampling Weights:** A set of weights $w_k$ for each sampling method $k$ used in Multiple Importance Sampling (MIS).
+*   **Slab Model:** A local geometric approximation defined by the entry point $\mathbf{x}_{in}$, exit point $\mathbf{x}_{out}$, and thickness $T = \|\mathbf{x}_{out} - \mathbf{x}_{in}\|$ along the view or scattering direction.
+*   **Probe Ray:** A ray cast from $\mathbf{x}$ in direction $\omega_i$ (or opposite, depending on implementation) to determine $T$.
 
 **Steps:**
-1.  **Probe Ray Casting:** Shoot a ray from the current vertex $\mathbf{x}$ in the direction of the incoming light or the primary ray direction to intersect the object boundary. This yields the entry point $\mathbf{x}_{in}$ and exit point $\mathbf{x}_{out}$ [S2, unofficial].
-2.  **Slab Thickness Estimation:** Calculate the local slab thickness $T = |\mathbf{x}_{out} - \mathbf{x}_{in}|$ [S2, unofficial]. This crudely approximates the object as a planar slab [S1][S2, unofficial].
-3.  **Analytic Probability Calculation:** Compute the probability of exiting the slab within a distance $s$ using the analytic solution for a slab with extinction coefficient $\sigma_t$. The transmission through a slab of thickness $T$ is $e^{-\sigma_t T}$ [S1]. The PDF for distance sampling biased towards exit is derived from the derivative of the transmission function relative to the slab geometry [S1].
-4.  **Sampling Mix:** Combine the Dwivedi-biased sampling with classical distance/direction sampling methods. Specifically, mix the slab-based sampling with standard exponential distance sampling $p_{classical}(s) = \sigma_t e^{-\sigma_t s}$ and potentially direction sampling methods [S2, unofficial].
-5.  **Multiple Importance Sampling (MIS):** Apply MIS to combine the samples. The sources specify mixing with classical methods and using modified heuristic weights from [Kd14] for distance and direction sampling [S2, unofficial]. For RGB renders, this involves weighting between 6 methods (2 directions $\times$ 3 channels or similar combinatorial mix depending on implementation) [S2, unofficial].
-6.  **Weight Adjustment:** The MIS weights are modified from the standard heuristic in [Kd14] to be slightly different for distance and direction sampling to better balance the bias [S2, unofficial].
-
-**Formulas:**
-*   Slab Transmission: $T(s) = e^{-\sigma_t s}$ for a path of length $s$ within the slab [S1].
-*   Biased PDF: The exact analytic form of the Dwivedi PDF is not explicitly provided in the notes, but it is derived from the slab approximation to favor shorter paths that exit the boundary [S1].
-*   MIS Weight: $w_k = \frac{\alpha_k p_k(x)}{\sum_j \alpha_j p_j(x)}$, where $\alpha_k$ are the heuristic weights modified from [Kd14] [S2, unofficial].
-
-**Parameters:**
-*   **Slab Approximation:** Used as a local surrogate for complex geometry [S1][S2, unofficial].
-*   **MIS Heuristic Weights:** Modified from [Kd14]; specific values are "Not given in the sources" [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Thin Geometries:** The method is unsuitable for thin geometries (such as ears) with strong backlighting [S1]. The slab approximation fails to capture the complex light transport in thin regions, leading to high variance or incorrect biasing [S1].
-*   **Precision:** The probe ray must accurately intersect the boundary; errors in $\mathbf{x}_{in}$ and $\mathbf{x}_{out}$ directly corrupt the slab thickness $T$ and the resulting bias [S2, unofficial].
+1.  **Thickness Estimation:** Cast a probe ray from the current vertex $\mathbf{x}$ in the direction of interest (typically the outgoing direction or towards the camera) to intersect the medium boundary. Calculate the distance to the intersection, which serves as the local slab thickness $T$ [S2, unofficial].
+2.  **Slab Approximation:** Approximate the local volume geometry as a homogeneous slab of thickness $T$ with constant coefficients $\sigma_t, \sigma_s, \sigma_a$ [S1].
+3.  **Analytic Light Field Computation:** Use the analytic solution for light transport through a slab to determine the probability density function (PDF) for the next interaction. This involves computing the transmittance and the contribution of light escaping the slab [S1].
+4.  **Biased Sampling:** Sample the distance to the next interaction $s$ from the biased PDF derived from the slab model. This PDF favors shorter distances that lead to boundary exit [S1].
+5.  **Weight Correction:** Calculate the importance weight $w$ to correct for the bias. The weight is the ratio of the true PDF (standard exponential sampling) to the biased PDF (slab sampling) [S1][S2, unofficial].
+    $$ w = \frac{p_{true}(s)}{p_{biased}(s)} $$
+6.  **Multiple Importance Sampling (MIS):** Combine the Dwivedi sampling strategy with classical distance and direction sampling methods. Use modified heuristic weights (e.g., from [Kd14]) to balance the contribution of the biased samples against unbiased samples [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dwivedi_sampling(vertex, medium, geometry):
-    # 1. Probe ray to estimate thickness
-    # Shoot ray from vertex in relevant direction (e.g., incoming light direction)
-    hit_in, hit_out = geometry.intersect_through(vertex)
+def dwivedi_sampling(vertex, geometry, sigma_t, sigma_s, sigma_a, phase_func):
+    # 1. Estimate thickness by shooting a probe ray
+    # Returns distance to boundary intersection
+    thickness = geometry.ray_intersect(vertex.position, vertex.direction)
     
-    # 2. Calculate slab thickness
-    T = distance(hit_in, hit_out)
+    # If no intersection found (infinite medium), fall back to standard sampling
+    if thickness is None:
+        return standard_monte_carlo_sampling(vertex, sigma_t, sigma_s, sigma_a, phase_func)
     
-    # 3. Compute slab-based PDF for distance
-    # Analytic approximation based on slab transmission
-    # Note: Exact formula from Dwivedi 1982 is not fully detailed in sources
-    # Assuming standard exponential decay biased by slab exit probability
-    sigma_t = medium.extinction
-    p_slab = compute_slab_pdf(vertex, T, sigma_t) 
+    # 2. Approximate local geometry as a slab
+    # Compute analytic transmittance and light field contribution for the slab
+    # This step derives the biased PDF p_biased(s) based on slab physics
+    biased_pdf = compute_slab_pdf(vertex.position, thickness, sigma_t, sigma_s, sigma_a)
     
-    # 4. Classical sampling
-    p_classical = sigma_t * exp(-sigma_t * random_distance())
+    # 3. Sample distance from biased PDF
+    # Inverse CDF sampling for the slab model
+    u = random_uniform()
+    sampled_distance = biased_pdf.inverse_cdf(u)
     
-    # 5. Direction sampling (if applicable)
-    # Mix with direction sampling methods from [Kd14]
-    p_dir = compute_direction_pdf(vertex, medium.phase)
+    # 4. Calculate weight correction
+    # True PDF is exponential distribution for homogeneous medium
+    true_pdf = sigma_t * exp(-sigma_t * sampled_distance)
     
-    # 6. MIS Combination
-    # Modified heuristic weights from [Kd14]
-    # Specific weights for distance and direction are modified [S2, unofficial]
-    weights = get_modified_heuristic_weights(p_slab, p_classical, p_dir)
+    # Handle division by zero or near-zero probabilities
+    if biased_pdf.value(sampled_distance) < epsilon:
+        weight = 0.0
+    else:
+        weight = true_pdf / biased_pdf.value(sampled_distance)
     
-    # Select sample based on weights
-    sample = select_mis_sample([p_slab, p_classical, p_dir], weights)
+    # 5. Apply MIS with classical sampling
+    # Mix with classical distance sampling using heuristic weights
+    # w_mis = w_biased * w_heuristic_biased + w_classical * w_heuristic_classical
+    mis_weight = compute_mis_weight(weight, sampled_distance, sigma_t)
     
-    return sample, weights
+    # 6. Update vertex
+    next_position = vertex.position + sampled_distance * vertex.direction
+    next_direction = sample_phase_function(phase_func, vertex.direction)
+    
+    return next_position, next_direction, mis_weight
 ```
+
+**Parameters:**
+*   **Slab Thickness T:** Determined dynamically per vertex.
+*   **MIS Heuristic Weights:** Modified from [Kd14] to distinguish between distance and direction sampling contributions [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Thin Geometries:** The method is unsuitable for thin geometries (such as ears) with strong backlighting, as the slab approximation may fail to capture the complex light transport in such cases [S1].
+*   **Heterogeneous Media:** The analytic slab solution assumes homogeneous coefficients. In heterogeneous media, the local approximation may introduce bias if the coefficients vary significantly over the thickness $T$ [S1].
+*   **Boundary Intersections:** If the probe ray fails to intersect a boundary (e.g., in an infinite medium), the method must gracefully degrade to standard Monte Carlo sampling [S2, unofficial].
 
 ## Subtopics
 
 ### Meng et al. Biasing Sampling
-Meng et al. [S1] proposed variants to address Dwivedi sampling's limitations with thin geometries. **Closest points sampling** searches for the closest point to the boundary at every scattering vertex to increase the chances of escaping thin geometry [S1]. **Incident illumination sampling** chooses light vertices proportional to their emission using importance sampling, specifically improving variance for backlit cases [S1]. These methods are only suitable for high-order scattering and isotropic participating media [S1].
+A variant that addresses the limitations of Dwivedi Sampling in thin geometries by incorporating geometric characteristics to guide scattering away from the object boundary [S1]. It proposes two specific methods: **Closest Points Sampling**, which searches for the closest point to the boundary at every scattering vertex to increase escape chances in thin structures, and **Incident Illumination Sampling**, which chooses light vertices proportional to their emission using importance sampling to improve variance in backlit cases [S1]. This variant is only suitable for high-order scattering and isotropic participating media [S1].
 
 ### Adjoint-guided Tracking
-Adjoint-guided tracking is a future work technique where the probabilities $P_a$ (absorption), $P_s$ (scattering), and $P_n$ (null scattering) in the tracker are biased based on scene information [S3]. This includes increasing absorption rates in emissive parts or scattering more in brightly lit regions to reduce variance [S3]. It cites Dwivedi (1982) for advanced zero-variance schemes [S3].
+A future work technique where the probabilities of absorption ($P_a$), scattering ($P_s$), and normal direction ($P_n$) in the tracker are biased based on scene information, such as light distribution [S3]. This involves increasing absorption rates in emissive parts or scattering more in brightly lit regions to reduce variance [S3]. It builds on historical biasing techniques by Spanier and Gelbard (1969) and Steen (1966), and relates to advanced zero-variance schemes proposed by Dwivedi (1982) [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Adds overhead for probe ray casting and slab intersection tests [S2, unofficial]. The MIS combination adds computational cost for evaluating multiple PDFs and weights [S2, unofficial].
-*   **Memory Complexity:** Minimal additional memory for storing slab parameters and MIS weights [S2, unofficial].
-*   **Performance:** Leads to lower variance in high-scattering, isotropic media [S1]. Significantly improves convergence by reducing lost paths [S2, unofficial].
-*   **Strengths:** Effective for thick, highly scattering volumes where paths deep inside contribute little [S1].
-*   **Limitations:** Fails on thin geometries with strong backlighting [S1]. Limited to isotropic media [S1].
-*   **When to use:** High-scattering, isotropic participating media with significant thickness [S1][S2, unofficial].
-*   **When not to use:** Thin geometries (e.g., ears, leaves) or anisotropic media [S1].
+*   **Variance Reduction:** Leads to significantly lower variance in high-scattering and isotropic participating media by reducing the number of paths that get "lost" deep within the volume [S1][S2, unofficial].
+*   **Computational Cost:** Requires additional geometric queries (probe rays) and analytic computations for the slab model, increasing per-sample cost compared to standard distance sampling [S2, unofficial].
+*   **Limitations:** Not suitable for thin geometries with strong backlighting [S1]. Limited to high-order scattering and isotropic media in its basic form [S1].
+*   **Implementation Complexity:** Moderate. Requires implementing slab analytic solutions and integrating with MIS frameworks [S2, unofficial].
 
 ## Background
-Dwivedi sampling originates from Dwivedi (1982), who proposed advanced zero-variance schemes for radiation transport [S3]. The technique was later adapted for computer graphics by Dwivedi et al. (cited as [40] in [S1] and [D’E16] in [S2, unofficial]) to improve subsurface scattering and volumetric path tracing [S1][S2, unofficial]. It builds on earlier biasing techniques such as those by Spanier and Gelbard (1969) and Steen (1966) for biasing probabilities towards increasing absorption rates [S3].
+Dwivedi Sampling originates from the work of Dwivedi (1982), who proposed advanced zero-variance schemes for radiation transport [S3]. The method was later adapted for computer graphics by Dwivedi et al. (2016) [S2, unofficial] to improve convergence in subsurface scattering and participating media rendering. It is cited in surveys on rendering homogeneous participating media [S1] and in practical implementations of path-traced subsurface scattering models [S2, unofficial]. The technique is part of a broader history of biasing random walks in radiation transport, with roots in nuclear engineering literature (Spanier and Gelbard, 1969; Steen, 1966) [S3].
 
 ## Sources
 [S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

@@ -15,6 +15,8 @@ A rendering technique using Unity procedural instancing to render surface points
 - `BASE_POINTSIZE`: Constant value 4.0 [S1, unofficial].
 - `BASE_BRIGHTNESS`: Constant value for brightness scaling [S1, unofficial].
 - `_PointBrightness`: Range 0.0 to 0.99, default 0.99 [S1, unofficial].
+- `_IsoVals`: A buffer containing per-instance isovalue/color data [S1, unofficial].
+- `grid_dim`: The grid dimension used for coordinate mapping [G].
 
 **Outputs:**
 - Rendered billboards representing surface points [S1, unofficial].
@@ -28,17 +30,17 @@ A rendering technique using Unity procedural instancing to render surface points
 3. **Set Translation:** Set the translation part of `unity_ObjectToWorld` to the calculated world position `pos` [S1, unofficial].
 4. **Set Scale:** Set the scale part of `unity_ObjectToWorld` (diagonal elements `m00`, `m11`, `m22`) to `_Step` divided by `(BASE_POINTSIZE - _PointSize)` [S1, unofficial].
 5. **Orient Billboard:** Construct a look-at matrix using the eye position as `pos`, the target as `pos - _ViewDir * 1000`, and up vector `(0, 1, 0)`. Multiply `unity_ObjectToWorld` by this matrix to orient the billboard [S1, unofficial].
-6. **Set Color:** Set the instance color based on the isovalue. The color is derived from a per-instance value scaled by `(BASE_BRIGHTNESS - _PointBrightness)` [S1, unofficial].
+6. **Set Color:** Set the instance color based on the isovalue. The color is derived from `_IsoVals[unity_InstanceID]` scaled by `BASE_BRIGHTNESS - _PointBrightness` [S1, unofficial].
 7. **Discard Invalid Points:** Points with alpha less than 1.0 are discarded in the `clip_float` function to hide invalid or empty points [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def configure_procedural(instance_id, surface_points, grid_to_world, view_dir, step, point_size, base_pointsize, base_brightness, point_brightness):
+def configure_procedural(instance_id, surface_points, grid_to_world, view_dir, step, point_size, base_pointsize, base_brightness, point_brightness, iso_vals, grid_dim):
     # Step 1: Retrieve Point Data
     point_data = surface_points[instance_id]
-    pos = grid_to_world @ [point_data.x, point_data.y, point_data.z, 1.0]
+    pos_buf = grid_to_world @ [point_data.x, point_data.y, point_data.z, 1.0]
     alpha = point_data.w
 
     # Step 7: Discard Invalid Points
@@ -46,7 +48,7 @@ def configure_procedural(instance_id, surface_points, grid_to_world, view_dir, s
         return
 
     # Step 2: Calculate World Position
-    grid_coord = one_d_to_three_d(instance_id)
+    grid_coord = one_d_to_three_d(instance_id, grid_dim)
     pos = grid_to_world @ [(grid_coord.x + 0.5) * step, (grid_coord.y + 0.5) * step, (grid_coord.z + 0.5) * step, 1.0]
 
     # Step 3: Set Translation
@@ -69,8 +71,12 @@ def configure_procedural(instance_id, surface_points, grid_to_world, view_dir, s
     unity_object_to_world = matrix_multiply(unity_object_to_world, look_at_matrix)
 
     # Step 6: Set Color
-    color = base_brightness - point_brightness
+    color = iso_vals[instance_id] * (base_brightness - point_brightness)
     return unity_object_to_world, color
+
+def one_d_to_three_d(idx, grid_dim):
+    # Standard 1D-to-3D grid coordinate extraction [G]
+    return (idx % grid_dim, (idx // grid_dim) % grid_dim, idx // (grid_dim * grid_dim))
 ```
 
 **Parameters:**

@@ -1,0 +1,97 @@
+# Object Space Ray Setup via Vertex Shader UV Computation
+
+Also called: GPU Raycasting (Vertex Shader UV Computation), Raycasting Bounding Box & Sample Position Setup, Vertex Shader UV Computation
+
+## Overview
+This method establishes the geometric foundation for GPU-based volume raycasting by mapping a 3D bounding box (typically a unit cube) to screen space while simultaneously computing normalized 3D texture coordinates for each fragment. It solves the problem of translating object-space vertex positions into both clip-space positions for rasterization and valid texture lookup coordinates for the fragment shader. It differs from camera-space ray setup [4179-object-space-ray-setup-camera-space-transformation-for-ray-o.md] by operating directly on object-space vertices and using hardware interpolation of 3D UVs, rather than computing ray origins and directions in camera space.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Object-space vertex positions (`vVertex`), Model-View-Projection matrix (`MVP`).
+*   **Output:** Clip-space position (`gl_Position`), 3D texture coordinates (`vUV`).
+
+**Data Structures:**
+*   **Vertex Buffer Object (VBO):** Stores vertex positions. Layout: `totalVertices * sizeof(glm::vec3)` (or equivalent 3-component float vector).
+*   **Index Buffer Object (IBO):** Stores triangle indices. Layout: `totalIndices * sizeof(GLuint)` (or `GLushort`/`GLuint` depending on implementation).
+*   **Vertex Array Object (VAO):** Binds the VBO and IBO, enabling the vertex attribute array for `vVertex` at location 0 with 3 components, `GL_FLOAT`, normalized false, stride 0, offset 0.
+
+**Steps:**
+1.  **Buffer Initialization:** Generate and bind a VAO. Allocate memory for vertices and indices. Fill the vertex buffer with the bounding box geometry (e.g., a cube centered at the origin with bounds $[-0.5, 0.5]$). Fill the index buffer with triangle indices. Enable the vertex attribute array for `vVertex` and bind the index buffer [S2, unofficial].
+2.  **Vertex Shader Execution:** For each vertex:
+    *   Compute the clip-space position by multiplying the MVP matrix with the homogeneous vertex position:
+        $$ \text{gl\_Position} = \text{MVP} \times \begin{bmatrix} \text{vVertex}.xyz \\ 1.0 \end{bmatrix} $$
+    *   Compute the 3D texture coordinates by adding $0.5$ to each component of the object-space vertex position. This shifts the coordinate range from $[-0.5, 0.5]$ to $[0.0, 1.0]$, which is required for normalized texture lookups:
+        $$ \text{vUV} = \text{vVertex}.xyz + 0.5 $$
+    *   The output `vUV` must be declared as `smooth out vec3` to enable hardware interpolation across the primitive [S2, unofficial].
+3.  **Fragment Shader Input:** The fragment shader receives the interpolated `vUV` values. These values represent the position within the volume texture space, allowing direct sampling of the volume data [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader Logic
+def vertex_shader(vVertex: vec3, MVP: mat4) -> (vec4, vec3):
+    """
+    Computes clip-space position and 3D texture coordinates.
+    
+    Args:
+        vVertex: Object-space vertex position (vec3).
+        MVP: Combined Model-View-Projection matrix (mat4).
+        
+    Returns:
+        gl_Position: Clip-space position (vec4).
+        vUV: 3D texture coordinates (vec3).
+    """
+    # Compute clip-space position
+    gl_Position = MVP * vec4(vVertex, 1.0)
+    
+    # Compute 3D texture coordinates
+    # Shift from [-0.5, 0.5] to [0.0, 1.0]
+    vUV = vVertex + 0.5
+    
+    return gl_Position, vUV
+
+# Fragment Shader Logic (Conceptual)
+def fragment_shader(vUV: vec3, volume_texture: texture3D) -> vec4:
+    """
+    Samples the volume texture using the interpolated UVs.
+    
+    Args:
+        vUV: Interpolated 3D texture coordinates (vec3).
+        volume_texture: The 3D volume texture.
+        
+    Returns:
+        FragColor: Output color.
+    """
+    # Sample the volume texture
+    sample = texture(volume_texture, vUV).r
+    
+    # Perform ray marching/compositing logic here
+    # ...
+    return FragColor
+```
+
+**Parameters:**
+*   `MVP`: Combined Model-View-Projection matrix, passed as a `uniform mat4` [S2, unofficial].
+*   `vVertex`: Object-space vertex position, declared as `layout(location = 0) in vec3` [S2, unofficial].
+*   `vUV`: 3D texture coordinates, declared as `smooth out vec3` in the vertex shader and `smooth in vec3` in the fragment shader [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate Range:** The unit cube is typically centered at the origin with bounds $[-0.5, -0.5, -0.5]$ to $[0.5, 0.5, 0.5]$. Failing to add $0.5$ to the vertex coordinates will result in texture coordinates outside the $[0, 1]$ range, causing incorrect sampling or clamping artifacts [S2, unofficial].
+*   **Interpolation:** Using `smooth` interpolation for `vUV` is critical. Without it, the texture coordinates may not be correctly interpolated across the triangle, leading to distorted volume sampling [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of vertices in the bounding box. The computation is performed per-vertex in the vertex shader.
+*   **Memory Complexity:** $O(V + I)$ where $V$ is the number of vertices and $I$ is the number of indices, for storing the VBO and IBO.
+*   **Strengths:** Simple implementation, leverages hardware interpolation for texture coordinates, efficient for simple bounding boxes.
+*   **Limitations:** Limited to convex bounding volumes that can be represented by a single mesh. Not suitable for complex object-space ray setups involving multiple primitives or non-convex shapes without additional logic.
+*   **When to use:** Ideal for simple volume rendering where the volume is contained within a single axis-aligned bounding box (AABB) or a simple cube.
+*   **When not to use:** When the volume requires multiple bounding boxes or complex geometry for ray setup.
+
+## Background
+This method is commonly used in GPU-based volume raycasting implementations, particularly in educational and open-source projects. It relies on standard OpenGL features such as vertex shaders, fragment shaders, and texture sampling. The approach of using a unit cube and shifting coordinates is a common technique in computer graphics for simplifying texture coordinate generation.
+
+## Sources
+[S1] mversiotech/volume-rendering-demo, https://github.com/mversiotech/volume-rendering-demo, fetched 2026-10-26 (unofficial)
+[S2] aashish24/vtkvolume, https://github.com/aashish24/vtkvolume, fetched 2026-10-27 (unofficial)

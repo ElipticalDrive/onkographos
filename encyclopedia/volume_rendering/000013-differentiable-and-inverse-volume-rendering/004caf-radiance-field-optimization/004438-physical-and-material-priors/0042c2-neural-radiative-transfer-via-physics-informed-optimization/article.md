@@ -3,140 +3,165 @@
 Also called: Neural Inverse Rendering for Participating Media, Volumetric Inverse Rendering
 
 ## Overview
-This method reconstructs spatially varying optical properties (absorption, scattering, phase function) and the light field of participating media from posed RGB images by enforcing the Radiative Transfer Equation (RTE) as a physics-informed constraint [S1]. Unlike surface-based inverse rendering which relies on stochastic ray sampling for nonlocal transport, this approach enforces light transport locally throughout the volume by imposing the RTE as a pointwise constraint on neural field representations [S1]. It is chosen when physically complete volumetric light transport is required without restrictive assumptions such as homogeneous media [S1].
+This method reconstructs the spatially varying optical properties (absorption, scattering, phase function) and the light field of participating media from posed RGB images by enforcing the Radiative Transfer Equation (RTE) as a physics-informed constraint [S1]. Unlike surface-based inverse rendering which relies on stochastic ray sampling for nonlocal transport, this approach enforces light transport locally throughout the volume by imposing the RTE as a pointwise constraint on neural field representations [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of posed RGB images $\{I_k\}$ providing multi-view observations. The environment illumination is assumed known and fixed [S1].
-*   **Output:** A neural light field representation $L_\theta$ encoding the spatio-angular light field, and a neural medium field representation $M_\phi$ encoding absorption $\sigma_a$, scattering $\sigma_s$, and phase function parameters [S1].
+**Inputs and Outputs**
+*   **Input:** A set of posed RGB images $\{I_k\}$ providing multi-view observations of a scene containing heterogeneous participating media. The environment illumination is assumed to be known and fixed [S1].
+*   **Output:** A neural light field representation $L_\theta$ encoding the spatio-angular light field, and a neural medium field representation $M_\phi$ encoding the optical properties [S1].
 
-**Data Structures:**
-1.  **Neural Light Field Representation:** $L_\theta : (\mathbf{x}, \boldsymbol{\omega}) \rightarrow \mathbb{R}^3$.
-    *   Inputs: Spatial position $\mathbf{x} \in \mathbb{R}^3$ and direction $\boldsymbol{\omega} \in S^2$.
-    *   Output: Radiance $\mathbb{R}^3$.
-    *   Parameters: $\theta$ [S1].
-2.  **Neural Medium Field Representation:** $M_\phi : \mathbf{x} \rightarrow (\sigma_a, \sigma_s, g)$.
-    *   Input: Spatial position $\mathbf{x} \in \mathbb{R}^3$.
-    *   Outputs:
-        *   Absorption coefficient $\sigma_a(\mathbf{x}) \in \mathbb{R}^3$.
-        *   Scattering coefficient $\sigma_s(\mathbf{x}) \in \mathbb{R}^3$.
-        *   Scalar anisotropy parameter $g$ defining the Henyey-Greenstein phase function [S1].
+**Data Structures**
+1.  **Neural Light Field Representation:** $L_\theta: (\mathbf{x}, \boldsymbol{\omega}) \rightarrow \mathbb{R}^3$. Encodes the radiance at position $\mathbf{x}$ and direction $\boldsymbol{\omega}$. Parameters: $\theta$ [S1].
+2.  **Neural Medium Field Representation:** $M_\phi: \mathbf{x} \rightarrow (\sigma_a, \sigma_s, g)$. Encodes the medium properties at position $\mathbf{x}$. Outputs:
+    *   Absorption coefficient $\sigma_a(\mathbf{x}) \in \mathbb{R}^3$ [S1].
+    *   Scattering coefficient $\sigma_s(\mathbf{x}) \in \mathbb{R}^3$ [S1].
+    *   Scalar $g$ defining the Henyey-Greenstein phase function $f_p$ [S1].
     *   Parameters: $\phi$ [S1].
 
-**Formulas:**
+**Formulas**
 *   **Extinction Coefficient:**
     $$ \sigma_t(\mathbf{x}) = \sigma_a(\mathbf{x}) + \sigma_s(\mathbf{x}) $$
     [S1]
 
-*   **RTE Residual Loss ($L_{RTE}$):**
-    Enforces the differential RTE at collocation points $(\mathbf{x}, \boldsymbol{\omega})$. The emission term is omitted as only environment illumination is considered [S1].
-    $$ L_{RTE}(\theta, \phi) = \mathbb{E}_{\mathbf{x}, \boldsymbol{\omega}} \left[ \left( \boldsymbol{\omega} \cdot \nabla \right) L_\theta(\mathbf{x}, \boldsymbol{\omega}) + \sigma_t(\mathbf{x}) L_\theta(\mathbf{x}, \boldsymbol{\omega}) - \sigma_s(\mathbf{x}) \int_{S^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') L_\theta(\mathbf{x}, \boldsymbol{\omega}') d\boldsymbol{\omega}' \right]^2 $$
+*   **RTE Residual Loss ($L_{RTE}$):** Enforces the differential RTE at collocation points $(\mathbf{x}, \boldsymbol{\omega})$. The emission term is omitted as only environment illumination is considered [S1].
+    $$ L_{RTE}(\theta, \phi) = \mathbb{E}_{\mathbf{x},\boldsymbol{\omega}} \left[ \left( \boldsymbol{\omega} \cdot \nabla \right) L_\theta(\mathbf{x},\boldsymbol{\omega}) + \sigma_t(\mathbf{x}) L_\theta(\mathbf{x},\boldsymbol{\omega}) - \sigma_s(\mathbf{x}) \int_{S^2} f_p(\mathbf{x},\boldsymbol{\omega},\boldsymbol{\omega}') L_\theta(\mathbf{x},\boldsymbol{\omega}') d\boldsymbol{\omega}' \right]^2 $$
     [S1]
 
 *   **Inflow Boundary Condition Domain ($\Gamma$):**
-    $$ \Gamma = \{ (\mathbf{x}, \boldsymbol{\omega}) \mid \mathbf{x} \in \partial B, \boldsymbol{\omega} \in S^2, \boldsymbol{\omega} \cdot \mathbf{n}_B(\mathbf{x}) < 0 \} $$
+    $$ \Gamma = \{ (\mathbf{x},\boldsymbol{\omega}) \mid \mathbf{x} \in \partial B, \boldsymbol{\omega} \in S^2, \boldsymbol{\omega} \cdot \mathbf{n}_B(\mathbf{x}) < 0 \} $$
     where $\partial B$ is the scene boundary and $\mathbf{n}_B$ is the outward unit normal [S1].
 
 *   **Boundary Condition Loss ($L_{BC}$):**
-    $$ L_{BC}(\theta) = \mathbb{E}_{(\mathbf{x}, \boldsymbol{\omega}) \in \Gamma} \left[ L_{in}(\mathbf{x}, \boldsymbol{\omega}) - L_\theta(\mathbf{x}, \boldsymbol{\omega}) \right]^2 $$
+    $$ L_{BC}(\theta) = \mathbb{E}_{(\mathbf{x},\boldsymbol{\omega}) \in \Gamma} \left[ L_{in}(\mathbf{x},\boldsymbol{\omega}) - L_\theta(\mathbf{x},\boldsymbol{\omega}) \right]^2 $$
     where $L_{in}$ is the incoming radiance from environment illumination [S1].
 
-*   **Volumetric Rendering Equation (VRE) Loss ($L_{VRE}$):**
-    Introduced to counteract oversmoothing by adding nonlocal constraints along viewing rays [S1].
-    $$ L_{VRE}(\theta) = \mathbb{E}_{\mathbf{r}} \left[ \left\| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \right\|^2 \right] $$
-    where $\hat{C}(\mathbf{r})$ is the rendered color from $L_\theta$ and $C(\mathbf{r})$ is the observed color [S1].
-
-**Steps:**
+**Steps**
 1.  **Sample Collocation Points:** Sample spatial positions $\mathbf{x}$ and directions $\boldsymbol{\omega}$ from the spatio-angular domain [S1].
-2.  **Evaluate Directional Derivative:** Compute the term $(\boldsymbol{\omega} \cdot \nabla) L_\theta(\mathbf{x}, \boldsymbol{\omega})$ using automatic differentiation of the neural network $L_\theta$ with respect to $\mathbf{x}$ [S1].
-3.  **Approximate In-Scattering Integral:** Approximate $\int_{S^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') L_\theta(\mathbf{x}, \boldsymbol{\omega}') d\boldsymbol{\omega}'$ using Monte Carlo sampling over the angular domain $S^2$ at the spatial location $\mathbf{x}$ [S1]. No ray tracing is performed [S1].
-4.  **Compute RTE Residual:** Calculate the residual of the RTE using the terms from steps 2 and 3, along with $\sigma_t$ and $\sigma_s$ from $M_\phi$ [S1].
-5.  **Enforce Boundary Conditions:** Sample points on the boundary $\partial B$ with incoming directions $\boldsymbol{\omega}$ (where $\boldsymbol{\omega} \cdot \mathbf{n}_B < 0$) and compute $L_{BC}$ [S1].
-6.  **Render and Compare:** For each input image $I_k$, render the color $\hat{C}(\mathbf{r})$ by integrating $L_\theta$ along the viewing rays $\mathbf{r}$ corresponding to the pixels. Compute $L_{VRE}$ against the observed image pixels [S1].
-7.  **Optimize:** Minimize the total loss $L_{total} = L_{RTE} + L_{BC} + L_{VRE}$ with respect to parameters $\theta$ and $\phi$ [S1].
+2.  **Evaluate Directional Derivative:** Compute the term $(\boldsymbol{\omega} \cdot \nabla) L_\theta(\mathbf{x},\boldsymbol{\omega})$ using automatic differentiation of the neural network $L_\theta$ with respect to its spatial input $\mathbf{x}$ [S1].
+3.  **Approximate In-Scattering Integral:** Approximate the integral $\int_{S^2} f_p(\mathbf{x},\boldsymbol{\omega},\boldsymbol{\omega}') L_\theta(\mathbf{x},\boldsymbol{\omega}') d\boldsymbol{\omega}'$ using Monte Carlo sampling over the angular domain $S^2$. This is evaluated locally at the spatial location $\mathbf{x}$ of the collocation point. No ray tracing is performed [S1].
+4.  **Compute Optical Properties:** Query the medium field $M_\phi(\mathbf{x})$ to obtain $\sigma_a(\mathbf{x})$, $\sigma_s(\mathbf{x})$, and $g$. Compute $\sigma_t(\mathbf{x})$ and the Henyey-Greenstein phase function $f_p$ using $g$ [S1].
+5.  **Enforce RTE Constraint:** Calculate $L_{RTE}$ using the terms from steps 2-4 [S1].
+6.  **Enforce Boundary Conditions:** Sample points on the boundary $\partial B$ with incoming directions $\boldsymbol{\omega}$ (where $\boldsymbol{\omega} \cdot \mathbf{n}_B(\mathbf{x}) < 0$) and calculate $L_{BC}$ [S1].
+7.  **Enforce Data Constraints:** (Implied by context) Incorporate image data $\{I_k\}$ by comparing rendered views from $L_\theta$ against observations [S1].
+8.  **Optimize:** Minimize the combined loss (including $L_{RTE}$, $L_{BC}$, and data terms) with respect to parameters $\theta$ and $\phi$ [S1].
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_neural_radiative_transfer(images, poses, environment_radiance, num_iterations):
-    # Initialize neural networks
-    L_theta = NeuralNetwork() # L_theta: (x, w) -> R3
-    M_phi = NeuralNetwork()   # M_phi: x -> (sigma_a, sigma_s, g)
+def compute_rte_residual(L_theta, M_phi, x, omega):
+    """
+    Computes the RTE residual for a single collocation point.
+    L_theta: Neural network for light field L_theta(x, omega) -> R3
+    M_phi: Neural network for medium M_phi(x) -> (sigma_a, sigma_s, g)
+    x: Position vector R3
+    omega: Direction vector R3
+    """
+    # 1. Evaluate directional derivative (omega . grad_x) L_theta(x, omega)
+    # Using automatic differentiation
+    L_val = L_theta(x, omega)
+    grad_L = autograd.grad(L_val, x, grad_outputs=torch.ones_like(L_val), create_graph=True)[0]
+    directional_derivative = torch.sum(omega * grad_L, dim=-1)
     
-    optimizer = Optimizer([L_theta.parameters(), M_phi.parameters()])
+    # 2. Get optical properties from medium field
+    sigma_a, sigma_s, g = M_phi(x)
+    sigma_t = sigma_a + sigma_s
+    
+    # 3. Approximate in-scattering integral via Monte Carlo
+    # Sample N directions omega_prime from S^2
+    N = 16 # Example sample count
+    omega_primes = sample_sphere(N)
+    L_primes = L_theta(x, omega_primes)
+    f_p = heney_greenstein_phase_function(g, omega, omega_primes)
+    
+    # Integral approximation: (4*pi / N) * sum(f_p * L_prime)
+    in_scattering = (4.0 * pi / N) * torch.sum(f_p * L_primes, dim=0)
+    
+    # 4. Compute RTE Residual
+    # (omega . grad) L + sigma_t * L - sigma_s * integral
+    residual = directional_derivative + sigma_t * L_val - sigma_s * in_scattering
+    
+    return residual
+
+def train_volumetric_inverse_rendering(L_theta, M_phi, images, boundary_mesh):
+    """
+    Main training loop for Neural Radiative Transfer via Physics-Informed Optimization.
+    """
+    optimizer = Adam([L_theta.parameters(), M_phi.parameters()])
     
     for iteration in range(num_iterations):
         optimizer.zero_grad()
         
-        # 1. Sample collocation points for RTE
-        x_colloc = sample_spatial_points()
-        w_colloc = sample_directions()
+        total_loss = 0.0
         
-        # 2. Evaluate directional derivative (omega . grad) L_theta
-        # Requires automatic differentiation of L_theta w.r.t x
-        L_val = L_theta(x_colloc, w_colloc)
-        grad_L = gradient(L_val, x_colloc)
-        directional_derivative = dot(w_colloc, grad_L)
+        # Sample collocation points (x, omega) in the volume
+        x_colloc, omega_colloc = sample_collocation_points()
         
-        # 3. Get medium properties
-        sigma_a, sigma_s, g = M_phi(x_colloc)
-        sigma_t = sigma_a + sigma_s
-        phase_func = HenyeyGreenstein(g)
+        # Compute RTE Loss
+        residuals = compute_rte_residual(L_theta, M_phi, x_colloc, omega_colloc)
+        loss_rte = torch.mean(residuals**2)
+        total_loss += loss_rte
         
-        # 4. Approximate in-scattering integral via Monte Carlo
-        # Sample directions w_prime for each x_colloc
-        w_prime = sample_directions()
-        L_prime = L_theta(x_colloc, w_prime)
-        phase_values = phase_func(w_colloc, w_prime)
+        # Sample boundary points for Boundary Condition Loss
+        x_boundary, omega_boundary = sample_inflow_boundary(boundary_mesh)
+        L_boundary = L_theta(x_boundary, omega_boundary)
+        L_in = get_environment_radiance(x_boundary, omega_boundary) # Known environment
+        loss_bc = torch.mean((L_in - L_boundary)**2)
+        total_loss += loss_bc
         
-        # Monte Carlo estimate: (1/N) * sum(phase * L_prime) * 4*pi
-        in_scattering = mean(phase_values * L_prime) * 4 * pi
+        # Sample camera rays for Data Loss (Image matching)
+        # Note: Specific data loss formulation depends on camera poses and image indices
+        # This is a placeholder for the data term mentioned in [S1]
+        loss_data = compute_image_consistency_loss(L_theta, images) 
+        total_loss += loss_data
         
-        # 5. Compute RTE Residual
-        rte_residual = directional_derivative + sigma_t * L_val - sigma_s * in_scattering
-        loss_rte = mean(rte_residual ** 2)
+        # Optional: Add VRE-based loss to counteract oversmoothing [S1]
+        # loss_vre = compute_volume_rendering_equation_loss(L_theta, images)
+        # total_loss += loss_vre
         
-        # 6. Enforce Boundary Conditions
-        x_boundary, w_boundary = sample_boundary_points()
-        L_boundary = L_theta(x_boundary, w_boundary)
-        L_in = environment_radiance(x_boundary, w_boundary)
-        loss_bc = mean((L_in - L_boundary) ** 2)
-        
-        # 7. Render and Compute VRE Loss
-        loss_vre = 0
-        for image, pose in zip(images, poses):
-            rays = generate_rays(pose, image.shape)
-            # Integrate L_theta along rays to get rendered color C_hat
-            C_hat = render_volumetric(L_theta, rays)
-            C_obs = image
-            loss_vre += mean((C_hat - C_obs) ** 2)
-            
-        # 8. Total Loss and Backprop
-        total_loss = loss_rte + loss_bc + loss_vre
         total_loss.backward()
         optimizer.step()
 ```
 
-**Parameters:**
-*   **Neural Network Architecture:** Not given in the sources.
-*   **Monte Carlo Samples:** Not given in the sources.
-*   **Collocation Points:** Not given in the sources.
+**Parameters**
+*   **Neural Network Architecture:** Not specified in the sources. [G] Standard MLPs or Fourier feature networks are typical for such representations.
+*   **Monte Carlo Samples:** Not specified in the sources. [G] A small number (e.g., 16-64) is typical for angular integration in this context.
+*   **Optimization Algorithm:** Not specified in the sources. [G] Adam is standard for neural field optimization.
 
-**Edge Cases and Pitfalls:**
-*   **Oversmoothing:** Solutions may be overly smooth and lack high-frequency detail due to the low-frequency bias of neural networks [S1]. This is mitigated by adding the VRE loss [S1].
-*   **Optimization Pathologies:** Related optimization pathologies have been reported for physics-informed formulations relying on differential constraints [S1].
+**Edge Cases and Pitfalls**
+*   **Oversmoothing:** Solutions may be overly smooth and lack high-frequency detail due to the low-frequency bias of neural networks [S1]. This is exacerbated in PINN-based formulations relying on differential constraints [S1].
+*   **Mitigation:** The sources suggest introducing an additional objective based on the Volume Rendering Equation (VRE) to explicitly integrate radiance along primary viewing rays, introducing nonlocal constraints that counteract oversmoothing [S1].
+*   **Boundary Conditions:** Incorrect enforcement of inflow boundary conditions can lead to non-physical solutions. The domain $\Gamma$ must correctly identify where radiance enters the volume ($\boldsymbol{\omega} \cdot \mathbf{n}_B(\mathbf{x}) < 0$) [S1].
+
+## Subtopics
+
+### [Refractive Index Tomography using Neural Fields](4146-refractive-index-tomography-using-neural-fields.md)
+Reconstructs refractive index fields, often for transparent media, using differentiable rendering or PINNs. Choose when the medium is transparent and refraction is the dominant effect.
+
+### [Inverse Rendering and Optical Properties](7914-inverse-rendering-and-optical-properties.md)
+General inverse rendering for optical properties, potentially on surfaces or simplified volumes. Choose when the scene geometry is known or simpler than full volumetric reconstruction.
+
+### [Multi-Sensor and Physical Priors](11031-multi-sensor-and-physical-priors.md)
+Incorporates multiple sensor types or additional physical priors (e.g., fluid dynamics) to constrain the solution. Choose when single-view RGB is insufficient or additional physical consistency is required.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Naturally supports the optimization of soft geometry (e.g., continuous volumetric media such as clouds or fog) [S1]. Does not rely on restrictive assumptions such as homogeneous media [S1]. Enforces light transport locally throughout the volume [S1].
-*   **Limitations:** Solutions may be overly smooth [S1]. Hard geometry optimization remains challenging for PINN-based inverse rendering in general [S1].
-*   **When to use:** When physically complete volumetric light transport is required for participating media with known environment illumination [S1].
-*   **When not to use:** When hard geometry with sharp discontinuities is the primary target [S1].
+*   **Time Complexity:** Not given in the sources. [G] Depends on the number of collocation points, Monte Carlo samples, and network size.
+*   **Memory Complexity:** Not given in the sources. [G] Depends on the neural network parameters and the number of stored collocation points/batch sizes.
+*   **Strengths:**
+    *   Enforces physically complete volumetric light transport without restrictive assumptions like homogeneous media [S1].
+    *   Naturally supports the optimization of soft geometry (e.g., continuous volumetric media such as clouds or fog) [S1].
+    *   Local enforcement of the RTE avoids the need for explicit ray tracing for the transport constraint [S1].
+*   **Limitations:**
+    *   Prone to oversmoothing and lack of high-frequency detail due to neural network bias [S1].
+    *   Requires known and fixed environment illumination [S1].
+    *   Optimization of hard geometry (surfaces with sharp discontinuities) remains challenging in PINN-based inverse rendering, though this method focuses on soft geometry [S1].
+*   **When to use:** When reconstructing heterogeneous participating media with physically complete light transport is required, and the scene consists of soft volumetric geometry.
+*   **When not to use:** When high-frequency detail is critical and oversmoothing cannot be mitigated, or when the environment illumination is unknown and variable.
 
 ## Background
-The method is based on Physics-Informed Neural Networks (PINNs) which integrate physical laws into neural network training by penalizing violations of equations in the loss function [S1]. While PINNs have been explored for light transport in surface-based scenes, this method extends the concept to volumetric scenes by enforcing the RTE as a pointwise constraint [S1]. The approach was introduced in "Volumetric Inverse Rendering via Neural Radiative Transfer" [S1].
+*   **Origin:** The method is described in "Volumetric Inverse Rendering via Neural Radiative Transfer" [S1].
+*   **History:** Physics-informed neural networks (PINNs) have been explored for light transport in both forward and inverse settings, often focusing on ultra low-frequency optical properties [S1]. This work extends PINNs to volumetric scenes without restrictive assumptions, contrasting with prior approaches that relied on homogeneous media or simplified transport [S1].
+*   **Usage:** Used for reconstructing optical properties and light fields of participating media from posed RGB images [S1].
 
 ## Sources
 [S1] Volumetric Inverse Rendering via Neural Radiative Transfer, https://arxiv.org/abs/2607.13695, fetched 2026-10-29

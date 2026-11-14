@@ -2,152 +2,298 @@
 
 
 ## Overview
-Sparse Solid Voxelization is a method for generating a solid voxel representation of a 3D object directly into a sparse hierarchical structure (octree), avoiding the creation of a dense intermediate grid [S1]. It solves the problem of memory inefficiency in traditional voxelization by ensuring that nodes representing uniform regions are not further refined, enabling logarithmic memory scaling relative to volume size [S1]. It sets itself apart from sibling methods like [Solid Voxelization via Octree](6830-solid-voxelization-via-octree.md) by constructing the adapted octree structure up-front in a massively parallel context, rather than adding nodes on the fly, and by using a specific bottom-up construction strategy based on conservative surface voxelization at a coarser level [S1].
+Sparse Solid Voxelization is a method for converting a triangular mesh into a solid, hierarchical voxel representation using a sparse octree [S1]. It solves the problem of efficiently generating large-scale voxel data by avoiding the creation of a dense intermediate grid, instead constructing the octree structure up-front and populating it directly [S1]. Unlike methods that voxelize a dense grid and then compress it, this approach determines active nodes based on a coarse surface voxelization and builds the hierarchy bottom-up, ensuring that uniform regions are represented by single nodes without further refinement [S1]. It is distinguished from [Solid Voxelization via Octree](6830-solid-voxelization-via-octree.md) by its specific GPU-optimized parallel construction pipeline and the use of level-0 sub-grids for encoding efficiency [S1].
 
 ## How it works
-**Inputs:** A triangle mesh representing the input object.
-**Outputs:** A sparse octree structure representing the solid voxelization, where leaf nodes (level-0) contain voxel data, and internal nodes store pointers to children, parents, and x-neighbors.
+The method operates in four main phases: determination of active level-1 nodes, bottom-up octree construction, voxelization of finest-level nodes, and hierarchical parity propagation [S1].
 
-**Data Structures:**
-The octree is stored in a linearized format. All nodes of one level are stored contiguously, sorted according to the Morton space-filling curve (Z-order) [S1].
-*   **Morton Code:** For a node at grid position $(i, j, k)$, the Morton code is formed by interleaving the bits of the coordinates: $k_{n-1} j_{n-1} i_{n-1} \dots k_0 j_0 i_0$ [S1].
-*   **Level-0 Node:** Stores a voxel sub-grid of size $4^3$ (64 voxels) for encoding and processing efficiency, effectively representing two finer levels [S1].
-*   **Node Fields:** Each node maintains:
-    *   A pointer to its first child.
-    *   A pointer to its parent.
-    *   Pointers to its neighbors in the x-direction [S1].
-*   **Memory Layout:** A node's eight children are contiguous in memory, and the first child has an index that is a multiple of eight [S1].
+### Inputs and Outputs
+**Inputs:**
+- A triangular mesh representing the input object.
+- The desired maximum depth of the octree (typically stopping two levels below the root) [S1].
+- The resolution of the level-1 grid (coarse resolution) [S1].
 
-**Parameters:**
-*   **Sub-grid size:** $4 \times 4 \times 2$ blocks are used for parallel processing [S1].
-*   **Shift:** Triangles are shifted in the $+x$ direction by half a level-0 sub-grid voxel to account for sampling at the voxel center [S1].
-*   **Bounding Box Enlargement:** The triangle's bounding box is enlarged in the $-x$ direction by one sub-grid voxel [S1].
+**Outputs:**
+- A sparse octree where each node stores a voxel state (inside/outside).
+- Level-0 nodes store a $4 \times 4 \times 4$ sub-grid (SG) representing two finer levels [S1].
+- The final voxelization boundary consists solely of level-0 nodes [S1].
 
-**Steps:**
+### Data Structures
+The octree is stored in a flat, contiguous array structure sorted by Morton order [S1].
 
-1.  **Determine Active Level-1 Nodes:**
-    *   Perform conservative surface voxelization into a grid with level-1 resolution [S1].
-    *   To ensure the final voxelization boundary consists solely of level-0 nodes, modify the conservative voxelization:
-        *   Shift the triangle in the $+x$ direction by half a level-0 sub-grid (SG) voxel [S1].
-        *   Enlarge the triangle's bounding box in the $-x$ direction by one SG voxel [S1].
-        *   Adapt the 2D edge functions accordingly, shifting all critical points on the voxel's max $x$ face in the $+x$ direction by one SG voxel [S1].
-    *   Derive a list of active nodes (`ActNodes1`) sorted in Morton order from the resulting grid [S1].
-        *   Launch one thread per 32-bit block of the voxelization grid. Each thread counts the number of set bits and writes the count to a buffer [S1].
-        *   Run an exclusive scan on the buffer to derive offsets into `ActNodes1` and the list's length [S1].
-        *   Launch one thread per block, writing the Morton codes of the block's set voxels into `ActNodes1` starting at its designated offset [S1].
-        *   Use blocks of extent $4 \times 4 \times 2$. Employ the block's index in Morton order when accessing the buffer and scan result, and traverse the bits within the block in Morton order to directly obtain a sorted list [S1].
+**Node Layout:**
+Each node maintains the following fields:
+- `first_child`: Pointer (index) to the first child node.
+- `parent`: Pointer (index) to the parent node.
+- `x_neighbors`: Pointers (indices) to neighbors in the x-direction [S1].
+- `voxel_data`: For level-0 nodes, a $4^3$ sub-grid of voxel states. For higher levels, a single bit or small integer representing the uniform state of the region [S1].
 
-2.  **Construct Level-0 Nodes:**
-    *   Allocate and initialize $8 \times \text{length}(\text{ActNodes1})$ child nodes (`Nodes0`) corresponding to the children of the active level-1 nodes [S1].
-    *   Set the x-neighbor pointers between adjacent nodes with the same parent node [S1].
+**Memory Layout:**
+- All nodes of a specific level are stored contiguously [S1].
+- Nodes are sorted according to the Morton space-filling curve [S1].
+- A node's eight children are stored contiguously in memory, and the index of the first child is a multiple of eight [S1].
 
-3.  **Construct Level-1 Nodes:**
-    *   Determine for each active level-1 node whether the next node in `ActNodes1` has a different level-2 parent. Write 1 if so, and 0 otherwise, into a buffer `Flag1` [S1].
-    *   Subject `Flag1` to an exclusive scan, yielding `ParentIndex1` [S1].
-    *   The last entry of `ParentIndex1` plus one equals the number of active level-2 nodes $N_a^2$ [S1].
-    *   Allocate and initialize $8 \times N_a^2$ level-1 nodes (`Nodes1`) similar to the level-0 nodes [S1].
-    *   Establish child and parent pointers for the active level-1 nodes and their children [S1].
-    *   The $i$-th entry in `ActNodes1` corresponds to `Nodes1`[$j$] with:
-        $$ j = 8 \times \text{ParentIndex1}[i] + (\text{ActNodes1}[i] \mod 8) $$
-        and has `Nodes0`[$8i$] as its first child [S1].
+**Morton Code:**
+The Morton code for a node at grid position $(i, j, k)$ is derived by interleaving the bits of its coordinates:
+$$ \text{Morton}(i, j, k) = k_{n-1} j_{n-1} i_{n-1} \dots k_0 j_0 i_0 $$
+where $n$ is the number of bits required to represent the maximum coordinate [S1].
 
-4.  **Construct Higher Levels:**
-    *   Derive a list of active level-2 nodes (`ActNodes2`) from `ActNodes1` by stripping the three least significant bits of the Morton codes and performing compaction, utilizing `Flag1` and `ParentIndex1` [S1].
-    *   Process `ActNodes2` analogously to `ActNodes1` to establish level-2 nodes [S1].
-    *   Repeat for remaining levels. In practice, stop two levels below the root node, as nodes at higher levels are typically fully present [S1].
+### Parameters
+- **Level-0 Sub-grid Size:** $4 \times 4 \times 4$ voxels [S1].
+- **Block Extent for Parallel Processing:** $4 \times 4 \times 2$ voxels [S1].
+- **Triangle Shift:** Half a level-0 sub-grid voxel in the $+x$ direction [S1].
+- **Bounding Box Enlargement:** One SG voxel in the $-x$ direction [S1].
 
-5.  **Voxelize and Propagate:**
-    *   Voxelize the input object into the finest-level (level-0) nodes [S1].
-    *   Propagate inside/outside parity flips hierarchically from the leaves up to the root to obtain a solid voxelization [S1].
+### Steps
 
-**Pseudocode:**
+#### 1. Determine Active Level-1 Nodes
+To identify which level-1 nodes are overlapped by the mesh, a conservative surface voxelization is performed on a grid with level-1 resolution [S1].
+
+1.  **Preprocess Triangles:**
+    - Shift each triangle in the $+x$ direction by $0.5$ level-0 sub-grid (SG) voxels to account for sampling at the voxel center [S1].
+    - Enlarge the triangle's bounding box in the $-x$ direction by one SG voxel [S1].
+    - Adapt the 2D edge functions accordingly, shifting all critical points on the voxel's max $x$ face in the $+x$ direction by one SG voxel [S1].
+    - *Note:* These modifications ensure that the final voxelization boundary consists solely of level-0 nodes [S1].
+
+2.  **Conservative Voxelization:**
+    - Perform conservative voxelization of the modified triangles into the level-1 resolution grid [S1].
+
+3.  **Extract Active Nodes:**
+    - Generate a list of active level-1 nodes sorted in Morton order [S1].
+    - Launch one thread per 32-bit block of the voxelization grid. Each thread counts the number of set bits (active voxels) and writes the count to a buffer [S1].
+    - Run an exclusive scan (prefix sum) on the buffer to derive offsets into the list of active level-1 nodes (`ActNodes1`) and determine the list's length [S1].
+    - Launch one thread per block again. Each thread writes the Morton codes of its block's set voxels into `ActNodes1`, starting at its designated offset from the scan result [S1].
+    - To ensure the list is sorted in Morton order, use blocks of extent $4 \times 4 \times 2$. Access the buffer and scan result using the block's index in Morton order, and traverse the bits within the block in Morton order [S1].
+
+#### 2. Octree Construction
+Construct the sparse octree bottom-up based on the list `ActNodes1` [S1].
+
+1.  **Allocate Level-0 Nodes:**
+    - Allocate and initialize $8 \times \text{length}(\text{ActNodes1})$ child nodes (level-0 nodes), stored in an array `Nodes0` [S1].
+    - Set the x-neighbor pointers between adjacent level-0 nodes that share the same parent [S1].
+
+2.  **Determine Level-2 Parents:**
+    - For each active level-1 node in `ActNodes1`, determine if the next node in the list has a different level-2 parent [S1].
+    - Write `1` to a buffer `Flag1` if the parent changes, `0` otherwise [S1].
+
+3.  **Scan for Parent Indices:**
+    - Perform an exclusive scan on `Flag1` to yield `ParentIndex1` [S1].
+    - The last entry of `ParentIndex1` plus one equals the number of active level-2 nodes, $N_a^2$ [S1].
+
+4.  **Allocate Level-1 Nodes:**
+    - Allocate and initialize $8 \times N_a^2$ level-1 nodes, stored in an array `Nodes1` [S1].
+    - Establish child and parent pointers:
+        - The $i$-th entry in `ActNodes1` corresponds to `Nodes1[j]`, where:
+          $$ j = 8 \times \text{ParentIndex1}[i] + (\text{ActNodes1}[i] \mod 8) $$
+        - `Nodes1[j]` has `Nodes0[8*i]` as its first child [S1].
+
+5.  **Iterate for Higher Levels:**
+    - Derive a list of active level-2 nodes (`ActNodes2`) from `ActNodes1` by stripping the three least significant bits of the Morton codes and performing compaction using `Flag1` and `ParentIndex1` [S1].
+    - Process `ActNodes2` analogously to `ActNodes1` to establish level-2 nodes [S1].
+    - Repeat this process for remaining levels, stopping two levels below the root node to avoid a single root node containing all data [S1].
+
+#### 3. Voxelize Input Object
+Voxelize the input mesh into the finest-level (level-0) nodes [S1].
+
+1.  **Traverse Nodes:**
+    - Traverse the octree to access all level-0 nodes [S1].
+    - Use the x-neighbor pointers and parent/child pointers to efficiently navigate the structure [S1].
+
+2.  **Rasterize:**
+    - For each level-0 node, rasterize the intersecting triangles into its $4 \times 4 \times 4$ sub-grid [S1].
+    - Use the conservative voxelization technique described in Step 1 to determine the inside/outside state of each voxel in the sub-grid [S1].
+
+#### 4. Propagate Parity
+Propagate the inside/outside parity flips hierarchically to obtain a solid voxelization [S1].
+
+1.  **Bottom-Up Propagation:**
+    - Starting from the level-0 nodes, propagate the voxel states to parent nodes [S1].
+    - If all voxels in a child node's sub-grid have the same state, the parent node adopts that state and is marked as uniform (not further refined) [S1].
+    - If the states differ, the parent node remains non-uniform, and its children are processed individually [S1].
+
+2.  **Solidification:**
+    - Ensure that the final representation is solid by filling any inside regions that were not explicitly voxelized due to sparse traversal [S1].
+    - The boundary of the voxelization is defined by the level-0 nodes [S1].
+
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sparse_solid_voxelization(mesh):
-    # Step 1: Determine active level-1 nodes
-    # Perform conservative surface voxelization at level-1 resolution
-    # Modifications:
-    # 1. Shift triangle +x by 0.5 * SG_voxel_size
-    # 2. Enlarge bounding box -x by 1 * SG_voxel_size
-    # 3. Shift critical points on max x face +x by 1 * SG_voxel_size
-    level1_grid = conservative_surface_voxelization(mesh, resolution=level1_res)
+def sparse_solid_voxelization(mesh, level1_res, max_depth):
+    """
+    Main entry point for Sparse Solid Voxelization.
     
-    # Extract active nodes sorted in Morton order
-    # Use blocks of 4x4x2
-    block_counts = parallel_count_set_bits(level1_grid, block_size=(4,4,2))
-    offsets = exclusive_scan(block_counts)
-    act_nodes_1 = compact_morton_codes(level1_grid, offsets, block_size=(4,4,2))
+    Args:
+        mesh: List of triangles.
+        level1_res: Resolution of the level-1 grid.
+        max_depth: Maximum depth of the octree.
+        
+    Returns:
+        SparseOctree: The constructed octree.
+    """
+    # Step 1: Determine Active Level-1 Nodes
+    act_nodes_1 = determine_active_level1_nodes(mesh, level1_res)
     
-    # Step 2: Construct Level-0 Nodes
-    num_level1_nodes = len(act_nodes_1)
-    nodes_0 = allocate_nodes(count=8 * num_level1_nodes)
-    set_x_neighbor_pointers(nodes_0, parent_grouping=True)
+    # Step 2: Construct Octree Bottom-Up
+    octree = build_octree(act_nodes_1, max_depth)
     
-    # Step 3: Construct Level-1 Nodes
-    # Determine parent changes
-    flag_1 = determine_parent_change(act_nodes_1)
-    parent_index_1 = exclusive_scan(flag_1)
-    num_level2_nodes = parent_index_1[-1] + 1
+    # Step 3: Voxelize into Finest-Level Nodes
+    voxelize_mesh(mesh, octree)
     
-    nodes_1 = allocate_nodes(count=8 * num_level2_nodes)
+    # Step 4: Propagate Parity
+    propagate_parity(octree)
     
-    # Map ActNodes1 to Nodes1
-    for i in range(num_level1_nodes):
+    return octree
+
+def determine_active_level1_nodes(mesh, level1_res):
+    """
+    Determines active level-1 nodes via conservative surface voxelization.
+    """
+    # Preprocess triangles
+    processed_triangles = []
+    for tri in mesh:
+        # Shift triangle in +x by 0.5 SG voxel
+        tri_shifted = shift_triangle_x(tri, 0.5 * get_sg_voxel_size())
+        # Enlarge bounding box in -x by 1 SG voxel
+        tri_enlarged = enlarge_bbox_x(tri_shifted, -1 * get_sg_voxel_size())
+        # Adapt edge functions
+        tri_adapted = adapt_edge_functions(tri_enlarged)
+        processed_triangles.append(tri_adapted)
+    
+    # Conservative voxelization into level-1 grid
+    # Grid dimensions: level1_res x level1_res x level1_res
+    grid = conservative_voxelize(processed_triangles, level1_res)
+    
+    # Extract active nodes in Morton order
+    # Use blocks of extent 4x4x2
+    block_size = (4, 4, 2)
+    num_blocks = calculate_num_blocks(level1_res, block_size)
+    
+    # Buffer for counts
+    count_buffer = [0] * num_blocks
+    
+    # Parallel count
+    for b in range(num_blocks):
+        count_buffer[b] = count_set_bits_in_block(grid, b, block_size)
+        
+    # Scan to get offsets
+    offsets = exclusive_scan(count_buffer)
+    total_active = offsets[-1] + count_buffer[-1]
+    
+    # Write Morton codes
+    act_nodes_1 = [0] * total_active
+    for b in range(num_blocks):
+        block_morton_idx = get_block_morton_index(b, level1_res, block_size)
+        offset = offsets[b]
+        write_morton_codes(grid, b, block_size, act_nodes_1, offset, block_morton_idx)
+        
+    return act_nodes_1
+
+def build_octree(act_nodes_1, max_depth):
+    """
+    Constructs the sparse octree bottom-up.
+    """
+    octree = SparseOctree()
+    
+    # Allocate Level-0 nodes
+    # Nodes0 array size: 8 * len(act_nodes_1)
+    num_level0 = 8 * len(act_nodes_1)
+    nodes_0 = allocate_nodes(num_level0)
+    set_x_neighbors(nodes_0, act_nodes_1)
+    
+    # Determine Level-2 parents
+    flag1 = [0] * len(act_nodes_1)
+    for i in range(len(act_nodes_1) - 1):
+        if get_parent_level2(act_nodes_1[i]) != get_parent_level2(act_nodes_1[i+1]):
+            flag1[i] = 1
+        else:
+            flag1[i] = 0
+    flag1[-1] = 1 # Last node always starts a new parent or is the last of its parent
+    
+    parent_index_1 = exclusive_scan(flag1)
+    num_level2 = parent_index_1[-1] + 1
+    
+    # Allocate Level-1 nodes
+    # Nodes1 array size: 8 * num_level2
+    num_level1 = 8 * num_level2
+    nodes_1 = allocate_nodes(num_level1)
+    
+    # Establish pointers
+    for i in range(len(act_nodes_1)):
         j = 8 * parent_index_1[i] + (act_nodes_1[i] % 8)
         nodes_1[j].first_child = nodes_0[8 * i]
-        nodes_1[j].parent = None # To be set later or during traversal
         nodes_0[8 * i].parent = nodes_1[j]
+        nodes_1[j].morton_code = act_nodes_1[i]
         
-    # Step 4: Construct Higher Levels (Iterative)
+    # Iterate for higher levels
     current_act_nodes = act_nodes_1
     current_level_nodes = nodes_1
-    level = 1
+    current_level = 1
     
-    while level < max_depth - 2: # Stop 2 levels below root
+    while current_level < max_depth - 2: # Stop two levels below root
         # Derive active nodes for next level
-        # Strip 3 LSBs from Morton codes
-        stripped_codes = [code >> 3 for code in current_act_nodes]
-        # Compaction using flag/parent_index logic from previous step
-        # (Simplified: assume we have flag/parent_index for current level)
-        # Re-run flag/scan logic for current level to get parent indices for next level
-        flag_next = determine_parent_change(current_act_nodes)
-        parent_index_next = exclusive_scan(flag_next)
-        num_next_nodes = parent_index_next[-1] + 1
+        # Strip 3 least significant bits and compact
+        act_nodes_next = compact_morton_codes(current_act_nodes, flag1, parent_index_1)
         
-        next_level_nodes = allocate_nodes(count=8 * num_next_nodes)
+        # Re-run flag/scan logic for next level
+        # ... (analogous to level 1 logic) ...
         
-        for i in range(len(current_act_nodes)):
-            j = 8 * parent_index_next[i] + (current_act_nodes[i] % 8)
-            next_level_nodes[j].first_child = current_level_nodes[8 * i]
-            current_level_nodes[8 * i].parent = next_level_nodes[j]
-            
-        current_act_nodes = compact_striped_codes(current_act_nodes, flag_next, parent_index_next)
+        # Allocate and link nodes
+        # ... (analogous to level 1 allocation) ...
+        
+        current_act_nodes = act_nodes_next
         current_level_nodes = next_level_nodes
-        level += 1
+        current_level += 1
         
-    # Step 5: Voxelize and Propagate
-    voxelize_mesh_into_nodes(mesh, nodes_0)
-    propagate_parity_flips(nodes_0)
-    
-    return root_node
+    return octree
+
+def voxelize_mesh(mesh, octree):
+    """
+    Voxelize the mesh into level-0 nodes.
+    """
+    for node in octree.get_level0_nodes():
+        # Rasterize triangles into node's 4x4x4 sub-grid
+        sub_grid = node.voxel_data
+        for tri in mesh:
+            if intersects_node(tri, node):
+                rasterize_triangle_into_subgrid(tri, sub_grid)
+
+def propagate_parity(octree):
+    """
+    Propagate inside/outside parity flips hierarchically.
+    """
+    for node in octree.get_level0_nodes():
+        # Determine uniform state of sub-grid
+        state = get_uniform_state(node.voxel_data)
+        if state is not None:
+            node.state = state
+            node.is_uniform = True
+        else:
+            node.is_uniform = False
+            
+    # Propagate up
+    for level in range(0, max_depth - 2):
+        for node in octree.get_nodes_at_level(level):
+            if node.is_uniform:
+                continue
+            children_states = [child.state for child in node.children if child.is_uniform]
+            if all(s == children_states[0] for s in children_states):
+                node.state = children_states[0]
+                node.is_uniform = True
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Boundary Consistency:** The specific shifting of triangles and bounding boxes is critical to ensure that the final voxelization boundary consists solely of level-0 nodes [S1]. Failure to apply these shifts may result in inconsistent boundary representations.
-*   **Parallel Construction:** Adding nodes on the fly is ill-suited for massively parallel contexts; the up-front construction is necessary for performance [S1].
-*   **Root Node Handling:** The process stops two levels below the root because nodes at higher levels are typically fully present, avoiding unnecessary overhead for a single root node [S1].
-
 ## Operating characteristics
-*   **Time Complexity:** The method involves parallel voxelization, sorting (via Morton order and scan), and tree construction. The parallel voxelization and scan steps are $O(N)$ where $N$ is the number of voxels in the coarse grid. Tree construction is linear in the number of active nodes.
-*   **Memory Complexity:** Memory usage scales logarithmically with the volume size due to the sparse hierarchical structure, storing only non-empty or significant nodes [S1]. The contiguous storage of nodes at each level minimizes overhead.
-*   **Performance:** Optimized for GPU execution using parallel threads per block and scan operations [S1].
-*   **Strengths:** Efficient memory usage for sparse objects; direct construction avoids intermediate dense grids; parallel-friendly design.
-*   **Limitations:** Requires careful handling of boundary conditions (shifting); may be complex to implement due to the intricate pointer management and Morton code sorting.
+- **Time Complexity:** The method is designed for parallel execution on GPUs. The voxelization and construction steps are linear with respect to the number of active voxels/nodes [S1]. The scan operations are $O(N)$ where $N$ is the number of blocks [S1].
+- **Memory Complexity:** The memory usage is proportional to the number of active nodes in the octree, which is significantly less than a dense grid for sparse objects [S1]. The use of $4 \times 4 \times 4$ sub-grids at level-0 increases the constant factor but improves cache efficiency [S1].
+- **Performance:** The method is optimized for massive parallelism, using one thread per 32-bit block for voxelization and construction [S1].
+- **Strengths:** Efficient for large-scale scenes with sparse geometry; avoids the memory overhead of dense voxelization; parallel-friendly construction [S1].
+- **Limitations:** Requires up-front determination of active nodes, which may be challenging for highly dynamic scenes; the conservative voxelization modifications add complexity to the rasterization step [S1].
+- **When to Use:** Suitable for applications requiring solid voxel representations of static or slowly changing meshes, such as volume rendering or physics simulation, where memory efficiency is critical [S1].
+- **When Not to Use:** Not ideal for real-time applications with highly dynamic meshes where the octree structure needs frequent rebuilding; not suitable for dense volumes where the sparse representation offers little benefit [S1].
 
 ## Background
-Sparse Solid Voxelization was introduced in the paper "Fast parallel surface and solid voxelization on GPUs" [S1]. It addresses the limitations of traditional voxelization methods that produce dense grids, which are memory-intensive for large or sparse scenes. The method leverages the properties of octrees and parallel computing to achieve efficient solid voxelization.
+The method was introduced in the paper "Fast parallel surface and solid voxelization on GPUs" [S1]. It addresses the limitations of traditional voxelization methods that rely on dense grids, which are memory-intensive and inefficient for sparse data [S1]. The approach leverages the properties of octrees and parallel computing to achieve efficient solid voxelization [S1].
 
 ## Sources
 [S1] Fast parallel surface and solid voxelization on GPUs, https://doi.org/10.1145/1882261.1866201, fetched 2026-11-03
