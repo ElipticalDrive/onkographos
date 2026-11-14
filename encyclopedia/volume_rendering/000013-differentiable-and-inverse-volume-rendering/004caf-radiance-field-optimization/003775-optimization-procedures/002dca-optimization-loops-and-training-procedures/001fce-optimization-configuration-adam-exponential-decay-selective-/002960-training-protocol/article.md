@@ -3,146 +3,130 @@
 Also called: DCCVT Optimization Setup, DCCVT Training Configuration
 
 ## Overview
-The Training Protocol defines the standard optimization procedure for neural networks in volume rendering, encompassing optimizer settings, learning rate scheduling, and data augmentation strategies [S2]. It addresses the problem of stabilizing gradient descent and preventing convergence failure during the reconstruction of implicit fields or radiance fields from noisy or sparse inputs [S3]. It differs from general optimization loops by explicitly integrating staged training phases (such as pilot networks) to handle early-stage feature integration issues [S3].
+The Training Protocol defines the standard optimization procedure for neural networks in differentiable volume rendering, encompassing optimizer settings, learning rate scheduling, and data augmentation strategies [S2]. It addresses the instability of training coordinate-based neural fields by providing a robust configuration for convergence, particularly when dealing with noisy real-world scan data or complex geometric priors [S2]. It sets itself apart from generic optimization loops by explicitly integrating domain-specific augmentations (such as Gaussian noise for point clouds) and specific regularization techniques (like CVT for discretization stability) into the core training loop [S1, S2].
 
 ## How it works
-The method configures the training loop for neural networks representing volumetric data. It combines a specific optimizer configuration with time-dependent scheduling of learning rates, data augmentations, and regularization weights [S2].
+The protocol establishes a baseline configuration for training neural implicit representations, with specific variations for different architectural needs (e.g., pilot networks, variable views).
 
-**Inputs and Outputs**
-*   **Inputs:** Neural network parameters (weights and biases), training data (point clouds, voxel grids, or radiance field samples), and hyperparameters (learning rate, decay schedule, augmentation parameters) [S2].
-*   **Outputs:** Optimized neural network weights representing the target volume or radiance field [S2].
+### Inputs and Outputs
+*   **Inputs:** Input data (point clouds, voxel grids, or radiographic projections), target values (SDF, density, color), and hyperparameters (optimizer settings, batch size, epochs).
+*   **Outputs:** Trained neural network weights and biases.
 
-**Data Structures**
-*   **Optimizer State:** Maintains first and second moment estimates for the Adam optimizer [S2].
-*   **Training Schedule:** A step counter or epoch counter used to trigger conditional logic for pilot network switching and background selection [S3].
+### Data Structures
+*   **Optimizer State:** Maintains first and second moment estimates for Adam/AdamW.
+*   **Learning Rate Scheduler:** Tracks current learning rate based on epoch/step count.
+*   **Pilot Network (Optional):** A small MLP used for early-stage coarse geometry estimation [S3].
 
-**Parameters**
-*   **Optimizer:** Adam [S2].
-    *   $\beta_1 = 0.9$, $\beta_2 = 0.999$ [S2].
-    *   Initial Learning Rate ($\eta$) = $0.0001$ [S2].
-*   **Decay Schedule:** Halve the learning rate every 100 epochs [S2].
-*   **Augmentation:**
-    *   Transformations: Random scaling and translation [S2].
-    *   Gaussian Noise Standard Deviation ($\sigma$) = $0.5$ (assuming unit cube grid cells) [S2].
-*   **Pilot Network:** Two hidden layers, each with 64 neurons [S3].
-*   **Training Duration:** 400 epochs (SDF/voxel inputs) or 250 epochs (point cloud inputs) [S2]. For VFR with pilot network, total 20,000 steps [S3].
-*   **Alternative Configuration (DCCVT):** Learning rate $5 \times 10^{-4}$, betas $\beta = (0.8, 0.99)$, 1000 iterations [S1].
+### Numbered Steps
 
-**Steps**
-1.  **Initialize** the neural network weights. If using a pilot network, initialize it with two hidden layers and 64 neurons each [S3].
-2.  **Iterate** through training steps (epochs or iterations).
-3.  **Check Step Count** for conditional behaviors:
-    *   **Steps 1–300 (Pilot):** Use the pilot network to aid coarse geometry finding [S3].
-    *   **Steps > 300 (Pilot):** Discard the pilot network and switch to the main framework (e.g., VFR) [S3].
-    *   **Steps 1–25:** Use constant gray backgrounds [S3].
-    *   **Steps > 25:** Switch to background augmentation (noise pattern or random Fourier feature) [S3].
-    *   **Steps < 100:** Do not apply density or color prior regularization [S3].
-    *   **Steps $\ge$ 100:** Apply density prior regularization with weight $\lambda_1 = 2 \cdot 10^{-5}$ and color regularization with weight $\lambda_2 = 8 \cdot 10^{-4}$ [S3].
-4.  **Augment Input Data:** Apply random scaling and translation to input point clouds or grids [S2]. Add Gaussian noise with $\sigma = 0.5$ to input point clouds when simulating real scan data [S2].
-5.  **Forward Pass:** Compute the rendered output or field values using the current network (or pilot network if in early steps) [S3].
-6.  **Compute Loss:** Calculate the loss using the same functions as UNDC for SDF/voxel inputs [S2]. Include regularization terms if step $\ge$ 100 [S3].
-7.  **Backward Pass:** Compute gradients with respect to network parameters [S2].
-8.  **Update Parameters:** Apply the Adam optimizer update step with the current learning rate [S2].
-9.  **Update Learning Rate:** If the current epoch is a multiple of 100, halve the learning rate [S2].
-10. **Repeat** until convergence or maximum epochs (400 for SDF/voxel, 250 for point cloud, or 20,000 total steps for VFR with pilot) [S2, S3].
+1.  **Initialization:**
+    *   Initialize the main neural network parameters. For methods like DCCVT, initialize both the main model and any auxiliary structures (like MTet sites) with the same initial sites [S1].
+    *   If using a Pilot Network, initialize it with two hidden layers, each containing 64 neurons [S3].
+    *   Normalize input coordinates and target values to the range $[-1, 1]$ to match the output range of activation functions like $\sin(\cdot)$ [S6].
+    *   [G] Initialize weights using a standard scheme (e.g., Kaiming uniform or the protocol by Sitzmann et al. for SIREN-like networks) [S6].
 
-**Pseudocode**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+2.  **Early Training (Pilot Phase - Optional):**
+    *   If a Pilot Network is employed, use it for the first $N_{pilot}$ steps (e.g., 300 steps) [S3].
+    *   The pilot network functions as a standard volume rendering model to aid in finding coarse geometry, preventing convergence failure caused by feature integration of all samples in the early stage [S3].
+    *   After $N_{pilot}$ steps, discard the pilot network and switch to the main framework (e.g., VFR) for the remaining training steps [S3].
 
-```python
-def train_protocol(network, pilot_network, data_loader, total_steps=20000, 
-                   lr_init=0.0001, decay_interval=100, 
-                   bg_switch_step=25, prior_start_step=100, 
-                   pilot_steps=300, lambda_density=2e-5, lambda_color=8e-4):
-    # Initialize optimizer state for Adam [S2]
-    optimizer = OptimizerAdam(network.parameters(), lr=lr_init, betas=(0.9, 0.999))
-    current_lr = lr_init
-    epoch = 0
+3.  **Main Training Loop:**
+    *   For each epoch or iteration:
+        a.  **Data Augmentation:**
+            *   Apply random scaling and translation to input data [S2].
+            *   For point cloud inputs, add Gaussian noise with standard deviation $\sigma = 0.5$ (assuming unit cube cells) to simulate real scan noise [S2].
+            *   For variable-view methods (e.g., X-GRM), randomly select the number of views from a set (e.g., $\{6, 8, 10\}$) evenly sampled from available projections [S5, unofficial].
+        b.  **Forward Pass:**
+            *   Compute the rendered output (e.g., SDF, density, color) using the current network weights.
+            *   If using structured latent codes, compute their contribution with a higher learning rate multiplier (e.g., $10\times$) [S4, unofficial].
+        c.  **Loss Computation:**
+            *   Compute the loss using the same functions as the baseline method (e.g., UNDC) [S2].
+            *   For DCCVT, incorporate CVT regularization to maintain discretization stability, distinct from pure Chamfer distance optimization [S1].
+        d.  **Backward Pass:**
+            *   Compute gradients with respect to network parameters.
+            *   [G] If using gradient checkpointing (e.g., in X-GRM), enable it to reduce GPU memory usage [S5, unofficial].
+        e.  **Optimization Step:**
+            *   Update parameters using the Adam or AdamW optimizer.
+            *   Apply learning rate decay as specified (e.g., halve every 100 epochs, cosine annealing, or multistep) [S2][S5, unofficial][S6].
 
-    for step in range(total_steps):
-        # 1. Learning Rate Decay (Epoch-based) [S2]
-        if step > 0 and step % decay_interval == 0:
-            epoch += 1
-            current_lr /= 2.0
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = current_lr
+4.  **Post-Training:**
+    *   Save the model weights. For MoE-INR, use 16-bit floating point for storage while training/inference uses 32-bit [S6].
 
-        # 2. Handle Pilot Network [S3]
-        if step < pilot_steps and pilot_network is not None:
-            model = pilot_network
-        else:
-            model = network
+### Formulas
+*   **Adam Optimizer Update:**
+    $$ \theta_{t+1} = \theta_t - \frac{\eta \cdot \hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} $$
+    Where $\eta$ is the learning rate, $\hat{m}_t$ is the bias-corrected first moment, and $\hat{v}_t$ is the bias-corrected second moment [S2][S5, unofficial].
+*   **Gaussian Noise Augmentation:**
+    $$ p_{noisy} = p_{clean} + \mathcal{N}(0, \sigma^2) $$
+    Where $\sigma = 0.5$ for point cloud inputs [S2].
 
-        # 3. Data Augmentation [S2]
-        batch = next(data_loader)
-        inputs = batch['inputs']
-        targets = batch['targets']
-        
-        # Random scaling and translation [S2]
-        scale_factor = 1.0 + (random.uniform(-0.1, 0.1))
-        translation = random.uniform(-0.05, 0.05)
-        inputs = inputs * scale_factor + translation
-        
-        # Gaussian noise for point clouds [S2]
-        if inputs.ndim == 2:  # Point cloud check [G]
-            noise = random.gauss(0, 0.5)
-            inputs = inputs + noise
+### Parameters
+*   **Optimizer:** Adam or AdamW [S2][S5, unofficial].
+*   **Learning Rate ($\eta$):**
+    *   Standard: $1 \times 10^{-4}$ [S5, unofficial] or $5 \times 10^{-4}$ [S1] or $0.0001$ [S2].
+    *   MoE-INR: $2 \times 10^{-5}$ [S6].
+    *   UVA: Decay from $5 \times 10^{-4}$ to $5 \times 10^{-6}$ [S4, unofficial].
+*   **Beta Coefficients ($\beta_1, \beta_2$):**
+    *   Common: $(0.9, 0.999)$ [S2, S6].
+    *   DCCVT: $(0.8, 0.99)$ [S1].
+    *   X-GRM: $(0.9, 0.95)$ [S5, unofficial].
+*   **Batch Size:**
+    *   Standard: 1 (per shape) [S2].
+    *   UVA: 1024 [S4, unofficial].
+    *   MoE-INR: 16,000 [S6].
+    *   X-GRM: 8 [S5, unofficial].
+*   **Iterations/Epochs:**
+    *   DCCVT: 1000 iterations [S1].
+    *   Neural Dual Contouring: 400 epochs (SDF/voxel) or 250 epochs (point cloud) [S2].
+    *   UVA: 300K iterations [S4, unofficial].
+    *   MoE-INR: 30 pre-training epochs + 270 training epochs [S6].
+    *   X-GRM: 100 epochs [S5, unofficial].
+*   **Precision:**
+    *   Standard: 32-bit float [S6].
+    *   X-GRM: bFloat16 [S5, unofficial].
 
-        # 4. Background Selection [S3]
-        if step < bg_switch_step:
-            background = 0.5  # Constant gray [G]
-        else:
-            background = random.uniform(-1.0, 1.0)  # Augmented background [G]
-
-        # 5. Forward Pass [S3]
-        outputs = model(inputs, background)
-        
-        # 6. Loss Computation [S2]
-        loss = compute_loss(outputs, targets)  # Uses UNDC loss functions [S2]
-        
-        # 7. Apply Regularization Priors [S3]
-        if step >= prior_start_step:
-            density_reg = compute_density_prior(outputs)  # [S3]
-            color_reg = compute_color_prior(outputs)      # [S3]
-            loss = loss + lambda_density * density_reg + lambda_color * color_reg
-            
-        # 8. Backward Pass and Update [S2]
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()  # Applies Adam update rule [S2]
-```
-
-**Edge Cases and Pitfalls**
-*   **Early Convergence Failure:** Without a pilot network or careful initialization, the model may fail to find correct geometry due to feature integration of all samples in early training [S3].
-*   **Optimization Instability:** Background augmentation (noise/Fourier features) can cause instability in the first few steps; hence, constant gray backgrounds are used initially [S3].
-*   **Prior Timing:** Applying density priors too early may prevent the general scene from being well-represented; they should only begin after step 100 [S3].
-*   **Precision:** Gaussian noise is applied assuming unit cube grid cells; scaling must match the input grid resolution [S2].
+### Edge Cases and Pitfalls
+*   **Convergence Failure:** In early training, feature integration of all samples can cause convergence failure. Using a pilot network for the first 300 steps mitigates this [S3].
+*   **Noisy Data:** Real scan data requires heavy augmentation, including Gaussian noise ($\sigma=0.5$) and random transformations, to prevent overfitting to artifacts [S2].
+*   **Discretization Stability:** For methods like DCCVT, omitting CVT regularization can lead to instability, especially with non-uniform site distributions [S1].
 
 ## Subtopics
 
 ### [Learned Initializations for Neural Fields](6509-learned-initializations-for-neural-fields.md)
 This method addresses the inefficiency of optimizing coordinate-based neural networks from random weights for each new signal by applying meta-learning to derive optimal initial weight parameters. It sets itself apart from standard training protocols by decoupling the initialization phase from the specific instance optimization, allowing the network to start closer to the solution manifold of a target signal class (e.g., faces, 3D shapes). This results in faster convergence and improved generalization when only partial observations are available.
 
+### [Training Protocol with Augmented Backgrounds and Density Prior](7043-training-protocol-with-augmented-backgrounds-and-density-pri.md)
+This protocol defines a specific training schedule for differentiable volume rendering that combines background augmentation with density regularization to suppress floating artifacts and stabilize convergence. It addresses the instability of immediate background augmentation and the emergence of scene-matching floaters by enforcing a strict temporal sequence: constant-color initialization, followed by augmented backgrounds, and finally density priors. It differs from standard training by explicitly decoupling the learning of general scene structure from the refinement of density bias and object compactness.
+
 ### [Network Training Settings](7193-network-training-settings.md)
 This article defines the standard hyperparameter configuration for neural networks in radiance-field optimization, specifically focusing on activation functions, dropout regularization, and latent space dimensionality validation. It addresses the problem of stabilizing training and preventing overfitting in differentiable rendering pipelines. It is distinguished from general optimization loops by its focus on architectural regularization (dropout) and non-linearities (PReLU) rather than gradient descent dynamics. It builds on [Training Protocol](4528-training-protocol.md).
 
 ### Pilot Network for Early Training
-A small neural network used during the early training stage to aid the model in finding coarse geometry, preventing convergence failure caused by feature integration of all samples [S3]. It uses two hidden layers with 64 neurons each and is active only for the first 300 training steps, after which it is discarded in favor of the main framework (e.g., VFR) [S3].
+A small neural network used during the early training stage to aid the model in finding coarse geometry, preventing convergence failure caused by feature integration of all samples [S3]. It uses two hidden layers, each with 64 neurons, and is only used in the first 300 training steps. After 300 steps, the pilot network is discarded, and the main framework (e.g., VFR) takes over for the remaining training steps (e.g., total 20K steps) [S3].
 
-### [Training Protocol with Augmented Backgrounds and Density Prior](7043-training-protocol-with-augmented-backgrounds-and-density-pri.md)
-A variant that introduces staged background augmentation and density priors. For the first 25 steps, constant gray backgrounds are used to prevent instability; thereafter, random backgrounds (noise/Fourier features) are applied. Density prior regularization ($\lambda_1 = 2 \cdot 10^{-5}$) and color regularization ($8 \cdot 10^{-4}$) are applied only after step 100 to refine the scene after initial representation.
+### UVA Training Configuration
+Optimizes the UVA model using Adam with learning rate decay from $5 \times 10^{-4}$ to $5 \times 10^{-6}$ [S4, unofficial]. Structured latent codes have a $10\times$ learning rate relative to the base rate [S4, unofficial]. The motion field and canonical field are jointly trained for 300K iterations with a batch size of 1024 [S4, unofficial]. Training takes about 10 hours using two NVIDIA Tesla V100 GPUs [S4, unofficial].
+
+### X-GRM Training Configuration
+Optimizes the X-GRM model using AdamW with a batch size of 8 for 100 epochs [S5, unofficial]. The initial learning rate is $1 \times 10^{-4}$, decreasing to $1 \times 10^{-6}$ via cosine annealing, with $\beta_1 = 0.9$ and $\beta_2 = 0.95$ [S5, unofficial]. It uses bFloat16 precision and gradient checkpointing [S5, unofficial]. The encoder ViT is initialized from DINO pre-trained weights, while the fusion ViT is initialized from scratch [S5, unofficial]. It employs variable-view learning, randomly selecting 6, 8, or 10 views from 50 available projections [S5, unofficial]. Inference on one A100 GPU for 10-view input takes 0.928 seconds, achieving a PSNR of 29.21 and SSIM of 0.886 [S5, unofficial].
+
+### MoE-INR Training Configuration
+Pre-trains the model for 30 epochs, then trains for 270 epochs [S6]. Coordinates and target values are normalized to $[-1, 1]$ [S6]. Uses Adam with initial learning rate $2 \times 10^{-5}$, $\beta_1 = 0.9$, $\beta_2 = 0.999$, and a multistep scheduler for decay [S6]. Uses 32-bit float for training/inference and 16-bit for storage [S6]. Batch size is 16,000 [S6]. Parameter initialization follows the protocol by Sitzmann et al. [S6].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of training steps and batch size. The pilot network variant adds negligible overhead as it is used for only a small fraction of steps (300 out of 20,000) [S3].
-*   **Memory Complexity:** Depends on the neural network architecture (e.g., 128 channels per hidden layer for UNDC [S2]) and the storage of optimizer states (Adam requires two additional tensors per parameter) [S2].
-*   **Performance:** The protocol is designed for reconstruction tasks, including noisy real scans, where heavy augmentation and specific priors improve robustness [S2].
-*   **Strengths:** Stabilizes training in early stages (via pilot network or constant backgrounds) and refines geometry later (via density priors) [S2, S3].
-*   **Limitations:** Requires careful tuning of step thresholds (25, 100, 300) and regularization weights [S3]. Not given in the sources for general radiance field scaling beyond specific experiments.
+*   **Time Complexity:** Depends on the number of iterations and batch size. For example, UVA training takes ~10 hours on two V100s for 300K iterations [S4, unofficial]. X-GRM inference takes 0.928 seconds on an A100 for 10 views [S5, unofficial].
+*   **Memory Complexity:** Gradient checkpointing (X-GRM) reduces memory usage [S5, unofficial]. Large batch sizes (MoE-INR: 16,000) require significant memory [S6].
+*   **Strengths:** Robust to noisy data with appropriate augmentation [S2]. Pilot networks prevent early-stage convergence failure [S3]. CVT regularization ensures discretization stability [S1].
+*   **Limitations:** Requires careful tuning of learning rate schedules and augmentation parameters. Pilot networks add complexity to the early training phase [S3].
+*   **When to Use:** Use for training neural implicit representations in volume rendering, especially when dealing with noisy point clouds or requiring stable discretization [S1, S2]. Use pilot networks for difficult initial geometry estimation [S3].
 
 ## Background
-The training protocol described originates from works on Neural Dual Contouring (UNDC) and Volume Feature Rendering (VFR) [S2, S3]. It was developed to address challenges in reconstructing implicit surfaces and radiance fields from point clouds and voxel data [S2]. The use of Adam with exponential decay and specific data augmentations is standard in deep learning for geometry processing [S2]. The pilot network concept was introduced to mitigate convergence failures in early training stages [S3].
+The training protocol for neural volume rendering has evolved from standard optimization techniques (Adam, learning rate decay) to more specialized configurations addressing the unique challenges of implicit representations. Early work focused on basic convergence [S2], while later methods introduced specific regularizations (CVT) [S1], pilot networks for stability [S3], and large-scale configurations for efficiency (bFloat16, gradient checkpointing) [S5, unofficial][S6]. The protocol is widely used in differentiable rendering pipelines for tasks like surface reconstruction, view synthesis, and 3D shape editing.
 
 ## Sources
 [S1] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
 [S2] Neural Dual Contouring, https://arxiv.org/abs/2202.01999v3, fetched 2026-10-26
 [S3] Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://doi.org/10.52202/075280-2853, fetched 2026-10-26
+[S4] UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing, https://doi.org/10.48550/arXiv.2304.06969, fetched 2026-10-29 (unofficial)
+[S5] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)
+[S6] PDF MoE-INR: Implicit Neural Representation with Mixture-of-Experts for ..., https://academicweb.nd.edu/~cwang11/papers/vis25-moeinr.pdf, fetched 2026-10-29

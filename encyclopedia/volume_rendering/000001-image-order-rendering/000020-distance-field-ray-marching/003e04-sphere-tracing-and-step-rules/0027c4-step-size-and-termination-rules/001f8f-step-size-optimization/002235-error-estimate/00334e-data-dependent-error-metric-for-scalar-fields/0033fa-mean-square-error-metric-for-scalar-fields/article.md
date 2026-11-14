@@ -7,19 +7,19 @@ The Mean-Square Error (EMS) metric quantifies the approximation error of a scala
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A tetrahedron $T$ defined by four vertices; a discrete scalar field $F$ sampled at specific locations; the set of sample points $x$ that lie within $T$.
-*   **Output:** A scalar error value $EMS(T)$ representing the mean squared deviation.
+*   **Input:** A tetrahedron $T$ defined by four vertices; a discrete scalar field $F$ sampled at specific locations; the set of sample points $x$ that lie within $T$ [S1].
+*   **Output:** A scalar error value $EMS(T)$ representing the mean squared deviation [S1].
 
 **Data Structures**
-The method operates on the geometric definition of the tetrahedron and the scalar values at its vertices and internal sample points. No complex data structures are required beyond standard vector/matrix representations for vertex positions and scalar arrays for field values.
+The method operates on the geometric definition of the tetrahedron and the scalar values at its vertices and internal sample points [S1]. No complex data structures are required beyond standard vector/matrix representations for vertex positions and scalar arrays for field values [G].
 
 **Steps**
-1.  Identify the set of original sample points $\{x_i\}$ from the scalar field $F$ that lie within the volume of tetrahedron $T$.
-2.  For each sample point $x_i$, determine its barycentric coordinates relative to the vertices of $T$.
-3.  Compute the interpolated value $f(x_i)$ by linearly interpolating the scalar values at the four vertices of $T$ using the barycentric coordinates.
-4.  Calculate the squared difference between the original field value $F(x_i)$ and the interpolated value $f(x_i)$.
-5.  Sum these squared differences over all sample points $x_i$ within $T$.
-6.  Normalize the sum by the volume of the tetrahedron $|T|$ to obtain the mean square error.
+1.  Identify the set of original sample points $\{x_i\}$ from the scalar field $F$ that lie within the volume of tetrahedron $T$ [S1].
+2.  For each sample point $x_i$, determine its barycentric coordinates relative to the vertices of $T$ [G].
+3.  Compute the interpolated value $f(x_i)$ by linearly interpolating the scalar values at the four vertices of $T$ using the barycentric coordinates [S1].
+4.  Calculate the squared difference between the original field value $F(x_i)$ and the interpolated value $f(x_i)$ [S1].
+5.  Sum these squared differences over all sample points $x_i$ within $T$ [S1].
+6.  Normalize the sum by the volume of the tetrahedron $|T|$ to obtain the mean square error [S1].
 
 **Formula**
 The error metric is defined as [S1]:
@@ -29,16 +29,16 @@ EMS(T) = \frac{1}{|T|} \sum_{x \in T} (F(x) - f(x))^2
 $$
 
 Where:
-*   $|T|$ is the volume spanned by tetrahedron $T$.
-*   $F(x)$ is the original scalar field value at sample point $x$.
-*   $f(x)$ is the value at $x$ linearly interpolated from the values at the vertices of $T$.
-*   The summation is over all sample values of $F$ at vertices $x$ that lie in $T$.
+*   $|T|$ is the volume spanned by tetrahedron $T$ [S1].
+*   $F(x)$ is the original scalar field value at sample point $x$ [S1].
+*   $f(x)$ is the value at $x$ linearly interpolated from the values at the vertices of $T$ [S1].
+*   The summation is over all sample values of $F$ at vertices $x$ that lie in $T$ [S1].
 
 **Parameters**
 *   **Root-Mean-Square (RMS) Conversion:** If an RMS error is preferred instead of EMS, the parameter $\alpha$ (used in the context of the refinement threshold) can be doubled [S1].
 
 **Pitfalls**
-*   **Unnecessary Refinement:** Using EMS alone may cause unnecessary refinement near the viewpoint even if the isosurface is not present in that region, leading to wasted computation [S1]. This is because EMS measures geometric approximation error of the field, not the relevance of the field to a specific isovalue. Data-dependent metrics are required to solve this [S1].
+*   **Unnecessary Refinement:** Using EMS alone may cause unnecessary refinement near the viewpoint even if the isosurface is not present in that region, leading to wasted computation [S1]. This is because EMS measures geometric approximation error of the field, not the relevance of the field to a specific isovalue [S1]. Data-dependent metrics are required to solve this [S1].
 *   **Screen-Space Projection:** The raw EMS is a volume-based metric. To use it for view-dependent rendering, it must be projected onto the screen space [S1].
 
 **Pseudocode**
@@ -48,56 +48,48 @@ Where:
 def compute_ems(tetrahedron, scalar_field, sample_points):
     """
     Computes the Mean-Square Error for a tetrahedron.
-    
     Args:
-        tetrahedron: Object containing 4 vertex positions and 4 vertex scalar values.
-        scalar_field: Function or array providing F(x) for any point x.
+        tetrahedron: Object containing 4 vertex positions (v0..v3) and 4 vertex scalar values (s0..s3).
+        scalar_field: Function returning F(x) for any point x.
         sample_points: List of points x lying within the tetrahedron.
-        
     Returns:
         float: The EMS value.
     """
-    # Calculate volume of the tetrahedron |T|
-    # Volume = |dot(v0-v3, cross(v1-v3, v2-v3))| / 6
     v0, v1, v2, v3 = tetrahedron.vertices
+    s0, s1, s2, s3 = tetrahedron.scalar_values
+
+    # Calculate volume of the tetrahedron |T| [G]
     volume = abs(dot(v0 - v3, cross(v1 - v3, v2 - v3))) / 6.0
-    
     if volume == 0:
         return 0.0
-        
+
     squared_diff_sum = 0.0
-    count = 0
-    
+
     for x in sample_points:
-        # Get original field value F(x)
         F_x = scalar_field(x)
-        
-        # Compute interpolated value f(x)
-        # f(x) is linear interpolation from vertex values
-        # Using barycentric coordinates or linear system solution
-        # Let V_i be vertex positions, S_i be vertex scalar values
-        # Solve for weights w_i such that sum(w_i * V_i) = x and sum(w_i) = 1
-        # f(x) = sum(w_i * S_i)
-        
-        # Note: In practice, barycentric coordinates are computed relative to v3
-        # x = v3 + u*(v0-v3) + v*(v1-v3) + w*(v2-v3)
-        # f(x) = w*S0 + v*S1 + u*S2 + (1-u-v-w)*S3
-        
-        f_x = interpolate_linear(tetrahedron, x)
-        
+
+        # Compute interpolated value f(x) using barycentric coordinates [G]
+        f_x = barycentric_interpolate(v0, s0, v1, s1, v2, s2, v3, s3, x)
+
         squared_diff_sum += (F_x - f_x) ** 2
-        count += 1
-        
-    # The formula sums over all sample points. 
-    # The source defines EMS(T) = (1/|T|) * sum(...). 
-    # It does not divide by the count of points, but by the volume.
-    # However, standard MSE divides by N. The source text says:
-    # "EMS(T) = 1/|T| sum_{x in T} (F(x) - f(x))^2"
-    # This implies the normalization is by volume, not point count.
-    
+
+    # Normalize by volume |T| as per definition [S1]
     ems = squared_diff_sum / volume
-    
     return ems
+
+def barycentric_interpolate(v0, s0, v1, s1, v2, s2, v3, s3, p):
+    # Compute barycentric coordinates of p in tetrahedron v0,v1,v2,v3 [G]
+    e1 = v0 - v3
+    e2 = v1 - v3
+    e3 = v2 - v3
+    q = p - v3
+    denom = dot(cross(e1, e3), cross(e2, e3))
+    if denom == 0:
+        return s3
+    u = dot(cross(q, e3), cross(e2, e3)) / denom
+    v = dot(cross(e1, q), cross(e2, e3)) / denom
+    w = dot(cross(e1, e3), cross(e1, q)) / denom
+    return u * s0 + v * s1 + w * s2 + (1.0 - u - v - w) * s3
 ```
 
 ## Subtopics
@@ -105,11 +97,18 @@ def compute_ems(tetrahedron, scalar_field, sample_points):
 ### Standard Deviation Model (SDM) for Error Quantification
 A local measurement model used to quantify errors in low-resolution approximations of the original data set [S2]. It calculates the standard deviation of attribute values around a weighted average [S2]. Formula: $e = \sqrt{\frac{1}{n}[(V_1 - V)^2 + (V_2 - V)^2 + \cdots + (V_n - V)^2]}$, where $e$ is the local error measurement, $n$ is the number of grid points, $V_1 \dots V_n$ are attribute values, and $V$ is the weighted average [S2]. It is applied to regular grids and used for uncertainty visualization with marching cubes [S2].
 
+### Field Error Metric
+Two methods to estimate error in simplified meshes: surface boundary error using Metro and field data error using scalar value differences [S3]. Field error samples points inside the domain of the original mesh (including interpolated points inside tetrahedra), computes differences in scalar values, and ignores points outside the simplified mesh domain [S3]. Field error normalization is expressed as a percentage relative to the range of the field, while surface error normalization is expressed as a percentage relative to the bounding box diagonal [S3].
+
 ## Operating characteristics
-*   **Complexity:** The complexity is linear with respect to the number of sample points within the tetrahedron. Calculating the volume is constant time.
+*   **Time Complexity:** Linear with respect to the number of sample points within the tetrahedron [G]. Volume calculation is constant time [G].
+*   **Memory Complexity:** Constant auxiliary space per tetrahedron, proportional to the number of sample points stored or streamed [G].
+*   **Measured Performance:** Not given in the sources.
 *   **Strengths:** Provides a rigorous mathematical measure of the deviation between the original data and the linear approximation [S1].
-*   **Limitations:** It does not account for the visual importance of the error relative to a specific isovalue. As noted, it can lead to over-refinement in empty space or regions far from the isosurface of interest [S1].
-*   **Scaling:** The metric is local to each tetrahedron, making it suitable for parallel evaluation during adaptive refinement.
+*   **Limitations:** Does not account for the visual importance of the error relative to a specific isovalue, leading to over-refinement in empty space or regions far from the isosurface of interest [S1].
+*   **Scaling:** The metric is local to each tetrahedron, making it suitable for parallel evaluation during adaptive refinement [G].
+*   **When to use:** When a global geometric approximation error is needed for adaptive mesh refinement [S1].
+*   **When not to use:** When view-dependent refinement is required, as it wastes computation near the viewpoint where the isosurface is absent [S1].
 
 ## Background
 The Mean-Square Error metric was introduced in the context of adaptive multi-valued volume data visualization [S1]. It was proposed as a typical error metric for comparing original scalar fields to downsampled approximations [S1]. The work highlights the limitation of using EMS alone for fly-through exploration, motivating the development of data-dependent error metrics that restrict refinement to regions near a chosen isovalue [S1].
@@ -117,3 +116,4 @@ The Mean-Square Error metric was introduced in the context of adaptive multi-val
 ## Sources
 [S1] Adaptive Multi-Valued Volume Data Visualization using Data-Dependent Error Metrics, https://doi.org/10.2316/journal.205.2005.2.205-4291, fetched 2026-10-26
 [S2] Visualizing uncertainty in multi-resolution volumetric data using marching cubes, https://doi.org/10.1145/2254556.2254649, fetched 2026-11-05
+[S3] Streaming Simplification of Tetrahedral Meshes, https://doi.org/10.1109/tvcg.2007.21, fetched 2026-11-04

@@ -1,83 +1,100 @@
 # Cosine Palette Color Mapping
 Also called: Inigo Quilez Palette
 ## Overview
-Cosine Palette Color Mapping generates smooth, perceptually uniform color gradients from a scalar input by evaluating a parametric cosine function with distinct phase offsets for each RGB channel [S1, unofficial]. It differs from sibling methods like the [Gaussian Transfer Function](4408-gaussian-transfer-function.md) or [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md) by relying on trigonometric interference rather than probability distributions or logistic curves, producing vibrant, continuous transitions without explicit piecewise definitions [S1, unofficial].
+Cosine Palette Color Mapping generates a smooth, continuous color gradient from a normalized scalar input using a parametric cosine function with specific vector parameters [S1, unofficial]. It solves the problem of mapping volumetric data values to visually distinct colors without the discontinuities of piecewise linear methods [S1, unofficial]. Unlike its siblings [Gaussian Transfer Function](4408-gaussian-transfer-function.md) and [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md), which rely on probability distributions or derivative-based transitions, this method uses trigonometric periodicity to create smooth, oscillating color bands [S1, unofficial].
 ## How it works
-**Inputs and Outputs**
-- Input: A normalized scalar value $t \in [0, 1]$ representing the volume data intensity [G].
-- Output: An RGBA color vector $\mathbf{C} = (R, G, B, A)$. The alpha channel is typically constant or handled separately; this method defines the RGB components [G].
+**Inputs and Outputs:**
+- Input: A normalized scalar value $t \in [0, 1]$, typically derived from raw voxel data via normalization [S1, unofficial].
+- Output: An RGBA color vector $\mathbf{C}$. The RGB channels are computed via the cosine palette; the Alpha channel is typically set to 1.0 (fully opaque) unless blended with other transfer function logic [G].
 
-**Data Structures**
-The method uses three constant vectors $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$ of size 3 (representing R, G, B channels).
+**Data Structures:**
+- `vec3 a`: Base color offset.
+- `vec3 b`: Amplitude scaling.
+- `vec3 c`: Frequency scaling.
+- `vec3 d`: Phase shift.
+
+**Formula:**
+The color $\mathbf{C}_{rgb}$ is calculated as:
+$$ \mathbf{C}_{rgb} = \mathbf{a} + \mathbf{b} \cdot \cos(2\pi \cdot (\mathbf{c} \cdot t + \mathbf{d})) $$
+
+Where:
 - $\mathbf{a} = (0.5, 0.5, 0.5)$
 - $\mathbf{b} = (0.5, 0.5, 0.5)$
 - $\mathbf{c} = (1.0, 1.0, 1.0)$
 - $\mathbf{d} = (0.00, 0.33, 0.67)$
+- $\cos$ is applied component-wise.
+- $t$ is the scalar input.
 
-**Formula**
-The RGB color is computed as:
-$$ \mathbf{C}_{rgb} = \mathbf{a} + \mathbf{b} \cdot \cos\left(2\pi \cdot (\mathbf{c} \cdot t + \mathbf{d})\right) $$
-where $\cdot$ denotes component-wise multiplication and addition. The $\cos$ function operates component-wise on the vector argument.
+**Parameters:**
+- The parameters $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$ are fixed constants defined by Inigo Quilez [S1, unofficial].
+- $t$ must be clamped to $[0, 1]$ to prevent out-of-bounds evaluation if raw values are not pre-normalized [G].
 
-**Steps**
-1. Clamp input $t$ to $[0, 1]$ to ensure valid domain evaluation [G].
-2. Compute the phase vector $\mathbf{\phi} = \mathbf{c} \cdot t + \mathbf{d}$.
-3. Compute the cosine vector $\mathbf{v} = \cos(2\pi \cdot \mathbf{\phi})$.
-4. Scale by amplitude $\mathbf{b}$ and shift by offset $\mathbf{a}$: $\mathbf{C}_{rgb} = \mathbf{a} + \mathbf{b} \cdot \mathbf{v}$.
-5. Clamp each component of $\mathbf{C}_{rgb}$ to $[0, 1]$ to handle numerical precision [G].
-6. Set Alpha $A$ to a constant value (e.g., 1.0) or a separate transfer function [G].
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point precision errors in $t$ may cause slight color banding if the output is quantized to 8-bit integers without dithering [G].
+- **Boundaries:** The function is periodic. If $t$ exceeds $[0, 1]$, the color will wrap around. Clamping $t$ is essential for monotonic data mapping [G].
+- **Alpha:** This method defines RGB only. Alpha must be handled separately, often by setting it to 1.0 or blending with opacity transfer functions [G].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def cosine_palette(t: float) -> tuple:
-    # Constants as defined in [S1, unofficial]
+def cosine_palette(t: float) -> tuple[float, float, float, float]:
+    # Clamp input to [0, 1] to prevent wrapping artifacts
+    t = max(0.0, min(1.0, t))
+    
+    # Define vector parameters
     a = (0.5, 0.5, 0.5)
     b = (0.5, 0.5, 0.5)
     c = (1.0, 1.0, 1.0)
     d = (0.00, 0.33, 0.67)
     
-    # Clamp input to [0, 1]
-    t = max(0.0, min(1.0, t))
+    # Compute RGB using component-wise cosine
+    # cos(2 * pi * (c_i * t + d_i))
+    r = a[0] + b[0] * math.cos(2 * math.pi * (c[0] * t + d[0]))
+    g = a[1] + b[1] * math.cos(2 * math.pi * (c[1] * t + d[1]))
+    b_val = a[2] + b[2] * math.cos(2 * math.pi * (c[2] * t + d[2]))
     
-    # Compute RGB channels
-    r = a[0] + b[0] * math.cos(2.0 * math.pi * (c[0] * t + d[0]))
-    g = a[1] + b[1] * math.cos(2.0 * math.pi * (c[1] * t + d[1]))
-    b_val = a[2] + b[2] * math.cos(2.0 * math.pi * (c[2] * t + d[2]))
+    # Alpha is not defined by the palette formula; set to 1.0 [G]
+    alpha = 1.0
     
-    # Clamp output to [0, 1]
-    r = max(0.0, min(1.0, r))
-    g = max(0.0, min(1.0, g))
-    b_val = max(0.0, min(1.0, b_val))
-    
-    # Alpha is not defined by the palette formula itself; set to 1.0 as default [G]
-    return (r, g, b_val, 1.0)
+    return (r, g, b_val, alpha)
 ```
-
-**Edge Cases**
-- If $t$ is outside $[0, 1]$, clamping is required to prevent unexpected color shifts due to the periodic nature of cosine [G].
-- The phase offsets $\mathbf{d}$ are chosen to create a specific visual progression; altering them changes the color sequence significantly.
-
 ## Subtopics
 
 ### [Blue-Red Colormap](3921-blue-red-colormap.md)
-Uses piecewise linear gradients for depth visualization, unlike the trigonometric smoothness of Cosine Palette.
+The Blue-Red Colormap normalizes scalar depth values to the range $[0, 1]$ and maps them to a piecewise linear color gradient ranging from blue at minimum depth to red at maximum depth. It solves the problem of interpreting 3D spatial structure from rendered depth buffers by providing a high-contrast continuous representation. Unlike the parent Cosine Palette Color Mapping which generates smooth gradients via trigonometric functions, this method uses explicit linear piecewise functions optimized for depth visualization.
 
 ### [Hue Transfer Function](4574-hue-transfer-function.md)
-Uses smoothstep-based hue cycling, distinct from the cosine interference pattern.
+The Hue Transfer Function is a procedural method that maps a scalar input value to an RGB color by cycling through hue bands using smoothstep functions. It serves as a specific implementation of color mapping within volume rendering classification, distinct from parent [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md) by using piecewise linear interpolation (smoothstep) rather than trigonometric functions to define color transitions.
 
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per sample, involving a few trigonometric evaluations.
-- **Memory Complexity**: $O(1)$, requiring only constant storage for the palette vectors.
-- **Strengths**: Produces smooth, vibrant gradients without discontinuities; computationally cheap; easy to implement in shaders.
-- **Limitations**: The color progression is fixed by the constants; not easily adjustable for specific perceptual uniformity requirements without retuning parameters.
-- **When to use**: When a visually pleasing, continuous color ramp is needed for volume rendering or general visualization without complex parameter tuning.
+**Time and Memory Complexity:**
+- Time: $O(1)$ per voxel, involving a constant number of arithmetic operations and trigonometric evaluations.
+- Memory: $O(1)$, requiring only storage for the four vector parameters and the input scalar.
 
+**Measured Performance:**
+- Performance is hardware-independent and extremely fast, suitable for real-time ray marching in fragment shaders [S1, unofficial].
+
+**Scaling:**
+- Scales linearly with the number of voxels sampled. No preprocessing or lookup table generation is required [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Smooth, continuous color transitions; no discontinuities; easy to implement in GLSL/HLSL; visually pleasing gradients [S1, unofficial].
+- **Limitations:** Limited control over specific color regions compared to piecewise methods; periodic nature may cause unintended color repetition if $t$ is not clamped [G].
+
+**When to Use:**
+- Use for general-purpose volumetric data visualization where smooth color gradients are desired and specific color mapping constraints are not critical [S1, unofficial].
+- Avoid when precise control over color transitions at specific data values is required, or when the data range is not normalized to $[0, 1]$ [G].
 ## Background
-The method was popularized by Inigo Quilez in the context of procedural shading and color palettes [S1, unofficial]. It leverages the mathematical property that summing cosines with different phases creates complex, smooth waveforms. It is used in real-time graphics and volume rendering to map scalar fields to colors efficiently.
+**Origin:**
+- The method was described by Inigo Quilez [S1, unofficial].
+- It is widely used in procedural graphics and shader programming for generating aesthetically pleasing color palettes [S1, unofficial].
 
+**History and Development:**
+- The technique gained popularity through online shader communities and blogs discussing procedural color generation [S1, unofficial].
+
+**Where it is Used:**
+- Volume rendering, particularly in real-time applications using WebGL/GLSL [S1, unofficial].
+- Procedural texture generation and shader art [S1, unofficial].
 ## Sources
 [S1] Show HN: Volume rendering 3D data in Three.js and GLSL, https://github.com/SuboptimalEng/volume-rendering, fetched 2026-10-26 (unofficial)

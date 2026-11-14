@@ -3,179 +3,173 @@
 Also called: 3D Volume Texture Creation
 
 ## Overview
-Volume Texture Creation allocates GPU memory and loads volumetric data, transfer functions, or auxiliary fields into GPU-accessible texture resources for subsequent rendering [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of translating abstract host-side volumetric representations (dense grids, scalar fields, label maps) into hardware-ready texture objects with correct memory layouts, filtering modes, and resource flags [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial]. Unlike [Volume Texture Setup](4055-volume-texture-setup.md), which configures sampling states and format flags, this method handles the high-level allocation, data transfer, and object lifecycle [S1, unofficial][S2, unofficial][S3, unofficial]. It differs from [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md) by operating on dense grids [S7154-memory-organization-and-layout.md].
+Volume Texture Creation is the method for allocating GPU memory and uploading volumetric data (density, gradients, transfer functions) into GPU-accessible texture objects for subsequent raymarching or splatting rendering. It solves the problem of transferring raw voxel data from host memory to device memory while defining the sampling behavior (filtering, wrapping) required for correct interpolation during rendering. It differs from [Volume Texture Setup](4055-volume-texture-setup.md) by focusing on the high-level object lifecycle and data upload rather than specific parameterization, and from [Trilinear Volume Sampling for Texture Generation](2726-trilinear-volume-sampling-for-texture-generation.md) by handling coordinate transformation and buffer construction rather than the interpolation algorithm itself.
 
 ## How it works
-The method varies significantly by API and data type. The following sections detail the primary implementation patterns found in the sources: CUDA, WebGPU, OpenGL (Standard), OpenGL (GPU Volume Rendering Data Setup), VolPack, and WebGL (Texture Array).
+The method varies by API (CUDA, OpenGL, WebGPU, VolPack). The core steps involve allocating device memory, copying data, and binding resources to texture objects.
 
 ### Inputs and Outputs
-*   **Inputs**: Host-side memory buffers containing volume data (e.g., `hostScalar`), transfer function tables, or image URLs. Dimensions $(dimX, dimY, dimZ)$ or width/height/depth.
-*   **Outputs**: GPU texture objects (e.g., `cudaTextureObject_t`, `GPUTexture`, `GLuint`), bound to memory arrays or buffers.
+- **Inputs**: Host-side scalar or vector volume data (e.g., attenuation $\tau$, gradients $\nabla\tau$), transfer function data, volume dimensions ($dimX, dimY, dimZ$), and scalar component count.
+- **Outputs**: GPU texture objects (e.g., `cudaTextureObject_t`, `GLuint`, `GPUTexture`) bound to device memory containing the volume data.
 
 ### Data Structures
+1.  **CUDA Resource Descriptor** (`cudaResourceDesc`):
+    -   `resType`: `cudaResourceTypeArray` [S2, unofficial].
+    -   `res.array.array`: Pointer to `cudaArray_t` [S2, unofficial].
+2.  **CUDA Texture Descriptor** (`cudaTextureDesc`):
+    -   `normalizedCoords`: `true` [S2, unofficial].
+    -   `filterMode`: `cudaFilterModeLinear` [S2, unofficial].
+    -   `addressMode[0-2]`: `cudaAddressModeClamp` [S2, unofficial].
+    -   `readMode`: `cudaReadModeElementType` [S2, unofficial].
+3.  **Channel Format Description** (`cudaChannelFormatDesc`):
+    -   Defined for float data (e.g., 32-bit float per component) [S2, unofficial].
+4.  **3D Memory Copy Parameters** (`cudaMemcpy3DParms`):
+    -   `srcPtr`: Host pointer (`hostScalar`) [S2, unofficial].
+    -   `srcPitch`: `dim.x * sizeof(float)` [S2, unofficial].
+    -   `dstArray`: `cudaArray_t` (`m_arrayField`) [S2, unofficial].
+    -   `extent`: Volume dimensions (`dim.x, dim.y, dim.z`) [S2, unofficial].
+    -   `kind`: `cudaMemcpyHostToDevice` [S2, unofficial].
 
-#### CUDA Volume Data
-*   **3D CUDA Array**: Allocated with extent $(dim.x, dim.y, dim.z)$ [S2, unofficial].
-*   **Channel Format**: Float data, typically 32-bit or 16-bit depending on precision requirements [S2, unofficial].
-*   **Resource Descriptor (`cudaResourceDesc`)**:
-    *   `resType`: `cudaResourceTypeArray` [S2, unofficial].
-    *   `res.array.array`: Pointer to `cudaArray_t` [S2, unofficial].
-*   **Texture Descriptor (`cudaTextureDesc`)**:
-    *   `normalizedCoords`: `true` [S2, unofficial].
-    *   `filterMode`: `cudaFilterModeLinear` [S2, unofficial].
-    *   `addressMode[0-2]`: `cudaAddressModeClamp` [S2, unofficial].
-    *   `readMode`: `cudaReadModeElementType` [S2, unofficial].
+### Numbered Steps (CUDA Approach)
+1.  **Create Channel Format**: Define the channel format for the scalar data (e.g., float) [S2, unofficial].
+2.  **Allocate 3D Array**: Allocate a `cudaArray_t` with extent defined by volume dimensions ($dim.x, dim.y, dim.z$) using the channel format [S2, unofficial].
+3.  **Configure Copy Parameters**: Initialize `cudaMemcpy3DParms` with source pointer, source pitch ($dim.x \times sizeof(float)$), destination array, extent, and copy kind [S2, unofficial].
+4.  **Execute Copy**: Perform the 3D memory copy from host to device [S2, unofficial].
+5.  **Initialize Resource Descriptor**: Set `resType` to `cudaResourceTypeArray` and `res.array.array` to the target `cudaArray_t` [S2, unofficial].
+6.  **Initialize Texture Descriptor**: Set `normalizedCoords` to true, `filterMode` to linear, address modes to clamp, and read mode to element type [S2, unofficial].
+7.  **Create Texture Object**: Call `cudaCreateTextureObject` with the resource and texture descriptors [S2, unofficial].
 
-#### WebGPU Volume Data
-*   **Texture Descriptor**:
-    *   `size`: `{width, height, depthOrArrayLayers: slices}` [S3, unofficial].
-    *   `dimension`: `'2d'` [S3, unofficial].
-    *   `format`: `'r16float'` [S3, unofficial].
-    *   `usage`: `GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST` [S3, unofficial].
-*   **Write Parameters**:
-    *   `origin`: `{x:0, y:0, z:i}` [S3, unofficial].
-    *   `bytesPerRow`: `width * 2` [S3, unofficial].
-    *   `rowsPerImage`: `height` [S3, unofficial].
-    *   `extent`: `{width, height, depthOrArrayLayers: 1}` [S3, unofficial].
+### Numbered Steps (WebGPU Approach)
+1.  **Create Texture**: Create a GPU texture with size `{width, height, depthOrArrayLayers: slices}`, dimension `'2d'`, format `'r16float'`, and usage `GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST` [S3, unofficial].
+2.  **Upload Data**: For each slice $i$ from $0$ to $depth-1$:
+    -   Write raw data to the volume texture using `device.queue.writeTexture`.
+    -   Specify texture, origin `{x:0, y:0, z:i}`, source buffer (`rawData.buffer`), bytesPerRow (`width * 2`), rowsPerImage (`height`), and extent `{width, height, depthOrArrayLayers: 1}` [S3, unofficial].
 
-#### OpenGL Standard (GPU Volume Rendering Data Setup)
-*   **Attenuation Texture**:
-    *   Format: `GL_R16` [S4, unofficial].
-    *   Type: `GL_UNSIGNED_SHORT` [S4, unofficial].
-    *   Data: 1D array of `dimX * dimY * dimZ` values in $[0,1]$ [S4, unofficial].
-*   **Gradient Texture**:
-    *   Format: `GL_RGB16F` [S4, unofficial].
-    *   Type: `GL_FLOAT` [S4, unofficial].
-    *   Data: 1D array of `dimX * dimY * dimZ` 3-tuples, components in $[-1, +1]$ [S4, unofficial].
-*   **Transfer Function Texture**:
-    *   Format: `GL_RGBA16` [S4, unofficial].
-    *   Type: `GL_UNSIGNED_SHORT` [S4, unofficial].
-    *   Size: Typically 256 entries [S4, unofficial].
-    *   Data: 1D array of 4-tuples; RGB stores $k_d$, Alpha stores $\tau'$ [S4, unofficial].
+### Numbered Steps (OpenGL Approach)
+1.  **Allocate 3D Texture**: Call `glTexImage3D` with target `GL_TEXTURE_3D`, internal format (e.g., `GL_R16` for attenuation, `GL_RGB16F` for gradients), dimensions ($dimX, dimY, dimZ$), and data type (e.g., `GL_UNSIGNED_SHORT`, `GL_FLOAT`) [S4, unofficial].
+2.  **Allocate 1D Transfer Function**: Call `glTexImage1D` with target `GL_TEXTURE_1D`, internal format `GL_RGBA16`, size (e.g., 256), and data type `GL_UNSIGNED_SHORT` [S4, unofficial].
 
-#### VolPack Context
-*   **Voxel Structure**: Defined by `bytes_per_voxel`, `num_voxel_fields`, `num_shade_fields`, `num_classify_fields` [S7].
-*   **Field Properties**: Declared via `vpSetVoxelField` with `field_num`, `field_size`, `field_offset`, `field_max` [S7].
+### Pseudocode (CUDA Volume Creation)
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-### Numbered Steps
-
-#### CUDA Implementation [S2, unofficial]
-1.  Create channel format description for float data.
-2.  Allocate 3D CUDA array with extent $(dim.x, dim.y, dim.z)$.
-3.  Configure `cudaMemcpy3DParms`:
-    *   `srcPtr`: Pointer to `hostScalar`.
-    *   `srcPitch`: $dim.x \times sizeof(float)$.
-    *   `dstArray`: Target `cudaArray_t`.
-    *   `extent`: Volume dimensions.
-    *   `kind`: `cudaMemcpyHostToDevice`.
-4.  Execute the 3D memory copy.
-5.  Initialize `cudaResourceDesc` with `resType = cudaResourceTypeArray` and `res.array.array` pointing to the array.
-6.  Initialize `cudaTextureDesc` with `normalizedCoords = true`, `filterMode = cudaFilterModeLinear`, `addressMode[0-2] = cudaAddressModeClamp`, `readMode = cudaReadModeElementType`.
-7.  Create texture object using `cudaCreateTextureObject` with the resource and texture descriptors.
-
-#### WebGPU Implementation [S3, unofficial]
-1.  Create a GPU texture with size `{width, height, depthOrArrayLayers: slices}`, dimension `'2d'`, format `'r16float'`, and usage `GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST`.
-2.  For each slice $i$ from $0$ to $depth-1$:
-    *   Write raw data to the volume texture using `device.queue.writeTexture`.
-    *   Specify `texture`, `origin {x:0, y:0, z:i}`, `source buffer` (`rawData.buffer`), `bytesPerRow` (`width * 2`), `rowsPerImage` (`height`), and `extent {width, height, depthOrArrayLayers: 1}`.
-
-#### OpenGL Standard Implementation [S4, unofficial]
-1.  **Attenuation**: Call `glTexImage3D(GL_TEXTURE_3D, 0, GL_R16, dimX, dimY, dimZ, 0, GL_RED, GL_UNSIGNED_SHORT, volumeTexMap)`.
-2.  **Gradient**: Call `glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB16F, dimX, dimY, dimZ, 0, GL_RGB, GL_FLOAT, gradientTexMap)`.
-3.  **Transfer Function**: Call `glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA16, 256, 0, GL_RGBA, GL_UNSIGNED_SHORT, transferTex)`.
-
-#### VolPack Implementation [S7]
-1.  Create a new context using `vpCreateContext()`.
-2.  Set volume dimensions using `vpSetVolumeSize(vpc, xlen, ylen, zlen)`.
-3.  Set voxel size and field counts using `vpSetVoxelSize(vpc, bytes_per_voxel, num_voxel_fields, num_shade_fields, num_classify_fields)`.
-4.  Declare voxel field properties using `vpSetVoxelField(vpc, field_num, field_size, field_offset, field_max)` and `vpFieldOffset(voxel_ptr, field_name)` for each field.
-
-#### WebGL Texture Array Implementation [S6, unofficial]
-1.  Create a WebGL texture object. Bind it as `gl.TEXTURE_2D_ARRAY`.
-2.  Initialize with a $1 \times 1 \times 1$ RGBA texture (magenta) to allocate storage.
-3.  For each URL in `urls`:
-    *   Load an image.
-    *   Create a canvas of size `width` $\times$ `height`.
-    *   Draw the image onto the canvas.
-    *   Extract pixel data using `ctx.getImageData`.
-    *   Flatten the data into a `Uint8Array` and append to `pixels` array.
-4.  Upload the complete `pixels` array to the texture using `texImage3D` with dimensions `width`, `height`, and `depth` equal to `urls.length`.
-5.  Generate mipmaps.
-6.  Set mag filter to `NEAREST` and min filter to `NEAREST_MIPMAP_LINEAR`.
-
-#### Splat Texture Management [S8, unofficial]
-1.  Create a texture from a `Uint32Array` by instantiating `THREE.DataArrayTexture` with `data`, `width`, `height`, `depth`.
-2.  Set format to `THREE.RGBAIntegerFormat`, type to `THREE.UnsignedIntType`, magFilter and minFilter to `THREE.NearestFilter`, and `generateMipmaps` to `false`.
-3.  When ensuring an SH texture:
-    *   Calculate padded size as `maxSplats * 4`.
-    *   If input data length is less than padded size, allocate a new `Uint32Array` of that size, copy data into it, and replace the original reference.
-
-#### Volume Texture Atlas Export [S9, unofficial]
-1.  Create an RGBA uint8 atlas array of shape `(rows * height, cols * width, 4)` initialized to zero.
-2.  Set Alpha channel to 255: `atlas[:, :, 3] = 255`.
-3.  Iterate `z_index` from $0$ to `depth-1`:
-    *   Calculate `row, column = divmod(z_index, cols)`.
-    *   Calculate `y0, x0` offsets: `y0 = row * height`, `x0 = column * width`.
-    *   Copy `result.density[z_index]` to `atlas[y0:y0+height, x0:x0+width, 0]`.
+```python
+def create_cuda_volume_texture(host_data, dim_x, dim_y, dim_z):
+    # 1. Create channel format description for float data
+    channel_desc = cuda.channel_format_type.FLOAT
+    
+    # 2. Allocate 3D array with extent defined by volume dimensions
+    cuda_array = cudaMalloc3DArray({
+        'format': channel_desc,
+        'width': dim_x,
+        'height': dim_y,
+        'depth': dim_z
+    })
+    
+    # 3. Configure cudaMemcpy3DParms for host-to-device copy
+    copy_params = cuda.memcpy3d(
+        src_ptr=host_data,
+        src_pitch=dim_x * 4,  # sizeof(float) = 4
+        dst_array=cuda_array,
+        extent_width=dim_x,
+        extent_height=dim_y,
+        extent_depth=dim_z,
+        kind=cuda.memcpy_kind.H2D
+    )
+    
+    # 4. Execute the 3D memory copy
+    cuda.copy_3d(copy_params)
+    
+    # 5. Initialize cudaResourceDesc
+    resource_desc = cuda.resource_desc(
+        res_type=cuda.resource_type.ARRAY,
+        array=cuda_array
+    )
+    
+    # 6. Initialize cudaTextureDesc
+    texture_desc = cuda.texture_desc(
+        normalized_coords=True,
+        filter_mode=cuda.filter_mode.LINEAR,
+        address_mode=[cuda.address_mode.CLAMP, cuda.address_mode.CLAMP, cuda.address_mode.CLAMP],
+        read_mode=cuda.read_mode.ELEMENT_TYPE
+    )
+    
+    # 7. Create the texture object
+    texture_object = cuda.create_texture_object(resource_desc, texture_desc)
+    
+    return texture_object
+```
 
 ### Parameters
-*   **CUDA**: Volume dimensions $(dim.x, dim.y, dim.z)$ [S2, unofficial].
-*   **WebGPU**: Width, height, depth/slices [S3, unofficial].
-*   **OpenGL (Standard)**: `dimX, dimY, dimZ` for 3D textures; 256 for transfer function [S4, unofficial].
-*   **VolPack**: `xlen, ylen, zlen` for volume size; `bytes_per_voxel`, `num_voxel_fields`, `num_shade_fields`, `num_classify_fields` for voxel structure [S7].
-*   **WebGL Array**: `width`, `height`, `urls.length` (depth) [S6, unofficial].
-*   **Splat**: `maxSplats` (maximum number of splats supported) [S8, unofficial].
-*   **Atlas**: `tile_columns` (typically equal to volume width), `tile_rows` (typically 1) [S9, unofficial].
+-   **numberOfScalarComponents**: Integer specifying scalar component count; must be exactly 1 or 4 [S1, unofficial].
+-   **Transfer Function Texture Size**: Typically 256, providing enough precision. Larger arrays provide more precision [S4, unofficial].
+-   **vol**: `vtkVolume` pointer containing the transfer function data [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **VTK Scalar Components**: Fails or is invalid if `numberOfScalarComponents` is not 1 or 4 [S1, unofficial].
-*   **Splat Data Length**: If `data.length` is zero or undefined, `getTextureSize` receives `Math.max(1, 0) = 1` to prevent degenerate texture dimensions [S8, unofficial].
-*   **Precision**: Larger transfer function arrays provide more precision, but 256 is usually sufficient [S4, unofficial].
-*   **Range Conversion**: OpenGL converts CPU-side `GL_UNSIGNED_SHORT` values to $[0,1]$ in textures automatically, regardless of whether they are stored as floats or shorts on the CPU [S4, unofficial].
+-   **Invalid Scalar Components**: Fails or is invalid if `numberOfScalarComponents` is not 1 or 4 [S1, unofficial].
+-   **Precision**: Attenuation values $\tau[x,y,z]$ are typically 16-bit in range [0,1], representing attenuation per distance [S4, unofficial]. Gradients $\nabla\tau[x,y,z]$ are 3-tuples of 16-bit floats in range [-1,+1] [S4, unofficial].
+-   **Degenerate Dimensions**: If data length is zero or undefined, texture size calculations must handle this to prevent degenerate dimensions (e.g., using `Math.max(1, 0) = 1`) [S8, unofficial].
 
 ## Subtopics
 
 ### [Trilinear Volume Sampling for Texture Generation](2726-trilinear-volume-sampling-for-texture-generation.md)
-Retrieves scalar or vector attributes from a 3D voxel grid at continuous surface positions by interpolating values from the surrounding 2x2x2 neighborhood of active grid points. It enables spatially coherent attribute coding and direct surface queries without UV mapping, serving as the fundamental data retrieval primitive for direct volume rendering, isosurface extraction, or maximum intensity projection. Unlike its parent method, which handles coordinate transformation and buffer construction, this method focuses strictly on the interpolation operation itself.
+Trilinear Volume Sampling retrieves scalar or vector attributes from a 3D voxel grid at continuous surface positions by interpolating values from the surrounding 2x2x2 neighborhood of active grid points. It enables spatially coherent attribute coding and direct surface queries without UV mapping, serving as the fundamental data retrieval primitive for direct volume rendering, isosurface extraction, or maximum intensity projection. Unlike its parent method, which handles coordinate transformation and buffer construction, this method focuses strictly on the interpolation operation itself.
 
 ### [Volume Texture Setup](4055-volume-texture-setup.md)
-Configures GPU-accessible 3D texture objects and their associated sampling states to serve as the data source for real-time volumetric rendering. It solves the problem of translating abstract volumetric data representations (density fields, label maps, noise functions) into hardware-ready texture resources with correct memory layouts, filtering modes, and resource flags. It is distinct from [Volume Texture Creation](1857-volume-texture-creation.md), which handles high-level allocation and object lifecycle, by focusing on the specific configuration of format, filtering, and platform-specific flags required for correct sampling behavior.
+Volume Texture Setup is the method for configuring GPU-accessible 3D texture objects to store volumetric data for raymarching or splatting rendering. It solves the problem of transferring raw voxel data from host memory to device memory while defining the sampling behavior (filtering, wrapping) required for correct interpolation during rendering. It differs from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the specific parameterization and upload steps rather than the high-level object lifecycle, and from [Trilinear Volume Sampling for Texture Generation](2726-trilinear-volume-sampling-for-texture-generation.md) by handling the storage layout rather than the interpolation algorithm itself.
 
 ### [Texture Slabs](7262-texture-slabs.md)
-A volume rendering technique that loads 3D density data into the graphics card's texture map memory, treating the volume as a series of slabs between slices. It differs from standard ray casting by enabling the pre-integration of the volume rendering integral, allowing for efficient accumulation of color and opacity along rays.
+Texture Slabs is a volume rendering technique that loads 3D density data into the graphics card's texture map memory, treating the volume as a series of slabs between slices. It differs from standard ray casting by enabling the pre-integration of the volume rendering integral, allowing for efficient accumulation of color and opacity along rays.
 
 ### [GPU Memory and Buffer Construction](8345-gpu-memory-and-buffer-construction.md)
-Defines the mechanisms for organizing volumetric data, transfer functions, and rendering state into GPU-accessible memory structures (textures, framebuffers, and unified buffers) to enable efficient raycasting and volume visualization. It solves the problem of translating host-side volumetric representations (dense grids, hexahedral meshes) into GPU-friendly formats that minimize memory bandwidth bottlenecks and support specific rendering techniques like MIP, speckle reduction, and hybrid rasterization-compositing. It sets itself apart from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the final memory layout, buffer construction, and resource management (framebuffers, unified buffers) rather than the interpolation or sampling logic itself.
+GPU Memory and Buffer Construction organizes volumetric data, transfer functions, and rendering state into GPU-accessible memory structures (textures, framebuffers, and unified buffers) to enable efficient raycasting and volume visualization [G]. It solves the problem of translating host-side volumetric representations (dense grids, hexahedral meshes) into GPU-friendly formats that minimize memory bandwidth bottlenecks and support specific rendering techniques like MIP, speckle reduction, and hybrid rasterization-compositing [G]. It sets itself apart from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the final memory layout, buffer construction, and resource management (framebuffers, unified buffers) rather than the interpolation or sampling logic itself [G].
 
 ### GPU Volume Rendering Data Setup
-Stores attenuation values $\tau[x,y,z]$ in a 3D texture of scalar values (typically 16-bit in $[0,1]$), pre-computed gradients $\nabla\tau[x,y,z]$ in a 3D texture of 3-tuples (16-bit float in $[-1,+1]$), and transfer function $f: \tau \rightarrow k_d, \tau'$ in a 1D texture of 4-tuples (16-bit values in $[0,1]$) [S4, unofficial]. The transfer function texture size is typically 256 [S4, unofficial].
+-   **Definition**: Storage of attenuation values $\tau[x,y,z]$ in a 3D texture of scalar values, typically 16-bit in range [0,1], representing attenuation per distance. Storage of pre-computed gradients $\nabla\tau[x,y,z]$ in a 3D texture of 3-tuples, where each component is a 16-bit float in range [-1,+1]. Storage of transfer function $f: \tau \rightarrow k_d, \tau'$ in a 1D texture of 4-tuples. RGB components store $k_d$, Alpha component stores $\tau'$. Both are 16-bit values in [0,1] [S4, unofficial].
+-   **Parameter**: Transfer function texture size: typically 256, providing enough precision. Larger arrays provide more precision [S4, unofficial].
+-   **Code**:
+    ```glsl
+    glTexImage3D( GL_TEXTURE_3D, 0, GL_R16, dimX, dimY, dimZ, 0, GL_RED, GL_UNSIGNED_SHORT, volumeTexMap );
+    glTexImage3D( GL_TEXTURE_3D, 0, GL_RGB16F, dimX, dimY, dimZ, 0, GL_RGB, GL_FLOAT, gradientTexMap );
+    glTexImage1D( GL_TEXTURE_1D, 0, GL_RGBA16, 256, 0, GL_RGBA, GL_UNSIGNED_SHORT, transferTex );
+    ```
+    [S4, unofficial]
 
 ### Texture Generation
-Creates an empty 2D RGBA texture in OpenGL for storing rendered image data [S5, unofficial]. It generates a texture ID, binds to `GL_TEXTURE_2D`, sets min/mag filters to `GL_LINEAR`, wrap modes to `GL_CLAMP_TO_EDGE`, and allocates memory with `glTexImage2D` using `GL_RGBA` format and `GL_UNSIGNED_BYTE` type [S5, unofficial].
+-   **Definition**: Creates an empty 2D RGBA texture in OpenGL for storing rendered image data [S5, unofficial].
+-   **Steps**: Generate texture ID, bind to `GL_TEXTURE_2D`, set min/mag filters to `GL_LINEAR`, set wrap modes to `GL_CLAMP_TO_EDGE`. Allocate memory with `glTexImage2D` using `GL_RGBA` format and `GL_UNSIGNED_BYTE` type, width and height parameters [S5, unofficial].
 
 ### Texture Array Loading
-Loads multiple 2D images into a 3D texture array (WebGL) [S6, unofficial]. It creates a `TEXTURE_2D_ARRAY`, initializes storage, loads images from URLs, flattens pixel data into a `Uint8Array`, and uploads it via `texImage3D` [S6, unofficial].
+-   **Steps**: Create a WebGL texture object. Bind it as `gl.TEXTURE_2D_ARRAY`. Initialize with a 1x1x1 RGBA texture (magenta) to allocate storage. For each URL in urls, load an image. Create a canvas of size width x height. Draw the image onto the canvas. Extract pixel data using `ctx.getImageData`. Flatten the data into a Uint8Array and append to pixels array. Upload the complete pixels array to the texture using `texImage3D` with dimensions width, height, and depth equal to urls.length. Generate mipmaps. Set mag filter to `NEAREST` and min filter to `NEAREST_MIPMAP_LINEAR` [S6, unofficial].
+-   **Parameter**: width: Width of the individual texture layers. height: Height of the individual texture layers [S6, unofficial].
 
 ### Volume Context and Configuration
-Manages VolPack rendering state [S7]. It creates/destroys contexts (`vpCreateContext`, `vpDestroyContext`), sets volume dimensions (`vpSetVolumeSize`), and declares voxel field properties (`vpSetVoxelSize`, `vpSetVoxelField`) [S7].
+-   **Steps**: Create a new context using `vpCreateContext()`. Returns a pointer to `vpContext` with default values. Destroy a context using `vpDestroyContext(vpContext *vpc)`. Set volume dimensions using `vpSetVolumeSize(vpContext *vpc, int xlen, int ylen, int zlen)`. Returns `vpResult` (VP_OK on success). Set voxel size and field counts using `vpSetVoxelSize(vpContext *vpc, int bytes_per_voxel, int num_voxel_fields, int num_shade_fields, int num_classify_fields)`. Declare voxel field properties using `vpSetVoxelField(vpContext *vpc, int field_num, int field_size, int field_offset, int field_max)` and `vpFieldOffset(void *voxel_ptr, field_name)` [S7].
 
 ### Splat Texture Management
-Manages textures for Gaussian Splatting [S8, unofficial]. It creates `DataArrayTexture` with specific formats and filters, and handles padding for spherical harmonic data based on `maxSplats` [S8, unofficial].
+-   **Steps**: Create a texture from a Uint32Array by instantiating `THREE.DataArrayTexture` with data, width, height, depth, then setting format to `THREE.RGBAIntegerFormat`, type to `THREE.UnsignedIntType`, magFilter and minFilter to `THREE.NearestFilter`, and generateMipmaps to false. When ensuring an SH texture, calculate padded size as `maxSplats * 4`. If the input data length is less than padded size, allocate a new Uint32Array of that size, copy data into it, and replace the original reference [S8, unofficial].
+-   **Parameter**: maxSplats: maximum number of splats supported by the texture buffer, used to compute padding dimensions and buffer capacity [S8, unofficial].
+-   **Pitfall**: If data.length is zero or undefined, getTextureSize receives `Math.max(1, 0) = 1` to prevent degenerate texture dimensions [S8, unofficial].
 
 ### Volume Texture Atlas Export
-Exports volume slices into a 2D RGBA atlas for Unreal Engine 5 [S9, unofficial]. It creates an atlas array, sets alpha to 255, and copies density slices into tiled positions within the atlas [S9, unofficial].
+-   **Steps**: Create an RGBA uint8 atlas array of shape `(rows * height, cols * width, 4)` initialized to zero. Set Alpha channel to 255: `atlas[:, :, 3] = 255`. Iterate z_index from 0 to depth-1. Calculate row and column: `row, column = divmod(z_index, cols)`. Calculate y0, x0 offsets: `y0, x0 = row * height, column * width`. Copy `result.density[z_index]` to `atlas[y0:y0+height, x0:x0+width, 0]` [S9, unofficial].
+-   **Parameter**: tile_columns: Number of columns in the atlas, typically equal to the volume size (width). tile_rows: Number of rows in the atlas, typically 1 for single-row layout [S9, unofficial].
+-   **Usage**: Designed for Unreal Engine 5, which requires creating a Volume Texture from a Texture2D atlas. The atlas is imported as a Texture2D (Masks/Linear), then 'Create Volume Texture' is used to generate the 3D resource [S9, unofficial].
+
+### Texture Creation from Palette
+-   **Steps**: Set `OutTexture->LODGroup` to `TEXTUREGROUP_World`, CompressionSettings to `TC_Default`, MipGenSettings to `TMGS_NoMipmaps`, DeferCompression to true. Init `OutTexture->Source` with width 256, height 1, depth 1, layers 1, format `TSF_BGRA8`, data from `Palette.GetData()`. Call `OutTexture->UpdateResource()` and `OutTexture->PostEditChange()` [S10, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Dominated by memory bandwidth during host-to-device transfer. CUDA `cudaMemcpy3D` and WebGPU `writeTexture` are optimized for 3D layouts. OpenGL `glTexImage3D` is typically a one-time upload.
-*   **Memory Complexity**: Proportional to $dimX \times dimY \times dimZ \times bytes\_per\_voxel$. For VolPack, memory is also influenced by the number of fields per voxel [S7].
-*   **Performance**: Linear filtering and normalized coordinates (CUDA) or standard OpenGL filtering provide smooth sampling but require texture cache hits [S2, unofficial][S4, unofficial]. Nearest filtering (WebGL Array) is faster but aliasing-prone [S6, unofficial].
-*   **Strengths**: Hardware-accelerated sampling, support for mipmaps (WebGL), and efficient 3D memory layouts (CUDA/WebGPU).
-*   **Limitations**: Fixed resolution (dense grids), memory consumption for large volumes, and potential precision loss with 16-bit formats if not carefully managed [S4, unofficial].
-*   **When to use**: Real-time volume rendering, isosurface extraction, or when hardware sampling is required.
-*   **When not to use**: Extremely large sparse volumes (use SVT), or when dynamic, per-frame voxel modification is needed without re-uploading (use compute buffers/SSBOs).
+-   **Time Complexity**: Dominated by the host-to-device memory copy, which is $O(N)$ where $N$ is the number of voxels. Texture object creation is $O(1)$ relative to data size but depends on driver overhead.
+-   **Memory Complexity**: $O(N)$ for the volume data, plus overhead for texture descriptors and mipmaps if generated.
+-   **Measured Performance**: Performance depends on the bus bandwidth (PCIe) and the size of the volume. For large volumes, asynchronous copies or pinned host memory can improve performance.
+-   **Scaling**: Scales linearly with volume size for memory allocation and copy. Texture sampling performance is independent of volume size but depends on filtering mode (linear vs. nearest).
+-   **Strengths**: Direct GPU access to volume data enables efficient raymarching. Normalized coordinates simplify coordinate transformation.
+-   **Limitations**: Memory bandwidth can be a bottleneck for very large volumes. Fixed function texture filtering may not support all interpolation needs (e.g., higher-order).
+-   **When to Use**: When rendering volumetric data on the GPU using raymarching or splatting.
+-   **When Not to Use**: When the volume is too large to fit in GPU memory, or when host-side processing is required before rendering.
 
 ## Background
-Volume texture creation is a fundamental technique in GPU-accelerated volume rendering, emerging with the advent of 3D texture support in OpenGL and CUDA. Early implementations used OpenGL's `glTexImage3D` for static volumes [S4, unofficial]. CUDA introduced `cudaArray` and texture objects for efficient, cached sampling in compute kernels [S2, unofficial]. WebGPU and WebGL 2.0+ extended these concepts to the web with `GPUTexture` and `TEXTURE_2D_ARRAY` [S3, unofficial][S6, unofficial]. VolPack provided an early high-level API for managing voxel fields and rendering contexts [S7]. The technique is widely used in medical imaging, scientific visualization, and real-time game engines (e.g., Unreal Engine's Volume Texture) [S9, unofficial].
+Volume Texture Creation is a fundamental technique in GPU-accelerated volume rendering, emerging with the advent of programmable shaders and 3D texture support in graphics APIs (OpenGL, DirectX, CUDA). It allows volumetric data to be stored in texture memory, leveraging hardware-accelerated interpolation and filtering. The method has been adapted across various APIs and frameworks, including CUDA, OpenGL, WebGPU, and VolPack, to support different rendering pipelines and data formats.
 
 ## Sources
 [S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)
@@ -187,3 +181,4 @@ Volume texture creation is a fundamental technique in GPU-accelerated volume ren
 [S7] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
 [S8] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
 [S9] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)
+[S10] mik14a/VOX4U, https://github.com/mik14a/VOX4U, fetched 2026-10-26 (unofficial)

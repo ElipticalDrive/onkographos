@@ -1,25 +1,20 @@
 # Procedural Ray/Box Intersection
-
-
 ## Overview
-Procedural Ray/Box Intersection is a method for determining ray entry and exit within a volume's bounding box entirely within the fragment shader, without pre-rendering geometry [S1, S2, unofficial]. It computes the ray's intersection with the bounding box directly in the shader, allowing the volume to be rendered as a simple screen-aligned quad or similar primitive [S1, S2, unofficial]. Unlike rasterization-based setup methods that use geometry to pass ray data, this approach is self-contained but places the full computational load of intersection and marching on the fragment shader [S1, S2, unofficial].
-
+Procedural Ray/Box Intersection determines ray entry and exit within a volume's bounding box entirely within the fragment shader, without pre-rendering geometry [S1, S2, unofficial]. It computes the ray's intersection parameters directly in the shader, allowing the volume to be rendered without rasterized bounding box primitives [S1, S2, unofficial]. Unlike rasterization-based setup methods that pass ray data via geometry, this approach is self-contained but places the full computational load of intersection and marching on the fragment shader [S1, S2, unofficial].
 ## How it works
 **Inputs and Outputs**
-*   **Input:** Camera position ($\mathbf{o}_{cam}$), volume entry position ($\mathbf{p}_{entry}$), and bounding box parameters (min/max corners or center/half-extents).
-*   **Output:** Ray origin ($\mathbf{o}$), ray direction ($\mathbf{d}$), and exit criterion (exit position or distance) for the marching loop.
+*   **Input:** Camera position ($\mathbf{o}_{cam}$), volume entry position ($\mathbf{p}_{entry}$), and bounding box parameters (minimum corner $\mathbf{b}_{min}$ and maximum corner $\mathbf{b}_{max}$) [S1, S2, unofficial].
+*   **Output:** Ray origin ($\mathbf{o}$), ray direction ($\mathbf{d}$), and exit parameter ($t_{exit}$) for the marching loop [S1, S2, unofficial].
 
 **Data Structures**
 *   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
-*   **Bounding Box:** Defined by minimum corner $\mathbf{b}_{min}$ and maximum corner $\mathbf{b}_{max}$ [G].
+*   **Bounding Box:** Axis-aligned box defined by $\mathbf{b}_{min}$ and $\mathbf{b}_{max}$ [G].
 
 **Steps**
-1.  **Define the Ray:** The ray origin $\mathbf{o}$ is set to the camera position $\mathbf{o}_{cam}$ [S1, S2, unofficial]. The ray direction $\mathbf{d}$ is computed as the vector from the camera position to the volume entry position $\mathbf{p}_{entry}$, normalized [S1, S2, unofficial].
-    $$ \mathbf{d} = \text{normalize}(\mathbf{p}_{entry} - \mathbf{o}_{cam}) $$
-2.  **Compute Exit Criterion:** Determine when the ray leaves the bounding box. This can be done by computing the exit position $\mathbf{p}_{exit}$ or the exit distance $t_{max}$ [S1, S2, unofficial].
-    *   *Exit Position:* Compute the intersection of the ray with the far planes of the bounding box.
-    *   *Exit Distance:* Compute the maximum $t$ such that $\mathbf{o} + t\mathbf{d}$ is inside the box.
-3.  **Marching Loop:** Use the computed ray parameters to march through the volume data, checking for exit at each step or using the precomputed exit criterion to terminate [S1, S2, unofficial].
+1.  **Define the Ray:** Set the ray origin $\mathbf{o}$ to the camera position $\mathbf{o}_{cam}$ [S1, S2, unofficial]. Compute the ray direction $\mathbf{d}$ as the vector from the camera position to the volume entry position $\mathbf{p}_{entry}$ [S1, S2, unofficial].
+    $$ \mathbf{d} = \mathbf{p}_{entry} - \mathbf{o}_{cam} $$
+2.  **Compute Exit Criterion:** Determine when the ray leaves the bounding box by calculating the intersection parameter $t_{exit}$ [S1, S2, unofficial].
+3.  **Marching Loop:** Use the computed ray parameters to march through the volume data, terminating when the exit criterion is met [S1, S2, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -38,36 +33,32 @@ def procedural_ray_box_intersection(camera_pos, volume_entry_pos, box_min, box_m
     Returns:
         ray_origin: vec3
         ray_direction: vec3
-        exit_distance: float, distance from ray_origin to exit point.
+        exit_t: float, parameter t where ray exits the box.
     """
     # Step 1: Define the ray
     ray_origin = camera_pos
-    ray_direction = normalize(volume_entry_pos - camera_pos)
+    ray_direction = volume_entry_pos - camera_pos
     
-    # Step 2: Compute exit criterion (exit distance)
+    # Step 2: Compute exit criterion using the slab method
     # Compute t values for intersection with all 6 planes
-    # t_min and t_max for each axis
-    t_min = (box_min - ray_origin) / ray_direction
-    t_max = (box_max - ray_origin) / ray_direction
+    t1 = (box_min - ray_origin) / ray_direction
+    t2 = (box_max - ray_origin) / ray_direction
     
-    # Swap if necessary to ensure t_min < t_max
-    # Note: Division by zero is handled by standard float behavior (inf)
-    # and min/max operations.
+    # Swap per axis to ensure t_min < t_max regardless of direction sign
+    t_min = min(t1, t2)
+    t_max = max(t1, t2)
     
     # t_enter is the maximum of the minimums
-    t_enter = max(max(t_min.x, t_min.y), t_min.z)
+    t_enter = max(t_min.x, t_min.y, t_min.z)
     
     # t_exit is the minimum of the maximums
-    t_exit = min(min(t_max.x, t_max.y), t_max.z)
+    t_exit = min(t_max.x, t_max.y, t_max.z)
     
-    # If t_enter > t_exit, the ray misses the box
+    # If t_enter > t_exit, the ray misses the box or the box is behind the ray
     if t_enter > t_exit:
         return None, None, -1.0
         
-    # The exit distance is t_exit
-    exit_distance = t_exit
-    
-    return ray_origin, ray_direction, exit_distance
+    return ray_origin, ray_direction, t_exit
 ```
 
 **Parameters**
@@ -75,34 +66,20 @@ def procedural_ray_box_intersection(camera_pos, volume_entry_pos, box_min, box_m
 *   **Typical Values:** Not given in the sources.
 
 **Edge Cases and Pitfalls**
-*   **Precision:** Division by zero in direction components must be handled (e.g., using `inf` and `min`/`max` logic) [G].
-*   **Boundaries:** The method assumes the volume entry position is on the near face of the bounding box [S1, S2, unofficial].
+*   **Precision:** Division by zero in direction components is handled by floating-point infinity and min/max operations [G].
+*   **Boundaries:** The method assumes the volume entry position lies on the near face of the bounding box [S1, S2, unofficial].
 *   **Performance:** The entire computational load for intersection and marching is placed on the fragment shader, which is a disadvantage compared to rasterization-based setup [S1, S2, unofficial].
-
-## Subtopics
-
-### Ray-box intersection
-Standard geometric intersection method. [Ray-box intersection](776-ray-box-intersection.md)
-
-### Ray-Volume Intersection (Face Distance Method)
-Uses face distances for intersection. [Ray-Volume Intersection (Face Distance Method)](2381-ray-volume-intersection-face-distance-method.md)
-
-### Ray Filtering
-Filters rays before intersection. [Ray Filtering](2681-ray-filtering.md)
-
 ## Operating characteristics
-*   **Time Complexity:** Linear in the number of samples along the ray, plus constant overhead for intersection calculation per pixel.
-*   **Memory Complexity:** Minimal, as no geometry is stored for the bounding box setup.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Scales with resolution and volume depth.
-*   **Strengths:** Simple and self-contained implementation [S1, S2, unofficial]. Independent of projection type (orthogonal/perspective) if implemented correctly [S1, unofficial].
-*   **Limitations:** Full computational load on the fragment shader, which can be less efficient than rasterization-based setup for complex scenes or large volumes [S1, S2, unofficial].
-*   **When to use:** Simple volume rendering tasks where implementation simplicity is prioritized over maximum performance.
-*   **When not to use:** High-performance applications where rasterization-based setup or hardware-accelerated intersection is available.
-
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Simple and self-contained implementation [S1, S2, unofficial].
+*   **Limitations:** Full computational load on the fragment shader [S1, S2, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
 ## Background
-The method was introduced by Röttger et al. in 2003 and Green in 2004 [S2, unofficial]. It is part of the broader field of GPU-based volume raycasting, which aims to leverage the parallel processing power of GPUs for real-time volume visualization [S1, S2, unofficial].
-
+The method was introduced by Röttger et al. in 2003 and Green in 2004 [S2, unofficial].
 ## Sources
 [S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)
 [S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)

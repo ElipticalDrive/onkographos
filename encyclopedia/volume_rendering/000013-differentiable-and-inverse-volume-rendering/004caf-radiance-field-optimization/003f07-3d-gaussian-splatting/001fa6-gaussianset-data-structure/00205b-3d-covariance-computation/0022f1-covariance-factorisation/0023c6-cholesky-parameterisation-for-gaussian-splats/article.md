@@ -3,18 +3,18 @@
 Also called: Cholesky Decomposition for Covariance, Cholesky-based Covariance Parameterization
 
 ## Overview
-Cholesky Parameterisation is a method for representing the covariance matrix of a 3D Gaussian splat that guarantees positive-definiteness by construction [S1, unofficial]. It sets itself apart from quaternion-based factorizations by storing fewer parameters ($D(D+1)/2$) and from unconstrained optimization by embedding geometric constraints directly into the parameter space [S1, unofficial]. It is primarily used in Luxar for microscopy data visualization to ensure stable optimization of Gaussian splats [S1, unofficial].
+Cholesky Parameterisation is a method for representing the covariance matrix of a Gaussian splat that guarantees positive-definiteness by construction [S1, unofficial]. It parameterizes the covariance using $D(D+1)/2$ elements per splat (6 for 3D) and applies a softplus activation with a minimum standard deviation floor $\sigma_{min} = 1/\sqrt{12}$ voxels to the diagonal, while bounding amplitudes with a configurable maximum $a_{max}$ [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Unconstrained optimization variables (raw gradients/parameters) for rotation and scale.
-*   **Output:** A valid, positive-definite $3 \times 3$ covariance matrix $\Sigma$ and its Cholesky factor $L$.
+*   **Input:** Unconstrained raw optimization parameters $p$ for the Cholesky factor and amplitude.
+*   **Output:** Lower triangular Cholesky factor $L$, positive-definite covariance matrix $\Sigma$, and non-negative amplitude $a$.
 
 **Data Structures:**
-The method stores $D(D+1)/2$ elements per splat. For 3D ($D=3$), this is 6 elements. These elements correspond to the lower triangular part of the Cholesky factor $L$, where $\Sigma = L L^T$.
+The method stores $D(D+1)/2$ elements per splat [S1, unofficial]. For 3D ($D=3$), this is 6 elements arranged as the lower triangular part of the Cholesky factor $L$, where $\Sigma = L L^T$ [S1, unofficial].
 
 **Formulas and Parameters:**
-1.  **Cholesky Factor Construction:** The 6 parameters are arranged into the lower triangular matrix $L$:
+1.  **Cholesky Factor Construction:** The parameters populate the lower triangular matrix $L$:
     $$
     L = \begin{bmatrix}
     l_{11} & 0 & 0 \\
@@ -22,20 +22,20 @@ The method stores $D(D+1)/2$ elements per splat. For 3D ($D=3$), this is 6 eleme
     l_{31} & l_{32} & l_{33}
     \end{bmatrix}
     $$
-    where $l_{ii} > 0$ is required for positive definiteness.
+    Off-diagonal elements $l_{ij}$ ($i > j$) are assigned directly to raw parameters $p_{ij}$ [G].
 
-2.  **Diagonal Regularization (Minimum Spread):** To prevent splats from becoming narrower than a single voxel, the diagonal elements $l_{ii}$ are parameterized using a softplus activation and a minimum standard deviation floor $\sigma_{min}$ [S1, unofficial]:
+2.  **Diagonal Regularization (Minimum Spread):** The diagonal elements $l_{ii}$ are parameterized using a softplus activation and a minimum standard deviation floor $\sigma_{min}$ [S1, unofficial]:
     $$
-    l_{ii} = \sigma_{min} + \text{softplus}(p_i)
+    l_{ii} = \sigma_{min} + \text{softplus}(p_{ii})
     $$
-    where $p_i$ are the raw optimization parameters for the diagonal.
-    *   $\sigma_{min} = 1/\sqrt{12}$ voxels [S1, unofficial]. This value represents the standard deviation of a uniform distribution over a single voxel unit.
+    where $p_{ii}$ are the raw optimization parameters for the diagonal [G].
+    *   $\sigma_{min} = 1/\sqrt{12}$ voxels [S1, unofficial]. This value represents the standard deviation of a uniform distribution over a single voxel unit [S1, unofficial].
 
-3.  **Amplitude Parameterization:** The amplitude (opacity/weight) $a_k$ is constrained to be non-negative and bounded above by a configurable maximum $a_{max}$ [S1, unofficial]:
+3.  **Amplitude Parameterization:** The amplitude $a$ is constrained to be non-negative and bounded above by a configurable maximum $a_{max}$ [S1, unofficial]:
     $$
-    a_k = \text{clamp}(\text{softplus}(p_a), 0, a_{max})
+    a = \text{clamp}(\text{softplus}(p_a), 0, a_{max})
     $$
-    where $p_a$ is the raw amplitude parameter.
+    where $p_a$ is the raw amplitude parameter [G].
 
 4.  **Covariance Reconstruction:** The final covariance matrix is computed as:
     $$
@@ -59,6 +59,7 @@ def cholesky_parameterization(raw_params, sigma_min=1.0/np.sqrt(12.0), a_max=1.0
         
     Returns:
         L: 3x3 lower triangular Cholesky factor
+        Sigma: 3x3 covariance matrix
         amplitude: Clamped non-negative amplitude
     """
     # Extract raw parameters
@@ -66,9 +67,9 @@ def cholesky_parameterization(raw_params, sigma_min=1.0/np.sqrt(12.0), a_max=1.0
     
     # Construct lower triangular matrix L
     # Diagonal elements are regularized to ensure positive definiteness and minimum spread
-    l11 = sigma_min + np.log(1 + np.exp(p11))  # softplus(p11)
-    l22 = sigma_min + np.log(1 + np.exp(p22))  # softplus(p22)
-    l33 = sigma_min + np.log(1 + np.exp(p33))  # softplus(p33)
+    l11 = sigma_min + np.log1p(np.exp(p11))  # numerically stable softplus(p11) [G]
+    l22 = sigma_min + np.log1p(np.exp(p22))  # numerically stable softplus(p22) [G]
+    l33 = sigma_min + np.log1p(np.exp(p33))  # numerically stable softplus(p33) [G]
     
     # Off-diagonal elements are unconstrained (can be negative)
     l21 = p21
@@ -85,15 +86,13 @@ def cholesky_parameterization(raw_params, sigma_min=1.0/np.sqrt(12.0), a_max=1.0
     Sigma = L @ L.T
     
     # Parameterize amplitude
-    amplitude = np.clip(np.log(1 + np.exp(p_amp)), 0.0, a_max)
+    amplitude = np.clip(np.log1p(np.exp(p_amp)), 0.0, a_max)
     
     return L, Sigma, amplitude
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The softplus function must be implemented numerically stably (e.g., using `np.log1p(np.exp(x))` for small $x$) to avoid overflow or underflow during gradient descent [S1, unofficial].
 *   **Degenerate Input:** If raw parameters result in extremely small $l_{ii}$, the covariance may become numerically singular. The $\sigma_{min}$ floor prevents this but may limit the ability to represent very sharp features smaller than a voxel [S1, unofficial].
-*   **Boundary Conditions:** The amplitude clamp at $a_{max}$ can create discontinuities in gradients if not handled carefully in the optimizer [S1, unofficial].
 
 ## Subtopics
 
@@ -101,15 +100,13 @@ def cholesky_parameterization(raw_params, sigma_min=1.0/np.sqrt(12.0), a_max=1.0
 Combines Cholesky factorization with skew-symmetric rotation matrices to preserve explicit 3D spatial interpretability while ensuring positive semi-definiteness. Chosen when explicit rotation structure is needed or when generalizing beyond 3D.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per splat for matrix construction (fixed $3 \times 3$ operations).
-*   **Memory Complexity:** Stores 6 floats for covariance and 1 float for amplitude per splat, totaling 7 floats [S1, unofficial]. This is more compact than quaternion-based methods which typically store 4 (quaternion) + 3 (scale) = 7 floats, but offers a more direct geometric interpretation of the covariance structure.
-*   **Strengths:** Guarantees positive-definiteness by construction, avoiding the need for projection steps or penalty terms during optimization. The $\sigma_{min}$ floor ensures physical plausibility relative to voxel resolution [S1, unofficial].
-*   **Limitations:** Loses explicit spatial rotation structure compared to quaternion or axis-angle parameterizations, making it harder to interpret the orientation of the Gaussian directly from the parameters [S1, unofficial].
-*   **When to Use:** Ideal for microscopy and scientific data visualization where stability and compact representation are prioritized over explicit rotational interpretability [S1, unofficial].
-*   **When Not to Use:** When explicit control over rotation is required or when generalizing to higher dimensions where skew-symmetric parameterizations are preferred [S1, unofficial].
+*   **Time Complexity:** $O(1)$ per splat for matrix construction (fixed $3 \times 3$ operations) [G].
+*   **Memory Complexity:** Stores $D(D+1)/2$ elements for covariance and 1 element for amplitude per splat [S1, unofficial].
+*   **Strengths:** Guarantees positive-definiteness by construction, avoiding the need for projection steps or penalty terms during optimization [S1, unofficial].
+*   **Limitations:** Loses explicit spatial rotation structure compared to axis-angle or quaternion parameterizations, making it harder to interpret the orientation of the Gaussian directly from the parameters [S1, unofficial].
 
 ## Background
-Cholesky Parameterisation was introduced in the Luxar project for Gaussian splatting of microscopy data [S1, unofficial]. It addresses the challenge of optimizing Gaussian splats in scientific imaging, where maintaining positive-definite covariance matrices is critical for stable rendering and visualization [S1, unofficial]. The method leverages the mathematical property that any positive-definite matrix can be decomposed into a lower triangular matrix and its transpose, allowing unconstrained optimization of the Cholesky factors [S1, unofficial].
+Cholesky Parameterisation is used in Gaussian splatting for microscopy and multidimensional scientific data visualization [S1, unofficial]. It addresses the challenge of optimizing Gaussian splats where maintaining positive-definite covariance matrices is critical for stable rendering [S1, unofficial]. The method leverages the mathematical property that any positive-definite matrix can be decomposed into a lower triangular matrix and its transpose, allowing unconstrained optimization of the Cholesky factors [G].
 
 ## Sources
 [S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

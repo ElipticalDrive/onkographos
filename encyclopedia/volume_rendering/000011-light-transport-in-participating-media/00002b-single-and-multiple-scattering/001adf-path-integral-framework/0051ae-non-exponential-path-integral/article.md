@@ -1,0 +1,99 @@
+# Non-exponential path integral
+
+Also called: Correlated heterogeneous path integral, Stochastic medium ensemble average framework
+
+## Overview
+This family formulates light transport in participating media with spatially correlated scatterers as the ensemble average of the classical path throughput over all realizations of a stochastic medium, rather than assuming independent random scatterers [S1]. It solves the problem of rendering heterogeneous media where the standard exponential Beer-Lambert law fails due to density fluctuations and spatial correlations [S1]. It sets itself apart from fully homogenized models (like Larsen and Vasques) by allowing arbitrary spatial distribution of correlations, and from general heterogeneous models by assuming statistical homogeneity of the underlying correlations [S1].
+
+## Shared principles
+The core mechanism replaces the classical transmittance term in the path integral with an ensemble-averaged transport kernel that accounts for spatial correlations between scatterers [S1].
+
+**Formulation**
+For a single realization $\mu$, the transmittance and free-flight PDF are defined as [S1]:
+$$ \text{Tr}_{\mu}(\mathbf{x}, \mathbf{x}_t) = e^{-\tau_{\mu}(\mathbf{x}, \mathbf{x}_t)}, \quad p_{\mu}(\mathbf{x}, \mathbf{x}_t) = e^{-\tau_{\mu}(\mathbf{x}, \mathbf{x}_t)} \sigma_{\mu}(\mathbf{x}_t) $$
+where $\tau_{\mu}(\mathbf{x}, \mathbf{x}_t) = \int_0^t \sigma_{\mu}(\mathbf{x}_s) ds$ [S1].
+
+The measurement $I_{\mu}$ for a length-$k$ path $\bar{\mathbf{x}} = \mathbf{x}_0 \cdots \mathbf{x}_k$ is [S1]:
+$$ I_{\mu} = \int_{\mathcal{P}} L_e(\mathbf{x}_0, \mathbf{x}_1) g_{\mu}(\bar{\mathbf{x}}) W(\mathbf{x}_{k-1}, \mathbf{x}_k) \, d\bar{\mathbf{x}} $$
+with path throughput [S1]:
+$$ g_{\mu}(\bar{\mathbf{x}}) = \left[ \prod_{i=1}^{k-1} f_{\mu}(\mathbf{x}_i) \Sigma_{\mu}(\mathbf{x}_i) \right] \left[ \prod_{i=0}^{k-1} \text{Tr}_{\mu}(\mathbf{x}_i, \mathbf{x}_{i+1}) G(\mathbf{x}_i, \mathbf{x}_{i+1}) \right] $$
+where $\Sigma_{\mu}(\mathbf{x}) = \sigma_{\mu}(\mathbf{x})$ if $\mathbf{x} \in \mathcal{V}$ (interior) and $1$ if $\mathbf{x} \in \partial\mathcal{V}$ (boundary) [S1].
+
+**Ensemble Averaging**
+The non-exponential rendering problem is formulated as the ensemble average $\langle \cdot \rangle$ over the space of realizations $\mathcal{R}$ [S1]:
+$$ \langle f_{\mu}(\mathbf{x}) \rangle = \int_{\mathcal{R}} f_{\mu}(\mathbf{x}) \, dP\{\mu\} $$
+Two key assumptions simplify this [S1]:
+1.  **Phase function and albedo are uncorrelated** with the realization $\mu$. By linearity, these terms move outside the ensemble average.
+2.  **Segment decorrelation**: The ensemble average of the product of segment terms is approximated by the product of the ensemble averages [S1]:
+    $$ \left\langle \prod_{i=0}^{k-1} \text{Tr}_{\mu}(\mathbf{x}_i, \mathbf{x}_{i+1}) \Sigma_{\mu}(\mathbf{x}_{i+1}) \right\rangle \approx \prod_{i=0}^{k-1} \langle T_{\mu}(\mathbf{x}_i, \mathbf{x}_{i+1}) \rangle $$
+    where $T_{\mu}$ is a transport kernel resembling $\text{Tr} \cdot \Sigma$ [S1].
+
+**Boundary Conditions**
+The transport kernel depends on the configuration of the segment endpoints relative to the medium boundary $\partial\mathcal{V}$ and interior $\mathcal{V}$ [S1]. The four cases are:
+*   $\mathbf{x}_i \in \partial\mathcal{V}, \mathbf{x}_{i+1} \in \partial\mathcal{V}$: Boundary-to-boundary.
+*   $\mathbf{x}_i \in \mathcal{V}, \mathbf{x}_{i+1} \in \mathcal{V}$: Interior-to-interior.
+*   Mixed: One point on boundary, one inside.
+
+## Subtopics
+
+### [Non-exponential transport kernel via macroscopic optical depth](14530-non-exponential-transport-kernel-via-macroscopic-optical-dep.md)
+This method models light transport by decomposing the medium into an explicit 3D macroscopic density field $\sigma(\mathbf{x})$ and a 1D base transport kernel $\tilde{T}_{\text{base}}(t)$. It maps the complex 3D stochastic problem to a simpler 1D function of macroscopic optical depth $\tau_i$. It sets itself apart from fully homogenized models by allowing arbitrary spatial distribution of correlations, and from general heterogeneous models by assuming statistical homogeneity of the underlying correlations.
+
+**Algorithm:**
+1.  Compute macroscopic optical depth $\tau_i = \int_{\mathbf{x}_i}^{\mathbf{x}_{i+1}} \sigma(\mathbf{x}) \, d\mathbf{x}$.
+2.  Determine if $\mathbf{x}_i, \mathbf{x}_{i+1}$ are on $\partial\mathcal{V}$ or in $\mathcal{V}$.
+3.  Select base function: $\text{ff}(\tau_i)$ for boundary-boundary, $\text{pp}(\tau_i)$ for interior-interior, $\text{pf}(\tau_i)$ for mixed.
+4.  Return $\tilde{T}(\mathbf{x}_i, \mathbf{x}_{i+1}) = \tilde{T}_{\text{base}}(\tau_i)$.
+
+The base functions are ensemble averages:
+$$ \text{ff}(t) = \langle \text{Tr}(t) \rangle, \quad \text{f}(t) = \langle \text{Tr}(\sigma_\mu(\mathbf{x}_t)) \rangle, \quad \text{pf}(t) = \langle \text{Tr}(t)\rho_\mu(\mathbf{x}_t) \rangle, \quad \text{pp}(t) = \langle \text{Tr}(t) \sigma_{\mu}(\mathbf{x}_t) \rho_{\mu}(\mathbf{x}_t) \rangle $$
+where $\text{Tr}(t)$ is transmittance, and $\sigma_\mu, \rho_\mu$ are stochastic extinction and phase components.
+
+**Pitfalls:** $\text{pp}(t)$ is a PDF; variable transformation incurs a Jacobian factor $\sigma(\mathbf{x}_{i+1})$ which cancels with the equivalent of Eq 22 in the source, resulting in the simple form. Assumes statistical homogeneity of correlations.
+
+### [Ensemble-averaged transmittance via characteristic functions](14531-ensemble-averaged-transmittance-via-characteristic-functions.md)
+This method computes ensemble-averaged transmittance by treating the line-averaged micro-scale density $\bar{\sigma}_\mu(t)$ as a random variable and evaluating its characteristic function (CF). It solves the problem of modeling light transport in heterogeneous media with spatial correlations where the standard exponential law fails. Unlike the macroscopic optical depth method, it derives closed-form transmittance directly from the PDF of density fluctuations, ensuring physical consistency with Jensen's inequality.
+
+**Algorithm:**
+1.  Model micro-scale density $\sigma_\mu(x)$ as a random process (e.g., fractal noise with spectral exponent $\beta$).
+2.  Determine the PDF $\text{pd}(\bar{\sigma}_\mu \mid t)$ for the line-averaged density.
+3.  Find the characteristic function $\varphi_{\bar{\sigma}_\mu(t)}(r) = \langle e^{ir\bar{\sigma}_\mu(t)} \rangle$.
+4.  Evaluate transmittance: $\text{ff}(t) = \varphi_{\bar{\sigma}_\mu(t)}(ti)$.
+
+**Properties:**
+Jensen's inequality ensures $\langle e^{-t \overline{\sigma}_\mu(t)} \rangle \geq e^{-t \langle \overline{\sigma}_\mu(t) \rangle}$, meaning ensemble-averaged transmittance is always greater than or equal to the transmittance of the mean density, with equality only for homogeneous media.
+
+**Parameters:** $\mu_\sigma$ (mean extinction), $C$ (amplitude), $\beta$ (spectral exponent, $-1$ to $1$).
+
+### [Ensemble Transport Kernel](14536-ensemble-transport-kernel.md)
+The Ensemble Transport Kernel $T(\mathbf{x}, \mathbf{y})$ approximates the ensemble average of light throughput by moving the expectation inside the product, assuming segment decorrelation. It replaces the classical transmittance term to account for spatial correlations. It differs from the macroscopic optical depth method by explicitly handling four discrete boundary cases (particle-to-particle, free-to-particle, etc.) rather than relying on a continuous macroscopic optical depth approximation.
+
+**Algorithm:**
+1.  Determine configuration of endpoints $\mathbf{x}_i, \mathbf{x}_{i+1}$ relative to particles (in particle $C=1$, free space $C=0$).
+2.  Select free-flight PDF: $\text{pp}$ if $C_i=1, C_{i+1}=1$; $\text{fp}$ if $C_i=0, C_{i+1}=1$; $\text{pf}$ if $C_i=1, C_{i+1}=0$; $\text{ff}$ if $C_i=0, C_{i+1}=0$.
+3.  Compute kernel $T(\mathbf{x}_i, \mathbf{x}_{i+1})$ based on the selected PDF and normalization.
+
+**Pitfalls:** The kernel is non-reciprocal ($T(\mathbf{x}, \mathbf{y}) \neq T(\mathbf{y}, \mathbf{x})$) because free-flight PDFs are not generally reciprocal and swapping endpoints changes the case statement. Requires robust geometric queries to distinguish "in particle" from "free space".
+
+### Data-driven transmittance via ensemble averaging
+A physically based approach to obtain transmittance profiles by numerically approximating the ensemble-averaging process through stochastic realizations of heterogeneous media or discrete point distributions [S1].
+
+**Algorithm:**
+1.  Generate $N$ stochastic realizations of the medium [S1].
+2.  For each realization $i$, calculate visibility $V_{\mu_i}(\mathbf{x}, \mathbf{x}_t)$ [S1].
+3.  Average visibilities: $f_f(t) \approx \frac{1}{N} \sum_{i=1}^N V_{\mu_i}(\mathbf{x}, \mathbf{x}_t)$ [S1].
+4.  Obtain other functions ($pf, pp, fp$) via integration, normalization, or differentiation [S1].
+
+**Parameters:** $N$ (number of realizations) [S1].
+
+### Uncorrelated Particle Assumption
+Models assume particle positions are uncorrelated (white noise distribution), meaning positions are independent even if density varies spatially [S2, book]. Processes are modeled as continuous rather than discrete, following radiometry assumptions, despite physically happening discretely [S2, book].
+
+**Pitfalls:** The assumption does not hold for many physical media where particles cannot occupy the same point in space; true white noise is physically impossible [S2, book].
+
+## Background
+The framework originates from the formulation of non-exponential media as the expected value of a stochastic process, contrasting with the classical exponential model which assumes independent random scatterers [S1]. The foundational paper "A radiative transfer framework for non-exponential media" [S1] introduces the ensemble average approach, the segment decorrelation assumption, and the four transport functions. The uncorrelated particle assumption is a standard simplification in volume scattering literature, noted as physically imperfect but common in continuous radiometry models [S2, book].
+
+## Sources
+[S1] A radiative transfer framework for non-exponential media, https://doi.org/10.1145/3272127.3275103, fetched 2026-11-08
+[S2] 11.1 Volume Scattering Processes, https://pbr-book.org/4ed/Volume_Scattering/Volume_Scattering_Processes, fetched 2026-10-29, book (book)

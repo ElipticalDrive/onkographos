@@ -41,8 +41,6 @@ VolumePro supports three blending modes [S1, unofficial]:
 7. Write the base plane pixel values to Pixel Memory for transfer to a companion 3D graphics card for final image warping [S1, unofficial].
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def ray_compositing_accumulation(sample_stream, volume_max_z, side_faces):
     # Simulates hardware FIFOs/Registers by tracking per-ray accumulated state

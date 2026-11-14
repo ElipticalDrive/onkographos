@@ -1,0 +1,175 @@
+--- v003.md
++++ v004.md
+@@ -4,101 +4,100 @@
+ 
+ ## Overview
+-Scene SDF Evaluation computes the minimum signed distance from a query point to the nearest surface among all primitives in a scene, effectively performing a union operation [S1, unofficial]. It distinguishes itself from other constructive SDF operations by aggregating individual primitive distances via the minimum function, enabling the representation of complex, disjoint geometries as a single continuous field.
++Scene SDF Evaluation computes the minimum signed distance from a query point to any primitive in a scene, effectively performing a union operation [S1, unofficial]. It aggregates individual primitive distances into a single continuous field, enabling the ray marching algorithm to step through complex scenes composed of multiple objects [S2, unofficial]. Unlike [Smooth SDF Composition](2685-smooth-sdf-composition.md), which handles the mathematical blending of primitives, this method manages the spatial composition and transformation of distinct geometric entities within a scene graph.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: A query point $P$ (3D vector) and a scene definition containing a list of sphere primitives and a list of cuboid primitives.
+-- **Output**: A scalar signed distance value $d$, representing the distance to the closest surface.
++**Inputs:**
++- A scene structure containing lists of primitives (e.g., spheres, cuboids) [S1, unofficial].
++- A query point $P$ in world space [S1, unofficial].
++- Transformations mapping local primitive coordinates to world space [S2, unofficial].
+ 
+-**Data Structures**
+-The scene is represented by two arrays:
+-1. `spheres`: An array of sphere primitives. Each sphere contains a center position $C$ (3D vector) and a radius $r$ (scalar).
+-2. `cuboids`: An array of cuboid primitives. Each cuboid contains a center position $C$ (3D vector) and a half-extent vector $H$ (3D vector), defining the bounds $[C_x - H_x, C_x + H_x]$, etc.
++**Outputs:**
++- A scalar value representing the signed distance from $P$ to the nearest surface in the scene [S1, unofficial].
+ 
+-**Algorithm Steps**
+-1. Initialize a variable `min_dist` to a large positive value representing infinity (e.g., $10000.0$ or `f32::MAX`) [S1, unofficial].
+-2. Iterate through each sphere in the `spheres` array:
+-   a. Calculate the distance from $P$ to the sphere surface using the sphere SDF function.
+-   b. Update `min_dist` to the minimum of its current value and the sphere's distance.
+-3. Iterate through each cuboid in the `cuboids` array:
+-   a. Calculate the distance from $P$ to the cuboid surface using the cuboid SDF function.
+-   b. Update `min_dist` to the minimum of its current value and the cuboid's distance.
+-4. Return `min_dist`.
++**Data Structures:**
++- `Scene`: Contains arrays for primitive types.
++  - `spheres`: Array of sphere primitives. Each sphere has a center $C$ and radius $R$.
++  - `cuboids`: Array of cuboid primitives. Each cuboid has a center $C$, orientation $Q$, and half-extents $H$.
++  - `sphere_count`: Integer count of spheres.
++  - `cuboid_count`: Integer count of cuboids.
++- `ComposedSDF` (Variant): A container holding a list of SDF objects and a corresponding stack of transformation matrices (one per SDF) [S2, unofficial].
+ 
+-**Formulas**
+-The distance to a sphere $i$ with center $C_i$ and radius $r_i$ is:
+-$$ d_{sphere}(P) = \| P - C_i \| - r_i $$
++**Steps:**
++1. Initialize `min_dist` to a large value representing infinity, typically `MAX_SIGNED_DISTANCE` (e.g., 10000.0) [S1, unofficial].
++2. Iterate through all spheres in the scene:
++   a. Transform the query point $P$ into the local coordinate system of the current sphere.
++   b. Evaluate the sphere's SDF: $d_{sphere} = \|P_{local} - C\| - R$.
++   c. Update `min_dist = min(min_dist, d_{sphere})`.
++3. Iterate through all cuboids in the scene:
++   a. Transform the query point $P$ into the local coordinate system of the current cuboid using its orientation $Q$ and center $C$.
++   b. Evaluate the cuboid's SDF: $d_{cuboid} = \text{distance to box surface}$.
++   c. Update `min_dist = min(min_dist, d_{cuboid})`.
++4. Return `min_dist` [S1, unofficial].
+ 
+-The distance to a cuboid $j$ with center $C_j$ and half-extents $H_j$ is calculated by clamping the vector from the center to the point within the box bounds:
+-$$ d_{cuboid}(P) = \| \max(|P - C_j| - H_j, 0) \| - \min(\max(|P - C_j| - H_j, 0)) $$
+-*Note: The standard implementation often simplifies this by computing the closest point on the box to P, then taking the Euclidean distance if outside, or 0 if inside.*
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def evaluate_scene_sdf(point, scene):
++def evaluate_scene_sdf(scene, point):
+     """
+     Computes the minimum signed distance from point to any primitive in the scene.
+-    
+-    Args:
+-        point: Vec3, the query point in world space.
+-        scene: Object containing 'spheres' (list of Sphere) and 'cuboids' (list of Cuboid).
+-        
+-    Returns:
+-        float: The signed distance to the nearest surface.
+     """
+-    # Initialize with a value larger than any possible distance in the scene
++    # Initialize with a value larger than any expected distance in the scene
+     min_dist = 10000.0
+     
+-    # Check all spheres
+-    for sphere in scene.spheres:
+-        # Vector from sphere center to point
+-        diff = point - sphere.center
+-        # Distance to surface: distance to center minus radius
+-        dist_to_sphere = diff.length() - sphere.radius
+-        if dist_to_sphere < min_dist:
+-            min_dist = dist_to_sphere
++    # Evaluate all spheres
++    for i in range(scene.sphere_count):
++        sphere = scene.spheres[i]
++        # Transform point to sphere's local space
++        # Assuming sphere center is in world space, we translate
++        local_point = point - sphere.center
++        # SDF for sphere: distance to center minus radius
++        dist = length(local_point) - sphere.radius
++        if dist < min_dist:
++            min_dist = dist
+             
+-    # Check all cuboids
+-    for cuboid in scene.cuboids:
+-        # Vector from cuboid center to point
+-        diff = point - cuboid.center
+-        # Absolute difference
+-        abs_diff = abs(diff)
+-        # Check if point is inside the cuboid
+-        inside = abs_diff <= cuboid.half_extents
+-        # Distance to surface
+-        if all(inside):
+-            dist_to_cuboid = 0.0
+-        else:
+-            # Distance to closest point on box surface
+-            outside = abs_diff - cuboid.half_extents
+-            # Clamp negative values to 0 (inside parts)
+-            clamped_outside = max(outside, 0.0)
+-            dist_to_cuboid = clamped_outside.length()
+-            
+-        if dist_to_cuboid < min_dist:
+-            min_dist = dist_to_cuboid
++    # Evaluate all cuboids
++    for i in range(scene.cuboid_count):
++        cuboid = scene.cuboids[i]
++        # Transform point to cuboid's local space
++        # Translate to center, then rotate by inverse orientation
++        translated = point - cuboid.center
++        local_point = cuboid.orientation.inverse() * translated
++        
++        # SDF for axis-aligned box centered at origin
++        # d = max(|x|-wx, |y|-wy, |z|-wz)
++        abs_local = abs(local_point)
++        dist = max(abs_local.x - cuboid.half_extents.x, 
++                   abs_local.y - cuboid.half_extents.y, 
++                   abs_local.z - cuboid.half_extents.z)
++        
++        if dist < min_dist:
++            min_dist = dist
+             
+     return min_dist
+ ```
+ 
+-**Parameters**
+-- `min_dist` initial value: Typically set to a value larger than the scene bounds (e.g., $10000.0$) [S1, unofficial].
++**Parameters:**
++- `MAX_SIGNED_DISTANCE`: Default 10000.0 [S1, unofficial].
+ 
+-**Edge Cases**
+-- **Empty Scene**: If both `spheres` and `cuboids` are empty, the function returns the initial `min_dist` value. This should be handled by the caller or by initializing to a specific error code or infinity.
+-- **Precision**: Floating-point precision issues may arise when points are very close to surfaces or when combining many primitives.
++**Edge Cases and Pitfalls:**
++- If objects overlap or share faces, artifacts may occur in determining interior-ness [S2, unofficial].
++- Precision issues may arise if `MAX_SIGNED_DISTANCE` is not sufficiently large relative to the scene bounds.
+ 
+ ## Subtopics
+ 
++### Composed SDF
++A variant that combines multiple SDFs into a single queryable SDF by passing a list of SDFs and a stack of transforms (one per SDF) to a constructor [S2, unofficial]. It is useful for scenes with multiple objects where each object may have its own complex SDF definition. Pitfall: Objects should not overlap or share faces, otherwise there will be artifacts in the SDF query in determining interior-ness [S2, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity**: $O(N + M)$, where $N$ is the number of spheres and $M$ is the number of cuboids. Each primitive requires a constant number of arithmetic operations.
+-- **Memory Complexity**: $O(1)$ auxiliary space, excluding the storage of the scene primitives themselves.
+-- **Strengths**: Simple to implement; efficient for scenes with a moderate number of primitives; supports arbitrary combinations of basic shapes.
+-- **Limitations**: Performance degrades linearly with the number of primitives; not suitable for highly complex scenes without spatial acceleration structures (which are not part of this basic evaluation method).
++- **Time Complexity:** $O(N)$, where $N$ is the total number of primitives in the scene. Each primitive must be evaluated once per query point.
++- **Memory Complexity:** $O(N)$ to store the primitive definitions and their transforms.
++- **Strengths:** Simple to implement; supports arbitrary combinations of primitives; efficient for scenes with a moderate number of objects.
++- **Limitations:** Performance degrades linearly with the number of primitives; not suitable for scenes with thousands of objects without spatial acceleration structures (e.g., BVH, which is outside the scope of this specific evaluation method).
++- **When to use:** Small to medium-sized scenes with procedural or mathematical primitives.
++- **When not to use:** Large-scale scenes requiring hierarchical culling or complex mesh-based SDFs.
+ 
+ ## Background
+-This method is a fundamental component of Signed Distance Field (SDF) ray marching, specifically within the context of Constructive SDF Modeling using Min Combination. It allows for the creation of complex scenes from simple geometric primitives by leveraging the property that the union of shapes corresponds to the minimum of their distance functions. The implementation details provided are derived from a practical ray marching example [S1, unofficial].
++Scene SDF Evaluation is a fundamental technique in ray marching for rendering scenes defined by constructive solid geometry (CSG) or collections of primitives. It builds on the concept of [Smooth SDF Composition](2685-smooth-sdf-composition.md) by applying the union operation (minimum) across a set of transformed primitives. The method is widely used in real-time ray marching demos and educational graphics code due to its simplicity and effectiveness for procedural geometry.
+ 
+ ## Sources
+-[S1] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)+[S1] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)
++[S2] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

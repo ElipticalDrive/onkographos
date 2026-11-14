@@ -3,10 +3,10 @@
 Also called: Chunk Load/Unload Distance Culling, Render Distance Chunk Management, Scanner, ScannerPlugin, Spatial Chunk Culling
 
 ## Overview
-The Chunk Loading/Unloading Scanner is a spatial management technique that determines which chunks of a volume dataset need to be loaded into memory or unloaded based on the camera's current and previous positions [S1, S2, unofficial]. It solves the problem of efficiently streaming large voxel worlds by identifying a load area and an unload area using offset grids, then computing the symmetric difference between these areas to generate precise queue updates [S1, S2, unofficial]. It differs from [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by operating on loaded chunks and using distance thresholds rather than frustum intersection tests [S1, S2, unofficial].
+The Chunk Loading/Unloading Scanner is a spatial management technique that determines which chunks of a volume dataset need to be loaded into memory or unloaded based on the camera's current and previous positions [S1, unofficial][S2, unofficial]. It solves the problem of efficiently streaming large voxel worlds by identifying a load area and an unload area using offset grids, then computing the symmetric difference between these areas to generate precise queue updates [S1, unofficial]. It differs from [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by operating on loaded chunks and using distance thresholds rather than frustum intersection tests [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs:** Camera world position, camera transform, previous camera chunk position, chunk grid dimensions, render distance radius, and data/mesh sampling offsets [S1, S2, unofficial].
+**Inputs:** Camera world position, camera transform, previous camera chunk position, chunk grid dimensions, render distance radius, and data/mesh sampling offsets [S1, unofficial][S2, unofficial].
 **Outputs:** Four queues of chunk coordinates: `unresolved_data_load`, `unresolved_mesh_load`, `unresolved_data_unload`, `unresolved_mesh_unload` [S1, unofficial].
 
 **Data Structures:**
@@ -28,9 +28,7 @@ The core state is held in a `Scanner` struct containing:
 
 **Algorithm Steps:**
 
-1. **Calculate Current Chunk Position:** Determine the chunk index containing the camera.
-   *Method A (from [S1, unofficial]):* $\text{chunk\_pos} = \lfloor (\text{camera\_transform.translation} - \text{Vec3}(16.0)) \times \frac{1}{32.0} \rfloor$
-   *Method B (from [S2, unofficial]):* $\text{current\_chunk\_index} = \left( \lfloor \frac{\text{camera\_position}.x}{\text{Chunk::CHUNK\_LENGTH}} \rfloor, \lfloor \frac{\text{camera\_position}.y}{\text{Chunk::CHUNK\_LENGTH}} \rfloor, \lfloor \frac{\text{camera\_position}.z}{\text{Chunk::CHUNK\_LENGTH}} \rfloor \right)$ [S1, S2, unofficial].
+1. **Calculate Current Chunk Position:** Determine the chunk index containing the camera. Method A scales and translates the camera transform: $\text{chunk\_pos} = \lfloor (\text{camera\_transform.translation} - \text{Vec3}(16.0)) \times \frac{1}{32.0} \rfloor$ [S1, unofficial]. Method B uses floor division: $\text{current\_chunk\_index} = \left( \lfloor \frac{\text{camera\_position}.x}{\text{Chunk::CHUNK\_LENGTH}} \rfloor, \lfloor \frac{\text{camera\_position}.y}{\text{Chunk::CHUNK\_LENGTH}} \rfloor, \lfloor \frac{\text{camera\_position}.z}{\text{Chunk::CHUNK\_LENGTH}} \rfloor \right)$ [S2, unofficial].
 2. **Check for Movement:** Compare `current_chunk_pos` with `prev_chunk_pos`. If unchanged, skip processing [S1, unofficial].
 3. **Generate Sampling Offsets:** Precompute relative offsets for load/unload areas. Iterate $x, y, z$ from $-\text{offset}$ to $+\text{offset}$. Collect offsets where at least one coordinate is at the boundary of the offset radius [S2, unofficial].
 4. **Define Load and Unload Areas:** Create sets of chunk coordinates: `load_data_area` = `current_chunk_pos` + `data_sampling_offsets`, `unload_data_area` = `previous_chunk_pos` + `data_sampling_offsets` [S1, unofficial].
@@ -46,7 +44,7 @@ The core state is held in a `Scanner` struct containing:
 ```python
 import math
 from collections import deque
-from typing import List, Set, Tuple
+from typing import List, Set
 
 class IVec3:
     def __init__(self, x: int, y: int, z: int):
@@ -124,7 +122,7 @@ class ChunkScanner:
         # Limit from [S1, unofficial]
         self.checks_per_frame = 32 * 32 * 32
 
-    def update(self, camera_pos: IVec3, loaded_chunks: Set[IVec3]) -> None:
+    def update(self, camera_pos: IVec3) -> None:
         current_chunk_pos = chunk_position_from_camera(camera_pos, self.chunk_length)
         
         # Step 2: Check for movement
@@ -132,22 +130,11 @@ class ChunkScanner:
             return
             
         # Step 4: Define Areas
-        load_data_area = set()
-        for offset in self.data_sampling_offsets:
-            load_data_area.add(current_chunk_pos + offset)
-            
-        load_mesh_area = set()
-        for offset in self.mesh_sampling_offsets:
-            load_mesh_area.add(current_chunk_pos + offset)
-            
+        load_data_area = {current_chunk_pos + off for off in self.data_sampling_offsets}
+        load_mesh_area = {current_chunk_pos + off for off in self.mesh_sampling_offsets}
         prev_pos = self.prev_chunk_pos if self.prev_chunk_pos else current_chunk_pos
-        unload_data_area = set()
-        for offset in self.data_sampling_offsets:
-            unload_data_area.add(prev_pos + offset)
-            
-        unload_mesh_area = set()
-        for offset in self.mesh_sampling_offsets:
-            unload_mesh_area.add(prev_pos + offset)
+        unload_data_area = {prev_pos + off for off in self.data_sampling_offsets}
+        unload_mesh_area = {prev_pos + off for off in self.mesh_sampling_offsets}
 
         # Step 5: Compute Differences
         data_load = load_data_area - unload_data_area
@@ -156,31 +143,22 @@ class ChunkScanner:
         mesh_unload = unload_mesh_area - load_mesh_area
 
         # Step 6: Update Queues
-        # Add to load queues
         for chunk in data_load:
-            if chunk not in loaded_chunks:
-                self.unresolved_data_load.append(chunk)
-        
+            self.unresolved_data_load.append(chunk)
         for chunk in mesh_load:
-            if chunk not in loaded_chunks:
-                self.unresolved_mesh_load.append(chunk)
-                
-        # Add to unload queues with threshold check from [S2, unofficial]
+            self.unresolved_mesh_load.append(chunk)
         for chunk in data_unload:
-            if chunk in loaded_chunks and chunk.axis_dist(current_chunk_pos) > self.render_distance * self.unload_threshold_multiplier:
+            if chunk.axis_dist(current_chunk_pos) > self.render_distance * self.unload_threshold_multiplier:
                 self.unresolved_data_unload.append(chunk)
-                
         for chunk in mesh_unload:
-            if chunk in loaded_chunks and chunk.axis_dist(current_chunk_pos) > self.render_distance * self.unload_threshold_multiplier:
+            if chunk.axis_dist(current_chunk_pos) > self.render_distance * self.unload_threshold_multiplier:
                 self.unresolved_mesh_unload.append(chunk)
                 
-        # Remove already loaded from unload queues
-        self.unresolved_data_unload = deque([c for c in self.unresolved_data_unload if c in loaded_chunks])
-        self.unresolved_mesh_unload = deque([c for c in self.unresolved_mesh_unload if c in loaded_chunks])
-        
-        # Remove unloaded from load queues
+        # Remove unloaded chunks from load queues. Remove loaded chunks from unload queues.
         self.unresolved_data_load = [c for c in self.unresolved_data_load if c not in data_unload]
         self.unresolved_mesh_load = [c for c in self.unresolved_mesh_load if c not in mesh_unload]
+        self.unresolved_data_unload = deque([c for c in self.unresolved_data_unload if c not in data_load])
+        self.unresolved_mesh_unload = deque([c for c in self.unresolved_mesh_unload if c not in mesh_load])
         
         # Step 7: Sort Load Queues
         self.unresolved_data_load.sort(key=lambda c: c.squared_dist(current_chunk_pos))

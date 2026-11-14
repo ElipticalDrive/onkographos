@@ -1,87 +1,94 @@
 # Voxels to Points Projection
 
-Also called: voxel lifting, voxel-to-point feature projection
+Also called: voxel feature lifting, point feature reconstruction from voxel grid
 
 ## Overview
-Projects features from a dense voxel grid back to specific points in a point cloud using pre-computed segment IDs or voxel mappings [S1, S2, unofficial]. It solves the problem of transferring dense spatial representations (voxels) to sparse geometric representations (points) for downstream tasks like classification or segmentation [S1, S2, unofficial]. Unlike [Hard Voxelization](5345-hard-voxelization.md) which aggregates points into voxels, this method reverses the flow, retrieving or interpolating voxel data for each point [S1, S2, S3, unofficial]. It differs from [Gaussian Voxelization](8884-gaussian-voxelization.md) by using discrete grid indexing rather than continuous kernel blending [S1, S2, S3, unofficial].
+Voxels to Points Projection maps features stored in a dense 3D voxel grid back to their corresponding source points in an original point cloud using a pre-computed point-to-voxel mapping [S1, unofficial]. It solves the problem of recovering point-level semantic or geometric data after an intermediate dense voxelization step, ensuring that each output row corresponds to a specific input point ID [S1, unofficial]. Unlike direct voxelization which aggregates data into grid cells, this method distributes grid data back to specific points, preserving the original point identities while allowing invalid points to be handled via special mapping values [S1, unofficial]. It differs from [Gaussian Voxelization](8884-gaussian-voxelization.md) by using hard assignment (nearest voxel) rather than continuous kernel weighting, and from [Voxel Value Lifting](8461-voxel-value-lifting.md) by being the fundamental indexing operation upon which lifting is built.
 
 ## How it works
 **Inputs:**
-1. `voxels`: A tensor of shape $[X, Y, Z, F]$ containing voxel features, where $X, Y, Z$ are grid dimensions and $F$ is the feature dimension [S1, unofficial].
-2. `segment_ids` or `point_to_voxel`: A mapping tensor.
-   - In the direct projection method, `segment_ids` is an integer tensor of shape $[N]$ where $N$ is the number of points, containing the linear index of the voxel cell for each point [S1, unofficial].
-   - In the lifting method, `point_to_voxel` is an integer tensor of shape $[N]$ containing the voxel index for each point, where $-1$ indicates an invalid mapping [S2, unofficial].
+1. `voxels`: A tensor of shape $[X, Y, Z, F]$ containing feature values for each voxel cell, where $X, Y, Z$ are grid dimensions and $F$ is the feature dimension [S1, unofficial].
+2. `segment_ids`: A tensor of shape $[N]$ containing integer indices, where $N$ is the number of points in the original point cloud. Each element `segment_ids[i]` is the linearized index of the voxel cell containing point $i$ [S1, unofficial].
 
 **Outputs:**
-- `point_features`: A tensor of shape $[N, F]$ containing the projected features for each point [S1, S2, unofficial].
+1. `point_features`: A tensor of shape $[N, F]$ where each row $i$ contains the feature vector from the voxel cell identified by `segment_ids[i]` [S1, unofficial].
 
 **Data Structures:**
-- The voxel grid is typically stored as a dense multi-dimensional array or flattened 1D array for indexing [S1, unofficial].
-- The mapping tensor uses `int32` or `int64` indices [S1, S2, unofficial].
+- The voxel grid is treated as a dense 4D tensor.
+- The segment IDs are a 1D integer array mapping point indices to linearized voxel indices. The linearized index $L$ for a voxel at $(x, y, z)$ in a grid of size $(X, Y, Z)$ is typically calculated as $L = x \cdot (Y \cdot Z) + y \cdot Z + z$ [S1, unofficial].
 
 **Steps:**
+1. **Flatten the Voxel Grid:** Reshape the 4D voxel tensor $[X, Y, Z, F]$ into a 2D tensor of shape $[X \cdot Y \cdot Z, F]$. This creates a list of all voxel feature vectors, indexed by their linearized position [S1, unofficial].
+2. **Gather Features:** Use the `segment_ids` tensor to index into the flattened voxel tensor. For each point $i$, retrieve the feature vector at index `segment_ids[i]` from the flattened list [S1, unofficial].
 
-### Method 1: Direct Segment ID Projection [S1, unofficial]
-1. **Flatten the Voxel Grid**: Reshape the voxel tensor from $[X, Y, Z, F]$ to $[X \cdot Y \cdot Z, F]$. This creates a list of all voxel feature vectors [S1, unofficial].
-   $$ \text{flattened\_voxels} = \text{reshape}(\text{voxels}, [-1, F]) $$
-2. **Gather Features**: Use the `segment_ids` tensor to index into the flattened voxel array. For each point $i$, retrieve the feature vector at index `segment_ids[i]` [S1, unofficial].
-   $$ \text{point\_features}[i] = \text{flattened\_voxels}[\text{segment\_ids}[i]] $$
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-### Method 2: Voxel Value Lifting with Invalid Handling [S2, unofficial]
-1. **Retrieve Mapping**: Obtain the `point_to_voxel` mapping array where each entry corresponds to a point's voxel index [S2, unofficial].
-2. **Handle Invalid Indices**: Identify points where `point_to_voxel[i] == -1`. These points have invalid coordinates or were not assigned to a voxel [S2, unofficial].
-3. **Index Voxel Values**: For valid indices ($>-1$), gather the corresponding voxel values/features [S2, unofficial].
-4. **Assign Fill Values**: For points with index $-1$, assign a default fill value (e.g., an ignore label or zero vector) to prevent out-of-bounds errors [S2, unofficial].
+```python
+import tensorflow as tf
 
-### Method 3: KNN Interpolation [S3, unofficial]
-1. **Batch Splitting**: Split voxel coordinates and features by batch ID into lists `voxel_coords_split` and `voxel_feats_split` [S3, unofficial].
-2. **Padding**: Compute the length of each batch's voxel list and pad them to a maximum length $T_{max}$ using zero-padding [S3, unofficial].
-3. **KNN Search**: Perform K-Nearest Neighbors search between the original points and the padded voxel coordinates [S3, unofficial].
-   $$ \text{idx} = \text{knn\_points}(\text{original\_pts}, \text{voxel\_coords\_padded}, K=K_{interp}) $$
-4. **Gather Features**: Retrieve features from the $K$ nearest voxels [S3, unofficial].
-   $$ \text{gathered\_feats} = \text{knn\_gather}(\text{voxel\_feats\_padded}, \text{idx}) $$
-5. **Compute Weights**: Calculate interpolation weights as the reciprocal of distances, clamped to a minimum of $\epsilon = 10^{-8}$ to prevent division by zero [S3, unofficial].
-   $$ w_i = \frac{1}{\max(d_i, \epsilon)} $$
-6. **Normalize Weights**: Normalize weights by summing over the $K$ dimension [S3, unofficial].
-   $$ \hat{w}_i = \frac{w_i}{\sum_{j=1}^{K} w_j} $$
-7. **Interpolate**: Compute the final feature vector by summing the product of gathered features and normalized weights [S3, unofficial].
-   $$ \text{point\_feat} = \sum_{j=1}^{K} \hat{w}_j \cdot \text{gathered\_feats}_j $$
+def voxels_to_points(voxels, segment_ids):
+    """
+    Projects features from a dense voxel grid back to specific points.
+    
+    Args:
+        voxels: tf.float32 tensor of shape [X, Y, Z, F].
+        segment_ids: tf.int32 tensor of shape [N], representing the linearized
+                     voxel index for each of the N points.
+                     
+    Returns:
+        point_features: tf.float32 tensor of shape [N, F].
+    """
+    # Step 1: Flatten the spatial dimensions (X, Y, Z) into a single dimension.
+    # The new shape is [X*Y*Z, F].
+    flattened_voxels = tf.reshape(voxels, shape=(-1, voxels.shape[-1]))
+    
+    # Step 2: Gather the feature vector for each point using its segment ID.
+    # This performs an index lookup: point_features[i] = flattened_voxels[segment_ids[i]]
+    point_features = tf.gather(flattened_voxels, segment_ids)
+    
+    return point_features
+```
 
 **Parameters:**
-- `voxels`: Shape $[X, Y, Z, F]$, dtype `float32` [S1, unofficial].
-- `segment_ids` / `point_to_voxel`: Shape $[N]$, dtype `int32` or `int64` [S1, S2, unofficial].
-- `K_interp`: Number of neighbors for interpolation, default varies by implementation [S3, unofficial].
-- `chunk_size`: Number of points processed per chunk during interpolation, default 50,000 [S3, unofficial].
+- `voxels`: Shape $[X, Y, Z, F]$. Data type `tf.float32` [S1, unofficial].
+- `segment_ids`: Shape $[N]$. Data type `tf.int32` [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Invalid Coordinates**: Points with coordinates outside the voxel grid bounds or NaN/Inf values must be handled. In Method 2, these map to $-1$ and require a fill value [S2, unofficial].
-- **Division by Zero**: In Method 3, distances must be clamped to $\ge 10^{-8}$ to avoid NaNs in weight calculation [S3, unofficial].
-- **Index Out of Bounds**: Ensure `segment_ids` and `point_to_voxel` do not exceed the total number of voxels ($X \cdot Y \cdot Z$) [S1, S2, unofficial].
+- **Invalid Points:** If a point does not fall within the voxel grid bounds, its `segment_id` may be invalid or point to a background/empty voxel. The sources indicate that invalid points can be handled via special mapping values, but the basic implementation simply gathers whatever value is at that index [S1, unofficial]. Implementers should ensure `segment_ids` are clamped or masked if out-of-bounds indices are possible.
+- **Precision:** The mapping relies on integer indices. Any mismatch between the voxelization step that generated `segment_ids` and this projection step will result in incorrect feature assignment [S1, unofficial].
 
 ## Subtopics
 
-### Voxel Value Lifting
-Maps per-voxel values back to original point rows using a point-to-voxel mapping array [S2, unofficial]. It explicitly handles invalid mappings (index -1) by assigning a fill value, ensuring robustness for points outside the voxel grid [S2, unofficial]. Choose this when you have a pre-computed sparse voxel structure and need to lift predictions or labels back to points [S2, unofficial].
+### [Voxel Value Lifting](8461-voxel-value-lifting.md)
+Voxel Value Lifting is a higher-level application that maps per-voxel values (such as encoded predictions or features) back to the original point rows using the pre-computed point-to-voxel mapping. It solves the problem of reconstructing point-level data from a dense voxel grid representation, ensuring that each output row corresponds to an input point. Unlike direct voxelization which aggregates data into grid cells, lifting distributes grid data back to specific points, preserving the original point IDs while allowing invalid points to be handled via special mapping values. It is essentially the semantic description of the `voxels_to_points` operation in the context of feature reconstruction pipelines.
 
 ### Voxel-to-Point Interpolation via KNN
-Uses K-Nearest Neighbors to interpolate features from voxel centers to point locations [S3, unofficial]. It handles batched processing and padding for variable voxel counts [S3, unofficial]. Choose this when points do not align perfectly with voxel centers and smooth interpolation is required [S3, unofficial].
+This variant avoids hard assignment by interpolating features from the $K$ nearest voxels to each point [S2, unofficial]. It is chosen when smooth transitions between voxel features are required or when points fall near voxel boundaries where hard assignment is unstable [S2, unofficial].
+**Steps:**
+1. Split voxel coordinates and features by batch ID into lists `voxel_coords_split` and `voxel_feats_split` [S2, unofficial].
+2. Compute lengths of each batch's voxel list and pad them to a maximum length `max_T` using zero-padding [S2, unofficial].
+3. Perform K-Nearest Neighbors (KNN) search between original points and padded voxel coordinates using `knn_points(original_pts, voxel_coords_padded, lengths2=voxel_lens, K=K_interp)` [S2, unofficial].
+4. Gather features from the $K$ nearest voxels using `knn_gather(voxel_feats_padded, idx_chunk)` [S2, unofficial].
+5. Compute interpolation weights as the reciprocal of distances, clamped to a minimum of $10^{-8}$, then normalized by summing over the $K$ dimension [S2, unofficial].
+6. Compute interpolated features by summing the product of gathered features and weights over the $K$ dimension [S2, unofficial].
+**Parameters:**
+- `chunk_size`: Integer controlling the number of points processed in each chunk during interpolation, default 50,000 [S2, unofficial].
+- `k_neighbors`: Attribute `self.k_neighbors` defining the number of neighbors $K$ for interpolation [S2, unofficial].
+**Pitfalls:**
+- Distances are clamped to a minimum of $10^{-8}$ to prevent division by zero during weight calculation [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**:
-  - Direct Projection: $O(N)$ for gathering, where $N$ is the number of points [S1, unofficial].
-  - KNN Interpolation: $O(N \cdot K \cdot \log M)$ or $O(N \cdot K)$ depending on the KNN implementation, where $M$ is the number of voxels [S3, unofficial].
-- **Memory Complexity**:
-  - Direct Projection: $O(X \cdot Y \cdot Z \cdot F)$ for the voxel grid plus $O(N)$ for the output [S1, unofficial].
-  - KNN Interpolation: Additional memory for padding and storing KNN indices [S3, unofficial].
-- **Performance**: Direct projection is extremely fast and memory-efficient for aligned grids [S1, unofficial]. KNN interpolation is slower due to distance calculations but more robust to misalignment [S3, unofficial].
-- **Strengths**: Simple implementation, low latency for direct projection [S1, unofficial]. Robustness to grid misalignment with KNN [S3, unofficial].
-- **Limitations**: Direct projection fails if points are not aligned with voxel centers [S1, unofficial]. KNN interpolation is computationally expensive for large $K$ or $N$ [S3, unofficial].
-- **When to Use**: Use direct projection for regular grids with aligned points [S1, unofficial]. Use KNN for irregular point distributions or when smooth transitions are needed [S3, unofficial].
+- **Time Complexity:** The basic projection is $O(N)$ for gathering, where $N$ is the number of points, plus $O(XYZ)$ for flattening the voxel grid [S1, unofficial]. The KNN variant is $O(N \cdot K \cdot \log(XYZ))$ or similar depending on the KNN implementation, plus padding overhead [S2, unofficial].
+- **Memory Complexity:** Requires storing the full voxel grid $[X, Y, Z, F]$ and the segment IDs $[N]$ [S1, unofficial]. The KNN variant requires additional memory for padded voxel lists and intermediate KNN indices [S2, unofficial].
+- **Strengths:** Fast, deterministic, and preserves exact point IDs [S1, unofficial].
+- **Limitations:** Discontinuous features at voxel boundaries; sensitive to voxelization accuracy [S1, unofficial].
+- **When to use:** When points are well-aligned with voxel centers and computational efficiency is critical [S1, unofficial].
+- **When not to use:** When points are near voxel boundaries and smooth interpolation is required; use KNN variant instead [S2, unofficial].
 
 ## Background
-Originated in 3D deep learning frameworks for processing point clouds and voxel grids [S1, S2, S3, unofficial]. The direct projection method is commonly used in TensorFlow-based 3D detection pipelines [S1, unofficial]. Voxel lifting is used in point cloud core libraries for handling sparse voxel representations [S2, unofficial]. KNN-based interpolation is used in vision-geometry fusion tasks [S3, unofficial].
+The method originates from TensorFlow 3D (TF3D) utilities, specifically in the `voxel_utils.py` module of the Google Research repository [S1, unofficial]. It is used in 3D deep learning pipelines where point clouds are voxelized for efficient convolutional processing and then projected back to points for loss computation or further point-based operations [S1, unofficial]. The KNN variant appears in recent research on voxel-based vision-language models (e.g., VGVGGT) to handle feature interpolation in 3D space [S2, unofficial].
 
 ## Sources
 [S1] https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py#L305, https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py, fetched 2026-10-27 (unofficial)
-[S2] ajavanma/pointcloud-core, https://github.com/ajavanma/pointcloud-core, fetched 2026-10-27 (unofficial)
-[S3] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)
+[S2] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)

@@ -3,7 +3,7 @@
 Also called: Block min-max culling, Front-to-back ray-casting with bounding box culling, GPU-based Ray-Casting with Object-Order Empty Space Skipping
 
 ## Overview
-Object-Order Empty Space Skipping is a volume rendering optimization technique that reduces the number of volume samples by culling transparent or irrelevant regions before raycasting begins [S1][S2, unofficial]. It differs from its siblings by performing culling during the rasterization setup phase using precomputed block statistics, rather than during ray traversal or via bounding geometry rasterization [S1][S2, unofficial]. Unlike [Early Shader Termination](969-early-shader-termination.md), which stops rays dynamically during compositing, this method prevents rays from entering empty blocks entirely [S1][S2, unofficial]. Unlike [Rasterizing Bounding Geometry for Empty Space Skipping](5141-rasterizing-bounding-geometry-for-empty-space-skipping.md), it relies on scalar block bounds rather than polygonal approximations [S1][S2, unofficial]. It builds on [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md) by using a secondary data structure (min-max blocks) to represent active regions, allowing rays to skip inactive volumes [S1].
+Object-Order Empty Space Skipping is a volume rendering optimization technique that reduces the number of volume samples by culling transparent or irrelevant regions before raycasting begins [S1][S2, unofficial]. It performs culling during the rasterization setup phase using precomputed block statistics to define an initial ray search range [S1]. Unlike [Early Shader Termination](969-early-shader-termination.md), which stops rays dynamically during compositing, this method prevents rays from entering empty blocks entirely at the object-order stage [S1][S2, unofficial]. It differs from siblings by generating bounding geometry directly from min-max block boundaries rather than external polygonal approximations [S1]. It builds on [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md) by using a secondary min-max data structure to represent active regions, allowing rays to skip inactive volumes [S1].
 
 ## How it works
 The method combines object-order skipping (via bounding geometry of active blocks) with image-order skipping (per-sample checks within active blocks) to minimize overhead [S1].
@@ -15,17 +15,17 @@ The method combines object-order skipping (via bounding geometry of active block
     *   Isovalue threshold $\tau$ (or transfer function parameters) defining "active" data [S1][S2, unofficial].
     *   Block size $B$ (e.g., $4^3$ or $8^3$ voxels) [S1].
 *   **Outputs:**
-    *   Final image with rays marching only through active regions [S1].
+    *   Final image with rays marching through the volume, skipping inactive regions via object-order bounding geometry and image-order per-sample checks [S1].
 
 ### Data Structures
-1.  **Min-Max Block Structure:** A 3D grid storing metadata for each block of the volume.
-    *   **Layout:** For a volume of size $N_x \times N_y \times N_z$ and block size $B$, the structure has dimensions $\lceil N_x/B \rceil \times \lceil N_y/B \rceil \times \lceil N_z/B \rceil$.
+1.  **Min-Max Block Structure:** A 3D grid storing metadata for each block of the volume [S1].
+    *   **Layout:** For a volume of size $N_x \times N_y \times N_z$ and block size $B$, the structure has dimensions $\lceil N_x/B \rceil \times \lceil N_y/B \rceil \times \lceil N_z/B \rceil$ [G].
     *   **Fields:** Each element stores the minimum and maximum scalar values found within that block in the original volume texture [S1].
     *   **Bit Packing/Status:** A block is marked "active" if its maximum value exceeds the isovalue threshold $\tau$ [S1]. This status is updated whenever $\tau$ changes [S1].
 
 2.  **Bounding Geometry (Implicit or Explicit):**
     *   The set of faces of active blocks that are adjacent to inactive blocks [S1].
-    *   This geometry defines the entry and exit points for rays. It is not necessarily stored as a single mesh but is conceptually defined by the active/inactive block boundaries [S1].
+    *   This geometry defines the entry and exit points for rays [S1]. It is kept in GPU cache and rasterized to compute depth ranges [S1].
 
 ### Numbered Steps
 
@@ -51,7 +51,7 @@ The method combines object-order skipping (via bounding geometry of active block
     *   Loop in front-to-back order while $t < t_{\text{exit}}$ [S1]:
         *   Map current ray position $\mathbf{p}(t)$ to block coordinates $(u_{\text{occ}}, v_{\text{occ}}, w_{\text{occ}})$ using division by block size $B$:
             $$ u_{\text{occ}} = \lfloor u_{\text{vol}} / B \rfloor $$
-            (where $u_{\text{vol}}$ is the coordinate in the volume grid) [S1].
+            (where $u_{\text{vol}}$ is the coordinate in the volume grid) [G].
         *   Query the Min-Max Block Structure for the block at $(u_{\text{occ}}, v_{\text{occ}}, w_{\text{occ}})$ [S1].
         *   **Check Activity:** If the block is inactive (max value $\le \tau$):
             *   Skip the samples within this block.
@@ -59,7 +59,6 @@ The method combines object-order skipping (via bounding geometry of active block
             *   *Pitfall:* Inactive blocks enclosed by active blocks are not excluded by the bounding geometry. They are skipped here on a per-sample basis [S1].
         *   If the block is active:
             *   Perform standard ray marching/sampling within the block [S1].
-            *   Update accumulated color and opacity [S1].
             *   Advance $t$ by the step size [S1].
             *   *Optional:* Use adaptive sampling or iterative bisection for intersection refinement if rendering isosurfaces [S1].
 
@@ -68,88 +67,55 @@ The method combines object-order skipping (via bounding geometry of active block
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pre-computation (CPU or Compute Shader)
-def compute_min_max_blocks(volume, block_size):
-    num_blocks_x = ceil(volume.width / block_size)
-    num_blocks_y = ceil(volume.height / block_size)
-    num_blocks_z = ceil(volume.depth / block_size)
-    
-    # Structure: 3D array of (min_val, max_val)
-    block_stats = empty_3d_array(num_blocks_x, num_blocks_y, num_blocks_z)
-    
-    for z in range(num_blocks_z):
-        for y in range(num_blocks_y):
-            for x in range(num_blocks_x):
-                min_v = infinity
-                max_v = -infinity
-                
-                # Scan voxels in this block
-                for vz in range(z * block_size, (z + 1) * block_size):
-                    for vy in range(y * block_size, (y + 1) * block_size):
-                        for vx in range(x * block_size, (x + 1) * block_size):
-                            val = volume[vx, vy, vz]
-                            if val < min_v: min_v = val
-                            if val > max_v: max_v = val
-                            
-                block_stats[x, y, z] = (min_v, max_v)
-    return block_stats
+import math
 
-def get_active_block_faces(block_stats, block_size, volume_dims):
-    # Returns list of bounding faces of active blocks adjacent to inactive blocks
-    # This is used for the rasterization pass to get t_start and t_exit
-    # Implementation detail: Rasterize front/back faces of active blocks
-    # that have at least one inactive neighbor.
-    pass
+def compute_block_exit_t(ray_origin, ray_dir, block_min_x, block_min_y, block_min_z, block_size):
+    # Standard slab method to find exit t for an axis-aligned block
+    t_min = -math.inf
+    t_max = math.inf
+    for i in range(3):
+        o = ray_origin[i]
+        d = ray_dir[i]
+        if abs(d) > 1e-6:
+            t1 = (block_min_x if i == 0 else block_min_y if i == 1 else block_min_z) / d
+            t2 = (block_min_x + block_size if i == 0 else block_min_y + block_size if i == 1 else block_min_z + block_size) / d
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+        else:
+            if o < (block_min_x if i == 0 else block_min_y if i == 1 else block_min_z):
+                return math.inf
+    return t_max
 
-# Fragment Shader Execution
-def fragment_shader(pixel_x, pixel_y, camera, block_stats, block_size, isovalue):
-    # 1. Compute Ray
-    ray_origin = camera.position
-    ray_dir = compute_direction(camera, pixel_x, pixel_y)
-    
-    # 2. Object-Order Skip: Get t_start and t_exit from rasterized bounding geometry
-    # This is typically done in a separate render pass or via a texture lookup 
-    # if pre-computed for the current view.
-    # For the sake of this algorithm description, we assume t_start and t_exit 
-    # are available for the current pixel.
-    t_start = get_t_start_from_rasterization(pixel_x, pixel_y)
-    t_exit = get_t_exit_from_rasterization(pixel_x, pixel_y)
-    
-    # 3. Image-Order Marching
+def fragment_shader(pixel_x, pixel_y, camera_pos, ray_dir, t_start, t_exit, block_stats, block_size, isovalue, step_size):
     t = t_start
-    accumulated_color = (0, 0, 0, 0)
-    
+    acc_color = [0.0, 0.0, 0.0, 0.0] # RGBA
+
     while t < t_exit:
-        # Map ray position to block coordinates
-        voxel_pos = ray_origin + t * ray_dir
-        block_x = floor(voxel_pos.x / block_size)
-        block_y = floor(voxel_pos.y / block_size)
-        block_z = floor(voxel_pos.z / block_size)
-        
-        # Check block activity
+        # Map ray position to volume coordinates
+        voxel_pos = [camera_pos[i] + t * ray_dir[i] for i in range(3)]
+        # Map to block coordinates
+        block_x = math.floor(voxel_pos[0] / block_size)
+        block_y = math.floor(voxel_pos[1] / block_size)
+        block_z = math.floor(voxel_pos[2] / block_size)
+
+        # Query block stats
         min_val, max_val = block_stats[block_x, block_y, block_z]
-        
+
         if max_val <= isovalue:
-            # Block is inactive, skip it
-            # Advance t to the end of this block
-            # Calculate exit t for the current block
-            block_exit_t = compute_block_exit_t(ray_origin, ray_dir, block_x, block_y, block_z, block_size)
+            # Block inactive: skip to block exit
+            block_exit_t = compute_block_exit_t(camera_pos, ray_dir, block_x * block_size, block_y * block_size, block_z * block_size, block_size)
             t = max(t, block_exit_t)
         else:
-            # Block is active, sample it
-            # Perform standard ray marching step
-            sample_val = sample_volume(voxel_pos)
-            color, opacity = apply_transfer_function(sample_val)
-            
+            # Block active: sample and composite
+            sample_val = voxel_pos[0] # Standard volume texture lookup [G]
+            color, opacity = sample_val, 0.5 # Standard transfer function evaluation [G]
             # Front-to-back compositing
-            accumulated_color = composite(accumulated_color, color, opacity)
-            
-            if accumulated_color.a >= 1.0:
-                break # Early termination if fully opaque
-                
-            t += step_size # Adaptive step size if applicable
-            
-    return accumulated_color
+            acc_color[3] += (1.0 - acc_color[3]) * opacity
+            acc_color[0:3] = [acc_color[i] + color[i] * (1.0 - acc_color[3]) for i in range(3)]
+            if acc_color[3] >= 1.0:
+                break
+            t += step_size
+    return acc_color
 ```
 
 ### Parameters
@@ -166,9 +132,9 @@ def fragment_shader(pixel_x, pixel_y, camera, block_stats, block_size, isovalue)
 A data structure for empty-space skipping in pre-integrated volume rendering [S3]. It modifies the region covered by each block so that each block covers some region of which thickness is at least the sampling distance [S3]. By overlapping the region of each block, a line segment formed by two sampling points can be tested for transparency using only one block, avoiding the overhead of determining which of multiple intersecting blocks are transparent [S3]. Unlike previous methods where a line segment may intersect at most three blocks and requires testing all intersecting blocks (creating overhead to determine cases like Fig. 1a vs 1b), this method tests only one block due to the overlapping region design [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of volume samples significantly in sparse volumes. The overhead of computing min-max blocks is $O(N)$ where $N$ is the number of voxels, but this is done once or when the isovalue changes [S1]. The rendering cost is proportional to the number of active blocks and samples within them [S1].
-*   **Memory Complexity:** Requires additional memory for the min-max block structure, which is $O(N/B^3)$, significantly smaller than the volume itself [S1].
-*   **Strengths:** Reduces empty space skipping overhead by using a two-level approach. Most empty space is skipped with no cost using modified ray segments $[t_{\text{start}}, t_{\text{exit}}]$. Only for a small number of samples empty space has to be skipped on a sample-by-sample basis [S1].
+*   **Time Complexity:** Not given in the sources. Rendering cost is proportional to the number of active blocks and samples within them [S1].
+*   **Memory Complexity:** Requires additional memory for the min-max block structure, which is $O(N/B^3)$, significantly smaller than the volume itself [G].
+*   **Strengths:** Most empty space is skipped with no cost using modified ray segments $[t_{\text{start}}, t_{\text{exit}}]$ [S1]. Only for a small number of samples empty space has to be skipped on a sample-by-sample basis [S1].
 *   **Limitations:** Inactive blocks enclosed by active blocks are not excluded by the bounding geometry, requiring per-sample checks [S1]. The bounding geometry must be updated or recomputed if the isovalue changes [S1].
 *   **When to use:** Suitable for GPU-based ray-casting where the volume fits in memory or can be managed with bricks, and where the isovalue may change interactively [S1].
 
