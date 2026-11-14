@@ -1,6 +1,5 @@
 # Hard Pruning
 
-
 ## Overview
 Hard Pruning is a density control method in 3D Gaussian Splatting that reduces model size by a constant ratio at fixed intervals after the densification stage [S1, S2]. It differs from Soft Pruning by occurring post-densification rather than during it, relying on subsequent refinement iterations to recover performance [S1, S2].
 
@@ -36,7 +35,7 @@ Hard Pruning is a density control method in 3D Gaussian Splatting that reduces m
 - $r = 0.3$ (30%) [S1].
 
 **Edge Cases:**
-- Not given in the sources.
+- Not given in the sources [S1, S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -48,25 +47,23 @@ def hard_pruning(gaussians, current_iteration):
     ratio = 0.3
     if current_iteration < start_iter or (current_iteration - start_iter) % interval != 0:
         return gaussians
-    # Compute Efficient Pruning Score for each Gaussian [S2]
+    # Compute Efficient Pruning Score for each Gaussian [S2].
     # Note: The exact formula for the Efficient Pruning Score is not provided in the sources.
-    scores = [0.0] * len(gaussians)
+    scores = [0.0] * len(gaussians)  # [G] Replace with actual score computation
     indexed_gaussians = sorted(enumerate(gaussians), key=lambda x: scores[x[0]])
     n_to_remove = int(len(gaussians) * ratio)
     gaussians = [g for _, g in indexed_gaussians[n_to_remove:]]
     return gaussians
 ```
 
-## Subtopics
-
 ### [Soft Pruning](5590-soft-pruning.md)
 Pruning performed during the densification stage to maintain a robust Hessian approximation. Choose when integrating pruning into the densification loop rather than after it.
 
 ### [PUP 3D-GS](link)
-A method that uses post-pruning refinement to match fully-trained model performance [S1]. Choose when comparing alternative post-densification pruning strategies.
+A method that uses post-pruning refinement to match fully-trained model performance [S1]. Choose when comparing alternative post-densification pruning strategies [S1].
 
 ### [LightGaussian](link)
-A method that uses post-pruning refinement to match fully-trained model performance [S1]. Choose when comparing alternative post-densification pruning strategies.
+A method that uses post-pruning refinement to match fully-trained model performance [S1]. Choose when comparing alternative post-densification pruning strategies [S1].
 
 ## Operating characteristics
 - **Performance:** Reduces total Gaussians by 10.6× across scenes when paired with Soft Pruning [S1]. Increases rendering and training speed by approximately 90% reduction in primitives [S2].
@@ -74,7 +71,7 @@ A method that uses post-pruning refinement to match fully-trained model performa
 - **Limitations:** Requires waiting for densification to complete; performance relies on the quality of the Efficient Pruning Score [S2].
 - **When to use:** After densification stage to aggressively reduce model size [S1, S2].
 - **When not to use:** During densification (use Soft Pruning instead) [S2].
-- **Time and Memory Complexity:** Not given in the sources.
+- **Time and Memory Complexity:** Not given in the sources [S1, S2].
 
 ## Background
 Hard Pruning was introduced in Speedy-Splat as part of a sparse primitive strategy for fast 3D Gaussian Splatting [S1, S2]. It builds on the observation that model performance after densification closely matches fully-trained models, allowing pruning followed by refinement [S1]. It is similar in philosophy to PUP 3D-GS and LightGaussian, which also use post-pruning refinement [S1].

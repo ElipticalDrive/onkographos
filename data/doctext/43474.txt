@@ -1,0 +1,2442 @@
+# HPC Parallel Optimization & NeRF Acceleration Project
+## Project Overview
+This repository records a complete technical path: early NeRF 3D reconstruction research (2024 MIT xPRO) → systematic learning of parallel computing & customized GPU acceleration for neural volume rendering (2026).
+
+Most parallel learning materials only contain basic MPI/OpenMP/CUDA demos without real industry-oriented application scenarios. This project combines fundamental high-performance computing implementations with optimized NeRF rendering kernels, forming a closed-loop from theoretical bottleneck discovery to engineering acceleration.
+
+## Two Core Parts
+### 1. 2024 MIT xPRO NeRF Research
+Folder: `2024_mit_nerf_research/`
+- Official MIT xPRO TechXcelerate completion certificate (verifiable official certificate with CEU credits)
+- Full comparative experiment report: evaluate image/video input pipelines for NeRF 3D avatar reconstruction
+- Core findings: Vanilla NeRF suffers severe rendering latency and heavy ray sampling computation overhead, which inspires the subsequent HPC optimization practice.
+
+### 2. Modular HPC Parallel Computing Implementation
+Folder: `hpc_parallel_modules/`
+10 independent, self-contained practice modules covering multi-threading, distributed computing and GPU optimization:
+- module_01 ~ module_06: CPU baseline, OpenMP multi-threading, MPI communication, naive & tiled CUDA matrix multiplication (memory optimization practice)
+- module_07: NeRF-inspired CUDA volume rendering for a parameterized transport equation
+
+## Environment & Build
+All modules adopt cross-platform CMake build system, support C++ / OpenMP / MPI / CUDA compilation separately.
+
+### parallel_hpc_modules/module_01_matmul_cpu/src/main.cpp
+```
+#include <iostream>
+#include <chrono>
+using namespace std;
+using namespace std::chrono;
+
+// Matrix multiplication naive version i-j-k loop order
+void matmul_ijk(double *A, double *B, double *C, int N){
+    for(int i=0;i<N;i++){
+        for(int j=0;j<N;j++){
+            for(int k=0;k<N;k++){
+                C[i*N+j] += A[i*N+k]*B[k*N+j];
+            }
+        }
+    }
+}
+
+
+// Matrix multiplication optimized version i-k-j loop order
+void matmul_ikj(double *A, double *B, double *C, int N){
+    for(int i=0;i<N;i++){
+        for(int k=0;k<N;k++){
+            for(int j=0;j<N;j++){
+                C[i*N+j] += A[i*N+k]*B[k*N+j];
+            }
+        }
+    }
+}
+
+int main(){
+    const int N = 1024; 
+    
+    // 1. Allocate matrix A,B,C on heap
+    double *A = new double[N*N];
+    double *B = new double[N*N];
+    double *C = new double[N*N];
+
+    // 2. Initialize value of matrix A and B
+    for(int i=0; i<N*N; i++) A[i] = 1.0;
+    for(int i=0; i<N*N; i++) B[i] = 2.0;
+    
+
+    
+    // 3. Benchmark ijk implementation, reset matrix C to zero first
+    for(int i=0; i<N*N; i++) C[i] = 0.0;
+    auto start1 = steady_clock::now();
+
+    matmul_ijk(A,B,C,N);
+
+    auto end1 = steady_clock::now();
+    auto dur1 = duration_cast<microseconds>(end1 - start1);
+    double t1 = dur1.count() / 1e6;
+    cout << "ijk runtime: " << t1 << " s\n";
+    
+    // 4. Benchmark ikj implementation, reset matrix C to zero again
+    for(int i=0; i<N*N; i++) C[i] = 0.0;
+    auto start2 = steady_clock::now();
+
+    matmul_ikj(A,B,C,N);
+
+    auto end2 = steady_clock::now();
+    auto dur2 = duration_cast<microseconds>(end2 - start2);
+    double t2 = dur2.count() / 1e6;
+    cout << "ikj runtime: " << t2 << " s\n";
+    
+    // 5. Free dynamically allocated memory
+    delete[] A;
+    delete[] B;
+    delete[] C;
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_02_matmul_omp/src/main.cpp
+```
+#include <iostream>
+#include <chrono>
+#include <algorithm>
+#include <omp.h>
+
+// Matrix dimension
+#define N 1024
+// Tile block size for cache optimization
+#define BLOCK 32
+
+// Serial matrix multiplication
+void matmul_serial(double *A, double *B, double *C)
+{
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            double tmp = 0.0;
+            for (int k = 0; k < N; k++)
+            {
+                tmp += A[i*N + k] * B[k*N + j];
+            }
+            C[i*N + j] = tmp;
+        }
+    }
+}
+
+// OpenMP parallel naive matrix multiplication
+void matmul_omp(double *A, double *B, double *C)
+{
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            double tmp = 0.0;
+            for (int k = 0; k < N; k++)
+            {
+                tmp += A[i*N + k] * B[k*N + j];
+            }
+            C[i*N + j] = tmp;
+        }
+    }
+}
+
+// OpenMP parallel matrix multiplication with tiling optimization
+void matmul_omp_tiled(double *A, double *B, double *C)
+{
+    #pragma omp parallel for schedule(static)
+    for (int ii = 0; ii < N; ii += BLOCK)
+    {
+        for (int jj = 0; jj < N; jj += BLOCK)
+        {
+            for (int kk = 0; kk < N; kk += BLOCK)
+            {
+                for (int i = ii; i < std::min(ii + BLOCK, N); i++)
+                {
+                    for (int j = jj; j < std::min(jj + BLOCK, N); j++)
+                    {
+                        double tmp = 0.0;
+                        for (int k = kk; k < std::min(kk + BLOCK, N); k++)
+                        {
+                            tmp += A[i*N + k] * B[k*N + j];
+                        }
+                        C[i*N + j] += tmp;
+                    }
+                }
+            }
+        }
+    }
+}
+
+int main()
+{
+    // Allocate memory for matrix A, B, C
+    double *A = new double[N*N];
+    double *B = new double[N*N];
+    double *C = new double[N*N];
+
+    // Initialize matrix elements
+    for(int i=0; i<N*N; i++) A[i] = 1.0;
+    for(int i=0; i<N*N; i++) B[i] = 2.0;
+
+    // ========== Serial benchmark ==========
+    for(int i=0; i<N*N; i++) C[i] = 0.0;
+    auto t1 = std::chrono::high_resolution_clock::now();
+    matmul_serial(A, B, C);
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double time_serial = std::chrono::duration<double>(t2 - t1).count();
+
+    // ========== OpenMP naive parallel benchmark ==========
+    omp_set_num_threads(4); // Set number of OpenMP threads
+    for(int i=0; i<N*N; i++) C[i] = 0.0;
+    auto t3 = std::chrono::high_resolution_clock::now();
+    matmul_omp(A, B, C);
+    auto t4 = std::chrono::high_resolution_clock::now();
+    double time_omp = std::chrono::duration<double>(t4 - t3).count();
+
+    // ========== OpenMP tiled parallel benchmark ==========
+    for(int i=0; i<N*N; i++) C[i] = 0.0;
+    auto t5 = std::chrono::high_resolution_clock::now();
+    matmul_omp_tiled(A, B, C);
+    auto t6 = std::chrono::high_resolution_clock::now();
+    double time_omp_tiled = std::chrono::duration<double>(t6 - t5).count();
+
+    // Print elapsed time and speedup metrics
+    std::cout << "Serial time:      " << time_serial << " s\n";
+    std::cout << "OMP naive time:   " << time_omp << " s\n";
+    std::cout << "OMP tiled time:   " << time_omp_tiled << " s\n";
+    std::cout << "Speedup (naive):  " << time_serial / time_omp << "\n";
+    std::cout << "Speedup (tiled):  " << time_serial / time_omp_tiled << "\n";
+
+    // Free dynamically allocated memory
+    delete[] A;
+    delete[] B;
+    delete[] C;
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_05_cuda_matmul_naive/src/main.cu
+```
+#include <iostream>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <cstdlib>
+#include <random>
+#include <cstdio>
+#include <cmath>
+
+#define CHECK_CUDA_FATAL(err) \
+do { \
+    cudaError_t e = (err); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[CUDA FATAL] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+#define CHECK_KERNEL() \
+do { \
+    cudaError_t e = cudaGetLastError(); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[KERNEL LAUNCH ERROR] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+// GPU Kernel
+__global__ void matmul_naive_kernel(
+    float* d_a,
+    float* d_b,
+    float* d_c,
+    int M,int N,int P
+)
+{   
+    int idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int jdx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < M && jdx < P)
+    {   
+        float tmp = 0;
+        for(int k = 0;k < N;k++){
+            tmp += d_a[idx*N+k]*d_b[k*P+jdx];
+        }
+        d_c[idx*P+jdx] = tmp;
+    }
+}
+
+// CPU serial reference calculation
+void cpu_verify(float* h_a, float* h_b, float* h_ref, int M,int N,int P)
+{
+    for(int i=0;i<M;i++){
+        for(int j=0;j<P;j++){
+            for(int k=0;k<N;k++){
+                h_ref[i*P+j] += h_a[i*N+k]*h_b[k*P+j];
+            }
+        }
+    }
+}
+
+
+int main()
+{
+    int M = 16;
+    int N = 16;
+    int P = 16;
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    // ===== Step1: Host memory allocation & initialization =====
+    float *h_a, *h_b, *h_c_gpu, *h_ref_cpu;
+    h_a       = (float *)malloc(M * N * sizeof(float));
+    h_b       = (float *)malloc(N * P * sizeof(float));
+    h_c_gpu   = (float *)malloc(M * P * sizeof(float));
+    h_ref_cpu = (float*)malloc(M * P * sizeof(float));
+    memset(h_ref_cpu, 0, M*P*sizeof(float));
+
+    for (int i = 0; i < M*N; i++)
+    {
+        h_a[i] = dist(gen);
+    }
+    for (int i = 0; i < N*P; i++)
+    {
+        h_b[i] = dist(gen);
+    }
+
+    // ===== Step2: Device memory allocation =====
+    float *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_a, M * N * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_b, N * P * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_c, M * P * sizeof(float)));
+
+
+
+    // ===== Step3: GPU kernel timing (cudaEvent) =====
+    cudaEvent_t start_gpu, stop_gpu;
+    CHECK_CUDA_FATAL(cudaEventCreate(&start_gpu));
+    CHECK_CUDA_FATAL(cudaEventCreate(&stop_gpu));   
+
+
+    const dim3 block_dim(16,16);
+    const dim3 grid_dim((P + block_dim.x - 1) / block_dim.x,(M + block_dim.y - 1) / block_dim.y);
+
+    CHECK_CUDA_FATAL(cudaEventRecord(start_gpu));
+     // ===== Host -> Device copy =====
+    CHECK_CUDA_FATAL(cudaMemcpy(d_a, h_a, M*N*sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_b, h_b, N*P*sizeof(float), cudaMemcpyHostToDevice));
+
+    matmul_naive_kernel<<<grid_dim, block_dim>>>(d_a, d_b, d_c, M,N,P);
+    CHECK_KERNEL();
+
+    // ===== Copy the GPU result back to the CPU =====
+    CHECK_CUDA_FATAL(cudaMemcpy(h_c_gpu, d_c, M*P*sizeof(float), cudaMemcpyDeviceToHost));
+
+    
+    CHECK_CUDA_FATAL(cudaEventRecord(stop_gpu));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(stop_gpu));
+
+    float gpu_ms = 0;
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&gpu_ms, start_gpu, stop_gpu));
+
+
+    // ===== Step4: CPU serial timing (high-resolution chrono) =====
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    cpu_verify(h_a, h_b, h_ref_cpu, M,N,P);
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    double cpu_ms = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start).count() / 1000.0;
+
+    // ===== Error verification =====
+    bool pass = true;
+    const float eps = 1e-5f;
+    for (int i = 0; i < M*P; i++)
+    {
+        if (fabs(h_c_gpu[i] - h_ref_cpu[i]) > eps)
+        {
+            pass = false;
+            std::cerr << "Mismatch at index " << i
+                      << " GPU:" << h_c_gpu[i]
+                      << " CPU:" << h_ref_cpu[i] << "\n";
+            break;
+        }
+    }
+
+    // ===== Output timing and speedup =====
+    std::cout << "====================================\n";
+    std::cout << "GPU time:    " << gpu_ms << " ms\n";
+    std::cout << "CPU serial time:    " << cpu_ms << " ms\n";
+    std::cout << "Speedup (CPU/GPU):  " << cpu_ms / gpu_ms << " x\n";
+
+
+    if (pass)
+        std::cout << "Verification passed!\n";
+    else
+        std::cout << "Verification failed!\n";
+
+    // ===== Release resources =====
+    CHECK_CUDA_FATAL(cudaEventDestroy(start_gpu));
+    CHECK_CUDA_FATAL(cudaEventDestroy(stop_gpu));
+
+    CHECK_CUDA_FATAL(cudaFree(d_a));
+    CHECK_CUDA_FATAL(cudaFree(d_b));
+    CHECK_CUDA_FATAL(cudaFree(d_c));
+
+    free(h_a);
+    free(h_b);
+    free(h_c_gpu);
+    free(h_ref_cpu);
+
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_06_cuda_matmul_tiled/src/main.cu
+```
+#include <iostream>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <cstdlib>
+#include <random>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+
+// Macro for CUDA runtime error checking, exit program on failure
+#define CHECK_CUDA_FATAL(err) \
+do { \
+    cudaError_t e = (err); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[CUDA FATAL] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+// Macro for kernel launch error checking
+#define CHECK_KERNEL() \
+do { \
+    cudaError_t e = cudaGetLastError(); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[KERNEL LAUNCH ERROR] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+// Hyperparameter: tile block size for shared memory optimization
+#define TILE_WIDTH 32
+
+
+/**
+ * Tiled Matrix Multiplication Kernel with Shared Memory
+ * Calculates matrix multiplication: C = A * B
+ * Matrix A shape: M rows × N columns
+ * Matrix B shape: N rows × P columns
+ * Output Matrix C shape: M rows × P columns
+ */
+__global__ void matmul_tiled_kernel(
+    float* d_a,
+    float* d_b,
+    float* d_c,
+    int M, int N, int P
+)
+{
+    // Step 1: Get local thread index inside current block
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+
+    // Step 2: Calculate global row & column index for output matrix C
+   
+    int row = blockIdx.y * TILE_WIDTH + ty;
+    int col = blockIdx.x * TILE_WIDTH + tx;
+
+    // Step 3: Allocate block-private shared memory buffer for A tile and B tile
+    __shared__ float As[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float Bs[TILE_WIDTH][TILE_WIDTH];
+
+
+    // Step 4: Register variable to accumulate dot product result
+    float accumulate = 0.0f;
+
+
+    // Step 5: Calculate total tile count along reduction dimension N
+    int total_tiles = (N+TILE_WIDTH-1)/TILE_WIDTH;
+
+
+    // Outer loop: iterate every tile segment along N dimension
+    for (int tile_idx = 0; tile_idx < total_tiles; tile_idx++)
+    {
+
+        // ---------------- Load A tile from global memory to shared memory As ----------------
+        int a_global_col = tile_idx*TILE_WIDTH+tx;
+
+        // Boundary judgment: only load valid elements, fill zero for out-of-bound position
+        if (row<M && a_global_col<N)  // TO-DO: Boundary check for matrix A
+        {
+            int a_global_addr = row*N+a_global_col;
+            As[ty][tx] = d_a[a_global_addr];
+        }
+        else
+        {
+            As[ty][tx] = 0.0f;
+        }
+
+
+
+        // ---------------- Load B tile from global memory to shared memory Bs ----------------
+        int b_global_row = tile_idx*TILE_WIDTH+ty;
+
+        if (b_global_row<N && col<P)  // TO-DO: Boundary check for matrix B
+        {
+            int b_global_addr = b_global_row*P+col;
+            Bs[ty][tx] = d_b[b_global_addr];
+        }
+        else
+        {
+            Bs[ty][tx] = 0.0f;
+        }
+
+
+
+        // Step 6: Block thread synchronization
+        // Wait all threads finish loading current tile to shared memory
+        __syncthreads();
+
+
+
+        // Step 7: Compute dot product inside shared memory tile
+        
+        for (int k=0;k<TILE_WIDTH;k++)
+        {
+            accumulate += As[ty][k]*Bs[k][tx];
+        }
+
+
+
+        // Step 8: Synchronize again before loading next tile block
+        __syncthreads();
+
+    } // End of tile outer loop
+
+
+    // Step 9: Write final accumulated value back to global output matrix C
+    if (row < M && col < P)
+    {
+        int c_global_addr = row*P+col;
+        d_c[c_global_addr] = accumulate;
+    }
+
+} // End of tiled kernel
+
+
+
+/**
+ * Naive Global Memory Matrix Multiplication Kernel (baseline comparison)
+ * Original unoptimized version without shared memory
+ */
+__global__ void matmul_naive_kernel(
+    float* d_a,
+    float* d_b,
+    float* d_c,
+    int M,int N,int P
+)
+{
+    int idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int jdx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < M && jdx < P)
+    {   
+        float tmp = 0;
+        for(int k = 0;k < N;k++){
+            tmp += d_a[idx*N+k]*d_b[k*P+jdx];
+        }
+        d_c[idx*P+jdx] = tmp;
+    }
+}
+
+
+/**
+ * CPU Serial Reference Implementation
+ * Generate ground truth result for error verification
+ */
+void cpu_verify(float* h_a, float* h_b, float* h_ref, int M,int N,int P)
+{
+    for(int i=0;i<M;i++){
+        for(int j=0;j<P;j++){
+            for(int k=0;k<N;k++){
+                h_ref[i*P+j] += h_a[i*N+k]*h_b[k*P+j];
+            }
+        }
+    }
+}
+
+
+
+int main()
+{
+    // Modify matrix dimensions here
+    // int M = 997;
+    // int N = 997;
+    // int P = 997;
+    int M = 1024;
+    int N = 1024;
+    int P = 1024;
+
+    // Random float value generator for matrix initialization
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+
+    // ===== Step 1: Allocate & Initialize Host Memory =====
+    float *h_a, *h_b, *h_c_naive, *h_c_tiled, *h_ref_cpu;
+    h_a         = (float *)malloc(M * N * sizeof(float));
+    h_b         = (float *)malloc(N * P * sizeof(float));
+    h_c_naive   = (float *)malloc(M * P * sizeof(float));
+    h_c_tiled   = (float *)malloc(M * P * sizeof(float));
+    h_ref_cpu   = (float*)malloc(M * P * sizeof(float));
+
+    memset(h_ref_cpu, 0, M*P*sizeof(float));
+
+    // Fill matrix A with random floats
+    for (int i = 0; i < M*N; i++)
+    {
+        h_a[i] = dist(gen);
+    }
+    // Fill matrix B with random floats
+    for (int i = 0; i < N*P; i++)
+    {
+        h_b[i] = dist(gen);
+    }
+
+
+    // ===== Step 2: Allocate Device Memory on GPU =====
+    float *d_a = nullptr, *d_b = nullptr, *d_c_naive = nullptr, *d_c_tiled = nullptr;
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_a, M * N * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_b, N * P * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_c_naive, M * P * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_c_tiled, M * P * sizeof(float)));
+
+    // Copy input matrices from host to device global memory
+    CHECK_CUDA_FATAL(cudaMemcpy(d_a, h_a, M*N*sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_b, h_b, N*P*sizeof(float), cudaMemcpyHostToDevice));
+
+
+    // ===== Step 3: Create CUDA Event Timers for GPU Runtime Measurement =====
+    cudaEvent_t start_naive_k, stop_naive_k;
+    cudaEvent_t start_tiled_k, stop_tiled_k;
+    cudaEvent_t start_naive_e2e, stop_naive_e2e;
+    cudaEvent_t start_tiled_e2e, stop_tiled_e2e;
+
+    CHECK_CUDA_FATAL(cudaEventCreate(&start_naive_k));
+    CHECK_CUDA_FATAL(cudaEventCreate(&stop_naive_k));
+    CHECK_CUDA_FATAL(cudaEventCreate(&start_tiled_k));
+    CHECK_CUDA_FATAL(cudaEventCreate(&stop_tiled_k));
+    CHECK_CUDA_FATAL(cudaEventCreate(&start_naive_e2e));
+    CHECK_CUDA_FATAL(cudaEventCreate(&stop_naive_e2e));
+    CHECK_CUDA_FATAL(cudaEventCreate(&start_tiled_e2e));
+    CHECK_CUDA_FATAL(cudaEventCreate(&stop_tiled_e2e));
+
+
+    // Kernel execution configuration for naive matmul
+    const dim3 block_naive(32,32);
+    const dim3 grid_naive(
+        (P + block_naive.x - 1) / block_naive.x,
+        (M + block_naive.y - 1) / block_naive.y
+    );
+
+    // Kernel execution configuration for tiled shared memory matmul
+    const dim3 block_tiled(TILE_WIDTH, TILE_WIDTH);
+    const dim3 grid_tiled(
+        (P + TILE_WIDTH - 1) / TILE_WIDTH,
+        (M + TILE_WIDTH - 1) / TILE_WIDTH
+    );
+
+    float naive_kernel_ms = 0.0f;
+    float naive_e2e_ms = 0.0f;
+    float tiled_kernel_ms = 0.0f;
+    float tiled_e2e_ms = 0.0f;
+
+
+    // ---------------------- Naive GPU: End‑to‑end (H2D already done, kernel + D2H) ----------------------
+    CHECK_CUDA_FATAL(cudaEventRecord(start_naive_e2e));
+
+    CHECK_CUDA_FATAL(cudaEventRecord(start_naive_k));
+    matmul_naive_kernel<<<grid_naive, block_naive>>>(d_a, d_b, d_c_naive, M,N,P);
+    CHECK_KERNEL();
+    CHECK_CUDA_FATAL(cudaDeviceSynchronize());
+    CHECK_CUDA_FATAL(cudaEventRecord(stop_naive_k));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(stop_naive_k));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&naive_kernel_ms, start_naive_k, stop_naive_k));
+
+    CHECK_CUDA_FATAL(cudaMemcpy(h_c_naive, d_c_naive, M*P*sizeof(float), cudaMemcpyDeviceToHost));
+
+    CHECK_CUDA_FATAL(cudaEventRecord(stop_naive_e2e));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(stop_naive_e2e));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&naive_e2e_ms, start_naive_e2e, stop_naive_e2e));
+
+
+    // ---------------------- Tiled GPU: End‑to‑end (kernel + D2H) ----------------------
+    CHECK_CUDA_FATAL(cudaEventRecord(start_tiled_e2e));
+
+    CHECK_CUDA_FATAL(cudaEventRecord(start_tiled_k));
+    matmul_tiled_kernel<<<grid_tiled, block_tiled>>>(d_a, d_b, d_c_tiled, M,N,P);
+    CHECK_KERNEL();
+    CHECK_CUDA_FATAL(cudaDeviceSynchronize());
+    CHECK_CUDA_FATAL(cudaEventRecord(stop_tiled_k));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(stop_tiled_k));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&tiled_kernel_ms, start_tiled_k, stop_tiled_k));
+
+    CHECK_CUDA_FATAL(cudaMemcpy(h_c_tiled, d_c_tiled, M*P*sizeof(float), cudaMemcpyDeviceToHost));
+
+    CHECK_CUDA_FATAL(cudaEventRecord(stop_tiled_e2e));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(stop_tiled_e2e));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&tiled_e2e_ms, start_tiled_e2e, stop_tiled_e2e));
+
+
+    // ===== Step 4: Run CPU Serial Calculation & Timing =====
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    cpu_verify(h_a, h_b, h_ref_cpu, M,N,P);
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    double cpu_ms = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start).count() / 1000.0;
+
+
+
+    // ===== Step 5: Result Error Verification =====
+    bool naive_pass = true;
+    bool tiled_pass = true;
+    const float eps = 1e-3f;
+
+    // Check naive kernel output
+    for (int i = 0; i < M*P; i++)
+    {
+        if (fabs(h_c_naive[i] - h_ref_cpu[i]) > eps)
+        {
+            naive_pass = false;
+            std::cerr << "[Naive Kernel] Mismatch index " << i
+                      << " GPU:" << h_c_naive[i]
+                      << " CPU:" << h_ref_cpu[i] << "\n";
+            break;
+        }
+    }
+
+    // Check tiled kernel output
+    for (int i = 0; i < M*P; i++)
+    {
+        if (fabs(h_c_tiled[i] - h_ref_cpu[i]) > eps)
+        {
+            tiled_pass = false;
+            std::cerr << "[Tiled Kernel] Mismatch index " << i
+                      << " GPU:" << h_c_tiled[i]
+                      << " CPU:" << h_ref_cpu[i] << "\n";
+            break;
+        }
+    }
+
+
+
+    // ===== Step 6: Print Performance Report =====
+    std::cout << "=============================================\n";
+    std::cout << "Matrix Size: M=" << M << " N=" << N << " P=" << P << "\n";
+    std::cout << "Tile Width:  " << TILE_WIDTH << "\n";
+    std::cout << "---------------------------------------------\n";
+    std::cout << "CPU Serial Time:            " << cpu_ms << " ms\n";
+    std::cout << "---------------------------------------------\n";
+    std::cout << "[GPU Kernel‑Only Time (pure compute)]\n";
+    std::cout << "Naive GPU Kernel:           " << naive_kernel_ms << " ms | Valid: " << (naive_pass ? "YES" : "NO") << "\n";
+    std::cout << "Tiled Shared GPU Kernel:    " << tiled_kernel_ms << " ms | Valid: " << (tiled_pass ? "YES" : "NO") << "\n";
+    std::cout << "---------------------------------------------\n";
+    std::cout << "[GPU End‑to‑End Time (kernel + DtoH copy)]\n";
+    std::cout << "Naive GPU E2E:              " << naive_e2e_ms << " ms\n";
+    std::cout << "Tiled Shared GPU E2E:       " << tiled_e2e_ms << " ms\n";
+    std::cout << "---------------------------------------------\n";
+    std::cout << "Speedup CPU / Naive(Kernel):    " << cpu_ms / naive_kernel_ms << " x\n";
+    std::cout << "Speedup CPU / Tiled(Kernel):    " << cpu_ms / tiled_kernel_ms << " x\n";
+    std::cout << "Speedup Tiled / Naive(Kernel):  " << naive_kernel_ms / tiled_kernel_ms << " x\n";
+    std::cout << "---------------------------------------------\n";
+    std::cout << "Speedup CPU / Naive(E2E):       " << cpu_ms / naive_e2e_ms << " x\n";
+    std::cout << "Speedup CPU / Tiled(E2E):       " << cpu_ms / tiled_e2e_ms << " x\n";
+    std::cout << "=============================================\n";
+
+
+
+    // ===== Step 7: Release All Allocated Resources =====
+    // Destroy CUDA timer events
+    CHECK_CUDA_FATAL(cudaEventDestroy(start_naive_k));
+    CHECK_CUDA_FATAL(cudaEventDestroy(stop_naive_k));
+    CHECK_CUDA_FATAL(cudaEventDestroy(start_tiled_k));
+    CHECK_CUDA_FATAL(cudaEventDestroy(stop_tiled_k));
+    CHECK_CUDA_FATAL(cudaEventDestroy(start_naive_e2e));
+    CHECK_CUDA_FATAL(cudaEventDestroy(stop_naive_e2e));
+    CHECK_CUDA_FATAL(cudaEventDestroy(start_tiled_e2e));
+    CHECK_CUDA_FATAL(cudaEventDestroy(stop_tiled_e2e));
+
+    // Free GPU device memory
+    CHECK_CUDA_FATAL(cudaFree(d_a));
+    CHECK_CUDA_FATAL(cudaFree(d_b));
+    CHECK_CUDA_FATAL(cudaFree(d_c_naive));
+    CHECK_CUDA_FATAL(cudaFree(d_c_tiled));
+
+    // Free CPU host memory
+    free(h_a);
+    free(h_b);
+    free(h_c_naive);
+    free(h_c_tiled);
+    free(h_ref_cpu);
+
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/scripts/plot_results.py
+```
+
+```
+
+### parallel_hpc_modules/module_03_mpi_basic/src/mpi_basic/main.cpp
+```
+#include <mpi.h>
+#include <iostream>
+#include <chrono>
+#include <climits>
+
+int main(int argc, char** argv) {
+    // Step1: Initialize MPI environment
+    MPI_Init(&argc, &argv);
+
+    int world_rank;
+    int world_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    int local_val = world_rank * 10;
+    
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Step2: Collective communication: Reduce all local value to rank 0
+    int global_max = 0;
+    MPI_Reduce(
+        &local_val,        // send buffer: local data of current rank
+        &global_max,       // recv buffer: only valid on root rank
+        1,                  // element count
+        MPI_INT,            // data type
+        MPI_MAX,            // reduction operation
+        0,                  // root process rank
+        MPI_COMM_WORLD
+    );
+
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsed = std::chrono::duration<double>(end - start).count();
+
+    // Step3: Root process print final result
+    if (world_rank == 0) {
+        std::cout << "Total process count: " << world_size << std::endl;
+        std::cout << "Global max result: " << global_max << std::endl;
+        std::cout << "MPI reduce time cost: " << elapsed << " s" << std::endl;
+    }
+
+    // Step4: Finalize MPI
+    MPI_Finalize();
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_03_mpi_basic/src/mpi_block_matmul/main.cpp
+```
+#include <iostream>
+#include <vector>
+#include <chrono>
+#include <random>
+#include <mpi.h>
+#include <algorithm>
+#include <string>
+#include <cstdlib>
+
+void init_matrix(std::vector<double>& mat, int rows, int cols,
+                 std::mt19937& gen,
+                 std::uniform_real_distribution<double>& dist)
+{
+    mat.resize(rows * cols);
+    for (int k = 0; k < rows * cols; k++) {
+        mat[k] = dist(gen);
+    }
+}
+
+void serial_block_matmul(
+    const std::vector<double>& A_local,
+    const std::vector<double>& B_global,
+    std::vector<double>& C_local,
+    int l_rows, int n
+)
+{
+    for (int i = 0; i < l_rows; i++) {
+        for (int k = 0; k < n; k++) {
+            for (int j = 0; j < n; j++) {
+                C_local[i * n + j] += A_local[i * n + k] * B_global[k * n + j];
+            }
+        }
+    }
+}
+
+void print_part_matrix(const std::vector<double>& mat,int cols, int print_rows)
+{
+    int slice_len = print_rows * cols;
+    auto start = mat.begin();
+    auto end = mat.begin() + slice_len;
+
+    std::cout << "matrix slice: [ ";
+    std::for_each(start, end, [](double val) {
+        std::cout << val << " ";
+    });
+    std::cout << "]" << std::endl;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc < 3)
+    {
+        std::cout << "Usage:\n";
+        std::cout << "  Strong scaling: ./mpi_matmul_scaling strong GLOBAL_N\n";
+        std::cout << "  Strong scaling with baseline: ./mpi_matmul_scaling strong GLOBAL_N BASELINE_TIME\n";
+        std::cout << "  Weak scaling: ./mpi_matmul_scaling weak LOCAL_ROWS_PER_PROC\n";
+        std::cout << "Examples:\n";
+        std::cout << "  mpirun -np 4 ./mpi_matmul_scaling strong 1024\n";
+        std::cout << "  mpirun -np 4 ./mpi_matmul_scaling weak 256\n";
+        return 1;
+    }
+
+    std::string mode = argv[1];
+    int param = std::atoi(argv[2]);
+    // Scaling runs are separate MPI jobs, so the single-process baseline must
+    // be passed explicitly to jobs with more than one process.
+    double baseline_time = -1.0;
+    if (argc >= 4) {
+        baseline_time = std::atof(argv[3]);
+    }
+
+    int rank, world_size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    int GLOBAL_N{0};
+    int local_rows{0};
+
+    if(mode == "strong"){
+        // Strong scaling: keep the global matrix size fixed.
+        GLOBAL_N = param;
+        if (GLOBAL_N % world_size != 0)
+        {
+            if (rank == 0)
+            {
+                std::cerr << "[Strong scaling] GLOBAL_N must divisible by world_size\n";
+            }
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        local_rows = GLOBAL_N / world_size;
+    }else if(mode == "weak"){
+        // Weak scaling: keep the local row count per process fixed and
+        // increase the global matrix size with the number of processes.
+        int local_rows_per_proc = param;
+        local_rows = local_rows_per_proc;
+        GLOBAL_N = local_rows_per_proc * world_size;
+    }else{
+        if(rank==0){
+            std::cerr<<"mode must be strong or weak\n";
+        }
+        MPI_Abort(MPI_COMM_WORLD,1);
+    }
+
+
+    std::vector<double> A_global, B_global, C_global;
+    std::mt19937 seed1, seed2;
+    std::uniform_real_distribution<double> dist;
+
+    if (rank == 0)
+    {
+        A_global.resize(GLOBAL_N * GLOBAL_N);
+        B_global.resize(GLOBAL_N * GLOBAL_N);
+        C_global.resize(GLOBAL_N * GLOBAL_N, 0.0);
+
+        init_matrix(A_global, GLOBAL_N, GLOBAL_N, seed1, dist);
+        init_matrix(B_global, GLOBAL_N, GLOBAL_N, seed2, dist);
+    }
+
+
+    std::vector<double> B_recv(GLOBAL_N * GLOBAL_N);
+    std::vector<double> A_local(local_rows * GLOBAL_N);
+    std::vector<double> C_local(local_rows * GLOBAL_N, 0.0);
+
+    // Synchronize all processes before starting the timer.
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t_start = MPI_Wtime();
+
+    MPI_Scatter(A_global.data(), local_rows * GLOBAL_N,
+        MPI_DOUBLE, A_local.data(),
+        local_rows * GLOBAL_N, MPI_DOUBLE,
+        0, MPI_COMM_WORLD);
+
+    MPI_Bcast(rank == 0 ? B_global.data() : B_recv.data(),
+        GLOBAL_N * GLOBAL_N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    serial_block_matmul(A_local, rank == 0 ? B_global : B_recv, C_local, local_rows, GLOBAL_N);
+
+    MPI_Gather(C_local.data(), local_rows * GLOBAL_N,
+        MPI_DOUBLE, C_global.data(),
+        local_rows * GLOBAL_N, MPI_DOUBLE,
+        0, MPI_COMM_WORLD);
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t_end = MPI_Wtime();
+    double wall_time = t_end - t_start;
+
+
+    // Rank 0 outputs scaling statistics in CSV format.
+    if(rank == 0)
+    {
+        double speedup = 0.0;
+        double efficiency = 0.0;
+
+        // Store the single-process baseline time.
+        if(world_size == 1){
+            baseline_time = wall_time;
+        }
+
+        if(mode == "strong")
+        {
+            if(baseline_time > 1e-12 && wall_time > 1e-12){
+                speedup    = baseline_time / wall_time;
+                efficiency = speedup / world_size;
+            }else{
+                speedup = NAN; efficiency = NAN;
+            }
+        }
+        else if(mode == "weak")
+        {
+            // Speedup is not commonly defined for weak scaling; output wall time only.
+            speedup = NAN;
+            efficiency = NAN;
+        }
+
+        // Print the CSV header only once (for np=1).
+        if(world_size == 1){
+            std::cout<<"mode,world_size,global_N,local_rows,wall_time[s],speedup,efficiency\n";
+        }
+        std::cout<<mode<<","
+                 <<world_size<<","
+                 <<GLOBAL_N<<","
+                 <<local_rows<<","
+                 <<wall_time<<","
+                 <<speedup<<","
+                 <<efficiency<<"\n";
+    }
+
+    MPI_Finalize();
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_04_cuda_basic/src/device_info/device_info.cu
+```
+/**
+ * @file device_info.cu
+ * @brief Day4: Query CUDA GPU hardware info
+ */
+#include <iostream>
+#include <cuda_runtime.h>
+
+int main()
+{
+    int device_count = 0;
+
+    // TODO: 1. Get the number of available GPUs
+    cudaGetDeviceCount(&device_count);
+    
+
+    for (int dev = 0; dev < device_count; dev++)
+    {
+        cudaDeviceProp prop;
+        // TODO: 2. Get the properties of the corresponding device
+        cudaGetDeviceProperties(&prop, dev);
+
+        // TODO: 3. Print key parameters: SM count, warp size, maximum block size, and memory size
+        std::cout << "==== GPU Device " << dev << " ====" << std::endl;
+        std::cout << "==== GPU Name " << prop.name << " ====" << std::endl;
+        std::cout << "==== SM Number " << prop.multiProcessorCount << " ====" << std::endl;
+        std::cout << "==== Wrap Size " << prop.warpSize << " ====" << std::endl;
+        std::cout << "==== Max Block Size " << prop.maxThreadsPerBlock << " ====" << std::endl;
+        std::cout << "==== Global Memory Size " << prop.totalGlobalMem << " ====" << std::endl;
+        // print prop.name, prop.multiProcessorCount, prop.warpSize ...
+    }
+
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_04_cuda_basic/src/vector_add/vector_add.cu
+```
+/**
+ * @file vector_add.cu
+ * @brief Day4: Basic host <-> device memcpy + simplest kernel
+ * Feature: GPU event timing + CPU chrono timing + speedup ratio
+ */
+#include <iostream>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <cstdlib>
+#include <random>
+#include <cstdio>
+#include <cmath>
+
+#define CHECK_CUDA_FATAL(err) \
+do { \
+    cudaError_t e = (err); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[CUDA FATAL] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+#define CHECK_KERNEL() \
+do { \
+    cudaError_t e = cudaGetLastError(); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[KERNEL LAUNCH ERROR] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+// GPU Kernel
+__global__ void vector_add_kernel(
+    float* d_a,
+    float* d_b,
+    float* d_c,
+    int n
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n)
+    {
+        d_c[idx] = d_a[idx] + d_b[idx];
+    }
+}
+
+// CPU serial reference calculation
+void cpu_verify(float* h_a, float* h_b, float* h_ref, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        h_ref[i] = h_a[i] + h_b[i];
+    }
+}
+
+int main()
+{
+    const int N = 1 << 20;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    // ===== Step1: Host memory allocation & initialization =====
+    float *h_a, *h_b, *h_c_gpu, *h_ref_cpu;
+    h_a       = (float *)malloc(N * sizeof(float));
+    h_b       = (float *)malloc(N * sizeof(float));
+    h_c_gpu   = (float *)malloc(N * sizeof(float));
+    h_ref_cpu = (float *)malloc(N * sizeof(float));
+
+    for (int i = 0; i < N; i++)
+    {
+        h_a[i] = dist(gen);
+        h_b[i] = dist(gen);
+    }
+
+    // ===== Step2: Device memory allocation =====
+    float *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_a, N * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_b, N * sizeof(float)));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_c, N * sizeof(float)));
+
+    // ===== Step3: Host -> Device copy =====
+    CHECK_CUDA_FATAL(cudaMemcpy(d_a, h_a, N*sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_b, h_b, N*sizeof(float), cudaMemcpyHostToDevice));
+
+    // ===== Step4: GPU kernel timing (cudaEvent) =====
+    cudaEvent_t start_gpu, stop_gpu;
+    CHECK_CUDA_FATAL(cudaEventCreate(&start_gpu));
+    CHECK_CUDA_FATAL(cudaEventCreate(&stop_gpu));
+
+    dim3 block_dim(256);
+    dim3 grid_dim((N + block_dim.x - 1) / block_dim.x);
+
+    CHECK_CUDA_FATAL(cudaEventRecord(start_gpu));
+    vector_add_kernel<<<grid_dim, block_dim>>>(d_a, d_b, d_c, N);
+    CHECK_KERNEL();
+    CHECK_CUDA_FATAL(cudaEventRecord(stop_gpu));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(stop_gpu));
+
+    float gpu_kernel_ms = 0.0f;
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&gpu_kernel_ms, start_gpu, stop_gpu));
+
+    // ===== Step5: Copy the GPU result back to the CPU =====
+    CHECK_CUDA_FATAL(cudaMemcpy(h_c_gpu, d_c, N*sizeof(float), cudaMemcpyDeviceToHost));
+
+    // ===== Step6: CPU serial timing (high-resolution chrono) =====
+    auto cpu_start = std::chrono::high_resolution_clock::now();
+    cpu_verify(h_a, h_b, h_ref_cpu, N);
+    auto cpu_end = std::chrono::high_resolution_clock::now();
+    double cpu_ms = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start).count() / 1000.0;
+
+    // ===== Error verification =====
+    bool pass = true;
+    const float eps = 1e-5f;
+    for (int i = 0; i < N; i++)
+    {
+        if (fabs(h_c_gpu[i] - h_ref_cpu[i]) > eps)
+        {
+            pass = false;
+            std::cerr << "Mismatch at index " << i
+                      << " GPU:" << h_c_gpu[i]
+                      << " CPU:" << h_ref_cpu[i] << "\n";
+            break;
+        }
+    }
+
+    // ===== Output timing and speedup =====
+    std::cout << "====================================\n";
+    std::cout << "GPU kernel time:    " << gpu_kernel_ms << " ms\n";
+    std::cout << "CPU serial time:    " << cpu_ms << " ms\n";
+    std::cout << "Speedup (CPU/GPU):  " << cpu_ms / gpu_kernel_ms << " x\n";
+
+    // Calculate memory bandwidth
+    double total_bytes = 3.0 * N * sizeof(float); // read a, read b, write c
+    double gb = total_bytes / (1024.0*1024.0*1024.0);
+    double bw_gbs = gb / (gpu_kernel_ms / 1000.0);
+    std::cout << "Effective bandwidth: " << bw_gbs << " GB/s\n";
+    std::cout << "====================================\n";
+
+    if (pass)
+        std::cout << "Verification passed!\n";
+    else
+        std::cout << "Verification failed!\n";
+
+    // ===== Release resources =====
+    CHECK_CUDA_FATAL(cudaEventDestroy(start_gpu));
+    CHECK_CUDA_FATAL(cudaEventDestroy(stop_gpu));
+
+    CHECK_CUDA_FATAL(cudaFree(d_a));
+    CHECK_CUDA_FATAL(cudaFree(d_b));
+    CHECK_CUDA_FATAL(cudaFree(d_c));
+
+    free(h_a);
+    free(h_b);
+    free(h_c_gpu);
+    free(h_ref_cpu);
+
+    return 0;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/demos/benchmark.cu
+```
+#include <cuda_runtime.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <utility>
+#include <vector>
+
+#include "cpu_forward.hpp"
+#include "cuda_forward.cuh"
+
+#define CHECK_CUDA(call)                                                        \
+    do {                                                                        \
+        const cudaError_t error = (call);                                      \
+        if (error != cudaSuccess) {                                             \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__     \
+                      << ": " << cudaGetErrorString(error) << '\n';            \
+            std::exit(EXIT_FAILURE);                                           \
+        }                                                                       \
+    } while (false)
+
+namespace {
+
+struct Timings {
+    double h2d_ms = 0.0;
+    double kernel_ms = 0.0;
+    double d2h_ms = 0.0;
+    double end_to_end_ms = 0.0;
+};
+
+double elapsed_ms(cudaEvent_t start, cudaEvent_t stop) {
+    float milliseconds = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+    return milliseconds;
+}
+
+double cpu_time_ms(const std::vector<float>& sigma,
+                   const std::vector<float>& source,
+                   const std::vector<float>& initial_intensity,
+                   std::vector<float>& output,
+                   int num_rays, int num_samples, float ds) {
+    const auto start = std::chrono::steady_clock::now();
+    solve_transport_cpu_multi(sigma.data(), source.data(),
+                              initial_intensity.data(), output.data(),
+                              num_rays, num_samples, ds);
+    const auto stop = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(stop - start).count();
+}
+
+Timings benchmark_case(int num_rays, int num_samples,
+                       int warmup_iterations, int measurement_iterations,
+                       float ds, std::mt19937& generator) {
+    const std::size_t sample_count = static_cast<std::size_t>(num_rays) *
+                                     static_cast<std::size_t>(num_samples);
+    const std::size_t sample_bytes = sample_count * sizeof(float);
+    const std::size_t ray_bytes = static_cast<std::size_t>(num_rays) * sizeof(float);
+
+    std::vector<float> h_sigma(sample_count);
+    std::vector<float> h_source(sample_count);
+    std::vector<float> h_initial_intensity(num_rays);
+    std::vector<float> h_output(num_rays);
+    std::vector<float> h_cpu_output(num_rays);
+    std::uniform_real_distribution<float> distribution(0.0f, 1.0f);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        h_sigma[i] = distribution(generator);
+        h_source[i] = distribution(generator);
+    }
+    for (float& value : h_initial_intensity) {
+        value = distribution(generator);
+    }
+
+    const double cpu_ms = cpu_time_ms(
+        h_sigma, h_source, h_initial_intensity, h_cpu_output,
+        num_rays, num_samples, ds);
+
+    float *d_sigma = nullptr, *d_source = nullptr;
+    float *d_initial_intensity = nullptr, *d_output = nullptr;
+    CHECK_CUDA(cudaMalloc(&d_sigma, sample_bytes));
+    CHECK_CUDA(cudaMalloc(&d_source, sample_bytes));
+    CHECK_CUDA(cudaMalloc(&d_initial_intensity, ray_bytes));
+    CHECK_CUDA(cudaMalloc(&d_output, ray_bytes));
+
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    // Copy once before warm-up. Warm-up launches use the same input and output buffers.
+    CHECK_CUDA(cudaMemcpy(d_sigma, h_sigma.data(), sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_source, h_source.data(), sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_initial_intensity, h_initial_intensity.data(),
+                         ray_bytes, cudaMemcpyHostToDevice));
+    for (int i = 0; i < warmup_iterations; ++i) {
+        CHECK_CUDA(launch_volume_transport_cuda(
+            d_sigma, d_source, d_output, num_rays, num_samples,
+            ds, d_initial_intensity,0));
+    }
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    Timings total;
+    for (int iteration = 0; iteration < measurement_iterations; ++iteration) {
+        CHECK_CUDA(cudaEventRecord(start));
+        CHECK_CUDA(cudaMemcpy(d_sigma, h_sigma.data(), sample_bytes,
+                              cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_source, h_source.data(), sample_bytes,
+                              cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_initial_intensity, h_initial_intensity.data(),
+                              ray_bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaEventRecord(stop));
+        CHECK_CUDA(cudaEventSynchronize(stop));
+        total.h2d_ms += elapsed_ms(start, stop);
+
+        CHECK_CUDA(cudaEventRecord(start));
+        CHECK_CUDA(launch_volume_transport_cuda(
+            d_sigma, d_source, d_output, num_rays, num_samples,
+            ds, d_initial_intensity,0));
+        CHECK_CUDA(cudaEventRecord(stop));
+        CHECK_CUDA(cudaEventSynchronize(stop));
+        total.kernel_ms += elapsed_ms(start, stop);
+
+        CHECK_CUDA(cudaEventRecord(start));
+        CHECK_CUDA(cudaMemcpy(h_output.data(), d_output, ray_bytes,
+                              cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaEventRecord(stop));
+        CHECK_CUDA(cudaEventSynchronize(stop));
+        total.d2h_ms += elapsed_ms(start, stop);
+
+        // End-to-end includes a fresh H2D, kernel launch, and D2H transfer.
+        CHECK_CUDA(cudaEventRecord(start));
+        CHECK_CUDA(cudaMemcpy(d_sigma, h_sigma.data(), sample_bytes,
+                              cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_source, h_source.data(), sample_bytes,
+                              cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_initial_intensity, h_initial_intensity.data(),
+                              ray_bytes, cudaMemcpyHostToDevice));
+        CHECK_CUDA(launch_volume_transport_cuda(
+            d_sigma, d_source, d_output, num_rays, num_samples,
+            ds, d_initial_intensity,0));
+        CHECK_CUDA(cudaMemcpy(h_output.data(), d_output, ray_bytes,
+                              cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaEventRecord(stop));
+        CHECK_CUDA(cudaEventSynchronize(stop));
+        total.end_to_end_ms += elapsed_ms(start, stop);
+    }
+
+    total.h2d_ms /= measurement_iterations;
+    total.kernel_ms /= measurement_iterations;
+    total.d2h_ms /= measurement_iterations;
+    total.end_to_end_ms /= measurement_iterations;
+
+    const double max_error = [&]() {
+        double result = 0.0;
+        for (int i = 0; i < num_rays; ++i) {
+            result = std::max(result, static_cast<double>(
+                std::fabs(h_output[i] - h_cpu_output[i])));
+        }
+        return result;
+    }();
+
+    const std::size_t device_bytes = 2 * sample_bytes + 2 * ray_bytes;
+    const double input_bytes = 2.0 * sample_bytes + ray_bytes;
+    const double output_bytes = static_cast<double>(ray_bytes);
+    const double samples_per_second = total.kernel_ms > 0.0
+        ? sample_count / (total.kernel_ms / 1000.0) : 0.0;
+    const double h2d_gbps = total.h2d_ms > 0.0
+        ? input_bytes / 1.0e9 / (total.h2d_ms / 1000.0) : 0.0;
+    const double d2h_gbps = total.d2h_ms > 0.0
+        ? output_bytes / 1.0e9 / (total.d2h_ms / 1000.0) : 0.0;
+
+    std::cout << num_rays << ',' << num_samples << ','
+              << warmup_iterations << ',' << measurement_iterations << ','
+              << total.h2d_ms << ',' << total.kernel_ms << ','
+              << total.d2h_ms << ',' << total.end_to_end_ms << ','
+              << cpu_ms << ','
+              << (total.end_to_end_ms > 0.0 ? cpu_ms / total.end_to_end_ms : 0.0) << ','
+              << samples_per_second / 1.0e6 << ','
+              << h2d_gbps << ',' << d2h_gbps << ','
+              << device_bytes / (1024.0 * 1024.0) << ',' << max_error << '\n';
+
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+    CHECK_CUDA(cudaFree(d_output));
+    CHECK_CUDA(cudaFree(d_initial_intensity));
+    CHECK_CUDA(cudaFree(d_source));
+    CHECK_CUDA(cudaFree(d_sigma));
+    return total;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const int warmup_iterations = argc > 1 ? std::atoi(argv[1]) : 5;
+    const int measurement_iterations = argc > 2 ? std::atoi(argv[2]) : 20;
+    if (warmup_iterations < 0 || measurement_iterations <= 0 || argc > 3) {
+        std::cerr << "usage: benchmark [warmup_iterations] [measurement_iterations]\n";
+        return EXIT_FAILURE;
+    }
+
+    CHECK_CUDA(cudaFree(0));  // Exclude context initialization from measurements.
+    std::mt19937 generator(12345);
+    constexpr float ds = 0.01f;
+
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "num_rays,num_samples,warmup,iterations,h2d_ms,kernel_ms,d2h_ms,"
+                 "end_to_end_ms,cpu_ms,speedup_end_to_end,"
+                 "samples_per_second_millions,h2d_gbps,d2h_gbps,"
+                 "device_memory_mib,max_abs_error\n";
+
+    // Fixed samples, increasing rays and fixed rays, increasing samples.
+    const std::vector<std::pair<int, int>> cases = {
+        {1024, 64}, {4096, 64}, {16384, 64},
+        {1024, 256}, {4096, 256}, {16384, 256}
+    };
+    for (const auto& problem : cases) {
+        benchmark_case(problem.first, problem.second,
+                       warmup_iterations, measurement_iterations,
+                       ds, generator);
+    }
+    return EXIT_SUCCESS;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/demos/forward_demo.cu
+```
+#include <iostream>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <cstdlib>
+#include <random>
+#include <cstdio>
+#include <cmath>
+#include <algorithm>
+#include <iomanip>
+
+#include "cuda_forward.cuh"
+#include "cpu_forward.hpp"
+
+#define CHECK_CUDA_FATAL(err) \
+do { \
+    cudaError_t e = (err); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[CUDA FATAL] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+#define CHECK_KERNEL() \
+do { \
+    cudaError_t e = cudaGetLastError(); \
+    if (e != cudaSuccess) { \
+        fprintf(stderr, "[KERNEL LAUNCH ERROR] %s:%d -> %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(e)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+bool cuda_forward(int num_rays, int num_samples, float ds, cudaStream_t stream)
+{
+    const std::size_t total_samples = static_cast<std::size_t>(num_rays) *
+                                      static_cast<std::size_t>(num_samples);
+    const std::size_t sample_bytes = total_samples * sizeof(float);
+    const std::size_t ray_bytes = static_cast<std::size_t>(num_rays) * sizeof(float);
+
+    std::mt19937 gen(12345);  // Keep the demo input reproducible.
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    // ===== Step1: Host memory allocation & initialization =====
+    float *h_sigma, *h_source, *h_I0, *h_output_gpu, *h_ref_cpu;
+    h_sigma = static_cast<float *>(malloc(sample_bytes));
+    h_source = static_cast<float *>(malloc(sample_bytes));
+    h_I0 = static_cast<float *>(malloc(ray_bytes));
+    h_output_gpu = static_cast<float *>(malloc(ray_bytes));
+    h_ref_cpu = static_cast<float *>(malloc(ray_bytes));
+    if (!h_sigma || !h_source || !h_I0 || !h_output_gpu || !h_ref_cpu) {
+        std::cerr << "Host allocation failed\n";
+        return false;
+    }
+
+    for (std::size_t i = 0; i < total_samples; ++i) {
+        h_sigma[i] = dist(gen);
+        h_source[i] = dist(gen);
+    }
+    for (int i = 0; i < num_rays; ++i) {
+        h_I0[i] = dist(gen);
+    }
+
+    // ===== Step2: CPU reference timing =====
+    const auto cpu_start = std::chrono::high_resolution_clock::now();
+    solve_transport_cpu_multi(h_sigma, h_source, h_I0, h_ref_cpu,
+                              num_rays, num_samples, ds);
+    const auto cpu_end = std::chrono::high_resolution_clock::now();
+    const double cpu_ms = std::chrono::duration<double, std::milli>(
+                              cpu_end - cpu_start).count();
+
+    // ===== Step3: Device memory allocation =====
+    float *d_sigma = nullptr, *d_source = nullptr, *d_I0 = nullptr, *d_output = nullptr;
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_sigma, sample_bytes));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_source, sample_bytes));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_I0, ray_bytes));
+    CHECK_CUDA_FATAL(cudaMalloc((void**)&d_output, ray_bytes));
+
+    // Separate events make H2D, kernel, D2H, and end-to-end times visible.
+    cudaEvent_t e2e_start, e2e_stop, h2d_start, h2d_stop;
+    cudaEvent_t kernel_start, kernel_stop, d2h_start, d2h_stop;
+    CHECK_CUDA_FATAL(cudaEventCreate(&e2e_start));
+    CHECK_CUDA_FATAL(cudaEventCreate(&e2e_stop));
+    CHECK_CUDA_FATAL(cudaEventCreate(&h2d_start));
+    CHECK_CUDA_FATAL(cudaEventCreate(&h2d_stop));
+    CHECK_CUDA_FATAL(cudaEventCreate(&kernel_start));
+    CHECK_CUDA_FATAL(cudaEventCreate(&kernel_stop));
+    CHECK_CUDA_FATAL(cudaEventCreate(&d2h_start));
+    CHECK_CUDA_FATAL(cudaEventCreate(&d2h_stop));
+
+    // ===== Step4: Warm-up (excluded from all reported timings) =====
+    CHECK_CUDA_FATAL(cudaMemcpy(d_sigma, h_sigma, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_source, h_source, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_I0, h_I0, ray_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(launch_volume_transport_cuda(
+        d_sigma, d_source, d_output, num_rays, num_samples, ds, d_I0, stream));
+    CHECK_KERNEL();
+    CHECK_CUDA_FATAL(cudaStreamSynchronize(stream));
+
+    // ===== Step5: Timed H2D -> kernel -> D2H pipeline =====
+    CHECK_CUDA_FATAL(cudaEventRecord(e2e_start, stream));
+    CHECK_CUDA_FATAL(cudaEventRecord(h2d_start, stream));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_sigma, h_sigma, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_source, h_source, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaMemcpy(d_I0, h_I0, ray_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_FATAL(cudaEventRecord(h2d_stop, stream));
+
+    CHECK_CUDA_FATAL(cudaEventRecord(kernel_start, stream));
+    CHECK_CUDA_FATAL(launch_volume_transport_cuda(
+        d_sigma, d_source, d_output, num_rays, num_samples, ds, d_I0, stream));
+    CHECK_KERNEL();
+    CHECK_CUDA_FATAL(cudaEventRecord(kernel_stop, stream));
+
+    CHECK_CUDA_FATAL(cudaEventRecord(d2h_start, stream));
+    CHECK_CUDA_FATAL(cudaMemcpy(h_output_gpu, d_output, ray_bytes, cudaMemcpyDeviceToHost));
+    CHECK_CUDA_FATAL(cudaEventRecord(d2h_stop, stream));
+    CHECK_CUDA_FATAL(cudaEventRecord(e2e_stop, stream));
+    CHECK_CUDA_FATAL(cudaEventSynchronize(e2e_stop));
+
+    float h2d_ms = 0.0f, kernel_ms = 0.0f, d2h_ms = 0.0f, e2e_ms = 0.0f;
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&h2d_ms, h2d_start, h2d_stop));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&d2h_ms, d2h_start, d2h_stop));
+    CHECK_CUDA_FATAL(cudaEventElapsedTime(&e2e_ms, e2e_start, e2e_stop));
+
+    // ===== Step6: Error verification =====
+    double squared_error = 0.0;
+    float max_abs_error = 0.0f;
+    for (int i = 0; i < num_rays; ++i) {
+        const float error = std::fabs(h_output_gpu[i] - h_ref_cpu[i]);
+        squared_error += static_cast<double>(error) * error;
+        max_abs_error = std::max(max_abs_error, error);
+    }
+    const double rmse = std::sqrt(squared_error / num_rays);
+    const bool pass = max_abs_error <= 1.0e-3f;
+    const std::size_t device_bytes = 2 * sample_bytes + 2 * ray_bytes;
+
+    // ===== Step7: Output timing, throughput, memory, and speedup =====
+    const double h2d_gbps = h2d_ms > 0.0f
+                                ? (2.0 * sample_bytes + ray_bytes) / 1.0e9 / (h2d_ms / 1000.0)
+                                : 0.0;
+    const double d2h_gbps = d2h_ms > 0.0f
+                                ? ray_bytes / 1.0e9 / (d2h_ms / 1000.0)
+                                : 0.0;
+    const double samples_per_second = kernel_ms > 0.0f
+                                ? total_samples / (kernel_ms / 1000.0)
+                                : 0.0;
+
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "rays=" << num_rays << ", samples=" << num_samples << ", ds=" << ds << "\n";
+    std::cout << "warmup: 1 run (excluded)\n";
+    std::cout << "H2D: " << h2d_ms << " ms (" << h2d_gbps << " GB/s)\n";
+    std::cout << "kernel: " << kernel_ms << " ms (" << samples_per_second / 1.0e6
+              << " Msamples/s)\n";
+    std::cout << "D2H: " << d2h_ms << " ms (" << d2h_gbps << " GB/s)\n";
+    std::cout << "end-to-end: " << e2e_ms << " ms\n";
+    std::cout << "CPU serial: " << cpu_ms << " ms\n";
+    std::cout << "Speedup (CPU / end-to-end): " << cpu_ms / e2e_ms << " x\n";
+    std::cout << "Device memory: " << device_bytes / (1024.0 * 1024.0) << " MiB\n";
+    std::cout << "RMSE: " << rmse << ", max abs error: " << max_abs_error << "\n";
+    std::cout << (pass ? "Verification passed!\n" : "Verification failed!\n");
+
+    CHECK_CUDA_FATAL(cudaEventDestroy(e2e_start));
+    CHECK_CUDA_FATAL(cudaEventDestroy(e2e_stop));
+    CHECK_CUDA_FATAL(cudaEventDestroy(h2d_start));
+    CHECK_CUDA_FATAL(cudaEventDestroy(h2d_stop));
+    CHECK_CUDA_FATAL(cudaEventDestroy(kernel_start));
+    CHECK_CUDA_FATAL(cudaEventDestroy(kernel_stop));
+    CHECK_CUDA_FATAL(cudaEventDestroy(d2h_start));
+    CHECK_CUDA_FATAL(cudaEventDestroy(d2h_stop));
+    CHECK_CUDA_FATAL(cudaFree(d_I0));
+    CHECK_CUDA_FATAL(cudaFree(d_output));
+    CHECK_CUDA_FATAL(cudaFree(d_sigma));
+    CHECK_CUDA_FATAL(cudaFree(d_source));
+    free(h_I0);
+    free(h_output_gpu);
+    free(h_ref_cpu);
+    free(h_sigma);
+    free(h_source);
+    return pass;
+}
+
+int main(int argc, char** argv)
+{
+    int num_rays = argc > 1 ? std::atoi(argv[1]) : 4096;
+    int num_samples = argc > 2 ? std::atoi(argv[2]) : 256;
+    if (num_rays <= 0 || num_samples <= 0 || argc > 3) {
+        std::cerr << "usage: forward_demo [num_rays] [num_samples]\n";
+        return EXIT_FAILURE;
+    }
+
+    CHECK_CUDA_FATAL(cudaFree(0));  // Exclude CUDA context initialization from timings.
+    return cuda_forward(num_rays, num_samples, 0.01f, 0)
+               ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/demos/improved_demo.cu
+```
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <random>
+
+#include <cuda_runtime.h>
+
+#include "cpu_forward.hpp"
+#include "cuda_forward.cuh"
+
+#define CHECK_CUDA(err) do { \
+    const cudaError_t e = (err); \
+    if (e != cudaSuccess) { \
+        std::fprintf(stderr, "[CUDA] %s:%d: %s\n", __FILE__, __LINE__, \
+                     cudaGetErrorString(e)); \
+        std::exit(EXIT_FAILURE); \
+    } \
+} while (false)
+
+bool run_improved_demo(int num_rays, int num_samples, float ds) {
+    const std::size_t samples = static_cast<std::size_t>(num_rays) *
+                                static_cast<std::size_t>(num_samples);
+    const std::size_t sample_bytes = samples * sizeof(float);
+    const std::size_t ray_bytes = static_cast<std::size_t>(num_rays) * sizeof(float);
+
+    // Page-locked host buffers allow the CUDA driver to transfer data directly.
+    float *h_sigma = nullptr, *h_source = nullptr, *h_i0 = nullptr;
+    float *h_gpu = nullptr, *h_cpu = nullptr;
+    CHECK_CUDA(cudaMallocHost(&h_sigma, sample_bytes));
+    CHECK_CUDA(cudaMallocHost(&h_source, sample_bytes));
+    CHECK_CUDA(cudaMallocHost(&h_i0, ray_bytes));
+    CHECK_CUDA(cudaMallocHost(&h_gpu, ray_bytes));
+    CHECK_CUDA(cudaMallocHost(&h_cpu, ray_bytes));
+
+    std::mt19937 generator(12345);
+    std::uniform_real_distribution<float> distribution(0.0f, 1.0f);
+    for (std::size_t i = 0; i < samples; ++i) {
+        h_sigma[i] = distribution(generator);
+        h_source[i] = distribution(generator);
+    }
+    for (int i = 0; i < num_rays; ++i) h_i0[i] = distribution(generator);
+
+    const auto cpu_start = std::chrono::high_resolution_clock::now();
+    solve_transport_cpu_multi(h_sigma, h_source, h_i0, h_cpu,
+                              num_rays, num_samples, ds);
+    const auto cpu_stop = std::chrono::high_resolution_clock::now();
+    const double cpu_ms = std::chrono::duration<double, std::milli>(
+        cpu_stop - cpu_start).count();
+
+    float *d_sigma = nullptr, *d_source = nullptr, *d_i0 = nullptr, *d_output = nullptr;
+    CHECK_CUDA(cudaMalloc(&d_sigma, sample_bytes));
+    CHECK_CUDA(cudaMalloc(&d_source, sample_bytes));
+    CHECK_CUDA(cudaMalloc(&d_i0, ray_bytes));
+    CHECK_CUDA(cudaMalloc(&d_output, ray_bytes));
+
+    cudaEvent_t e2e_start, e2e_stop, h2d_start, h2d_stop;
+    cudaEvent_t kernel_start, kernel_stop, d2h_start, d2h_stop;
+    CHECK_CUDA(cudaEventCreate(&e2e_start));
+    CHECK_CUDA(cudaEventCreate(&e2e_stop));
+    CHECK_CUDA(cudaEventCreate(&h2d_start));
+    CHECK_CUDA(cudaEventCreate(&h2d_stop));
+    CHECK_CUDA(cudaEventCreate(&kernel_start));
+    CHECK_CUDA(cudaEventCreate(&kernel_stop));
+    CHECK_CUDA(cudaEventCreate(&d2h_start));
+    CHECK_CUDA(cudaEventCreate(&d2h_stop));
+
+    // Warmup is excluded from reported timings.
+    CHECK_CUDA(cudaMemcpy(d_sigma, h_sigma, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_source, h_source, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_i0, h_i0, ray_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(launch_volume_transport_cuda(d_sigma, d_source, d_output,
+                                             num_rays, num_samples, ds, d_i0));
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaEventRecord(e2e_start));
+    CHECK_CUDA(cudaEventRecord(h2d_start));
+    CHECK_CUDA(cudaMemcpy(d_sigma, h_sigma, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_source, h_source, sample_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_i0, h_i0, ray_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaEventRecord(h2d_stop));
+    CHECK_CUDA(cudaEventRecord(kernel_start));
+    CHECK_CUDA(launch_volume_transport_cuda(d_sigma, d_source, d_output,
+                                             num_rays, num_samples, ds, d_i0));
+    CHECK_CUDA(cudaEventRecord(kernel_stop));
+    CHECK_CUDA(cudaEventRecord(d2h_start));
+    CHECK_CUDA(cudaMemcpy(h_gpu, d_output, ray_bytes, cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaEventRecord(d2h_stop));
+    CHECK_CUDA(cudaEventRecord(e2e_stop));
+    CHECK_CUDA(cudaEventSynchronize(e2e_stop));
+
+    float h2d_ms, kernel_ms, d2h_ms, e2e_ms;
+    CHECK_CUDA(cudaEventElapsedTime(&h2d_ms, h2d_start, h2d_stop));
+    CHECK_CUDA(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop));
+    CHECK_CUDA(cudaEventElapsedTime(&d2h_ms, d2h_start, d2h_stop));
+    CHECK_CUDA(cudaEventElapsedTime(&e2e_ms, e2e_start, e2e_stop));
+
+    double squared_error = 0.0;
+    float max_error = 0.0f;
+    for (int i = 0; i < num_rays; ++i) {
+        const float error = std::fabs(h_gpu[i] - h_cpu[i]);
+        squared_error += static_cast<double>(error) * error;
+        max_error = std::max(max_error, error);
+    }
+    const double rmse = std::sqrt(squared_error / num_rays);
+    const double input_bytes = 2.0 * sample_bytes + ray_bytes;
+    const double h2d_gbps = h2d_ms > 0.0
+        ? input_bytes / 1.0e9 / (h2d_ms / 1000.0) : 0.0;
+    const double throughput = kernel_ms > 0.0
+        ? samples / (kernel_ms / 1000.0) / 1.0e6 : 0.0;
+
+    std::cout << std::fixed << std::setprecision(6)
+              << "rays=" << num_rays << ", samples=" << num_samples
+              << ", ds=" << ds << "\n"
+              << "host_memory: pinned (cudaMallocHost)\n"
+              << "warmup: 1 run (excluded)\n"
+              << "H2D: " << h2d_ms << " ms (" << h2d_gbps << " GB/s)\n"
+              << "kernel: " << kernel_ms << " ms (" << throughput << " Msamples/s)\n"
+              << "D2H: " << d2h_ms << " ms\n"
+              << "end-to-end: " << e2e_ms << " ms\n"
+              << "CPU serial: " << cpu_ms << " ms\n"
+              << "Speedup (CPU / end-to-end): " << cpu_ms / e2e_ms << " x\n"
+              << "RMSE: " << rmse << ", max abs error: " << max_error << "\n"
+              << (max_error <= 1.0e-3f ? "Verification passed!\n"
+                                       : "Verification failed!\n");
+
+    CHECK_CUDA(cudaEventDestroy(e2e_start));
+    CHECK_CUDA(cudaEventDestroy(e2e_stop));
+    CHECK_CUDA(cudaEventDestroy(h2d_start));
+    CHECK_CUDA(cudaEventDestroy(h2d_stop));
+    CHECK_CUDA(cudaEventDestroy(kernel_start));
+    CHECK_CUDA(cudaEventDestroy(kernel_stop));
+    CHECK_CUDA(cudaEventDestroy(d2h_start));
+    CHECK_CUDA(cudaEventDestroy(d2h_stop));
+    CHECK_CUDA(cudaFree(d_sigma));
+    CHECK_CUDA(cudaFree(d_source));
+    CHECK_CUDA(cudaFree(d_i0));
+    CHECK_CUDA(cudaFree(d_output));
+    CHECK_CUDA(cudaFreeHost(h_sigma));
+    CHECK_CUDA(cudaFreeHost(h_source));
+    CHECK_CUDA(cudaFreeHost(h_i0));
+    CHECK_CUDA(cudaFreeHost(h_gpu));
+    CHECK_CUDA(cudaFreeHost(h_cpu));
+    return max_error <= 1.0e-3f;
+}
+
+int main(int argc, char** argv) {
+    const int num_rays = argc > 1 ? std::atoi(argv[1]) : 4096;
+    const int num_samples = argc > 2 ? std::atoi(argv[2]) : 256;
+    if (num_rays <= 0 || num_samples <= 0 || argc > 3) {
+        std::cerr << "usage: improved_demo [num_rays] [num_samples]\n";
+        return EXIT_FAILURE;
+    }
+    CHECK_CUDA(cudaFree(0));
+    return run_improved_demo(num_rays, num_samples, 0.01f)
+               ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/demos/inverse_cpu_demo.cpp
+```
+#include "grid_search.hpp"
+#include "newton_method.hpp"
+
+#include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <vector>
+
+namespace {
+struct Summary { int valid = 0; double sigma_abs = 0, q_abs = 0, rmse = 0; };
+
+Summary run_case(double I0, double sigma, double q, double ds, int points,
+                 double noise_std, int trials, std::mt19937& generator)
+{
+    std::normal_distribution<double> noise(0.0, noise_std);
+    Summary summary;
+    for (int trial = 0; trial < trials; ++trial) {
+        std::vector<double> samples;
+        for (int k = 0; k < points; ++k) {
+            const double exact = constant_intensity(I0, sigma, q, k * ds);
+            samples.push_back(exact + (noise_std > 0 ? noise(generator) : 0));
+        }
+        const InverseEstimate estimate = recover_constant_parameters(samples, ds);
+        if (!estimate.valid) continue;
+        ++summary.valid;
+        summary.sigma_abs += std::abs(estimate.sigma - sigma);
+        summary.q_abs += std::abs(estimate.q - q);
+        summary.rmse += estimate.reconstruction_rmse;
+    }
+    if (summary.valid) {
+        const double scale = 1.0 / summary.valid;
+        summary.sigma_abs *= scale; summary.q_abs *= scale; summary.rmse *= scale;
+    }
+    return summary;
+}
+
+void noise_table(double I0, double sigma, double q, double ds, int points,
+                 int trials, std::mt19937& generator)
+{
+    std::cout << "noise_table,noise_std,valid_trials,mean_abs_sigma,mean_abs_q,mean_reconstruction_rmse" << std::endl;
+    for (double noise : {0.0, 0.001, 0.005, 0.01, 0.02, 0.05}) {
+        const Summary s = run_case(I0, sigma, q, ds, points, noise, trials, generator);
+        std::cout << "noise," << noise << ',' << s.valid << ',' << s.sigma_abs
+                  << ',' << s.q_abs << ',' << s.rmse << std::endl;
+    }
+}
+}
+
+int main()
+{
+    constexpr double I0 = 0.4, sigma = 0.7, q = 1.8, ds = 0.25;
+    constexpr int trials = 200;
+    std::mt19937 generator(20260906);
+    std::cout << std::setprecision(10);
+    std::cout << "method,uniform_transition_least_squares" << std::endl;
+    std::cout << "true_parameters,I0=" << I0 << ",sigma=" << sigma
+              << ",q=" << q << ",ds=" << ds << std::endl;
+
+    std::cout << "sampling_table,points,total_length,valid_trials,mean_abs_sigma,mean_abs_q,mean_reconstruction_rmse" << std::endl;
+    for (int points : {3, 5, 9, 17, 33, 65}) {
+        const Summary s = run_case(I0, sigma, q, ds, points, 0.01, trials, generator);
+        std::cout << "sampling," << points << ',' << (points - 1) * ds << ','
+                  << s.valid << ',' << s.sigma_abs << ',' << s.q_abs << ',' << s.rmse << std::endl;
+    }
+    noise_table(I0, sigma, q, ds, 33, trials, generator);
+
+    std::cout << "length_table,points,ds,total_length,valid_trials,mean_abs_sigma,mean_abs_q,mean_reconstruction_rmse" << std::endl;
+    for (double spacing : {0.05, 0.1, 0.25, 0.5, 1.0}) {
+        const Summary s = run_case(I0, sigma, q, spacing, 17, 0.01, trials, generator);
+        std::cout << "length,17," << spacing << ',' << 16 * spacing << ',' << s.valid
+                  << ',' << s.sigma_abs << ',' << s.q_abs << ',' << s.rmse << std::endl;
+    }
+
+    std::vector<double> exact;
+    for (int k = 0; k < 33; ++k) exact.push_back(constant_intensity(I0, sigma, q, k * ds));
+    const InverseEstimate estimate = recover_constant_parameters(exact, ds);
+    std::cout << "single_noiseless,sigma=" << estimate.sigma << ",q=" << estimate.q
+              << ",a=" << estimate.a << ",b=" << estimate.b
+              << ",transition_rmse=" << estimate.transition_rmse
+              << ",reconstruction_rmse=" << estimate.reconstruction_rmse << std::endl;
+
+    const GridSearchResult grid = grid_search_constant_parameters(
+        exact, ds, 0.0, 1.5, 61, 0.0, 3.0, 61);
+    std::cout << "grid_best,sigma=" << grid.sigma << ",q=" << grid.q
+              << ",loss=" << grid.loss << ",sigma_count=" << grid.sigma_count
+              << ",q_count=" << grid.q_count << std::endl;
+
+    const GaussNewtonResult gn = gauss_newton_constant_parameters(
+        exact, ds, grid.sigma, grid.q);
+    std::cout << "gauss_newton,sigma=" << gn.sigma << ",q=" << gn.q
+              << ",loss=" << gn.loss << ",iterations=" << gn.iterations
+              << ",converged=" << gn.converged << std::endl;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/demos/inverse_demo.cu
+```
+
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/forward/cpu_forward.cpp
+```
+#include "cpu_forward.hpp"
+#include "transport_step.hpp"
+#include <cmath>
+
+namespace {
+
+float solve_one_ray(
+    const float* sigma,
+    const float* source,
+    int num_samples,
+    float ds,
+    float I0)
+{
+    float I = I0;
+    for (int i = 0; i < num_samples; ++i) {
+        I = transport_detail::transport_step(
+            I, sigma[i], source[i], ds);
+    }
+    return I;
+}
+
+}  // namespace
+
+float solve_transport_cpu(
+    const float* sigma,
+    const float* source,
+    int num_samples,
+    float ds,
+    float I0)
+{
+    return solve_one_ray(sigma, source, num_samples, ds, I0);
+}
+
+void solve_transport_cpu_multi(
+    const float* sigma,
+    const float* source,
+    const float* initial_intensity,
+    float* output,
+    int num_rays,
+    int num_samples,
+    float ds)
+{
+    for (int ray = 0; ray < num_rays; ++ray) {
+        const int offset = ray * num_samples;
+        output[ray] = solve_one_ray(
+            sigma + offset,
+            source + offset,
+            num_samples,
+            ds,
+            initial_intensity[ray]);
+    }
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/forward/cpu_forward.hpp
+```
+#pragma once
+
+float solve_transport_cpu(
+    const float* sigma,
+    const float* q,
+    int num_samples,
+    float ds,
+    float I0);
+
+// sigma and source are row-major [ray][sample]. Each ray has its own
+// coefficients and initial intensity.
+void solve_transport_cpu_multi(
+    const float* sigma,
+    const float* source,
+    const float* initial_intensity,
+    float* output,
+    int num_rays,
+    int num_samples,
+    float ds);
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/forward/cuda_forward.cu
+```
+#include "cuda_forward.cuh"
+#include "transport_step.hpp"
+
+__global__ void volume_transport_kernel(
+    const float* sigma,
+    const float* source,
+    float* output,
+    int num_rays,
+    int num_samples,
+    float ds,
+    const float* initial_intensity
+)
+{
+    const int ray = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ray < num_rays) {
+        const int offset = ray * num_samples;
+        float I = initial_intensity[ray];
+        for (int sample = 0; sample < num_samples; ++sample) {
+            const float sigma_i = sigma[offset + sample];
+            const float source_i = source[offset + sample];
+            I = transport_detail::transport_step(
+                I, sigma_i, source_i, ds);
+        }
+        output[ray] = I;
+    }
+}
+
+cudaError_t launch_volume_transport_cuda(
+    const float* sigma,
+    const float* source,
+    float* output,
+    int num_rays,
+    int num_samples,
+    float ds,
+    const float* initial_intensity,
+    cudaStream_t stream)
+{
+    if (num_rays < 0 || num_samples < 0 || ds < 0.0f) {
+        return cudaErrorInvalidValue;
+    }
+    if (num_rays == 0) {
+        return cudaSuccess;
+    }
+
+    constexpr int threads_per_block = 256;
+    const int blocks = (num_rays + threads_per_block - 1) / threads_per_block;
+    volume_transport_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        sigma, source, output, num_rays, num_samples, ds, initial_intensity);
+    return cudaGetLastError();
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/forward/cuda_forward.cuh
+```
+#pragma once
+
+#include <cuda_runtime.h>
+
+// sigma and source are row-major [ray][sample]. One CUDA thread processes one
+// ray; samples along that ray remain sequential because of the transport
+// recurrence.
+__global__ void volume_transport_kernel(
+    const float* sigma,
+    const float* source,
+    float* output,
+    int num_rays,
+    int num_samples,
+    float ds,
+    const float* initial_intensity);
+
+// Launches volume_transport_kernel with one thread per ray.
+cudaError_t launch_volume_transport_cuda(
+    const float* sigma,
+    const float* source,
+    float* output,
+    int num_rays,
+    int num_samples,
+    float ds,
+    const float* initial_intensity,
+    cudaStream_t stream = 0);
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/forward/transport_step.hpp
+```
+#pragma once
+
+#include <cmath>
+
+namespace transport_detail {
+
+#ifdef __CUDACC__
+#define TRANSPORT_HOST_DEVICE __host__ __device__
+#else
+#define TRANSPORT_HOST_DEVICE
+#endif
+
+inline TRANSPORT_HOST_DEVICE
+float transport_step(float I, float sigma, float q, float ds)
+{
+    const float tau = sigma * ds;
+
+    if (fabsf(tau) < 1e-5f) {
+        return I + q * ds - I * tau;
+    }
+
+    const float one_minus_T = -expm1f(-tau);
+    return I * (1.0f - one_minus_T) + (q / sigma) * one_minus_T;
+}
+
+#undef TRANSPORT_HOST_DEVICE
+
+}  // namespace transport_detail
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/inverse/grid_search.cpp
+```
+#include "grid_search.hpp"
+
+#include <cmath>
+#include <limits>
+
+namespace { constexpr double kEps = 1e-14; }
+
+double constant_intensity(double I0, double sigma, double q, double s)
+{
+    if (std::abs(sigma) < 1e-10) return I0 + q * s;
+    const double e = std::exp(-sigma * s);
+    return I0 * e + (q / sigma) * (-std::expm1(-sigma * s));
+}
+
+double rmse_constant_model(const std::vector<double>& intensity,
+                           double ds, double sigma, double q)
+{
+    if (intensity.empty() || ds <= 0.0) return std::numeric_limits<double>::infinity();
+    double squared = 0.0;
+    for (std::size_t k = 0; k < intensity.size(); ++k) {
+        const double predicted = constant_intensity(
+            intensity.front(), sigma, q, static_cast<double>(k) * ds);
+        const double error = predicted - intensity[k];
+        squared += error * error;
+    }
+    return std::sqrt(squared / static_cast<double>(intensity.size()));
+}
+
+double constant_model_loss(const std::vector<double>& intensity,
+                           double ds, double sigma, double q)
+{
+    if (intensity.empty() || ds <= 0.0 || sigma < 0.0 || q < 0.0)
+        return std::numeric_limits<double>::infinity();
+    double loss = 0.0;
+    for (std::size_t k = 0; k < intensity.size(); ++k) {
+        const double prediction = constant_intensity(
+            intensity.front(), sigma, q, static_cast<double>(k) * ds);
+        const double residual = prediction - intensity[k];
+        loss += 0.5 * residual * residual;
+    }
+    return loss;
+}
+
+GridSearchResult grid_search_constant_parameters(
+    const std::vector<double>& intensity, double ds,
+    double sigma_min, double sigma_max, int sigma_count,
+    double q_min, double q_max, int q_count)
+{
+    GridSearchResult result;
+    result.sigma_count = sigma_count;
+    result.q_count = q_count;
+    if (intensity.size() < 2 || ds <= 0.0 || sigma_count < 1 || q_count < 1
+        || sigma_min < 0.0 || q_min < 0.0 || sigma_min > sigma_max || q_min > q_max)
+        return result;
+
+    result.loss = std::numeric_limits<double>::infinity();
+    result.loss_map.resize(static_cast<std::size_t>(sigma_count) * q_count);
+    for (int i = 0; i < sigma_count; ++i) {
+        const double sigma = sigma_count == 1 ? sigma_min
+            : sigma_min + (sigma_max - sigma_min) * i / (sigma_count - 1);
+        for (int j = 0; j < q_count; ++j) {
+            const double q = q_count == 1 ? q_min
+                : q_min + (q_max - q_min) * j / (q_count - 1);
+            const double loss = constant_model_loss(intensity, ds, sigma, q);
+            result.loss_map[static_cast<std::size_t>(i) * q_count + j] = loss;
+            if (loss < result.loss) {
+                result.loss = loss;
+                result.sigma = sigma;
+                result.q = q;
+            }
+        }
+    }
+    result.valid = std::isfinite(result.loss);
+    return result;
+}
+
+InverseEstimate recover_constant_parameters(
+    const std::vector<double>& intensity, double ds)
+{
+    InverseEstimate result;
+    if (intensity.size() < 3 || ds <= 0.0) return result;
+
+    const double n = static_cast<double>(intensity.size() - 1);
+    double sum_x = 0.0, sum_y = 0.0, sum_xx = 0.0, sum_xy = 0.0;
+    for (std::size_t k = 0; k + 1 < intensity.size(); ++k) {
+        const double x = intensity[k];
+        const double y = intensity[k + 1];
+        sum_x += x; sum_y += y; sum_xx += x * x; sum_xy += x * y;
+    }
+    const double determinant = n * sum_xx - sum_x * sum_x;
+    if (std::abs(determinant) <= kEps) return result;
+
+    result.a = (n * sum_xy - sum_x * sum_y) / determinant;
+    result.b = (sum_y - result.a * sum_x) / n;
+    if (!(result.a > 0.0 && result.a < 1.0 + 1e-10)) return result;
+
+    result.sigma = -std::log(result.a) / ds;
+    result.q = std::abs(1.0 - result.a) < 1e-8
+        ? result.b / ds : result.sigma * result.b / (1.0 - result.a);
+    for (std::size_t k = 0; k + 1 < intensity.size(); ++k) {
+        const double error = result.a * intensity[k] + result.b - intensity[k + 1];
+        result.transition_rmse += error * error;
+    }
+    result.transition_rmse = std::sqrt(
+        result.transition_rmse / static_cast<double>(intensity.size() - 1));
+    result.reconstruction_rmse = rmse_constant_model(
+        intensity, ds, result.sigma, result.q);
+    result.valid = std::isfinite(result.sigma) && std::isfinite(result.q)
+        && result.sigma >= 0.0 && result.q >= 0.0;
+    return result;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/inverse/grid_search.hpp
+```
+#pragma once
+
+#include <vector>
+
+struct GridSearchResult {
+    double sigma = 0.0;
+    double q = 0.0;
+    double loss = 0.0;
+    int sigma_count = 0;
+    int q_count = 0;
+    std::vector<double> loss_map;
+    bool valid = false;
+};
+
+struct InverseEstimate {
+    double sigma = 0.0;
+    double q = 0.0;
+    double a = 0.0;
+    double b = 0.0;
+    double transition_rmse = 0.0;
+    double reconstruction_rmse = 0.0;
+    bool valid = false;
+};
+
+InverseEstimate recover_constant_parameters(
+    const std::vector<double>& intensity, double ds);
+
+double constant_intensity(double I0, double sigma, double q, double s);
+
+double rmse_constant_model(const std::vector<double>& intensity,
+                           double ds, double sigma, double q);
+
+double constant_model_loss(const std::vector<double>& intensity,
+                           double ds, double sigma, double q);
+
+GridSearchResult grid_search_constant_parameters(
+    const std::vector<double>& intensity, double ds,
+    double sigma_min, double sigma_max, int sigma_count,
+    double q_min, double q_max, int q_count);
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/inverse/newton_method.cpp
+```
+#include "newton_method.hpp"
+
+#include "grid_search.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace {
+struct Derivatives { double dsigma; double dq; };
+
+Derivatives model_derivatives(double I0, double sigma, double q, double s)
+{
+    if (std::abs(sigma) < 1e-7)
+        return {-I0 * s - 0.5 * q * s * s, s};
+    const double e = std::exp(-sigma * s);
+    const double one_minus_e = -std::expm1(-sigma * s);
+    return {-s * I0 * e
+                + q * (sigma * s * e - one_minus_e) / (sigma * sigma),
+            one_minus_e / sigma};
+}
+}
+
+GaussNewtonResult gauss_newton_constant_parameters(
+    const std::vector<double>& intensity, double ds,
+    double initial_sigma, double initial_q,
+    const GaussNewtonOptions& options)
+{
+    GaussNewtonResult result;
+    if (intensity.size() < 2 || ds <= 0.0 || !std::isfinite(initial_sigma)
+        || !std::isfinite(initial_q) || options.max_iterations <= 0)
+        return result;
+
+    double sigma = std::max(0.0, initial_sigma);
+    double q = std::max(0.0, initial_q);
+    const double I0 = intensity.front();
+    double previous_loss = std::numeric_limits<double>::infinity();
+    for (int iteration = 0; iteration < options.max_iterations; ++iteration) {
+        double loss = 0.0, g_sigma = 0.0, g_q = 0.0;
+        double h_ss = options.damping, h_sq = 0.0, h_qq = options.damping;
+        for (std::size_t k = 0; k < intensity.size(); ++k) {
+            const double s = static_cast<double>(k) * ds;
+            const double residual = constant_intensity(I0, sigma, q, s)
+                - intensity[k];
+            const Derivatives d = model_derivatives(I0, sigma, q, s);
+            loss += 0.5 * residual * residual;
+            g_sigma += d.dsigma * residual;
+            g_q += d.dq * residual;
+            h_ss += d.dsigma * d.dsigma;
+            h_sq += d.dsigma * d.dq;
+            h_qq += d.dq * d.dq;
+        }
+        const double gradient_norm = std::hypot(g_sigma, g_q);
+        result.loss_history.push_back(loss);
+        result.loss = loss;
+        result.gradient_norm = gradient_norm;
+        result.sigma = sigma;
+        result.q = q;
+        result.iterations = iteration;
+        if (!std::isfinite(loss) || !std::isfinite(gradient_norm)) return result;
+        if (gradient_norm < options.gradient_tolerance) {
+            result.converged = result.valid = true;
+            return result;
+        }
+
+        const double determinant = h_ss * h_qq - h_sq * h_sq;
+        if (!(determinant > 0.0) || !std::isfinite(determinant)) return result;
+        const double delta_sigma = (-h_qq * g_sigma + h_sq * g_q) / determinant;
+        const double delta_q = (h_sq * g_sigma - h_ss * g_q) / determinant;
+        const double step_norm = std::hypot(delta_sigma, delta_q);
+        if (step_norm < options.step_tolerance * (1.0 + std::hypot(sigma, q))) {
+            result.converged = result.valid = true;
+            return result;
+        }
+
+        double alpha = 1.0;
+        bool accepted = false;
+        for (int trial = 0; trial < options.max_line_search; ++trial) {
+            const double next_sigma = std::max(0.0, sigma + alpha * delta_sigma);
+            const double next_q = std::max(0.0, q + alpha * delta_q);
+            const double next_loss = constant_model_loss(
+                intensity, ds, next_sigma, next_q);
+            if (next_loss < loss) {
+                sigma = next_sigma;
+                q = next_q;
+                accepted = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+        if (!accepted) return result;
+        if (std::isfinite(previous_loss)
+            && std::abs(previous_loss - loss)
+                < options.loss_tolerance * (1.0 + loss)) {
+            result.converged = result.valid = true;
+            result.sigma = sigma;
+            result.q = q;
+            return result;
+        }
+        previous_loss = loss;
+    }
+    result.valid = std::isfinite(result.loss);
+    result.sigma = sigma;
+    result.q = q;
+    return result;
+}
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/inverse/newton_method.hpp
+```
+#pragma once
+
+#include <vector>
+
+struct GaussNewtonOptions {
+    int max_iterations = 100;
+    double gradient_tolerance = 1e-10;
+    double step_tolerance = 1e-10;
+    double loss_tolerance = 1e-12;
+    double damping = 1e-8;
+    int max_line_search = 20;
+};
+
+struct GaussNewtonResult {
+    double sigma = 0.0;
+    double q = 0.0;
+    double loss = 0.0;
+    double gradient_norm = 0.0;
+    int iterations = 0;
+    bool converged = false;
+    bool valid = false;
+    std::vector<double> loss_history;
+};
+
+GaussNewtonResult gauss_newton_constant_parameters(
+    const std::vector<double>& intensity, double ds,
+    double initial_sigma, double initial_q,
+    const GaussNewtonOptions& options = {});
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/utils/plotting.cpp
+```
+
+```
+
+### parallel_hpc_modules/module_07_nerf_inspired_volume_rendering/src/utils/plotting.hpp
+```
+
+```

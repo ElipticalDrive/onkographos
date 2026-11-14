@@ -1,0 +1,204 @@
+Context Phases 0-2 of the multi-resolution voxel grid work are complete (#64, PR #67): VoxelGrid Protocol defined — abstracts storage strategy UniformVoxelGrid implements the protocol with query_overlap() and walk_layer() All handlers an...
+
+multi-resolution voxel grid: octree implementation + refinement policy (#64 phases 3-4) · Issue #68 · hellolifeforms/lila · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+multi-resolution voxel grid: octree implementation + refinement policy (#64 phases 3-4) #68
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+multi-resolution voxel grid: octree implementation + refinement policy (#64 phases 3-4)#68
+Copy link
+Labels
+architecturemulti-resolutionvoxel-grid
+Description
+biosynthart
+opened on Jun 2, 2026
+Issue body actions
+Context
+Phases 0-2 of the multi-resolution voxel grid work are complete (#64, PR #67):
+VoxelGrid Protocol defined — abstracts storage strategy
+UniformVoxelGrid implements the protocol with query_overlap() and walk_layer()
+All handlers and engine code use the protocol interface
+This issue tracks phases 3-4: implementing an octree-based grid and the refinement/coarsening policy that makes it adaptive.
+Phase 3: OctreeVoxelGrid Implementation (~300-500 lines)
+Goal
+Implement OctreeVoxelGrid satisfying the same VoxelGrid protocol, enabling swap-in at engine init with zero changes to handlers or engine code.
+Design
+```
+class OctreeNode:
+    """Single node in the octree."""
+    is_leaf: bool
+    value: dict[str, float] | None  # layer -> value (leaf only)
+    children: list[OctreeNode]      # up to 8 children (internal only)
+    bounds: tuple[float, ...]       # world-space AABB
+
+class OctreeVoxelGrid:
+    """Multi-resolution octree voxel grid.
+
+    Each node is either a leaf (stores layer values) or an internal
+    node with up to 8 children. Refinement splits a leaf into 8
+    sub-cells, each inheriting the parent's value as initial state.
+
+    Key properties:
+    - Memory: O(active cells × layers), not O(grid³)
+    - query_overlap(): recursive descent, stops at coarse nodes fully inside radius
+    - walk_layer(): visits only existing leaf nodes
+    """
+
+    def __init__(self, dimensions: tuple[int,int,int], cell_size: float, max_depth: int = 4):
+        ...
+
+    def get(self, layer, x, y, z) -> float:
+        # Descend to finest resolution at (x,y,z), return value or DEFAULT_VALUE
+        ...
+
+    def set(self, layer, x, y, z, value) -> None:
+        # Descend/set leaf, mark dirty
+        ...
+
+    def add(self, layer, x, y, z, delta) -> float:
+        # get + set with delta
+        ...
+
+    def query_overlap(self, center, radius) -> list[tuple[int,int,int]]:
+        # Recursive descent:
+        # - If node AABB is fully outside sphere → skip subtree
+        # - If node AABB is fully inside sphere → collect all leaves in subtree
+        # - Otherwise → recurse into children
+        ...
+
+    def walk_layer(self, layer, callback) -> None:
+        # DFS over leaf nodes only, call callback(x,y,z,value) for each
+        ...
+
+    def world_to_grid(self, wx, wy, wz) -> tuple[int,int,int]:
+        # Convert to coarse-level grid coordinate (for backward compat)
+        ...
+
+    def get_delta_packet(self) -> dict:
+        # Collect dirty leaves, clear buffer
+        ...
+```
+Acceptance criteria
+isinstance(OctreeVoxelGrid(...), VoxelGrid) → True
+All existing tests pass when engine init uses OctreeVoxelGrid instead of UniformVoxelGrid
+New test suite covering: split/merge, query_overlap at different depths, walk_layer sparsity, memory proportional to active cells
+Phase 4: Refinement Policy (~100 lines)
+Goal
+Configurable triggers that automatically refine/coarsen octree regions based on simulation activity.
+Design
+```
+@dataclass
+class RefinementPolicy:
+    """Controls when the octree refines or coarsens."""
+    # Refine a region when it contains ≥N entities within its bounds
+    entity_density_threshold: int = 2
+    # Always refine regions overlapping water sources
+    refine_water_sources: bool = True
+    # Coarsen a region after N ticks with no activity
+    idle_coarsen_ticks: int = 100
+    # Maximum refinement depth (limits memory)
+    max_depth: int = 4
+
+class AdaptiveOctreeVoxelGrid(OctreeVoxelGrid):
+    """Octree with automatic refinement/coarsening."""
+
+    def __init__(self, dimensions, cell_size, policy: RefinementPolicy | None = None):
+        super().__init__(dimensions, cell_size, max_depth=(policy or RefinementPolicy()).max_depth)
+        self._policy = policy or RefinementPolicy()
+        self._activity_ticks: dict[int, int] = {}  # node_id → last active tick
+
+    def note_entity(self, position: tuple[float,float,float]) -> None:
+        """Called by engine each tick for mobile entities. Triggers refinement if needed."""
+        ...
+
+    def cleanup(self, tick: int) -> int:
+        """Periodic coarsening pass. Returns number of nodes coarsened."""
+        # Walk tree, find idle leaf clusters that can merge back to parent
+        ...
+
+    def _refine_node(self, node: OctreeNode) -> None:
+        """Split a leaf into 8 children, each inheriting parent value."""
+        ...
+
+    def _try_coarsen_node(self, parent: OctreeNode) -> bool:
+        """Merge 8 identical-value children back into single leaf."""
+        ...
+```
+Integration points (engine.py)
+```
+# In step(), after movement phase:
+if isinstance(self.voxels, AdaptiveOctreeVoxelGrid):
+    for entity in self.entities.values():
+        if is_alive(entity) and entity.get("speed", 0) > 0:
+            self.voxels.note_entity(tuple(entity["position"]))
+
+# Periodic cleanup (e.g., every 50 ticks):
+if self.tick % 50 == 0 and isinstance(self.voxels, AdaptiveOctreeVoxelGrid):
+    self.voxels.cleanup(self.tick)
+```
+Acceptance criteria
+Refinement triggered by entity presence within region bounds
+Water source footprints always refined to finest level
+Idle regions coarsen after configurable tick threshold
+Memory stays bounded by max_depth regardless of world size
+Performance profile shows improvement over uniform grid for sparse worlds
+Risks and mitigations
+Risk
+Mitigation
+Octree memory overhead for small worlds
+UniformVoxelGrid remains default; octree is opt-in via world config flag
+Interpolation artifacts at refinement boundaries
+Parent value inherited by children on split; no interpolation needed for writes, only reads
+Performance regression on dense worlds
+Benchmark both implementations; keep uniform grid as fallback
+Refinement policy too aggressive → thrashing
+Configurable thresholds with sensible defaults; idle_coarsen_ticks prevents ping-pong
+Scope estimate
+Phase 3: ~300-500 lines (OctreeVoxelGrid + tests)
+Phase 4: ~100 lines (AdaptiveOctreeVoxelGrid + RefinementPolicy)
+Total: ~400-600 lines across 2 files
+Related
+Supersedes remaining work from #64
+Built on top of PR #67 (VoxelGrid protocol + engine adoption)
+Reactions are currently unavailable
+Activity
+biosynthart
+added
+architecture
+voxel-grid
+multi-resolution
+on Jun 2, 2026
+biosynthart commented on Jun 9, 2026
+biosynthart
+on Jun 9, 2026
+MemberAuthor
+More actions
+🔥 Promoted to active — octree voxel grid is now a priority dependency of the distributed engine architecture. Sparse storage at region boundaries will dramatically reduce cross-engine message volume for shared voxel layers.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+architecturemulti-resolutionvoxel-grid
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

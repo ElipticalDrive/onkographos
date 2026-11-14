@@ -1,0 +1,91 @@
+# Magnitude-based Edge Pruning
+
+Also called: Edge Pruning, Importance Pruning, Unstructured Pruning
+
+## Overview
+Magnitude-based Edge Pruning is an unstructured pruning technique that eliminates individual weights (edges) in a neural network based on their absolute magnitude, typically discarding those below a specific threshold [S1, book]. It addresses the problem of model sparsity by reducing the parameter count while attempting to maintain inference quality [S1, book]. Unlike structured pruning methods that remove entire neurons or layers, edge pruning creates irregular memory patterns, which can hinder efficient hardware implementation but allows for fine-grained compression [S1, book]. It is distinguished from its sibling [Conjoint Pruning of the Ensemble](12978-conjoint-pruning-of-the-ensemble.md) by targeting individual connections rather than jointly pruning ensemble models for memory footprint reduction.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained neural network model (specifically MLPs in the context of NeRF) with weight matrices $W$.
+*   **Output:** A pruned model where specific weights are set to zero or removed from the active computation graph.
+
+**Data Structures:**
+The method operates on the weight matrices of the network layers. For a fully connected layer, the weights are stored in a matrix $W \in \mathbb{R}^{n \times m}$, where $n$ is the number of output neurons and $m$ is the number of input neurons [S1, book]. The pruning process modifies this matrix by zeroing out entries $W_{ij}$ where $|W_{ij}| < \tau$.
+
+**Steps:**
+1.  **Extract Weights:** Retrieve all edge weights from the MLP model layers [S1, book].
+2.  **Compute Distribution:** Analyze the frequency distribution of the absolute values of these weights to identify the sparsity characteristics [S1, book].
+3.  **Determine Threshold:** Select a magnitude threshold $\tau$ [S1, book].
+4.  **Prune Edges:** Iterate through the weight matrix. For each weight $w$, if $|w| < \tau$, set $w = 0$ (or mark it as discarded) [S1, book].
+5.  **Evaluate:** Assess the performance of the pruned model using metrics such as Peak Signal-to-Noise Ratio (PSNR) [S1, book].
+
+**Formulas:**
+The PSNR is calculated to evaluate the quality of the reconstructed images compared to the ground truth:
+$$
+\text{PSNR} = 10 \log_{10} \left( \frac{\text{MAX}_I^2}{\text{MSE}} \right)
+$$
+where $\text{MAX}_I$ is the maximum possible pixel value of the image, and MSE is the Mean Squared Error [S1, book]:
+$$
+\text{MSE} = \frac{1}{mn} \sum_{i=0}^{m-1} \sum_{j=0}^{n-1} [I(i, j) - K(i, j)]^2
+$$
+Here, $I(i, j)$ is the original image, $K(i, j)$ is the reconstructed image, and $m \times n$ are the image dimensions [S1, book].
+
+**Parameters:**
+*   **Threshold ($\tau$):** The magnitude cutoff for discarding edges. In experiments on NeRF MLPs, a threshold of $\tau = 0.05$ was used [S1, book].
+
+**Pitfalls:**
+*   **No Memory Reduction in Dense Formats:** Pruning edges does not reduce the overall size of the layer weight matrices if they retain their original dimensions. Consequently, training time remains largely unaffected because the hardware still processes the full dense matrix dimensions [S1, book].
+*   **Irregular Memory Access:** The resulting sparsity is unstructured, creating irregular memory access patterns that can hinder efficient implementation on hardware designed for dense operations [S1, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def magnitude_based_edge_pruning(model, threshold):
+    """
+    Prunes edges in a neural network model based on weight magnitude.
+    
+    Args:
+        model: A neural network object with attributes containing weight matrices.
+        threshold (float): The magnitude cutoff. Weights with abs(w) < threshold are pruned.
+        
+    Returns:
+        model: The pruned model with zeroed-out weights.
+    """
+    for layer in model.layers:
+        if hasattr(layer, 'weight'):
+            weights = layer.weight
+            # Create a mask for weights below the threshold
+            # Note: In a real implementation, this might involve sparse tensor formats
+            # or in-place zeroing. Here we assume dense matrix manipulation for clarity.
+            mask = weights.abs() >= threshold
+            
+            # Apply mask: set pruned weights to zero
+            pruned_weights = weights * mask.float()
+            
+            # Update the layer's weights
+            layer.weight = pruned_weights
+            
+    return model
+```
+
+## Subtopics
+
+### Structured Pruning
+Structured pruning removes entire neurons, filters, or layers to maintain regular structures suitable for hardware acceleration [S1, book]. It targets higher-level architectural components, such as compressing fully connected layers from $256 \times 256$ to $64 \times 64$ in NeRF MLPs, theoretically reducing the parameter count to one-sixteenth of the initial size [S1, book]. It is chosen when significant memory reduction and training speed improvements are required, as it avoids the irregular memory patterns of unstructured pruning, though it may lead to greater performance drops if done too aggressively [S1, book].
+
+## Operating characteristics
+*   **Time Complexity:** The pruning step itself is $O(N)$ where $N$ is the number of weights, as it requires a single pass to compare magnitudes against the threshold [S1, book]. However, training time is not reduced because the weight matrices retain their original dimensions [S1, book].
+*   **Memory Complexity:** The memory footprint of the weight storage does not decrease unless a sparse data structure is explicitly implemented; in standard dense formats, memory usage remains unchanged [S1, book].
+*   **Measured Performance:** On a NeRF MLP, a threshold of 0.05 kept 40% of edges, resulting in a test set PSNR of 21.3 (compared to 21.5 for the unpruned model) [S1, book]. A threshold of 0.1 kept 20% of edges, resulting in a PSNR of 20.8 [S1, book].
+*   **Strengths:** Dramatically reduces parameter count; simple to implement; minimal impact on performance for small pruning ratios [S1, book].
+*   **Limitations:** Does not reduce memory usage or training time in dense implementations; irregular memory patterns hinder hardware efficiency [S1, book].
+*   **When to use:** When the goal is to analyze sparsity or reduce parameter count without immediate hardware optimization constraints.
+*   **When not to use:** When memory footprint or inference/training speed is the primary constraint, as structured pruning is more effective for those goals [S1, book].
+
+## Background
+Magnitude-based Edge Pruning originated from research into neural network compression, specifically applied to Neural Radiance Fields (NeRF) [S1, book]. The method was introduced in the paper "Neural Pruning for 3D Scene Reconstruction: Efficient NeRF Acceleration" by T. Ding, D. Xiang, P. Rivas, and L. Dong [S1, book]. The authors identified sparsity in NeRF MLPs, noting that a large percentage of edge weights were very small (less than 0.05) [S1, book]. This technique is part of the broader category of unstructured pruning, which contrasts with structured pruning approaches that remove entire neurons or layers [S1, book].
+
+## Sources
+[S1] Neural Pruning for 3D Scene Reconstruction: Efficient NeRF Acceleration, https://doi.org/10.1007/978-3-032-13056-3_8, fetched 2026-10-27 (book)

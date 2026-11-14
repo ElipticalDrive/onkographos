@@ -1,0 +1,89 @@
+--- v002.md
++++ v003.md
+@@ -7,15 +7,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$; a pre-trained proposal network $N_p(\mathbf{x})$ outputting density $\sigma$; a pre-computed occupancy grid $G$ storing binary occupancy values for voxels; near and far clipping planes $t_{min}, t_{max}$.
+-*   **Outputs:** A set of sample points $\{t_i\}$ along the ray for the final volume rendering stage; a boolean flag indicating if the ray is fully skipped.
++*   **Inputs:** Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$; a pre-trained proposal network $N_p(\mathbf{x})$ outputting density $\sigma$; a pre-computed occupancy grid $G$ storing binary occupancy values for voxels; near and far clipping planes $t_{min}, t_{max}$ [G].
++*   **Outputs:** A set of sample points $\{t_i\}$ along the ray for the final volume rendering stage; a boolean flag indicating if the ray is fully skipped [G].
+ 
+ **Data Structures:**
+-1.  **Occupancy Grid ($G$):** A 3D hash map or uniform grid mapping voxel coordinates to binary values (occupied/unoccupied). The resolution and hash function are implementation-specific [S1].
++1.  **Occupancy Grid ($G$):** A 3D hash map or uniform grid mapping voxel coordinates to binary values (occupied/unoccupied) [G].
+ 2.  **Proposal Network ($N_p$):** A lightweight neural network (e.g., MLP) that takes 3D coordinates $\mathbf{x}$ and outputs a scalar density $\sigma_p(\mathbf{x})$ [S1].
+ 
+ **Numbered Steps:**
+-1.  **Initial Proposal Sampling:** Sample $N_{prop}$ points uniformly or via importance sampling along the ray $[\mathbf{o}, \mathbf{d}]$ within $[t_{min}, t_{max}]$. Evaluate the proposal network $N_p$ at these points to estimate density $\sigma_p$. Compute cumulative transmittance $T(t) = \exp(-\sum_{j < i} \sigma_p(t_j) \Delta t_j)$ [S1].
+-2.  **Ray Pruning via Occupancy Grid:** For rays where the cumulative transmittance remains high (indicating empty space), query the occupancy grid $G$ along the ray segment. If the ray passes through unoccupied voxels for the majority of its path, or if the grid indicates no occupied voxels within the current bounds, the ray is skipped entirely [S1].
+-3.  **Shrinking Near-Far Bounds:** For rays that are not skipped, use the combined transmittance estimates from the proposal network and the occupancy grid to identify the first and last occupied regions. Shrink the effective near-far bounds $[t'_{min}, t'_{max}]$ to exclude empty space identified by the grid [S1].
++1.  **Initial Proposal Sampling:** Sample $N_{prop}$ points uniformly along the ray $[\mathbf{o}, \mathbf{d}]$ within $[t_{min}, t_{max}]$ [G]. Evaluate the proposal network $N_p$ at these points to estimate density $\sigma_p$ [S1]. Compute cumulative transmittance $T(t) = \exp(-\sum_{j < i} \sigma_p(t_j) \Delta t_j)$ [S1].
++2.  **Ray Pruning via Occupancy Grid:** For rays where the cumulative transmittance remains high (indicating empty space), query the occupancy grid $G$ along the ray segment [G]. If the ray passes through unoccupied voxels for the majority of its path, or if the grid indicates no occupied voxels within the current bounds, the ray is skipped entirely [S1].
++3.  **Shrinking Near-Far Bounds:** For rays that are not skipped, use the combined transmittance estimates from the proposal network and the occupancy grid to identify the first and last occupied regions [S1]. Shrink the effective near-far bounds $[t'_{min}, t'_{max}]$ to exclude empty space identified by the grid [S1].
+ 4.  **Final Sampling:** Perform the final volume rendering sampling using $N_{fine}$ samples within the shrunk bounds $[t'_{min}, t'_{max}]$, evaluating the final neural radiance field [S1].
+ 
+@@ -36,36 +36,34 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def combined_sampling(ray_o, ray_d, t_min, t_max, proposal_network, occupancy_grid, N_prop, N_fine, tau_skip):
+     # Step 1: Proposal Sampling
+-    t_prop = linspace(t_min, t_max, N_prop)
+-    sigma_prop = proposal_network(ray_o + ray_d * t_prop)
+-    delta_t = diff(t_prop)
+-    # Prepend zero for first segment
+-    delta_t = concatenate([array([0]), delta_t])
+-    alpha_prop = 1 - exp(-sigma_prop * delta_t)
+-    T_prop = exp(-cumsum(sigma_prop * delta_t))
+-    
+-    # Step 2 & 3: Grid Query and Bounds Shrinking
+-    # Query occupancy grid along the ray
++    t_prop = [t_min + i * (t_max - t_min) / (N_prop - 1) for i in range(N_prop)]
++    sigma_prop = [proposal_network(ray_o + ray_d * t) for t in t_prop]
++    delta_t = [t_prop[i+1] - t_prop[i] for i in range(N_prop - 1)]
++    delta_t = [0.0] + delta_t
++    T_prop = []
++    cum_sum = 0.0
++    for s, d in zip(sigma_prop, delta_t):
++        T_prop.append(math.exp(-cum_sum))
++        cum_sum += s * d
++
++    # Step 2: Ray Pruning via Occupancy Grid
++    # Query occupancy grid along the ray segment [t_min, t_max]
+     occupied_voxels = occupancy_grid.query_ray(ray_o, ray_d, t_min, t_max)
+-    
+     if not occupied_voxels:
+-        # Ray is entirely in empty space
+         return [], True
+-    
+-    # Find first and last occupied voxel boundaries
++
++    # Step 3: Shrinking Near-Far Bounds
++    # Find first and last occupied voxel boundaries along the ray
+     t_first_occ, t_last_occ = occupancy_grid.get_ray_bounds(ray_o, ray_d, occupied_voxels)
+-    
+-    # Shrink bounds
+     t_eff_min = max(t_min, t_first_occ)
+     t_eff_max = min(t_max, t_last_occ)
+-    
+-    # Check if remaining segment is negligible or empty
+     if t_eff_max <= t_eff_min:
+         return [], True
+-        
++
+     # Step 4: Final Sampling
+-    t_fine = linspace(t_eff_min, t_eff_max, N_fine)
+-    # Final rendering would use these t_fine points
++    t_fine = [t_eff_min + i * (t_eff_max - t_eff_min) / (N_fine - 1) for i in range(N_fine)]
+     return t_fine, False
+ ```
+@@ -83,6 +81,6 @@
+ *   **Strengths:** Significant speedup and quality improvement on sparse scenes [S1].
+ *   **Limitations:** Less effective on dense scenes where the occupancy grid cannot skip many rays [S1].
+-*   **When to use:** Scenes with large empty regions.
+-*   **When not to use:** Dense scenes with little empty space.
++*   **When to use:** Scenes with large empty regions [S1].
++*   **When not to use:** Dense scenes with little empty space [S1].
+ 
+ ## Background

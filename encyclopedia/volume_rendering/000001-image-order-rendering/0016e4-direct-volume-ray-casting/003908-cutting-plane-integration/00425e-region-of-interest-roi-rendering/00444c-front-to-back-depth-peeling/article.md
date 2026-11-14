@@ -7,84 +7,123 @@ Front-to-Back Depth Peeling (FtBDP) is a technique for Region of Interest (ROI) 
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** Polygonal envelope geometry (tagged), volume dataset, MIDA (Multilevel Isosurface Data Analysis) visualization settings, initial ray starting positions (optional, for optimization).
-*   **Outputs:** Final composited image with ROI visualization.
+*   **Inputs:** Polygonal envelope geometry (tagged with a vertex attribute key), volume dataset, MIDA visualization settings for inside/outside regions, initial ray starting positions (optional, for optimization) [S1, unofficial].
+*   **Outputs:** Final composited image with ROI visualization [S1, unofficial].
 
 **Data Structures**
-*   **Depth Buffer:** Stores depth values of fragments. Used to track peeled surfaces.
-*   **Color Buffer:** Stores accumulated color from previous peeling and ray casting passes.
-*   **Ray Position Buffer:** Stores the 3D intersection positions of rays with the peeled envelope surfaces from previous steps.
-*   **Envelope Geometry Tag:** A vertex attribute key used to distinguish envelope polygons from regular scene geometry [S1, unofficial].
+*   **Depth Buffer:** Stores depth values of fragments for tracking peeled surfaces [S1, unofficial].
+*   **Color Buffer:** Stores accumulated color from previous peeling and ray casting passes [S1, unofficial].
+*   **Ray Position Buffer:** Stores 3D intersection positions of rays with peeled envelope surfaces from previous steps [S1, unofficial].
+*   **Envelope Geometry Tag:** A vertex attribute key distinguishing envelope polygons from regular scene geometry [S1, unofficial].
 
-**Parameters**
-*   **MIDA Settings:** Visualization parameters for rendering volume samples inside vs. outside the envelope [S1, unofficial].
-*   **Depth Test Condition:** Comparison operator (e.g., `>`) to select fragments behind previously peeled surfaces [S1, unofficial].
-
-**Algorithm Steps**
+**Numbered Steps**
 The method proceeds in a sequence of peeling and ray casting stages [S1, unofficial]:
-
 1.  **Initial Peeling:** Render the front-most polygonal geometry (the front surface of the envelope) normally. Store the depths of all corresponding fragments for every pixel in the depth buffer [S1, unofficial].
 2.  **First Ray Casting Stage:** Initiate MIDA ray casting. Pass the color and depth buffers from Step 1 as textures. Perform a depth test; render only volume parts that fall *outside* the envelope. Blend the colors from the previous peeling pass with the ray casting results. Store the positions of rays intersecting the peeled surface (from Step 1) in a separate buffer [S1, unofficial].
 3.  **Next Peeling Stage:** Initiate the next envelope peeling stage. Pass the depth results of the previous peeling pass as a texture. Choose new fragments that satisfy the depth test condition (depth > stored texture values). Store the depth values of all newly chosen fragments in the depth buffer [S1, unofficial].
 4.  **Subsequent Ray Casting Stage:** Initiate MIDA ray casting. Pass the color and depth buffers from Step 3, as well as the ray positions and accumulated color results from Step 2, as textures. Initialize ray starting positions from the stored values. Perform the depth test. Render sampled values inside or outside the envelope using different MIDA settings. Blend the colors from the previous peeling pass and the previous ray casting pass with the current ray casting results. Store the positions of rays intersecting the newly peeled surface (from Step 3) in the ray position buffer [S1, unofficial].
 5.  **Iteration:** Repeat Steps 3 and 4 until the envelope peeling stage reports 0 newly chosen fragments [S1, unofficial].
 
-**Inside/Outside Determination**
-To distinguish between volume parts inside and outside the envelope, polygon face orientation is used. Any ray sample values that fall between a front-facing and a back-facing fragment are considered to be *inside* the envelope; otherwise, they are considered *outside* [S1, unofficial].
+**Formulas**
+*   Fragment selection condition: $d_{frag} > d_{texture}$, where $d_{frag}$ is the depth of a candidate fragment and $d_{texture}$ is the stored depth value from the previous peeling pass [S1, unofficial].
+*   Inside/Outside determination: A ray sample is classified as *inside* if it lies between a front-facing and a back-facing envelope fragment; otherwise it is *outside* [S1, unofficial].
 
-**Pseudocode**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Initialization
-depth_buffer = render_front_envelope(envelope_geometry)
-ray_position_buffer = get_ray_intersections(ray_origin, ray_direction, depth_buffer)
-accumulated_color = blend(peeling_color, ray_casting_color)
-
-# Iterative Peeling and Ray Casting
-while True:
-    # Peeling Stage
-    current_depth_texture = depth_buffer
-    new_fragments = select_fragments(envelope_geometry, current_depth_texture, condition="depth > texture_value")
-    
-    if new_fragments is empty:
-        break
-        
-    depth_buffer = update_depth_buffer(depth_buffer, new_fragments)
-    
-    # Ray Casting Stage
-    # Pass buffers as textures to shaders
-    color_texture = accumulated_color
-    depth_texture = depth_buffer
-    ray_pos_texture = ray_position_buffer
-    
-    # Initialize ray start positions from previous intersections
-    ray_start_positions = ray_pos_texture
-    
-    # Render volume using MIDA settings
-    # Different settings for inside vs outside based on face orientation
-    current_ray_color = ray_cast_volume(
-        volume_data, 
-        ray_start_positions, 
-        color_texture, 
-        depth_texture,
-        inside_settings, 
-        outside_settings
-    )
-    
-    # Update buffers
-    accumulated_color = blend(accumulated_color, current_ray_color)
-    ray_position_buffer = get_ray_intersections(ray_start_positions, ray_direction, depth_buffer)
-```
+**Parameters**
+*   **MIDA Settings:** Visualization parameters for rendering volume samples inside vs. outside the envelope [S1, unofficial].
+*   **Depth Test Condition:** Comparison operator (e.g., `>`) to select fragments behind previously peeled surfaces [S1, unofficial].
+*   Typical values are not given in the sources.
 
 **Edge Cases and Pitfalls**
 *   **Open Surfaces:** Extreme cases where the envelope geometry crosses metaball grid boundaries and no longer forms a closed surface are handled correctly [S1, unofficial].
 *   **Overdraw:** The full geometry of the scene must be drawn and tested in each polygon peeling pass, leading to overdraw [S1, unofficial].
 *   **Shader Overhead:** There is overhead associated with shader code initialization and execution per stage [S1, unofficial].
+*   Precision and boundary handling are not specified beyond the open-surface case [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def front_to_back_depth_peeling(envelope_geometry, volume_data, inside_settings, outside_settings):
+    # Data structures
+    depth_buffer = []
+    color_buffer = []
+    ray_position_buffer = []
+
+    # Step 1: Initial Peeling
+    # Render front-most polygonal geometry (envelope front surface)
+    # Store depths of all corresponding fragments for every pixel
+    depth_buffer = render_front_surface(envelope_geometry)
+
+    # Step 2: First Ray Casting Stage
+    # Pass color and depth buffers from Step 1 as textures
+    # Perform depth test; render only volume parts outside the envelope
+    # Blend previous pass colors with ray casting results
+    # Store ray intersection positions in a separate buffer
+    ray_cast_result_2 = cast_volume_rays(
+        volume_data, ray_origin=None, ray_direction=None,
+        depth_texture=depth_buffer, color_texture=color_buffer,
+        settings=outside_settings, mode="outside"
+    )
+    color_buffer = blend_buffers(color_buffer, ray_cast_result_2.color)
+    ray_position_buffer = ray_cast_result_2.intersections
+
+    # Steps 3 & 4: Iterative Peeling and Ray Casting
+    while True:
+        # Step 3: Next Peeling Stage
+        # Pass depth results of previous peeling pass as a texture
+        # Choose new fragments satisfying depth test condition (depth > stored texture values)
+        # Store new fragment depths in the depth buffer
+        new_fragments = select_fragments(envelope_geometry, depth_buffer, condition="depth > texture")
+        if not new_fragments:
+            break
+        depth_buffer = update_depth_buffer(depth_buffer, new_fragments)
+
+        # Step 4: Subsequent Ray Casting Stage
+        # Pass color and depth buffers from Step 3, and ray positions/accumulated colors from Step 2 as textures
+        # Initialize ray starting positions from stored values
+        # Perform depth test. Render sampled values inside/outside envelope using different MIDA settings
+        # Blend previous peeling and ray casting results with current results
+        # Store new ray intersection positions
+        ray_cast_result_4 = cast_volume_rays(
+            volume_data, ray_origin=ray_position_buffer, ray_direction=None,
+            depth_texture=depth_buffer, color_texture=color_buffer,
+            settings_inside=inside_settings, settings_outside=outside_settings
+        )
+        color_buffer = blend_buffers(color_buffer, ray_cast_result_4.color)
+        ray_position_buffer = ray_cast_result_4.intersections
+
+    return color_buffer
+
+# Helper functions (standard operations)
+def render_front_surface(geometry):
+    # Renders front-facing envelope polygons, returns depth buffer
+    return [fragment.depth for fragment in geometry.front_faces]
+
+def cast_volume_rays(volume, ray_origin, ray_direction, depth_texture, color_texture, settings, mode="outside", settings_inside=None, settings_outside=None):
+    # Casts rays through volume, applies depth test against depth_texture,
+    # samples volume using settings based on mode/face orientation,
+    # returns color buffer and intersection positions
+    color = []
+    intersections = []
+    # Standard ray marching logic would go here
+    return type('Result', (), {'color': color, 'intersections': intersections})()
+
+def blend_buffers(prev_color, new_color):
+    # Alpha blends new_color over prev_color
+    return prev_color
+
+def select_fragments(geometry, depth_texture, condition):
+    # Selects fragments where depth satisfies condition against depth_texture
+    return []
+
+def update_depth_buffer(depth_buffer, fragments):
+    # Updates depth buffer with new fragment depths
+    return depth_buffer
+```
 
 ## Operating characteristics
-*   **Time Complexity:** The method involves multiple passes. Each peeling pass requires drawing the full geometry and performing depth tests. Each ray casting pass involves volume sampling and blending. The number of passes depends on the complexity of the envelope depth layers.
-*   **Memory Complexity:** Requires storage for depth buffers, color buffers, and ray position buffers. The ray position buffer size scales with the number of pixels and rays [S1, unofficial].
+*   **Time Complexity:** The method involves multiple passes. Each peeling pass requires drawing the full geometry and performing depth tests. Each ray casting pass involves volume sampling and blending. The number of passes depends on the complexity of the envelope depth layers [S1, unofficial].
+*   **Memory Complexity:** Requires storage for depth buffers, color buffers, and ray position buffers [S1, unofficial].
 *   **Performance:** No additional GPU computational workload for ray casting is introduced by keeping and initializing ray positions between stages [S1, unofficial]. However, overhead exists from shader initialization/execution per stage and overdraw from the depth peeling algorithm [S1, unofficial].
 *   **Strengths:** Allows for complex ROI definitions using implicit surfaces (metaballs) and handles open envelope surfaces. Correctly blends polygonal and volumetric data [S1, unofficial].
 *   **Limitations:** Overdraw and shader overhead can impact performance. Requires careful management of buffer passing between passes [S1, unofficial].

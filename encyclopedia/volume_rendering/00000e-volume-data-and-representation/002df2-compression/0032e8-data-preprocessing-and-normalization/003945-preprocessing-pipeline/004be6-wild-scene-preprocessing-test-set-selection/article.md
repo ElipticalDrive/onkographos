@@ -1,0 +1,95 @@
+# Wild Scene Preprocessing & Test Set Selection
+
+Also called: Image filtering for unconstrained datasets, Phototourism Dataset Pre-filtering
+
+## Overview
+A coarse pre-filtering pipeline to remove low-quality images dominated by transient objects from unconstrained photo collections, ensuring robust training and evaluation for view synthesis systems [S1][S2, unofficial]. It differs from sibling pipelines by focusing specifically on semantic quality (NIMA) and transient occlusion metrics (DeepLab) rather than geometric consistency or voxel-based segmentation [S1][S2, unofficial].
+
+## How it works
+**Inputs:** Unconstrained photo collection (images and metadata).
+**Outputs:** Filtered training set and curated test set.
+
+**Data Structures:**
+*   Image: Standard raster format.
+*   NIMA Score: Float [0, 10].
+*   Transient Occupancy: Float [0, 1] (ratio of pixels classified as transient).
+
+**Steps:**
+1.  **Compute NIMA Scores:** Calculate the Neural Image Assessment (NIMA) score for each image [S1][S2, unofficial].
+2.  **Compute Transient Occupancy:** Run a DeepLab v3 model (trained on ADE20k) on each image to identify transient objects (e.g., people, vehicles) [S1][S2, unofficial]. Calculate the ratio of pixels belonging to transient classes to total image pixels [S1][S2, unofficial].
+3.  **Filter Training Images:** Remove images if:
+    *   NIMA score < 3 [S1][S2, unofficial].
+    *   Transient occupancy > 80% [S1][S2, unofficial].
+4.  **Select Test Images:** From the remaining pool, identify candidates where:
+    *   NIMA score is in the top 30% (70th percentile or higher) [S2, unofficial].
+    *   Transient occupancy is in the bottom 25% [S2, unofficial].
+5.  **Manual Verification:** Manually review candidates to minimize transient occluders and ensure well-focused, representative qualities [S1][S2, unofficial].
+
+**Parameters:**
+*   NIMA removal threshold: 3 [S1][S2, unofficial].
+*   Transient occupancy removal threshold: 80% [S1][S2, unofficial].
+*   Test set NIMA percentile: 70th [S2, unofficial].
+*   Test set transient occupancy percentile: Bottom 25% [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_wild_scene(images, nima_model, deeplab_model):
+    training_images = []
+    test_candidates = []
+    
+    for img in images:
+        # Step 1 & 2: Compute metrics
+        nima_score = nima_model.predict(img)
+        segmentation = deeplab_model.predict(img)
+        transient_pixels = count_transient_pixels(segmentation)
+        total_pixels = img.width * img.height
+        transient_ratio = transient_pixels / total_pixels
+        
+        # Step 3: Filter training set
+        if nima_score >= 3.0 and transient_ratio <= 0.8:
+            training_images.append(img)
+            
+            # Step 4: Identify test candidates
+            # Note: Percentiles are computed over the full filtered pool
+            test_candidates.append({
+                'image': img,
+                'nima': nima_score,
+                'transient_ratio': transient_ratio
+            })
+            
+    # Step 4 (continued): Select top candidates by criteria
+    # Sort by NIMA descending, then transient ratio ascending
+    test_candidates.sort(key=lambda x: (-x['nima'], x['transient_ratio']))
+    
+    # Select top 25% by transient occupancy (bottom 25% percentile)
+    # and top 30% by NIMA (70th percentile)
+    # Implementation note: Sources [S2, unofficial] specify these percentiles as criteria.
+    # A precise implementation requires calculating the threshold values from the distribution.
+    nima_threshold = np.percentile([c['nima'] for c in test_candidates], 70)
+    transient_threshold = np.percentile([c['transient_ratio'] for c in test_candidates], 25)
+    
+    final_test_set = []
+    for candidate in test_candidates:
+        if candidate['nima'] >= nima_threshold and candidate['transient_ratio'] <= transient_threshold:
+            final_test_set.append(candidate['image'])
+            
+    # Step 5: Manual verification is required for final test set selection [S1][S2, unofficial]
+    # This step is not automated in the source description.
+    
+    return training_images, final_test_set
+```
+
+## Operating characteristics
+*   **Complexity:** Dominated by inference time of NIMA and DeepLab v3 models. Not given in the sources.
+*   **Performance:** Applied to scenes like Brandenburg Gate (763 images, 564M pixels), Sacré Cœur (830 images, 605M pixels), Trevi Fountain (1,689 images, 1249M pixels), Taj Mahal (811 images, 581M pixels), Prague (2,000 images, 1417M pixels), and Hagia Sophia (606 images, 434M pixels) [S1].
+*   **Strengths:** Removes low-quality and highly occluded images, improving training stability and evaluation fairness [S1][S2, unofficial].
+*   **Limitations:** Relies on the accuracy of pretrained models (NIMA, DeepLab) [S2, unofficial]. Manual verification for test sets is subjective and time-consuming [S1][S2, unofficial].
+
+## Background
+Originated in NeRF in the Wild (NeRF-W) [S1] to address the challenge of evaluating view synthesis on unconstrained photo collections. Extended in UP-NeRF [S2, unofficial] with specific percentile-based criteria for test set selection.
+
+## Sources
+[S1] NeRF in the Wild: Neural Radiance Fields for Unconstrained Photo Collections, https://doi.org/10.1109/cvpr46437.2021.00713, fetched 2026-10-26
+[S2] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)

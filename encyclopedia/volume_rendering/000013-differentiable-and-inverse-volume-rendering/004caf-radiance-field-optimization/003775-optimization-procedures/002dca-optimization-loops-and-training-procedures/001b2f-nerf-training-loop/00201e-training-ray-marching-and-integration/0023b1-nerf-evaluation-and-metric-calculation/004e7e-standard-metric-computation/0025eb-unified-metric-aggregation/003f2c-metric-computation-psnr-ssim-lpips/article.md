@@ -2,104 +2,180 @@
 Also called: Image quality metrics, Novel-View Rendering Metrics, PSNR, SSIM, LPIPS Computation, Photorealistic Metrics, Rendering Quality Metrics
 
 ## Overview
-This method computes standard photorealistic evaluation metrics—Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index (SSIM), and Learned Perceptual Image Patch Similarity (LPIPS)—to quantify the fidelity of synthesized novel views against ground-truth images [S1, S3]. It differs from depth-specific metrics by focusing exclusively on RGB pixel-space and perceptual feature-space comparisons, serving as the final quantitative step in the NeRF evaluation pipeline after ray marching and integration [S1, S3].
+This method computes standard photorealistic evaluation metrics—Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index (SSIM), and Learned Perceptual Image Patch Similarity (LPIPS)—to quantify the visual fidelity of synthesized novel-view images against ground-truth references [S1, S3]. It differs from depth-specific metrics by focusing exclusively on RGB appearance quality, and from perceptual protocols like the split-image evaluation by assuming direct pixel-wise correspondence between rendered and ground-truth images [S1, S4].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Predicted RGB image tensor $I_{pred}$ and Ground Truth RGB image tensor $I_{gt}$. Both are typically in range $[0, 1]$ or $[0, 255]$. For LPIPS, the network version (AlexNet) is required [S1].
-*   **Outputs:** Scalar values for PSNR, SSIM, and LPIPS.
+**Inputs:**
+- Predicted RGB image $I_{pred}$ of shape $[H, W, 3]$ or $[1, 3, H, W]$.
+- Ground-truth RGB image $I_{gt}$ of shape $[H, W, 3]$ or $[1, 3, H, W]$.
+- (Optional) Predicted depth map $D_{pred}$ and ground-truth depth map $D_{gt}$ for depth-specific evaluation [S1].
+
+**Outputs:**
+- Scalar PSNR value (dB).
+- Scalar SSIM value (range [-1, 1], typically reported as mean).
+- Scalar LPIPS value (range [0, 1], lower is better).
 
 **Data Structures:**
-*   Images are stored as tensors with shape $[1, C, H, W]$ (batch size 1, channels, height, width) for metric computation [S2, unofficial].
-*   If the input is $[H, W, C]$, it must be permuted to $[1, C, H, W]$ [S2, unofficial].
+- Images are represented as floating-point tensors. For metric libraries, inputs are often expected in $[0, 1]$ range.
+- LPIPS requires a pre-trained neural network feature extractor (AlexNet, VGG, or SqueezeNet) [S1, S4].
 
 **Steps:**
-1.  **Preprocessing:** Ensure $I_{pred}$ and $I_{gt}$ are in the same coordinate system and range. If $I_{pred}$ is not clamped, clamp it to $[0, 1]$ before LPIPS computation [S2, unofficial].
-2.  **PSNR Calculation:** Compute the Mean Squared Error (MSE) between $I_{pred}$ and $I_{gt}$, then convert to decibels.
-3.  **SSIM Calculation:** Compute the Structural Similarity Index using a sliding window approach over the image pairs.
-4.  **LPIPS Calculation:** Pass $I_{pred}$ and $I_{gt}$ through the AlexNet-based LPIPS network to extract feature maps, then compute the learned perceptual distance [S1].
 
-**Formulas:**
-*   **MSE:**
-    $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^{N} (I_{pred}(i) - I_{gt}(i))^2 $$
-    where $N = H \times W \times C$.
-*   **PSNR:**
-    $$ \text{PSNR} = 10 \cdot \log_{10} \left( \frac{\text{MAX}_I^2}{\text{MSE}} \right) $$
-    where $\text{MAX}_I$ is the maximum possible image value (1.0 for $[0,1]$ range, 255 for $[0,255]$ range).
-*   **SSIM:** Computed via the standard SSIM index formula [S1, S3].
-*   **LPIPS:** Computed as the weighted $L_2$ distance between normalized feature activations from the AlexNet network [S1, S3].
+1. **Preprocessing:**
+   - Ensure $I_{pred}$ and $I_{gt}$ are in the same coordinate system and resolution.
+   - If the input format is $[H, W, C]$, reshape to $[1, C, H, W]$ for batched metric computation [S2, unofficial].
+   - Clamp $I_{pred}$ to the range $[0, 1]$ if necessary, as LPIPS expects normalized inputs [S2, unofficial].
+   - If evaluating depth, align the scale of $D_{pred}$ to $D_{gt}$ using a scaling factor derived from alignment procedures (e.g., similarity transform), then compute the mean absolute difference over valid depth pixels [S1].
+
+2. **PSNR Computation:**
+   - Compute the Mean Squared Error (MSE) between $I_{gt}$ and $I_{pred}$:
+     $$ MSE = \frac{1}{N} \sum_{i=1}^{N} (I_{gt}(i) - I_{pred}(i))^2 $$
+     where $N = H \times W \times C$.
+   - Compute PSNR:
+     $$ PSNR = 10 \cdot \log_{10} \left( \frac{MAX_I^2}{MSE} \right) $$
+     where $MAX_I = 1.0$ for normalized $[0, 1]$ images [S1, S3].
+
+3. **SSIM Computation:**
+   - Compute SSIM using a sliding window approach (typically $11 \times 11$ window) [S3].
+   - For each window, calculate luminance, contrast, and structure comparisons using constants $C_1, C_2$ to stabilize division [S3].
+   - Average the SSIM values over all windows and all channels to produce the final score [S3].
+
+4. **LPIPS Computation:**
+   - Pass $I_{gt}$ and $I_{pred}$ through a pre-trained feature extractor network (AlexNet is specified in [S1, S4]).
+   - Extract feature maps from multiple layers (e.g., relu1, relu2, relu3, relu4, relu5 for AlexNet).
+   - Normalize the feature maps per channel.
+   - Compute the squared Euclidean distance between the normalized feature vectors of $I_{gt}$ and $I_{pred}$ at each layer.
+   - Apply learned weights to each layer's distance and sum them to produce the final LPIPS score [S1, S4].
 
 **Parameters:**
-*   **LPIPS Network:** AlexNet version [S1].
-*   **Image Range:** Typically $[0, 1]$ for neural network outputs, but must match the PSNR $\text{MAX}_I$ definition [S2, unofficial].
+- **LPIPS Network:** AlexNet version is used by default in many NeRF evaluations [S1, S4]. Other variants (VGG, SqueezeNet) exist but require re-weighting [S4].
+- **SSIM Window Size:** Typically $11 \times 11$ [S3].
+- **Depth Alignment:** Requires a scale factor from a prior alignment step (e.g., Procrustes analysis) [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Range Mismatch:** If $I_{pred}$ is not clamped to $[0, 1]$ before LPIPS, results may be invalid [S2, unofficial].
-*   **Tensor Shape:** Metrics libraries often expect $[N, C, H, W]$. Passing $[H, W, C]$ directly will cause errors or incorrect computation [S2, unofficial].
-*   **Background:** Ground truth images may require blending with a background color if they contain alpha channels, though standard novel-view synthesis metrics often assume opaque backgrounds or pre-blended images [S2, unofficial].
+- **Clamping:** LPIPS is sensitive to input range; predicted images must be clamped to $[0, 1]$ before feature extraction [S2, unofficial].
+- **Depth Scale:** Predicted depth from NeRF is often up to a scale ambiguity; failing to align scales before computing depth error leads to meaningless results [S1].
+- **Background:** Ground truth images may have transparent backgrounds; blending with a solid color (e.g., black or white) is required before metric computation to avoid NaNs or incorrect MSE [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
 import torch.nn.functional as F
-from lpips import LPIPS # Assuming standard lpips library implementation
+from torchvision import models
 
-def compute_metrics(I_pred: torch.Tensor, I_gt: torch.Tensor, max_val: float = 1.0) -> dict:
+def compute_psnr(pred: torch.Tensor, gt: torch.Tensor) -> float:
     """
-    Compute PSNR, SSIM, and LPIPS.
-    Inputs: I_pred, I_gt in shape [1, C, H, W] or [H, W, C].
+    Compute PSNR between predicted and ground truth images.
+    Inputs: [1, C, H, W] or [H, W, C], range [0, 1].
     """
-    # Ensure consistent shape [1, C, H, W]
-    if I_pred.dim() == 3:
-        I_pred = I_pred.permute(2, 0, 1).unsqueeze(0)
-        I_gt = I_gt.permute(2, 0, 1).unsqueeze(0)
-    
-    # Clamp predictions for LPIPS [S2, unofficial]
-    I_pred_clamped = torch.clamp(I_pred, 0.0, 1.0)
-    
-    # 1. PSNR
-    mse = F.mse_loss(I_pred, I_gt)
-    psnr = 10 * torch.log10((max_val ** 2) / mse)
-    
-    # 2. SSIM (using a standard implementation, e.g., from skimage or pytorch_msssim)
-    # Note: SSIM formula involves local windows, mean, var, and covariance [S1, S3]
-    ssim = compute_ssim(I_pred, I_gt) # [G] Standard SSIM implementation
-    
-    # 3. LPIPS
-    # Uses AlexNet network version [S1]
-    loss_fn = LPIPS(net='alex')
-    lpips_val = loss_fn(I_pred_clamped, I_gt).item()
-    
-    return {
-        "psnr": psnr.item(),
-        "ssim": ssim.item(),
-        "lpips": lpips_val
-    }
+    # Ensure same shape and channel order
+    if pred.dim() == 3:
+        pred = pred.permute(2, 0, 1).unsqueeze(0)
+    if gt.dim() == 3:
+        gt = gt.permute(2, 0, 1).unsqueeze(0)
+        
+    mse = F.mse_loss(pred, gt)
+    if mse == 0:
+        return float('inf')
+    psnr = 10 * torch.log10(1.0 / mse)
+    return psnr.item()
 
-def compute_ssim(I_pred: torch.Tensor, I_gt: torch.Tensor) -> float:
+def compute_ssim(pred: torch.Tensor, gt: torch.Tensor, window_size: int = 11) -> float:
     """
-    Placeholder for standard SSIM computation.
-    Computes structural similarity using sliding windows [S1, S3].
+    Compute SSIM between predicted and ground truth images.
+    Inputs: [1, C, H, W], range [0, 1].
     """
-    # [G] Implementation details for SSIM involve calculating local means, variances,
-    # and covariances between I_pred and I_gt, then applying the SSIM formula.
-    # This is a standard computer vision operation.
-    pass
+    # SSIM is typically computed per channel and averaged
+    ssim_val = 0.0
+    channels = pred.shape[1]
+    for c in range(channels):
+        # Extract single channel
+        p = pred[:, c:c+1, :, :]
+        g = gt[:, c:c+1, :, :]
+        # Use torch.nn.functional or a library like skimage
+        # Here we assume a helper function that computes SSIM for a single channel
+        ssim_val += single_channel_ssim(p, g, window_size)
+    return ssim_val / channels
+
+def single_channel_ssim(pred: torch.Tensor, gt: torch.Tensor, window_size: int) -> float:
+    """
+    Simplified SSIM for a single channel tensor [1, 1, H, W].
+    """
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    
+    mu_pred = F.avg_pool2d(pred, window_size, stride=1, padding=window_size//2)
+    mu_gt = F.avg_pool2d(gt, window_size, stride=1, padding=window_size//2)
+    
+    mu_pred_sq = mu_pred.pow(2)
+    mu_gt_sq = mu_gt.pow(2)
+    mu_pred_gt = mu_pred * mu_gt
+    
+    sigma_pred_sq = F.avg_pool2d(pred.pow(2), window_size, stride=1, padding=window_size//2) - mu_pred_sq
+    sigma_gt_sq = F.avg_pool2d(gt.pow(2), window_size, stride=1, padding=window_size//2) - mu_gt_sq
+    sigma_pred_gt = F.avg_pool2d(pred * gt, window_size, stride=1, padding=window_size//2) - mu_pred_gt
+    
+    ssim_map = ((2 * mu_pred_gt + C1) * (2 * sigma_pred_gt + C2)) / \
+               ((mu_pred_sq + mu_gt_sq + C1) * (sigma_pred_sq + sigma_gt_sq + C2))
+               
+    return ssim_map.mean().item()
+
+def compute_lpips(pred: torch.Tensor, gt: torch.Tensor, net_type: str = 'alex') -> float:
+    """
+    Compute LPIPS using AlexNet.
+    Inputs: [1, C, H, W], range [0, 1].
+    """
+    # Load pre-trained LPIPS network (AlexNet version)
+    # Note: In practice, use lpips.LPIPS(net='alex')
+    # Here we simulate the feature extraction and distance calculation
+    net = get_lpips_network(net_type)
+    
+    # Clamp inputs to [0, 1]
+    pred = torch.clamp(pred, 0.0, 1.0)
+    gt = torch.clamp(gt, 0.0, 1.0)
+    
+    # Compute LPIPS distance
+    # The network returns a tensor of distances
+    loss = net(pred, gt)
+    return loss.mean().item()
+
+def get_lpips_network(net_type: str):
+    """
+    Returns a pre-trained LPIPS network.
+    This is a placeholder for the actual lpips library initialization.
+    """
+    # In real implementation: import lpips; return lpips.LPIPS(net=net_type)
+    # For self-contained pseudocode, we assume a hypothetical class
+    class DummyLPIPS:
+        def __init__(self, net):
+            self.net = net
+        def __call__(self, x, y):
+            # Simulate feature extraction and distance
+            # Real implementation uses specific layers and learned weights
+            return torch.tensor(0.0) # Placeholder
+    return DummyLPIPS(net_type)
 ```
 
+## Subtopics
+
+### Split-image Evaluation Protocol
+An evaluation protocol for appearance-aware NeRF models (e.g., NeRF-A, NeRF-W) that optimizes the appearance embedding on a subset of pixels to adapt scene appearance without directly optimizing held-out pixels, preventing information leakage while measuring perceptual similarity [S4]. It splits a ground-truth test image into left and right halves, optimizes the appearance embedding using only the left half pixels, renders the right half using the optimized embedding, and calculates perceptual metrics on the rendered right half against the ground truth right half [S4]. Unlike the NRW baseline which encodes the entirety of a held-out image with an appearance encoder, this scheme isolates geometry from appearance and limits information leakage [S4]. A pitfall is that setting the appearance embedding to a vector of zeros or to the mean of optimized embeddings results in plausible but structurally accurate renderings that fail to match ground truth appearance, causing perceptual metrics to fail [S4].
+
 ## Operating characteristics
-*   **Time Complexity:** PSNR and SSIM are $O(N)$ where $N$ is the number of pixels. LPIPS is $O(N \cdot C \cdot K^2)$ where $K$ is the kernel size of the AlexNet convolutions, dominated by the forward pass of the CNN.
-*   **Memory Complexity:** PSNR/SSIM are $O(1)$ auxiliary memory. LPIPS requires storing intermediate feature maps from the AlexNet network, which is significant but constant per image resolution.
-*   **Strengths:** PSNR and SSIM are fast and standard. LPIPS correlates better with human perception than PSNR/SSIM [S1, S3].
-*   **Limitations:** LPIPS is computationally expensive and requires a pre-trained network. PSNR is sensitive to pixel-wise errors and does not correlate well with perceptual quality [S1, S3].
-*   **When to use:** Use for final evaluation of novel-view synthesis quality. Do not use for training loss if perceptual quality is the primary goal (use LPIPS or SSIM as loss instead).
+- **Time Complexity:** PSNR and SSIM are $O(N)$ where $N$ is the number of pixels. LPIPS is $O(N \cdot L)$ where $L$ is the number of layers in the feature extractor, dominated by the forward pass of the neural network.
+- **Memory Complexity:** PSNR and SSIM require $O(1)$ additional memory relative to image size. LPIPS requires memory proportional to the feature map sizes of the pre-trained network, which is constant relative to input resolution but significant for high-resolution images.
+- **Performance:** PSNR and SSIM are fast and deterministic. LPIPS is slower due to GPU inference but correlates better with human perception [S1, S3].
+- **Strengths:** PSNR and SSIM are standard, easy to compute, and provide a baseline for pixel-level accuracy. LPIPS captures perceptual quality that PSNR/SSIM miss, such as texture fidelity and structural coherence [S1, S3].
+- **Limitations:** PSNR and SSIM do not correlate well with human perception for complex textures. LPIPS is dependent on the choice of network (AlexNet, VGG, etc.) and may not generalize across all types of artifacts [S1, S4]. Depth metrics require careful scale alignment, which is non-trivial for uncalibrated scenes [S1].
 
 ## Background
-PSNR and SSIM are standard image quality metrics in computer vision [S1, S3]. LPIPS was introduced to address the poor correlation of PSNR/SSIM with human perception [S1, S3]. In the context of NeRF and radiance fields, these metrics are used to evaluate the quality of rendered novel views [S1, S3]. The AlexNet version of LPIPS is commonly used in this domain [S1].
+The use of PSNR, SSIM, and LPIPS for evaluating novel-view synthesis in NeRF has become standard practice in the community [S1, S3]. PSNR and SSIM were originally developed for image compression and restoration [S3]. LPIPS was introduced by Zhang et al. [61] as a learned perceptual metric. In the context of NeRF, these metrics are used to compare synthesized views at testing viewpoints with ground truth [S3]. The split-image evaluation protocol was introduced by Mildenhall et al. [S4] to address the issue of appearance leakage in unconstrained photo collections, where naive optimization of appearance embeddings could lead to overfitting to held-out views.
 
 ## Sources
 [S1] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
 [S2] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
 [S3] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30
+[S4] NeRF in the Wild: Neural Radiance Fields for Unconstrained Photo Collections, https://doi.org/10.1109/cvpr46437.2021.00713, fetched 2026-10-26

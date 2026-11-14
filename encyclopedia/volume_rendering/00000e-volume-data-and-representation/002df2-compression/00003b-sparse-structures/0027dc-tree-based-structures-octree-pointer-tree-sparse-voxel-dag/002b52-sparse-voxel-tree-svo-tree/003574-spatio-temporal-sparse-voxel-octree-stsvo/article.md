@@ -6,22 +6,22 @@ The Spatio-Temporal Sparse Voxel Octree (STSVO) is a hierarchical data structure
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A sequence of time-variable 3D voxelized scenes. The source assumes the scene geometry is defined on a grid where dimensions are powers of two.
+*   **Input:** A sequence of time-variable 3D voxelized scenes. The method assumes the scene geometry is defined on a grid where dimensions are powers of two [S1].
 *   **Output:** A single binary-encoded STSVO structure representing the 4D spatio-temporal volume.
 
 **Data Structures and Layout:**
-The STSVO structure is defined using Backus-Naur Form (BNF). The key difference from the standard SVO is the expansion of the child node mask (CHNM) and the pointer array (PTS) to handle the 4th dimension (time) [S1].
+The STSVO structure is defined using Backus-Naur Form (BNF) [S1]. The key difference from the standard SVO is the expansion of the child node mask (CHNM) and the pointer array (PTS) to handle the 4th dimension (time) [S1].
 
 *   **SVO Layout (Reference):**
-    *   `CHNM ::= (8)<HT>` (8 bits for 8 spatial children)
-    *   `PTS ::= (1)*(8)<PT>` (Up to 8 pointers)
+    *   `CHNM ::= (8)<HT>` [S1]
+    *   `PTS ::= (1)*(8)<PT>` [S1]
 *   **STSVO Layout:**
     *   `STSVO ::= (n)<NODE>`
     *   `NODE ::= <INODE> | <LNODE>`
     *   `INODE ::= <CHNM>(p)<BIT><PTS>`
     *   `LNODE ::= <CHNM>(q)<BIT>`
-    *   `CHNM ::= (16)<HT>` (16 bits: 8 spatial children × 2 time states or similar 4D expansion) [S1]
-    *   `PTS ::= (1)*(16)<PT>` (Up to 16 pointers) [S1]
+    *   `CHNM ::= (16)<HT>` [S1]
+    *   `PTS ::= (1)*(16)<PT>` [S1]
     *   `PT ::= (r)<BIT>`
     *   `HT ::= <BIT>`
     *   `BIT ::= "0" | "1"`
@@ -32,143 +32,71 @@ The STSVO structure is defined using Backus-Naur Form (BNF). The key difference 
 *   The number of time frames must equal the geometric dimension $N$ [S1].
 
 **Algorithm Steps:**
-1.  **Check Frame Count:** Let $T$ be the number of time frames in the input scene.
-2.  **Handle $T > N$:**
-    *   If $T > N$, divide the time frames into sets of cardinality $N$.
-    *   The last set may have cardinality $\le N$ [S1].
-    *   Each set is compressed independently into a separate STSVO [S1].
-3.  **Handle $T < N$:**
-    *   If $T < N$, fill in the missing time frames with homogeneously passive voxels.
-    *   Each completed frame contributes $N^3$ voxels to the total grid [S1].
-    *   The completed set is compressed into a single STSVO [S1].
-4.  **Alternative Mitigation (Adjust Resolution):**
-    *   Alternatively, adjust the geometric dimension $N$ to $N_1 = 2^{m_1}$ where $m_1 > m$.
-    *   This increases the number of coded time frames to $\le N_1$ [S1].
-    *   Increasing $m$ by 1 increases the number of voxels of each time frame by $\Delta V = 7 \times N^3$ [S1].
-5.  **Encoding:**
-    *   Encode the resulting 4D volume using the STSVO BNF layout. The structure treats the time dimension as an additional spatial dimension, effectively creating a 4D octree (or similar hierarchy) where internal nodes have 16 children instead of 8 [S1].
+1.  **Check Frame Count:** Let $T$ be the number of time frames in the input scene [S1].
+2.  **Handle $T > N$:** If $T > N$, divide the time frames into sets of cardinality $N$ [S1]. The last set may have cardinality $\le N$ [S1]. Each set is compressed independently into a separate STSVO [S1].
+3.  **Handle $T < N$:** If $T < N$, fill in the missing time frames with homogeneously passive voxels [S1]. Each completed frame contributes $N^3$ voxels to the total grid [S1]. The completed set is compressed into a single STSVO [S1].
+4.  **Alternative Mitigation (Adjust Resolution):** Alternatively, adjust the geometric dimension $N$ to $N_1 = 2^{m_1}$ where $m_1 > m$ [S1]. This increases the number of coded time frames to $\le N_1$ [S1]. Increasing $m$ by 1 increases the number of voxels of each time frame by $\Delta V = 7 \times N^3$ [S1].
+5.  **Encoding:** Encode the resulting 4D volume using the STSVO BNF layout [S1]. The structure treats the time dimension as an additional spatial dimension, effectively creating a 4D hierarchy where internal nodes have 16 children instead of 8 [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class INODE:
+    def __init__(self, chnm, pts):
+        self.chnm = chnm
+        self.pts = pts
+
+class LNODE:
+    def __init__(self, chnm, bit):
+        self.chnm = chnm
+        self.bit = bit
+
 def compress_to_stsvo(frames, N):
-    """
-    Compress a list of 3D voxel frames into a single STSVO structure.
-    
-    Args:
-        frames: List of 3D voxel grids (numpy arrays or similar).
-        N: Base geometric dimension (N = 2^m).
-        
-    Returns:
-        Binary representation of the STSVO.
-    """
+    """Compress time-variable 3D voxel frames into STSVO structure."""
     T = len(frames)
-    
-    # Step 1: Check if T equals N. If not, pad or split.
     if T > N:
-        # Split into chunks of size N
-        chunks = []
-        for i in range(0, T, N):
-            chunk = frames[i : i + N]
-            chunks.append(chunk)
-        
-        # Compress each chunk into a separate STSVO
-        # Note: The source implies multiple STSVOs if T > N
-        stsvos = [compress_chunk(chunk, N) for chunk in chunks]
-        return stsvos # Or a container of STSVOs
-        
+        chunks = [frames[i:i+N] for i in range(0, T, N)]
+        return [compress_chunk(chunk, N) for chunk in chunks]
     elif T < N:
-        # Pad with passive voxels
-        padded_frames = list(frames)
-        # Calculate size of one frame
-        frame_size = N * N * N
-        # Number of missing frames
-        missing = N - T
-        
-        # Create passive frame (all zeros/passive)
-        passive_frame = create_passive_frame(N)
-        
-        for _ in range(missing):
-            padded_frames.append(passive_frame)
-            
-        return compress_chunk(padded_frames, N)
-        
+        padded = list(frames)
+        passive_frame = [[[0 for _ in range(N)] for _ in range(N)] for _ in range(N)]
+        while len(padded) < N:
+            padded.append(passive_frame)
+        return compress_chunk(padded, N)
     else:
-        # T == N, direct compression
         return compress_chunk(frames, N)
 
 def compress_chunk(chunk_frames, N):
-    """
-    Compress a single chunk of N frames into an STSVO.
-    Assumes chunk_frames has length N.
-    """
-    # Construct the 4D volume
-    # Dimensions: N x N x N x N
-    volume_4d = np.zeros((N, N, N, N), dtype=bool)
-    
-    for t_idx, frame in enumerate(chunk_frames):
-        # Assuming frame is N x N x N
-        volume_4d[:, :, :, t_idx] = frame
-        
-    # Encode using STSVO BNF
-    # The root node covers the entire 4D space
-    # Internal nodes have 16 children (CHNM length 16)
-    # Leaf nodes store the voxel value
-    
-    root = encode_node(volume_4d, depth=0, max_depth=4*m) # 4 dimensions, m levels each
-    return serialize_stsvo(root)
+    """Compress a single chunk of N frames into an STSVO string."""
+    m = int(N.bit_length() - 1)
+    # Construct 4D volume: [time][z][y][x]
+    volume_4d = [[[chunk_frames[t][z][y][x] for x in range(N)] for y in range(N)] for z in range(N)] for t in range(N)]
+    return serialize_stsvo(encode_node(volume_4d, 0, 4 * m))
 
 def encode_node(volume, depth, max_depth):
-    """
-    Recursively encode the 4D volume into STSVO nodes.
-    """
-    # Check if homogeneous (all passive or all active)
-    if is_homogeneous(volume):
-        return LNODE(CHNM="0"*16, BIT=volume[0,0,0,0])
-    
-    # Split into 16 sub-cubes
-    # In 4D, splitting a cube of size S into 2x2x2x2 creates 16 children
-    # Each child is a sub-volume of size S/2
-    
+    # Check homogeneity
+    first = volume[0][0][0][0]
+    if all(volume[t][z][y][x] == first for t in range(len(volume)) for z in range(len(volume[0])) for y in range(len(volume[0][0])) for x in range(len(volume[0][0][0]))):
+        return LNODE('0' * 16, str(first))
+    if depth >= max_depth:
+        return LNODE('0' * 16, str(first))
+
+    half = len(volume) // 2
     children = []
     for i in range(2):
         for j in range(2):
             for k in range(2):
                 for l in range(2):
-                    # Extract sub-volume
-                    # Indices depend on current depth and size
-                    # This is a simplified representation
-                    sub_vol = extract_sub_volume(volume, i, j, k, l)
-                    children.append(encode_node(sub_vol, depth + 1, max_depth))
-    
-    # Create INODE
-    # CHNM indicates which children are present (non-leaf)
-    # PTS contains pointers to the children
-    chnm = ""
-    pts = []
-    for child in children:
-        if child is not None:
-            chnm += "1"
-            pts.append(child)
-        else:
-            chnm += "0"
-            
-    return INODE(CHNM=chnm, BIT="1", PTS=pts)
+                    sub = [[[volume[t][z][y][x] for x in range(l*half, (l+1)*half)] for y in range(k*half, (k+1)*half)] for z in range(j*half, (j+1)*half)] for t in range(i*half, (i+1)*half)]
+                    children.append(encode_node(sub, depth + 1, max_depth))
 
-def create_passive_frame(N):
-    return np.zeros((N, N, N), dtype=bool)
-
-def is_homogeneous(volume):
-    return np.all(volume == volume[0,0,0,0])
-
-def extract_sub_volume(volume, i, j, k, l):
-    # Placeholder for actual slicing logic
-    # In 4D, this splits the array along 4 axes
-    pass
+    chnm = ''.join('1' if isinstance(c, INODE) else '0' for c in children)
+    pts = [c for c in children if isinstance(c, INODE)]
+    return INODE(chnm, pts)
 
 def serialize_stsvo(root):
-    # Serialize according to BNF: STSVO ::= (n)<NODE>
+    # BNF: STSVO ::= (n)<NODE>
     # NODE ::= <INODE>|<LNODE>
     # INODE ::= <CHNM>(p)<BIT><PTS>
     # LNODE ::= <CHNM>(q)<BIT>
@@ -177,19 +105,27 @@ def serialize_stsvo(root):
     # PT ::= (r)<BIT>
     # HT ::= <BIT>
     # BIT ::= "0" | "1"
-    pass
+    # Note: The exact bit-length (r) for pointers is not specified in the sources [G].
+    if isinstance(root, LNODE):
+        return root.chnm + root.bit
+    elif isinstance(root, INODE):
+        node_str = root.chnm + '1'
+        for child in root.pts:
+            node_str += serialize_stsvo(child)
+        return node_str
+    return ''
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Dimensional Constraint:** The requirement for $N^4$ dimensions and equal time frames/geometric dimension is a limiting factor [S1].
-*   **Padding Impact:** Mitigation involves padding with passive voxels or adjusting resolution, which adds passive voxels. However, homogeneous passive subspaces are represented extremely economically by SVO, so the size impact is not significant [S1].
+*   **Padding Impact:** Mitigation involves padding with passive voxels or adjusting resolution, which adds passive voxels [S1]. However, homogeneous passive subspaces are represented extremely economically by SVO, so the size impact is not significant [S1].
 *   **Resolution Adjustment Cost:** Increasing $m$ by 1 increases the number of voxels of each time frame by $7 \times N^3$ [S1].
 
 ## Operating characteristics
 *   **Compactness:** STSVO achieves 1.73 to 2.08 times more compact binary representation compared to storing each time frame as a separate SVO [S1].
 *   **Memory:** The structure uses a single hierarchical tree for the 4D volume. The expansion of CHNM to 16 bits and PTS to 16 pointers increases the per-node overhead compared to standard SVO, but this is offset by the shared hierarchy across time [S1].
 *   **Performance:** Not given in the sources.
-*   **Strengths:** More compact than separate SVOs; handles time-variable scenes as a single static 4D structure.
+*   **Strengths:** More compact than separate SVOs; handles time-variable scenes as a single static 4D structure [S1].
 *   **Limitations:** Requires scene dimensions to be $N^4$ and number of time frames to equal $N$. Mitigation strategies (padding/resolution adjustment) can introduce significant numbers of passive voxels, though their encoding is economical [S1].
 
 ## Background

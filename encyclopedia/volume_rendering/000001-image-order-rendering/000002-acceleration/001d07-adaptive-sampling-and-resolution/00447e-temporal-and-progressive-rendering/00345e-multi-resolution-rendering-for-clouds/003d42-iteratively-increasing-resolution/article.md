@@ -3,132 +3,131 @@
 Also called: Multi-resolution rendering strategy
 
 ## Overview
-Iteratively Increasing Resolution is a rendering strategy that reduces computation time by starting at a low resolution and gradually increasing it to the target final resolution [S1, unofficial]. It solves the problem of expensive high-resolution ray-surface intersection tests by deferring them until necessary, using cone-tracing to guarantee that no surface points are skipped during the resolution transition [S1, unofficial]. Unlike standard adaptive sampling which varies sample counts per pixel, this method varies the spatial resolution of the entire rendering pass, building on the acceleration principles of [Multi-Resolution Rendering for Clouds](7260-multi-resolution-rendering-for-clouds.md) but applied specifically to sphere tracing and SDF rendering.
+Iteratively Increasing Resolution is a rendering strategy that reduces computation time by starting at a low resolution and gradually increasing it to the target final resolution [S1, unofficial]. It solves the problem of expensive high-resolution ray-surface intersection tests by deferring them until necessary, using cone-tracing to guarantee that no surface points are skipped during the resolution transition [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A signed distance function (SDF) or SDF lower estimate (SDFE) $f$.
-- Camera parameters (position, direction, resolution).
-- Target final resolution $(W_{final}, H_{final})$.
-- Initial low resolution $(W_{start}, H_{start})$.
+- A signed distance function (SDF) or SDF lower estimate (SDFE) $f$ [S1, unofficial].
+- Camera parameters (position, direction, resolution) [G].
+- Target final resolution $(W_{final}, H_{final})$ [G].
+- Initial low resolution $(W_{start}, H_{start})$ [G].
 
 **Outputs:**
-- Final rendered image at target resolution.
-- State textures storing intermediate rendering data (e.g., distance traveled).
+- Final rendered image at target resolution [G].
+- State textures storing intermediate rendering data (e.g., distance traveled) [S1, unofficial].
 
 **Data Structures:**
-- **Ping-Pong Textures:** Two screen-sized textures are used to store the state for each pixel, such as the distance traveled along the ray ($t$) or accumulated color. These are swapped (ping-ponged) between passes.
-- **State Field:** Each pixel stores the current ray parameter $t$ (distance from origin) where the ray currently stands.
+- **Ping-Pong Textures:** Two screen-sized textures are used to store the state for each pixel, such as the distance traveled along the ray ($t$) or accumulated color [S1, unofficial]. These are swapped (ping-ponged) between passes [S1, unofficial].
+- **State Field:** Each pixel stores the current ray parameter $t$ (distance from origin) where the ray currently stands [S1, unofficial].
 
 **Algorithm Steps:**
-1. **Initialization:** Start rendering at the lowest resolution $(W_{start}, H_{start})$. Initialize state textures with $t=0$ (or the ray origin).
-2. **Cone-Tracing Pass:** For each pixel, perform sphere tracing using cone-tracing logic. The ray is advanced by a step size $d$ determined by the SDFE value, but bounded by the cone termination condition to ensure no surface is missed when resolution increases.
-3. **Termination Check:** A pixel is considered complete if it intersects the surface (SDF value $\approx 0$) or exceeds a maximum distance. Incomplete pixels retain their current $t$ in the state texture.
-4. **Resolution Increase:** If the target resolution is not reached, increase the resolution (e.g., double width and height). The starting position for each new pixel in the higher resolution is always the closest pixel in the previous resolution. This ensures continuity.
-5. **Incremental Continuation:** In the next frame (or pass), computation continues from the stored $t$ values. If the camera or scene has not changed, the state is preserved. If changed, the process may restart or adjust.
-6. **Repeat:** Steps 2-5 are repeated until the target resolution is achieved.
+1. **Initialization:** Start rendering at the lowest resolution $(W_{start}, H_{start})$ [S1, unofficial]. Initialize state textures with $t=0$ (or the ray origin) [G].
+2. **Cone-Tracing Pass:** For each pixel, perform sphere tracing using cone-tracing logic [S1, unofficial]. The ray is advanced by a step size determined by the modified SDFE, bounded by the cone termination condition to ensure no surface is missed when resolution increases [S1, unofficial].
+3. **Termination Check:** A pixel is considered complete if it intersects the surface (SDF value $\le 0$) or exceeds a maximum distance [S1, unofficial]. Incomplete pixels retain their current $t$ in the state texture [S1, unofficial].
+4. **Resolution Increase:** If the target resolution is not reached, increase the resolution (e.g., double width and height) [S1, unofficial]. The starting position for each new pixel in the higher resolution is always the closest pixel in the previous resolution [S1, unofficial].
+5. **Incremental Continuation:** In the next frame (or pass), computation continues from the stored $t$ values [S1, unofficial]. If the camera or scene has not changed, the state is preserved [S1, unofficial].
+6. **Repeat:** Steps 2-5 are repeated until the target resolution is achieved [S1, unofficial].
 
 **Cone-Tracing Formula:**
 To support resolution increase, cone-tracing ensures that no surface point lies inside the cone defined by the pixel's footprint. The terminating condition for the pixel cone, assuming rectangular pixels, is [S1, unofficial]:
 
-$$ f(p + tv) < \frac{p^2}{\text{width}^2 \text{height}^2} $$
+$$ f(o + tv) < \frac{p^2}{\text{width}^2 \text{height}^2} $$
 
 where:
-- $p$ is the pixel size (assumed square for simplicity, or derived from aspect ratio).
+- $o$ is the ray origin (pixel center), $v$ is the ray direction, and $t$ is the distance along the ray.
+- $p$ is the pixel size in world units (or $1$ for normalized coordinates).
 - $\text{width} \cdot \text{height}$ is the total number of pixels in the current resolution.
-- $p$ is typically $1/\text{width}$ or $1/\text{height}$ depending on normalization. The source uses $p^2 / (\text{width}^2 \text{height}^2)$ which simplifies to $(1/\text{width}\cdot\text{height})^2$ if $p=1$. Let $\alpha = \frac{p^2}{\text{width}^2 \text{height}^2}$.
+- Let $\alpha = \frac{p^2}{\text{width}^2 \text{height}^2}$.
 
 **Modified SDFE for Safe Travel:**
 The condition above can be incorporated into the SDFE to avoid special termination checks. Let $\alpha = \frac{p^2}{\text{width}^2 \text{height}^2}$. The modified one-dimensional SDFE $F(t)$ is [S1, unofficial]:
 
-$$ F(t) = \frac{f(p + tv) - \alpha t}{1 + \alpha} $$
+$$ F(t) = \frac{f(o + tv) - \alpha t}{1 + \alpha} $$
 
-This transformation offsets the surface by a value that increases with distance. The Lipschitz constant of $F$ is bounded by $1 + \alpha$, ensuring stability. This allows the algorithm to approximate the safe travel distance without needing a special termination condition for the cone.
+This transformation offsets the surface by a value that increases with distance. The Lipschitz constant of $F$ is bounded by $1 + \alpha$, ensuring stability [S1, unofficial]. This allows the algorithm to approximate the safe travel distance without needing a special termination condition for the cone [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def iteratively_increasing_resolution(sdf, camera, start_res, target_res, max_passes):
+def iteratively_increasing_resolution(sdf, camera, start_res, target_res, max_dist):
     """
     Renders a scene using iteratively increasing resolution with cone-tracing.
+    sdf: callable returning SDF value at (x,y,z)
+    camera: callable get_ray(x, y) -> (origin, direction)
+    start_res: (w, h)
+    target_res: (w, h)
+    max_dist: maximum ray length to prevent infinite loops
     """
     current_w, current_h = start_res
-    # Initialize state textures: store distance t for each pixel
-    state_tex = create_texture(current_w, current_h, init_value=0.0)
-    next_state_tex = create_texture(current_w, current_h)
+    # Initialize state textures: 2D arrays storing distance t for each pixel
+    state_tex = [[0.0] * current_w for _ in range(current_h)]
+    next_state_tex = [[0.0] * current_w for _ in range(current_h)]
     
-    for pass_idx in range(max_passes):
+    while current_w <= target_res[0] and current_h <= target_res[1]:
         # Calculate alpha for current resolution
-        # p is pixel size. Assuming normalized coordinates where pixel size is 1/resolution
-        # alpha = (1/current_w)^2 / (current_w^2 * current_h^2) ? 
-        # Source says: alpha = p^2 / (width^2 * height^2). 
-        # If p is pixel width in world units, and image is normalized, p ~ 1/w.
-        # Let's assume p=1 for normalized pixel index, then alpha = 1/(w^2 h^2).
-        # However, standard cone tracing uses pixel footprint. 
-        # We follow the source formula exactly.
-        alpha = 1.0 / (current_w * current_w * current_h * current_h)
+        p = 1.0  # Normalized pixel size
+        alpha = (p ** 2) / (current_w ** 2 * current_h ** 2)
         
-        # Render pass
         for y in range(current_h):
             for x in range(current_w):
-                # Get current ray t from state
-                t = state_tex[y, x]
+                t = state_tex[y][x]
                 
-                # If pixel is already done (e.g., t > max_dist or surface hit), skip
-                if is_complete(state_tex[y, x]):
-                    next_state_tex[y, x] = t
+                # Skip if already completed or exceeded max distance
+                if t >= max_dist:
+                    next_state_tex[y][x] = t
                     continue
                 
-                # Ray origin and direction for this pixel
                 ray_o, ray_d = camera.get_ray(x, y)
-                
-                # Perform sphere tracing with modified SDFE
-                # F(t) = (f(ray_o + t*ray_d) - alpha*t) / (1 + alpha)
-                # We step until F(t) <= 0 or max iterations
                 safe_t = t
-                for step in range(max_steps_per_pixel):
-                    pos = ray_o + safe_t * ray_d
+                
+                while safe_t < max_dist:
+                    pos = (ray_o[0] + safe_t * ray_d[0],
+                           ray_o[1] + safe_t * ray_d[1],
+                           ray_o[2] + safe_t * ray_d[2])
                     f_val = sdf(pos)
                     
-                    # Modified SDFE value
+                    # Modified SDFE value for cone-tracing step size
                     f_mod = (f_val - alpha * safe_t) / (1.0 + alpha)
                     
                     if f_mod <= 0:
                         # Surface hit or cone boundary reached
                         break
                     
-                    # Step size is f_val (standard sphere tracing)
-                    # But we must ensure we don't overstep the cone
-                    # The modified SDFE handles the cone constraint implicitly
-                    step_size = f_val
+                    # Step size is the safe travel distance approximated by F(t)
+                    step_size = f_mod
                     safe_t += step_size
                     
-                    # Check for max distance or convergence
-                    if step_size < epsilon:
+                    # Prevent infinite loops on flat/parallel surfaces
+                    if step_size < 1e-6:
                         break
                 
-                next_state_tex[y, x] = safe_t
+                next_state_tex[y][x] = safe_t
         
         # Swap textures
         state_tex, next_state_tex = next_state_tex, state_tex
         
-        # Check if target resolution reached
-        if current_w >= target_res[0] and current_h >= target_res[1]:
-            break
-            
         # Increase resolution
         current_w *= 2
         current_h *= 2
-        # Resize state textures to new resolution
-        # "starting position for each new pixel is always the closest pixel in the previous resolution"
-        state_tex = resize_texture(state_tex, current_w, current_h, interpolation='nearest')
+        
+        # Resize state textures to new resolution using nearest-neighbor mapping
+        new_state_tex = [[0.0] * current_w for _ in range(current_h)]
+        for y in range(current_h):
+            for x in range(current_w):
+                src_y = min(y // 2, current_h // 2 - 1)
+                src_x = min(x // 2, current_w // 2 - 1)
+                new_state_tex[y][x] = state_tex[src_y][src_x]
+        state_tex = new_state_tex
+        
+        if current_w > target_res[0] or current_h > target_res[1]:
+            break
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** The transformation $F(t)$ offsets the surface by a value that increases with distance. Floating-point precision errors may accumulate over many steps.
-- **Boundaries:** The cone-tracing condition assumes rectangular pixels. Non-rectangular pixels or anisotropic scaling may require adjustment of $\alpha$.
-- **Degenerate Input:** If the SDF is not a valid lower estimate (Lipschitz constant > 1), the sphere tracing may overstep. The source assumes $Lip f \le 1$.
+- **Precision:** The transformation $F(t)$ offsets the surface by a value that increases with distance. Floating-point precision errors may accumulate over many steps [S1, unofficial].
+- **Boundaries:** The cone-tracing condition assumes rectangular pixels. Non-rectangular pixels or anisotropic scaling may require adjustment of $\alpha$ [S1, unofficial].
+- **Degenerate Input:** If the SDF is not a valid lower estimate (Lipschitz constant $> 1$), the sphere tracing may overstep. The source assumes $\text{Lip } f \le 1$ [S1, unofficial].
 
 ## Subtopics
 
@@ -136,13 +135,13 @@ def iteratively_increasing_resolution(sdf, camera, start_res, target_res, max_pa
 A training and evaluation protocol designed to simulate zoom-in effects and test anti-aliasing performance across resolutions [S2, unofficial]. It trains a model at a single downsampled resolution and renders at multiple higher scales. Steps: 1) Define dataset's default resolution (e.g., 1352×1014) as full resolution baseline. 2) Downsample training data by a fixed factor (e.g., 4×) and train exclusively on this lower resolution. 3) Evaluate rendering quality at progressively higher resolutions (1×, 2×, and 4× relative to training resolution). 4) When comparing against baselines like Mip-Splatting, integrate the baseline into the pipeline and ensure consistency in maximum sampling frequency computation between both methods [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Reduces total render time by performing most of the ray-surface intersection work at lower resolutions. The cost is proportional to the sum of pixel counts across all resolution levels, which is less than rendering at full resolution from the start.
-- **Memory Complexity:** Requires storage for state textures (distance traveled) at the current resolution. Ping-ponging two textures doubles this requirement.
+- **Time Complexity:** Reduces total render time by performing most of the ray-surface intersection work at lower resolutions. The cost is proportional to the sum of pixel counts across all resolution levels, which is less than rendering at full resolution from the start [S1, unofficial].
+- **Memory Complexity:** Requires storage for state textures (distance traveled) at the current resolution. Ping-ponging two textures doubles this requirement [S1, unofficial].
 - **Measured Performance:** Implemented in GLSL with C++ test application. Used with relaxed and enhanced sphere tracing. Showed reduced render times for 3D fractals and SDF scenes [S1, unofficial].
-- **Strengths:** High-quality rendering for stationary scenes; real-time responsiveness when camera/scene changes (by restarting or incrementing). General applicability to any sphere tracing variant.
-- **Limitations:** Requires multiple passes or frames to complete. Not suitable for highly dynamic scenes where state cannot be preserved. Precision issues with the modified SDFE transformation over long distances.
-- **When to Use:** Static or slowly changing scenes where high resolution is needed but initial low-res passes can identify complex areas.
-- **When Not to Use:** Highly dynamic scenes where state preservation is not feasible. Scenes with very thin structures that might be missed by coarse initial passes (though cone-tracing mitigates this).
+- **Strengths:** High-quality rendering for stationary scenes; real-time responsiveness when camera/scene changes (by restarting or incrementing). General applicability to any sphere tracing variant [S1, unofficial].
+- **Limitations:** Requires multiple passes or frames to complete. Not suitable for highly dynamic scenes where state cannot be preserved. Precision issues with the modified SDFE transformation over long distances [S1, unofficial].
+- **When to Use:** Static or slowly changing scenes where high resolution is needed but initial low-res passes can identify complex areas [S1, unofficial].
+- **When Not to Use:** Highly dynamic scenes where state preservation is not feasible. Scenes with very thin structures that might be missed by coarse initial passes (though cone-tracing mitigates this) [S1, unofficial].
 
 ## Background
 Originated from work on accelerating sphere tracing, introduced by Csaba Bálint and Gábor Valasek in 2018 [S1, unofficial]. Sphere tracing was introduced by Hart in 1994 [S1, unofficial]. The method builds on improvements by Keinert et al. [S1, unofficial]. It is used in real-time rendering of SDF representations, such as 3D fractals, where traditional triangle-based engines are inefficient [S1, unofficial].

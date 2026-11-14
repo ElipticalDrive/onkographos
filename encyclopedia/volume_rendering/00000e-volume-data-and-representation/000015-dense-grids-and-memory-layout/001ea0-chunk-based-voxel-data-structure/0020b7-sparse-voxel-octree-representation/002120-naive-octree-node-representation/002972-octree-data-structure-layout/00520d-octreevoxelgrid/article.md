@@ -1,0 +1,310 @@
+# OctreeVoxelGrid
+
+Also called: Adaptive Octree Voxel Grid, Multi-resolution Octree Voxel Grid
+
+## Overview
+OctreeVoxelGrid is a sparse, multi-resolution voxel data structure that implements the `VoxelGrid` protocol, allowing it to replace uniform grids in existing engine code without modification [S1]. It solves the memory inefficiency of dense grids for sparse scenes by storing only active regions, achieving $O(\text{active cells} \times \text{layers})$ memory complexity instead of $O(\text{grid}^3)$ [S1]. It distinguishes itself from sibling structures by supporting dynamic refinement/coarsening policies and inheriting parent values to children upon split to avoid interpolation artifacts at refinement boundaries [S1].
+
+## How it works
+**Inputs and Outputs:**
+The structure is initialized with world dimensions (`dimensions: tuple[int, int, int]`), cell size (`cell_size: float`), and a maximum refinement depth (`max_depth: int`, default 4) [S1]. It provides methods to read (`get`), write (`set`), modify (`add`), query spatial overlap (`query_overlap`), iterate (`walk_layer`), and manage dirty state (`get_delta_packet`) [S1].
+
+**Data Structures:**
+The core unit is the `OctreeNode`, which contains:
+- `is_leaf: bool`: True if the node stores data, False if it has children.
+- `value: dict[str, float] | None`: A mapping from layer name to float value. Present only if `is_leaf` is True.
+- `children: list[OctreeNode]`: A list of up to 8 child nodes. Present only if `is_leaf` is False.
+- `bounds: tuple[float, ...]`: The world-space Axis-Aligned Bounding Box (AABB) of the node [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization**: Create the root `OctreeNode` covering the full `dimensions` at depth 0. Set `is_leaf=True`, `value` to empty or default, and `children` to empty.
+2.  **Coordinate Conversion**: To access a voxel at world coordinates $(wx, wy, wz)$, convert to coarse grid coordinates using `world_to_grid(wx, wy, wz)` [S1]. This function maps world space to the coarsest level grid indices.
+3.  **Get Value (`get`)**:
+    - Start at the root.
+    - Descend the tree following the path determined by the grid coordinates $(x, y, z)$ at each level.
+    - If a node is a leaf, return `value[layer]`.
+    - If a node is internal, recurse into the appropriate child.
+    - If the path exceeds `max_depth` or coordinates are out of bounds, return `DEFAULT_VALUE` [S1].
+4.  **Set Value (`set`)**:
+    - Descend to the leaf node corresponding to $(x, y, z)$.
+    - If the leaf does not exist, create it (potentially splitting parent nodes if they are leaves and depth < `max_depth`).
+    - Update `value[layer] = value`.
+    - Mark the node and its ancestors as "dirty" [S1].
+5.  **Add Value (`add`)**:
+    - Perform `get(layer, x, y, z)` to retrieve current value.
+    - Perform `set(layer, x, y, z, current_value + delta)` [S1].
+6.  **Query Overlap (`query_overlap`)**:
+    - Input: `center` (world position), `radius` (float).
+    - Check intersection between node `bounds` and sphere defined by `center, radius`.
+    - If `bounds` is fully outside the sphere, skip the subtree.
+    - If `bounds` is fully inside the sphere, collect all leaf nodes in the subtree and return their coordinates.
+    - Otherwise, recurse into all 8 children [S1].
+7.  **Walk Layer (`walk_layer`)**:
+    - Perform a Depth-First Search (DFS) starting from the root.
+    - Only visit nodes where `is_leaf` is True.
+    - For each leaf, call `callback(x, y, z, value[layer])` [S1].
+8.  **Refinement (Split)**:
+    - When a leaf node needs refinement (e.g., due to activity or policy), create 8 new child `OctreeNode` instances.
+    - Each child inherits the parent's `value` as its initial state.
+    - Set parent `is_leaf=False`, populate `children`, and update `bounds` for each child to be half the size of the parent [S1].
+9.  **Delta Packet (`get_delta_packet`)**:
+    - Traverse the tree to collect all nodes marked "dirty".
+    - Return a dictionary or list of changes.
+    - Clear the dirty flags and the internal buffer [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class OctreeNode:
+    def __init__(self, bounds, is_leaf=True, value=None):
+        self.bounds = bounds
+        self.is_leaf = is_leaf
+        self.value = value if value is not None else {}
+        self.children = []
+        self.dirty = False
+
+    def split(self):
+        """Split a leaf node into 8 children, inheriting parent value."""
+        if not self.is_leaf:
+            return
+        
+        # Calculate half bounds
+        center = self._get_center()
+        half_size = self._get_half_size()
+        
+        self.is_leaf = False
+        self.children = []
+        
+        # Create 8 children
+        for i in range(8):
+            # Determine child bounds based on octant index i
+            child_bounds = self._get_child_bounds(i, center, half_size)
+            child_node = OctreeNode(child_bounds, is_leaf=True, value=dict(self.value))
+            self.children.append(child_node)
+        
+        # Mark children as dirty if parent was dirty
+        if self.dirty:
+            for child in self.children:
+                child.dirty = True
+
+    def _get_center(self):
+        # Returns (min_x + max_x)/2, etc.
+        min_b = self.bounds[:3]
+        max_b = self.bounds[3:]
+        return [(min_b[i] + max_b[i]) / 2 for i in range(3)]
+
+    def _get_half_size(self):
+        min_b = self.bounds[:3]
+        max_b = self.bounds[3:]
+        return [(max_b[i] - min_b[i]) / 2 for i in range(3)]
+
+    def _get_child_bounds(self, index, center, half_size):
+        # Standard octree child bounding box calculation
+        min_b = []
+        max_b = []
+        for i in range(3):
+            bit = (index >> i) & 1
+            if bit == 0:
+                min_b.append(center[i] - half_size[i])
+                max_b.append(center[i])
+            else:
+                min_b.append(center[i])
+                max_b.append(center[i] + half_size[i])
+        return tuple(min_b) + tuple(max_b)
+
+class OctreeVoxelGrid:
+    def __init__(self, dimensions, cell_size, max_depth=4):
+        self.dimensions = dimensions
+        self.cell_size = cell_size
+        self.max_depth = max_depth
+        # Root bounds cover the entire world
+        self.root = OctreeNode((0, 0, 0, dimensions[0]*cell_size, dimensions[1]*cell_size, dimensions[2]*cell_size))
+
+    def _world_to_grid(self, wx, wy, wz):
+        # Convert world coordinates to coarse grid indices
+        # Note: This is for backward compatibility as per source
+        return (int(wx / self.cell_size), int(wy / self.cell_size), int(wz / self.cell_size))
+
+    def _get_node_at(self, node, x, y, z, current_depth):
+        if node.is_leaf:
+            return node
+        
+        if current_depth >= self.max_depth:
+            return node # Cannot split further
+        
+        # Determine child index from coordinates relative to node bounds
+        # This requires mapping global x,y,z to local node space
+        # Simplified logic: assume x,y,z are global grid coords
+        # We need to traverse down. 
+        # For implementation completeness, we assume a helper to find child index
+        child_idx = self._get_child_index(node, x, y, z)
+        
+        if child_idx < len(node.children):
+            return self._get_node_at(node.children[child_idx], x, y, z, current_depth + 1)
+        else:
+            # Path doesn't exist, return None or create? 
+            # Based on 'set' logic, we might need to create nodes.
+            # For 'get', if path missing, return DEFAULT_VALUE
+            return None
+
+    def _get_child_index(self, node, x, y, z):
+        # Determine which octant (x,y,z) falls into relative to node bounds
+        center = node._get_center()
+        half = node._get_half_size()
+        
+        # Check if point is within node bounds
+        if not (node.bounds[0] <= x * self.cell_size < node.bounds[3] and
+                node.bounds[1] <= y * self.cell_size < node.bounds[4] and
+                node.bounds[2] <= z * self.cell_size < node.bounds[5]):
+            return -1
+            
+        idx = 0
+        if x * self.cell_size >= center[0]: idx |= 1
+        if y * self.cell_size >= center[1]: idx |= 2
+        if z * self.cell_size >= center[2]: idx |= 4
+        return idx
+
+    def get(self, layer, x, y, z):
+        node = self._get_node_at(self.root, x, y, z, 0)
+        if node is None or node.is_leaf is False:
+            return 0.0 # DEFAULT_VALUE
+        return node.value.get(layer, 0.0)
+
+    def set(self, layer, x, y, z, value):
+        # Descend and create nodes if necessary
+        self._set_recursive(self.root, x, y, z, 0, layer, value)
+
+    def _set_recursive(self, node, x, y, z, depth, layer, value):
+        if node.is_leaf:
+            if depth < self.max_depth:
+                # Check if refinement is needed (simplified: always refine on write for demo)
+                # In practice, a policy decides. Here we split to ensure leaf exists.
+                node.split()
+            else:
+                node.value[layer] = value
+                node.dirty = True
+                return
+        
+        child_idx = self._get_child_index(node, x, y, z)
+        if child_idx == -1:
+            return # Out of bounds
+            
+        if child_idx >= len(node.children):
+            # Create missing child
+            center = node._get_center()
+            half = node._get_half_size()
+            child_bounds = node._get_child_bounds(child_idx, center, half)
+            new_child = OctreeNode(child_bounds)
+            node.children.append(new_child)
+            
+        self._set_recursive(node.children[child_idx], x, y, z, depth + 1, layer, value)
+
+    def add(self, layer, x, y, z, delta):
+        current = self.get(layer, x, y, z)
+        self.set(layer, x, y, z, current + delta)
+
+    def query_overlap(self, center, radius):
+        results = []
+        self._query_recursive(self.root, center, radius, results)
+        return results
+
+    def _query_recursive(self, node, center, radius, results):
+        # Check AABB vs Sphere
+        if not self._aabb_sphere_intersect(node.bounds, center, radius):
+            return
+        
+        if node.is_leaf:
+            # Collect leaf
+            # Need to derive x,y,z from bounds or store them
+            # For this pseudocode, assume we can extract grid coords from bounds
+            x, y, z = self._bounds_to_grid_coords(node.bounds)
+            results.append((x, y, z))
+            return
+        
+        for child in node.children:
+            self._query_recursive(child, center, radius, results)
+
+    def _aabb_sphere_intersect(self, bounds, center, radius):
+        # Standard AABB-Sphere intersection test
+        min_b = bounds[:3]
+        max_b = bounds[3:]
+        closest = [0.0, 0.0, 0.0]
+        for i in range(3):
+            if center[i] < min_b[i]: closest[i] = min_b[i]
+            elif center[i] > max_b[i]: closest[i] = max_b[i]
+            else: closest[i] = center[i]
+        
+        dist_sq = sum((closest[i] - center[i])**2 for i in range(3))
+        return dist_sq <= radius * radius
+
+    def walk_layer(self, layer, callback):
+        self._walk_recursive(self.root, layer, callback)
+
+    def _walk_recursive(self, node, layer, callback):
+        if node.is_leaf:
+            # Extract coords
+            x, y, z = self._bounds_to_grid_coords(node.bounds)
+            val = node.value.get(layer, 0.0)
+            callback(x, y, z, val)
+            return
+        
+        for child in node.children:
+            self._walk_recursive(child, layer, callback)
+
+    def _bounds_to_grid_coords(self, bounds):
+        # Convert world-space AABB min corner to grid coords
+        min_b = bounds[:3]
+        return (int(min_b[0] / self.cell_size), int(min_b[1] / self.cell_size), int(min_b[2] / self.cell_size))
+
+    def get_delta_packet(self):
+        packet = {}
+        self._collect_dirty(self.root, packet)
+        self._clear_dirty(self.root)
+        return packet
+
+    def _collect_dirty(self, node, packet):
+        if node.dirty:
+            if node.is_leaf:
+                x, y, z = self._bounds_to_grid_coords(node.bounds)
+                packet[(x, y, z)] = dict(node.value)
+            else:
+                # Internal node dirty? Usually implies children are dirty
+                pass
+        if not node.is_leaf:
+            for child in node.children:
+                self._collect_dirty(child, packet)
+
+    def _clear_dirty(self, node):
+        node.dirty = False
+        if not node.is_leaf:
+            for child in node.children:
+                self._clear_dirty(child)
+```
+
+**Parameters:**
+- `max_depth`: Integer, default 4. Limits the maximum refinement level [S1].
+- `cell_size`: Float. Size of the coarsest voxel [S1].
+
+**Edge Cases and Pitfalls:**
+- **Interpolation Artifacts**: Avoided because parent values are inherited by children upon split. No interpolation is required for writes, only for reads if bilinear/trilinear filtering is applied on top of the grid values [S1].
+- **Memory Overhead**: For small, dense worlds, the octree overhead may exceed a uniform grid. The uniform grid should remain the default, with the octree being opt-in [S1].
+- **Thrashing**: Aggressive refinement policies can cause performance regression. Configurable thresholds are required [S1].
+
+## Operating characteristics
+- **Memory Complexity**: $O(\text{active cells} \times \text{layers})$. This is significantly better than $O(\text{grid}^3)$ for sparse scenes [S1].
+- **Time Complexity**:
+  - `get`/`set`: $O(\text{depth})$, where depth $\le$ `max_depth`.
+  - `query_overlap`: Worst case $O(N)$ where $N$ is number of leaves, but pruned by AABB checks.
+  - `walk_layer`: $O(L)$ where $L$ is the number of leaf nodes [S1].
+- **Performance**: Improves over uniform grids in sparse worlds. Performance regression is possible in dense worlds if the octree overhead is high [S1].
+- **Strengths**: Zero integration cost (protocol compliance), adaptive resolution, bounded memory via `max_depth`.
+- **Limitations**: Not ideal for very dense, uniform volumes due to pointer overhead and traversal cost [S1].
+
+## Background
+OctreeVoxelGrid was implemented as part of Phase 3 and 4 of a multi-resolution voxel grid project, specifically addressing the need for an octree-based grid with refinement/coarsening policies [S1]. The implementation aims to satisfy the `VoxelGrid` protocol to allow seamless swapping with `UniformVoxelGrid` in engine handlers [S1].
+
+## Sources
+[S1] multi-resolution voxel grid: octree implementation + refinement policy (#64 phases 3-4), https://github.com/hellolifeforms/lila/issues/68, fetched 2026-10-26

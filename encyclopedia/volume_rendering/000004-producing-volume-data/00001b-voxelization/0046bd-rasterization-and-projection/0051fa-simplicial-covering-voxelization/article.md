@@ -1,0 +1,259 @@
+# Simplicial Covering Voxelization
+
+Also called: P-Buffer method, Solid Voxelization via Simplicial Covering, Voxelization of solids using simplicial coverings
+
+## Overview
+Simplicial Covering Voxelization is a method to rasterize and voxelize 3D solids by decomposing their surface into tetrahedra connected to an origin point and using a presence buffer (P-buffer) to toggle voxel states [S1, unofficial]. Unlike sibling methods such as [Voxel Carving](1213-voxel-carving.md) or [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) which often require complex intersection tests or distance field evaluations, this method relies on simple incremental rasterization of tetrahedral slices [S1, unofficial]. It differs from [Scanline and Geometric Primitives](10941-scanline-and-geometric-primitives.md) by operating directly in 3D space via tetrahedral decomposition rather than projecting 2D slices, and from [Multi-Plane Projection Voxelization and Aggregation](12100-multi-plane-projection-voxelization-and-aggregation.md) by avoiding multiple 2D render passes [S1, unofficial]. The primary trade-off is that it produces a complete solid voxelization in a single pass, whereas boundary-only methods like [Sramek's method](10941-scanline-and-geometric-primitives.md) require separate handling for interior filling [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input**: A 3D solid defined by a mesh of planar faces (manifold or non-manifold, with or without holes). The solid is assumed to be closed.
+- **Output**: A 3D voxel grid (P-buffer) where each voxel stores a presence bit (0 or 1) indicating if it is inside the solid, and optionally a color value.
+
+**Data Structures:**
+- **P-buffer**: A 3D array of bits. Each position $(x_i, y_i, z_i)$ stores a single bit: 0 (outside) or 1 (inside). Initialized to 0.
+- **Vertices**: Points $A, B, C$ representing the base triangle of a tetrahedron.
+- **Origin**: Point $O$ (typically $(0,0,0)$ or centroid).
+- **Slopes**: Pairs $(m_x, m_z)$ representing the incremental change in $x$ and $z$ per unit change in $y$ for each edge.
+
+**Algorithm Steps:**
+
+1.  **Simplicial Covering Construction**:
+    For each face of the solid, triangulate the face if necessary. For each resulting triangle $ABC$, construct a tetrahedron by joining the triangle vertices to the origin $O$. The tetrahedron is defined by vertices $O, A, B, C$ [S1, unofficial].
+
+2.  **Tetrahedron Rasterization**:
+    For each tetrahedron $OABC$, determine the sweeping direction. Calculate the normal vector $\mathbf{n}$ of the base triangle $ABC$. Find the coordinate axis with the maximum absolute value in $\mathbf{n}$. The method assumes sweeping along the Y-axis. If the Y-component of the normal is negative, invert the tetrahedron with respect to the Y coordinate (swap $Y$ signs of vertices) and invert the resulting voxel coordinates $(x_i, y_i, z_i)$ to $(x_i, -y_i, z_i)$ at the end [S1, unofficial].
+
+3.  **Initialization**:
+    - Sort vertices $A, B, C$ by their Y-coordinate such that $y_A \ge y_B \ge y_C$.
+    - Set current sweeping plane $y = y_A$.
+    - Initialize the triangle vertices for the current slice: $A_i = A$, $B_i = B$, $C_i = C$.
+    - Compute initial slopes for edges $AB$ and $AC$:
+      $$ m_{AB} = \left( \frac{x_B - x_A}{y_B - y_A}, \frac{z_B - z_A}{y_B - y_A} \right) $$
+      $$ m_{AC} = \left( \frac{x_C - x_A}{y_C - y_A}, \frac{z_C - z_A}{y_C - y_A} \right) $$
+    - Set $m_B = m_{AB}$ and $m_C = m_{AC}$ [S1, unofficial].
+
+4.  **Sweeping Loop**:
+    While $y > 0$ (assuming the origin is at $y=0$ and is the minimum Y):
+    a. **Update Edge Vertices**:
+       - If $y_B == y$ (vertex B reached):
+         - Set $B_i = B$.
+         - Update slope $m_B = m_{OB} = \left( \frac{x_B}{y_B}, \frac{z_B}{y_B} \right)$.
+       - Else:
+         - Update $B_i$ incrementally: $B_i = A_i + (B - A) \cdot m_B$? *Correction based on source logic*: The source states $B_i = A_i + (B-A) \cdot m_B$ is incorrect notation in the notes; the correct incremental update for the vertex position on the slice is derived from the slope. The source specifies: "If $B_y > y > C_y$, the slice is a quadrilateral...". The vertex update logic in the source pseudocode is:
+           If $B_y == y$: $B_i = B, m_B = m_{OB}$.
+           Else: $B_i$ is updated using the current slope $m_B$. Specifically, the source says $B_i = A_i + (B-A) \cdot m_B$ which seems to be a typo for incremental step. The standard incremental step for a vertex $V$ on edge $AV$ with slope $m$ is $V_{i+1} = V_i + m$. However, the source explicitly writes: $B_i = A_i + (B-A) \cdot m_B$. This is likely a misinterpretation of $B_i = A + (y - y_A)m_{AB}$. Let's stick to the explicit source text for the "If/Else" block:
+           ```python
+           if By == y:
+               Bi = B
+               mB = mOB
+           else:
+               mB = mAB # Or current slope? Source says "else mB=mAB" which implies reset? No, source says "if By=y... else mB=mAB". This is ambiguous. 
+           ```
+           *Re-reading Source [S1, unofficial] Figure 7*:
+           `if By=y then Bi=B; mB=mOB else mB=mAB; Bi=Ai+(B-A)·mB`
+           This line is syntactically confusing. It likely means:
+           If $B_y == y$: $B_i = B$, $m_B = m_{OB}$.
+           Else: $m_B$ remains the slope of $AB$ (or updates?), and $B_i$ is calculated.
+           Actually, the source text says: "If $B_y$ equals current y, set $B_i=B$ and $m_B=m_{OB}$. Else, set $m_B=m_{AB}$ and $B_i=A_i+(B-A)\cdot m_B$."
+           This "Else" branch seems to imply a reset or a specific calculation. Given the context of incremental rasterization, $B_i$ should move along the edge. The formula $B_i = A_i + (B-A) \cdot m_B$ is dimensionally inconsistent if $m_B$ is a slope (dx/dy). It likely means $B_i = A + (y - y_A) m_{AB}$.
+           However, to be faithful to the "notes" provided:
+           ```python
+           if By == y:
+               Bi = B
+               mB = mOB
+           else:
+               mB = mAB # Note: Source says mB=mAB in else. This might be a simplification for the first step or a specific logic.
+               Bi = Ai + (B - A) * mB # Note: This formula is suspicious. Standard is Bi = Bi + mB. 
+           ```
+           *Decision*: The source notes are contradictory or poorly transcribed. The standard incremental approach for scanline is $V_{new} = V_{old} + slope$. The source mentions "incremental approach... to avoid divisions". The formula $x_{i+1} = x_i + \frac{A_x}{A_y}$ suggests $x_{i+1} = x_i + m_x$.
+           Let's look at the "Update" step in Figure 7: "Update Ai, Bi, Ci with the corresponding incremental slopes".
+           So, the correct logic is:
+           1. If vertex Y reached, switch slope to origin slope.
+           2. Else, keep current slope.
+           3. Update position: $V_i = V_i + m_V$.
+           
+           Let's rewrite the pseudocode to be valid Python and consistent with the "incremental" description, while noting the source's specific variable names.
+           
+    b. **Rasterize 2D Slice**:
+       Determine the shape of the intersection of the tetrahedron with the plane $Y=y$.
+       - If $y_B > y > y_C$: The intersection is a quadrilateral.
+         - Compute intersection point $D_i$ on edge $BC$:
+           $$ D_i = B + (C - B) \cdot m_{BC} $$
+           (Where $m_{BC}$ is the slope of edge $BC$).
+         - Rasterize triangle $(B_i, D_i, C_i)$ using `Rasterize2D`.
+       - Rasterize triangle $(A_i, B_i, C_i)$ using `Rasterize2D`.
+       
+       *Note*: The source Figure 7 calls `Rasterize2D(Ai, Bi, Ci)` then checks for quadrilateral. It implies the base triangle is always rasterized, and if a quad, the second triangle is rasterized.
+
+    c. **Decrement Y**:
+       $y = y - 1$.
+
+    d. **Update Slopes and Vertices**:
+       - If $y < y_B$: Update $m_B = m_{OB}$.
+       - If $y < y_C$: Update $m_C = m_{OC}$.
+       - Update vertices incrementally:
+         $$ A_i = A_i + m_{OA} $$
+         $$ B_i = B_i + m_B $$
+         $$ C_i = C_i + m_C $$
+       *(Note: The source says "Update Ai, Bi, Ci with the corresponding incremental slopes". $m_{OA}$ is constant for edge OA. $m_B$ and $m_C$ change only when the vertex is reached).*
+
+5.  **Rasterize2D Function**:
+    - Input: Three 2D points $(x_1, z_1), (x_2, z_2), (x_3, z_3)$ representing the triangle slice at current $y$.
+    - Process: Perform 2D triangle rasterization in the X-Z plane.
+    - For each pixel $(x_i, z_i)$ inside the triangle:
+      - Flip the P-buffer bit at $(x_i, y, z_i)$: $P(x_i, y, z_i) = 1 - P(x_i, y, z_i)$.
+
+6.  **Finalization**:
+    - After all tetrahedra are processed, iterate through the P-buffer.
+    - Transfer all positions with presence value 1 to the framebuffer.
+    - Apply a color function. For homogeneous solids, assign a constant color. For heterogeneous solids, compute color based on solid properties at that point [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simplicial_covering_voxelization(solid_mesh, origin, grid_resolution):
+    # Initialize P-buffer (3D array of bits)
+    P_buffer = zeros(grid_resolution, dtype=bool)
+    
+    # 1. Construct Tetrahedra
+    tetrahedra = []
+    for face in solid_mesh.faces:
+        # Triangulate face if necessary
+        triangles = triangulate(face)
+        for tri in triangles:
+            # Construct tetrahedron from triangle and origin
+            tetrahedra.append((origin, tri[0], tri[1], tri[2]))
+            
+    # 2. Rasterize each Tetrahedron
+    for O, A, B, C in tetrahedra:
+        rasterize_tetrahedron(O, A, B, C, P_buffer)
+        
+    return P_buffer
+
+def rasterize_tetrahedron(O, A, B, C, P_buffer):
+    # Determine sweeping direction (Y-axis assumed)
+    # Calculate normal of base ABC
+    n = cross(B - A, C - A)
+    
+    # Check Y-component of normal
+    if n.y < 0:
+        # Invert tetrahedron wrt Y
+        A, B, C = invert_y(A), invert_y(B), invert_y(C)
+        invert_flag = True
+    else:
+        invert_flag = False
+        
+    # Sort vertices by Y coordinate: yA >= yB >= yC
+    vertices = [A, B, C]
+    vertices.sort(key=lambda v: v.y, reverse=True)
+    A, B, C = vertices[0], vertices[1], vertices[2]
+    
+    # Initialize slopes
+    # Slope m = (dx/dy, dz/dy)
+    m_AB = (B.x - A.x) / (B.y - A.y), (B.z - A.z) / (B.y - A.y)
+    m_AC = (C.x - A.x) / (C.y - A.y), (C.z - A.z) / (C.y - A.y)
+    m_BC = (C.x - B.x) / (C.y - B.y), (C.z - B.z) / (C.y - B.y)
+    m_OA = (A.x - O.x) / (A.y - O.y), (A.z - O.z) / (A.y - O.y)
+    m_OB = (B.x - O.x) / (B.y - O.y), (B.z - O.z) / (B.y - O.y)
+    m_OC = (C.x - O.x) / (C.y - O.y), (C.z - O.z) / (C.y - O.y)
+    
+    # Current slice vertices and slopes
+    Ai = A
+    Bi = B
+    Ci = C
+    mB = m_AB
+    mC = m_AC
+    
+    # Current Y
+    y = A.y
+    
+    # Sweep from max Y down to 0 (origin)
+    while y > 0:
+        # Update Bi if B is reached
+        if B.y == y:
+            Bi = B
+            mB = m_OB
+        else:
+            # Note: Source logic for 'else' is ambiguous, but incremental update is standard
+            # We keep mB as is if not at vertex
+            pass
+            
+        # Update Ci if C is reached
+        if C.y == y:
+            Ci = C
+            mC = m_OC
+        else:
+            pass
+            
+        # Determine slice shape and rasterize
+        # Base triangle Ai, Bi, Ci
+        rasterize_2d_triangle(Ai, Bi, Ci, y, P_buffer)
+        
+        # Check for quadrilateral slice (By > y > Cy)
+        if B.y > y > C.y:
+            # Compute intersection Di on edge BC
+            # Di = B + (C - B) * m_BC? 
+            # Actually, Di is on the slice y. 
+            # Using linear interpolation:
+            t = (y - B.y) / (C.y - B.y)
+            Di = B + t * (C - B)
+            rasterize_2d_triangle(Bi, Di, Ci, y, P_buffer)
+            
+        # Decrement Y
+        y -= 1
+        
+        # Update slopes if passing vertex Y
+        if y < B.y:
+            mB = m_OB
+        if y < C.y:
+            mC = m_OC
+            
+        # Incremental update of vertices
+        Ai = Ai + m_OA
+        Bi = Bi + mB
+        Ci = Ci + mC
+        
+    # Invert coordinates if needed
+    if invert_flag:
+        invert_p_buffer_y(P_buffer)
+
+def rasterize_2d_triangle(v1, v2, v3, y, P_buffer):
+    # Standard 2D triangle rasterization in X-Z plane
+    # Determine bounding box
+    min_x = max(0, floor(min(v1.x, v2.x, v3.x)))
+    max_x = min(res_x, ceil(max(v1.x, v2.x, v3.x)))
+    min_z = max(0, floor(min(v1.z, v2.z, v3.z)))
+    max_z = min(res_z, ceil(max(v1.z, v2.z, v3.z)))
+    
+    for x in range(min_x, max_x):
+        for z in range(min_z, max_z):
+            if point_in_triangle(x, z, v1, v2, v3):
+                # Flip presence bit
+                P_buffer[x, y, z] = not P_buffer[x, y, z]
+```
+
+**Parameters:**
+- **P-buffer**: Stores presence values (1 bit per voxel).
+- **Color**: Homogeneous solids use a single color; heterogeneous solids use a position-dependent color function [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Quadrilateral Slices**: When the sweeping plane intersects the tetrahedron such that $y_B > y > y_C$, the intersection is a quadrilateral. This must be decomposed into two triangles (e.g., $B_i, D_i, C_i$ and $A_i, B_i, C_i$) to avoid gaps or overlaps [S1, unofficial].
+- **Aliasing**: Integer arithmetic on floating-point objects causes aliasing artifacts. This minimizes but does not eliminate the effect [S1, unofficial].
+- **Degenerate Input**: Triangles with zero area or collinear vertices should be handled or skipped.
+- **Boundary vs. Solid**: The method produces a solid voxelization. To get boundary-only, only rasterize spans between $B_i$ and $C_i$ (or $D_i$ and $C_i$) [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Depends on the number of faces of the solid and the grid resolution. Unlike Sramek's method, which depends only on resolution and volume, this method's time scales with the number of faces [S1, unofficial].
+- **Memory Complexity**: Proportional to the grid resolution ($N_x \times N_y \times N_z$) for the P-buffer.
+- **Measured Performance**: On a Pentium III 1GHz with 768 MB RAM, for a solid with 100,250 vertices and 202,520 faces at resolution 512, the method took 24.635 seconds. Sramek's method took 237.601 seconds for the same task [S1, unofficial]. For boundary-only rasterization at 512 resolution, the method took 4.715 seconds vs Sramek's 244.893 seconds [S1, unofficial].
+- **Strengths**: Simple, general, robust. No additional data structures or complex operations. Suitable for hardware implementation. Produces complete solid voxelization in one pass [S1, unofficial].
+- **Limitations**: Aliasing artifacts. Performance degrades with high face counts compared to resolution-dependent methods at low resolutions [S1, unofficial].
+
+## Background
+The method was introduced in the paper "Voxelization of solids using simplicial coverings" [S1, unofficial]. It extends 2D polygon rasterization to 3D by decomposing solids into tetrahedra. It is designed for 3D displays and solid modeling, handling manifold and non-manifold solids with holes [S1, unofficial].
+
+## Sources
+[S1] Voxelization of solids using simplicial coverings, http://wscg.zcu.cz/wscg2004/Papers_2004_Short/J53.pdf, fetched 2026-10-26 (unofficial)

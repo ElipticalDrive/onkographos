@@ -1,191 +1,289 @@
 # Van Hook-Levoy Ray-Casting
 
-Also called: Basic ray-casting model, DRR Generation via Ray Casting, Digital Radiograph Synthesis, Levoy Raycasting, Ray Casting DRR
+Also called: Basic ray-casting model, DRR Generation via Ray Casting, Digital Radiograph Synthesis, Direct Volume Rendering (Levoy's Model), Levoy Raycasting, Levoy's rendering model, Ray Casting DRR
 
 ## Overview
-Van Hook-Levoy Ray-Casting is a direct volume rendering technique that processes volume data without generating intermediate representations, assigning optical properties directly to the voxels [S3, unofficial]. It solves the problem of synthesizing 2D projections or shaded views from 3D scalar fields by casting rays from the image plane into the dataset [S2, unofficial]. What sets it apart from its siblings, such as [Two-Pass Depth Ray Casting](3377-two-pass-depth-ray-casting.md) and [Koyamada's Algorithm](4148-koyamada-s-algorithm.md), is its feed-backward accumulation order and the specific early-termination optimization enabled when accumulated opacity reaches one [S2, unofficial].
+Van Hook-Levoy Ray-Casting is a direct volume rendering technique that visualizes the entire volume by casting rays from the image plane into the data set, accumulating optical properties without generating intermediate representations [S3, S4, unofficial]. It is distinguished from its siblings by its specific "feed-backward" traversal order and the use of Levoy’s back-lit attenuation model, which allows for early termination when accumulated opacity reaches one [S2, S4, unofficial]. Unlike [Backward Mapping (Ray Tracing)](3009-backward-mapping-ray-tracing.md) which traces from light to eye, or [Hybrid Ray-Casting](3180-hybrid-ray-casting.md) which uses pre-integration, this method performs per-sample shading and compositing directly along the ray [S2, S4, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset $V$ with dimensions $W \times H \times D$ [G]. A camera model defining the image plane and ray origins/directions [G].
-*   **Output:** A 2D image where each pixel contains the accumulated color and opacity [G].
+**Inputs:**
+*   3D volume data $V$ with dimensions $W \times H \times D$, where each voxel contains a scalar value (e.g., density).
+*   Camera parameters: view direction, up vector, and image plane dimensions (width, height).
+*   Transfer functions: $T_c(v)$ mapping scalar value $v$ to color $(R, G, B)$ and $T_a(v)$ mapping scalar value $v$ to opacity $\alpha \in [0, 1]$ [S4, unofficial].
+*   Shading model parameters (e.g., light direction, ambient/diffuse coefficients) [S2, S4, unofficial].
+
+**Outputs:**
+*   2D image buffer $I$ of size $W_{img} \times H_{img}$, where each pixel contains an RGB color value.
 
 **Data Structures:**
-*   **Volume $V$:** A 3D array of scalar values (e.g., density) [G].
-*   **Ray:** Defined by origin $O$ and direction $D$ [G].
-*   **Accumulators:** Per-ray variables for accumulated color $C_{acc}$ (RGB) and accumulated opacity $\alpha_{acc}$ (scalar) [G].
+*   **Ray:** Defined by origin $O$ (on the image plane) and direction $D$ (normalized vector into the volume).
+*   **Sample Point:** Defined by position $P$ in world space, interpolated scalar value $v$, and computed color $C$ and opacity $\alpha$.
+*   **Accumulators:**
+    *   $C_{acc}$: Accumulated color (RGB), initialized to $(0, 0, 0)$.
+    *   $\alpha_{acc}$: Accumulated opacity, initialized to $0$.
+    *   $\tau_{acc}$: Accumulated transmission, initialized to $1$ (where $\tau = 1 - \alpha_{acc}$).
 
-**Numbered Steps:**
-1.  **Ray Initialization:** For each pixel in the image plane, cast a ray into the dataset [S2, unofficial].
-2.  **Sampling:** Traverse the ray through the volume using basic equidistant sampling along the ray path [S1, unofficial]. For higher performance, this is replaced by Digital Differential Analyzer (DDA) or Bresenham-like algorithms to efficiently traverse voxel boundaries [S1, unofficial].
-3.  **Interpolation:** At each sample point along the ray, interpolate the volume data $V$ to generate the scalar value at that specific coordinate [S2, unofficial].
-4.  **Shading:** Shade each sample point using a shading model that accounts for light transmission and reflection, converting the scalar value into color and opacity [S2, unofficial].
-5.  **Accumulation (Feed-Backward):** Add the results of the shading model to the current ray's accumulators using the feed-backward order [S2, unofficial]:
-    $$
-    C_{acc} = C_{acc} + C \cdot (1 - \alpha_{acc})
-    $$
-    $$
-    \alpha_{acc} = \alpha_{acc} + \alpha \cdot (1 - \alpha_{acc})
-    $$
-    [G]
-6.  **Termination:** Terminate the process when the ray exits the volume boundaries or when the accumulated opacity $\alpha_{acc}$ equals one [S2, unofficial].
+**Steps:**
 
-**Parameters:**
-*   **Sampling Interval:** Determined by the DDA step size or equidistant spacing [S1, unofficial].
-*   **Coordinate System:** Consistency is mandatory across the pipeline [S1, unofficial]. For medical applications (DRR), the `DRRGeometry` class must initialize spatial parameters from DICOM metadata fields 'Image Position Patient' and 'Image Orientation Patient' [S1, unofficial].
+1.  **Initialization:** For each pixel $(x, y)$ in the image plane, compute the ray origin $O$ and direction $D$ based on camera geometry [S4, unofficial]. Initialize $C_{acc} = (0,0,0)$, $\alpha_{acc} = 0$, $\tau_{acc} = 1$ [S2, unofficial].
+
+2.  **Ray Traversal:** Cast the ray into the volume. Determine the entry and exit points of the ray with the volume bounding box [S2, unofficial].
+    *   *Optimization:* Use a Digital Differential Analyzer (DDA) or Bresenham-like algorithm to step through voxels equidistantly or along voxel boundaries, rather than fixed floating-point intervals, for efficiency [S1, unofficial].
+
+3.  **Sampling and Interpolation:** At each step along the ray, compute the sample position $P$. Interpolate the volume data $V$ at $P$ to obtain the scalar value $v$ [S2, S4, unofficial].
+    *   *Note:* The sources mention "evenly distributed points" [S4, unofficial] but also "DDA/Bresenham-like" for efficiency [S1, unofficial]. In implementation, DDA steps are effectively equidistant in voxel space, which approximates equidistant sampling in world space if the volume is isotropic or properly scaled.
+
+4.  **Classification:** Map the scalar value $v$ to color $C_{sample}$ and opacity $\alpha_{sample}$ using the transfer functions:
+    $$ C_{sample} = T_c(v) $$
+    $$ \alpha_{sample} = T_a(v) $$
+    [S4, unofficial]
+
+5.  **Shading:** Apply the shading model to $C_{sample}$ to account for lighting (diffuse, specular, ambient) based on the gradient at $P$ and light direction [S2, S4, unofficial]. Let the shaded color be $C_{shaded}$ [S4, unofficial].
+
+6.  **Compositing (Feed-Backward):** Update the accumulators using the front-to-back blending equations [S2, S4, unofficial]:
+    $$ C_{acc} = C_{acc} + C_{shaded} \cdot \alpha_{sample} \cdot \tau_{acc} $$
+    $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot \tau_{acc} $$
+    $$ \tau_{acc} = 1 - \alpha_{acc} $$
+    [S2, S4, unofficial]
+
+7.  **Early Termination:** If $\alpha_{acc} \ge 1$ (or $\tau_{acc} \le \epsilon$ for a small threshold $\epsilon$), terminate the ray traversal early, as subsequent samples will not contribute to the final color [S2, unofficial].
+
+8.  **Final Assignment:** Assign $C_{acc}$ to the pixel $(x, y)$ in the image buffer [S4, unofficial].
+
+9.  **Iteration:** Repeat for all pixels.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def van_hook_levoy_ray_casting(volume, volume_dims, ray_origin, ray_direction):
+import numpy as np
+
+def van_hook_levoy_ray_casting(volume, transfer_func_color, transfer_func_opacity, 
+                               shading_model, camera, volume_bounds):
     """
-    Implements the basic Van Hook-Levoy feed-backward ray casting.
+    Implements Van Hook-Levoy Ray-Casting.
     
     Args:
-        volume: 3D array of scalar values.
-        volume_dims: Tuple (W, H, D) defining the volume bounds [0, W] x [0, H] x [0, D].
-        ray_origin: Tuple (ox, oy, oz).
-        ray_direction: Tuple (dx, dy, dz).
+        volume: 3D numpy array (W, H, D) of scalar values.
+        transfer_func_color: Function mapping scalar value -> (R, G, B).
+        transfer_func_opacity: Function mapping scalar value -> alpha in [0, 1].
+        shading_model: Function mapping (value, gradient, light_dir) -> shaded_color.
+        camera: Object with method get_ray(x, y) -> (origin, direction).
+        volume_bounds: Bounding box of the volume for ray intersection.
         
     Returns:
-        acc_color: List [R, G, B].
-        acc_opacity: Float.
+        image: 2D numpy array (H_img, W_img, 3) of RGB values.
     """
-    W, H, D = volume_dims
-    ox, oy, oz = ray_origin
-    dx, dy, dz = ray_direction
+    # Determine image dimensions from camera
+    # Note: Camera parameters must define the image plane size.
+    # Assuming camera provides width and height of the output image.
+    img_width = camera.width
+    img_height = camera.height
     
-    # 1. Ray-Box Intersection (Slab method)
-    t_min = -float('inf')
-    t_max = float('inf')
+    image = np.zeros((img_height, img_width, 3), dtype=np.float32)
     
-    # X slab
-    if dx == 0:
-        if ox < 0 or ox >= W: return [0.0, 0.0, 0.0], 0.0
-    else:
-        t1 = (0.0 - ox) / dx
-        t2 = (W - 0.0 - ox) / dx
-        if t1 > t2: t1, t2 = t2, t1
-        t_min = max(t_min, t1)
-        t_max = min(t_max, t2)
-        
-    # Y slab
-    if dy == 0:
-        if oy < 0 or oy >= H: return [0.0, 0.0, 0.0], 0.0
-    else:
-        t1 = (0.0 - oy) / dy
-        t2 = (H - 0.0 - oy) / dy
-        if t1 > t2: t1, t2 = t2, t1
-        t_min = max(t_min, t1)
-        t_max = min(t_max, t2)
-        
-    # Z slab
-    if dz == 0:
-        if oz < 0 or oz >= D: return [0.0, 0.0, 0.0], 0.0
-    else:
-        t1 = (0.0 - oz) / dz
-        t2 = (D - 0.0 - oz) / dz
-        if t1 > t2: t1, t2 = t2, t1
-        t_min = max(t_min, t1)
-        t_max = min(t_max, t2)
-        
-    if t_min > t_max: return [0.0, 0.0, 0.0], 0.0
+    # Pre-compute volume dimensions for interpolation
+    vol_shape = volume.shape
     
-    # 2. DDA Step Size (assumes unit voxel size [G])
-    max_abs_dir = max(abs(dx), abs(dy), abs(dz))
-    if max_abs_dir == 0: return [0.0, 0.0, 0.0], 0.0
-    dt = 1.0 / max_abs_dir
-    
-    # 3. Accumulation
-    acc_color = [0.0, 0.0, 0.0]
-    acc_opacity = 0.0
-    
-    t = t_min
-    while t < t_max:
-        # Current position
-        px = ox + t * dx
-        py = oy + t * dy
-        pz = oz + t * dz
-        
-        # Boundary guard
-        if px < 0 or px >= W or py < 0 or py >= H or pz < 0 or pz >= D:
-            break
+    for y in range(img_height):
+        for x in range(img_width):
+            # 1. Initialize accumulators
+            acc_color = np.array([0.0, 0.0, 0.0])
+            acc_alpha = 0.0
+            acc_tau = 1.0
             
-        # Trilinear Interpolation
-        ix, iy, iz = int(px), int(py), int(pz)
-        fx, fy, fz = px - ix, py - iy, pz - iz
-        
-        def get_val(x, y, z):
-            x = max(0, min(W-1, x))
-            y = max(0, min(H-1, y))
-            z = max(0, min(D-1, z))
-            return volume[z][y][x]
+            # 2. Cast ray
+            origin, direction = camera.get_ray(x, y)
             
-        v000 = get_val(ix, iy, iz)
-        v100 = get_val(ix+1, iy, iz)
-        v010 = get_val(ix, iy+1, iz)
-        v110 = get_val(ix+1, iy+1, iz)
-        v001 = get_val(ix, iy, iz+1)
-        v101 = get_val(ix+1, iy, iz+1)
-        v011 = get_val(ix, iy+1, iz+1)
-        v111 = get_val(ix+1, iy+1, iz+1)
-        
-        c00 = v000 * (1-fx) + v100 * fx
-        c01 = v010 * (1-fx) + v110 * fx
-        c10 = v001 * (1-fx) + v101 * fx
-        c11 = v011 * (1-fx) + v111 * fx
-        c0 = c00 * (1-fy) + c01 * fy
-        c1 = c10 * (1-fy) + c11 * fy
-        scalar = c0 * (1-fz) + c1 * fz
-        
-        # Shading / Transfer Function (maps scalar to color/alpha [G])
-        alpha_sample = min(1.0, scalar)
-        color_sample = [scalar, scalar, scalar]
-        
-        # Feed-backward accumulation
-        acc_color[0] = acc_color[0] + color_sample[0] * (1.0 - acc_opacity)
-        acc_color[1] = acc_color[1] + color_sample[1] * (1.0 - acc_opacity)
-        acc_color[2] = acc_color[2] + color_sample[2] * (1.0 - acc_opacity)
-        acc_opacity = acc_opacity + alpha_sample * (1.0 - acc_opacity)
-        
-        # Early termination
-        if acc_opacity >= 1.0:
-            break
+            # 3. Determine ray bounds within volume
+            t_min, t_max = ray_box_intersect(origin, direction, volume_bounds)
             
-        t += dt
+            if t_max <= t_min:
+                continue # Ray misses volume
+                
+            # 4. Traverse ray using DDA-like steps
+            # Calculate step size. For DDA, step is often 1 voxel in the dominant axis.
+            # For simplicity in this generic implementation, we use a fixed small step 
+            # or voxel-based step. Let's use a step size corresponding to 1/2 voxel 
+            # to ensure coverage, or use a DDA loop.
+            # Here we use a simple equidistant sampling for clarity, 
+            # but in practice, DDA is preferred [S1, unofficial].
+            step_size = 0.5 # Normalized units, adjust based on volume scale
+            num_steps = int((t_max - t_min) / step_size)
+            
+            for i in range(num_steps):
+                t = t_min + i * step_size
+                if t > t_max:
+                    break
+                    
+                # Position in world space
+                pos = origin + t * direction
+                
+                # Check if pos is inside volume bounds
+                if not is_inside_volume(pos, volume_bounds):
+                    continue
+                
+                # 5. Sample and Interpolate
+                # Convert world pos to voxel indices
+                # Note: Requires inverse transform from world to voxel space
+                # Assuming camera and volume are in consistent coordinate systems [S1, unofficial]
+                voxel_coords = world_to_voxel(pos, volume_bounds, vol_shape)
+                
+                # Trilinear interpolation
+                v = trilinear_interpolate(volume, voxel_coords, vol_shape)
+                
+                # 6. Classification
+                c_sample = transfer_func_color(v)
+                alpha_sample = transfer_func_opacity(v)
+                
+                # 7. Shading
+                # Compute gradient at voxel_coords for normal estimation
+                grad = compute_gradient(volume, voxel_coords, vol_shape)
+                c_shaded = shading_model(v, grad, direction)
+                
+                # 8. Compositing
+                # Front-to-back blending
+                # C_acc = C_acc + C_shaded * alpha_sample * tau_acc
+                # alpha_acc = alpha_acc + alpha_sample * tau_acc
+                # tau_acc = 1 - alpha_acc
+                
+                contribution = c_shaded * alpha_sample * acc_tau
+                acc_color = acc_color + contribution
+                acc_alpha = acc_alpha + alpha_sample * acc_tau
+                acc_tau = 1.0 - acc_alpha
+                
+                # 9. Early Termination
+                if acc_alpha >= 1.0:
+                    break
+            
+            # 10. Final Assignment
+            image[y, x] = acc_color
+            
+    return image
+
+def ray_box_intersect(origin, direction, bounds):
+    """
+    Computes intersection of ray with axis-aligned bounding box.
+    Returns (t_min, t_max).
+    """
+    # Standard slab method
+    t_min = -np.inf
+    t_max = np.inf
+    
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bounds[i*2] or origin[i] > bounds[i*2+1]:
+                return (np.inf, -np.inf) # Parallel and outside
+        else:
+            t1 = (bounds[i*2] - origin[i]) / direction[i]
+            t2 = (bounds[i*2+1] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+            
+    if t_min > t_max:
+        return (np.inf, -np.inf)
         
-    return acc_color, acc_opacity
+    return (t_min, t_max)
+
+def is_inside_volume(pos, bounds):
+    """Check if position is within volume bounds."""
+    for i in range(3):
+        if pos[i] < bounds[i*2] or pos[i] > bounds[i*2+1]:
+            return False
+    return True
+
+def world_to_voxel(pos, bounds, vol_shape):
+    """
+    Convert world position to voxel coordinates.
+    Assumes linear mapping from bounds to [0, vol_shape-1].
+    """
+    # Normalize pos to [0, 1] range relative to bounds
+    norm_pos = (pos - bounds[0:3]) / (bounds[3:6] - bounds[0:3])
+    # Scale to voxel indices
+    voxel_coords = norm_pos * (np.array(vol_shape) - 1)
+    return voxel_coords
+
+def trilinear_interpolate(volume, coords, shape):
+    """
+    Perform trilinear interpolation.
+    coords: array of [x, y, z] in voxel space.
+    """
+    # Clamp coordinates to valid range
+    x, y, z = coords
+    x = np.clip(x, 0, shape[0] - 1)
+    y = np.clip(y, 0, shape[1] - 1)
+    z = np.clip(z, 0, shape[2] - 1)
+    
+    # Get integer and fractional parts
+    x0, y0, z0 = np.floor([x, y, z]).astype(int)
+    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+    
+    # Handle boundary conditions for x1, y1, z1
+    x1 = np.clip(x1, 0, shape[0] - 1)
+    y1 = np.clip(y1, 0, shape[1] - 1)
+    z1 = np.clip(z1, 0, shape[2] - 1)
+    
+    fx, fy, fz = x - x0, y - y0, z - z0
+    
+    # Fetch 8 neighbors
+    c000 = volume[x0, y0, z0]
+    c100 = volume[x1, y0, z0]
+    c010 = volume[x0, y1, z0]
+    c110 = volume[x1, y1, z0]
+    c001 = volume[x0, y0, z1]
+    c101 = volume[x1, y0, z1]
+    c011 = volume[x0, y1, z1]
+    c111 = volume[x1, y1, z1]
+    
+    # Interpolate
+    c00 = c000 * (1 - fx) + c100 * fx
+    c01 = c001 * (1 - fx) + c101 * fx
+    c10 = c010 * (1 - fx) + c110 * fx
+    c11 = c011 * (1 - fx) + c111 * fx
+    
+    c0 = c00 * (1 - fy) + c10 * fy
+    c1 = c01 * (1 - fy) + c11 * fy
+    
+    result = c0 * (1 - fz) + c1 * fz
+    return result
+
+def compute_gradient(volume, coords, shape):
+    """
+    Compute gradient at voxel coordinates using central differences.
+    """
+    x, y, z = coords
+    # Use simple finite differences
+    # Note: This is a placeholder for gradient computation.
+    # In practice, use a more robust method or pre-computed gradients.
+    # [G] Gradient computation is not explicitly detailed in sources, 
+    # but shading requires it [S2, S4, unofficial].
+    dx = volume[np.clip(x+1, 0, shape[0]-1), y, z] - volume[np.clip(x-1, 0, shape[0]-1), y, z]
+    dy = volume[x, np.clip(y+1, 0, shape[1]-1), z] - volume[x, np.clip(y-1, 0, shape[1]-1), z]
+    dz = volume[x, y, np.clip(z+1, 0, shape[2]-1)] - volume[x, y, np.clip(z-1, 0, shape[2]-1)]
+    return np.array([dx, dy, dz])
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Geometric Transformations:** Handling coordinate system consistency is critical, as errors in mapping DICOM metadata to the volume coordinate system cause artifacts [S1, unofficial].
-*   **Boundary Handling:** Volume boundary handling involves numerous implementation details, and incorrect ray-box intersection logic leads to sampling outside the valid data range [S1, unofficial].
-*   **Precision:** Floating-point precision in accumulation can lead to slight inaccuracies in color blending, though early termination mitigates error propagation for opaque regions [G].
-
-## Subtopics
-
-### Digital Radiograph (DRR) Synthesis
-A specific application of Van Hook-Levoy ray-casting for medical imaging [S1, unofficial]. Unlike surface rendering, it preserves interior density information for projection synthesis [S3, unofficial]. It generates 2D X-ray-like projections from 3D CT data [S1, unofficial]. It is chosen when rapid visualization of bone or contrast structures is needed for surgical planning [S1, unofficial]. Link to [DRR Generation](link-to-drr-article) [S1, unofficial].
-
-### GPU-Accelerated Ray Casting
-Porting the algorithm to parallel hardware (CUDA/OpenCL) to achieve real-time performance [S1, unofficial]. Unlike CPU implementations, it exploits massive parallelism to process independent rays simultaneously [S1, unofficial]. It is chosen when interactive frame rates are required, moving from offline processing (seconds) to real-time (milliseconds) [S1, unofficial]. Link to [GPU Volume Rendering](link-to-gpu-article) [S1, unofficial].
+**Subtopics:**
+*   **Digital Radiograph (DRR) Synthesis:** A specific application of Van Hook-Levoy Ray-Casting in medical imaging, where the ray casting is used to project 3D CT data into 2D X-ray-like images [S1, unofficial]. It requires strict coordinate system consistency using DICOM metadata [S1, unofficial].
+*   **Feed-Forward vs. Feed-Backward:** Van Hook-Levoy is a feed-backward method (ray from eye to volume), which enables early termination when opacity is 1 [S2, unofficial]. This contrasts with feed-forward methods which accumulate from the back [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ per ray (excluding the volume storage) [S3, unofficial]. No intermediate representations are generated [S3, unofficial].
-*   **Measured Performance:** Python/Numba (CPU) requires seconds to tens of seconds for offline processing [S1, unofficial]. Python/PyCUDA (GPU) achieves tens to hundreds of milliseconds for real-time interaction [S1, unofficial].
-*   **Strengths:** Simple implementation; direct access to interior information; early termination optimization reduces computation for opaque regions [S2, unofficial].
-*   **Limitations:** Computationally intensive compared to surface rendering; "cloudy interiors" can be difficult to interpret [S3, unofficial].
-*   **When to use:** Ideal for direct volume visualization and DRR generation where intermediate geometry extraction is undesirable [S3, unofficial].
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of samples per ray. With DDA, $S$ is proportional to the number of voxels intersected by the ray [S1, unofficial].
+*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(1)$ per ray for accumulators [S2, unofficial].
+*   **Performance:** Naive equidistant sampling is slow [S1, unofficial]. Using DDA/Bresenham-like algorithms improves traversal efficiency [S1, unofficial]. GPU implementation (e.g., CUDA) can achieve real-time performance (tens to hundreds of milliseconds) compared to seconds for CPU implementations [S1, unofficial].
+*   **Strengths:** Simple to implement; visualizes the entire volume; early termination optimization reduces computation for opaque regions [S2, unofficial].
+*   **Limitations:** Computationally expensive for high-resolution volumes; requires careful handling of geometric transformations and boundary conditions to avoid artifacts [S1, unofficial].
+*   **When to use:** When direct visualization of internal structures is needed, and real-time performance is achievable via GPU acceleration [S1, S3, unofficial].
+*   **When not to use:** When surface rendering is sufficient, or when hardware acceleration is unavailable and performance is critical [S3, unofficial].
 
 ## Background
-*   **Origin:** The method was published by Marc Levoy in 1988 [S3, unofficial]. David Van Hook also explored the basic ray-casting model in 1986 [S2, unofficial].
-*   **History:** It is one of the four main paradigms of volume rendering, alongside splatting, shear-warp, and cell projection [S3, unofficial]. It falls under the category of direct volume rendering, which processes voxels directly without intermediate polygonal meshes [S3, unofficial].
-*   **Development:** Initially implemented on CPUs, the algorithm was later ported to GPUs (introduced by Kruger in 2003) to leverage parallel processing for the independent ray calculations [S3, unofficial].
-*   **Usage:** Widely integrated into medical imaging pipelines for therapy planning and Digital Radiograph (DRR) synthesis [S1, unofficial].
+*   **Origin:** The method was published by Marc Levoy in 1988 [S3, unofficial]. Thomas Van Hook also explored the basic ray-casting model in 1986 [S2, unofficial].
+*   **History:** It is one of the four main paradigms of volume rendering (along with splatting, shear-warp, and cell projection) [S3, unofficial]. GPU raycasting was later introduced by Kruger in 2003 [S3, unofficial].
+*   **Usage:** Widely used in medical imaging for therapy planning and generating Digital Radiographs (DRR) from 3D CT data [S1, S3, unofficial].
 
 ## Sources
 [S1] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)
 [S2] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
 [S3] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S4] 14 Acceleration Techniques for Volume Rendering Mark W. Jones 14 Acceleration Techniques for Volume Rendering Mark W. Jones, https://docslib.org/doc/3014834/14-acceleration-techniques-for-volume-rendering-mark-w-jones, fetched 2026-10-28 (unofficial)

@@ -1,20 +1,20 @@
 # 2D Gradient Estimation for Shading
 
-Also called: Depth Image Gradient Shading, Post-processing Normal Estimation from Depth
+Also called: Depth Image Gradient Shading, Normal Map Calculation, Post-processing Normal Estimation from Depth
 
 ## Overview
-This method estimates surface normals for shading by computing 2D spatial gradients from a rendered depth image (distance from the view plane to the surface) [S1, book]. It enables post-processing illumination (ambient, diffuse, specular) without recomputing the volume rendering [S1, book]. Unlike 3D gradient estimation which operates on volumetric data, this approach operates on the 2D image plane, making it computationally cheaper but susceptible to artifacts when depth values represent disjoint volumetric regions [S1, book].
+This method estimates surface normals for shading by computing 2D spatial gradients from a rendered depth image (distance from the view plane to the surface) [S1, book]. It enables post-processing illumination without recomputing the volume rendering [S1, book]. Unlike 3D gradient estimation which operates on volumetric data, this approach operates on the 2D image plane, making it computationally cheaper but susceptible to artifacts when depth values represent disjoint volumetric regions [S1, book].
 
 ## How it works
-**Inputs:** A depth image $Z$ where each pixel $(x_p, y_p)$ stores the distance from the camera view plane to the nearest surface intersection.
-**Outputs:** A normal map where each pixel stores a unit normal vector $\mathbf{n}$.
+**Inputs:** A depth image $Z$ where each pixel $(x_p, y_p)$ stores the distance from the camera view plane to the nearest surface intersection [S1, book].
+**Outputs:** A normal map where each pixel stores a unit normal vector $\mathbf{n}$ [S1, book].
 
 **Data Structures:**
 *   $Z$: 2D array of floating-point values representing depth.
 *   $\mathbf{n}$: 2D array of 3D vectors $(n_x, n_y, n_z)$.
 
 **Parameters:**
-*   $\Delta x, \Delta y$: Step sizes for the central difference approximation. Typically equal to the pixel spacing in the x and y directions, respectively. Larger values can be used to smooth the resulting normals [S1, book].
+*   $\Delta x, \Delta y$: Step sizes for the central difference approximation. Typically equal to the pixel spacing in the x and y directions, respectively [S1, book]. Larger values can be used to smooth the resulting normals [S1, book].
 
 **Algorithm:**
 1.  For each pixel $(x_p, y_p)$ in the depth image $Z$:
@@ -24,7 +24,7 @@ This method estimates surface normals for shading by computing 2D spatial gradie
         $$ \frac{\partial Z}{\partial y} \simeq \frac{Z(x_p, y_p + \Delta y) - Z(x_p, y_p - \Delta y)}{2 \Delta y} $$
     c.  Set the partial derivative with respect to $z$ to 1:
         $$ \frac{\partial Z}{\partial z} \simeq 1 $$
-    d.  Construct the gradient vector $\mathbf{g} = \left( \frac{\partial Z}{\partial x}, \frac{\partial Z}{\partial y}, \frac{\partial Z}{\partial z} \right)$.
+    d.  Construct the gradient vector $\mathbf{g} = \left( \frac{\partial Z}{\partial x}, \frac{\partial Z}{\partial y}, \frac{\partial Z}{\partial z} \right)$ [S1, book].
     e.  Normalize $\mathbf{g}$ to produce the unit normal vector $\mathbf{n}$:
         $$ \mathbf{n} = \frac{\mathbf{g}}{\|\mathbf{g}\|} $$
 
@@ -39,7 +39,7 @@ def compute_normal_map(depth_image, dx=1.0, dy=1.0):
     Computes surface normals from a depth image using 2D central differences.
     
     Args:
-        depth_image: 2D list or array of floats, Z[x, y].
+        depth_image: 2D list or array of floats, Z[y, x].
         dx: Step size in x direction (default 1.0 pixel).
         dy: Step size in y direction (default 1.0 pixel).
         
@@ -53,14 +53,17 @@ def compute_normal_map(depth_image, dx=1.0, dy=1.0):
     for y in range(height):
         for x in range(width):
             # Central difference for x
-            # Handle boundaries by clamping or assuming constant depth [G]
-            z_left = depth_image[y][max(0, x - int(dx))]
-            z_right = depth_image[y][min(width - 1, x + int(dx))]
+            x_left = max(0, x - int(dx))
+            x_right = min(width - 1, x + int(dx))
+            z_left = depth_image[y][x_left]
+            z_right = depth_image[y][x_right]
             dz_dx = (z_right - z_left) / (2.0 * dx)
             
             # Central difference for y
-            z_up = depth_image[max(0, y - int(dy))][x]
-            z_down = depth_image[min(height - 1, y + int(dy))][x]
+            y_up = max(0, y - int(dy))
+            y_down = min(height - 1, y + int(dy))
+            z_up = depth_image[y_up][x]
+            z_down = depth_image[y_down][x]
             dz_dy = (z_down - z_up) / (2.0 * dy)
             
             # dz/dz is always 1
@@ -86,9 +89,9 @@ def compute_normal_map(depth_image, dx=1.0, dy=1.0):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Disjoint Regions:** Normals computed from depth values may represent disjoint regions in the volume, leading to blurring of sharp features on object edges [S1, book]. This occurs because the 2D gradient assumes local continuity which may not exist across occlusion boundaries or separate objects in the depth buffer.
+*   **Disjoint Regions:** Normals computed from depth values may represent disjoint regions in the volume, leading to blurring of sharp features on object edges [S1, book].
 *   **Boundary Conditions:** The sources do not specify boundary handling. Implementers must clamp coordinates or use one-sided differences at image edges [G].
-*   **Step Size Selection:** Care must be taken when selecting $\Delta x$ and $\Delta y$. While pixel spacing is typical, larger values smooth the image but reduce spatial accuracy [S1, book].
+*   **Step Size Selection:** Care must be taken when selecting $\Delta x$ and $\Delta y$ [S1, book].
 
 ## Subtopics
 
@@ -96,14 +99,14 @@ def compute_normal_map(depth_image, dx=1.0, dy=1.0):
 Refines standard estimation by restricting normal computation to pixels within the same continuous curvature region, preventing blurring across disjoint boundaries.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the depth image, as each pixel requires a constant number of arithmetic operations.
-*   **Memory Complexity:** $O(N)$ to store the output normal map.
-*   **Strengths:** Allows post-processing shading without recomputing the volume render; computationally inexpensive compared to 3D gradient estimation.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Allows post-processing shading without recomputing the volume render [S1, book].
 *   **Limitations:** Prone to artifacts at object boundaries and occlusions due to the assumption of local depth continuity [S1, book].
-*   **When to use:** When a depth image is already available and high-fidelity edge preservation is not critical, or when used as a base for more advanced techniques like curvature-constrained estimation.
+*   **When to use:** When a depth image is already available and high-fidelity edge preservation is not critical, or when used as a base for more advanced techniques like curvature-constrained estimation [S1, book].
 
 ## Background
-This technique is described in the context of volume rendering and surface illumination models, specifically for capturing ambient, diffuse, and specular lighting [S1, book]. It is presented as an alternative to 3D finite difference gradient estimation, leveraging the depth buffer generated during rendering. The problem of disjoint regions causing edge blurring is noted, with references to prior work such as [Yagel92a] for curvature-constrained approaches.
+This technique is described in the context of volume rendering and surface illumination models, specifically for capturing ambient, diffuse, and specular lighting [S1, book]. It is presented as an alternative to 3D finite difference gradient estimation, leveraging the depth buffer generated during rendering [S1, book]. The problem of disjoint regions causing edge blurring is noted, with references to prior work such as [Yagel92a] for curvature-constrained approaches [S1, book].
 
 ## Sources
 [S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)

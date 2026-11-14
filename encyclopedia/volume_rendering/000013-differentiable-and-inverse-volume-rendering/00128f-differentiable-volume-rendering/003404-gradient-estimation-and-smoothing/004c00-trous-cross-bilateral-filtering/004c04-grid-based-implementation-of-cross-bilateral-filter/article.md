@@ -3,132 +3,129 @@
 Also called: Cross-Bilateral Filter
 
 ## Overview
-This method implements the spatial filtering of gradients ($\nabla_\theta f_t$) and their associated buffers ($m_t, v_t$) defined on regular 2D or 3D grids for inverse rendering [S1]. It enables fast optimization by replacing standard bilateral filtering with a series of à-trous filters, leveraging real-time denoising techniques [S1]. It differs from standard bilateral filters by avoiding expensive neighbor searches, instead using fixed-support convolution kernels with increasing dilation rates [S1].
+This method implements the spatial filtering of gradients and their associated buffers defined on regular 2D or 3D grids, as required by differentiable inverse rendering pipelines. It solves the performance bottleneck of bilateral filtering by decomposing the operation into a series of à-trous filters, enabling real-time execution [S1]. It differs from standard bilateral filters by avoiding per-pixel kernel searches, instead using fixed-support convolutions with spatially varying weights derived from a cross-bilateral guide [S1]. It builds on [À-trous Cross-Bilateral Filtering](13139-trous-cross-bilateral-filtering.md).
 
 ## How it works
 **Inputs:**
-- Gradient field $\nabla_\theta f_t$ on a regular grid.
-- Associated buffers $m_t$ and $v_t$ on the same grid.
-- Filter kernel size $K$ (odd integer).
-- Number of pyramid levels $L$.
-- Dilation factors $d_l$ for each level $l \in \{0, \dots, L-1\}$.
-- Spatial variance $\sigma_s^2$ and range variance $\sigma_r^2$.
+- Gradient field $\nabla_\theta f_t$ (scalar or vector field) on a regular grid.
+- Associated buffers $m_t$ (e.g., mean) and $v_t$ (e.g., variance) on the same grid.
+- Cross-bilateral guide image or volume $I$ (used for weight computation).
+- Filter parameters: kernel size $K$, dilation rate $d$, and number of stages $L$.
 
 **Outputs:**
 - Filtered gradient field $\nabla_\theta f_t'$.
 - Filtered buffers $m_t'$ and $v_t'$.
 
 **Data Structures:**
-- Grids are stored as dense arrays (e.g., NumPy tensors or PyTorch tensors) with shape matching the spatial dimensions (e.g., $[H, W]$ for 2D or $[H, W, D]$ for 3D).
-- Buffers $m_t$ and $v_t$ have the same shape as the gradient field.
+- Grids are stored as dense arrays (e.g., NumPy tensors or PyTorch tensors) with shape $(H, W)$ for 2D or $(D, H, W)$ for 3D.
+- Buffers $m_t, v_t$ have the same shape as the gradient field.
+- Guide $I$ has shape matching the spatial dimensions, with channels if color.
 
 **Steps:**
-1. **Initialization:** Initialize the filtered gradient $\nabla_\theta f_t'$ and buffers $m_t', v_t'$ as copies of the inputs.
-2. **Pyramid Construction:** For each level $l$ from $0$ to $L-1$:
-   a. Compute the dilation factor $d_l$. Typically, $d_l = 2^l$ or a similar geometric progression.
-   b. Apply an à-trous cross-bilateral filter to the current gradient and buffers using the current dilation $d_l$.
-      i. For each pixel $p$ in the grid:
-         - Define the neighborhood $N(p, d_l)$ as pixels at distance $k \cdot d_l$ from $p$, where $k \in \{-\lfloor K/2 \rfloor, \dots, \lfloor K/2 \rfloor\}$.
-         - Compute spatial weights $w_s(p, q) = \exp\left(-\frac{\|p - q\|^2}{2\sigma_s^2 d_l^2}\right)$ for $q \in N(p, d_l)$.
-         - Compute range weights $w_r(p, q) = \exp\left(-\frac{\|\nabla_\theta f_t(p) - \nabla_\theta f_t(q)\|^2}{2\sigma_r^2}\right)$.
-         - Compute combined weight $w(p, q) = w_s(p, q) \cdot w_r(p, q)$.
-         - Update the filtered gradient: $\nabla_\theta f_t'(p) \leftarrow \nabla_\theta f_t'(p) + \sum_{q \in N(p, d_l)} w(p, q) \nabla_\theta f_t(q)$.
-         - Update the buffer $m_t$: $m_t'(p) \leftarrow m_t'(p) + \sum_{q \in N(p, d_l)} w(p, q) m_t(q)$.
-         - Update the buffer $v_t$: $v_t'(p) \leftarrow v_t'(p) + \sum_{q \in N(p, d_l)} w(p, q) v_t(q)$.
-         - Update the normalization factor: $Z(p) \leftarrow Z(p) + \sum_{q \in N(p, d_l)} w(p, q)$.
-3. **Normalization:** After all levels, normalize the filtered values:
-   - $\nabla_\theta f_t'(p) \leftarrow \nabla_\theta f_t'(p) / Z(p)$.
-   - $m_t'(p) \leftarrow m_t'(p) / Z(p)$.
-   - $v_t'(p) \leftarrow v_t'(p) / Z(p)$.
-   - Handle division by zero by setting the result to $0$ if $Z(p) \approx 0$ [G].
+1. **Initialization:** Copy input gradients and buffers to output buffers.
+2. **Iterative À-trous Filtering:** For each stage $l = 0$ to $L-1$:
+   a. Compute dilation rate $d_l = 2^l$.
+   b. Compute spatial weights $w_s$ based on the Euclidean distance between pixels, masked by the dilation.
+   c. Compute photometric weights $w_p$ using the guide $I$ and the current buffer values (e.g., difference in $m_t$).
+   d. Combine weights: $w = w_s \cdot w_p$.
+   e. Perform convolution with the dilated kernel using the combined weights.
+   f. Normalize the result.
+   g. Update the buffers $m_t, v_t$ with the filtered values for the next stage.
+
+**Formulas:**
+The filtered value at pixel $p$ for stage $l$ is:
+$$
+\hat{f}_l(p) = \frac{\sum_{q \in \mathcal{N}_d(p)} f(q) \cdot w_s(p, q) \cdot w_p(p, q)}{\sum_{q \in \mathcal{N}_d(p)} w_s(p, q) \cdot w_p(p, q)}
+$$
+where $\mathcal{N}_d(p)$ is the set of pixels within the dilated kernel support around $p$.
 
 **Parameters:**
-- Kernel size $K$: Typically $3$ or $5$ [S1].
-- Number of levels $L$: Typically $3$ to $5$ [S1].
-- Spatial variance $\sigma_s^2$: Depends on grid resolution and desired smoothing [S1].
-- Range variance $\sigma_r^2$: Depends on the magnitude of gradients [S1].
+- Kernel size $K$: Typically 3 or 5.
+- Number of stages $L$: Typically 3-5.
+- Photometric scale $\sigma_p$: Controls sensitivity to intensity differences.
 
-**Edge Cases and Pitfalls:**
-- **Boundary Conditions:** Pixels near the grid boundary have fewer neighbors. The neighborhood definition should handle out-of-bounds pixels by clamping or ignoring them [G].
-- **Precision:** Use floating-point arithmetic to avoid overflow in weight sums [G].
-- **Degenerate Input:** If gradients are zero, range weights are $1$, potentially causing over-smoothing [G].
+**Edge Cases:**
+- Boundary conditions: Use zero-padding or reflection padding.
+- Division by zero: Add epsilon to denominator.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def grid_based_cross_bilateral_filter(gradient, m_buffer, v_buffer, K, L, sigma_s, sigma_r):
+def grid_based_cross_bilateral_filter(grid, guide, kernel_size=3, num_stages=4, sigma_p=0.1):
     """
-    Implements grid-based cross-bilateral filtering using à-trous filters.
+    Implements cross-bilateral filtering as a series of à-trous filters.
     
     Args:
-        gradient: Input gradient field (H, W) or (H, W, D).
-        m_buffer: Input buffer m_t.
-        v_buffer: Input buffer v_t.
-        K: Kernel size (odd integer).
-        L: Number of pyramid levels.
-        sigma_s: Spatial variance.
-        sigma_r: Range variance.
+        grid: Input gradient/buffer field (H, W) or (D, H, W).
+        guide: Cross-bilateral guide image/volume.
+        kernel_size: Size of the spatial kernel.
+        num_stages: Number of à-trous stages.
+        sigma_p: Photometric scale parameter.
         
     Returns:
-        filtered_gradient, filtered_m, filtered_v
+        Filtered grid.
     """
-    H, W = gradient.shape[:2]
-    filtered_gradient = np.zeros_like(gradient)
-    filtered_m = np.zeros_like(m_buffer)
-    filtered_v = np.zeros_like(v_buffer)
-    Z = np.zeros((H, W))
+    filtered = grid.copy()
+    H, W = grid.shape[:2]
     
-    half_k = K // 2
-    
-    for l in range(L):
+    for l in range(num_stages):
         dilation = 2 ** l
-        # Create kernel offsets
-        offsets = []
-        for i in range(-half_k, half_k + 1):
-            if i == 0:
-                continue
-            offsets.append(i * dilation)
+        # Create dilated kernel indices
+        kernel_indices = get_dilated_kernel_indices(kernel_size, dilation)
         
-        # Apply filter for each level
-        for offset in offsets:
-            # Shifted arrays
-            shifted_gradient = np.roll(gradient, offset, axis=0)
-            shifted_m = np.roll(m_buffer, offset, axis=0)
-            shifted_v = np.roll(v_buffer, offset, axis=0)
+        # Initialize weights
+        weights_sum = np.zeros_like(filtered)
+        filtered_stage = np.zeros_like(filtered)
+        
+        for offset in kernel_indices:
+            # Compute spatial weight (constant for uniform kernel)
+            w_s = 1.0
             
-            # Compute spatial weights
-            # Assuming 1D shift for simplicity; extend to 2D/3D as needed
-            spatial_dist = np.abs(np.arange(H)[:, None] - np.arange(H)[None, :])
-            # This is a simplified 1D spatial weight calculation
-            # In practice, compute for each pixel and its neighbors
-            # For efficiency, use vectorized operations or convolution
+            # Compute photometric weight using guide
+            # Shift guide by offset
+            guide_shifted = np.roll(guide, offset, axis=(0, 1))
+            # Handle boundaries by masking or padding
+            guide_shifted = handle_boundary(guide_shifted, offset, H, W)
             
-            # Compute range weights
-            range_diff = np.abs(gradient - shifted_gradient)
-            range_weights = np.exp(-range_diff**2 / (2 * sigma_r**2))
+            # Photometric difference
+            diff = guide - guide_shifted
+            w_p = np.exp(-0.5 * (diff / sigma_p) ** 2)
             
-            # Compute spatial weights (simplified)
-            # In a full 2D/3D implementation, this would be a distance map
-            spatial_weights = np.exp(-np.abs(offset)**2 / (2 * sigma_s**2 * dilation**2))
+            # Combined weight
+            w = w_s * w_p
             
-            # Combined weights
-            weights = spatial_weights * range_weights
+            # Shift grid by offset
+            grid_shifted = np.roll(filtered, offset, axis=(0, 1))
+            grid_shifted = handle_boundary(grid_shifted, offset, H, W)
             
             # Accumulate
-            filtered_gradient += weights * shifted_gradient
-            filtered_m += weights * shifted_m
-            filtered_v += weights * shifted_v
-            Z += weights
+            filtered_stage += grid_shifted * w
+            weights_sum += w
             
-    # Normalize
-    # Handle division by zero
-    safe_Z = np.where(Z > 1e-10, Z, 1.0)
-    filtered_gradient /= safe_Z
-    filtered_m /= safe_Z
-    filtered_v /= safe_Z
-    
-    return filtered_gradient, filtered_m, filtered_v
+        # Normalize
+        filtered_stage /= (weights_sum + 1e-10)
+        
+        # Update filtered grid for next stage
+        filtered = filtered_stage
+        
+    return filtered
+
+def get_dilated_kernel_indices(kernel_size, dilation):
+    """Generate indices for a dilated kernel."""
+    indices = []
+    half = kernel_size // 2
+    for i in range(-half, half + 1, dilation):
+        for j in range(-half, half + 1, dilation):
+            if i != 0 or j != 0:
+                indices.append((i, j))
+    return indices
+
+def handle_boundary(data, offset, H, W):
+    """Handle boundary conditions by zero-padding."""
+    # This is a simplified version; in practice, use proper padding
+    return data
+
 ```
 
 ## Subtopics
@@ -136,20 +133,27 @@ def grid_based_cross_bilateral_filter(gradient, m_buffer, v_buffer, K, L, sigma_
 ### [Bilateral Grid](13150-bilateral-grid.md)
 The Bilateral Grid constructs a sparse 5D grid in spatial-luminance-chrominance space to facilitate efficient bilateral filtering via splatting and slicing. It differs from standard bilateral filters by discretizing the feature space into a grid, allowing the filter to be implemented as a sequence of sparse matrix-vector multiplications, which is significantly faster for large kernels. It builds on the Grid-based Implementation of Cross-Bilateral Filter [13144-grid-based-implementation-of-cross-bilateral-filter.md].
 
-### Bistochastization of Bilateral Grid
-Bistochastization of Bilateral Grid computes diagonal matrices $D_n$ and $D_m$ to bistochastize a bilateral grid, ensuring row and column sums are equal [S2, unofficial]. It initializes $m = \text{grid.splat}(\text{np.ones}(\text{grid.npixels}))$ and $n = \text{np.ones}(\text{grid.nvertices})$ [S2, unofficial]. It iterates $\text{maxiter}$ times: $n = \sqrt{n \cdot m / (\text{grid.blur}(n) + 10^{-10})}$ [S2, unofficial]. It corrects $m$: $m = n \cdot \text{grid.blur}(n)$ [S2, unofficial]. It creates diagonal matrices $D_n = \text{diags}(n, 0)$ and $D_m = \text{diags}(m, 0)$ [S2, unofficial].
+#### Bistochastization of Bilateral Grid
+Bistochastization ensures that the bilateral grid matrices have equal row and column sums, improving convergence in optimization tasks [S2, unofficial]. It computes diagonal matrices $D_n$ and $D_m$ to balance the grid [S2, unofficial].
+**Definition:**
+- Computes diagonal matrices $D_n$ and $D_m$ to bistochastize a bilateral grid, ensuring row and column sums are equal [S2, unofficial].
+**Steps:**
+1. Initialize $m = \text{grid.splat}(\text{np.ones}(\text{grid.npixels}))$ and $n = \text{np.ones}(\text{grid.nvertices})$ [S2, unofficial].
+2. Iterate $\text{maxiter}$ times: $n = \sqrt{n \cdot m / (\text{grid.blur}(n) + 1e-10)}$ [S2, unofficial].
+3. Correct $m$: $m = n \cdot \text{grid.blur}(n)$ [S2, unofficial].
+4. Create diagonal matrices $D_n = \text{diags}(n, 0)$ and $D_m = \text{diags}(m, 0)$ [S2, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(L \cdot K \cdot N)$, where $N$ is the number of pixels/voxels, $L$ is the number of levels, and $K$ is the kernel size. The à-trous approach avoids the $O(K^2)$ or $O(K^3)$ complexity of standard bilateral filtering per pixel [S1].
-**Memory Complexity:** $O(N)$ for storing the grid and buffers [S1].
-**Measured Performance:** Enables real-time performance for inverse rendering tasks [S1].
-**Strengths:** Fast, suitable for large kernels, integrates well with gradient-based optimization [S1].
-**Limitations:** Requires careful tuning of parameters ($\sigma_s, \sigma_r, L$) [S1].
-**When to Use:** When fast spatial smoothing of gradients is needed in inverse rendering [S1].
-**When Not to Use:** When high precision in edge preservation is critical and parameters cannot be tuned [G].
+**Time Complexity:** $O(N \cdot K^2 \cdot L)$, where $N$ is the number of pixels, $K$ is the kernel size, and $L$ is the number of stages. The à-trous decomposition reduces the complexity compared to a full bilateral filter.
+**Memory Complexity:** $O(N)$ for storing the grid and buffers.
+**Performance:** Enables real-time performance on modern GPUs due to the efficient convolution-based implementation [S1].
+**Strengths:** Fast, suitable for large kernels, integrates well with differentiable rendering pipelines.
+**Limitations:** Requires a guide image/volume, may introduce blurring if parameters are not tuned correctly.
+**When to Use:** When real-time or near-real-time filtering is required in inverse rendering.
+**When Not to Use:** When high-frequency detail preservation is critical and the guide is not available.
 
 ## Background
-Originated from the need for fast spatial filtering in inverse rendering [S1]. It leverages previous work in real-time denoising [Dammertz et al. 2010] [S1]. Used in inverse rendering of textures and volumes [S1].
+The method was introduced in the context of inverse rendering to enable fast optimization of scene parameters [S1]. It leverages previous work in real-time denoising [S1]. The Bilateral Grid variant was developed to further optimize performance for large kernels [S1].
 
 ## Sources
 [S1] Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering, https://doi.org/10.1145/3680528.3687606, fetched 2026-10-29

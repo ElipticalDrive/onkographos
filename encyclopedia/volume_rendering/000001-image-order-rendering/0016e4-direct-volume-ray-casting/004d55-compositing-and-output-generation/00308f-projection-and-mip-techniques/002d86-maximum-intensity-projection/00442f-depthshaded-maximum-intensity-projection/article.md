@@ -1,0 +1,107 @@
+# DepthShaded Maximum Intensity Projection
+
+Also called: DSMIP, Depth-enhanced Maximum Intensity Projection
+
+## Overview
+DepthShaded Maximum Intensity Projection (DSMIP) is a volume rendering technique that enhances depth perception in Maximum Intensity Projection (MIP) by modulating voxel intensities based on their distance from the viewer [S2, S1, unofficial]. Unlike standard MIP, which maps only the global maximum along a ray to the screen and provides no depth cues, DSMIP allows closer structures with similar material properties to occlude or modulate the appearance of deeper, high-intensity structures [S1, S2, unofficial]. This addresses the ambiguity in interpreting spatial relationships in angiography and other high-contrast volumetric data [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- A 3D volume dataset $V$ with scalar values representing intensity/density.
+- A camera view defining ray origins and directions.
+- A sampling step size or ray length.
+
+**Outputs:**
+- A 2D image where each pixel contains the final modulated intensity and color.
+
+**Data Structures:**
+- `image_buffer`: 2D array storing the current best modulated intensity for each pixel, initialized to $-\infty$.
+- `depth_buffer`: 2D array storing the depth of the voxel that produced the current best modulated intensity, initialized to $\infty$.
+
+**Algorithm:**
+For each pixel $(u, v)$ in the image:
+1. Cast a ray $R$ from the camera through $(u, v)$ into the volume.
+2. Sample the volume along $R$ at discrete points $p_i$ with corresponding intensity values $I_i$ and depths $d_i$ (distance from camera origin).
+3. For each sample $i$:
+   a. Calculate the modulated intensity $M_i$:
+      $$ M_i = I_i \cdot f(d_i) $$
+      Where $f(d_i)$ is a depth modulation function. The sources describe this as modulating intensity by depth, typically implying a decay or weighting factor that reduces the influence of distant samples [S2, unofficial]. Specific functional forms (e.g., linear decay, exponential) are not explicitly defined in the provided notes, but the effect is that distant values have less chance of being projected [S2, unofficial].
+   b. Compare $M_i$ with the current best modulated intensity stored in `image_buffer[u][v]`.
+   c. If $M_i > \text{image\_buffer}[u][v]$:
+      i. Update `image_buffer[u][v] = M_i`.
+      ii. Update `depth_buffer[u][v] = d_i`.
+      iii. Store the color associated with the material at $p_i$ (or the original intensity mapped to color) in the output image.
+4. After processing all samples along the ray, write `image_buffer[u][v]` to the final image.
+
+**Parameters:**
+- Depth modulation function $f(d)$: Not given in the sources. Typically involves a factor that decreases with depth.
+- Thresholds: Not explicitly required for basic DSMIP, unlike LMIP [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Obscuring of distant features:** Because distant values are modulated down, high-intensity structures located far from the viewer may fail to update the buffer if closer, lower-intensity structures have a higher modulated value. This can result in the obscuring of volumetric features even if they have high intrinsic intensity values [S2, unofficial].
+- **Material similarity:** The method assumes that structures with "similar material" should be compared. If the volume contains heterogeneous materials, the intensity comparison might not reflect true spatial occlusion correctly without additional material classification [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def depth_shaded_mip(volume, camera, image_width, image_height):
+    # Initialize buffers
+    # image_buffer stores the max modulated intensity
+    image_buffer = np.full((image_height, image_width), -np.inf)
+    # depth_buffer stores the depth of the voxel that produced the max modulated intensity
+    depth_buffer = np.full((image_height, image_width), np.inf)
+    # output_image stores the final color/intensity
+    output_image = np.zeros((image_height, image_width, 3))
+
+    for y in range(image_height):
+        for x in range(image_width):
+            # Cast ray for pixel (x, y)
+            ray = camera.cast_ray(x, y)
+            
+            # Sample along the ray
+            # Assume sample_points is a list of (intensity, depth) tuples
+            sample_points = volume.sample_ray(ray)
+            
+            for intensity, depth in sample_points:
+                # Modulate intensity by depth
+                # Note: The exact function f(depth) is not specified in sources [S1, S2, unofficial]
+                # It is a function that reduces intensity for larger depths
+                modulated_intensity = intensity * depth_modulation_function(depth)
+                
+                # Update if this modulated value is better than current best
+                if modulated_intensity > image_buffer[y, x]:
+                    image_buffer[y, x] = modulated_intensity
+                    depth_buffer[y, x] = depth
+                    # Map intensity to color (simplified)
+                    output_image[y, x] = intensity_to_color(intensity)
+                    
+    return output_image
+
+def depth_modulation_function(depth):
+    # Placeholder for the specific depth weighting function
+    # Sources indicate intensity is modulated by depth, reducing chance of projection for far values [S2, unofficial]
+    # A common implementation might be 1 / (1 + depth) or similar decay
+    # Not given in the sources. [G]
+    return 1.0 / (1.0 + depth)
+```
+
+## Subtopics
+
+### Depth Perception in MIP via Polygonal Surfaces
+A method to improve depth perception in MIP by extracting isosurfaces and modifying vertex coordinates before projection [S1, unofficial]. It replaces the z-coordinate of each vertex with its associated isovalue, modifying the depth buffer so that geometry with higher densities appears closer to the viewpoint [S1, unofficial]. This modified z-buffer is then used to enhance the MIP visualization [S1, unofficial]. Unlike DSMIP, which operates on ray-casted samples, this method relies on surface extraction [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of pixels and $R$ is the number of samples per ray. Similar to standard MIP, but with additional per-sample depth modulation calculations [S2, unofficial].
+- **Memory Complexity:** $O(N)$ for the image and depth buffers [S2, unofficial].
+- **Strengths:** Enhances depth perception without requiring complex surface extraction [S1, S2, unofficial]. Provides spatial context with minimum information loss compared to shading-only methods [S1, unofficial].
+- **Limitations:** Can obscure distant high-intensity features due to depth-based modulation [S2, unofficial]. Requires careful tuning of the depth modulation function to balance depth cues and feature visibility [S2, unofficial].
+- **When to use:** When depth perception is critical in MIP visualizations, such as in angiography, and the user can tolerate some potential obscuring of distant structures [S1, S2, unofficial].
+- **When not to use:** When preserving all high-intensity features regardless of depth is required, or when the volume contains heterogeneous materials where depth-based intensity modulation is misleading [S1, S2, unofficial].
+
+## Background
+The DepthShaded Maximum Intensity Projection (DSMIP), also referred to as Depth-enhanced Maximum Intensity Projection (DeMIP), was introduced to address the lack of depth cues in standard MIP [S1, S2, unofficial]. It was proposed as an alternative to other depth-enhancement techniques such as Local Maximum Intensity Projection (LMIP) and polygonal surface-based methods [S1, S2, unofficial]. The method is based on slightly modifying the MIP shading by taking into account the depth of closer structures with similar material to the one with maximum intensity [S1, unofficial]. It is often used in conjunction with color schemes to correctly convey spatial context [S1, unofficial]. The technique is particularly relevant in medical imaging, such as CT and MRI angiographies, where understanding the spatial arrangement of vascular structures is crucial [S1, S2, unofficial].
+
+## Sources
+[S1] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)
+[S2] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)

@@ -2,94 +2,121 @@
 Also called: Classic ray tracing, Whitted-style Ray Tracing
 
 ## Overview
-Classic ray tracing (Whitted-style) is a recursive rendering model that captures shadows, specular reflection, refraction, and diffuse surface shading by tracing light paths from the image plane into the scene [S1, unofficial]. It differs from simple ray casting by explicitly spawning secondary rays for reflection and refraction, and shadow rays for occlusion testing, thereby supporting native recursive ray propagation [S2, unofficial].
+Classic ray tracing (Whitted-style) is a rendering model that captures shadows, specular reflection, refraction, and diffuse surface shading by placing an image plane in the scene and sending rays through each pixel [S1, unofficial]. It entails ray casting with the additional tracing of secondary rays for shadows and refractions [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A scene description containing geometric primitives (surfaces), material properties (reflectivity, refractivity, BRDF), light sources, and a camera model defining an image plane and primary viewing rays.
-*   **Output:** A 2D image where each pixel value represents the accumulated radiance along the traced ray path.
+*   **Input:** A scene description containing geometric primitives, material properties, light sources, and a camera model defining an image plane [S1, unofficial].
+*   **Output:** A 2D image where each pixel value represents the accumulated lighting information gathered by rays intersecting objects [S1, unofficial].
 
 **Data Structures:**
-*   **Ray:** Defined by an origin point $\mathbf{o}$ and a direction vector $\mathbf{d}$ (normalized).
-*   **Intersection Record:** Contains the hit point $\mathbf{p}$, surface normal $\mathbf{n}$, material properties, and distance $t$ from origin.
-*   **Scene Graph:** A spatial acceleration structure (e.g., BVH, grid) is implied to efficiently find the closest intersection, though the specific structure is not defined in the core algorithm [G].
+*   **Ray:** Defined by an origin point $\mathbf{o}$ and a direction vector $\mathbf{d}$ [G].
+*   **Intersection Record:** Contains the hit point $\mathbf{p}$, surface normal $\mathbf{n}$, material properties, and distance $t$ from origin [G].
+*   **Scene:** Contains objects, lights, and a method to find the closest intersection along a ray [G].
 
 **Algorithm Steps:**
-The rendering process is recursive. For each pixel, a primary ray is generated. The function `TraceRay(ray, depth)` proceeds as follows:
+The rendering process traces rays recursively. For each pixel, a primary ray is generated. The function `TraceRay(ray, depth)` proceeds as follows:
 
-1.  **Intersection Test:** Find the closest intersection between `ray` and any object in the scene. If no intersection occurs within the scene bounds, return the background color [S1, unofficial].
-2.  **Shading (Diffuse):** Calculate the diffuse component of the surface color based on the material's diffuse reflectivity and the illumination from visible light sources.
-3.  **Shadow Testing:** For each light source in the scene, cast a **shadow ray** from the intersection point $\mathbf{p}$ toward the light source. If this ray intersects any object before reaching the light, the point is in shadow; otherwise, it is illuminated [S1, unofficial].
+1.  **Intersection Test:** Find the closest intersection between `ray` and any object in the scene. If no intersection occurs, return the background color [G].
+2.  **Diffuse Shading:** Calculate the diffuse component of the surface color based on the material's diffuse reflectivity and illumination from visible light sources [G].
+3.  **Shadow Testing:** For each light source, cast a **shadow ray** from the intersection point $\mathbf{p}$ toward the light source. If this ray intersects any object before reaching the light, the point is blocked; otherwise, it is illuminated [S1, unofficial].
 4.  **Reflection:** If the material has non-zero reflectivity, spawn a **reflection ray**. The direction $\mathbf{r}$ is calculated using the surface normal $\mathbf{n}$ and incident direction $\mathbf{d}$:
     $$ \mathbf{r} = \mathbf{d} - 2(\mathbf{d} \cdot \mathbf{n})\mathbf{n} $$
-    Recursively call `TraceRay(r, depth + 1)`.
-5.  **Refraction:** If the material has non-zero refractivity, spawn a **refraction ray**. The direction $\mathbf{t}$ is calculated using Snell's Law, accounting for the indices of refraction of the current medium and the material [S1, unofficial]. Recursively call `TraceRay(t, depth + 1)`.
-6.  **Accumulation:** Combine the diffuse, reflected, and refracted contributions according to the material's shading model (e.g., Phong or Blinn-Phong approximation) to produce the final color for the pixel [S1, unofficial].
+    Recursively call `TraceRay(r, depth + 1)` [G].
+5.  **Refraction:** If the material has non-zero refractivity, spawn a **refraction ray**. The direction $\mathbf{t}$ is calculated using Snell's Law, accounting for the indices of refraction of the current medium and the material [G]. Recursively call `TraceRay(t, depth + 1)` [G].
+6.  **Accumulation:** Combine the diffuse, reflected, and refracted contributions according to the material's shading model to produce the final color for the pixel [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+class Ray:
+    def __init__(self, origin, direction):
+        self.origin = origin
+        self.direction = direction
+
+class HitRecord:
+    def __init__(self, point, normal, material, distance):
+        self.point = point
+        self.normal = normal
+        self.material = material
+        self.distance = distance
+
+EPSILON = 1e-4
+BACKGROUND_COLOR = (0.0, 0.0, 0.0)
+
+def dot(v1, v2):
+    return sum(a * b for a, b in zip(v1, v2))
+
+def normalize(v):
+    length = math.sqrt(sum(x * x for x in v))
+    return tuple(x / length for x in v)
+
+def reflect(direction, normal):
+    return tuple(d - 2 * dot(direction, normal) * n for d, n in zip(direction, normal))
+
+def refract(direction, normal, eta_ratio):
+    cos_theta_i = -dot(normalize(direction), normalize(normal))
+    sin_theta_i_sq = 1.0 - cos_theta_i ** 2
+    if eta_ratio ** 2 * sin_theta_i_sq > 1.0:
+        return None
+    cos_theta_t = math.sqrt(1.0 - eta_ratio ** 2 * sin_theta_i_sq)
+    return tuple(eta_ratio * d + (eta_ratio * cos_theta_i - cos_theta_t) * n for d, n in zip(direction, normal))
+
 def trace_ray(ray, scene, max_depth):
-    # Step 1: Find closest intersection
+    if max_depth <= 0:
+        return BACKGROUND_COLOR
+
     hit = scene.intersect(ray)
     if hit is None:
-        return background_color
+        return BACKGROUND_COLOR
 
-    # Step 2 & 3: Diffuse shading and Shadow rays
-    color = vec3(0.0, 0.0, 0.0)
+    color = (0.0, 0.0, 0.0)
+
     for light in scene.lights:
-        # Shadow ray from hit point to light
-        shadow_ray = Ray(origin=hit.point + hit.normal * epsilon, direction=light.position - hit.point)
+        light_dir = normalize(tuple(l - p for l, p in zip(light.position, hit.point)))
+        shadow_ray = Ray(origin=tuple(h + EPSILON * n for h, n in zip(hit.point, hit.normal)), direction=light_dir)
         shadow_hit = scene.intersect(shadow_ray)
-        
-        # If no object blocks the light, add diffuse contribution
-        if shadow_hit is None or shadow_hit.distance > (light.position - hit.point).length():
-            # Diffuse calculation using BRDF approximation
-            diffuse = hit.material.diffuse * max(0.0, dot(hit.normal, light.direction))
-            color += diffuse * light.intensity
+        light_dist = dot(light_dir, tuple(l - p for l, p in zip(light.position, hit.point)))
+        if shadow_hit is None or shadow_hit.distance > light_dist:
+            diffuse = hit.material.diffuse * max(0.0, dot(hit.normal, light_dir))
+            color = tuple(c + d * l for c, d, l in zip(color, diffuse, light.intensity))
 
-    # Step 4: Reflection
-    if hit.material.reflectivity > 0 and max_depth > 0:
-        # Reflect direction: r = d - 2(d.n)n
-        reflect_dir = ray.direction - 2 * dot(ray.direction, hit.normal) * hit.normal
-        reflect_ray = Ray(origin=hit.point + hit.normal * epsilon, direction=reflect_dir)
-        color += trace_ray(reflect_ray, scene, max_depth - 1) * hit.material.reflectivity
+    if hit.material.reflectivity > 0:
+        reflect_dir = reflect(ray.direction, hit.normal)
+        reflect_ray = Ray(origin=tuple(h + EPSILON * n for h, n in zip(hit.point, hit.normal)), direction=reflect_dir)
+        refl_color = trace_ray(reflect_ray, scene, max_depth - 1)
+        color = tuple(c + r * m for c, r, m in zip(color, refl_color, hit.material.reflectivity))
 
-    # Step 5: Refraction
-    if hit.material.refractivity > 0 and max_depth > 0:
-        # Refract direction using Snell's Law (simplified)
-        # t = eta * d + (eta * cos(theta_i) - sqrt(1 - eta^2 * sin^2(theta_i))) * n
-        # Note: Exact Snell's law implementation requires handling indices of refraction
-        # and determining if the ray is entering or exiting the medium.
-        refract_dir = compute_refraction(ray.direction, hit.normal, hit.material.ior)
-        refract_ray = Ray(origin=hit.point - hit.normal * epsilon, direction=refract_dir)
-        color += trace_ray(refract_ray, scene, max_depth - 1) * hit.material.refractivity
+    if hit.material.refractivity > 0:
+        eta = hit.material.ior
+        refract_dir = refract(ray.direction, hit.normal, eta)
+        if refract_dir is not None:
+            refract_ray = Ray(origin=tuple(h - EPSILON * n for h, n in zip(hit.point, hit.normal)), direction=refract_dir)
+            refract_color = trace_ray(refract_ray, scene, max_depth - 1)
+            color = tuple(c + r * m for c, r, m in zip(color, refract_color, hit.material.refractivity))
 
     return color
 ```
 
 **Parameters:**
-*   `max_depth`: Maximum recursion depth for secondary rays. Typical values range from 3 to 10 to prevent infinite loops and manage performance [G].
-*   `epsilon`: Small offset value added to intersection points to prevent self-intersection artifacts (shadow acne) when spawning secondary rays [G].
+*   `max_depth`: Maximum recursion depth for secondary rays. Typical values are Not given in the sources. [G]
+*   `epsilon`: Small offset value added to intersection points to prevent self-intersection artifacts when spawning secondary rays. Typical values are Not given in the sources. [G]
 
 **Edge Cases:**
-*   **Total Internal Reflection:** When the angle of incidence exceeds the critical angle during refraction, no refracted ray exists; only reflection occurs.
-*   **Infinite Recursion:** Caused by perfect mirrors or transparent objects in a closed loop. Mitigated by `max_depth` and energy attenuation per bounce.
-*   **Precision Errors:** Floating-point inaccuracies can cause rays to miss intersections or intersect the same surface they originated from. Offset vectors (`epsilon`) are required [G].
+*   **Total Internal Reflection:** When the angle of incidence exceeds the critical angle during refraction, no refracted ray exists; only reflection occurs. [G]
+*   **Infinite Recursion:** Caused by perfect mirrors or transparent objects in a closed loop. Mitigated by `max_depth` and energy attenuation per bounce. [G]
+*   **Precision Errors:** Floating-point inaccuracies can cause rays to miss intersections or intersect the same surface they originated from. Offset vectors (`epsilon`) are required. [G]
 
 ## Operating characteristics
-*   **Time Complexity:** Exponential in the worst case due to recursion depth and branching factor (reflections/refractions). Average case depends heavily on scene complexity and acceleration structure efficiency.
-*   **Memory Complexity:** Linear with respect to the scene graph size plus stack depth for recursion.
-*   **Strengths:** Physically plausible results for specular highlights, reflections, and refractions; handles complex lighting interactions natively [S1, unofficial].
-*   **Limitations:** Computationally expensive for deep recursion; does not handle diffuse inter-reflection (global illumination) without extensions like path tracing; aliasing artifacts if not supersampled [S2, unofficial].
-*   **When to use:** Rendering scenes with significant specular effects, glass, mirrors, or transparent objects where physical accuracy is prioritized over speed [S1, unofficial].
-*   **When not to use:** Real-time applications requiring high frame rates without hardware acceleration; scenes dominated by diffuse lighting where simpler rasterization suffices.
+Not given in the sources.
 
 ## Background
-*   **Origin:** First proposed by Turner Whitted in 1980 [S2, unofficial].
-*   **History:** Whitted's algorithm extended Appel's earlier ray casting work by introducing recursive secondary rays for reflection and refraction, establishing the foundation for modern ray tracing [S2, unofficial]. It became a standard technique for offline rendering due to its ability to produce photorealistic images with complex lighting [S1, unofficial].
-*   **Usage:** Widely used in offline rendering for films, architectural visualization, and product design where image quality is paramount [S1, unofficial].
+*   **Origin:** First proposed by Whitted [S2, unofficial].
+*   **History:** Extends Appel's earlier ray casting work by introducing secondary rays for shadows and refractions [S2, unofficial].
+*   **Usage:** Not given in the sources.
 
 ## Sources
 [S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
