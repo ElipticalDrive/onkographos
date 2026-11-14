@@ -3,7 +3,7 @@
 Also called: Run-Time Parallel Volume Rendering, WTSP tree traversal, parallel volume rendering
 
 ## Overview
-This method traverses the Wavelet-based Time-Space Partitioning (WTSP) tree at run time to reconstruct and render data blocks of varying spatio-temporal resolutions in parallel, composing the final image [S1]. It solves the problem of efficiently visualizing large-scale time-varying data on parallel clusters by eliminating parent-child data dependencies for reconstruction and balancing workload among processors [S1]. It is distinguished from its parent [WTSP Tree](5371-wtsp-tree.md) by its runtime execution strategy and from its sibling [Time-Space Partitioning Tree](5382-time-space-partitioning-tree.md) by its specific use of wavelet compression and error-guided bucketization for distributed rendering [S1].
+This method traverses the Wavelet-based Time-Space Partitioning (WTSP) tree at run time to reconstruct and render data blocks of varying spatio-temporal resolutions in parallel, composing the final image [S1]. It solves the problem of efficiently visualizing large-scale time-varying data on parallel clusters by eliminating parent-child data dependencies for reconstruction and balancing workload among processors [S1].
 
 ## How it works
 **Inputs:**
@@ -21,16 +21,16 @@ This method traverses the Wavelet-based Time-Space Partitioning (WTSP) tree at r
 *   **Reconstructed Data:** Stored at nodes in selective WTSP tree levels to alleviate long chains of parent-child dependencies [S1].
 
 **Steps:**
-1.  **Partitioning:** Partition the WTSP tree into distribution units. This is done to eliminate parent-child data dependency for reconstruction and achieve load-balanced rendering [S1].
+1.  **Partitioning:** Partition the WTSP tree into distribution units to eliminate parent-child data dependency for reconstruction and achieve load-balanced rendering [S1].
 2.  **Distribution:** Distribute the partitioned data along hierarchical space-filling curves among different processors [S1].
-3.  **Bucketization:** Use the hierarchical spatial and temporal error metric to guide the bucketization during distribution. This metric controls the tradeoff between image quality and rendering speed [S1].
+3.  **Bucketization:** Use the hierarchical spatial and temporal error metric to guide the bucketization during distribution [S1].
 4.  **Traversal:** At run time, traverse the WTSP tree according to the user-specified time step [S1].
 5.  **Error-Guided Selection:** Traverse the tree according to tolerances of both spatial and temporal errors [S1].
-6.  **Reconstruction:** Reconstruct data blocks of different spatio-temporal resolutions. To reduce reconstruction cost, reconstructed data is stored at nodes in selective WTSP tree levels, breaking long dependency chains [S1].
+6.  **Reconstruction:** Reconstruct data blocks of different spatio-temporal resolutions [S1].
 7.  **Parallel Rendering:** Render the reconstructed data blocks in parallel to compose the final image [S1].
 
 **Pitfalls:**
-*   Parent-child data dependency for reconstruction can cause long chains of dependencies, increasing reconstruction cost. This is mitigated by storing reconstructed data at nodes in selective WTSP tree levels [S1].
+*   Parent-child data dependency for reconstruction can cause long chains of dependencies, increasing reconstruction cost [S1]. This is mitigated by storing reconstructed data at nodes in selective WTSP tree levels [S1].
 
 ## Subtopics
 

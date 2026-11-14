@@ -1,39 +1,45 @@
 # Color and Appearance Modeling
 
-Also called: Appearance conditioning, View-dependent color modeling, Illumination-aware rendering
+Also called: View-dependent color modeling, Appearance-conditioned rendering, Neural shading for Gaussians
 
 ## Overview
-Color and Appearance Modeling in 3D Gaussian Splatting extends the standard radiance representation to handle complex lighting, view-dependent effects, and environmental variations that static Spherical Harmonics (SH) cannot capture. It solves the problem of inaccurate specular reflections, inconsistent lighting across unstructured image collections, and the inability to disentangle static geometry from transient appearance changes. It sets itself apart from standard 3DGS by replacing or augmenting per-Gaussian SH coefficients with learned illumination fields, neural conditioning networks, or compact neural fields, enabling physically plausible shading and robust handling of "in-the-wild" data.
+Color and Appearance Modeling in 3D Gaussian Splatting extends the standard radiance representation to handle complex lighting, view-dependent effects, and photometric variations that static Spherical Harmonics (SH) coefficients cannot capture. While standard 3DGS optimizes per-Gaussian SH coefficients for outgoing radiance, this family of methods introduces external conditioning mechanisms—such as neural fields, illumination grids, or image embeddings—to disentangle geometry from appearance. This approach solves the problem of blurry or inaccurate specular highlights and transient artifacts in unstructured image collections, setting it apart from siblings by replacing or augmenting the fixed SH basis with learnable, context-aware functions.
 
 ## Shared principles
-The core mechanism involves modifying the outgoing radiance $\mathbf{c}(\omega_o)$ of a Gaussian $i$ from a static SH coefficient vector to a dynamic function dependent on local geometry, illumination, or image context.
+All methods in this family share the goal of computing the outgoing radiance $\mathbf{c}_i$ for a Gaussian $i$ as a function of its position, viewing direction, and potentially external context, rather than a direct lookup from optimized SH coefficients.
 
-1.  **Radiance Composition:** The final color is typically composed of a diffuse base and a view-dependent specular component, or a base color modulated by an image-specific embedding.
-    $$ \mathbf{c}(\omega_o) = \mathbf{c}_{diffuse} + \mathbf{c}_{specular}(\omega_o) \quad \text{or} \quad \mathbf{c} = f(\mathbf{c}_{base}, \mathbf{e}_{image}, \mathbf{x}) $$
-2.  **Conditioning Inputs:** Methods introduce auxiliary inputs to the color computation:
-    *   **Illumination:** Incoming light $L_i$ queried from a spatial grid [S1, Child 13977].
-    *   **View Direction:** $\omega_o$ encoded via Integrated Directional Encoding (IDE) or raw vector [S1, Child 13977, Minor Variant].
-    *   **Image Embedding:** A latent vector $\mathbf{l}_I$ representing the specific camera capture [S1, Child 14315].
-    *   **Position Encoding:** Hash grid features $\text{emb}(\mathbf{x})$ for spatial context [S1, Child 14315, Minor Variant].
-3.  **Optimization:** These new parameters (illumination grids, MLP weights, image embeddings) are optimized alongside Gaussian attributes using standard losses (L1 + D-SSIM) [S1, Child 13977, Child 14315].
+1.  **Positional Encoding:** Unbounded 3D positions $\mathbf{p} \in \mathbb{R}^3$ are often contracted to a bounded range to improve neural field stability. The contraction function from mip-NeRF 360 is used [S1]:
+    $$
+    \text{contract}(\mathbf{p}_n) = 
+    \begin{cases} 
+    \mathbf{p}_n & \text{if } \|\mathbf{p}_n\| \le 1 \\
+    \frac{\mathbf{p}_n}{\|\mathbf{p}_n\|} (2 - \|\mathbf{p}_n\|) & \text{if } \|\mathbf{p}_n\| > 1
+    \end{cases}
+    $$
+2.  **Neural Field Mapping:** A neural network $f_\theta$ (typically a small MLP) maps encoded spatial features and view directions to color or appearance parameters. The general form is:
+    $$
+    \mathbf{c}_n(\mathbf{d}) = f_\theta(\text{feature}(\mathbf{p}_n), \mathbf{d})
+    $$
+    where $\mathbf{d}$ is the view direction [S1].
+3.  **Modulation:** Appearance is modulated by combining a base color (often from 0-degree SH or a learned base) with a variation term predicted by the neural field or MLP [S1].
 
 ## Subtopics
 
 ### [3iGS (Factorised Tensorial Illumination for 3D Gaussian Splatting)](13977-3igs-factorised-tensorial-illumination-for-3d-gaussian-splat.md)
-3iGS models outgoing radiance as a function of a continuous local illumination field and individual Gaussian BRDF attributes, rather than optimizing outgoing radiance in isolation. It differs from standard 3DGS by explicitly accounting for scene lighting and inter-Gaussian illumination dependencies, enabling accurate specular view-dependent effects on reflective surfaces. It builds on [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md) by adding a neural renderer and illumination grid. See [3iGS (Factorised Tensorial Illumination for 3D Gaussian Splatting)](13977-3igs-factorised-tensorial-illumination-for-3d-gaussian-splat.md).
+3iGS models outgoing radiance as a function of a continuous local illumination field and individual Gaussian BRDF attributes, solving the problem of poor specular view-dependent effects in standard 3DGS. It uses a compact, factorized tensor illumination grid and a neural shading network. Choose this for scenes with reflective surfaces requiring realistic specular highlights. It differs from SWAG by using explicit illumination grids rather than per-image latent embeddings.
 
 ### [SWAG (Splatting in the Wild images with Appearance-conditioned Gaussians)](14315-swag-splatting-in-the-wild-images-with-appearance-conditione.md)
-SWAG is an extension of 3D Gaussian Splatting (3DGS) designed to handle unstructured, in-the-wild image collections by modeling appearance variations and handling transient objects (occluders) without supervision. It sets itself apart from standard 3DGS by disentangling static scene geometry from dynamic appearance and transient occluders, using image-dependent embeddings and opacity modulation to prevent the "blurry elongated Gaussians" and floaters typical of view-dependent 3DGS in unconstrained settings. It builds on [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md) by adding a conditioning mechanism for color and opacity. See [SWAG (Splatting in the Wild images with Appearance-conditioned Gaussians)](14315-swag-splatting-in-the-wild-images-with-appearance-conditione.md).
+SWAG reconstructs 3D scenes from unstructured, in-the-wild image collections by disentangling static geometry from dynamic appearance and transient objects. It uses a latent image embedding and an MLP to modulate color and opacity, addressing photometric variations and transient occluders (e.g., tourists, clouds). Choose this for in-the-wild datasets with lighting changes. It differs from 3iGS by using per-image conditioning rather than a global illumination field.
 
 ### Compact View-dependent Color
-A method to represent view-dependent color using a grid-based neural field instead of storing Spherical Harmonics (SH) coefficients per Gaussian, reducing parameters from 48 to a shared grid [S1]. It contracts unbounded positions $p \in \mathbb{R}^3$ to a bounded range using the contraction function from mip-NeRF 360, inputs them into hash grids, and feeds the resulting feature and view direction into a tiny MLP [S1]. The view-dependent color $c_n(d)$ is computed as:
-$$ c_n(d) = f(\text{contract}(p_n), d; \theta) $$
-where $f$ is a tiny MLP with parameters $\theta$ [S1]. The contraction function is:
-$$ \text{contract}(p_n) = \begin{cases} p_n & \text{if } \|p_n\| \le 1 \\ \frac{p_n}{\|p_n\|} (2 - \|p_n\|) & \text{if } \|p_n\| > 1 \end{cases} $$
-It uses 0-degree components of SH (same channels as RGB, not view-dependent) and converts them to RGB colors [S1]. Original 3DGS uses 48 parameters per Gaussian for SH (max 3 degrees) to model view-dependent color; this method uses a shared grid-based neural field [S1].
+A method to represent view-dependent color using a grid-based neural field instead of storing Spherical Harmonics (SH) coefficients per Gaussian, reducing parameters from 48 to a shared grid [S1].
+*   **Definition:** Replaces per-Gaussian SH (48 params) with a shared Hash Grid + MLP [S1].
+*   **Step:** Contract unbounded positions $\mathbf{p} \in \mathbb{R}^3$ to a bounded range using the contraction function from mip-NeRF 360. Input positions into hash grids, then feed the resulting feature and view direction into the tiny MLP. Use 0-degree components of SH (same channels as RGB, not view-dependent) and convert to RGB colors [S1].
+*   **Formula:** Contraction function: $\text{contract}(\mathbf{p}_n) = \mathbf{p}_n$ if $\|\mathbf{p}_n\| \le 1$, else $\frac{\mathbf{p}_n}{\|\mathbf{p}_n\|} (2 - \|\mathbf{p}_n\|)$. View-dependent color $\mathbf{c}_n(\mathbf{d})$ is computed as: $\mathbf{c}_n(\mathbf{d}) = f(\text{contract}(\mathbf{p}_n), \mathbf{d}; \theta)$, where $f$ is a tiny MLP with parameters $\theta$ [S1].
+*   **Comparison:** Original 3DGS uses 48 parameters per Gaussian for SH (max 3 degrees) to model view-dependent color; this method uses a shared grid-based neural field [S1].
 
 ## Background
-Standard 3D Gaussian Splatting uses Spherical Harmonics (SH) to represent view-dependent color, which is efficient but limited in modeling complex specularities and lighting changes [S1]. The need for better appearance modeling arose from the limitations of SH in handling high-frequency reflections and the instability of 3DGS when applied to unstructured, in-the-wild image collections with varying lighting and transient objects [S1]. 3iGS was introduced to address specular rendering by factorizing the illumination field [S1]. SWAG was developed to handle appearance variations in wild images by conditioning Gaussians on image embeddings [S1]. Compact View-dependent Color was proposed to reduce the parameter count of view-dependent color representation by replacing per-Gaussian SH with a shared neural field [S1].
+Standard 3D Gaussian Splatting [Parent](9128-3d-gaussian-splatting-implementation-details.md) uses Spherical Harmonics (SH) to represent view-dependent color, which is efficient but limited in modeling complex specularities and lighting variations. The need for advanced appearance modeling arose from the limitations of SH in handling high-frequency reflections and unstructured data. 3iGS introduced factorized tensor illumination grids to model lighting explicitly [S1]. SWAG addressed the "in-the-wild" problem by introducing per-image appearance embeddings to handle transient objects and lighting changes [S1]. Compact View-dependent Color proposed replacing the heavy SH storage with a shared neural field to reduce memory usage [S1].
 
 ## Sources
 [S1] Compact 3D Gaussian Representation for Radiance Field, https://doi.org/10.1109/cvpr52733.2024.02052, fetched 2026-10-26

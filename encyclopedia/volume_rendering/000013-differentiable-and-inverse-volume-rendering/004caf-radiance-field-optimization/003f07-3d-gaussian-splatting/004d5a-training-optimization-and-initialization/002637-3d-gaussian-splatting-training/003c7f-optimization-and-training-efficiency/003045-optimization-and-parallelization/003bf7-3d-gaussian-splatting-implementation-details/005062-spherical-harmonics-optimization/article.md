@@ -1,39 +1,36 @@
 # Spherical Harmonics Optimization
 
-Also called: SH Optimization, SH Distillation, SH Vector Quantization, SH Degree Zero Optimization
+Also called: SH Optimization, SH Compression, SH Distillation, SH Quantization
 
 ## Overview
-Spherical Harmonics (SH) Optimization refers to a family of techniques designed to reduce the computational cost and memory footprint of 3D Gaussian Splatting by modifying how directional radiance is represented and optimized. It addresses the high parameter count associated with high-degree SH coefficients (typically degree 3, requiring 45 coefficients per RGB channel) by employing distillation, quantization, or degree reduction. It sets itself apart from sibling methods like [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md) by targeting the appearance representation's dimensionality rather than the geometric or sorting pipeline.
+Spherical Harmonics (SH) Optimization encompasses techniques to reduce the computational cost, memory footprint, and training time associated with the view-dependent color representation in 3D Gaussian Splatting. It addresses the high dimensionality of third-order SH coefficients (45 floats per splat excluding base color) by compressing, quantizing, or distilling the representation. It sets itself apart from general rendering optimizations by targeting the specific algebraic structure of spherical harmonics, distinct from [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md) which targets the rasterization loop.
 
 ## Shared principles
-The methods in this family share the goal of compressing or simplifying the SH representation of 3D Gaussians. Standard 3D Gaussian Splatting uses SH coefficients to represent view-dependent color. The zeroth-order coefficient ($c_{0,0}$) represents the base color, while higher-order coefficients ($c_{l,m}$ for $l > 0$) represent directional variations. In the original implementation, higher-order coefficients are often static or change minimally during training, leading to redundancy. Optimization strategies exploit this by either:
-1.  Reducing the maximum degree $L$ (e.g., from 3 to 0 or 1).
-2.  Quantizing the high-dimensional SH vectors into a shared palette.
-3.  Distilling high-degree coefficients from a teacher model into a lower-degree student model.
+The family operates on the premise that the view-dependent color $c(\omega)$ of a Gaussian splat is represented by SH coefficients. For degree $L$, there are $(L+1)^2$ coefficients per color channel. The standard implementation uses $L=3$, resulting in 16 coefficients per channel (48 total, or 45 if the zeroth-order term is treated as base color).
+
+The core mathematical operation for rendering view-dependent color is the evaluation of the SH basis functions $Y(\omega)$ against the coefficient vector $\mathbf{c}$:
+$$ c(\omega) = \mathbf{c}^T Y(\omega) $$
+Optimization strategies modify $\mathbf{c}$ or the evaluation process to reduce the cost of this operation or the storage of $\mathbf{c}$.
 
 ## Subtopics
 
 ### [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md)
-First-order Spherical Harmonics Distillation reduces the parameter count by distilling high-fidelity third-order SH coefficients from a pretrained teacher model into a compact first-order representation for a student model. Unlike standard degree reduction which simply truncates coefficients, this method uses knowledge distillation to preserve rendering quality despite the aggressive reduction from 16 coefficients per color channel to 4. It sets itself apart from sibling methods like [RoofGS](9830-roofgs.md) or [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md) by specifically targeting the appearance representation's dimensionality rather than the geometric or sorting pipeline. See [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md) for details.
+Reduces parameter count by training a "student" model with first-order SH ($L=1$, 4 coeffs/channel) to approximate a pretrained "teacher" model using third-order SH ($L=3$). It uses knowledge distillation to preserve fidelity better than simple degree truncation. Suitable for mobile/edge devices. See [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md).
+
+### [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md)
+Derives analytical Jacobians of the SE(3) camera pose with respect to Gaussian primitives to enable efficient camera pose optimization in SLAM. It solves the overhead of automatic differentiation by providing minimal Jacobians matching the 6 degrees of freedom of the Lie group. See [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md).
+
+### [Efficient Multi-View Training for 3D Gaussian Splatting](13982-efficient-multi-view-training-for-3d-gaussian-splatting.md)
+Enables stable optimization by processing multiple camera views per iteration using thread-efficient partial rendering. It addresses gradient variance and geometric inconsistency by introducing 3D-space D-SSIM loss and adapted density control. See [Efficient Multi-View Training for 3D Gaussian Splatting](13982-efficient-multi-view-training-for-3d-gaussian-splatting.md).
 
 ### [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md)
-Spherical Harmonics Vector Quantization (SH VQ) is a compression technique that replaces per-splat SH coefficients with indices pointing to a shared palette of distinct SH vectors, reducing memory footprint at the cost of minor lighting artifacts. It sets itself apart from quantization methods like Norm11 or Norm565 by leveraging the redundancy in directional lighting across the scene, allowing for significantly higher compression ratios (e.g., 14.9x vs 5.1x for Norm11) while retaining specular "shininess" effects that scalar quantization often blurs. See [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md) for details.
+Compresses memory footprint by replacing per-splat SH coefficients with indices into a shared finite palette of SH vectors. It reduces data size from gigabytes to megabytes using mini-batch k-means clustering, retaining full directional detail capacity of the original coefficients but quantizing their values. See [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md).
 
 ### SH Degree Zero Optimization
-**Definition**
-Setting the maximum degree of Spherical Harmonics (SH) coefficients to 0 to remove superfluous operations and improve training speed, as higher-degree SH coefficients for color remain unchanged during training [S1, unofficial].
-
-**Step**
-Modify the model code to delete operations relative to the max degree in the model and set the max degree parameter to 0 [S1, unofficial].
-
-**Pitfall**
-In the original 3D Gaussian Splatting model, features represented by SH coefficients with degree > 0 are unchanged during all training, making them useless [S1, unofficial].
-
-**Number**
-Directly changing the max degree to 0 yields a 16.25% improvement compared to the default. With specific changing code, it yields a 16.57% improvement but increases CPU-GPU process time [S1, unofficial].
+Setting the maximum degree of Spherical Harmonics coefficients to 0 removes superfluous operations and improves training speed, as higher-degree SH coefficients for color remain unchanged during training in the original implementation. Modifying the model code to delete operations relative to the max degree and setting it to 0 yields a 16.57% improvement in training speed, though it increases CPU-GPU process time [S1, unofficial].
 
 ## Background
-The use of Spherical Harmonics in 3D Gaussian Splatting was introduced in the original paper by Kerbl et al. (2023) [12]. Subsequent analysis, such as in I3DGS, identified that higher-order SH coefficients for color are often static during training, leading to optimization strategies that remove or compress these coefficients to improve efficiency [S1, unofficial].
+Originated from the need to optimize the 3D Gaussian Splatting framework [12] (referenced in [S1, unofficial]). The standard 3DGS uses third-order SH for view-dependent color, which is computationally expensive to store and evaluate. Subsequent research identified redundancies in the training process (unchanged high-degree coefficients) and opportunities for compression (quantization) and distillation.
 
 ## Sources
 [S1] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)

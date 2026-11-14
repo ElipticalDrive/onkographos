@@ -1,22 +1,20 @@
 # Polynomial and Spline Kernels
 
-Also called: Spline Kernels, Polynomial Kernels, Non-Gaussian Splatting
 
 ## Overview
-Polynomial and Spline Kernels replace the standard Gaussian reconstruction kernel in splatting with piecewise polynomial or spline functions to improve rendering accuracy and visual fidelity [S1, unofficial][S2, S3, S4]. They solve the problem of visual artifacts and blurring inherent in Gaussian kernels by providing kernels with compact support, specific decay properties, or tunable shapes that better preserve high-frequency features like edges and small textures [S1, unofficial][S2]. They set themselves apart from siblings like [EWA Splatting](1069-ewa-splatting.md) by focusing on the mathematical form of the kernel function itself rather than just the projection geometry, and from [Splat Extent and Projection](1792-splat-extent-and-projection.md) by defining the internal weight distribution within the footprint [S1, unofficial][S2, S3, S4].
+Polynomial and Spline Kernels refer to a family of splatting methods that replace standard Gaussian reconstruction kernels with piecewise polynomial, spline, or other non-Gaussian functions to control the shape, support, and decay of the splat footprint [S1, unofficial][S2][S3][S4]. They solve the problem of visual artifacts, blurring, or inflexible footprint shapes inherent in Gaussian kernels by providing kernels with compact support, tunable parameters, or specific decay properties that better preserve high-frequency features or enable differentiable optimization [S1, unofficial][S2]. They set themselves apart from siblings like [EWA Splatting](1069-ewa-splatting.md) by focusing on the mathematical form of the kernel function itself rather than just the projection geometry, and from [Splat Extent and Projection](1792-splat-extent-and-projection.md) by defining the internal weight distribution within the footprint [S1, unofficial][S2].
 
 ## Shared principles
-The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, unofficial][S3, S4].
-
-1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, unofficial][S3, S4]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ [S1, unofficial][S6, unofficial][S10, abstract only, unofficial].
-2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6, unofficial][S10, abstract only, unofficial].
-3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, unofficial][S2, S3, S4]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2][S6, unofficial][S10, abstract only, unofficial]:
-    $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
-    The intensity written to the pixel is modulated by the voxel density:
-    $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
-    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, abstract only, unofficial].
-4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, unofficial][S2, S3][S7]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, abstract only, unofficial].
-5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, unofficial][S2, S3].
+The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [G].
+1. **Primitive Representation:** The volume is decomposed into primitives [G]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $\rho_k$, and a reconstruction kernel $h$ [G].
+2. **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4]. For perspective projections, the kernel shape may be distorted to account for foreshortening [G].
+3. **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, unofficial][S2, S3, S4]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2]:
+   $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+   The intensity written to the pixel is modulated by the voxel density:
+   $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+   where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [G].
+4. **Compositing:** Contributions are accumulated to form the final image [G]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [G].
+5. **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, unofficial][S2, S3].
 
 ## Subtopics
 
@@ -60,24 +58,22 @@ Raised Cosine Splatting is a volume rendering technique that replaces the standa
       ```cpp
       float correctionFactor = 1.3f;
       cov *= correctionFactor;
-      float ellipse = (con_o.x * d.x * d.x + con_o.z * d.y * d.y + 2.f * con_o.y * d.x * d.y); // dM**2
-      if (ellipse < 0 || ellipse > 9.f) continue;
-      const float parabola = 1. - ellipse / 9.;
-      const float alpha = min(0.99f, con_o.w * parabola);
+      float ellipse = (con_o.x * d.x * d.x + con_o.z * d.y * d.y + 2.f * con_o.y * d.x * d.y); // dM**2 [S2]
+      if (ellipse < 0 || ellipse > 9.f) continue; [S2]
+      const float parabola = 1. - ellipse / 9.; [S2]
+      const float alpha = min(0.99f, con_o.w * parabola); [S2]
       ```
-      [S2]
     - Backward propagation gradient updates for mean and covariance:
       ```cpp
       float correctionFactor = 1.3f;
       cov2D *= correctionFactor;
-      // Gradients of loss w.r.t. entries of 2D covariance matrix,
-      // given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
-      // e.g., dL / da = dL / d_conic_a * d_conic_a / d_a
+      // Gradients of loss w.r.t. entries of 2D covariance matrix, [G]
+      // given gradients of loss w.r.t. conic matrix (inverse covariance matrix). [G]
+      // e.g., dL / da = dL / d_conic_a * d_conic_a / d_a [G]
       dL_da = denom2inv * (-c * c * dL_dconic.x + 2 * b * c * dL_dconic.y + (denom - a * c) * dL_dconic.z);
       dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
       dL_db = deno…
       ```
-      [S2]
 
 ### Tree and Forest Modeling with KRS
 - **Definition:** Hierarchical modeling of trees and forests using Kernel-Reflection Sequences (KRS) with specific kernel sets and reflection planes [S3].
@@ -104,7 +100,7 @@ Raised Cosine Splatting is a volume rendering technique that replaces the standa
 - **Complexity:** Time complexity: $K-1$ complex multiply-adds [S4].
 
 ## Background
-Polynomial and spline kernels in volume rendering emerged as alternatives to Gaussian kernels to address limitations in visual quality and computational efficiency. The use of Dirichlet (Lanczos/sinc) kernels for 3D point splatting was implemented in libraries such as `splat-points-3d` by Mikola Lysenko, providing a method for accurate grid-based accumulation [S1, unofficial]. Parabolic and other decaying anisotropic radial basis functions were introduced in DARB-Splatting to generalize splatting with specific decay properties, allowing for differentiable rendering and optimization [S2]. Kernel-Reflection Sequences (KRS) were developed to model complex hierarchical structures like trees and forests, leveraging the self-similar nature of splines and reflections [S3]. Fourier-encoded primitives using Horner's method for boundary evaluation were proposed in Fourier Splatting to enable scalable radiance fields with efficient polynomial accumulation [S4]. These methods are used in real-time volume rendering, differentiable rendering pipelines, and procedural modeling of natural phenomena.
+Polynomial and spline kernels in volume rendering emerged as alternatives to Gaussian kernels to address limitations in visual quality and computational efficiency [G]. The use of Dirichlet (Lanczos/sinc) kernels for 3D point splatting was implemented in libraries such as `splat-points-3d` by Mikola Lysenko, providing a method for accurate grid-based accumulation [S1, unofficial]. Parabolic and other decaying anisotropic radial basis functions were introduced in DARB-Splatting to generalize splatting with specific decay properties, allowing for differentiable rendering and optimization [S2]. Kernel-Reflection Sequences (KRS) were developed to model complex hierarchical structures like trees and forests, leveraging the self-similar nature of splines and reflections [S3]. Fourier-encoded primitives using Horner's method for boundary evaluation were proposed in Fourier Splatting to enable scalable radiance fields with efficient polynomial accumulation [S4]. These methods are used in real-time volume rendering, differentiable rendering pipelines, and procedural modeling of natural phenomena [G].
 
 ## Sources
 [S1] mikolalysenko/splat-points-3d, https://github.com/mikolalysenko/splat-points-3d, fetched 2026-10-26 (unofficial)

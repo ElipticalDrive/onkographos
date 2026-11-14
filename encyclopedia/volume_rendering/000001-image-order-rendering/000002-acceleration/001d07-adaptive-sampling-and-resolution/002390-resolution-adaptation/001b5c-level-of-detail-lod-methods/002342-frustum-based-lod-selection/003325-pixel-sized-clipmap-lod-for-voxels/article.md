@@ -7,12 +7,12 @@ Pixel-Sized Clipmap LOD is a level-of-detail strategy where full-resolution voxe
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** Voxel size $s$ (world units per voxel), camera vertical field of view $\theta_{v}$, screen height $H$ (pixels), and the desired maximum render distance or number of LOD rings $L$.
-*   **Outputs:** A set of clipmap rings, where ring $i$ contains voxels of size $s \cdot 2^i$ spanning a specific radial distance from the camera.
+*   **Inputs:** Voxel size $s$ (world units per voxel), camera vertical field of view $\theta_{v}$, screen height $H$ (pixels), and the desired number of LOD rings $L$ [S1].
+*   **Outputs:** A set of clipmap rings, where ring $i$ contains voxels of size $s \cdot 2^i$ spanning a specific radial distance from the camera [S1].
 
 **Data Structures**
-The data is organized into concentric rings around the camera position. Each ring $i$ (where $i=0$ is the innermost full-resolution ring) stores voxels at resolution $s_i = s \cdot 2^i$.
-*   **Ring $i$ Bounds:** Spans radial distance $[R_{i-1}, R_i]$ where $R_i = R_0 \cdot 2^i$.
+The data is organized into concentric rings around the camera position [S1]. Each ring $i$ (where $i=0$ is the innermost full-resolution ring) stores voxels at resolution $s_i = s \cdot 2^i$ [S1].
+*   **Ring $i$ Bounds:** Spans radial distance $[R_{i-1}, R_i]$ where $R_i = R_0 \cdot 2^i$ [S1].
 *   **Voxel Count per Ring:** Each ring holds approximately $0.75 \times N_0$ voxels, where $N_0$ is the voxel count in the central disk [S1].
 *   **Storage Format:** Voxels can be stored in a compact format (e.g., 3.3 bytes/voxel) or raw format (e.g., 8 bytes/voxel) [S1].
 
@@ -47,9 +47,9 @@ The data is organized into concentric rings around the camera position. Each rin
 *   **High-Quality Headroom:** For path-traced detail at 2 voxels per pixel, multiply resident memory by 4 (approx. 0.6–2.8 GB) [S1].
 
 **Edge Cases and Pitfalls**
-*   **Precision:** At 2 cm resolution, a 32-bit integer voxel coordinate spans $\approx 85,900$ km, which is ample. Float32 positions at 5 km from origin have a step of 0.49 mm, which is sufficient for camera-relative coordinates [S1].
-*   **Full-Resolution Region:** The region within $R_0$ must remain full-resolution regardless of pixel size for dynamic elements like edits, debris, fluids, and collisions. For a 64 m radius per player, this costs 211 MB (compact) at 2 cm resolution [S1].
-*   **Memory Scaling:** While the clipmap scales logarithmically, the full-resolution dynamic region scales with the square of the voxel size. Smaller $s$ significantly increases the cost of the central dynamic region [S1].
+*   **Precision:** At 2 cm resolution, a 32-bit integer voxel coordinate spans $\approx 85,900$ km, which is ample [S1]. Float32 positions at 5 km from origin have a step of 0.49 mm, which is sufficient for camera-relative coordinates [S1].
+*   **Full-Resolution Region:** The region within $R_0$ must remain full-resolution regardless of pixel size for dynamic elements like edits, debris, fluids, and collisions [S1]. For a 64 m radius per player, this costs 211 MB (compact) at 2 cm resolution [S1].
+*   **Memory Scaling:** While the clipmap scales logarithmically, the full-resolution dynamic region scales with the square of the voxel size [S1]. Smaller $s$ significantly increases the cost of the central dynamic region [S1].
 
 ## Subtopics
 
@@ -58,9 +58,9 @@ A Level of Detail scheme covering all-voxel to orbit views using camera-centred 
 
 ## Operating characteristics
 *   **Time Complexity:** The number of LOD levels grows logarithmically with distance [S1]. On-demand generation cost scales with voxel density; for example, 2 cm resolution requires 25× more voxel evaluations than 10 cm resolution for the same area [S1].
-*   **Memory Complexity:** Memory usage is bounded by the number of rings $L$. Total voxels scale linearly with $L$ ($N_0 \cdot (1 + 0.75 \cdot L)$) [S1].
+*   **Memory Complexity:** Memory usage is bounded by the number of rings $L$ [S1]. Total voxels scale linearly with $L$ ($N_0 \cdot (1 + 0.75 \cdot L)$) [S1].
 *   **Performance:** The method fits within 8–12 GB of VRAM, leaving room for path-tracing buffers and lighting caches [S1]. Aokana keeps only ~2–17% of a scene resident with distance LOD, confirming the efficiency of this bounded memory approach [S1].
-*   **Strengths:** Bounded memory usage; efficient coverage of large distances; simple ring-based data structure.
+*   **Strengths:** Bounded memory usage; efficient coverage of large distances; simple ring-based data structure [S1].
 *   **Limitations:** Requires significant memory for high-resolution dynamic regions near the camera; quality headroom for high-fidelity rendering (2 voxels/pixel) increases memory demands substantially [S1].
 
 ## Background

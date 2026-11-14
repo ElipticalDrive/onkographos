@@ -1,0 +1,203 @@
+--- v002.md
++++ v003.md
+@@ -4,64 +4,156 @@
+ 
+ ## Overview
+-NRFF is a method for encoding view-dependent specular effects in neural radiance fields by replacing standard positional encodings and roughness parameters with Anisotropic Spherical Gaussians (ASG) and a custom Rendering Equation Encoding (REE) [S1]. It distinguishes itself from Ref-NeRF by using multiscale tensor decomposition for spatial representation and predicting ASG features to model complex reflections, rather than relying on isotropic roughness or precomputed environment maps [S1].
++NRFF is a method for encoding view-dependent effects in radiance fields by replacing the standard positional encoding and roughness/IDE inputs of Ref-NeRF with a structured latent representation of specular reflections [S1]. It differs from its siblings by explicitly modeling anisotropic reflections using Anisotropic Spherical Gaussians (ASG) and a custom Rendering Equation Encoding (REE) in the latent space, rather than relying on isotropic roughness or precomputed environment maps [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$; viewing direction $\mathbf{v}$ (or reflection direction $\hat{\omega}_r$); regularization coefficient $\beta$.
+-*   **Output:** Color $\mathbf{c}$, density $\sigma$, and feature vector $\mathbf{f}$ (implicitly handled via the ASG/REE pipeline).
++**Inputs:** Camera rays defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; ground-truth color images; optional ground-truth feature maps or teacher network outputs for supervision [S1, S2].
++**Outputs:** Rendered color images $\hat{\mathbf{C}}$ and rendered feature maps $\hat{\mathbf{F}}$ [S1, S2].
+ 
+ **Data Structures:**
+-1.  **Spatial MLP:** Takes 3D position $\mathbf{x}$. Uses Multiscale Tensor Decomposition (MTD) instead of Positional Encoding (PE) [S1].
+-2.  **ASG Features:** A vector of 128 values representing $N = 8 \times 16$ lobes of ASGs on a unit sphere [S1].
+-3.  **ASG MLP:** Takes ASG features. Outputs:
+-    *   Bottleneck vector $\mathbf{a}$ of length 2.
+-    *   Scalars $\lambda$ and $\mu$ (must be $> 0$) [S1].
+-4.  **REE Vector:** An $8 \times 16 \times 2$ vector resulting from the REE function [S1].
+-5.  **Directional MLP:** Takes the REE vector and viewing direction. Outputs color and density [S1].
++1.  **Spatial MLP:** Takes 3D position $\mathbf{x}$. Uses Multiscale Tensor Decomposition (MTD) for input representation [S1]. Outputs a vector of 128 values representing $N=8 \times 16$ ASG lobes [S1].
++2.  **ASG MLP:** Takes the 128 ASG feature vector. Outputs:
++    *   Bottleneck vector $\mathbf{a}$ of length 2 [S1].
++    *   Scalar coefficients $\lambda$ and $\mu$ (must be $>0$) modeling ASG shape in orthogonal directions [S1].
++3.  **Directional MLP:** Takes the REE vector (size $8 \times 16 \times 2$) and view direction. Outputs color $\mathbf{c}$ and density $\sigma$ [S1].
+ 
+-**Numbered Steps:**
+-1.  **Spatial Encoding:** For a query point $\mathbf{x}$, the Spatial MLP uses MTD to encode the scene geometry in a coarse-to-fine scheme [S1].
+-2.  **ASG Feature Prediction:** The Spatial MLP predicts a vector of 128 values corresponding to $N = 8 \times 16$ ASG lobes [S1].
+-3.  **Bottleneck Generation:** The ASG features are passed to an auxiliary ASG MLP. This network outputs:
+-    *   An anisotropic reflections bottleneck vector $\mathbf{a}$ of length 2.
+-    *   Two scalar coefficients $\lambda$ and $\mu$, which model the shape of the ASG in orthogonal directions [S1].
+-4.  **REE Computation:** Compute the Rendering Equation Encoding (REE) for the reflection direction $\hat{\omega}_r$ using the predicted parameters:
+-    $$
+-    \text{REE}(\hat{\omega}_r, \mathbf{a}, \lambda, \mu) = \sum_{i=0}^{N-1} a_i S(\hat{\omega}_r; \omega_i) \exp\left(-\lambda_i (\hat{\omega}_r \cdot \omega_{\lambda_i})^2 - \mu_i (\hat{\omega}_r \cdot \omega_{\mu_i})^2\right)
+-    $$
+-    where:
+-    *   $N = 8 \times 16 = 128$ is the number of lobes [S1].
+-    *   $a_i$ is the bottleneck coefficient for the $i$-th ASG [S1].
+-    *   $S(\hat{\omega}_r; \omega_i) = \max(\hat{\omega}_r \cdot \omega_i, 0)$ is a smooth term [S1].
+-    *   $\lambda_i, \mu_i > 0$ are bandwidth coefficients related to orthogonal axes $\omega_{\lambda_i}, \omega_{\mu_i}$ [S1].
+-    *   The set of directions $\omega_i$ covers 360 degrees (the unit sphere) [S1].
+-5.  **Directional Processing:** The resulting $8 \times 16 \times 2$ REE vector is ingested by the Directional MLP, replacing the roughness and Incident Direction Encoding (IDE) used in Ref-NeRF [S1].
+-6.  **Rendering:** The Directional MLP outputs the final color and density, which are composited along the ray using standard volume rendering integration [S1].
++**Rendering Equation Encoding (REE):**
++The REE integrates specular contributions in the latent space. For a reflection direction $\hat{\omega}_r$, the encoding is computed as [S1]:
+ 
+-**Loss Function:**
+-NRFF uses the auxiliary loss $L_o$ from Ref-NeRF and adds a regularization term $L_f$ to enforce sparse feature representation:
+ $$
+-L_f = \frac{\beta}{M} \sum_{i=0}^{M-1} \frac{|F_\tau^i|}{\tau}
++\text{REE}(\hat{\omega}_r, \mathbf{a}, \lambda, \mu) = \sum_{i=0}^{N-1} a_i S(\hat{\omega}_r; \omega_i) \exp\left(-\lambda_i (\hat{\omega}_r \cdot \omega_{\lambda_i})^2 - \mu_i (\hat{\omega}_r \cdot \omega_{\mu_i})^2\right)
+ $$
+-where:
+-*   $M$ is the number of features in the density field representation [S1].
+-*   $F_\tau$ is the density field feature map [S1].
+-*   $\beta$ is a regularization coefficient [S1].
+-*   $\tau$ is a scaling factor (implied by context) [S1].
++
++Where:
++*   $N = 128$ is the number of ASG lobes [S1].
++*   $a_i$ is the bottleneck coefficient of the $i$-th ASG [S1].
++*   $S(\hat{\omega}_r; \omega_i) = \max(\hat{\omega}_r \cdot \omega_i, 0)$ is a smooth term [S1].
++*   $\lambda_i, \mu_i > 0$ are bandwidth coefficients related to orthogonal axes $\omega_{\lambda_i}, \omega_{\mu_i}$ [S1].
++*   The set of directions $\omega_i$ covers the unit sphere (360 degrees) [S1].
++
++**Algorithm Steps:**
++1.  Sample points $\mathbf{x}_i$ along the ray [S1].
++2.  Pass $\mathbf{x}_i$ through the Spatial MLP (using MTD) to get ASG features [S1].
++3.  Pass ASG features through the ASG MLP to obtain $\mathbf{a}, \lambda, \mu$ [S1].
++4.  Compute the REE vector for the view direction $\mathbf{d}$ using the formula above [S1].
++5.  Pass the REE vector and $\mathbf{d}$ through the Directional MLP to get $\mathbf{c}_i, \sigma_i$ [S1].
++6.  Render color and features using standard volume integration [S1, S2].
++7.  Compute loss:
++    *   Color loss (standard MSE/SSIM) [S1].
++    *   Feature loss (if available) [S1, S2].
++    *   Regularization loss $L_f$ to enforce sparsity:
++        $$
++        L_f = \frac{\beta}{M} \sum_{i=0}^{M-1} \frac{|\mathbf{F}_\tau^i|}{\tau}
++        $$
++        Where $M$ is the number of features in the density field representation, $\mathbf{F}_\tau$ is the density field feature map, $\tau$ is a threshold, and $\beta$ is a coefficient [S1].
++
++**Pseudocode:**
++
++```python
++def nrff_forward(ray_origin, ray_direction, spatial_mlp, asg_mlp, directional_mlp, num_samples):
++    """
++    Renders a single ray using the NRFF architecture.
++    """
++    # 1. Sample points along the ray
++    points = sample_points(ray_origin, ray_direction, num_samples)
++    
++    colors = []
++    densities = []
++    
++    for x in points:
++        # 2. Spatial MLP with Multiscale Tensor Decomposition (MTD)
++        # MTD handles positional encoding internally
++        asg_features = spatial_mlp(x) # Output: 128 values (8x16 lobes)
++        
++        # 3. ASG MLP to get bottleneck and bandwidths
++        a, lambda_coeffs, mu_coeffs = asg_mlp(asg_features)
++        # a: vector of length 2 (bottleneck for all lobes? Note: Source says "bottleneck vector a of length 2" 
++        # but formula uses a_i per lobe. Assuming a is expanded or a_i is derived from a. 
++        # Source text: "ai is the bottleneck of the i-th ASG". 
++        # Clarification: The source says "converts them into an anisotropic reflections bottleneck vector a of length 2".
++        # This implies a global bottleneck, but the REE formula sums over i=0 to N-1 with a_i.
++        # Implementation Note [G]: If a is length 2, it likely modulates the 128 lobes. 
++        # However, the formula explicitly uses a_i. We assume the ASG MLP outputs a vector of size N 
++        # or the "length 2" refers to a specific parameterization not fully detailed in the snippet.
++        # Given the strict constraint to not guess core definitions, we follow the formula's a_i.
++        # The source states: "predicts N = 8 x 16 lobes... resulting in a vector of 128 values."
++        # Then: "ASG MLP... converts them into... a of length 2".
++        # This is a contradiction or a specific compression. 
++        # Re-reading: "REE(..., a, ...)" where a is in the formula as a_i.
++        # We will assume the ASG MLP outputs the necessary parameters for the REE.
++        # If the source says a is length 2, but REE needs a_i for N lobes, 
++        # we cannot implement the exact mapping without guessing. 
++        # However, the prompt asks for implementation from text. 
++        # We will output the REE calculation as defined, assuming a_i is available.
++        
++        # 4. Compute REE Vector
++        # The REE vector size is 8x16x2. This matches the lobes.
++        ree_vector = compute_ree(ray_direction, a, lambda_coeffs, mu_coeffs, num_lobes=128)
++        
++        # 5. Directional MLP
++        c, sigma = directional_mlp(ree_vector, ray_direction)
++        
++        colors.append(c)
++        densities.append(sigma)
++        
++    # 6. Volume Rendering
++    # Standard alpha compositing using densities and colors
++    rendered_color = volume_render(colors, densities)
++    
++    return rendered_color
++
++def compute_ree(view_direction, a, lambda_coeffs, mu_coeffs, num_lobes):
++    """
++    Computes the Rendering Equation Encoding vector.
++    """
++    ree_vector = []
++    # The source defines REE as a scalar sum, but the directional MLP ingests an 8x16x2 vector.
++    # This implies the REE is computed per lobe or per dimension.
++    # Formula: REE(omega_r, a, lambda, mu) = sum(...)
++    # This formula yields a scalar. 
++    # The text says: "Directional MLP ingests an 8 x 16 x 2 REE vector".
++    # This suggests the REE is not just the scalar sum, but a vector representation.
++    # Or, the "REE" in the formula is the core component, and the vector is constructed from it.
++    # Given the ambiguity, we implement the scalar REE as the core operation.
++    # [G] Implementation detail: The 8x16x2 vector likely corresponds to the parameters 
++    # of the lobes or the result of projecting the REE onto a basis. 
++    # Without explicit mapping, we compute the scalar REE value for the view direction.
++    
++    ree_value = 0.0
++    for i in range(num_lobes):
++        # S(omega_r; omega_i) = max(dot(omega_r, omega_i), 0)
++        # We need omega_i, omega_lambda_i, omega_mu_i.
++        # These are predefined for the N lobes on the unit sphere.
++        omega_i = get_lobe_direction(i)
++        omega_lambda_i = get_lobe_axis_lambda(i)
++        omega_mu_i = get_lobe_axis_mu(i)
++        
++        term = a[i] * max(dot(view_direction, omega_i), 0)
++        term *= exp(-lambda_coeffs[i] * dot(view_direction, omega_lambda_i)**2)
++        term *= exp(-mu_coeffs[i] * dot(view_direction, omega_mu_i)**2)
++        
++        ree_value += term
++        
++    return ree_value
++```
+ 
+ **Parameters:**
+-*   $N$: Number of ASG lobes, set to $8 \times 16$ [S1].
++*   $N$: Number of ASG lobes, set to $8 \times 16 = 128$ [S1].
+ *   $\mathbf{a}$: Anisotropic reflections bottleneck vector, length 2 [S1].
+-*   $\lambda, \mu$: Scalar coefficients modeling ASG shape, constrained to be $> 0$ [S1].
++*   $\lambda, \mu$: Scalar coefficients modeling ASG shape, must be $> 0$ [S1].
++*   $\beta$: Coefficient for regularization term $L_f$ [S1].
++*   $\tau$: Threshold in regularization term [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Positivity Constraint:** $\lambda$ and $\mu$ must be strictly positive to ensure valid Gaussian bandwidths [S1].
+-*   **Sparsity:** The regularization term $L_f$ is critical for preventing overfitting and enhancing interpretability by removing redundant features [S1].
++**Edge Cases:**
++*   $\lambda, \mu$ must be strictly positive to ensure valid Gaussian shapes [S1].
++*   MTD requires careful initialization of tensor cores [S1].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Complexity:** Uses Multiscale Tensor Decomposition (MTD) for efficiency in reconstructing scene geometry and appearance compared to standard Positional Encoding [S1].
++*   **Performance:** Shows proficiency in encoding view-dependent effects and superior rendering quality on diverse datasets compared to Ref-NeRF [S1].
++*   **Strengths:** Explicit modeling of anisotropic reflections; sparse feature representation enhances interpretability and mitigates overfitting [S1].
++*   **Limitations:** Requires auxiliary ASG MLP and REE computation, increasing architectural complexity over standard NeRF [S1].
+ 
+ ## Background
+-NRFF was proposed by Albert Barreiro, Roger Marı́, Rafael Redondo, Gloria Haro, Carles Bosch, and David Berga from Eurecat and Universitat Pompeu Fabra [S1]. It was submitted on 2024–07–09, accepted on 2025–01–17, and published in *Image Processing On Line* on 2025–03–12 [S1]. The method builds on Ref-NeRF but introduces architectural improvements to better encode view-dependent specular effects [S1].
++NRFF was proposed by Albert Barreiro, Roger Marı́, Rafael Redondo, Gloria Haro, Carles Bosch, and David Berga from Eurecat and Universitat Pompeu Fabra [S1]. It was submitted on 2024-07-09, accepted on 2025-01-17, and published in *Image Processing On Line* on 2025-03-12 [S1]. It builds on the Ref-NeRF formulation [S1].
+ 
+ ## Sources

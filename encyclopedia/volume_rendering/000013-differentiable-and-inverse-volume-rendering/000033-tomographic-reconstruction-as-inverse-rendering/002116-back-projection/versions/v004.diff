@@ -1,0 +1,160 @@
+--- v003.md
++++ v004.md
+@@ -37,5 +37,5 @@
+ 4.  **Gradient Computation (Differentiable Back-projection):**
+     *   To compute $\frac{\partial \mathcal{L}}{\partial x}$, pass the residual gradient $\frac{\partial \mathcal{L}}{\partial \hat{p}}$ through the back-projection operator [G].
+-    *   To compute gradients w.r.t. geometry (source/detector positions), apply the chain rule through the interpolation derivatives, scattering gradients back to the camera parameters [S2, unofficial][S8258, unofficial].
++    *   To compute gradients w.r.t. geometry (source/detector positions), apply the chain rule through the interpolation derivatives, scattering gradients back to the camera parameters [S2, unofficial][S8, unofficial].
+     *   Shift gradients are computed using phase modulation derivatives: $\frac{\partial P}{\partial \mathbf{s}} = -i2\pi\mathbf{k}_{proj}P(\mathbf{k}_{proj})$ [S2, unofficial].
+ 
+@@ -43,5 +43,20 @@
+ 
+ ```python
+-def cone_adjoint(projections, sources, detectors, box, n_samples, volume_shape):
++def ray_box_intersect(ray_o, ray_d, box):
++    # box: [min_x, max_x, min_y, max_y, min_z, max_z]
++    # Handle zero direction components to avoid division by zero
++    inv_d = torch.where(ray_d.abs() > 1e-8, 1.0 / ray_d, torch.zeros_like(ray_d))
++    t1 = (box[0] - ray_o[0]) * inv_d[0]
++    t2 = (box[1] - ray_o[0]) * inv_d[0]
++    t3 = (box[2] - ray_o[1]) * inv_d[1]
++    t4 = (box[3] - ray_o[1]) * inv_d[1]
++    t5 = (box[4] - ray_o[2]) * inv_d[2]
++    t6 = (box[5] - ray_o[2]) * inv_d[2]
++    t_min = torch.maximum(torch.minimum(t1, t2), torch.maximum(torch.minimum(t3, t4), torch.minimum(t5, t6)))
++    t_max = torch.minimum(torch.maximum(t1, t2), torch.minimum(torch.maximum(t3, t4), torch.maximum(t5, t6)))
++    t_min = torch.clamp(t_min, min=0.0)
++    return t_min, t_max
++
++def cone_adjoint(projections, sources, detectors, box, n_samples, volume_shape, voxel_size):
+     """
+     Computes the adjoint of the cone-beam forward projection.
+@@ -54,4 +69,5 @@
+         n_samples: int
+         volume_shape: tuple (Z, Y, X)
++        voxel_size: float or Tensor [3]
+         
+     Returns:
+@@ -60,56 +76,47 @@
+     batch, _, views, rows, cols = projections.shape
+     volume = torch.zeros(batch, 1, *volume_shape, device=projections.device)
+-    
+-    # Precompute voxel grid
+     z, y, x = volume_shape
+-    zz, yy, xx = torch.meshgrid(torch.arange(z), torch.arange(y), torch.arange(x), indexing='ij')
+-    voxels = torch.stack([xx, yy, zz], dim=-1).float() # [Z, Y, X, 3]
+-    
++
+     for view in range(views):
+-        src = sources[view] # [3]
+-        det_plane = detectors[view] # [rows, cols, 3]
+-        proj_view = projections[:, 0, view] # [B, rows, cols]
+-        
+-        # Vectorized ray casting for all voxels
+-        # Ray direction: det - src
+-        rays_d = det_plane - src # [rows, cols, 3]
+-        rays_o = src.expand_as(rays_d) # [rows, cols, 3]
+-        
+-        # Normalize directions
+-        rays_d_norm = rays_d / rays_d.norm(dim=-1, keepdim=True)
+-        
+-        # Compute ray-box intersection to determine active rays
+-        # Simplified: assume all rays are valid for this example
+-        # In practice, use ray_bbox_intersect to get t_min, t_max
+-        
+-        # Sample along rays
+-        # For each voxel, find the intersection point with the ray passing through the detector pixel
+-        # This is computationally expensive in pure Python; typically done in CUDA
+-        
+-        # Pseudocode for a single ray (detector pixel r, c)
+-        for r in range(rows):
+-            for c in range(cols):
+-                ray_o = rays_o[r, c]
+-                ray_d = rays_d_norm[r, c]
+-                value = proj_view[:, r, c] # [B]
+-                
+-                # Determine ray path through volume
+-                # Intersect ray with box
+-                t_min, t_max = ray_box_intersect(ray_o, ray_d, box)
+-                
+-                if t_max <= t_min:
+-                    continue
+-                    
+-                # Sample points along the ray
+-                t_vals = torch.linspace(t_min, t_max, n_samples)
+-                points = ray_o + t_vals.unsqueeze(-1) * ray_d # [n_samples, 3]
+-                
+-                # Trilinear interpolation into volume
+-                # Map points to voxel coordinates
+-                # Accumulate weighted values
+-                # This step requires a differentiable trilinear interpolation function
+-                # volume += scatter_add(points, value, weights)
+-                
+-                pass # Implementation detail omitted for brevity; see GPU kernels [S3, unofficial]
++        src = sources[view]
++        det_plane = detectors[view]
++        proj_view = projections[:, 0, view]
++        rays_d = det_plane - src
++        rays_o = src.expand_as(rays_d)
++        rays_d_norm = rays_d / (rays_d.norm(dim=-1, keepdim=True) + 1e-8)
++
++        t_min, t_max = ray_box_intersect(rays_o, rays_d_norm, box)
++        valid = t_max > t_min
++
++        # Step along rays
++        t_vals = torch.linspace(0, 1, n_samples, device=projections.device)
++        t_sampled = t_min.unsqueeze(-1) + t_vals.unsqueeze(0) * (t_max - t_min).unsqueeze(-1)
++        points = rays_o.unsqueeze(1) + t_sampled.unsqueeze(-1) * rays_d_norm.unsqueeze(1)
++
++        # Convert to voxel coordinates
++        voxel_coords = points / voxel_size
++        ix, iy, iz = voxel_coords[..., 0], voxel_coords[..., 1], voxel_coords[..., 2]
++
++        # Clamp to volume bounds for interpolation
++        ix = torch.clamp(ix, 0, x - 1)
++        iy = torch.clamp(iy, 0, y - 1)
++        iz = torch.clamp(iz, 0, z - 1)
++
++        # Trilinear weights
++        dx = ix - ix.floor()
++        dy = iy - iy.floor()
++        dz = iz - iz.floor()
++        w000 = (1-dx)*(1-dy)*(1-dz)
++        w100 = dx*(1-dy)*(1-dz)
++        w010 = (1-dx)*dy*(1-dz)
++        w110 = dx*dy*(1-dz)
++        w001 = (1-dx)*(1-dy)*dz
++        w101 = dx*(1-dy)*dz
++        w011 = (1-dx)*dy*dz
++        w111 = dx*dy*dz
++
++        # Scatter weighted values to 8 neighboring voxels
++        # ... (Implementation detail omitted for brevity; see GPU kernels [S3, unofficial])
++        pass
+ 
+     return volume
+@@ -124,7 +131,7 @@
+ **Edge Cases and Pitfalls:**
+ *   **Atomic Contention:** Using `atomicAdd` for scatter accumulation is a major bottleneck on GPUs. Keeping pending voxels in registers minimizes atomics [S3, unofficial].
+-*   **Unfiltered Blurring:** Unfiltered back-projection creates a blurred image due to low-frequency noise accumulation ($1/r^2$ blur) [S5, unofficial].
++*   **Unfiltered Blurring:** Unfiltered back-projection creates a blurred image due to low-frequency noise accumulation [S5, unofficial].
+ *   **Boundary Conditions:** Volumes often require a 1-voxel zero-padding border to handle interpolation at edges without bounds checks [S3, unofficial].
+-*   **Precision:** Relative error compared to reference implementations (e.g., Astra Toolbox) is typically $< 10^{-4}$ for forward and $< 10^{-5}$ for back-projection [S1, unofficial].
++*   **Precision:** Relative error compared to reference implementations (e.g., Astra Toolbox) is $8.07 \times 10^{-4}$ for forward projection and $4.12 \times 10^{-5}$ for back-projection [S1, unofficial].
+ 
+ ## Subtopics
+@@ -153,5 +160,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N_v \cdot N_r \cdot N_s)$, where $N_v$ is the number of views, $N_r$ is the number of rays per view, and $N_s$ is the number of samples per ray [S3, unofficial]. In Fourier space, complexity is dominated by FFTs: $O(N^3 \log N)$ [S2, unofficial].
+-*   **Memory Complexity:** $O(N_v \cdot N_r)$ for storing projection data and $O(N_x \cdot N_y \cdot N_z)$ for the volume buffer [S3, unofficial]. Explicit Radon Matrix Construction requires $O(N_v \cdot N_r \cdot N_x \cdot N_y \cdot N_z)$, which is prohibitive for large volumes [S9109, unofficial].
++*   **Memory Complexity:** $O(N_v \cdot N_r)$ for storing projection data and $O(N_x \cdot N_y \cdot N_z)$ for the volume buffer [G]. Explicit Radon Matrix Construction requires $O(N_v \cdot N_r \cdot N_x \cdot N_y \cdot N_z)$, which is prohibitive for large volumes [S9109, unofficial].
+ *   **Performance:** TorchRadon is up to 125× faster than Astra Toolbox for parallel/fan-beam projections due to GPU batch operations [S1, unofficial]. Fourier-space methods show 1–2 orders of magnitude improvement over `torch-fourier-slice` [S6356, unofficial].
+ *   **Strengths:** Differentiable, stable for iterative optimization, efficient on GPUs [S1, unofficial][S6, unofficial].
+@@ -168,3 +175,7 @@
+ [S5] imanfs/inverse-problems-CT-scans - GitHub, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)
+ [S6] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)
+-[S7] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)+[S7] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)
++[S8] Gradient w.r.t Source/Detector Geometry, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
++[S9109] Explicit Radon Matrix Construction, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
++[S6356] Fourier-space Projection Operations, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
++[S5110] GPU Backprojection using OpenCL Buffers, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)

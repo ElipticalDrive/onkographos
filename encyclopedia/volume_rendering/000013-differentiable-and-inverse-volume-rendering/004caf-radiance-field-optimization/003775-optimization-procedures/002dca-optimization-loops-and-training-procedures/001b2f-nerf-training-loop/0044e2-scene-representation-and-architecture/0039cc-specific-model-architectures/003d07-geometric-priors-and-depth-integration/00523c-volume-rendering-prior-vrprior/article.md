@@ -3,336 +3,293 @@
 Also called: learnable differentiable renderer, neural weight function
 
 ## Overview
-VRPrior replaces handcrafted, 1D ray-centric equations for mapping unsigned distance fields (UDFs) to opaque density with a learned neural network $f_w$ that incorporates 3D spatial context from neighboring points [S1]. Unlike sibling methods that rely on fixed formulas sensitive to outliers, VRPrior learns a robust mapping from UDFs to alpha-blending weights, enabling accurate surface reconstruction from multi-view RGB-D data by minimizing depth rendering errors during a dedicated prior training phase [S1].
+VRPrior replaces handcrafted, 2D-aware equations for mapping unsigned distance functions (UDFs) to opaque density with a learnable neural network $f_w$ that incorporates 3D context from neighboring points [S1]. It solves the bias and sensitivity to outliers inherent in standard volume rendering when applied to signed or unsigned distance fields by learning a robust, data-driven weighting function [S1]. Unlike sibling methods that rely on fixed geometric constraints or hybrid representations, VRPrior explicitly learns the mapping from local geometric neighborhoods to rendering weights, enabling better generalization to unseen scenes [S1].
 
 ## How it works
-VRPrior operates in two distinct stages: **Prior Learning** (training $f_w$ on ground truth meshes) and **Generalization** (optimizing the scene UDF and color using the frozen $f_w$) [S1].
+VRPrior operates in two distinct phases: **Prior Training** (learning the mapping function $f_w$) and **Generalization** (optimizing a scene-specific UDF field $f_u$ and color field $f_c$ using the frozen prior) [S1].
 
 ### Inputs and Outputs
-*   **Inputs:**
-    *   Query point $q_n$ along a ray.
-    *   Set of $M$ nearest neighbor points $\{q'_m\}_{m=1}^M$ along the same ray.
-    *   Ground truth unsigned distances for neighbors: $\{f_{u_{gt}}(q'_m)\}_{m=1}^M$.
-    *   Sampling intervals between neighbors: $\{\delta_m\}_{m=1}^M$.
-*   **Outputs:**
-    *   Opaque density $\sigma_n$ at $q_n$.
-    *   Rendered depth $D'$ and color $I'$ via volume integration.
+*   **Prior Training Inputs:** Ground truth meshes $\{S_h\}_{h=1}^H$, camera poses for $A=100$ views per shape, and hierarchical samples along rays.
+*   **Prior Training Output:** Network parameters $\theta_w$ for $f_w$.
+*   **Generalization Inputs:** Multi-view RGB images $\{I_j\}_{j=1}^J$ of an unseen scene, camera poses.
+*   **Generalization Output:** Optimized UDF field $f_u$, color field $f_c$, and rendered RGB/Depth images.
 
 ### Data Structures and Layout
-The network $f_w$ processes neighbors grouped into three sets based on distance to $q_n$:
-1.  **Group 1:** $M_1 = 10$ nearest neighbors.
-2.  **Group 2:** $M_2 = 20$ next nearest neighbors.
-3.  **Group 3:** $M_3 = 30$ furthest neighbors.
-Total $M = M_1 + M_2 + M_3 = 60$ [S1].
 
-For each group $k \in \{1, 2, 3\}$, the input feature vector is the concatenation of:
-*   Unsigned distances: $\{f_{u_{gt}}(q'_m)\}$ for $m$ in group $k$.
-*   Sampling intervals: $\{\delta_m\}$ for $m$ in group $k$.
+**1. Neighbor Grouping**
+For a query point $q_n$ on a ray, $M$ nearest neighbors $\{q'_m\}_{m=1}^M$ are identified along the ray. These neighbors are grouped into three sets based on their distance to $q_n$:
+*   Group 1: $M_1 = 10$ nearest neighbors.
+*   Group 2: $M_2 = 20$ next-nearest neighbors.
+*   Group 3: $M_3 = 30$ furthest neighbors.
+*   Total neighbors $M = M_1 + M_2 + M_3 = 60$.
 
-### Network Architecture ($f_w$)
-$f_w$ consists of:
-1.  Three separate MLPs ($f_{w1}^{(k)}$) with **non-shared** parameters, one for each neighbor group $k$. Each MLP takes the concatenated features of its group and outputs a feature vector.
-2.  A summation layer that adds the outputs of the three $f_{w1}$ MLPs.
-3.  A final MLP ($f_{w2}$) with skip connections from the input to every 4th layer (standard NeRF-style skip connections) to predict the scalar opaque density $\sigma_n$ [S1].
+**2. Feature Vector for $f_w$**
+For each group $k \in \{1, 2, 3\}$, the input to the sub-network $f_{w1}^{(k)}$ is a concatenated vector of:
+*   Unsigned distances: $\{f_{u_{gt}}(q'_m)\}_{m \in \text{Group } k}$
+*   Sampling intervals: $\{\delta_m\}_{m \in \text{Group } k}$, where $\delta_m$ is the distance between neighbor $q'_m$ and $q'_{m+1}$ (or to $q_n$ for the last neighbor).
+
+**3. Network Architecture $f_w$**
+*   **Sub-networks:** Three separate MLPs ($f_{w1}^{(1)}, f_{w1}^{(2)}, f_{w1}^{(3)}$) with non-shared parameters. Each processes the features of one neighbor group.
+*   **Aggregation:** The output feature vectors from the three sub-networks are summed.
+*   **Final MLP ($f_{w2}$):** The summed features are passed to a final MLP with skip connections to predict the opaque density $\sigma_n$.
 
 ### Numbered Steps
 
-#### Stage 1: Prior Learning
-1.  **Data Preparation:** For each ground truth mesh shape $S_h$ in a dataset of $H$ shapes:
-    *   Compute ground truth UDF $f_{u_{gt}}$.
-    *   Render $A=100$ depth images $\{D_a^h\}_{a=1}^A$ from random view angles [S1].
-2.  **Ray Sampling:** For each pixel in each view, shoot a ray $V_k$. Hierarchically sample $N=128$ points $\{q_n\}_{n=1}^N$ along the ray [S1].
-3.  **Neighbor Selection:** For each query point $q_n$, identify $M=60$ nearest neighbors $\{q'_m\}$ along the ray.
-4.  **Feature Extraction:**
-    *   Calculate ground truth unsigned distances $u'_m = f_{u_{gt}}(q'_m)$.
-    *   Calculate sampling intervals $\delta_m$ between adjacent neighbors.
-    *   Group features into the three sets defined above.
-5.  **Density Prediction:**
-    *   Pass each group's features through its respective $f_{w1}^{(k)}$ MLP.
-    *   Sum the feature vectors.
-    *   Pass the sum through $f_{w2}$ to predict $\sigma_n$ for all $n$ [S1].
-6.  **Volume Rendering:** Compute rendered depth $\tilde{D}_a^h$ using the predicted densities:
-    $$
-    \sigma_n = f_w(\{\delta_m\}, \{f_{u_{gt}}(q'_m)\})
-    $$
-    $$
-    w_n = \sigma_n \times \prod_{n'=1}^{n-1} (1 - \sigma_{n'})
-    $$
-    $$
-    \tilde{D}_a^h = \sum_{n'=1}^N w_{n'} \times d_{n'}
-    $$
-    where $d_{n'}$ is the depth of point $q_{n'}$ [S1].
-7.  **Optimization:** Update parameters $\theta_w$ of $f_w$ by minimizing the L2 error between rendered and ground truth depth:
-    $$
-    \min_{\theta_w} \sum_{h=1}^H \sum_{a=1}^A \|D_a^h - \tilde{D}_a^h\|_2^2
-    $$
-    *Note: RGB images are NOT used in this stage to preserve generalization ability [S1].*
+#### Phase 1: Prior Training
+1.  **Generate Ground Truth UDFs:** For each training shape $S_h$, compute the ground truth unsigned distance function $f_{u_{gt}}$.
+2.  **Sample Views:** For each shape $S_h$, select $A=100$ random camera views.
+3.  **Hierarchical Sampling:** For each view, shoot rays and hierarchically sample $N=128$ points $\{q_n\}$ along each ray [S1].
+4.  **Compute Neighbor Features:** For each sample point $q_n$:
+    *   Identify $M=60$ nearest neighbors $\{q'_m\}$ along the ray.
+    *   Compute unsigned distances $u'_m = f_{u_{gt}}(q'_m)$.
+    *   Compute sampling intervals $\delta_m$.
+    *   Group features into three sets of sizes $M_1=10, M_2=20, M_3=30$.
+5.  **Predict Density:** Pass the grouped features through $f_w$ to predict opaque density $\sigma_n = f_w(\{\delta_m\}, \{u'_m\})$.
+6.  **Render Depth:** Compute rendered depth $\tilde{D}$ using the standard volume rendering accumulation formula (see Formulas below).
+7.  **Compute Loss:** Calculate the L2 error between rendered depth $\tilde{D}$ and ground truth depth $D$ (rendered from $f_{u_{gt}}$).
+8.  **Optimize:** Update $\theta_w$ to minimize the loss.
 
-#### Stage 2: Generalization (Scene Optimization)
-1.  **Freeze Prior:** Fix parameters $\theta_w$ of $f_w$ [S1].
-2.  **Initialize Field:** Initialize a UDF field $f_u$ (e.g., spherical initialization) and a color network $f_c$ [S1].
-3.  **Ray Sampling:** For each pixel in input RGB images $\{I_j\}_{j=1}^J$, shoot a ray. Sample $N=128$ points $\{q_n\}$ [S1].
-4.  **Density Prediction:**
-    *   For each $q_n$, find $M$ nearest neighbors $\{q'_m\}$ along the ray.
-    *   Compute current unsigned distances $f_u(q'_m)$ and intervals $\delta_m$.
-    *   Predict $\sigma_n = f_w(\{\delta_m\}, \{f_u(q'_m)\})$ using the frozen prior [S1].
-5.  **Volume Rendering:**
-    *   Compute weights $w_n = \sigma_n \times \prod_{n'=1}^{n-1} (1 - \sigma_{n'})$.
-    *   Compute rendered color $I' = \sum_{n'=1}^N w_{n'} \times f_c(q_{n'})$.
-    *   Compute rendered depth $D' = \sum_{n'=1}^N w_{n'} \times d_{n'}$ [S1].
-6.  **Optimization:** Update $f_u$ and $f_c$ by minimizing:
-    $$
-    \mathcal{L} = \mathcal{L}_{rgb} + \lambda \mathcal{L}_e
-    $$
-    where $\mathcal{L}_{rgb} = \sum_{j=1}^J \|I_j - I'\|_2^2$ and $\mathcal{L}_e$ is the Eikonal loss [S1]. The balance weight $\lambda$ is typically 0.1 [S1].
-7.  **Surface Extraction:** Extract the zero-level set of the optimized $f_u$ as the final surface [S1].
+#### Phase 2: Generalization (Unseen Scene)
+1.  **Freeze Prior:** Fix parameters $\theta_w$ of $f_w$.
+2.  **Initialize Fields:** Initialize a UDF field $f_u$ (e.g., spherical initialization) and a color field $f_c$.
+3.  **Sample Rays:** For each pixel in training views, shoot rays and sample $N=128$ points $\{q_n\}$.
+4.  **Compute Neighbor Features:** For each $q_n$, find $M=60$ neighbors $\{q'_m\}$ along the ray. Compute current unsigned distances $f_u(q'_m)$ and intervals $\delta_m$.
+5.  **Predict Density:** Compute $\sigma_n = f_w(\{\delta_m\}, \{f_u(q'_m)\})$ using the frozen $f_w$.
+6.  **Render RGB and Depth:**
+    *   Compute weights $w_n$.
+    *   Render color $I'$ and depth $D'$.
+7.  **Compute Loss:**
+    *   Photometric loss $\mathcal{L}_{rgb}$ between rendered $I'$ and input $I$.
+    *   Eikonal loss $\mathcal{L}_e$ on $f_u$.
+8.  **Optimize:** Update parameters of $f_u$ and $f_c$ to minimize $\mathcal{L} = \mathcal{L}_{rgb} + \lambda \mathcal{L}_e$.
+
+### Formulas
+
+**Opaque Density Prediction:**
+$$ \sigma_n = f_w(\{\delta_m\}_{m=1}^M, \{f_{u_{gt}}(q'_m)\}_{m=1}^M) $$
+where $q'_m$ are the $M$ nearest neighbors of $q_n$ along the ray, and $\delta_m$ is the sampling interval between neighbors [S1].
+
+**Volume Rendering Accumulation:**
+$$ w_n = \sigma_n \times \prod_{n'=1}^{n-1} (1 - \sigma_{n'}) $$
+$$ I' = \sum_{n'=1}^N w_{n'} \times f_c(q_{n'}) $$
+$$ D' = \sum_{n'=1}^N w_{n'} \times d_{n'} $$
+where $w_n$ is the weight, $I'$ is rendered color, $D'$ is rendered depth, and $d_{n'}$ is the depth of point $q_{n'}$ [S1].
+
+**Prior Training Loss:**
+$$ \min_{\theta_w} \sum_{h=1}^H \sum_{a=1}^A \|D_a^h - \tilde{D}_a^h\|_2^2 $$
+where $H$ is the number of shapes, $A=100$ is the number of views per shape, $D_a^h$ is ground truth depth, and $\tilde{D}_a^h$ is rendered depth [S1].
+
+**Generalization Loss:**
+$$ \mathcal{L} = \mathcal{L}_{rgb} + \lambda \mathcal{L}_e $$
+where $\mathcal{L}_{rgb} = \sum_{j=1}^J \|I_j - \tilde{I}_j\|$, $\mathcal{L}_e$ is the Eikonal loss, and $\lambda = 0.1$ [S1].
+
+### Parameters
+*   $N=128$: Number of hierarchical samples along each ray [S1].
+*   $A=100$: Number of ground truth depth images rendered per shape during prior training [S1].
+*   $M_1=10, M_2=20, M_3=30$: Sizes of the three neighbor groups [S1].
+*   $\lambda=0.1$: Balance weight for Eikonal loss [S1].
+
+### Edge Cases and Pitfalls
+*   **RGB in Prior Training:** Using RGB images during the prior training phase reduces the generalization ability of the learned prior. The prior should be trained only on depth errors to learn the mapping from UDF to density [S1].
+*   **Small Receptive Fields:** Handcrafted equations using only $M=2$ neighbors are biased at ray-surface intersections and sensitive to unsigned distance outliers because they lack 3D awareness [S1]. VRPrior mitigates this by using $M=60$ neighbors grouped by scale.
+*   **UDF Variations:** The multi-resolution windowing (grouping neighbors by distance) is critical for handling variations such as large near-surface regions or sharp surface corners [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
 
-class VRPriorMLP(nn.Module):
+def compute_neighbors(query_point, ray_points, num_neighbors=60):
     """
-    The final MLP (f_w2) with skip connections.
+    Find M nearest neighbors of query_point along the ray.
+    Returns indices of neighbors.
     """
-    def __init__(self, input_dim, hidden_dim=256, num_layers=8):
-        super().__init__()
-        self.layers = nn.ModuleList()
-        self.skip_layers = nn.ModuleList()
-        
-        # First layer
-        self.layers.append(nn.Linear(input_dim, hidden_dim))
-        self.skip_layers.append(nn.Linear(input_dim, hidden_dim))
-        
-        # Hidden layers with skip connections every 4th layer
-        for i in range(1, num_layers):
-            self.layers.append(nn.Linear(hidden_dim, hidden_dim))
-            if i % 4 == 0:
-                self.skip_layers.append(nn.Linear(input_dim, hidden_dim))
-            else:
-                self.skip_layers.append(nn.Identity())
-        
-        # Output layer
-        self.output_layer = nn.Linear(hidden_dim, 1) # Predicts sigma
+    # Calculate distances from query_point to all other points on the ray
+    distances = np.abs(np.array(ray_points) - query_point)
+    # Sort and pick M nearest
+    sorted_indices = np.argsort(distances)
+    return sorted_indices[:num_neighbors]
 
-    def forward(self, x):
-        h = x
-        for i, layer in enumerate(self.layers):
-            if i > 0:
-                h = F.relu(h)
-            h = layer(h)
-            # Add skip connection if applicable
-            if i < len(self.skip_layers) and not isinstance(self.skip_layers[i], nn.Identity):
-                h = h + self.skip_layers[i](x)
-        return self.output_layer(h)
+def group_neighbors(neighbors, query_point, M1=10, M2=20, M3=30):
+    """
+    Group neighbors into three sets based on distance to query_point.
+    Returns list of three groups.
+    """
+    # Neighbors are already sorted by distance from query_point
+    group1 = neighbors[:M1]
+    group2 = neighbors[M1:M1+M2]
+    group3 = neighbors[M1+M2:M1+M2+M3]
+    return [group1, group2, group3]
 
-class VRPrior(nn.Module):
+def compute_intervals(group_indices, ray_points):
     """
-    The full VRPrior network f_w.
+    Compute sampling intervals delta_m for a group of neighbors.
+    delta_m is distance between neighbor m and m+1 (or query point for last).
     """
-    def __init__(self, neighbor_counts=[10, 20, 30], feature_dim=64, hidden_dim=256):
-        super().__init__()
-        self.M1, self.M2, self.M3 = neighbor_counts
-        # Input to f_w1: distances + intervals
-        # Group 1: M1 distances + M1 intervals
-        # Group 2: M2 distances + M2 intervals
-        # Group 3: M3 distances + M3 intervals
-        self.fw1_1 = VRPriorMLP(self.M1 * 2, hidden_dim)
-        self.fw1_2 = VRPriorMLP(self.M2 * 2, hidden_dim)
-        self.fw1_3 = VRPriorMLP(self.M3 * 2, hidden_dim)
-        
-        # Summed feature dim is hidden_dim
-        self.fw2 = VRPriorMLP(hidden_dim, hidden_dim)
+    intervals = []
+    for i in range(len(group_indices) - 1):
+        idx_curr = group_indices[i]
+        idx_next = group_indices[i+1]
+        dist = np.abs(ray_points[idx_next] - ray_points[idx_curr])
+        intervals.append(dist)
+    # Last interval to query point
+    last_idx = group_indices[-1]
+    dist_last = np.abs(query_point - ray_points[last_idx])
+    intervals.append(dist_last)
+    return intervals
 
-    def forward(self, q_n, neighbors_q, neighbors_udf, intervals):
-        """
-        q_n: query point (unused in current f_w definition, kept for interface consistency)
-        neighbors_q: tensor of shape (N_rays, M, 3) - neighbor coordinates
-        neighbors_udf: tensor of shape (N_rays, M) - unsigned distances of neighbors
-        intervals: tensor of shape (N_rays, M-1) - sampling intervals between neighbors
-        
-        Returns:
-        sigma: tensor of shape (N_rays, N_samples) - opaque density
-        """
-        # Note: The source describes grouping neighbors by distance to q_n.
-        # In implementation, neighbors are sorted by distance to q_n along the ray.
-        # M = M1 + M2 + M3 = 60.
-        
-        # Extract groups
-        # Group 1: first M1 neighbors
-        udf_1 = neighbors_udf[:, :self.M1]
-        # Intervals for group 1: intervals between the first M1 neighbors
-        # If M1=10, we have 9 intervals between them? Or intervals from q_n?
-        # Source says "sampling interval delta_m between q'_m and q'_{m+1}".
-        # Assuming intervals tensor is aligned with neighbor indices.
-        int_1 = intervals[:, :self.M1-1] if self.M1 > 1 else torch.zeros_like(udf_1)
-        
-        # Group 2: next M2 neighbors (indices M1 to M1+M2)
-        udf_2 = neighbors_udf[:, self.M1:self.M1+self.M2]
-        int_2 = intervals[:, self.M1-1:self.M1+self.M2-1]
-        
-        # Group 3: next M3 neighbors (indices M1+M2 to M1+M2+M3)
-        udf_3 = neighbors_udf[:, self.M1+self.M2:]
-        int_3 = intervals[:, self.M1+self.M2-1:]
-        
-        # Concatenate features for each group
-        # Feature vector = [distances, intervals]
-        # Note: Dimensions must match. If M1=10, we have 10 distances. 
-        # Intervals between 10 points is 9. We might need to pad or handle boundary.
-        # Source implies direct concatenation. Let's assume intervals are padded or 
-        # the definition of delta_m includes distance from q_n or previous point.
-        # Standard interpretation: delta_m is distance between q'_m and q'_{m+1}.
-        # For the last point in a group, we might use distance to q_n or pad with 0.
-        # For simplicity in pseudocode, we assume intervals are provided for all gaps.
-        
-        feat_1 = torch.cat([udf_1, int_1], dim=-1)
-        feat_2 = torch.cat([udf_2, int_2], dim=-1)
-        feat_3 = torch.cat([udf_3, int_3], dim=-1)
-        
-        # Process through separate MLPs
-        feat_out_1 = self.fw1_1(feat_1)
-        feat_out_2 = self.fw1_2(feat_2)
-        feat_out_3 = self.fw1_3(feat_3)
-        
-        # Sum features
-        summed_feat = feat_out_1 + feat_out_2 + feat_out_3
-        
-        # Predict sigma
-        sigma = torch.sigmoid(self.fw2(summed_feat)) # Sigmoid to bound sigma? Source says predict sigma.
-        # Source Eq 1 uses sigma in alpha = 1 - exp(-sigma * delta). 
-        # Usually sigma is positive. Sigmoid ensures positivity.
-        
-        return sigma
+def forward_prior_f_w(group1_features, group2_features, group3_features, f_w1_params, f_w2_params):
+    """
+    Forward pass of the VRPrior network f_w.
+    f_w1_params: List of 3 sets of MLP weights for the 3 groups.
+    f_w2_params: MLP weights for the final aggregation MLP.
+    """
+    # Process each group with separate MLPs
+    feat1 = apply_mlp(group1_features, f_w1_params[0])
+    feat2 = apply_mlp(group2_features, f_w1_params[1])
+    feat3 = apply_mlp(group3_features, f_w1_params[2])
+    
+    # Sum features
+    summed_feat = feat1 + feat2 + feat3
+    
+    # Final MLP with skip connection
+    sigma = apply_mlp_with_skip(summed_feat, f_w2_params)
+    return sigma
 
-def volume_render(sigma, depths, colors):
+def volume_render(rays, f_u, f_c, f_w_params, N=128, M=60):
     """
-    Standard volume rendering accumulation.
-    sigma: (N_rays, N_samples)
-    depths: (N_rays, N_samples)
-    colors: (N_rays, N_samples, 3)
+    Render RGB and Depth using VRPrior.
+    rays: List of rays, each ray is (origin, direction, [sample_points])
+    f_u: UDF field function
+    f_c: Color field function
+    f_w_params: Parameters for f_w
     """
-    deltas = depths[:, 1:] - depths[:, :-1]
-    # Add a small epsilon to avoid division by zero or log(0) if needed, 
-    # but here we use the exponential formulation.
+    rendered_colors = []
+    rendered_depths = []
     
-    # Alpha
-    alpha = 1.0 - torch.exp(-sigma * deltas)
-    
-    # Transmittance
-    # T_i = product_{j=1}^{i-1} (1 - alpha_j)
-    # T_1 = 1
-    T = torch.cumprod(1.0 - alpha, dim=1)
-    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
-    
-    # Weights
-    weights = T * alpha
-    
-    # Rendered Color
-    rendered_color = torch.sum(weights.unsqueeze(-1) * colors, dim=1)
-    
-    # Rendered Depth
-    rendered_depth = torch.sum(weights * depths, dim=1)
-    
-    return rendered_color, rendered_depth
-
-def train_prior_stage(f_w, gt_meshes, num_views=100, num_samples=128):
-    """
-    Stage 1: Train the volume rendering prior.
-    """
-    optimizer = torch.optim.Adam(f_w.parameters(), lr=1e-3)
-    
-    for shape in gt_meshes:
-        udf_gt = compute_udf(shape)
+    for ray in rays:
+        origin, direction, sample_points = ray
+        # Hierarchical sampling is assumed to have generated sample_points
+        # sample_points are sorted along the ray
         
-        for _ in range(num_views):
-            view = sample_random_view()
-            gt_depth = render_depth_from_mesh(shape, view)
+        weights = []
+        colors = []
+        depths = []
+        
+        alpha_accum = 1.0
+        
+        for n, q_n in enumerate(sample_points):
+            # 1. Find neighbors
+            neighbors = compute_neighbors(q_n, sample_points, M)
             
-            rays = generate_rays(view, num_samples)
+            # 2. Group neighbors
+            groups = group_neighbors(neighbors, q_n)
             
-            # For each ray, sample points and get neighbors
-            # This part requires efficient neighbor search along rays
-            # Simplified: assume we have neighbors_udf and intervals ready
+            # 3. Compute features for each group
+            group_features = []
+            for group in groups:
+                # Get unsigned distances
+                u_distances = [f_u(q) for q in group]
+                # Get intervals
+                intervals = compute_intervals(group, sample_points)
+                # Concatenate
+                features = np.concatenate([u_distances, intervals])
+                group_features.append(features)
             
-            # Forward pass through VRPrior
-            # sigma = f_w(q, neighbors_udf, intervals)
-            # Note: In training, we use GT UDF for neighbors
-            sigma = f_w(rays.query_points, rays.neighbors_q, udf_gt(rays.neighbors_q), rays.intervals)
+            # 4. Predict density
+            sigma = forward_prior_f_w(*group_features, f_w_params)
             
-            # Render depth
-            rendered_depth, _ = volume_render(sigma, rays.depths, None)
+            # 5. Compute weight
+            weight = sigma * alpha_accum
+            alpha_accum *= (1 - sigma)
+            
+            # 6. Accumulate
+            colors.append(weight * f_c(q_n))
+            depths.append(weight * np.dot(q_n - origin, direction)) # Depth is distance along ray
+            weights.append(weight)
+            
+        # Final accumulation
+        I_prime = np.sum(colors, axis=0)
+        D_prime = np.sum(depths, axis=0)
+        
+        rendered_colors.append(I_prime)
+        rendered_depths.append(D_prime)
+        
+    return rendered_colors, rendered_depths
+
+def train_prior(meshes, camera_poses, f_w_params, H=1, A=100):
+    """
+    Train the VRPrior network using ground truth meshes.
+    """
+    for h in range(H):
+        mesh = meshes[h]
+        # Compute ground truth UDF
+        f_u_gt = compute_udf_from_mesh(mesh)
+        
+        for a in range(A):
+            # Random view
+            pose = sample_random_pose(camera_poses)
+            # Render ground truth depth from mesh
+            D_gt = render_depth_from_mesh(mesh, pose)
+            
+            # Render predicted depth using f_w and f_u_gt
+            rays = generate_rays(pose)
+            # For prior training, we use f_u_gt to provide distances
+            # But f_w takes neighbors' distances as input
+            # We need to simulate the neighbor lookup using f_u_gt
+            # This is a simplified representation; in practice, f_u_gt is queried for neighbors
+            
+            # Note: The pseudocode above assumes f_u is a function. 
+            # During prior training, f_u is replaced by f_u_gt for distance queries.
+            
+            # To train f_w, we need to backprop through the rendering process
+            # However, the source states f_w is optimized by minimizing depth error.
+            # The rendering process is differentiable.
+            
+            I_pred, D_pred = volume_render(rays, f_u_gt, lambda q: 0, f_w_params) # Color not used for prior training loss
             
             # Loss
-            loss = F.mse_loss(rendered_depth, gt_depth)
+            loss = np.mean((D_gt - D_pred)**2)
             
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Update f_w_params
+            f_w_params = update_params(f_w_params, loss)
+            
+    return f_w_params
 
-def train_generalization_stage(f_w, f_u, f_c, rgb_images, lambda_eikonal=0.1):
+def train_scene(rays, images, f_u_params, f_c_params, f_w_params, lambda_e=0.1):
     """
-    Stage 2: Optimize scene UDF and color using frozen prior.
+    Generalize to unseen scene.
     """
-    optimizer = torch.optim.Adam(list(f_u.parameters()) + list(f_c.parameters()), lr=1e-3)
-    
-    for image in rgb_images:
-        rays = generate_rays_from_image(image)
+    for ray, img in zip(rays, images):
+        I_pred, D_pred = volume_render([ray], f_u, f_c, f_w_params)
         
-        # Sample points
-        points = rays.sample_points()
+        # Photometric loss
+        loss_rgb = np.mean((img - I_pred)**2)
         
-        # Get neighbors for each point
-        neighbors = rays.get_neighbors(points)
+        # Eikonal loss (requires gradient of f_u)
+        loss_eikonal = compute_eikonal_loss(f_u, f_u_params)
         
-        # Get current UDF values for neighbors
-        neighbors_udf = f_u(neighbors)
-        intervals = rays.intervals
+        loss = loss_rgb + lambda_e * loss_eikonal
         
-        # Predict sigma using frozen prior
-        with torch.no_grad():
-            sigma = f_w(points, neighbors, neighbors_udf, intervals)
+        # Update f_u and f_c params
+        f_u_params = update_params(f_u_params, loss)
+        f_c_params = update_params(f_c_params, loss)
         
-        # Get colors from color network
-        colors = f_c(points)
-        
-        # Render
-        rendered_color, rendered_depth = volume_render(sigma, rays.depths, colors)
-        
-        # Loss
-        loss_rgb = F.mse_loss(rendered_color, image.color)
-        loss_eikonal = compute_eikonal_loss(f_u, points)
-        loss = loss_rgb + lambda_eikonal * loss_eikonal
-        
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    return f_u_params, f_c_params
 ```
 
-### Parameters
-*   $N=128$: Number of hierarchical samples along each ray [S1].
-*   $A=100$: Number of ground truth depth images rendered per shape during prior training [S1].
-*   $M_1=10, M_2=20, M_3=30$: Sizes of the three neighbor groups [S1].
-*   $\lambda=0.1$: Balance weight for Eikonal loss in generalization stage [S1].
-
-### Edge Cases and Pitfalls
-*   **Handcrafted Bias:** Using handcrafted equations with only $M=2$ neighbors is biased at ray-surface intersections and sensitive to unsigned distance outliers due to small receptive fields and lack of 3D awareness [S1].
-*   **RGB in Prior Training:** Using RGB images during the prior training stage reduces the generalization ability of the learned prior. The prior should only be trained on depth errors to learn the UDF-to-density mapping [S1].
-*   **Neighbor Selection:** Neighbors must be selected based on distance to the query point $q_n$ along the ray to ensure the multi-resolution windows capture appropriate spatial context [S1].
-
 ## Operating characteristics
-*   **Time Complexity:** The prior training stage requires rendering $A=100$ views per shape and optimizing $f_w$. The generalization stage requires iterative optimization of $f_u$ and $f_c$ with forward passes through the frozen $f_w$. The neighbor search adds overhead compared to single-point MLPs.
-*   **Memory Complexity:** Stores parameters for three $f_{w1}$ MLPs and one $f_{w2}$ MLP, plus $f_u$ and $f_c$. No large voxel grids or hash tables are required for the prior itself.
-*   **Strengths:** Robust to unsigned distance outliers; 3D aware due to multi-neighbor input; adaptive to different UDF variants (e.g., sharp corners, large near-surface regions) [S1].
-*   **Limitations:** Requires a dedicated prior training phase on ground truth meshes; generalization depends on the diversity of the prior training dataset [S1].
-*   **When to use:** When reconstructing surfaces from multi-view RGB-D data where UDFs are available or estimable, and robustness to noise/outliers in distance fields is critical [S1].
+*   **Time Complexity:** The prior training phase requires rendering $A=100$ views per shape, which is computationally expensive but done offline. The generalization phase has similar complexity to standard NeRF but with additional neighbor lookups and MLP evaluations for density prediction.
+*   **Memory Complexity:** Requires storing the UDF field $f_u$ and color field $f_c$. The prior network $f_w$ is small (three MLPs).
+*   **Strengths:** Robust to unsigned distance outliers; 3D aware due to multi-scale neighbor aggregation; better generalization to unseen scenes compared to handcrafted mappings.
+*   **Limitations:** Requires ground truth meshes for prior training; sensitive to the quality of the UDF field $f_u$ during generalization.
+*   **When to use:** When working with UDFs and needing robust volume rendering that adapts to varying surface densities and distances.
+*   **When not to use:** When ground truth meshes are unavailable for prior training; when computational resources for prior training are limited.
 
 ## Background
-VRPrior was introduced in "VRP-UDF: Toward Unbiased Learning of Unsigned Distance Functions From Multi-View Images With Volume Rendering Priors" [S1]. It addresses the limitations of handcrafted weighting functions in previous UDF-based methods (like NeUDF [2]) which were biased and sensitive to outliers. The method builds on the idea of learnable neural rendering frameworks [66-68] and integrates with hierarchical volume sampling [69].
+VRPrior was introduced in the paper "VRP-UDF: Toward Unbiased Learning of Unsigned Distance Functions From Multi-View Images With Volume Rendering Priors" [S1]. It addresses the limitations of handcrafted weighting functions in UDF-based volume rendering, which are biased at ray-surface intersections and sensitive to outliers. The method builds on the canonical NeRF architecture [Parent] but replaces the density prediction with a learnable function $f_w$ that maps UDFs to opaque densities.
 
 ## Sources
 [S1] VRP-UDF: Toward Unbiased Learning of Unsigned Distance Functions From Multi-View Images With Volume Rendering Priors., https://doi.org/10.1109/tpami.2026.3653901, fetched 2026-10-27

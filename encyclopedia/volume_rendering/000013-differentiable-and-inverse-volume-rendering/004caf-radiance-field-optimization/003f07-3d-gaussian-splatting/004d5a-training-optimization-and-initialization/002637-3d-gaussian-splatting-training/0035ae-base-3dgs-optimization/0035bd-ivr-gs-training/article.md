@@ -6,17 +6,17 @@ The method optimizes a set of 3D Gaussians to match input volume data and target
 
 **Inputs:**
 *   Target volume data (scalar field).
-*   Transfer function (TF) parameters defining the desired visualization.
+*   Transfer function (TF) parameters defining the desired visualization [G].
 *   Camera poses for training views.
 
 **Outputs:**
 *   A set of 3D Gaussian primitives $\{G_i\}$, each defined by:
     *   Position $\mu_i \in \mathbb{R}^3$
-    *   Rotation $R_i \in SO(3)$ (represented as a quaternion or rotation matrix)
+    *   Rotation $R_i \in SO(3)$ (represented as a quaternion or rotation matrix) [G]
     *   Scale $s_i \in \mathbb{R}^3$
     *   Opacity $\alpha_i \in [0, 1]$
-    *   Normal $n_i \in \mathbb{R}^3$ (unit vector)
-    *   Shading attributes (e.g., color or density coefficients)
+    *   Normal $n_i \in \mathbb{R}^3$ (unit vector) [G]
+    *   Shading attributes (e.g., color or density coefficients) [S1]
 
 **Data Structures:**
 *   **Gaussian Attributes:** Stored in contiguous arrays or structures of arrays (SoA) for efficient GPU access [G].
@@ -25,13 +25,13 @@ The method optimizes a set of 3D Gaussians to match input volume data and target
 
 **Numbered Steps:**
 
-1.  **Stage 1: Base 3DGS Optimization (30,000 iterations)**
+1.  **Stage 1: Base 3DGS Optimization (30,000 iterations) [S1]**
     *   Initialize a set of 3D Gaussians from the volume data [G].
     *   Optimize position, rotation, scale, and opacity to capture the basic scene geometry and density distribution [S1].
     *   Use the loss function defined below [S1].
     *   *Note:* This stage corresponds to the "Base 3DGS Optimization" phase, ensuring the geometric foundation is solid before introducing shading-specific edits [S1].
 
-2.  **Stage 2: Editable Gaussian Optimization (10,000 iterations)**
+2.  **Stage 2: Editable Gaussian Optimization (10,000 iterations) [S1]**
     *   Initialize editable Gaussian primitives on the geometry established in Stage 1 [S1].
     *   Optimize normal attributes $n_i$ and shading attributes [S1].
     *   Keep base geometry attributes (position, scale, rotation) relatively stable or allow limited adjustment to fit shading details [S1].
@@ -57,28 +57,34 @@ Where:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ivr_gs_training(volume_data, tf_params, camera_poses):
+def ivr_gs_training(volume_data, tf_params, camera_poses, gt_images):
     # Stage 1: Base 3DGS Optimization (30,000 iterations) [S1]
     gaussians = initialize_from_volume(volume_data)  # [G] Standard 3DGS initialization
+    optimizer = Adam(gaussians.parameters(), lr=original_3dgs_lr)  # [G] Adam optimizer
     for iteration in range(30000):
-        rendered_image = rasterize(gaussians, camera_poses)  # [G] Standard differentiable rasterization
-        target_image = get_target_view(camera_poses)  # [G] Ground truth image for current pose
-        loss_l1 = mean(abs(rendered_image - target_image))
-        loss_ssim = ssim(rendered_image, target_image)
-        loss_reg = mean(abs(gaussians.scale)) + mean(abs(gaussians.opacity))
+        rendered_image = differentiable_rasterize(gaussians, camera_poses)  # [G] Standard differentiable rasterization
+        target_image = gt_images[iteration % len(gt_images)]
+        loss_l1 = sum(abs(rendered_image - target_image)) / len(rendered_image)
+        loss_ssim = compute_ssim(rendered_image, target_image)  # [G] Standard SSIM computation
+        loss_reg = sum(abs(gaussians.scale)) / len(gaussians.scale) + sum(abs(gaussians.opacity)) / len(gaussians.opacity)
         total_loss = 0.8 * loss_l1 + 0.2 * loss_ssim + 0.1 * loss_reg
-        optimizer_step(gaussians, total_loss, lr=original_3dgs_lr)  # [G] Adam optimizer with original 3DGS learning rates
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
     # Stage 2: Editable Gaussian Optimization (10,000 iterations) [S1]
     editable_gaussians = init_editable_on_base(gaussians)  # [G] Initialize editable primitives on Stage 1 geometry
+    optimizer = Adam(editable_gaussians.parameters(), lr=0.01)  # [G] Mixed learning rates: 0.01 for normal/shading, original for others
     for iteration in range(10000):
-        rendered_image = rasterize(editable_gaussians, camera_poses)
-        target_image = get_target_view(camera_poses)
-        loss_l1 = mean(abs(rendered_image - target_image))
-        loss_ssim = ssim(rendered_image, target_image)
-        loss_reg = mean(abs(editable_gaussians.scale)) + mean(abs(editable_gaussians.opacity))
-        loss_normal = normal_consistency(editable_gaussians)  # [G] Normal consistency loss
+        rendered_image = differentiable_rasterize(editable_gaussians, camera_poses)
+        target_image = gt_images[iteration % len(gt_images)]
+        loss_l1 = sum(abs(rendered_image - target_image)) / len(rendered_image)
+        loss_ssim = compute_ssim(rendered_image, target_image)
+        loss_reg = sum(abs(editable_gaussians.scale)) / len(editable_gaussians.scale) + sum(abs(editable_gaussians.opacity)) / len(editable_gaussians.opacity)
+        loss_normal = compute_normal_consistency(editable_gaussians)  # [G] Normal consistency loss
         total_loss = 0.8 * loss_l1 + 0.2 * loss_ssim + 0.1 * loss_reg + 0.01 * loss_normal
-        optimizer_step(editable_gaussians, total_loss, lr_normal_shading=0.01, lr_other=original_3dgs_lr)  # [G] Mixed learning rates
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
     return editable_gaussians
 ```
 
@@ -89,7 +95,7 @@ def ivr_gs_training(volume_data, tf_params, camera_poses):
 ## Subtopics
 
 ### iVR-GS Two-Stage Training
-This is the core variant of iVR-GS training. It explicitly separates the training into a 30,000-iteration base 3DGS phase and a 10,000-iteration editable Gaussian phase [S1]. It is chosen when computational efficiency and reduced model size are priorities [S1]. Compared to one-stage training (40,000 iterations from scratch), it accelerates optimization, uses fewer primitives, and reduces training time by over 2× while maintaining similar reconstruction quality [S1].
+It explicitly separates the training into a 30,000-iteration base 3DGS phase and a 10,000-iteration editable Gaussian phase [S1]. It is chosen when computational efficiency and reduced model size are priorities [S1]. Compared to one-stage training (40,000 iterations from scratch), it accelerates optimization, uses fewer primitives, and reduces training time by over 2× while maintaining similar reconstruction quality [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** The two-stage approach reduces total training time by over 2× compared to one-stage training [S1].

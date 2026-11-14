@@ -1,0 +1,131 @@
+--- v001.md
++++ v002.md
+@@ -4,38 +4,34 @@
+ 
+ ## Overview
+-This method calculates view-dependent lighting in layered volume rendering by storing a single representative normal vector per ray segment and performing shading in a deferred step before compositing, rather than multiplying shading coefficients with fragment color before warping [S1]. It solves the problem of noisy shading in regions with low volume gradient magnitudes by using a weighted accumulation strategy that prioritizes samples with high visual impact [S1]. It differs from its parent, [Depth-Gradient Shading with Ray-Layer Buffer](7010-depth-gradient-shading-with-ray-layer-buffer.md), by explicitly storing and shading with normal vectors derived from volume gradients rather than depth gradients, allowing for more accurate specular highlights and surface perception [S1].
++This method calculates view-dependent lighting in layered volume rendering by storing a single representative normal vector per ray segment and performing shading in a deferred step before compositing, rather than multiplying shading coefficients with fragment color before warping [S1]. It addresses noisy gradients in CT or MRT datasets by using a weighted accumulation strategy that prioritizes samples with high visual impact [S1]. It differs from its parent, [Depth-Gradient Shading with Ray-Layer Buffer](7010-depth-gradient-shading-with-ray-layer-buffer.md), by deriving normals directly from volume gradients instead of depth coherency [S1, G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume dataset $V$, transfer function $T$, camera parameters, ray-layer buffer containing depth and opacity information.
+-*   **Output:** Final composited image with view-dependent lighting.
++*   **Input:** Volume dataset $V$, transfer function $T$, camera parameters, ray-layer buffer containing depth and opacity information [S1].
++*   **Output:** Final composited image with view-dependent lighting [S1].
+ 
+ **Data Structures:**
+-*   **Ray Segment:** A contiguous range of samples along a ray between two layer boundaries.
+-*   **Accumulated Normal:** A 3D vector $\mathbf{N}_{acc}$ initialized to $(0,0,0)$.
+-*   **Accumulated Alpha:** A scalar $\alpha_{acc}$ initialized to $0$.
++*   **Ray Segment:** A contiguous range of samples along a ray between two layer boundaries [S1].
++*   **Accumulated Normal:** A 3D vector $\mathbf{N}_{acc}$ initialized to $(0,0,0)$ [G].
++*   **Accumulated Alpha:** A scalar $\alpha_{acc}$ initialized to $0$ [G].
+ 
+ **Numbered Steps:**
+-1.  **Ray Traversal:** For each pixel, cast a ray through the volume. Identify the ray segments defined by the layer boundaries.
+-2.  **Gradient Computation:** At each sample point $i$ within a segment, compute the volume gradient $\nabla V_i$ [S1].
+-3.  **Normalization:** Normalize the gradient to obtain the surface normal direction: $\mathbf{n}_i = \frac{\nabla V_i}{\|\nabla V_i\|}$ [S1]. If $\|\nabla V_i\| \approx 0$, skip or handle as noise [G].
+-4.  **Weighted Accumulation:** Accumulate the normals weighted by visual impact. The weight $w_i$ for sample $i$ is calculated as:
+-    $$ w_i = \alpha_i \cdot (1 - \alpha_{prev\_i})^3 $$
+-    where $\alpha_i$ is the opacity contribution of sample $i$, and $(1 - \alpha_{prev\_i})$ is the remaining opacity (transmittance) from the camera to sample $i$ [S1]. The remaining opacity is raised to the third power to weight closer samples more strongly [S1].
+-5.  **Final Normal Selection:** Compute the accumulated normal:
+-    $$ \mathbf{N}_{acc} = \sum_{i \in \text{segment}} w_i \cdot \mathbf{n}_i $$
+-    Normalize the result: $\mathbf{N}_{final} = \frac{\mathbf{N}_{acc}}{\|\mathbf{N}_{acc}\|}$ [S1]. If $\|\mathbf{N}_{acc}\| \approx 0$, use a default normal (e.g., view direction or zero) [G].
+-6.  **Deferred Shading:** After all rays are processed and layers are composited, use $\mathbf{N}_{final}$ for each fragment to calculate lighting (diffuse/specular) in a post-processing pass [S1].
++1.  **Ray Traversal & Segmentation:** For each pixel, cast a ray through the volume and identify the ray segments defined by the layer boundaries [S1].
++2.  **Gradient Computation:** At each sampling step $i$ within a segment, compute the volume gradient $\nabla V_i$ [S1].
++3.  **Normalization:** Compute the unit normal direction $\mathbf{n}_i = \nabla V_i / \|\nabla V_i\|$ [S1]. If $\|\nabla V_i\| \approx 0$, skip the sample [G].
++4.  **Weighted Accumulation:** Accumulate normals weighted by visual impact. For each sample, calculate the weight $w_i = \alpha_i \cdot T_i^3$, where $\alpha_i$ is the sample opacity and $T_i$ is the remaining opacity (transmittance) from the camera to sample $i$ [S1]. The remaining opacity is raised to the third power to weight closer samples more strongly, causing the impact on the resulting gradient to fall off quickly along the segment [S1]. Update the accumulated normal: $\mathbf{N}_{acc} \leftarrow \mathbf{N}_{acc} + w_i \cdot \mathbf{n}_i$ [S1].
++5.  **Final Normal Selection:** Normalize the accumulated vector: $\mathbf{N}_{final} = \mathbf{N}_{acc} / \|\mathbf{N}_{acc}\|$ [S1]. If $\|\mathbf{N}_{acc}\| \approx 0$, assign a fallback normal (e.g., view direction) [G].
++6.  **Deferred Shading:** After all rays are processed and layers are composited, use $\mathbf{N}_{final}$ for each fragment to calculate lighting in a deferred pass [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_accumulated_normal(samples, remaining_opacity):
++def compute_accumulated_normal(samples, initial_transmittance):
+     """
+-    Computes the accumulated normal for a ray segment.
++    Computes the accumulated normal for a ray segment using cubic opacity weighting.
+     samples: list of dicts with keys 'gradient' (vec3), 'alpha' (float)
+-    remaining_opacity: float, transmittance from camera to start of segment
++    initial_transmittance: float, transmittance from camera to start of segment
+     """
+     acc_normal = vec3(0, 0, 0)
+-    acc_alpha = 0.0
++    transmittance = initial_transmittance
+     
+     for sample in samples:
+@@ -44,31 +40,30 @@
+         
+         # Normalize gradient to get normal direction
+-        grad_norm = length(grad)
+-        if grad_norm < 1e-6:
+-            continue # Skip zero gradients
++        grad_len = length(grad)
++        if grad_len < 1e-6:
++            transmittance *= (1.0 - alpha)
++            continue # Skip zero gradients [G]
++            
++        normal = grad / grad_len
+         
+-        normal = grad / grad_norm
+-        
+-        # Calculate weight: alpha * (remaining_opacity)^3
+-        # remaining_opacity is updated per sample in traversal
+-        weight = alpha * (remaining_opacity ** 3)
++        # Calculate weight: alpha * (transmittance)^3
++        weight = alpha * (transmittance ** 3)
+         
+         acc_normal += weight * normal
+-        acc_alpha += weight
+         
+-        # Update remaining opacity for next sample
+-        remaining_opacity *= (1.0 - alpha)
++        # Update transmittance for next sample
++        transmittance *= (1.0 - alpha)
+         
+     # Normalize the accumulated normal
+-    acc_norm_len = length(acc_normal)
+-    if acc_norm_len < 1e-6:
+-        return vec3(0, 0, 0) # Fallback for degenerate case
++    acc_len = length(acc_normal)
++    if acc_len < 1e-6:
++        return vec3(0, 0, 0) # Fallback for degenerate case [G]
+         
+-    return acc_normal / acc_norm_len
++    return acc_normal / acc_len
+ ```
+ 
+ **Parameters:**
+ *   **Opacity Power:** The exponent applied to remaining opacity. The source specifies a value of **3** [S1].
+-*   **Gradient Smoothing:** Not specified in sources. Noise in CT/MRT data may require pre-smoothing [S1].
++*   **Gradient Smoothing:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+@@ -80,18 +75,18 @@
+ 
+ ### Longest Gradient Selection
+-Selects the sample with the maximum gradient magnitude as the representative normal. Simpler but less accurate [S1].
++Selects the sample with the maximum gradient magnitude as the representative normal. Evaluated in [S1] but yields higher pixel error than accumulated methods [S1].
+ 
+ ### Gradient at Opacity Maximum
+-Selects the gradient at the sample with the highest opacity contribution. Intuitive but suboptimal for view-dependent lighting [S1].
++Selects the gradient at the sample with the highest opacity contribution. Evaluated in [S1] but yields higher pixel error than accumulated methods [S1].
+ 
+ ### Standard Accumulated Gradient
+-Accumulates normals weighted by $\alpha \cdot (1-\alpha_{prev})$. Less effective than the cubic opacity weighting for handling noise [S1].
++Accumulates normals weighted by $\alpha_i \cdot T_i$. Evaluated in [S1] but is outperformed by the cubic opacity weighting method [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples per segment. The deferred shading step is $O(P)$ where $P$ is the number of pixels.
+-*   **Memory Complexity:** Requires storing one normal vector per fragment in addition to standard layer buffers.
+-*   **Performance:** Evaluation on MANIX and VIX datasets showed that the 'accumulated w. opacity^3' method provides the best visual quality (lowest average absolute pixel error) across rotation angles [S1].
+-*   **Strengths:** Reduces noise in shading compared to per-sample shading; provides view-dependent lighting in a layered rendering context.
+-*   **Limitations:** Approximate normal; may not perfectly match per-sample shaded raycasting; sensitive to gradient noise in raw data [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Requires storing one normal vector per fragment in addition to standard layer buffers [G].
++*   **Performance:** Evaluation on MANIX and VIX datasets showed that 'accumulated w. opacity^3' (method 4) outperforms 'longest gradient' (method 1), 'gradient at opacity max' (method 2), and 'accumulated gradient' (method 3) in terms of average absolute pixel error across rotation angles [S1].
++*   **Strengths:** Provides view-dependent lighting in a layered rendering context and mitigates noise compared to per-sample shading [S1].
++*   **Limitations:** Approximate normal; may not perfectly match per-sample shaded raycasting; sensitive to gradient noise in raw CT/MRT data [S1].
+ 
+ ## Background

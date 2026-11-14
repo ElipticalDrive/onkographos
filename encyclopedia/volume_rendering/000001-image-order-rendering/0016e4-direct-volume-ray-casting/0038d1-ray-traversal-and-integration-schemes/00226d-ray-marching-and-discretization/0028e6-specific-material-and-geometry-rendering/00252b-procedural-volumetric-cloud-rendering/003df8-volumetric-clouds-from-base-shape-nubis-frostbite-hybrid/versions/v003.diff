@@ -1,0 +1,104 @@
+--- v002.md
++++ v003.md
+@@ -36,12 +36,14 @@
+ 
+ ### Steps
+-1.  **Layer Definition:** Define the cloud layer as a shell above the base shape. The layer height is scaled relative to the planet's radius. For Earth, the layer spans 1.5 to 4 km altitude. The layer is lifted so its bottom is at least $1.25 \times$ the maximum ground relief to ensure the marcher ignores terrain [S1, unofficial].
+-2.  **Density Calculation (Schneider/Nubis):** For a shading point $P$ in 3D space, sample `shape_noise` at $P$ using a weather scale. Determine cloud cover and type based on thresholds measured directly on the noise values. Sample `detail_noise` at $P$ for fine-scale variation [S1, unofficial].
+-3.  **Sky Integration (Camera-Centred Grid):** Initialize a $1536 \times 768$ grid. For each $2 \times 2$ block of texels, one invocation marches one texel's direction. The other three are reprojected based on the cloud's distance. For each marched direction, calculate sun transmittance through air via the atmosphere's transmittance march, calculate sun transmittance through the cloud using progressive shadow samples, apply Wrenninge's multiple-scattering octaves to the cloud interior, sample the sky's light contribution from the atmosphere's multiple-scattering table, and compute `cloud_light`, `transmittance`, `front_dist`, `mean_dist`, and `opacity` for the texel [S1, unofficial].
+-4.  **Shadow Map Generation:** Render a $512 \times 512$ shadow map aligned with the sun vector around the camera. This map stores shadow information for the cloud layer [S1, unofficial].
+-5.  **Shading Integration:** The sky shader places clouds over the atmosphere's sky using the precomputed grid data. The page shader adds clouds in front of the fragment to the FOG buffer. The light function reads the shadow map (one fetch) to determine cloud shadows for the fragment [S1, unofficial].
++1.  **Layer Definition:** Define the cloud layer as a shell above the base shape [S1, unofficial]. The layer height is scaled relative to the planet's radius [S1, unofficial]. For Earth, the layer spans 1.5 to 4 km altitude [S1, unofficial]. The layer is lifted so its bottom is at least $1.25 \times$ the maximum ground relief to ensure the marcher ignores terrain [S1, unofficial].
++2.  **Density Calculation (Schneider/Nubis):** For a shading point $P$ in 3D space, sample `shape_noise` at $P$ using a weather scale [S1, unofficial]. Determine cloud cover and type based on thresholds measured directly on the noise values [S1, unofficial]. Sample `detail_noise` at $P$ for fine-scale variation [S1, unofficial].
++3.  **Sky Integration (Camera-Centred Grid):** Initialize a $1536 \times 768$ grid [S1, unofficial]. For each $2 \times 2$ block of texels, one invocation marches one texel's direction [S1, unofficial]. The other three are reprojected based on the cloud's distance [S1, unofficial]. For each marched direction, calculate sun transmittance through air via the atmosphere's transmittance march [S1, unofficial]. Calculate sun transmittance through the cloud using progressive shadow samples [S1, unofficial]. Apply Wrenninge's multiple-scattering octaves to the cloud interior [S1, unofficial]. Sample the sky's light contribution from the atmosphere's multiple-scattering table [S1, unofficial]. Compute `cloud_light`, `transmittance`, `front_dist`, `mean_dist`, and `opacity` for the texel [S1, unofficial].
++4.  **Shadow Map Generation:** Render a $512 \times 512$ shadow map aligned with the sun vector around the camera [S1, unofficial]. This map stores shadow information for the cloud layer [S1, unofficial].
++5.  **Shading Integration:** The sky shader places clouds over the atmosphere's sky using the precomputed grid data [S1, unofficial]. The page shader adds clouds in front of the fragment to the FOG buffer [S1, unofficial]. The light function reads the shadow map (one fetch) to determine cloud shadows for the fragment [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
++import math
++
+ # Constants
+ SHAPE_NOISE_RES = 128
+@@ -64,5 +66,7 @@
+     max_relief = base_shape.max_relief()
+     layer_bottom = base_shape.radius() + 1.25 * max_relief
+-    layer_top = layer_bottom + base_shape.radius() * 0.002  # Scaled relative to radius [G]
++    # Layer height is scaled relative to the planet's radius [G]
++    layer_height = base_shape.radius() * 0.0025  # Scaled factor derived from Earth range [G]
++    layer_top = layer_bottom + layer_height
+     grid = [[CloudTexel(0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(GRID_WIDTH)] for _ in range(GRID_HEIGHT)]
+ 
+@@ -74,24 +78,18 @@
+                     if (dy * 2 + dx) == march_idx:
+                         dir_vec = normalize(grid_direction(x + dx, y + dy, camera.up))
+-                        texel = march_cloud_direction(dir_vec, layer_bottom, layer_top, sun_dir, atmosphere, step_size)
++                        texel = march_cloud_direction(dir_vec, layer_bottom, layer_top, sun_dir, atmosphere, step_size, base_shape)
+                         grid[y + dy][x + dx] = texel
+                     else:
+-                        # Reproject from the marched texel by copying its fields
+-                        grid[y + dy][x + dx] = CloudTexel(
+-                            grid[(march_idx // 2) * 2 + (march_idx % 2)][(march_idx % 2) * 2 + (march_idx // 2)].cloud_light,
+-                            grid[(march_idx // 2) * 2 + (march_idx % 2)][(march_idx % 2) * 2 + (march_idx // 2)].transmittance,
+-                            grid[(march_idx // 2) * 2 + (march_idx % 2)][(march_idx % 2) * 2 + (march_idx // 2)].front_dist,
+-                            grid[(march_idx // 2) * 2 + (march_idx % 2)][(march_idx % 2) * 2 + (march_idx // 2)].mean_dist,
+-                            grid[(march_idx // 2) * 2 + (march_idx % 2)][(march_idx % 2) * 2 + (march_idx // 2)].opacity
+-                        )
++                        # Reproject: copy data from the marched texel in this block
++                        grid[y + dy][x + dx] = grid[y + (march_idx // 2)][x + (march_idx % 2)]
+     return grid
+ 
+ def grid_direction(grid_x, grid_y, up_vector):
+     """Maps grid coordinates to a direction vector around the up vector [G]."""
+-    theta = (grid_x / GRID_WIDTH) * 2.0 * 3.14159265
+-    phi = (grid_y / GRID_HEIGHT) * 3.14159265
+-    return normalize(vec3(sin(phi)*cos(theta), cos(phi), sin(phi)*sin(theta)))
++    theta = (grid_x / GRID_WIDTH) * 2.0 * math.pi
++    phi = (grid_y / GRID_HEIGHT) * math.pi
++    return normalize(vec3(math.sin(phi)*math.cos(theta), math.cos(phi), math.sin(phi)*math.sin(theta)))
+ 
+-def march_cloud_direction(dir_vec, layer_bottom, layer_top, sun_dir, atmosphere, step_size):
++def march_cloud_direction(dir_vec, layer_bottom, layer_top, sun_dir, atmosphere, step_size, base_shape):
+     """
+     Marches a single ray through the cloud layer.
+@@ -107,6 +105,7 @@
+     t = 0.0
+     base_center = base_shape.center
++    ray_length = layer_top - layer_bottom
+ 
+-    while t < layer_top - layer_bottom:
++    while t < ray_length:
+         point = ray_origin + dir_vec * t
+         height = dot(point - base_center, dir_vec)
+@@ -122,5 +121,5 @@
+             sky_light = atmosphere.multiple_scattering_table.sample(dir_vec)
+             cloud_light += scattering * air_transmittance * sun_dir.color + sky_light * density * step_size
+-            cloud_transmittance *= exp(-density * step_size)
++            cloud_transmittance *= math.exp(-density * step_size)
+             mean_dist = (mean_dist * (t - step_size) + t * step_size) / t if t > 0 else 0.0
+             opacity = 1.0 - cloud_transmittance
+@@ -170,16 +169,16 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Terrain Occlusion:** The layer is lifted, not composited. The march knows nothing of terrain, so clouds sit above the largest relief and do not wrap peaks. A depth-aware march is required to fix this [S1, unofficial].
++*   **Terrain Occlusion:** The layer is lifted, not composited [S1, unofficial]. The march knows nothing of terrain, so clouds sit above the largest relief and do not wrap peaks [S1, unofficial]. A depth-aware march is required to fix this [S1, unofficial].
+ *   **Jagged Edges:** The grid resolution ($0.23^\circ$ per texel) causes jagged edges on small planets seen whole [S1, unofficial].
+ *   **Shadow Reach:** Shadows do not extend past the shadow map boundary (64 km on Earth, or 4 camera altitudes) [S1, unofficial].
+-*   **Color Accuracy:** Clouds take the scene's warm sun color, reddened by air, resulting in a pinkish-tan appearance. No white balance is applied. Fixing this requires setting the scene's light to white, which is a scene change [S1, unofficial].
+-*   **Wind Direction:** Wind is a render-space vector. On a planet, noise drifts through the shell away from the pole. It is now aligned with the wind; the old layer drifted against it [S1, unofficial].
++*   **Color Accuracy:** Clouds take the scene's warm sun color, reddened by air, resulting in a pinkish-tan appearance [S1, unofficial]. No white balance is applied [S1, unofficial]. Fixing this requires setting the scene's light to white, which is a scene change [S1, unofficial].
++*   **Wind Direction:** Wind is a render-space vector [S1, unofficial]. On a planet, noise drifts through the shell away from the pole [S1, unofficial]. It is now aligned with the wind; the old layer drifted against it [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The grid march is $O(W \times H)$ where $W=1536, H=768$. Shadow map generation is $O(S^2)$ where $S=512$. Per-fragment shading is $O(1)$ with one shadow map fetch [S1, unofficial].
+-*   **Memory Complexity:** Grid storage $1536 \times 768 \times 5 \times 4$ bytes (assuming float32 for 5 fields) $\approx 18.75$ MB. Shadow map $512 \times 512 \times 4$ bytes $\approx 1$ MB. Noise textures $128^3 \times 4$ bytes $\approx 256$ MB, $32^3 \times 4$ bytes $\approx 128$ KB [S1, unofficial].
+-*   **Measured Performance (RTX 3070 Laptop, power-saver mode):** Forest5cm, steady, 300 frames: Clouds off 19.05 ms, Clouds on 21.21 ms (+2.2 ms). Single 20-frame shots: Earth's pole 4.8 → 8.1 ms (sky full of clouds). Earth from 100 km 5.2 → 11 ms [S1, unofficial].
+-*   **Strengths:** No 2D weather map tearing on curved bases. Efficient shadowing via shadow map (removed +33 ms cost of per-fragment shadow reads) [S1, unofficial].
+-*   **Limitations:** Jagged edges on small planets. Shadow reach limited by map size. Color accuracy issues without scene light changes. No light shafts, lightning, or precipitation [S1, unofficial].
++*   **Time Complexity:** The grid march is $O(W \times H)$ where $W=1536, H=768$ [S1, unofficial]. Shadow map generation is $O(S^2)$ where $S=512$ [S1, unofficial]. Per-fragment shading is $O(1)$ with one shadow map fetch [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance (RTX 3070 Laptop, power-saver mode):** Forest5cm, steady, 300 frames: Clouds off 19.05 ms, Clouds on 21.21 ms (+2.2 ms) [S1, unofficial]. Single 20-frame shots: Earth's pole 4.8 → 8.1 ms (sky full of clouds) [S1, unofficial]. Earth from 100 km 5.2 → 11 ms [S1, unofficial].
++*   **Strengths:** No 2D weather map tearing on curved bases [S1, unofficial]. Efficient shadowing via shadow map (removed +33 ms cost of per-fragment shadow reads) [S1, unofficial].
++*   **Limitations:** Jagged edges on small planets [S1, unofficial]. Shadow reach limited by map size [S1, unofficial]. Color accuracy issues without scene light changes [S1, unofficial]. No light shafts, lightning, or precipitation [S1, unofficial].
+ *   **When to Use:** Real-time rendering of planetary clouds where performance is critical and terrain occlusion is not a primary concern [S1, unofficial].
+ *   **When Not to Use:** When high-fidelity cloud shadows extending far from the camera are required, or when accurate color balance is critical without scene modifications [S1, unofficial].

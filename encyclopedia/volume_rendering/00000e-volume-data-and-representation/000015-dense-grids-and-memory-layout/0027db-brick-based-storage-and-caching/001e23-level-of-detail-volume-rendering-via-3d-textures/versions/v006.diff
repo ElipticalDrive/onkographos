@@ -1,0 +1,145 @@
+--- v005.md
++++ v006.md
+@@ -22,5 +22,5 @@
+ 
+ **1. Brick LOD Index Map**
+-A 3D array mapping each brick to its selected LOD level $k$.
++A 3D array mapping each brick to its selected LOD level $k$ [S1, S3].
+ *   Constraint: $|k_{b_i} - k_{b_j}| \le 1$ for any adjacent bricks $b_i, b_j$ [S1, S3].
+ 
+@@ -29,6 +29,6 @@
+ *   **Level 0 ($T_{b,0}$):** Contains the original voxel data of brick $b$ [S1, S2, S3].
+ *   **Level $k > 0$:** Contains the low-pass filtered and subsampled version of $T_{b,k-1}$ [S1, S2, S3].
+-*   **Texture Dimensions:** Due to OpenGL power-of-two restrictions, textures are expanded to the next power of two. Let $P(L)$ be the smallest power of two $\ge L$. The stored size is $P(L_x+1) \times P(L_y+1) \times P(L_z+1)$, including 1-voxel padding [S1, S2, S3].
+-*   **Merged Textures:** To save memory, adjacent bricks at coarser levels share textures. At level $k$, $8^k$ adjacent bricks share a single texture map, forming an octree-like hierarchy [S1].
++*   **Texture Dimensions:** Due to OpenGL power-of-two restrictions, textures are expanded to the next power of two [S3]. Let $P(L)$ be the smallest power of two $\ge L$. The stored size is $P(L_x+1) \times P(L_y+1) \times P(L_z+1)$, including 1-voxel padding [S1, S2, S3].
++*   **Merged Textures:** To save memory, adjacent bricks at coarser levels share textures [S1]. At level $k$, $8^k$ adjacent bricks share a single texture map, forming an octree-like hierarchy [S1].
+ 
+ **3. Texture Coordinate Domain**
+@@ -73,4 +73,6 @@
+ 
+ ```python
++import math
++
+ def build_texture_hierarchy(brick_data, max_levels):
+     """Construct multi-resolution texture hierarchy for a single brick."""
+@@ -79,5 +81,5 @@
+     for k in range(1, max_levels + 1):
+         filtered = apply_quadratic_spline_filter(current)
+-        next_data = filtered[0::2, 0::2, 0::2]
++        next_data = filter_even_indices(filtered)
+         next_data = pad_to_power_of_two(next_data)
+         textures.append(next_data)
+@@ -95,19 +97,40 @@
+     """Standard 1D convolution with zero-padding at boundaries."""
+     shape = list(data.shape)
+-    out = np.zeros(shape, dtype=data.dtype)
++    out = [[[0 for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
+     half = len(kernel) // 2
+-    for i in range(shape[dim]):
+-        for j in range(len(kernel)):
+-            idx = i - half + j
+-            if 0 <= idx < shape[dim]:
+-                out[..., i, ...] += data[..., idx, ...] * kernel[j]
++    for i in range(shape[0]):
++        for j in range(shape[1]):
++            for k in range(shape[2]):
++                val = 0.0
++                for m in range(len(kernel)):
++                    idx = i - half + m if dim == 0 else (j - half + m if dim == 1 else k - half + m)
++                    if 0 <= idx < shape[dim]:
++                        src = data[i][j][k] if dim == 2 else (data[i][j][idx] if dim == 1 else data[idx][j][k])
++                        val += src * kernel[m]
++                out[i][j][k] = val
++    return out
++
++def filter_even_indices(data):
++    """Subsample by keeping only even-indexed elements along each axis."""
++    shape = data.shape
++    new_shape = [math.ceil(s / 2) for s in shape]
++    out = [[[0.0 for _ in range(new_shape[2])] for _ in range(new_shape[1])] for _ in range(new_shape[0])]
++    for i in range(new_shape[0]):
++        for j in range(new_shape[1]):
++            for k in range(new_shape[2]):
++                out[i][j][k] = data[i * 2][j * 2][k * 2]
+     return out
+ 
+ def pad_to_power_of_two(data):
+     """Pad with zeros to next power of two in each dimension."""
+-    new_shape = [1 if d == 0 else 2**int(np.ceil(np.log2(d))) for d in data.shape]
+-    padded = np.zeros(new_shape, dtype=data.dtype)
+-    padded[:data.shape[0], :data.shape[1], :data.shape[2]] = data
+-    return padded
++    new_shape = []
++    for d in data.shape:
++        new_shape.append(1 if d <= 1 else 2 ** math.ceil(math.log2(d)))
++    out = [[[0.0 for _ in range(new_shape[2])] for _ in range(new_shape[1])] for _ in range(new_shape[0])]
++    for i in range(data.shape[0]):
++        for j in range(data.shape[1]):
++            for k in range(data.shape[2]):
++                out[i][j][k] = data[i][j][k]
++    return out
+ 
+ def adapt_boundary(fine_tex, coarse_tex, axis, boundary_idx):
+@@ -116,6 +139,8 @@
+     Interpolates odd-indexed voxels in fine from neighbors.
+     Adapts 1 voxel if boundary at center, 2 if between."""
+-    # Implementation depends on exact grid alignment; see step 4
+-    pass
++    # Implementation follows evidence: copy even indices from coarse to fine,
++    # then interpolate odd indices in fine using the adapted even neighbors.
++    # Boundary position determines whether 1 or 2 voxels are modified.
++    pass  # Sources do not specify the exact indexing arithmetic for arbitrary axes.
+ 
+ def correct_opacity(alpha):
+@@ -128,5 +153,9 @@
+     for n in neighbors:
+         if n.level > brick.level:
++            # Sources describe a modified 3D Sutherland-Hodgman algorithm for clipping
++            # even/odd slices against perspective projections, but do not provide 
++            # the exact clipping routine implementation.
+             polygons = clip_against_finer(polygons, n)
++    # Sources state polygons are sorted back-to-front to minimize color table reloads.
+     polygons = sort_back_to_front(polygons, camera)
+     for p in polygons:
+@@ -150,30 +179,30 @@
+ 
+ ### Brick Caching with LRU Replacement
+-Manages the residency of bricks in GPU memory. Unlike LOD which selects resolution, caching selects which bricks to keep. [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md)
++Manages the residency of bricks in GPU memory. Unlike LOD which selects resolution, caching selects which bricks to keep. Choose when memory bandwidth is the bottleneck rather than texture resolution. [Brick Caching with LRU Replacement](879-brick-caching-with-lru-replacement.md)
+ 
+ ### Bricking
+-The fundamental decomposition of volume into bricks. LOD builds on this by adding resolution levels to each brick. [Bricking](914-bricking.md)
++The fundamental decomposition of volume into bricks. LOD builds on this by adding resolution levels to each brick. Choose when the dataset exceeds single-texture capacity. [Bricking](914-bricking.md)
+ 
+ ### Brick-based Volume Raycasting
+-A rendering technique that can use LOD bricks as input. LOD reduces the number of samples per ray. [Brick-based Volume Raycasting](3341-brick-based-volume-raycasting.md)
++A rendering technique that can use LOD bricks as input. LOD reduces the number of samples per ray. Choose when ray-based traversal is preferred over slicing planes. [Brick-based Volume Raycasting](3341-brick-based-volume-raycasting.md)
+ 
+ ### N³-tree with Brick Pool and Node Pool
+-An alternative hierarchical structure. LOD uses a fixed brick hierarchy with local texture maps, whereas N³-tree uses a dynamic tree structure. [N³-tree with Brick Pool and Node Pool](3407-n-tree-with-brick-pool-and-node-pool.md)
++An alternative hierarchical structure. LOD uses a fixed brick hierarchy with local texture maps, whereas N³-tree uses a dynamic tree structure. Choose when dynamic subdivision is required over fixed brick sizes. [N³-tree with Brick Pool and Node Pool](3407-n-tree-with-brick-pool-and-node-pool.md)
+ 
+ ### Multi-Level Cache and Prefetching
+-Optimizes data transfer. LOD reduces data volume, but prefetching ensures the selected LOD bricks are loaded in time. [Multi-Level Cache and Prefetching](4631-multi-level-cache-and-prefetching.md)
++Optimizes data transfer. LOD reduces data volume, but prefetching ensures the selected LOD bricks are loaded in time. Choose when network or PCIe latency dominates rendering time. [Multi-Level Cache and Prefetching](4631-multi-level-cache-and-prefetching.md)
+ 
+ ### Bricked Volume Hierarchy
+-The general concept of hierarchical bricks. LOD is a specific implementation using 3D textures and opacity correction. [Bricked Volume Hierarchy](5036-bricked-volume-hierarchy.md)
++The general concept of hierarchical bricks. LOD is a specific implementation using 3D textures and opacity correction. Choose when GPU texture hardware is available and fixed brick sizes are acceptable. [Bricked Volume Hierarchy](5036-bricked-volume-hierarchy.md)
+ 
+ ### Raymarching with LOD-based Brick Caching
+-Combines raymarching with LOD. LOD determines the resolution, caching determines the brick residency. [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md)
++Combines raymarching with LOD. LOD determines the resolution, caching determines the brick residency. Choose when adaptive sampling along rays is needed alongside brick residency management. [Raymarching with LOD-based Brick Caching](5776-raymarching-with-lod-based-brick-caching.md)
+ 
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** LOD selection is $O(B)$ where $B$ is the number of bricks. Hierarchy construction is $O(V)$ where $V$ is the total voxel count. Rendering is $O(P \cdot S)$ where $P$ is pixels and $S$ is samples, but $S$ is reduced by LOD. Clipping operations average 2500 per frame, up to 5500 in worst-case diagonal views [S3].
+-*   **Memory Complexity:** Texture memory usage is significantly reduced. For four levels of detail, memory usage drops to 29% for front-to-back rendering, or 38% for other configurations, compared to the original [S3].
++*   **Time Complexity:** Not given in the sources. Clipping operations average 2500 per frame, up to 5500 in worst-case diagonal views [S3].
++*   **Memory Complexity:** Texture memory usage is significantly reduced [S3]. For four levels of detail, memory usage drops to 29% for front-to-back rendering, or 38% for other configurations, compared to the original [S3].
+ *   **Performance:** On an engine dataset, LOD reduced texture lookups to 32% (or 41% in another configuration) of original and frame time from ~2 seconds to 0.5 seconds [S2, S3]. Clipping overhead is <0.1 seconds, texture adaptation takes ~0.2 seconds [S3].
+-*   **Strengths:** Interactive frame rates for large datasets; continuous interpolation; correct opacity accumulation.
++*   **Strengths:** Interactive frame rates for large datasets; continuous interpolation; correct opacity accumulation [S1, S2, S3].
+ *   **Limitations:** Clipping overhead; power-of-two memory waste; potential topology distortion if LOD selection relies solely on focus point oracles without error measures [S3].
+ 

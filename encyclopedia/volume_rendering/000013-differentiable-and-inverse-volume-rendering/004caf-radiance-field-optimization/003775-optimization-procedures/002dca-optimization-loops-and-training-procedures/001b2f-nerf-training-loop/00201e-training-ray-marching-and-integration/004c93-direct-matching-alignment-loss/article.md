@@ -1,0 +1,183 @@
+# Direct Matching Alignment Loss
+
+Also called: Direct Alignment
+
+## Overview
+Direct Matching Alignment Loss ($L_{align}$) is a regularization term used during NeRF training to align a reference image with a set of surrogate views, thereby reducing overfitting and improving pose estimation accuracy [S1, unofficial]. Unlike standard rendering losses that only compare rendered pixels against ground truth, this method enforces geometric consistency between different camera viewpoints by projecting 3D points from a reference view into surrogate views and comparing their appearance, ensuring that the learned radiance field represents a coherent 3D structure rather than memorizing 2D textures [S1, unofficial].
+
+## How it works
+The method minimizes the appearance difference between a reference image and surrogate views for points visible in both views. It relies on the estimated depth from the NeRF to project pixels across views.
+
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   Reference image $I_r$ and its camera pose $(K, R_r, \mathbf{t}_r)$.
+    *   Set of surrogate views $\mathcal{N}_r$ with poses $(K, R_s, \mathbf{t}_s)$ for $s \in \mathcal{N}_r$.
+    *   NeRF model parameters $\Theta$ (used to estimate depth).
+    *   Pixel coordinates $\mathbf{u} \in \Omega(I_r)$ on the reference image.
+*   **Outputs:**
+    *   Scalar loss value $L_{align}$.
+
+**Data Structures:**
+*   Camera matrices: $K$ (intrinsic, $3 \times 3$), $R$ (rotation, $3 \times 3$), $\mathbf{t}$ (translation, $3 \times 1$).
+*   Pixel coordinates: $\mathbf{u} = [u, v]^T$.
+*   Depth estimates: $\bar{d}(\mathbf{u})$ (scalar).
+*   Image intensities: $\mathcal{I}_r(\mathbf{u})$, $\mathcal{I}_s(\mathbf{u}_s)$ (RGB vectors).
+
+**Numbered Steps:**
+
+1.  **Sample Reference Frame and Points:** Randomly select a reference frame $r$ from the training set and a set of pixel coordinates $\mathbf{u}$ on that image. Unless specified otherwise, the entire training set is considered as the set of surrogate views $\mathcal{N}_r$ [S1, unofficial].
+2.  **Estimate Reference Depth:** Compute the estimated depth $\bar{d}(\mathbf{u})$ for each pixel $\mathbf{u}$ in the reference view using the weighted sum of sampled depths $d_{sample}$ along the ray, weighted by the ray termination distribution $h$ [S1, unofficial]:
+    $$ \bar{d}(\mathbf{u}) = \sum _{d_{sample}} h(\mathbf{u},d_{sample}) d_{sample} $$
+3.  **Project to Surrogate View:** For each surrogate view $s \in \mathcal{N}_r$, compute the corresponding pixel coordinate $\mathbf{u}_s$ in the surrogate view. This involves back-projecting the reference pixel to 3D using the estimated depth, transforming to the surrogate camera frame, and projecting back to 2D [S1, unofficial]:
+    $$ \mathbf{u}_s = \Pi \left( K R_s \left( R_{r}^{-1} K^{-1} [\mathbf{u}, 1]^T \bar {d}(\mathbf{u}) - \mathbf{t}_r \right) + \mathbf{t}_s \right) $$
+    where $\Pi ([X,Y,Z]^T) = [X/Z, Y/Z]^T$ is the perspective projection function [S1, unofficial].
+4.  **Check Occlusion (Visibility Indicator):** Determine if the point is visible in the surrogate view using the visibility indicator $\mathcal{V}(\mathbf{u}_s, \mathbf{u})$. A point is considered visible if the depth at the projected location in the surrogate view is closer than the depth of the projected point, minus a threshold $\delta_d$ [S1, unofficial]:
+    $$ \mathcal{V}(\mathbf{u}_s,\mathbf{u}) = \mathbbm {1}[ \bar {d}(\mathbf{u}_s) < \mathcal {T}_s (\mathbf{u}, \bar {d}(\mathbf{u})) - \delta _d ] $$
+    where $\mathcal {T}_s (\mathbf{u}, \bar {d}(\mathbf{u}))$ is the depth of the 3D point (projected from reference) in the surrogate camera frame, calculated as the Z-component of the transformed 3D point [S1, unofficial]:
+    $$ \mathcal {T}_s (\mathbf{u}, \bar {d}(\mathbf{u})) = \omega \left( K \left( R_s \left( R_{r}^{-1} K^{-1} [\mathbf{u}, 1]^T \bar {d}(\mathbf{u}) - \mathbf{t}_r \right) + \mathbf{t}_s \right) \right) $$
+    and $\omega ([X,Y,Z]^T) = Z$ extracts the depth component [S1, unofficial].
+5.  **Compute Alignment Loss:** Calculate the loss by summing the Huber penalty between the reference image intensity $\mathcal{I}_{r}(\mathbf{u})$ and the surrogate view intensity $\mathcal{I}_s (\mathbf{u}_s)$, weighted by the visibility indicator [S1, unofficial]:
+    $$ L_{align} = \sum _{r=1}^{F} \sum _{s \in \mathcal {N}_r} \sum _{\mathbf {u} \in \Omega (I_r)} \mathcal {V}(\mathbf {u}_s,\mathbf {u}) \| \mathcal {I}_s (\mathbf {u}_s) - \mathcal {I}_{r}(\mathbf {u}) \|_\epsilon $$
+    where $\| \cdot \|_\epsilon$ denotes the Huber penalty [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_direct_alignment_loss(reference_image, reference_pose, surrogate_views, nerf_model, delta_d):
+    """
+    Computes the Direct Matching Alignment Loss.
+    
+    Args:
+        reference_image: Ground truth RGB image I_r.
+        reference_pose: Tuple (K, R_r, t_r).
+        surrogate_views: List of tuples (I_s, K, R_s, t_s) for s in N_r.
+        nerf_model: NeRF model capable of estimating depth distribution h.
+        delta_d: Depth threshold for occlusion reasoning.
+        
+    Returns:
+        Scalar loss value.
+    """
+    K, R_r, t_r = reference_pose
+    total_loss = 0.0
+    
+    # Get pixel coordinates for the reference image
+    # Assuming uniform grid or random sampling of u in Omega(I_r)
+    pixels_u = get_pixel_coordinates(reference_image.shape) 
+    
+    for u in pixels_u:
+        # Step 2: Estimate depth from NeRF
+        # h(u, d_sample) is the termination probability at depth d_sample
+        # d_sample are the depths of the sampled points along the ray
+        d_samples = nerf_model.get_sample_depths(u, reference_pose)
+        h_values = nerf_model.get_termination_distribution(u, reference_pose)
+        
+        # Weighted sum for estimated depth
+        estimated_depth_u = sum(h * d for h, d in zip(h_values, d_samples))
+        
+        # Step 3: Project to 3D in world/camera coordinates
+        # Back-project pixel u to 3D point P_r in reference camera frame
+        # P_r_cam = K_inv @ [u, 1]^T * estimated_depth_u
+        u_homogeneous = np.array([u[0], u[1], 1.0])
+        P_r_cam = np.linalg.inv(K) @ u_homogeneous * estimated_depth_u
+        
+        # Transform to World frame (assuming reference pose is World->Cam, so Cam->World is inv)
+        # P_world = R_r_inv @ (P_r_cam - t_r)
+        # Note: Standard NeRF pose is World->Cam. 
+        # To go from Camera to World: P_world = R^T * (P_cam - t)
+        R_r_inv = R_r.T
+        P_world = R_r_inv @ (P_r_cam - t_r)
+        
+        for surrogate_view in surrogate_views:
+            I_s, K_s, R_s, t_s = surrogate_view
+            
+            # Transform P_world to surrogate camera frame
+            # P_s_cam = R_s @ P_world + t_s
+            P_s_cam = R_s @ P_world + t_s
+            
+            # Project to surrogate pixel u_s
+            # u_s = Pi(P_s_cam)
+            if P_s_cam[2] <= 0:
+                continue # Behind camera
+            u_s = np.array([P_s_cam[0] / P_s_cam[2], P_s_cam[1] / P_s_cam[2]])
+            
+            # Check if u_s is within image bounds
+            if not is_in_bounds(u_s, I_s.shape):
+                continue
+                
+            # Step 4: Occlusion Reasoning
+            # Calculate depth of the projected point in surrogate view (T_s)
+            # T_s = omega(K_s @ P_s_cam) -> Z component of K_s @ P_s_cam? 
+            # Wait, formula says: omega( K ( ... ) ). 
+            # The term inside omega is the 3D point in surrogate camera coordinates transformed by K?
+            # No, omega extracts Z. The argument to omega is the 3D point in the surrogate camera frame?
+            # Let's re-read carefully: 
+            # T_s(u, d(u)) = omega( K ( R_s ( R_r^-1 K^-1 [u,1]^T d(u) - t_r ) + t_s ) )
+            # The term inside the outer K is the 3D point in the SURROGATE CAMERA FRAME?
+            # R_s ( ... ) + t_s is the transformation from World to Surrogate Camera.
+            # So P_s_cam = R_s @ P_world + t_s.
+            # Then K @ P_s_cam is the homogeneous pixel coordinate.
+            # omega extracts Z. But Z in homogeneous coordinates is the depth?
+            # Actually, usually depth is just P_s_cam[2]. 
+            # The formula writes: omega( K ( ... ) ). 
+            # If P_s_cam is the 3D point in cam frame, K @ P_s_cam = [X', Y', Z']^T.
+            # Z' is the depth in the surrogate camera frame.
+            # So T_s is simply P_s_cam[2].
+            
+            depth_projected_point = P_s_cam[2]
+            
+            # Get estimated depth at the projected pixel u_s in the surrogate view
+            # This requires querying the NeRF for the ray corresponding to u_s in view s
+            d_samples_s = nerf_model.get_sample_depths(u_s, (K_s, R_s, t_s))
+            h_values_s = nerf_model.get_termination_distribution(u_s, (K_s, R_s, t_s))
+            estimated_depth_us = sum(h * d for h, d in zip(h_values_s, d_samples_s))
+            
+            # Visibility indicator
+            # V = 1 if estimated_depth_us < depth_projected_point - delta_d
+            if estimated_depth_us < (depth_projected_point - delta_d):
+                visibility = 1.0
+            else:
+                visibility = 0.0
+            
+            if visibility > 0:
+                # Step 5: Compute Huber Loss
+                # Intensity at u_s in surrogate view
+                I_s_u_s = bilinear_sample(I_s, u_s)
+                I_r_u = reference_image[u[0], u[1]] # Assuming integer coords or sampled similarly
+                
+                # Huber penalty
+                diff = I_s_u_s - I_r_u
+                loss = huber_penalty(diff)
+                total_loss += visibility * loss
+                
+    return total_loss
+```
+
+**Parameters:**
+*   $\delta_d$: Depth threshold for occlusion reasoning. Value not given in the sources.
+*   $\epsilon$: Huber penalty parameter. Value not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The projection $\mathbf{u}_s$ is defined as the projection of the intersection point of the two rays. This ensures geometric consistency for the occlusion check [S1, unofficial]. Floating-point inaccuracies in depth estimation or projection can lead to incorrect occlusion decisions.
+*   **Boundaries:** Projected pixels $\mathbf{u}_s$ may fall outside the image boundaries of the surrogate view. These should be handled by skipping the pixel or assigning zero visibility.
+*   **Degenerate Input:** If the estimated depth $\bar{d}(\mathbf{u})$ is zero or negative, the back-projection is invalid. The NeRF's depth estimation should be robust to this, or such rays should be skipped.
+
+## Subtopics
+
+### Occlusion Reasoning
+This variant explicitly models visibility between views using a depth-based indicator. It calculates the depth of the 3D point projected from the reference view into the surrogate view and compares it with the NeRF's estimated depth at the corresponding pixel in the surrogate view. If the surrogate view's surface is closer than the projected point (minus a threshold $\delta_d$), the point is considered occluded and excluded from the loss [S1, unofficial]. This prevents the loss from penalizing the model for correct occlusions where the reference point is hidden in the surrogate view.
+
+## Operating characteristics
+*   **Time Complexity:** The loss calculation is $O(F \cdot |\mathcal{N}_r| \cdot |\Omega(I_r)|)$, where $F$ is the number of reference frames, $|\mathcal{N}_r|$ is the number of surrogate views, and $|\Omega(I_r)|$ is the number of pixels sampled. Since the entire training set is often used as surrogate views, this can be computationally expensive.
+*   **Memory Complexity:** Requires storing the NeRF model and the training images. No additional large data structures are needed beyond the ray samples.
+*   **Measured Performance:** On the Fern sequence, using alignment increased PSNR from 23.06 to 24.50 and SSIM from 0.72 to 0.75. On the Trex sequence, it increased PSNR from 21.82 to 21.90 and SSIM from 0.76 to 0.78 [S1, unofficial].
+*   **Strengths:** Reduces overfitting to training data, improves pose estimation, and enforces geometric consistency across views.
+*   **Limitations:** Computationally intensive due to cross-view projections and depth queries. Relies on accurate depth estimation from the NeRF.
+*   **When to use:** When training NeRFs on datasets with significant overfitting or when pose estimation accuracy is critical.
+*   **When not to use:** When computational resources are limited or when the dataset is very large, making the $O(N^2)$ cross-view comparison prohibitive.
+
+## Background
+The Direct Matching Alignment Loss was proposed by R. Garg et al. in the paper "Direct Alignment for Robust NeRF Learning" presented at ACCV 2024 [S1, unofficial]. The work addresses the issue of NeRFs overfitting to training data, even with multiple views, by introducing a direct alignment term that encourages consistency between different camera viewpoints. The method builds on the standard NeRF rendering pipeline and integrates with the training loop using SGD [S1, unofficial].
+
+## Sources
+[S1] ACCV 2024 Open Access Repository, https://openaccess.thecvf.com/content/ACCV2024/html/Garg_Direct_Alignment_for_Robust_NeRF_Learning_ACCV_2024_paper.html, fetched 2026-10-29 (unofficial)

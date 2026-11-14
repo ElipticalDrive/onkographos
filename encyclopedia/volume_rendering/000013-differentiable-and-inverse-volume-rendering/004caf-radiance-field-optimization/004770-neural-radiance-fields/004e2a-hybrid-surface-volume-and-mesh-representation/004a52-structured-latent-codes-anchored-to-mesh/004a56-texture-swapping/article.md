@@ -1,0 +1,139 @@
+# Texture Swapping
+
+Also called: Texture transfer
+
+## Overview
+Texture swapping transfers appearance latent codes from a source mesh area to a target mesh area within a trained Unified Volumetric Avatar (UVA) or similar neural mesh representation [S2, unofficial]. It solves the problem of reusing textures between objects with slightly different geometries by performing non-rigid 3D alignment of anchor nodes (mesh vertices) [S2, unofficial]. Unlike [Texture Painting](12730-texture-painting.md), which modifies appearance directly on a single model, swapping operates between two distinct trained models or areas, leveraging pre-blended latent codes for better 3D consistency [S2, unofficial].
+
+## How it works
+**Inputs:**
+*   Source mesh area: A set of vertices $V_S$ and their associated latent codes $C_S$ from a trained source model.
+*   Target mesh area: A set of vertices $V_T$ and their associated latent codes $C_T$ from a trained target model.
+*   Correspondences: A set of $K$ point pairs $(p_i^S, p_i^T)$ where $p_i^S \in V_S$ and $p_i^T \in V_T$, with $K \in [4, 9]$ [S1].
+
+**Outputs:**
+*   Updated latent codes $C_T'$ for the target vertices, allowing the target area to display the source texture [S2, unofficial].
+
+**Data Structures:**
+*   Mesh vertices: 3D coordinates $(x, y, z)$.
+*   Latent codes: Vectors $c$ stored at anchor nodes (mesh vertices) [Parent].
+
+**Steps:**
+1.  **Selection:** Select source and target areas by choosing mesh vertices in a 3D editor (e.g., Blender) [S1].
+2.  **Annotation:** Annotate $K$ point correspondences between the source and target areas [S1].
+3.  **Initial Alignment (Umeyama):** Compute a scaled rigid transformation $T_{scale}$ that aligns the source correspondences to the target correspondences using the Umeyama algorithm [S1][S2, unofficial]. This minimizes the least-squares error between the point sets.
+4.  **Non-Rigid Deformation (ARAP):** Calculate the residual transformation for each corresponding point pair after applying $T_{scale}$. Use As-Rigid-As-Possible (ARAP) deformation to deform the entire source mesh area $V_S$ to match the target shape, producing deformed source vertices $V_S'$ [S1][S2, unofficial].
+5.  **Code Interpolation:** For each target vertex $v_j \in V_T$, identify the 4 nearest neighbors in the deformed source vertices $V_S'$ [S1].
+6.  **Code Assignment:** Compute the new latent code $c_j'$ for $v_j$ using inverse distance weighting (IDW) of the latent codes from the 4 nearest deformed source vertices [S1].
+    $$ c_j' = \frac{\sum_{k=1}^{4} w_k c_k'}{\sum_{k=1}^{4} w_k} $$
+    where $c_k'$ is the latent code of the $k$-th nearest deformed source vertex, and $w_k = \frac{1}{d_k}$ is the weight based on the Euclidean distance $d_k$ between $v_j$ and the $k$-th source vertex [S1].
+7.  **Decoding:** Decode the updated latent codes $C_T'$ using the target model's decoder to render the swapped texture [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def texture_swap(source_mesh, target_mesh, source_codes, target_codes, num_correspondences=4):
+    """
+    Swaps texture codes from source_mesh to target_mesh.
+    
+    Args:
+        source_mesh: List of 3D vertices for source area.
+        target_mesh: List of 3D vertices for target area.
+        source_codes: List of latent codes corresponding to source_mesh.
+        target_codes: List of latent codes corresponding to target_mesh.
+        num_correspondences: Number of manual point correspondences (4-9).
+        
+    Returns:
+        updated_target_codes: New latent codes for target_mesh.
+    """
+    # Step 1 & 2: Select areas and annotate correspondences
+    # In practice, these are selected by the user in Blender.
+    # For implementation, we assume indices are provided.
+    source_indices = get_user_selected_indices(source_mesh)
+    target_indices = get_user_selected_indices(target_mesh)
+    
+    # Get corresponding points (user annotated)
+    # Returns list of tuples: (source_point, target_point)
+    correspondences = get_user_annotated_correspondences(source_indices, target_indices)
+    
+    # Step 3: Scaled rigid alignment using Umeyama
+    # Umeyama finds scale, rotation, translation minimizing least-squares error
+    scale, rotation, translation = umeyama_alignment(
+        [p for p, _ in correspondences], 
+        [p for _, p in correspondences]
+    )
+    
+    # Step 4: Non-rigid deformation using ARAP
+    # Apply initial rigid transform
+    deformed_source_vertices = apply_transform(source_mesh, scale, rotation, translation)
+    
+    # Compute residuals for correspondences
+    residuals = []
+    for src_p, tgt_p in correspondences:
+        transformed_src = apply_transform(src_p, scale, rotation, translation)
+        residuals.append(tgt_p - transformed_src)
+        
+    # Deform the rest of the source mesh to minimize ARAP energy
+    # ARAP preserves local rigidity while accommodating residuals
+    deformed_source_vertices = arap_deform(
+        deformed_source_vertices, 
+        source_mesh, 
+        residuals, 
+        correspondences
+    )
+    
+    # Step 5 & 6: Interpolate codes using Inverse Distance Weighting
+    updated_target_codes = []
+    for i, target_v in enumerate(target_mesh):
+        # Find 4 nearest neighbors in deformed source vertices
+        neighbors = get_k_nearest_neighbors(target_v, deformed_source_vertices, k=4)
+        
+        if not neighbors:
+            updated_target_codes.append(target_codes[i]) # Fallback
+            continue
+            
+        weights = []
+        neighbor_codes = []
+        for neighbor_idx in neighbors:
+            dist = euclidean_distance(target_v, deformed_source_vertices[neighbor_idx])
+            # Guard against division by zero
+            weight = 1.0 / (dist + 1e-6)
+            weights.append(weight)
+            neighbor_codes.append(source_codes[neighbor_idx])
+            
+        # Weighted average
+        total_weight = sum(weights)
+        new_code = [0.0] * len(source_codes[0])
+        for w, code in zip(weights, neighbor_codes):
+            for d in range(len(code)):
+                new_code[d] += w * code[d]
+        for d in range(len(new_code)):
+            new_code[d] /= total_weight
+            
+        updated_target_codes.append(new_code)
+        
+    return updated_target_codes
+```
+
+**Parameters:**
+*   Number of correspondences: 4 to 9 points [S1].
+*   Nearest neighbors for interpolation: 4 [S1].
+*   Weighting scheme: Inverse distance weighting [S1].
+
+**Edge Cases:**
+*   Precision: Ensure distance calculations use sufficient precision to avoid division by zero in IDW [G].
+*   Boundaries: The method assumes the source and target areas can be reasonably aligned [S1]. Large shape differences may require more correspondences or manual adjustment.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the ARAP deformation and nearest neighbor search. ARAP is typically solved iteratively. Nearest neighbor search is $O(N \log N)$ or $O(N)$ with spatial indexing.
+*   **Memory Complexity:** Requires storing latent codes for all vertices in the source and target areas.
+*   **Strengths:** Provides better 3D consistency than pose-dependent inference methods by using pre-blended codes [S2, unofficial]. Allows local editing without global shape parameter changes [S2, unofficial].
+*   **Limitations:** Requires manual annotation of correspondences (though automation is possible) [S1]. Performance depends on the quality of the initial alignment and the similarity of the source and target shapes [S1].
+
+## Background
+Texture swapping was introduced in the context of Unified Volumetric Avatars (UVA) and NeuMesh for geometry and texture editing [S1][S2, unofficial]. It builds on the concept of storing latent codes at mesh vertices, allowing for non-rigid deformation and texture transfer between models [S2, unofficial]. The method leverages Umeyama alignment for initial rigid transformation and ARAP for non-rigid deformation [S1].
+
+## Sources
+[S1] NeuMesh: Learning Disentangled Neural Mesh-Based Implicit Field for Geometry and Texture Editing, https://doi.org/10.1007/978-3-031-19787-1_34, fetched 2026-10-26
+[S2] UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing, https://doi.org/10.48550/arXiv.2304.06969, fetched 2026-10-29 (unofficial)

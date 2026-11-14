@@ -3,193 +3,133 @@
 Also called: Area Encoding NeRF, Object Segmentation Component in NeRF, Semantic NeRF Segmentation
 
 ## Overview
-This method extends the standard NeRF formulation to perform object segmentation by simultaneously estimating scene geometry and predicting semantic occlusion masks. It introduces "area encoding" to represent the probability that a sampling point belongs to an occluded area, leveraging the strong correlation between geometry estimation and semantic label prediction [S1]. Unlike standard NeRF which only predicts color and density, this approach outputs a semantic probability field, allowing for view-consistent segmentation results even in occluded regions by integrating these probabilities along rays [S1]. It builds on [Feature Fields](12995-feature-fields.md) by treating the occlusion probability as the feature signal $\mathbf{f}$, and differs from [Semantic and Feature Branches](12095-semantic-and-feature-branches.md) by explicitly modeling occlusion via volumetric integration of area encoding probabilities rather than separate branch architectures.
+This method extends the standard NeRF formulation to perform object segmentation by simultaneously estimating scene geometry and predicting semantic occlusion masks. It introduces "area encoding" to represent the probability that a sampling point belongs to an occluded area, leveraging the strong correlation between geometry estimation and semantic label prediction [S1]. Unlike sibling methods that predict arbitrary feature vectors, this approach specifically targets binary or probabilistic occlusion masks to enable view-consistent segmentation and subsequent inpainting of occluded regions [S1].
 
 ## How it works
+The method modifies the radiance field function $F_\Theta$ to map input coordinates $(\mathbf{x}, \mathbf{d})$ to a tuple $(\mathbf{c}, \sigma, p)$, where $\mathbf{c} \in \mathbb{R}^3$ is color, $\sigma \in \mathbb{R}$ is density, and $p \in [0, 1]$ is the area encoding probability [S1].
 
-### Inputs and Outputs
 **Inputs:**
-*   A set of multi-view images $I_o$ with corresponding camera poses.
-*   Ground-truth 2D semantic masks $P(r)$ for the target object(s) in the input views.
-*   Ground-truth depth maps $D(r)$ for the input views (used to supervise geometric modeling in occluded areas) [S1].
-*   (Optional) 2D inpainted images $C_l(r)$ for occluded regions to provide color priors when multi-view consistency fails [S1].
+*   Multi-view images $I_o$ with corresponding ground-truth semantic masks $P(r)$ for pixels $r$.
+*   Ground-truth depth maps $D(r)$ for all rays $r$ in the input views [S1].
+*   (Optional) 2D inpainted images $C_l(r)$ for occluded regions lacking multi-view consistency [S1].
 
 **Outputs:**
-*   A neural radiance field $F_\Theta: (\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma, p)$, where:
-    *   $\mathbf{c} \in \mathbb{R}^3$ is the predicted color.
-    *   $\sigma \in \mathbb{R}$ is the predicted volume density.
-    *   $p \in [0, 1]$ is the predicted area encoding probability (probability that the point $\mathbf{x}$ belongs to an occluded area) [S1].
+*   Rendered color $\hat{C}(r)$.
+*   Rendered depth $\hat{D}(r)$.
+*   Rendered mask $\hat{P}(r)$.
 
-### Data Structures
-*   **Neural Network $F_\Theta$:** A multi-layer perceptron (MLP) taking position $\mathbf{x}$ and viewing direction $\mathbf{d}$ as input. The output layer has 3 channels for color, 1 channel for density, and 1 channel for area encoding probability $p$ [S1].
-*   **Ray Sampling:** For each pixel, a ray $r$ is cast. $N$ sample points $\mathbf{x}_i$ are sampled along the ray within the bounding volume of the scene.
-*   **Transmittance:** Precomputed or computed on-the-fly for each sample point $i$:
-    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
-    where $\delta_j$ is the distance between sample points $j$ and $j+1$ [S1].
+**Data Structures:**
+The network $F_\Theta$ takes positional encoding of $\mathbf{x}$ and direction $\mathbf{d}$ as input. It outputs:
+*   $\sigma_i$: Density at sample point $i$.
+*   $\mathbf{c}_i$: Color at sample point $i$.
+*   $p_i$: Area encoding probability at sample point $i$.
 
-### Numbered Steps
+**Rendering Formulas:**
+For a ray $r$ with $N$ sample points, the transmittance $T_i$ and opacity $\alpha_i$ are computed as:
+$$
+T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)
+$$
+$$
+\alpha_i = 1 - \exp(-\sigma_i \delta_i)
+$$
+where $\delta_j$ is the distance between adjacent samples [S1].
 
-1.  **Ray Casting and Sampling:** For each pixel in each input view, cast a ray $r$ through the camera center. Sample $N$ points $\mathbf{x}_i$ along the ray.
-2.  **Network Forward Pass:** For each sample point $\mathbf{x}_i$ and viewing direction $\mathbf{d}$, query the network $F_\Theta$ to obtain density $\sigma_i$, color $\mathbf{c}_i$, and area encoding probability $p_i$ [S1].
-3.  **Volumetric Rendering of Mask:** Compute the predicted mask value $\hat{P}(r)$ for the pixel by integrating the area encoding probabilities weighted by transmittance and opacity:
-    $$ \hat{P}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) p_i $$
-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1].
-4.  **Volumetric Rendering of Color:** Compute the predicted color $\hat{C}(r)$ using standard volume rendering:
-    $$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
-5.  **Volumetric Rendering of Depth:** Compute the predicted depth $\hat{D}(r)$ as the weighted average of sample depths:
-    $$ \hat{D}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) d_i $$
-    where $d_i$ is the depth of sample point $i$ along the ray [S1].
-6.  **Loss Calculation:** Compute the total loss as a weighted sum of three components (see Formulas below).
-7.  **Optimization:** Update network parameters $\Theta$ using gradient descent to minimize the total loss [S1].
+The rendered mask $\hat{P}(r)$ is computed via volumetric rendering integration of area encoding probabilities:
+$$
+\hat{P}(r) = \sum_{i=1}^{N} T_i \alpha_i p_i
+$$
+The rendered color $\hat{C}(r)$ and depth $\hat{D}(r)$ are computed similarly using $\mathbf{c}_i$ and depth values $z_i$ respectively [S1].
 
-### Formulas
+**Loss Functions:**
+The total loss is a weighted sum of three components:
 
-**Area Encoding Loss ($L_{area-encoding}$):**
-Minimizes the L2 distance between the predicted mask $\hat{P}(r)$ and the ground-truth mask $P(r)$ for rays $r$ in the input views $R_o$:
-$$ L_{area-encoding} = \sum_{r \in R_o} ||\hat{P}(r) - P(r)||_2^2 $$
-[S1]
+1.  **Color Loss ($L_{rgb}$):** Applied only to rays where the predicted mask is zero (non-occluded areas) to ensure correct geometry and appearance modeling [S1].
+    $$
+    L_{rgb} = \sum_{r \in R \land \hat{P}(r)=0} ||\hat{C}(r) - C(r)||_2^2
+    $$
+    where $R$ is the set of all rays in input views and $C(r)$ is the ground-truth color [S1].
 
-**Color Loss ($L_{rgb}$):**
-Minimizes the L2 distance between predicted color $\hat{C}(r)$ and ground-truth color $C(r)$, but **only** for rays where the predicted mask $\hat{P}(r) = 0$ (non-occluded areas). This ensures geometry and appearance are correctly modeled for visible parts:
-$$ L_{rgb} = \sum_{r \in R \land \hat{P}(r)=0} ||\hat{C}(r) - C(r)||_2^2 $$
-where $R$ is the set of all rays in the input views [S1].
+2.  **Area Encoding Loss ($L_{area-encoding}$):** Minimizes the difference between predicted and actual mask values for rays in view $o$ ($R_o$) [S1].
+    $$
+    L_{area-encoding} = \sum_{r \in R_o} ||\hat{P}(r) - P(r)||_2^2
+    $$
+    where $P(r)$ is the ground-truth mask [S1].
 
-**Depth Loss ($L_{depth}$):**
-Guides geometric modeling of occluded areas by comparing rendered depth $\hat{D}(r)$ with ground-truth depth $D(r)$ for all rays $r \in R$:
-$$ L_{depth} = \sum_{r \in R} ||\hat{D}(r) - D(r)||_2^2 $$
-[S1]
+3.  **Depth Loss ($L_{depth}$):** Guides geometric modeling of occluded areas by comparing rendered depth with ground truth depth for all rays [S1].
+    $$
+    L_{depth} = \sum_{r \in R} ||\hat{D}(r) - D(r)||_2^2
+    $$
+    where $D(r)$ is the ground-truth depth [S1].
 
 **Total Loss:**
-$$ L = \lambda_1 L_{area-encoding} + \lambda_2 L_{rgb} + \lambda_3 L_{depth} $$
+$$
+L = \lambda_1 L_{area-encoding} + \lambda_2 L_{rgb} + \lambda_3 L_{depth}
+$$
 where $\lambda_1, \lambda_2, \lambda_3$ are hyperparameter weights [S1].
 
-*Note: The source also describes a more complex reconstruction loss for occluded areas ($L_{Occ}$) using 2D inpainting priors $C_l(r)$, but the core "Area Encoding NeRF" definition focuses on the three losses above. If 2D inpainting is used, the color loss is split into non-occluded ($L_{NonOcc}$) and occluded ($L_{Occ}$) components [S1].*
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_nerf_segmentation(network, rays, masks, depths, colors, 
-                            lr=0.0005, lambda1=1.0, lambda2=1.0, lambda3=1.0):
+def compute_loss_and_render(F_Theta, ray, samples, gt_color, gt_mask, gt_depth):
     """
-    Optimizes the NeRF network for object segmentation.
-    
-    Args:
-        network: Neural network F_Theta predicting (c, sigma, p)
-        rays: List of rays, each containing sample points x_i and directions d
-        masks: Ground truth 2D masks P(r) for each ray
-        depths: Ground truth depth maps D(r) for each ray
-        colors: Ground truth colors C(r) for each ray
-        lr: Learning rate
-        lambda1, lambda2, lambda3: Weights for area encoding, color, and depth losses
+    F_Theta: Neural network returning (sigma, color, p) for (x, d)
+    ray: Ray origin and direction
+    samples: Array of N 3D points along the ray
+    gt_color: Ground truth color for the pixel
+    gt_mask: Ground truth mask for the pixel (0 or 1)
+    gt_depth: Ground truth depth for the pixel
     """
-    optimizer = Adam(network.parameters(), lr=lr)
+    # 1. Forward pass to get densities, colors, and area encodings
+    # F_Theta takes positional encoding of samples and ray direction
+    sigmas, colors, p_values = F_Theta(samples, ray.direction)
     
-    for epoch in range(num_epochs):
-        optimizer.zero_grad()
-        
-        total_loss = 0.0
-        l_area = 0.0
-        l_rgb = 0.0
-        l_depth = 0.0
-        
-        for ray, mask_val, depth_val, color_val in zip(rays, masks, depths, colors):
-            # Step 1-3: Forward pass and rendering
-            # Sample points x_i, directions d_i along ray
-            # Query network for sigma_i, c_i, p_i
-            
-            # Compute transmittance T_i
-            T_i = compute_transmittance(sigma_i)
-            
-            # Compute weights w_i = T_i * (1 - exp(-sigma_i * delta_i))
-            w_i = T_i * (1 - torch.exp(-sigma_i * delta_i))
-            
-            # Render predicted mask P_hat
-            P_hat = torch.sum(w_i * p_i)
-            
-            # Render predicted color C_hat
-            C_hat = torch.sum(w_i * c_i)
-            
-            # Render predicted depth D_hat
-            D_hat = torch.sum(w_i * depth_i)
-            
-            # Step 4: Compute Losses
-            
-            # Area Encoding Loss: L2 between P_hat and mask_val
-            # Applied to all rays in R_o (input views)
-            l_area += torch.sum((P_hat - mask_val) ** 2)
-            
-            # Color Loss: L2 between C_hat and color_val
-            # Applied ONLY if P_hat == 0 (non-occluded)
-            # Note: In practice, use a threshold or soft mask based on P_hat
-            if P_hat == 0:
-                l_rgb += torch.sum((C_hat - color_val) ** 2)
-            
-            # Depth Loss: L2 between D_hat and depth_val
-            # Applied to all rays in R
-            l_depth += torch.sum((D_hat - depth_val) ** 2)
-        
-        # Total Loss
-        total_loss = lambda1 * l_area + lambda2 * l_rgb + lambda3 * l_depth
-        
-        # Backpropagation
-        total_loss.backward()
-        optimizer.step()
+    # 2. Compute transmittance and opacity
+    # delta is distance between adjacent samples
+    deltas = compute_deltas(samples)
+    alphas = 1.0 - torch.exp(-sigmas * deltas)
+    transmittances = torch.cumprod(torch.cat([torch.ones(1), 1.0 - alphas[:-1]]), dim=0)
+    
+    # 3. Render Color, Depth, and Mask
+    weights = transmittances * alphas
+    rendered_color = torch.sum(weights * colors, dim=0)
+    rendered_depth = torch.sum(weights * samples.depth_values, dim=0) # Assuming samples have depth
+    rendered_mask = torch.sum(weights * p_values, dim=0)
+    
+    # 4. Compute Losses
+    # Color loss only for non-occluded areas (rendered_mask == 0)
+    # Note: In practice, use a threshold or soft mask if rendered_mask is probabilistic
+    non_occluded_mask = (rendered_mask == 0).float()
+    loss_rgb = torch.mean(non_occluded_mask * (rendered_color - gt_color)**2)
+    
+    # Area encoding loss for all rays in the view
+    loss_area = torch.mean((rendered_mask - gt_mask)**2)
+    
+    # Depth loss for all rays
+    loss_depth = torch.mean((rendered_depth - gt_depth)**2)
+    
+    # Hyperparameters
+    lambda_1 = 1.0 # Example value
+    lambda_2 = 1.0 # Example value
+    lambda_3 = 1.0 # Example value
+    
+    total_loss = lambda_1 * loss_area + lambda_2 * loss_rgb + lambda_3 * loss_depth
+    
+    return total_loss, rendered_color, rendered_mask, rendered_depth
 ```
 
-### Parameters and Typical Values
-*   $\lambda_1, \lambda_2, \lambda_3$: Hyperparameter weights for the three loss terms. Specific values are not given in the sources [S1].
-*   $N$: Number of sample points per ray. Not given in the sources [S1].
-*   $\tau$: Threshold for adaptive inpainting strategy (if used). Not given in the sources [S1].
-
-### Edge Cases and Pitfalls
-*   **Geometric Modeling Errors in Occluded Areas:** Due to NeRF's entangled scene representation, errors in modeling occluded areas can propagate to non-occluded areas, breaking multi-view consistency and causing inaccurate mask predictions [S1]. This is addressed by adding the depth loss $L_{depth}$ to supervise geometry in occluded regions [S1].
-*   **Lack of Multi-View Information:** In areas occluded in all views, there is no supplementary information from other views. The method may use 2D inpainting priors $C_l(r)$ to guide modeling in these regions, but this is an extension beyond the core area encoding formulation [S1].
-*   **Precision:** The area encoding probability $p$ is constrained to $[0, 1]$ implicitly by the network output and sigmoid activation (if used). The transmittance $T_i$ can suffer from underflow for long rays with high density, requiring careful implementation of the exponential sum [S1].
+**Edge Cases and Pitfalls:**
+*   **Geometric Errors Propagation:** Errors in modeling occluded areas can propagate to non-occluded areas due to NeRF's entangled representation, breaking multi-view consistency and causing inaccurate mask predictions [S1]. This is mitigated by the joint optimization with depth loss [S1].
+*   **Occluded Area Modeling:** Geometric modeling in occluded areas is supervised only by a single mask image, making it difficult to capture complex geometric features [S1].
 
 ## Operating characteristics
-
-### Time and Memory Complexity
-*   **Time:** Training time depends on the number of rays, sample points $N$, and network depth. Each iteration requires a forward pass for all sample points along all rays. Rendering time is similar to standard NeRF but with an additional output channel for $p$.
-*   **Memory:** Memory usage is dominated by the neural network parameters and the storage of training data (images, masks, depths). The network outputs an additional scalar $p$ per sample point, increasing memory bandwidth slightly compared to standard NeRF.
-
-### Measured Performance
-*   The method is evaluated on 23 scenes from three datasets [S1].
-*   Specific quantitative metrics (e.g., mIoU, PSNR) are not provided in the source text [S1].
-
-### Scaling
-*   The method scales with the number of views and the complexity of the scene geometry. More views provide better multi-view consistency, reducing the need for inpainting priors in occluded areas [S1].
-
-### Strengths and Limitations
-*   **Strengths:**
-    *   Simultaneously estimates geometry and semantic labels, leveraging their correlation [S1].
-    *   Produces view-consistent segmentation results for all views [S1].
-    *   Handles occluded areas by using area encoding and depth supervision [S1].
-*   **Limitations:**
-    *   Geometric modeling errors in occluded areas can affect non-occluded areas if not properly supervised (addressed by depth loss) [S1].
-    *   Requires ground-truth masks and depth maps for training [S1].
-    *   May struggle with regions occluded in all views without additional priors (e.g., 2D inpainting) [S1].
-
-### When to Use
-*   Use when you have multi-view images with ground-truth semantic masks and depth maps, and you need to segment objects in a 3D scene, especially in the presence of occlusions.
-*   Use when view-consistent segmentation is critical.
-
-### When Not to Use
-*   Do not use if ground-truth masks or depth maps are unavailable.
-*   Do not use if the scene has no occlusions and standard NeRF is sufficient for color rendering.
+*   **Time Complexity:** Standard NeRF training complexity, dominated by the forward pass through the MLP for each sample point on each ray. The addition of area encoding $p$ adds negligible computational overhead as it shares the same MLP structure.
+*   **Memory Complexity:** Standard NeRF memory usage. The output layer size increases by 1 (for $p$) compared to standard color-only NeRF.
+*   **Strengths:** Enables view-consistent segmentation by leveraging multi-view consistency and geometry-aware area encoding. Allows for 3D de-occlusion and inpainting [S1].
+*   **Limitations:** Relies on the availability of ground-truth masks and depth maps for supervision. Performance may degrade if the correlation between geometry and semantic labels is weak in certain regions [S1].
 
 ## Background
-
-### Origin
-The method was introduced in the paper "3D Scene De-occlusion in Neural Radiance Fields: A Framework for Obstacle Removal and Realistic Inpainting" by Yi Liu, Xinyi Li, and Wenjing Shuai, published in MM '24 (October 28-November 1, 2024, Melbourne, VIC, Australia) [S1].
-
-### History and Development
-The method builds on the observation that scene geometry estimation and semantic label prediction are strongly correlated [S1]. It extends the NeRF formulation by introducing area encoding to represent occlusion probabilities, allowing for the integration of semantic information into the volumetric rendering process [S1].
-
-### Where it is Used
-The method is used for 3D scene de-occlusion, obstacle removal, and realistic inpainting in neural radiance fields [S1]. It is evaluated on datasets containing multi-view images with occlusions [S1].
+The method was introduced in the paper "3D Scene De-occlusion in Neural Radiance Fields: A Framework for Obstacle Removal and Realistic Inpainting" [S1]. It addresses the challenge of segmenting objects in scenes with occlusions by integrating semantic information into the NeRF framework. The core observation is that scene geometry estimation and semantic label prediction are strongly correlated [S1].
 
 ## Sources
-
 [S1] 3D Scene De-occlusion in Neural Radiance Fields: A Framework for Obstacle Removal and Realistic Inpainting, https://doi.org/10.1145/3664647.3681429, fetched 2026-11-01
