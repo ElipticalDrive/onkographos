@@ -1,106 +1,143 @@
 # Implicit Octree Storage
+
 Also called: Implicit Order Storage
+
 ## Overview
-Implicit Octree Storage is a serialization technique for sparse voxel octrees that eliminates explicit node pointers by sorting the tree nodes into a linear array using an implicit traversal order, such as breadth-first order [S1]. It solves the problem of high memory overhead associated with pointer-based tree structures, making it suitable for streaming or persistent storage of large volumetric datasets [S1]. The primary trade-off is that while it minimizes memory footprint, the resulting linear layout is not suitable for efficient random-access traversal [S1].
+Implicit Octree Storage is a memory-efficient serialization technique that represents a sparse voxel octree without explicit pointers by sorting the tree nodes in a deterministic implicit order, such as breadth-first order [S1]. It solves the problem of high memory overhead and pointer-chasing costs associated with traditional pointer-based octrees, making the structure suitable for streaming, persistent storage, or out-of-core management [S1]. Unlike sibling methods like [OpenVDB (VDB)](1508-openvdb-vdb.md) which use linked lists or compressed bitmaps for traversal, or [Sparse Voxel Brick Set](11886-sparse-voxel-brick-set.md) which uses hybrid brick structures, Implicit Octree Storage relies purely on index arithmetic or array position to define topology [S1]. Its primary trade-off is that while it minimizes storage size, the resulting linear array is not suitable for efficient direct traversal because nodes near each other in the list may have widely different spatial locations, preventing spatial locality optimizations [S1][S4, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A sparse voxel octree data structure [G].
-- Output: A contiguous linear array of node data, ordered according to the chosen implicit traversal sequence [S1].
+The method converts a hierarchical tree structure into a linear sequence of nodes. The core mechanism is the elimination of child/parent pointers by replacing them with implicit relationships derived from the node's position in the array or via arithmetic formulas.
 
-**Data Structures:**
-The output is a flat array of node records [G]. Each record stores the node's type and attributes, with child existence tracked implicitly by the traversal sequence [G]. The spatial position of each node is implicit based on the traversal order and array index [G].
+### Inputs and Outputs
+- **Input:** A fully constructed sparse voxel octree (or DAG) where each node contains metadata (type, occupancy) and data (voxel values, min/max bounds).
+- **Output:** A contiguous linear array (or file stream) of node structures, ordered implicitly (e.g., breadth-first).
 
-**Algorithm:**
-1. **Traversal Order Selection:** Choose an implicit ordering scheme. Breadth-first order is explicitly cited as a viable method [S1]. Depth-first order is not given in the sources.
-2. **Linearization:** Perform a traversal of the octree using the selected order [G].
-3. **Node Serialization:** For each node visited:
-   a. Determine the node's type and attributes.
-   b. Determine the existence of its children.
-   c. Write the node's data to the output array.
-   d. Do not write child pointers; children will appear later in the array at positions determined by the traversal logic [G].
-4. **Completion:** The resulting array represents the entire tree. To access a specific node, one must traverse the array from the root, using the child existence flags to determine the offset of the next node in the sequence [G].
+### Data Structures
+The specific layout depends on the variant, but the general concept stores node attributes in a flat array.
 
-**Pseudocode:**
+**General Node Layout (Implicit):**
+- `index`: Integer index in the linear array (implicit pointer).
+- `data`: Voxel value or metadata (e.g., color, density, min/max bounds).
+- `type`: Node type (empty, leaf, interior) if not inferred from context.
+
+**Specific Layout (Linear Octree with Parent/Child Index Arithmetic) [S4, unofficial]:**
+- `sChunk *buffer`: Pointer to a cached vertex buffer (implementation-specific, not part of the implicit topology itself).
+- `u32 data`: Stores voxel color or scalar value.
+
+### Numbered Steps
+1. **Traverse the Tree:** Perform a traversal of the octree (typically breadth-first or depth-first) to visit every node.
+2. **Serialize Nodes:** For each visited node, extract its data fields (occupancy, value, bounds) and append them to a linear buffer.
+3. **Assign Implicit Indices:** Assign each node a sequential integer index based on its position in the buffer (0, 1, 2, ...).
+4. **Discard Pointers:** Remove all explicit child and parent pointers from the node structures.
+5. **Store/Stream:** Write the linear buffer to disk or memory.
+
+### Formulas
+For the variant using **Parent/Child Index Arithmetic** [S4, unofficial]:
+- The root node is at index `-1`.
+- The parent of a node at index $n$ is calculated as:
+  $$ P(n) = \lfloor n / 8 \rfloor - 1 $$
+- The $c$-th child (where $c \in [0, 7]$) of a node at index $n$ is calculated as:
+  $$ C(n, c) = (n + 1) \times 8 + c $$
+
+### Parameters
+- **Ordering:** Breadth-first order is cited as a common implicit order [S1].
+- **Compression:** Lossless compression libraries (e.g., LZO) can be applied to the serialized data stream [S2].
+
+### Edge Cases and Pitfalls
+- **Spatial Locality:** Nodes that are adjacent in the linear array may correspond to spatially distant regions in the 3D volume. This prevents efficient spatial caching or direct coordinate-to-index mapping [S4, unofficial].
+- **Traversal Efficiency:** The structure is not suitable for efficient runtime traversal because the parent-child relationships must be computed via arithmetic or searched for, rather than followed via pointers [S1].
+- **Empty Branches:** In variants like the Integral Octree, empty branches must be handled carefully to avoid generating holes; this may require looping through edge voxels to verify emptiness [S3].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def serialize_octree_bfs(root_node):
+# Implicit Octree Storage: Breadth-First Serialization
+# Note: This pseudocode illustrates the serialization process.
+# It does not implement the arithmetic lookup formulas directly,
+# as those are used during reconstruction/traversal.
+
+class Node:
+    def __init__(self, data, is_leaf):
+        self.data = data
+        self.is_leaf = is_leaf
+        self.children = [] # List of Node objects
+
+def serialize_octree(root: Node) -> list:
     """
-    Serializes an octree into a flat array using breadth-first order.
-    Assumes a standard octree node structure with children[8] and attributes.
+    Serializes an octree into a linear list using breadth-first order.
+    Returns a list of serialized node data.
     """
-    output_buffer = []
-    queue = [root_node]
+    serialized_nodes = []
+    queue = [root]
     
     while queue:
         current_node = queue.pop(0)
         
-        # Serialize current node data
+        # Serialize current node
+        # In a real implementation, this might include bit-packing
         node_record = {
-            'type': current_node.type,
-            'attributes': current_node.attributes,
-            'child_mask': 0
+            'data': current_node.data,
+            'is_leaf': current_node.is_leaf
         }
+        serialized_nodes.append(node_record)
         
-        # Determine which children exist and add them to the queue
-        for i in range(8):
-            if current_node.children[i] is not None:
-                node_record['child_mask'] |= (1 << i)
-                queue.append(current_node.children[i])
-        
-        output_buffer.append(node_record)
-        
-    return output_buffer
+        # Add children to queue for BFS
+        if not current_node.is_leaf:
+            for child in current_node.children:
+                if child is not None: # Skip null children (empty branches)
+                    queue.append(child)
+                    
+    return serialized_nodes
+
+def get_parent_index(node_index: int) -> int:
+    """
+    Calculates the parent index for a node in a linear octree
+    using the arithmetic formula from [S4, unofficial].
+    Root is at index -1.
+    """
+    if node_index == -1:
+        return -1
+    return (node_index // 8) - 1
+
+def get_child_index(parent_index: int, child_id: int) -> int:
+    """
+    Calculates the child index for a node in a linear octree
+    using the arithmetic formula from [S4, unofficial].
+    child_id must be in [0, 7].
+    """
+    return (parent_index + 1) * 8 + child_id
 ```
-
-**Parameters:**
-- **Ordering Scheme:** Breadth-first is explicitly mentioned [S1]. Other schemes are not given in the sources.
-- **Compression:** The sources note that this storage format can be combined with lossless compression libraries like LZO for further size reduction, particularly in out-of-core implementations [S2].
-
-**Edge Cases and Pitfalls:**
-- **Traversal Efficiency:** The implicit order is explicitly noted as "not suitable for efficient traversal" [S1]. Random access requires re-traversing from the root or maintaining auxiliary index structures, which adds complexity [G].
-- **Memory vs. Speed:** While memory size is reduced by removing pointers, the lack of spatial locality for traversal can impact rendering performance if not handled by specific traversal algorithms [G].
 
 ## Subtopics
 
-### [Bottom-up Octree Construction](1590-bottom-up-octree-construction.md)
-Organizes quantized scalar volume data into an adaptive-resolution octree by recursively fusing neighboring voxels into macro voxels. Visits each data value only once, making it approximately two times faster than top-down approaches. Choose for efficient construction on commodity hardware. [1590-bottom-up-octree-construction.md]
+### Out-of-Core Octree Storage
+A variant that stores the volume octree in an out-of-core structure, typically using a database management system like Berkeley DB, to handle datasets larger than available RAM [S2]. It often employs lossless compression libraries (e.g., LZO) to reduce I/O bandwidth [S2].
 
-### [Packed Tensor Representation](1611-packed-tensor-representation.md)
-Stores samples from rays with varying valid sample counts, avoiding the memory inefficiency of fixed-size tensors with masks. Packs per-sample ray indices into per-ray chunk information for flattened tensors. Choose when handling variable-length ray samples efficiently. [1611-packed-tensor-representation.md]
+### Integral Octree
+A data structure that attempts to preserve properties from both "Octree Max/Min" and "Integral Volumes" [S3]. It stores the sum of leaf values in interior nodes to allow constant-time volume sum queries [S3].
+- **Pitfalls:** It consumes more memory for saving leaves into a 1D-array. If the isolevel is lower than the noise threshold, it is more affected by low-level noise than Octree Max/Min because it checks the sum of leaves rather than the max value. It must loop through all voxels at the edges of an empty branch to avoid generating holes [S3].
+- **Usage:** Beneficial for multiresolution direct volumetric rendering and blurring the volume for noise removal [S3].
 
-### [Octree Volume Structure](1978-octree-volume-structure.md)
-Memory-efficient format eliminating explicit leaf nodes by storing nodes corresponding to the parents of logical octree nodes. Integrates compression and acceleration data into a unified layout suitable for interactive ray tracing. Choose for interactive ray tracing with reduced overhead. [1978-octree-volume-structure.md]
-
-### [Octree Volume Compression](1979-octree-volume-compression.md)
-Lossless technique reducing memory footprint by consolidating zero-variance voxels. Achieves compression factors of 3 to 5 for typical simulation data by exploiting spatial coherence. Choose for initial grid-to-hierarchy conversion. [1979-octree-volume-compression.md]
-
-### [Sparse Voxel Octree Attribute Encoding (Neighbor)](2641-sparse-voxel-octree-attribute-encoding-neighbor.md)
-Encodes attributes using deltas relative to immediate spatial neighbors rather than absolute values or parent-relative deltas [unofficial]. Solves high memory bandwidth and storage costs for dense attribute data by exploiting spatial coherence [unofficial]. Choose for dense attribute data (color, normals) to reduce bandwidth. [2641-sparse-voxel-octree-attribute-encoding-neighbor.md]
-
-### [SVO Node Encoding](2705-svo-node-encoding.md)
-Compact 32-bit binary serialization storing node type, child pointers, and attributes in a single integer [unofficial]. Uses a contiguous little-endian array with a specific header and level-based allocation. Choose for highly compact SVO storage. [2705-svo-node-encoding.md]
-
-### [Sparse Voxel Octree Structure Encoding/Decoding](3012-sparse-voxel-octree-structure-encoding-decoding.md)
-CPU-side algorithms responsible for serializing and deserializing the hierarchical topology of a sparse voxel octree. Handles Morton-code-based node ordering and empty-voxel padding to reconstruct the exact spatial hierarchy. Choose for persistent storage or transmission of SVOs. [3012-sparse-voxel-octree-structure-encoding-decoding.md]
-
-### [Hierarchical Data Structure Storage](3333-hierarchical-data-structure-storage.md)
-Not given in the sources.
-
-### [Sparse Volume Data Structures](6804-sparse-volume-data-structures.md)
-Hybrid structures decomposing a 3D volume into bricks, assigning each brick one of several elemental node types based on local sparsity. JIT-compiled variant generates specialized code to eliminate dead code and memory fetches. Choose for adaptive density handling with instruction cache optimization. [6804-sparse-volume-data-structures.md]
+### Linear Octree with Parent/Child Index Arithmetic
+A method to store an octree hierarchy in a linear array without pointers, inferring parent-child relationships via integer arithmetic on node indices [S4, unofficial].
+- **Formula:** Parent of node $n$ is $\lfloor n / 8 \rfloor - 1$. Child $c$ of node $n$ is $(n + 1) \times 8 + c$.
+- **Pitfalls:** Nodes near each other in the linear list have wildly different spatial locations, making spatial locality poor and preventing direct calculation of index from coordinate [S4, unofficial].
+- **Layout:** Node structure contains `sChunk *buffer` (pointer to cached vertex buffer) and `u32 data` (stores voxel color) [S4, unofficial].
 
 ## Operating characteristics
-- **Memory Complexity:** Significantly reduced compared to pointer-based octrees due to the elimination of explicit pointers [S1]. The exact reduction factor depends on pointer size and node density [G].
-- **Time Complexity:** Serialization is linear with respect to the number of nodes $O(N)$ [G]. Traversal is not efficient for this layout [S1].
-- **Performance:** Suitable for streaming and storage [S1]. Not suitable for real-time rendering traversal without additional acceleration structures or traversal algorithms designed for implicit layouts [S1].
-- **Strengths:** Reduces memory size for streaming or storage [S1]. Compatible with standard compression libraries like LZO in out-of-core variants [S2].
-- **Limitations:** Not suitable for efficient traversal [S1]. Random access requires re-traversal or auxiliary indices [G].
+- **Memory Footprint:** Significantly reduced compared to pointer-based octrees because explicit pointers are eliminated [S1]. The size is proportional to the number of nodes in the tree.
+- **Storage Efficiency:** Suitable for streaming and persistent storage due to the linear, contiguous layout [S1].
+- **Traversal Cost:** High. The structure is not suitable for efficient traversal because spatial locality is poor and parent-child relationships must be computed or searched for [S1][S4, unofficial].
+- **Construction Cost:** Requires a full traversal and serialization step.
+- **When to Use:** When memory bandwidth for storage/streaming is the bottleneck, or when the tree needs to be persisted to disk.
+- **When Not to Use:** When real-time traversal performance is critical, or when spatial locality is required for cache efficiency [S1][S4, unofficial].
 
 ## Background
-The concept of storing octrees without pointers by sorting them in an implicit order (such as breadth-first) was highlighted in the context of reducing memory consumption for point clouds discretized into octrees [S1]. The work by Schnabel and Klein [2006] is cited as focusing on decreasing memory consumption for 4K resolution point clouds using this technique [S1]. The approach is related to common subtree merging techniques used in cartographic image compression [S1]. The out-of-core variant using Berkeley DB and LZO compression was demonstrated in the context of volumetric display of the human musculoskeletal system [S2].
+The concept of storing octrees without pointers by sorting them in an implicit order was introduced by Schnabel and Klein [2006] in the context of point cloud geometry discretized into an octree [S1]. The goal was to decrease memory consumption for large datasets (e.g., $4K^3$ resolution) [S1]. The approach is related to common subtree merging techniques used in cartographic images [S1].
 
 ## Sources
-[S1] (PDF) High resolution sparse voxel DAGs - ResearchGate, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27
+[S1] High resolution sparse voxel DAGs, https://www.researchgate.net/publication/262367808_High_resolution_sparse_voxel_DAGs, fetched 2026-10-27
 [S2] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
+[S3] A Comparative Study about Data Structures Used for Efficient Management of Voxelised Full-Waveform Airborne LiDAR Data during 3D Polygonal Model Creation, https://doi.org/10.3390/rs13040559, fetched 2026-10-26
+[S4] Weekend Project – Voxel Octree – Bit-Hacks Pixel Dungeon, https://bit-hack.net/2014/05/04/weekend-project-voxel-octree-2/, fetched 2026-10-24 (unofficial)

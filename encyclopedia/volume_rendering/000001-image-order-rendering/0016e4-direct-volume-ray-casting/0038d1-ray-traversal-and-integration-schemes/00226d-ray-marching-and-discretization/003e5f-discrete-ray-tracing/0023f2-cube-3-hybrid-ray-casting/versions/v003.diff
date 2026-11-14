@@ -1,0 +1,379 @@
+--- v002.md
++++ v003.md
+@@ -1,181 +1,225 @@
+ # Cube-3 Hybrid Ray-Casting
+ 
+-Also called: Cube-3, Cube-3 Architecture, Cubic Frame Buffer rendering
++Also called: Cube-3 algorithm
+ 
+ ## Overview
+-Cube-3 is a highly parallel, pipelined hardware architecture and hybrid ray-casting algorithm designed for the real-time visualization of high-resolution volumetric datasets (e.g., $512^3$ voxels) [S1]. It solves the traditional memory access bottleneck in volume rendering by ensuring at most one memory access per voxel per projection without pre-processing or data-dependent optimizations [S1]. Unlike object-order methods like VIRIM or image-order methods like VOGUE, which process single ray samples per pipeline stage, Cube-3 processes all sample values belonging to a ray simultaneously, exploiting spatial coherency to achieve the largest possible degree of parallelism [S1].
++Cube-3 is a hardware-oriented hybrid ray-casting algorithm designed for the real-time visualization of high-resolution volumetric datasets (e.g., $512^3$ voxels) [S4]. It solves the traditional memory access bottleneck in volume rendering by ensuring that each voxel is read from memory at most once per projection, without pre-processing or data-dependent optimizations [S4]. Unlike object-order methods like VIRIM or image-order methods like VOGUE, Cube-3 exploits spatial coherency by processing all sample values of a ray simultaneously in a fully pipelined architecture [S4]. It is distinguished by its use of a Cubic Frame Buffer (CFB) with skewed memory organization and a global communication network (Fast Bus) to align discrete rays for parallel processing [S3, unofficial][S4].
+ 
+ ## How it works
+-The method combines discrete ray tracing with hybrid interpolation to generate continuous ray samples from a skewed memory structure, shading them, and compositing them via a hierarchical tree [S1].
++The algorithm combines object-order data access with image-order projection. It generates discrete voxel-rays from continuous viewing rays, fetches them as beams from a skewed memory structure, and composites them into a base-plane image, which is subsequently warped to the final view plane [S4].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A volumetric dataset of size $n^3$ voxels, where each voxel is 16 bits. The viewing direction defines a "base-plane" (the volume face most perpendicular to the view) [S1].
+-*   **Output:** A projected image on the base-plane, which is subsequently warped and interpolated by the host into the final view plane image [S1].
+-
+-### Data Structures and Layout
+-1.  **Cubic Frame Buffer (CFB):** The dataset is stored in $n$ dual-access memory modules. Each module stores $n^2$ voxels [S1].
+-    *   **Mapping:** A voxel at coordinates $(x, y, z)$ is mapped to module $k$ using:
++*   **Input:** A volumetric dataset of size $n \times n \times n$ voxels (typically 16-bit per voxel) [S4]. Viewing direction (parallel or perspective) [S4].
++*   **Output:** A 2D base-plane image, which is transformed and warped by the host CPU/GPU into the final view plane image [S4].
++
++### Data Structures
++1.  **Cubic Frame Buffer (CFB):** The volume memory is organized into $n$ dual-access memory modules, each storing $n^2$ voxels [S4].
++    *   **Memory Mapping:** A voxel at coordinates $(x, y, z)$ is mapped to memory module $k$ using:
+         $$k = (x + y + z) \bmod n$$
+-        where $0 \leq k, x, y, z \leq n-1$ [S1].
+-    *   **Internal Layout:** Within module $k$, the voxel is stored at indices $(i, j)$ where $i=x$ and $j=y$ [S1]. This skewed organization ensures that any beam of $n$ voxels parallel to a primary axis resides in different memory modules, preventing access conflicts [S1].
+-2.  **Discrete Ray Buffers:** Part of the TRILIN units, these store beams fetched from the CFB [S1].
+-3.  **ABC Buffers:** Three buffers storing continuous planes of ray samples: **A**bove, **B**elow, and **C**urrent. These are used for gradient estimation and shading [S1].
+-4.  **Ray Projection Cone (RPC):** A folded and circular binary tree of $n-1$ Voxel Combination Units (VCUs) with $n$ shading units as leaves [S1].
++        where $0 \leq k, x, y, z \leq n-1$ [S4].
++    *   **Internal Mapping:** Within module $k$, the voxel is stored at internal coordinates $(i, j)$ where $i=x$ and $j=y$ [S4].
++    *   **Skewing:** This skewed organization ensures conflict-free access to any beam of $n$ voxels parallel to a primary axis [S4].
++2.  **Discrete Ray Templates:** Lookup tables storing the steps in non-major directions (e.g., X and Y) for Bresenham's line drawing algorithm, ensuring constant stepping along the major axis (e.g., Z) and avoiding voxel overlap between neighboring rays [S4].
++3.  **2D Buffers:** Memory structures with 2D skewing (similar to CFB) used to store beams fetched from the CFB and retrieve axis-aligned discrete rays conflict-free [S4].
++4.  **ABC Sample Buffers:** Stores three continuous planes of ray samples: Above, Below, and Current [S4].
++5.  **Ray Projection Cone (RPC):** A circular cross-linked binary tree of $n-1$ Voxel Combination Units (VCUs) that composites samples into final pixel values [S4].
+ 
+ ### Algorithm Steps
+-1.  **Generate Discrete Rays:**
+-    *   Cast discrete voxel-rays from each pixel on the base-plane [S1].
+-    *   Use a 3D variation of Bresenham's line drawing algorithm to generate these rays from continuous viewing rays [S1].
+-    *   This guarantees constant stepping of distance 1 along the major axis (e.g., Z) [S1].
+-    *   Steps in non-major directions (e.g., X, Y) are determined by lookup tables called **templates**. These templates ensure that neighboring discrete rays do not overlap in voxels [S1].
+-    *   Discrete rays belonging to a scanline form a **Projection Ray Plane (PRP)** [S1].
+-2.  **Fetch Beams:**
+-    *   Fetch PRPs as a sequence of voxel beams from the CFB according to the discrete ray templates [S1].
+-    *   Beams are stored in the discrete ray buffers of the TRILIN units [S1].
+-3.  **Align and Store:**
+-    *   Use a high-bandwidth global bus (**Fast Bus**) to align all discrete rays in each PRP parallel to a main axis of the 2D buffers [S1].
+-    *   Use 2D skewing (similar to CFB) to support conflict-free storage of beams from the CFB and conflict-free retrieval of axis-aligned discrete rays [S1].
+-4.  **Interpolate (TRI-LIN):**
+-    *   Fetch consecutive discrete rays each clock cycle into $n$ tri-linear interpolation units (TRI-LINs) [S1].
+-    *   **Sheared Tri-linear Interpolation:** Two discrete PRPs (top and bottom) are used to generate sample values for the original continuous rays. Interpolation uses voxels from neighboring discrete rays of the top and bottom PRPs [S1].
+-    *   **Gradient Estimation:** Estimate the gradient at each resample location using central differences between samples of rays on the immediate left, right, above, below, and along the current ray [S1].
+-    *   **Sharing:** Overlapping voxels of neighboring discrete rays are shared between neighboring TRILIN units. This allows sharing already computed ray samples between neighboring rays, avoiding additional CFB accesses [S1].
+-    *   Store the interpolated continuous sample values and gradients in the ABC buffers [S1].
+-5.  **Shade (Shaders):**
+-    *   Forward interpolated sample and gradient values to shading units (Shaders) [S1].
+-    *   **Opacity:** Assign opacity values to each sample using a user-controlled look-up table (transfer function) [S1].
+-    *   **Color:** Calculate color value at each sample location according to a local illumination model [S1].
+-6.  **Composite (RPC):**
+-    *   Connect the $n$ shading units as leaves of the Ray Projection Cone (RPC), a folded and circular binary tree containing $n-1$ Voxel Combination Units (VCUs) [S1].
+-    *   The RPC takes one ray of opacity and color samples and generates one projected pixel value per clock cycle [S1].
+-    *   **Projection Schemes:** The RPC implements schemes such as first/last opaque projection, maximum voxel value, weighted summation, or standard compositing [S1].
+-7.  **Output:**
+-    *   Transmit the resulting pixel of the base-plane to the host [S1].
+-    *   The host warps and stores the result in the frame-buffer [S1].
++
++1.  **Discrete Ray Generation:**
++    Generate discrete voxel-rays from continuous viewing rays using a 3D variation of Bresenham's line drawing algorithm [S4]. This guarantees a constant step of distance 1 along the major axis of the viewing direction. Steps in non-major directions are retrieved from lookup tables (templates) [S4].
++
++2.  **Base-Plane Projection:**
++    Cast discrete rays from each pixel on the **base-plane**, defined as the volume face most perpendicular to the viewing direction [S4]. A set of discrete rays belonging to a scanline forms a **Projection Ray Plane (PRP)** [S4].
++
++3.  **Beam Fetching:**
++    Fetch PRPs as a sequence of voxel beams from the CFB. The beams are stored in discrete ray buffers within the TRILIN units [S4].
++
++4.  **Ray Alignment:**
++    Use a high-bandwidth global bus (Fast Bus) to align all discrete rays in each PRP parallel to a main axis of the 2D buffers [S4].
++
++5.  **Interpolation (Sheared Trilinear):**
++    Consecutive discrete rays are fetched each clock cycle and placed into $n$ Tri-linear Interpolation units (TRI-LINs) [S4].
++    *   Two discrete PRPs (top and bottom) are used to generate sample values for the original continuous rays [S4].
++    *   Perform sheared trilinear interpolation using voxels from neighboring discrete rays of the top and bottom PRPs [S4].
++    *   Overlapping voxels of neighboring discrete rays are shared between neighboring TRI-LIN units [S4].
++
++6.  **Sample Storage and Gradient Estimation:**
++    Store the resulting continuous planes of ray samples in the Above, Below, and Current (ABC) sample buffers [S4].
++    *   Estimate the gradient at each sample location using central differences between samples of rays on the immediate left, right, above, below, and along the current ray [S4].
++    *   This allows sharing of already computed ray samples and avoids additional voxel accesses [S4].
++
++7.  **Shading and Classification:**
++    Forward interpolated sample and gradient values to shading units (Shaders) [S4].
++    *   Assign opacity values using a user-controlled look-up table (transfer function) [S4].
++    *   Calculate color values at each sample location according to a local illumination model (e.g., Phong lighting) [S4].
++
++8.  **Compositing (RPC):**
++    Connect the $n$ shading units as leaves of a folded and circular binary tree containing $n-1$ Voxel Combination Units (VCUs) [S4].
++    *   The RPC takes one ray of opacity and color samples and generates one projected pixel value per clock cycle [S4].
++    *   Implement projection schemes such as first/last opaque projection, maximum voxel value, weighted summation, or front-to-back compositing within the RPC [S4].
++
++9.  **Warping:**
++    Transmit the resulting pixel of the base-plane to the host [S4]. The host transforms and interpolates it into the final view plane image [S4].
+ 
+ ### Pseudocode
++
+ ```python
+-def cube3_render(dataset, n, viewing_direction, transfer_function, illumination_model):
+-    # 1. Setup CFB Mapping
+-    # k = (x + y + z) % n
+-    # Internal index: (i, j) = (x, y)
++# Cube-3 Hybrid Ray-Casting Algorithm
++# Assumes n is the dataset dimension (n x n x n)
++# Assumes CFB is the memory structure with n modules
++
++def cube3_render(dataset, view_direction):
++    # 1. Determine Base Plane
++    # The base plane is the volume face most perpendicular to view_direction
++    base_plane = get_base_plane(view_direction)
+     
+-    # 2. Generate Discrete Rays from Base-Plane
+-    base_plane_pixels = [(x, y) for x in range(n) for y in range(n)]
++    # 2. Generate Discrete Rays
++    # Use 3D Bresenham's algorithm with templates for non-major steps
++    discrete_rays = []
++    for pixel in base_plane:
++        ray = generate_discrete_ray(pixel, view_direction, templates)
++        discrete_rays.append(ray)
++        
++    # 3. Fetch and Align Beams
++    # Fetch beams from CFB using skewed memory access
++    # Align rays using Fast Bus to 2D buffers
++    aligned_prps = []
++    for i in range(0, len(discrete_rays), n):
++        # Fetch a Projection Ray Plane (PRP)
++        prp_beams = fetch_beams_from_cfb(discrete_rays[i:i+n])
++        aligned_prp = align_prp_on_fast_bus(prp_beams)
++        aligned_prps.append(aligned_prp)
++        
++    # 4. Interpolation and Shading Pipeline
++    # Process PRPs in parallel using TRI-LINs and Shaders
++    base_plane_pixels = []
+     
+-    # Templates for non-major axis steps (Bresenham 3D variation)
+-    # Sources note templates are hardware lookup tables; here represented as step deltas
+-    templates = [(1, 0), (0, 1), (1, 1)]
++    for prp in aligned_prps:
++        # Use top and bottom discrete PRPs for sheared interpolation
++        top_prp = get_top_prp(prp)
++        bottom_prp = get_bottom_prp(prp)
++        
++        # Initialize ABC buffers
++        abc_buffers = initialize_abc_buffers()
++        
++        # Process rays in the PRP
++        for ray_index, ray in enumerate(prp.rays):
++            # Sheared Trilinear Interpolation
++            # Share overlapping voxels with neighboring TRI-LIN units
++            samples = sheared_trilinear_interpolate(
++                ray, 
++                top_prp.rays[ray_index], 
++                bottom_prp.rays[ray_index],
++                abc_buffers
++            )
++            
++            # Store samples in ABC buffers
++            update_abc_buffers(abc_buffers, samples)
++            
++            # Gradient Estimation using Central Differences
++            # Use samples from left, right, above, below, and current rays
++            gradients = estimate_gradients(samples, abc_buffers)
++            
++            # Shading
++            opacities = apply_transfer_function(samples)
++            colors = calculate_illumination(samples, gradients)
++            
++            # Compositing via RPC (Ray Projection Cone)
++            # The RPC is a circular binary tree of VCU nodes
++            pixel_value = composite_ray(opacities, colors, rpc_tree)
++            
++            base_plane_pixels.append(pixel_value)
++            
++    # 5. Warping
++    # Transmit base-plane to host for warping to view plane
++    final_image = warp_to_view_plane(base_plane_pixels, view_direction)
+     
+-    discrete_rays = []
+-    for pixel in base_plane_pixels:
+-        ray = []
+-        for t in range(n):
+-            x = pixel[0] + t * templates[0][0]
+-            y = pixel[1] + t * templates[0][1]
+-            z = t
+-            ray.append((x, y, z))
+-        discrete_rays.append(ray)
+-        
+-    # Group rays into Projection Ray Planes (PRPs) by scanline
+-    prps = [discrete_rays[i:i+n] for i in range(0, len(discrete_rays), n)]
+-    
+-    # 3. Fetch and Align Beams
+-    aligned_prps = []
+-    for prp in prps:
+-        beams = []
+-        for ray in prp:
+-            beam = []
+-            for x, y, z in ray:
+-                k = (x + y + z) % n
+-                i, j = x, y
+-                beam.append(dataset[k][i][j])
+-            beams.append(beam)
+-        aligned_prps.append(beams)
+-        
+-    # 4. Interpolation and Gradient Estimation (TRI-LIN)
+-    abc_buffers = {'above': [], 'below': [], 'current': []}
+-    
+-    for i in range(len(aligned_prps) - 1):
+-        top_prp = aligned_prps[i]
+-        bottom_prp = aligned_prps[i+1]
+-        
+-        continuous_samples = []
+-        for beam_idx in range(len(top_prp)):
+-            ray_samples = []
+-            for sample_idx in range(n):
+-                val = (top_prp[beam_idx][sample_idx] + bottom_prp[beam_idx][sample_idx]) / 2.0
+-                ray_samples.append({'value': val, 'location': (beam_idx, sample_idx)})
+-            continuous_samples.append(ray_samples)
+-            
+-        gradients = []
+-        for ray_samples in continuous_samples:
+-            ray_grads = []
+-            for sample in ray_samples:
+-                grad = 0.0
+-                ray_grads.append(grad)
+-            gradients.append(ray_grads)
+-            
+-        abc_buffers['current'] = continuous_samples
+-        abc_buffers['above'] = abc_buffers['below']
+-        abc_buffers['below'] = continuous_samples
+-        
+-    # 5. Shading
+-    shaded_rays = []
+-    for ray_samples in continuous_samples:
+-        shaded_samples = []
+-        for sample in ray_samples:
+-            opacity = transfer_function(sample['value'])
+-            color = illumination_model(sample['value'], 0.0)
+-            shaded_samples.append({
+-                'opacity': opacity,
+-                'color': color,
+-                'distance': sample['location'][1]
+-            })
+-        shaded_rays.append(shaded_samples)
+-        
+-    # 6. Composition via Ray Projection Cone (RPC)
+-    final_pixels = []
+-    for ray_shaded_samples in shaded_rays:
+-        pixel_value = 0.0
+-        for sample in ray_shaded_samples:
+-            pixel_value += sample['color'] * sample['opacity']
+-        final_pixels.append(pixel_value)
+-        
+-    # 7. Output
+-    return final_pixels
++    return final_image
++
++def generate_discrete_ray(pixel, view_direction, templates):
++    # 3D Bresenham's line drawing algorithm
++    # Guarantees constant stepping of 1 along major axis
++    # Non-major steps retrieved from templates to avoid overlap
++    ray = Bresenham3D(pixel, view_direction, templates)
++    return ray
++
++def fetch_beams_from_cfb(rays):
++    # Map voxels to memory modules: k = (x + y + z) mod n
++    # Retrieve beams conflict-free
++    beams = []
++    for ray in rays:
++        beam = []
++        for voxel in ray:
++            k = (voxel.x + voxel.y + voxel.z) % n
++            beam.append(CFB[k][voxel.x][voxel.y])
++        beams.append(beam)
++    return beams
++
++def sheared_trilinear_interpolate(ray, top_ray, bottom_ray, abc_buffers):
++    # Interpolate continuous samples from discrete top/bottom rays
++    # Uses sheared trilinear interpolation
++    samples = []
++    for t in range(0, 1, step_size):
++        sample = trilinear_interpolate(ray, top_ray, bottom_ray, t)
++        samples.append(sample)
++    return samples
++
++def estimate_gradients(samples, abc_buffers):
++    # Central differences using left, right, above, below, current rays
++    # Stored in ABC buffers (Above, Below, Current)
++    gradients = []
++    for i, sample in enumerate(samples):
++        grad = central_difference(sample, abc_buffers.left[i], abc_buffers.right[i], 
++                                  abc_buffers.above[i], abc_buffers.below[i])
++        gradients.append(grad)
++    return gradients
++
++def composite_ray(opacities, colors, rpc_tree):
++    # Folded circular binary tree of Voxel Combination Units (VCUs)
++    # Implements projection schemes (e.g., front-to-back compositing)
++    result = rpc_tree.composite(opacities, colors)
++    return result
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Dataset Size:** Typically $n^3$ where $n$ is a power of 2 (e.g., 128, 256, 512) [S1].
+-*   **Voxel Depth:** 16 bits [S1].
+-*   **Memory Modules:** $n$ modules required [S1].
+-*   **Edge Cases:**
+-    *   **Memory Conflicts:** Avoided by the skewed CFB organization and 2D skewing in buffers [S1].
+-    *   **Ray Overlap:** The use of templates in Bresenham's algorithm specifically avoids overlap of voxels between neighboring discrete rays, which is critical for the sharing mechanism in TRILINs [S1].
+-    *   **Precision:** The method relies on fixed-point or specific hardware floating-point units for the interpolation and shading; precision limits are not explicitly detailed in the sources but are implied by the 16-bit input and hardware constraints [S1].
++### Parameters and Typical Values
++*   **Dataset Size:** $512^3$ voxels, 16 bits per voxel [S4].
++*   **Memory Modules:** $n$ modules for an $n^3$ dataset [S4].
++*   **Pipelines:** 8 identical rendering pipelines in EM-Cube (commercial variant) [S2]. Cube-3 uses a fully distributed memory system [S4].
++*   **Bus Frequency:** Performance scales with bus frequency. 125 MHz yields 30 Hz for $512^3$ [S4].
++*   **Frame Rate:** Target 30 frames per second for $512^3$ datasets [S4].
++
++### Edge Cases and Pitfalls
++*   **Perspective Projections:** While Cube-3 supports arbitrary parallel and perspective projections, certain viewpoints under perspective projections may adversely affect performance for hybrid order algorithms [S2]. The commercial EM-Cube variant does not support perspective projections [S2].
++*   **Memory Conflicts:** Avoided by the skewed organization of the CFB and 2D skewing of the 2D buffers [S4].
++*   **Voxel Re-fetch:** In section-based processing (used to reduce on-chip storage), boundary voxels of a section must be re-fetched, increasing average voxel re-fetch [S2].
+ 
+ ## Subtopics
+ 
+ ### [Extended Cube Architecture for Arbitrary Parallel Projection](3375-extended-cube-architecture-for-arbitrary-parallel-projection.md)
+-Extends Cube-3 to support arbitrary parallel projections by using a 2D Skewed Buffer and Ray Projection Tree, overcoming the orthographic limitation of the original Cube.
+-
+-### [Discrete Ray Tracing](3020-discrete-ray-tracing.md)
+-The parent method providing the foundation for generating discrete voxel-rays from continuous viewing rays.
++Extends the original Cube architecture to support arbitrary viewing directions by shearing data into a 2D memory structure, overcoming the distortion limitations of rotating the Cubic Frame Buffer for non-orthographic views.
+ 
+ ## Operating characteristics
+-*   **Performance:** Limited only by the data-transfer rate on the Fast Bus due to fully pipelined implementation [S1].
+-    *   128^3 dataset at 8MHz bus: 30Hz [S1].
+-    *   256^3 dataset at 33MHz bus: 30Hz [S1].
+-    *   512^3 dataset at 66MHz bus: 15Hz [S1].
+-    *   512^3 dataset at 125MHz bus: 30Hz [S1].
+-*   **Hardware Requirements:** A Cube-3 implementation for 30 projections per second of a 512^3 16-bit dataset requires 8 custom boards and a specially fabricated bus backplane [S1].
+-*   **Complexity:** The architecture exhibits the largest possible degree of parallelism compared to VIRIM and VOGUE [S1].
+-*   **Strengths:** Real-time visualization of high-resolution datasets; no pre-processing required; solves memory access bottleneck; supports 4D visualization (dynamic datasets) [S1].
+-*   **Limitations:** Hardware-specific; requires high-bandwidth global bus (Fast Bus) which becomes a bottleneck for larger datasets or higher frame rates (leading to Cube-4 development) [S1].
++*   **Time Complexity:** The algorithm is limited only by the data-transfer rate on the Fast Bus due to its fully pipelined implementation [S4].
++*   **Memory Complexity:** Requires $n$ memory modules for an $n^3$ dataset. Memory utilization is 100% when synchronous memory accesses are sustained for each voxel [S2].
++*   **Performance:**
++    *   Cube-3 implementation for $512^3$ 16-bit dataset requires 8 custom boards and a specially fabricated bus backplane [S4].
++    *   Performance estimates: $128^3$ at 8 MHz bus yields 30 Hz; $256^3$ at 33 MHz yields 30 Hz; $512^3$ at 66 MHz yields 15 Hz; $512^3$ at 125 MHz yields 30 Hz [S4].
++    *   EM-Cube (Cube-4 variant) processes ~533 million samples per second, sufficient for $256^3$ at 30 fps [S2].
++*   **Strengths:**
++    *   Solves the memory access bottleneck by reading each voxel at most once per projection [S4].
++    *   High degree of parallelism; processes all sample values of a ray simultaneously [S4].
++    *   Supports arbitrary parallel and perspective projections (theoretically) [S4].
++*   **Limitations:**
++    *   Requires specialized hardware (Fast Bus, skewed memory) [S4].
++    *   Perspective projections can cause performance issues [S2].
++    *   EM-Cube does not support perspective projections [S2].
+ 
+ ## Background
+-Cube-3 was developed at the State University of New York at Stony Brook [S1]. It was designed to enable real-time 4D visualization of dynamically changing datasets, such as in-situ fluid flow in rocks [S1]. The architecture is a hybrid ray-casting algorithm that exploits coherency to solve the traditional memory access bottleneck, contrasting with object-order (VIRIM) and image-order (VOGUE) approaches [S1].
++The Cube project, pioneered at the State University of New York at Stony Brook, aims to realize high-performance volume rendering systems for large datasets [S1, S3, unofficial]. Cube-1 was the first generation hardware prototype based on specially interleaved memory organization [S1, S3, unofficial]. Cube-2 was a single-chip VLSI implementation of Cube-1 [S3, unofficial]. Cube-3 introduced a high-speed global communication network (Fast Bus) and a circular cross-linked binary tree for compositing to reduce the memory access bottleneck further [S3, unofficial][S4]. EM-Cube is a commercial version of the Cube-4 architecture, which uses local interconnections for scalability [S2].
+ 
+ ## Sources
+-[S1] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
++[S2] Ray Casting Architectures for Volume Visualization, https://vcg.seas.harvard.edu/publications/19990101-ray-casting-architetures-for-volume-visualization/paper, fetched 2026-10-27
++[S3] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
++[S4] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29

@@ -3,123 +3,118 @@
 Also called: Boolean Operations on SDFs, SDF Boolean Operations, SDF Boolean Operators, SDF Boolean Union, SDF Min, Boolean Union on Distance Fields
 
 ## Overview
-Boolean operations on Signed Distance Fields (SDFs) combine primitive distance functions to construct complex implicit surfaces using Constructive Solid Geometry (CSG) logic [S2, S4, unofficial][S8]. This method solves the problem of modeling arbitrary composite shapes without requiring mesh topology, by evaluating the scalar field of the resulting volume at any point in space [S2, unofficial][S8]. It is distinguished from [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) by its strict adherence to exact set-theoretic Boolean logic (min/max) rather than smooth approximations, although smooth variants exist [S9, S13, unofficial].
+Boolean operations on Signed Distance Fields (SDFs) construct complex implicit surfaces by combining primitive SDFs using set-theoretic logic: union, intersection, and difference (subtraction) [S2, S4, S14, unofficial]. Unlike polygonal Constructive Solid Geometry (CSG), which requires explicit mesh boolean algorithms to resolve topological changes, SDF booleans operate pointwise on scalar fields, preserving the Lipschitz continuity required for sphere tracing [S8][S16, unofficial]. This method is distinguished from [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) by its focus on the fundamental binary operators (min/max) rather than smooth approximations or higher-level scene graph management.
 
 ## How it works
 ### Inputs and Outputs
-- **Inputs**: Two signed distance functions, $d_1(p)$ and $d_2(p)$, evaluated at a query point $p \in \mathbb{R}^3$. Each function returns a scalar distance value [S2, S4, unofficial][S8][S11, S15, unofficial]. In implementations tracking material identity, inputs may be vectors containing both distance and an identifier [S6, S13, unofficial].
-- **Outputs**: A new signed distance function $d_{result}(p)$ representing the Boolean combination of the two volumes [S4, unofficial][S8].
+**Inputs:**
+*   Two signed distance functions, $d_1(\mathbf{p})$ and $d_2(\mathbf{p})$, evaluated at a point $\mathbf{p} \in \mathbb{R}^3$.
+*   Optionally, material identifiers or markers associated with each primitive to track surface origin for shading [S6, S13, unofficial].
+
+**Outputs:**
+*   A combined signed distance value $d_{comb}(\mathbf{p})$ that satisfies the signed distance property relative to the resulting boolean shape [S2, S14, unofficial].
+*   (Optional) A material ID or marker indicating which primitive contributed the final distance [S6, S13, unofficial].
 
 ### Data Structures
-The core data structure is a scalar value representing distance [S7, S11, unofficial]. Some implementations extend this to a vector or struct to preserve material identity:
-- **Scalar**: `float` or `f32` [S7, S11, unofficial].
-- **Vector/Struct**: `vec2` or similar, where `.x` is the distance and `.y` is a material ID or marker [S6, S13, unofficial].
-
-### Numbered Steps
-1. Evaluate the primitive SDFs for all objects in the scene at the query point $p$ [S5, S13, unofficial].
-2. Initialize the accumulated distance to a large value (e.g., `MAX_DIST`) or the first primitive's distance [S5, unofficial].
-3. Iterate through the remaining primitives, combining the accumulated distance with each new primitive's distance using the appropriate Boolean operator (union, intersection, or difference) [S5, S13, unofficial].
-4. Return the final accumulated distance as the scene SDF value at $p$ [S2, S6, unofficial].
+The core data structure is a scalar value representing distance. In implementations tracking material identity, a vector or struct is used:
+*   `vec2` or `struct { float distance; int material_id; }`
+*   `.x` (or `distance`): The signed distance value.
+*   `.y` (or `material_id`): An integer or float marker identifying the source primitive [S6, S13, unofficial].
 
 ### Formulas
-Let $d_1$ be the distance to the first object and $d_2$ be the distance to the second object [S1, S4, unofficial][S8][S11, S15, unofficial].
+Let $d_1$ be the distance to the first object and $d_2$ be the distance to the second object.
 
-1. **Union (Add)**: The volume of the union is the set of points closest to either object [S2, S4, unofficial][S8][S11, S15, unofficial]. The distance is the minimum of the two distances [S2, S4, unofficial][S8][S11, S15, unofficial]:
-   $$ d_{union}(p) = \min(d_1(p), d_2(p)) $$
+1.  **Union (Add):** The volume of the union is the set of points inside either object. The distance is the minimum of the two distances [S3, S4, S11, S16, unofficial]:
+    $$ d_{union}(\mathbf{p}) = \min(d_1(\mathbf{p}), d_2(\mathbf{p})) $$
+    This ensures the ray advances by the smallest distance to any surface, preventing overshooting [S16, unofficial].
 
-2. **Intersection**: The volume of the intersection is the set of points inside both objects [S2, S4, unofficial][S8][S11, S15, unofficial]. The distance is the maximum of the two distances [S2, S4, unofficial][S8][S11, S15, unofficial]:
-   $$ d_{intersection}(p) = \max(d_1(p), d_2(p)) $$
+2.  **Intersection:** The volume of the intersection is the set of points inside both objects. The distance is the maximum of the two distances [S3, S4, S5, S11, S15, unofficial]:
+    $$ d_{intersect}(\mathbf{p}) = \max(d_1(\mathbf{p}), d_2(\mathbf{p})) $$
 
-3. **Difference (Subtraction)**: The volume of $A - B$ is the set of points in $A$ but not in $B$ [S1, S4, unofficial][S8][S11, S15, unofficial]. This is implemented by negating the distance of the subtracted object ($B$) and taking the maximum with the first object's distance [S1, S4, unofficial][S8][S11, S15, unofficial]:
-   $$ d_{difference}(p) = \max(d_1(p), -d_2(p)) $$
-   Note: Some sources define subtraction as $B - A$ using $\max(-d_1, d_2)$ [S3, S13, unofficial]. The standard convention $A - B$ uses $\max(d_1, -d_2)$ [S1, S4, unofficial][S8].
+3.  **Difference (Subtraction):** Subtracting object 2 from object 1 ($1 - 2$) removes the volume of object 2 from object 1. This is achieved by negating the distance of the subtracted object and taking the maximum [S1, S4, unofficial][S8][S11, S14, unofficial]:
+    $$ d_{diff}(\mathbf{p}) = \max(d_1(\mathbf{p}), -d_2(\mathbf{p})) $$
+    Negating $d_2$ flips the inside/outside signs of object 2, so points inside object 2 have negative distance, which becomes positive. The max operator then selects the positive distance (outside object 2) if it is larger than the distance to object 1, effectively carving out object 2 [S8].
 
-### Parameters
-- **Operation Type**: Enum or string specifying 'union', 'intersection', or 'difference' [S10, unofficial].
-- **Smoothness Parameter ($k$)**: For smooth unions (not strict Boolean), a blending parameter $k$ controls the transition radius [S13, S15, unofficial]. The smooth union formula is:
-  $$ j = \text{clamp}(0.5 + 0.5(b_x - a_x)/k, 0, 1) $$
-  $$ d_{smooth} = \text{mix}(b_x, a_x, j) - j \cdot k \cdot (1 - j) $$
-  This is not a strict Boolean operation but a common extension [S9, S13, unofficial].
-
-### Edge Cases and Pitfalls
-- **Discontinuities**: Standard Boolean operations (min/max) create sharp, non-smooth transitions at the boundaries where the active SDF switches [S9, S15, unofficial].
-- **Normal Computation**: Normals must be computed from the winning SDF [S2, S10, unofficial]. If $d_1 < d_2$ in a union, the normal is $\nabla d_1$; otherwise, it is $\nabla d_2$ [S2, S10, unofficial]. For difference, if $-d_2 > d_1$, the normal is $-\nabla d_2$ [S10, unofficial].
-- **Precision**: Near the boundary where $d_1 \approx d_2$, floating-point precision errors can cause jitter in normals if not handled carefully [G].
-- **Degenerate Input**: If one SDF is always positive (empty volume) or negative (full volume), the result simplifies to the other SDF or the empty/full volume respectively [G].
+    *Note on Sign Convention:* Some sources define subtraction as $\max(-d_1, d_2)$, which corresponds to $2 - 1$ (subtracting object 1 from object 2) [S3, S11, unofficial]. The formula $\max(d_1, -d_2)$ corresponds to $1 - 2$ [S1, S4, unofficial][S8][S14, unofficial].
 
 ### Pseudocode
-The following Python-like pseudocode implements the three standard Boolean operations [S2, S4, S6, S11, S13, unofficial]. It assumes `d1` and `d2` are scalar distances [S7, S11, unofficial]. If material IDs are required, the logic extends to selecting the ID corresponding to the winning distance [S6, S13, unofficial].
+The following Python-like pseudocode implements the standard boolean operators. It assumes `d1` and `d2` are floats. If material IDs are tracked, the logic extends to return the ID of the winning primitive.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sdf_union(d1: float, d2: float) -> float:
+def boolean_union(d1, d2):
     """
     Computes the union of two SDFs.
     Returns the minimum distance.
     """
     return min(d1, d2)
 
-def sdf_intersection(d1: float, d2: float) -> float:
+def boolean_intersection(d1, d2):
     """
     Computes the intersection of two SDFs.
     Returns the maximum distance.
     """
     return max(d1, d2)
 
-def sdf_difference(d1: float, d2: float) -> float:
+def boolean_difference(d1, d2):
     """
-    Computes the difference (subtraction) of d1 by d2 (d1 - d2).
+    Computes the difference (d1 minus d2).
     Negates d2 and returns the maximum.
     """
     return max(d1, -d2)
 
-def sdf_union_with_id(a: tuple, b: tuple) -> tuple:
+def boolean_union_with_material(dist1, id1, dist2, id2):
     """
-    Computes union with material ID tracking.
-    Input: (distance, material_id)
-    Output: (distance, material_id)
+    Computes union while tracking which primitive provided the distance.
+    Returns (distance, material_id).
     """
-    dist_a, id_a = a
-    dist_b, id_b = b
-    if dist_a < dist_b:
-        return (dist_a, id_a)
+    if dist1 < dist2:
+        return dist1, id1
     else:
-        return (dist_b, id_b)
+        return dist2, id2
 
-def sdf_intersection_with_id(a: tuple, b: tuple) -> tuple:
+def boolean_intersection_with_material(dist1, id1, dist2, id2):
     """
-    Computes intersection with material ID tracking.
+    Computes intersection while tracking material.
+    Returns (distance, material_id).
     """
-    dist_a, id_a = a
-    dist_b, id_b = b
-    if dist_a > dist_b:
-        return (dist_a, id_a)
+    if dist1 > dist2:
+        return dist1, id1
     else:
-        return (dist_b, id_b)
+        return dist2, id2
 
-def sdf_difference_with_id(a: tuple, b: tuple) -> tuple:
+def boolean_difference_with_material(dist1, id1, dist2, id2):
     """
-    Computes difference (a - b) with material ID tracking.
+    Computes difference (1 - 2) while tracking material.
+    Returns (distance, material_id).
     """
-    dist_a, id_a = a
-    dist_b, id_b = b
-    neg_dist_b = -dist_b
-    if dist_a > neg_dist_b:
-        return (dist_a, id_a)
+    neg_dist2 = -dist2
+    if dist1 > neg_dist2:
+        return dist1, id1
     else:
-        return (neg_dist_b, id_b)
+        return neg_dist2, id2
 ```
 
+### Parameters
+*   **Operation Type:** Enum or string specifying 'union', 'intersection', or 'difference' [S10, unofficial].
+*   **Smoothness Parameter ($k$):** For smooth boolean operations (not strict booleans), a blending parameter $k$ controls the radius of the transition zone [S13, S9, unofficial]. Standard boolean operations use $k=0$ (sharp edges).
+
+### Edge Cases and Pitfalls
+*   **Gradient Discontinuity:** Standard boolean operations (min/max) result in non-differentiable surfaces at the boundaries where the active primitive switches (e.g., where $d_1 = d_2$ in a union) [S9, unofficial]. This causes artifacts in normal-based shading (lighting) and prevents the use of gradient-based optimization or smooth ray marching variants. Smooth unions (smin) are required for continuous normals [S13, S9, unofficial].
+*   **Precision:** When $d_1 \approx d_2$, floating-point precision errors can cause flickering or incorrect normal selection if not handled carefully [G].
+*   **Inside/Outside Logic:** In difference operations, failing to negate the subtracted object's distance correctly results in incorrect topology (e.g., keeping the inside of the subtracted object).
+
 ## Operating characteristics
-- **Time Complexity**: $O(1)$ per evaluation, requiring two SDF evaluations and one min/max operation [G].
-- **Memory Complexity**: $O(1)$ additional memory per operation [G].
-- **Performance**: Extremely fast compared to mesh-based CSG, as it avoids boolean mesh intersection algorithms. Suitable for real-time ray marching [S8][S11, unofficial].
-- **Strengths**: Easy composition of complex shapes [S2, unofficial][S8].
-- **Limitations**: Sharp edges at Boolean seams (unless smoothed), difficulty in representing non-manifold geometry or thin features that require very small step sizes in ray marching [S9, unofficial].
+*   **Time Complexity:** $O(1)$ per primitive pair. For a scene with $N$ primitives combined via nested booleans, the cost is proportional to the number of nodes in the expression tree.
+*   **Memory Complexity:** $O(1)$ additional memory per operation, excluding storage for the primitive SDFs themselves.
+*   **Strengths:** Extremely fast to evaluate; no mesh generation or topological analysis required; naturally handles complex overlapping geometry; compatible with any ray marching scheme that relies on Lipschitz continuity [S8][S16, unofficial].
+*   **Limitations:** Sharp edges at boolean boundaries lead to shading artifacts; no explicit representation of the resulting mesh (implicit only); cannot easily handle non-manifold geometries or self-intersections in the same way explicit CSG can [S9, unofficial].
+*   **When to use:** Real-time ray marching, procedural generation, and scenes where performance is critical and sharp geometric details are acceptable.
+*   **When not to use:** When smooth shading across boolean boundaries is required (use smooth unions), or when explicit mesh output is needed for further processing (e.g., 3D printing, collision detection with physics engines).
 
 ## Background
-The technique leverages the mathematical property that the signed distance function to a union of sets is the minimum of their individual distance functions, and the intersection is the maximum [S4, unofficial][S8]. It is a fundamental building block for [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) and allows for the creation of complex scenes from simple primitives like spheres and boxes [S2, S6, unofficial].
+Boolean operations on SDFs were popularized in the context of ray marching for real-time graphics, particularly through the work of Inigo Quilez and others in the demoscene and shader programming communities [S11, S16, unofficial]. The technique leverages the mathematical properties of distance fields, specifically that the distance to the union of sets is the minimum of the distances, and the distance to the intersection is the maximum [S4, S14, unofficial]. This approach allows for the creation of complex scenes from simple primitives without the computational overhead of traditional polygonal CSG [S8].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
@@ -137,3 +132,4 @@ The technique leverages the mathematical property that the signed distance funct
 [S13] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
 [S14] jk9g13/LaFortuna-SDF-Ray-marching, https://github.com/jk9g13/LaFortuna-SDF-Ray-marching, fetched 2026-10-27 (unofficial)
 [S15] Ray Marching with Signed Distance Fields - Scribd, https://www.scribd.com/document/831412915/1-Ray-Marching-and-Signed-Distance-Fields, fetched 2026-10-27 (unofficial)
+[S16] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)

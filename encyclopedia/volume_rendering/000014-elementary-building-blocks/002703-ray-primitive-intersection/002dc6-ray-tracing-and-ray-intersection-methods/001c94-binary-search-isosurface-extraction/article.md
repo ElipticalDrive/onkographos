@@ -3,7 +3,7 @@
 Also called: Bisection Isosurface Extraction, Isosurface Raycasting with Bisection, Isovalue Stepping, RayEvaluationSteppingIso
 
 ## Overview
-Binary Search IsoSurface Extraction approximates the position of an isosurface between two sample points by iteratively halving the interval based on scalar field values [S1, unofficial]. It solves the problem of accurately locating the zero-crossing of a scalar field along a ray without requiring explicit polygon extraction [S1, unofficial]. Unlike [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md), which computes an analytical intersection using trilinear interpolation, this method uses a fixed number of iterative bisection steps to refine the hit position [S3, unofficial]. It is distinct from [Neubauer Iso-surface Ray Casting](7024-neubauer-iso-surface-ray-casting.md) in that it does not rely on specific acceleration structures for traversal but rather refines a detected interval [S3, unofficial].
+Binary Search IsoSurface Extraction approximates the position of an isosurface between two sample points by iteratively halving the interval based on scalar field values [S1, unofficial]. It locates the zero-crossing of a scalar field along a ray using a fixed number of iterative bisection steps to refine the hit position [S3, unofficial].
 
 ## How it works
 **Inputs:**
@@ -11,29 +11,29 @@ Binary Search IsoSurface Extraction approximates the position of an isosurface b
 *   `right`: 3D point where the scalar field value is greater than the isovalue.
 *   `texVol`: Volume texture object providing scalar field samples.
 *   `iso`: The target isovalue (scalar or batched tensor) [S2, unofficial].
-*   `rec_depth`: The number of bisection iterations (typically 5) [S1, unofficial].
+*   `rec_depth`: The number of bisection iterations (default 5) [S1, unofficial].
 
 **Outputs:**
 *   `surf`: The 3D position of the isosurface intersection, calculated as the midpoint of the final interval.
 
 **Data Structures:**
-*   `vec3`: A 3-component vector type (e.g., `float3` or `glm::vec3`) representing 3D coordinates.
+*   `vec3`: A 3-component vector type representing 3D coordinates.
 *   `float`: Scalar floating-point type for volume values.
 *   `cudaTextureObject_t`: Handle for accessing the volume texture on the GPU [S2, unofficial].
 
 **Parameters:**
 *   `rec_depth`: Fixed number of bisection iterations. Default value is 5 [S1, unofficial].
-*   `binarySearchSteps`: Number of binary search steps to refine hit position. Range 0-20. Default 0 [S2, unofficial].
-*   `isocontourRange`: Range of values $[-v, +v]$ for surface feature mapping. Range 0.01f-500.0f. Default 5.0f [S2, unofficial].
-*   `selectedSurfaceFeature`: Enum for shading features (OFF, FIRST_PRINCIPAL_CURVATURE, etc.). Default OFF [S2, unofficial].
+*   `binarySearchSteps`: Number of binary search steps to refine hit position. Range 0–20. Default 0 [S2, unofficial].
+*   `isocontourRange`: Range of values $[-v, +v]$ for surface feature mapping. Range 0.01–500.0. Default 5.0 [S2, unofficial].
+*   `selectedSurfaceFeature`: Enum for shading features (OFF, FIRST_PRINCIPAL_CURVATURE, SECOND_PRINCIPAL_CURVATURE, MEAN_CURVATURE, GAUSSIAN_CURVATURE). Default OFF [S2, unofficial].
 
 **Algorithm Steps:**
 1.  Initialize the recursion depth limit `rec_depth` to 5 [S1, unofficial].
 2.  Loop `iter` from 0 to `rec_depth - 1`:
-    a.  Compute the midpoint: $mid = \frac{right + left}{2.0}$
-    b.  Sample the volume scalar value at the midpoint: $curIso = texture(texVol, mid).x$
-    c.  If $curIso \le iso$, set $left = mid$ (the surface is in the right half).
-    d.  Else, set $right = mid$ (the surface is in the left half).
+    a.  Compute the midpoint: $mid = \frac{right + left}{2.0}$ [S1, unofficial].
+    b.  Sample the volume scalar value at the midpoint: $curIso = texture(texVol, mid).x$ [S1, unofficial].
+    c.  If $curIso \le iso$, set $left = mid$ [S1, unofficial].
+    d.  Else, set $right = mid$ [S1, unofficial].
 3.  Set the output surface point: $surf = \frac{right + left}{2.0}$ [S1, unofficial].
 
 **Pseudocode:**
@@ -60,8 +60,7 @@ def binary_search_isosurface_extraction(left, right, tex_vol, iso, rec_depth=5):
         mid = (right + left) / 2.0
         
         # Sample scalar value at midpoint
-        # Note: texture() returns a vec4; we take the x component (scalar)
-        cur_iso = tex_vol.sample(mid).x
+        cur_iso = texture(tex_vol, mid).x
         
         # Bisection step
         if cur_iso <= iso:
@@ -75,9 +74,10 @@ def binary_search_isosurface_extraction(left, right, tex_vol, iso, rec_depth=5):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The method relies on a fixed number of iterations. With `rec_depth=5`, the interval is reduced by a factor of $2^5 = 32$. This may not be sufficient for high-precision requirements or very small features [S3, unofficial].
-*   **Boundary Conditions:** The method assumes `left` and `right` correctly bracket the isovalue. If the bracketing condition is violated (e.g., both points are on the same side of the isosurface), the algorithm will converge to a point that is not the intersection [G].
-*   **Performance:** Refining already detected intersections has virtually no impact on performance but improves accuracy [S3, unofficial].
+*   **Precision:** With `rec_depth=5`, the interval is reduced by a factor of $2^5 = 32$ [S1, unofficial].
+*   **Boundary Conditions:** The method assumes `left` and `right` correctly bracket the isovalue [S1, unofficial].
+*   **Adaptive Sampling:** The method can apply adaptive sampling to handle small features or silhouette regions where standard sampling fails [S3, unofficial].
+*   **Performance:** Refining already detected intersections has virtually no impact on performance [S3, unofficial].
 
 ## Subtopics
 
@@ -97,16 +97,16 @@ IsoSurface Ray Marching is a ray casting technique that renders an isosurface by
 A ray function that computes whether a given isovalue $\sigma$ exists along the ray. Produces the same result as marching cubes but with higher accuracy [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(k)$ where $k$ is the number of bisection steps (fixed constant, typically 5).
-*   **Memory Complexity:** $O(1)$ auxiliary space.
-*   **Measured Performance:** At a sampling distance of 1.0, performance is 24 fps; at a sampling distance of 5.0, performance is 66 fps [S3, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** At sampling distance 1.0, performance is 24 fps; at sampling distance 5.0, performance is 66 fps [S3, unofficial].
 *   **Strengths:** Virtually no impact on performance for refinement; improves accuracy for small features and silhouette regions [S3, unofficial].
-*   **Limitations:** Fixed number of steps may not adapt to feature size; requires initial bracketing of the isosurface.
-*   **When to Use:** When high accuracy is needed for already detected intersections or when analytical intersection is too complex [S3, unofficial].
-*   **When Not to Use:** When adaptive sampling is required for varying feature sizes across the volume [S3, unofficial].
+*   **Limitations:** Fixed number of steps does not adapt to feature size; requires initial bracketing of the isosurface.
+*   **When to Use:** When high accuracy is needed for already detected intersections [S3, unofficial].
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-Binary Search IsoSurface Extraction is a technique used in GPU-based volume raycasting to refine isosurface intersections. It was discussed in the context of advanced illumination techniques for volume rendering [S3, unofficial]. The method is often used in conjunction with curvature-based shading to enhance visual quality [S2, unofficial]. It provides a higher accuracy alternative to marching cubes for ray-casted isosurfaces [S4, unofficial].
+Binary Search IsoSurface Extraction is a technique used in GPU-based volume raycasting to refine isosurface intersections [S3, unofficial]. It was discussed in the context of advanced illumination techniques for volume rendering [S3, unofficial]. The method optionally supports coloring the surface based on curvature features via a selected surface feature parameter [S2, unofficial]. It provides a higher accuracy alternative to marching cubes for ray-casted isosurfaces [S4, unofficial].
 
 ## Sources
 [S1] ShashwatC/Ray, https://github.com/ShashwatC/Ray, fetched 2026-10-26 (unofficial)

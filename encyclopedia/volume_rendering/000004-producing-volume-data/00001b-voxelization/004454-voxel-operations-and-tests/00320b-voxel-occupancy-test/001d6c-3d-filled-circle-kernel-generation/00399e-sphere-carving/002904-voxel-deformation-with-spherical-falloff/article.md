@@ -3,175 +3,190 @@
 Also called: Spherical Voxel Deformation, Voxel Falloff Modification
 
 ## Overview
-Voxel Deformation with Spherical Falloff modifies scalar voxel values within a spherical region around a 3D hit point to add or remove terrain mass, enabling real-time digging and building operations [S1, S2, unofficial]. It sets itself apart from its parent [Sphere Carving](2377-sphere-carving.md) by using a continuous soft falloff function to create smooth edges rather than binary inclusion/exclusion, and by supporting additive (build) as well as subtractive (dig) operations [S1, S2, unofficial].
+Voxel Deformation with Spherical Falloff modifies scalar voxel values (typically density) within a spherical region around a 3D hit point to add or remove terrain mass, creating smooth edges for digging or building operations [S1, S2, unofficial]. It differs from [Sphere Carving](2377-sphere-carving.md), which removes solid voxels within a binary radius, by using a continuous soft falloff to allow gradual mass modification and reversible editing [S1, S2, unofficial]. It serves as the core mechanism for [Voxel Edit Brush Operations](6271-voxel-edit-brush-operations.md), enabling real-time interaction with the density field [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `playerCamera`: Camera object providing position and forward direction [S1, S2, unofficial].
-- `hitPoint`: World position where the deformation occurs, obtained via raycast [S1, S2, unofficial].
-- `radius`: Brush radius in meters [S2, unofficial].
-- `deformSpeed` (S1) or `digSpeed`/`buildSpeed` (S2): Rate of density change per second at the center of the brush [S1, S2, unofficial].
-- `buildModifier`: Integer `1` for adding mass, `-1` for removing mass [S1, unofficial].
-- `voxelSize`: Size of one voxel in meters [S2, unofficial].
-- `densityField`: Array of scalar values representing the terrain [S1, S2, unofficial].
-- `chunkSize`: Size of a terrain chunk in voxels [S2, unofficial].
+- `worldPos`: The 3D world position of the deformation center (usually from a raycast hit) [S1, S2, unofficial].
+- `radius`: The radius of the deformation sphere in world units [S2, unofficial].
+- `delta`: The magnitude of density change per frame (e.g., `speed * deltaTime`) [S2, unofficial].
+- `mode`: The operation type (Dig, Build, or Smooth) [S2, unofficial].
+- `voxelSize`: The size of a single voxel in world units [S2, unofficial].
+- `densityField`: The array of scalar density values for the voxels [S2, unofficial].
+- `dimensions`: The dimensions of the voxel grid [S2, unofficial].
 
 **Outputs:**
-- Updated `densityField` values within the affected region [S1, S2, unofficial].
-- List of "dirty" chunks marked for re-meshing [S2, unofficial].
+- Updated `densityField` values for voxels within the spherical region [S1, S2, unofficial].
+- A list of "dirty" chunks that overlap the modified region, requiring mesh regeneration [S2, unofficial].
 
 **Data Structures:**
-- **Density Field:** A 3D grid of scalar values [S1, S2, unofficial]. In [S1, unofficial], values are 8-bit unsigned integers (`byte`) in range `[0, 255]`, where 0 is air and 255 is solid rock [S1, unofficial]. In [S2, unofficial], values are `float` in range `[0, 1]` [S2, unofficial].
-- **Chunk:** A sub-volume of the world defined by `chunkSize` [S2, unofficial]. Each chunk manages its own mesh and collision data [S2, unofficial].
-- **Bounds:** Axis-aligned bounding box (AABB) in voxel coordinates defining the region to iterate [S1, S2, unofficial].
+- `densityField`: A 1D array or 3D tensor of floats representing voxel density. The mapping from 3D coordinates $(x, y, z)$ to array index is implementation-specific but typically follows row-major or column-major ordering [S1, S2, unofficial].
+- `TerrainChunk`: A structure representing a sub-volume of the world, containing a subset of the density field and a mesh [S2, unofficial].
 
 **Steps:**
-1. **Raycast:** Cast a ray from `playerCamera.position` along `playerCamera.forward` with a maximum distance `maxReachDistance` (or `range`) [S1, S2, unofficial]. If no hit is detected, abort [S1, S2, unofficial].
-2. **Hit Point Adjustment (Build Only):** If the operation is a build, offset the hit point slightly into the surface to ensure new material attaches correctly: `hitPoint -= rayDirection * radius * 0.3f` [S2, unofficial].
-3. **Coordinate Conversion:** Convert the world-space `hitPoint` to local voxel coordinates: `local = (hitPoint - worldOrigin) / voxelSize` [S2, unofficial]. (Note: [S1, unofficial] assumes direct conversion to integer voxel coordinates `(hitX, hitY, hitZ)`).
-4. **Bounding Box Calculation:** Calculate the integer bounding box of the sphere in voxel coordinates: `minX = Floor(local.x - radius_voxels)`, `maxX = Ceil(local.x + radius_voxels)`, etc., clamped to the world boundaries [S2, unofficial]. [S1, unofficial] uses `intRange = ceil(deformRange)` and defines bounds as `[hitX - intRange, hitX + intRange]` etc.
-5. **Chunk Identification:** Identify all chunks that overlap with this bounding box [S2, unofficial]. Mark them as "dirty" [S2, unofficial].
-6. **Voxel Iteration:** Iterate over all voxels `(x, y, z)` within the bounding box [S1, S2, unofficial]. [S2, unofficial] specifies skipping border voxels if they are outside the world or protected [S2, unofficial].
-7. **Distance Calculation:** For each voxel, calculate the Euclidean distance `d` from the voxel center to the brush center `local`: `d = sqrt((x - local.x)^2 + (y - local.y)^2 + (z - local.z)^2)` [S1, S2, unofficial].
-8. **Falloff Calculation:** [S1, unofficial] uses an inverse distance falloff: `modificationAmount = deformSpeed / d * buildModifier` [S1, unofficial]. [S2, unofficial] uses a SmoothStep falloff: `falloff = SmoothStep(1, 0, dist / radius_voxels)` [S2, unofficial].
-9. **Density Update:** [S1, unofficial] (Byte-based): `v_new = clamp((v_old / 255 - modificationAmount) * 255, 0, 255)` [S1, unofficial]. [S2, unofficial] (Float-based): `density[i] = Clamp01(density[i] + delta * falloff)`, where `delta = speed * deltaTime` [S2, unofficial].
-10. **Re-meshing:** In `LateUpdate`, iterate over all "dirty" chunks and call `Rebuild()` on each, then clear the dirty set [S2, unofficial].
+
+1. **Raycast and Hit Detection:** Cast a ray from the camera position along the camera's forward direction with a maximum range. If the ray hits a terrain collider, record the hit point `worldPos` [S1, S2, unofficial].
+2. **Coordinate Conversion:** Convert `worldPos` to local voxel coordinates. If the voxel grid is offset from the world origin, apply the inverse transform:
+   $$
+   \text{localPos} = \frac{\text{worldPos} - \text{origin}}{\text{voxelSize}}
+   $$
+   [S2, unofficial]
+3. **Bounding Box Calculation:** Compute the integer bounding box of the sphere in voxel coordinates. For each axis $i \in \{x, y, z\}$:
+   $$
+   \begin{aligned}
+   \text{min}_i &= \lfloor \text{localPos}_i - \text{radius} \rfloor \\
+   \text{max}_i &= \lceil \text{localPos}_i + \text{radius} \rceil
+   \end{aligned}
+   $$
+   Clamp these bounds to the world dimensions $[0, \text{dimensions}_i]$ [S1, S2, unofficial].
+4. **Iteration:** Iterate over all voxels $(x, y, z)$ within the bounding box [S1, S2, unofficial].
+5. **Distance Check:** Calculate the Euclidean distance $d$ from the voxel center to the brush center:
+   $$
+   d = \sqrt{(x - \text{localPos}_x)^2 + (y - \text{localPos}_y)^2 + (z - \text{localPos}_z)^2}
+   $$
+   If $d > \text{radius}$, skip this voxel [S1, S2, unofficial].
+6. **Falloff Calculation:** Compute the falloff factor using a smooth step function (e.g., `SmoothStep(1, 0, d/radius)`), which maps distance to a value in $[0, 1]$ where 1 is at the center and 0 is at the edge [S2, unofficial].
+7. **Density Update:**
+   - **For Dig/Build:** Calculate the modification amount. In [S1, unofficial], the modification is inversely proportional to distance:
+     $$
+     \text{modificationAmount} = \frac{\text{deformSpeed}}{d} \cdot m
+     $$
+     where $m \in \{-1, 1\}$ is the build modifier (-1 for dig, 1 for build) [S1, unofficial].
+     Update the voxel value:
+     $$
+     v_{\text{new}} = \text{clamp}\left(\left(\frac{v_{\text{old}}}{255} - \text{modificationAmount}\right) \cdot 255, 0, 255\right)
+     $$
+     [S1, unofficial]
+   - In [S2, unofficial], the update is additive with falloff:
+     $$
+     \text{density}[i] = \text{Clamp01}(\text{density}[i] + \text{delta} \cdot \text{falloff})
+     $$
+     [S2, unofficial]
+   - **For Smooth:** (See Local Area Smoothing Brush below) [S2, unofficial].
+8. **Chunk Marking:** Identify all `TerrainChunk` objects that overlap the bounding box and mark them as "dirty" [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def raycast(origin, direction, max_distance):
-    """Stub for physics raycast; returns hit dict with 'point' or None."""
-    # Implementation depends on engine; returns hit or None
-    pass
-
-def get_chunk_id(x, y, z, chunk_size):
-    """Returns chunk coordinates for a given voxel."""
-    return (x // chunk_size, y // chunk_size, z // chunk_size)
-
-def smoothstep(edge0, edge1, x):
-    """Standard smooth interpolation."""
-    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
-    return t * t * (3.0 - 2.0 * t)
-
-def deform_voxel_terrain(camera, terrain, radius, speed, is_build, delta_time):
-    # 1. Raycast
-    ray_origin = camera.position
-    ray_direction = camera.forward
-    hit = raycast(ray_origin, ray_direction, terrain.max_reach)
-    if hit is None:
-        return
-
-    hit_point = hit.point
-
-    # 2. Adjust hit point for build
-    if is_build:
-        hit_point = hit_point - ray_direction * radius * 0.3
-
-    # 3. Convert to voxel coordinates
-    local_center = (hit_point - terrain.origin) / terrain.voxel_size
-
-    # 4. Calculate bounding box (convert radius to voxel units for scale consistency)
-    radius_voxels = radius / terrain.voxel_size
-    min_x = int(math.floor(local_center.x - radius_voxels))
-    max_x = int(math.ceil(local_center.x + radius_voxels))
-    min_y = int(math.floor(local_center.y - radius_voxels))
-    max_y = int(math.ceil(local_center.y + radius_voxels))
-    min_z = int(math.floor(local_center.z - radius_voxels))
-    max_z = int(math.ceil(local_center.z + radius_voxels))
-
+def deform_voxel_field(density_field, dimensions, voxel_size, world_pos, radius, delta, mode):
+    # 1. Convert world position to local voxel coordinates
+    # Assuming origin at (0,0,0) for simplicity; adjust if offset exists
+    local_pos = world_pos / voxel_size
+    
+    # 2. Calculate bounding box
+    min_x = floor(local_pos.x - radius)
+    max_x = ceil(local_pos.x + radius)
+    min_y = floor(local_pos.y - radius)
+    max_y = ceil(local_pos.y + radius)
+    min_z = floor(local_pos.z - radius)
+    max_z = ceil(local_pos.z + radius)
+    
     # Clamp to world bounds
-    min_x = max(min_x, 0); max_x = min(max_x, terrain.width - 1)
-    min_y = max(min_y, 0); max_y = min(max_y, terrain.height - 1)
-    min_z = max(min_z, 0); max_z = min(max_z, terrain.depth - 1)
-
-    # 5. Identify and mark dirty chunks
+    min_x = max(0, min_x)
+    max_x = min(dimensions.x - 1, max_x)
+    min_y = max(0, min_y)
+    max_y = min(dimensions.y - 1, max_y)
+    min_z = max(0, min_z)
+    max_z = min(dimensions.z - 1, max_z)
+    
     dirty_chunks = set()
+    
+    # 3. Iterate over voxels in bounding box
     for x in range(min_x, max_x + 1):
         for y in range(min_y, max_y + 1):
             for z in range(min_z, max_z + 1):
-                dirty_chunks.add(get_chunk_id(x, y, z, terrain.chunk_size))
-
-    # 6. Iterate voxels and update
-    for x in range(min_x, max_x + 1):
-        for y in range(min_y, max_y + 1):
-            for z in range(min_z, max_z + 1):
-                dx = x - local_center.x
-                dy = y - local_center.y
-                dz = z - local_center.z
-                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                # 4. Calculate distance to brush center
+                dx = x - local_pos.x
+                dy = y - local_pos.y
+                dz = z - local_pos.z
+                dist = sqrt(dx*dx + dy*dy + dz*dz)
                 
-                # Skip if outside radius
-                if dist > radius_voxels:
+                # 5. Skip if outside radius
+                if dist > radius:
                     continue
-
-                # Calculate falloff (SmoothStep variant [S2, unofficial])
-                falloff = smoothstep(1.0, 0.0, dist / radius_voxels)
                 
-                # Calculate delta
-                delta = speed * delta_time * falloff
-                modifier = 1.0 if is_build else -1.0
-
-                # Get old value
-                old_val = terrain.density_field[x, y, z]
-
-                # Update value
-                new_val = old_val + delta * modifier
-
-                # Clamp to [0.0, 1.0]
-                terrain.density_field[x, y, z] = max(0.0, min(1.0, new_val))
-
-    # 7. Mark chunks dirty
-    for chunk_id in dirty_chunks:
-        terrain.mark_chunk_dirty(chunk_id)
-
-def late_update_terrain(terrain):
-    dirty_chunks = terrain.get_dirty_chunks()
-    for chunk_id in dirty_chunks:
-        terrain.rebuild_chunk(chunk_id)
-    terrain.clear_dirty_chunks()
+                # 6. Calculate falloff
+                # SmoothStep(1, 0, t) = 3t^2 - 2t^3 for t in [0,1]
+                t = dist / radius
+                if t > 1.0:
+                    falloff = 0.0
+                elif t < 0.0:
+                    falloff = 1.0
+                else:
+                    falloff = 3 * t * t - 2 * t * t * t
+                
+                # 7. Update density based on mode
+                if mode == "DIG":
+                    # [S1, unofficial] Inverse distance falloff
+                    if dist == 0:
+                        continue # Guard against division by zero [S1, unofficial]
+                    modification_amount = delta / dist
+                    # Assuming density is stored as 0-255 byte values normalized to 0-1 for calculation
+                    # Reconstructing [S1, unofficial] formula: v_new = clamp((v_old/255 - mod) * 255, 0, 255)
+                    # Here we assume density_field stores 0-255 integers
+                    v_old = density_field[x, y, z]
+                    v_normalized = v_old / 255.0
+                    v_new_normalized = v_normalized - modification_amount
+                    v_new = clamp(v_new_normalized * 255.0, 0, 255)
+                    density_field[x, y, z] = int(v_new)
+                    
+                elif mode == "BUILD":
+                    # [S1, unofficial] Inverse distance falloff
+                    if dist == 0:
+                        continue # Guard against division by zero [S1, unofficial]
+                    modification_amount = delta / dist
+                    v_old = density_field[x, y, z]
+                    v_normalized = v_old / 255.0
+                    v_new_normalized = v_normalized + modification_amount
+                    v_new = clamp(v_new_normalized * 255.0, 0, 255)
+                    density_field[x, y, z] = int(v_new)
+                    
+                elif mode == "SMOOTH":
+                    # See Local Area Smoothing Brush logic
+                    pass
+                
+                # 8. Mark chunks as dirty
+                # Determine which chunk this voxel belongs to
+                chunk_x = x // chunk_size
+                chunk_y = y // chunk_size
+                chunk_z = z // chunk_size
+                dirty_chunks.add((chunk_x, chunk_y, chunk_z))
+                
+    return dirty_chunks
 ```
 
 **Parameters:**
 - `radius`: Brush radius in meters. Typical value: 2.5f. Range: 1f to 6f [S2, unofficial].
-- `digSpeed`: Density removed per second at the center. Typical value: 4f [S2, unofficial].
-- `buildSpeed`: Density added per second at the center. Typical value: 3f [S2, unofficial].
-- `smoothSpeed`: Smoothing speed. Typical value: 6f [S2, unofficial].
+- `digSpeed`: Density removed per second at the center of the brush. Typical value: 4f [S2, unofficial].
+- `buildSpeed`: Density added per second at the center of the brush. Typical value: 3f [S2, unofficial].
+- `smoothSpeed`: Smoothing speed as a fraction of blur per second. Typical value: 6f [S2, unofficial].
+- `deformRange`: The range of deformation in voxel units, calculated as `ceil(radius / voxel_size)` [S1, unofficial].
+- `deformSpeed`: The speed of deformation, often derived from `digSpeed` or `buildSpeed` [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero:** If the raycast hit point exactly matches a voxel center, `distance` becomes 0, causing infinite `modificationAmount` in inverse-distance falloff [S1, unofficial]. A guard such as `if dist == 0: dist = 1e-6` is required [G].
-- **Precision:** Using `byte` values (0-255) as in [S1, unofficial] can lead to quantization artifacts compared to `float` (0-1) as in [S2, unofficial] [S1, S2, unofficial].
-- **Boundary Conditions:** Voxels at the world boundary must be clamped to prevent out-of-bounds array access [S2, unofficial].
-- **Scale Mismatch:** The brush radius is provided in meters, but bounding box calculations require voxel units; failing to divide by `voxelSize` will produce incorrect deformation volumes [G].
+- **Division by Zero:** If the raycast hit point exactly matches a voxel center, the distance $d$ becomes 0. In [S1, unofficial], this causes `modificationAmount` to become infinite. The code does not explicitly guard against `distance == 0` before division, which is a pitfall [S1, unofficial]. Implementers should add a check: `if dist == 0: continue` or use a minimum distance threshold [G].
+- **Border Voxels:** Iterating over the bounding box may include voxels outside the valid world bounds if not clamped. The bounding box calculation must be clamped to the world dimensions [S1, S2, unofficial].
+- **Precision:** Using floating-point arithmetic for distance and falloff is standard. However, converting between world coordinates and voxel indices must be handled carefully to avoid off-by-one errors [S2, unofficial].
 
 ## Subtopics
 
+### [Dig Tool](13359-dig-tool.md)
+The Dig Tool alleviates occlusion in volumetric datasets by smoothly displacing data points radially away from a user-defined focus point, creating a gap to reveal hidden internal structures. It serves as the 3D equivalent of the MoleView principle, operating on screen-space projections to manipulate the visible density field without altering the underlying geometry permanently until release.
+
 ### Local Area Smoothing Brush
-A variant that locally blurs the density field within a spherical region to round off jagged edges created by deformation [S2, unofficial]. It differs from standard deformation by averaging density values with neighbors rather than adding/removing mass [S2, unofficial].
-- **Definition:** Locally blurs the density field within a spherical region to round off jagged edges, using a snapshot of the field to ensure consistent averaging [S2, unofficial].
-- **Steps:**
-  1. Calculate the bounding box of the brush area, expanded by 1 voxel in all directions to include neighbors: `sMinX = Max(minX - 1, 0)`, `sMaxX = Min(maxX + 1, pointCount.x - 1)`, etc. [S2, unofficial].
-  2. Create a snapshot array of the expanded region and copy the current density values into it [S2, unofficial].
-  3. Iterate through the original brush bounding box (not the expanded one). Skip border voxels and voxels outside the radius [S2, unofficial].
-  4. Calculate the average density from the snapshot using the voxel and its 6 neighbors, clamping coordinates to the snapshot bounds: `average = (Snap(x,y,z) + Snap(x+1,y,z) + Snap(x-1,y,z) + Snap(x,y+1,z) + Snap(x,y-1,z) + Snap(x,y,z+1) + Snap(x,y,z-1)) / 7.0f` [S2, unofficial].
-  5. Calculate the falloff factor: `falloff = SmoothStep(1, 0, dist / r) * strength` [S2, unofficial].
-  6. Interpolate the density towards the average: `density[i] = Lerp(density[i], average, falloff)` [S2, unofficial].
-- **When to choose:** Use after digging or building to smooth out stair-stepping artifacts and create natural-looking terrain transitions [S2, unofficial].
+Locally blurs the density field within a spherical region to round off jagged edges created by deformation, using a snapshot of the field to ensure consistent averaging [S2, unofficial]. It expands the bounding box by 1 voxel in all directions to include neighbors for averaging [S2, unofficial]. A snapshot of the expanded region is created, and the density of each voxel is interpolated towards the average of itself and its 6 neighbors, weighted by the falloff factor [S2, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(R^3)$ per deformation call, where $R$ is `deformRange` in voxel units, due to iterating over the full bounding box of the spherical region [S1, unofficial].
-- **Memory Complexity:** $O(R^3)$ for the bounding box iteration. The Local Area Smoothing Brush variant requires an additional $O((R+1)^3)$ memory for the snapshot array [S2, unofficial].
-- **Measured Performance:** Real-time deformation is achieved using three brushes (Dig, Build, Smooth) with soft spherical falloffs [S2, unofficial]. Performance scales with the cube of the brush radius [S1, unofficial].
-- **Strengths:** Smooth edges via falloff functions; supports both addition and subtraction; real-time capable [S1, S2, unofficial].
-- **Limitations:** $O(R^3)$ complexity can be expensive for large brushes; inverse-distance falloff requires division-by-zero guards [S1, unofficial].
-- **When to use:** Destructible terrain scenarios requiring smooth, natural-looking modifications [S1, S2, unofficial].
-- **When not to use:** When strict binary voxel occupancy is required (use [Sphere Carving](2377-sphere-carving.md) instead) [S1, unofficial].
+- **Memory Complexity:** $O(R^3)$ for the temporary snapshot array used in smoothing operations [S2, unofficial].
+- **Performance:** Real-time deformation is achievable with typical brush radii (e.g., 2.5m) on modern hardware, provided that mesh regeneration is deferred to `LateUpdate` and only dirty chunks are rebuilt [S2, unofficial].
+- **Strengths:** Smooth edges, reversible operations, intuitive user interaction [S2, unofficial].
+- **Limitations:** Inverse distance falloff can cause instability at the center if not guarded [S1, unofficial]. Large deformation radii can be computationally expensive [S1, unofficial].
 
 ## Background
-Voxel Deformation with Spherical Falloff is used in real-time voxel terrain editors and games, particularly those utilizing Marching Cubes for mesh generation [S1, S2, unofficial]. It builds on [Sphere Carving](2377-sphere-carving.md) by adding continuous density modification [S1, S2, unofficial]. The method is implemented in Unity-based voxel terrain projects such as Eldemarkki/Marching-Cubes-Terrain and Rabidus4k/UnityVoxelTerrain [S1, S2, unofficial].
+Voxel Deformation with Spherical Falloff is a technique used in real-time voxel terrain editors and games to allow players to modify the terrain dynamically [S1, S2, unofficial]. It is commonly implemented in Unity-based voxel terrain systems, such as those using Marching Cubes for mesh generation [S2, unofficial]. The technique builds on [Sphere Carving](2377-sphere-carving.md) by adding continuous falloff and bidirectional modification (dig/build) [S1, S2, unofficial].
 
 ## Sources
 [S1] Eldemarkki/Marching-Cubes-Terrain, https://github.com/Eldemarkki/Marching-Cubes-Terrain, fetched 2026-10-26 (unofficial)

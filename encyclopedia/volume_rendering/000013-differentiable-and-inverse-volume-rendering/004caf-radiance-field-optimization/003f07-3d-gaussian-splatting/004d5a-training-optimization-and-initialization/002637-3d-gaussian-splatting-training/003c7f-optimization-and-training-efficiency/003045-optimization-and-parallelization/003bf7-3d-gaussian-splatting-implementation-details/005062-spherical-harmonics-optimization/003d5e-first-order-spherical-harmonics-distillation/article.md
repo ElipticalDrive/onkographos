@@ -3,106 +3,145 @@
 Also called: Mobile-GS SH Distillation, SH Knowledge Distillation, SH Order Reduction via Distillation, SH degree reduction, Spherical Harmonics degree reduction
 
 ## Overview
-First-order Spherical Harmonics Distillation reduces the view-dependent color representation of 3D Gaussians from third-order to first-order spherical harmonics (SH) to decrease parameter count and rendering computation [S1][S2, unofficial]. It achieves this by training a "student" model with first-order SH coefficients to approximate the radiance output of a pretrained "teacher" model using third-order SH [S2, unofficial]. Unlike standard degree reduction which may simply truncate coefficients, this method uses knowledge distillation to preserve visual fidelity despite the significant reduction in representational capacity [S2, unofficial]. It is distinct from [Spherical Harmonics Vector Quantization](14181-spherical-harmonics-vector-quantization.md) which compresses coefficients via codebooks, and [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md) which optimizes training gradients rather than representation size.
+First-order Spherical Harmonics Distillation reduces the spherical harmonics (SH) degree of 3D Gaussian primitives from third-order to first-order to decrease parameter count and computation cost, enabling efficient rendering on mobile devices [S1][S2, S2, unofficial]. Unlike standard degree reduction which simply truncates coefficients, this method uses a distillation strategy where a pretrained third-order teacher model guides the optimization of a first-order student model, preserving visual fidelity despite the significant reduction in representational capacity [S2, S2, unofficial]. It builds on [Spherical Harmonics Optimization](14206-spherical-harmonics-optimization.md) by replacing the fixed basis truncation with a learned approximation via knowledge distillation.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A pretrained teacher model with third-order SH coefficients ($\mathbf{C}^{tea}$) and a student model initialized with first-order SH coefficients ($\mathbf{C}$).
-*   **Output:** Optimized first-order SH coefficients for the student model.
+- **Input:** A pretrained 3D Gaussian Splatting model (Teacher) with third-order SH coefficients ($L=3$, 16 coefficients per color channel) and a randomly initialized or truncated first-order SH student model ($L=1$, 4 coefficients per color channel).
+- **Output:** Optimized first-order SH coefficients for the student model.
 
 **Data Structures:**
-*   **Teacher Coefficients ($\mathbf{C}^{tea}$):** For each Gaussian, 3 color channels $\times$ 16 coefficients (degree 3).
-*   **Student Coefficients ($\mathbf{C}$):** For each Gaussian, 3 color channels $\times$ 4 coefficients (degree 1).
-*   **Rendered Pixel Color ($\mathbf{C}_p$):** The RGB color of pixel $p$ rendered by the student.
-*   **Teacher Rendered Pixel Color ($\mathbf{C}_p^{tea}$):** The RGB color of pixel $p$ rendered by the teacher.
-*   **Depth Maps ($\hat{\mathbf{D}}_p, \hat{\mathbf{D}}_p^{tea}$):** Depth values for pixel $p$ from student and teacher respectively.
+- **Teacher SH Coefficients:** Stored as floating-point values (typically FP32). For each Gaussian, 3 channels $\times$ 16 coefficients = 48 values.
+- **Student SH Coefficients:** Stored as floating-point values. For each Gaussian, 3 channels $\times$ 4 coefficients = 12 values.
+- **Rendered Pixel Color ($\mathbf{C}$):** The output of the differentiable rasterizer for a given camera view.
+- **Rendered Depth ($\hat{\mathbf{D}}$):** The accumulated depth value from the volume rendering process.
+
+**Numbered Steps:**
+1. **Initialization:** Initialize the student model's first-order SH coefficients. These can be initialized to zero or by projecting the teacher's third-order coefficients onto the first-order basis (truncation), though distillation allows them to diverge during training [S2, S2, unofficial].
+2. **Forward Pass (Teacher):** Render the scene using the teacher model (third-order SH) to obtain reference pixel colors $\mathbf{C}_p^{tea}$ and depths $\hat{\mathbf{D}}_p^{tea}$ for a batch of training views.
+3. **Forward Pass (Student):** Render the scene using the student model (first-order SH) to obtain predicted pixel colors $\mathbf{C}_p$ and depths $\hat{\mathbf{D}}_p$.
+4. **Distillation Loss Calculation:** Compute the color distillation loss $\mathcal{L}_{\text{dstill}}$ and the scale-invariant depth distillation loss $\mathcal{L}_{\text{depth}}$.
+5. **Optimization:** Update the student model's first-order SH coefficients using gradient descent to minimize the combined loss. Other Gaussian attributes (position, scale, rotation, opacity) may also be fine-tuned during this process [S2, S2, unofficial].
+
+**Formulas:**
+The total distillation loss is a combination of color and depth losses.
+
+1. **Color Distillation Loss:**
+   $$ \mathcal{L}_{\text{dstill}} = \frac{1}{|P|} \sum_{p \in P} \|\mathbf{C}_p^{tea} - \mathbf{C}_p\| $$
+   Where:
+   - $P$ is the set of pixels in the rendered image.
+   - $\mathbf{C}_p^{tea}$ is the rendered pixel color from the teacher model.
+   - $\mathbf{C}_p$ is the rendered pixel color from the student model.
+   - The norm $\|\cdot\|$ is typically the L2 norm (Euclidean distance) [S2, S2, unofficial].
+
+2. **Scale-Invariant Depth Distillation Loss:**
+   $$ \mathcal{L}_{\text{depth}}(\mathbf{D}, \mathbf{D}^{tea}) = \frac{1}{|P|} \sum_{p \in P} \left( \log(\hat{\mathbf{D}}_p) - \log(\hat{\mathbf{D}}_p^{tea}) \right)^2 - \frac{1}{|P|^2} \left( \sum_{p \in P} \left( \log(\hat{\mathbf{D}}_p) - \log(\hat{\mathbf{D}}_p^{tea}) \right) \right)^2 $$
+   Where:
+   - $\hat{\mathbf{D}}_p^{tea} = \mathbf{D}^{tea} + \epsilon$ and $\hat{\mathbf{D}}_p = \mathbf{D} + \epsilon$.
+   - $\epsilon = 10^{-8}$ is added for training stability [S2, S2, unofficial].
+   - The second term subtracts the mean of the log-differences, making the loss scale-invariant [S2, S2, unofficial].
 
 **Parameters:**
-*   $\epsilon$: Stability constant for depth distillation, set to $1e-8$ [S2, unofficial].
-*   $P$: Set of pixels in the training image batch.
-
-**Steps:**
-1.  **Initialize Student:** Initialize the student model's SH coefficients to first-order (degree 1). The spatial attributes (position, scale, rotation, opacity) can be copied from the teacher or re-optimized [S2, unofficial].
-2.  **Render Teacher:** Render the training image using the teacher model to obtain $\mathbf{C}_p^{tea}$ and $\hat{\mathbf{D}}_p^{tea}$ for all pixels $p \in P$ [S2, unofficial].
-3.  **Render Student:** Render the training image using the student model to obtain $\mathbf{C}_p$ and $\hat{\mathbf{D}}_p$ for all pixels $p \in P$ [S2, unofficial].
-4.  **Compute Distillation Loss:** Calculate the color distillation loss $\mathcal{L}_{\text{dstill}}$ between the student and teacher rendered colors [S2, unofficial]:
-    $$ \mathcal{L}_{\text{dstill}} = \frac{1}{|P|} \sum_{p \in P} \|\mathbf{C}_p^{tea} - \mathbf{C}_p\| $$
-    Note: The norm $\|\cdot\|$ is typically the L2 norm (Euclidean distance) for RGB vectors, though the source notation is generic [S2, unofficial].
-5.  **Compute Depth Distillation Loss:** Calculate the scale-invariant depth distillation loss $\mathcal{L}_{\text{depth}}$ to enforce geometric consistency [S2, unofficial]:
-    $$ \mathcal{L}_{\text{depth}}(\hat{\mathbf{D}}, \hat{\mathbf{D}}^{tea}) = \frac{1}{|P|} \sum_{p \in P} \left( \log(\hat{\mathbf{D}}_p) - \log(\hat{\mathbf{D}}_p^{tea}) \right)^2 - \frac{1}{|P|^2} \left( \sum_{p \in P} \left( \log(\hat{\mathbf{D}}_p) - \log(\hat{\mathbf{D}}_p^{tea}) \right) \right)^2 $$
-    where $\hat{\mathbf{D}}_p^{tea} = \mathbf{D}^{tea}_p + \epsilon$ and $\epsilon = 1e-8$ [S2, unofficial]. The second term is the mean of the log-differences, effectively making the loss scale-invariant [S2, unofficial].
-6.  **Optimize:** Update the student's first-order SH coefficients (and potentially other attributes) by minimizing the combined loss. The source emphasizes that strict L1/L2 depth losses are not used because teacher depth may be unreliable and slight differences are expected [S2, unofficial].
+- **Target SH Degree:** 1 (first-order) [S1][S2, S2, unofficial].
+- **Epsilon ($\epsilon$):** $10^{-8}$ for depth stability [S2, S2, unofficial].
+- **Loss Weights:** Not specified in the sources. Typically, $\mathcal{L}_{\text{total}} = \lambda_1 \mathcal{L}_{\text{dstill}} + \lambda_2 \mathcal{L}_{\text{depth}}$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def first_order_sh_distillation(teacher_model, student_model, images, intrinsics, extrinsics, epsilon=1e-8):
+import torch
+import torch.nn as nn
+
+def first_order_sh_distillation(teacher_model, student_model, images, cameras, num_iterations=1000, lr=1e-4, epsilon=1e-8):
     """
     Distills third-order SH from teacher to first-order SH in student.
+    
+    Args:
+        teacher_model: Pretrained 3DGS model with 3rd-order SH.
+        student_model: 3DGS model with 1st-order SH (parameters to optimize).
+        images: Ground truth images for training views.
+        cameras: Camera parameters for training views.
+        num_iterations: Number of optimization steps.
+        lr: Learning rate.
+        epsilon: Stability constant for depth log.
+        
+    Returns:
+        Optimized student_model.
     """
-    # 1. Render Teacher
-    teacher_colors, teacher_depths = render_scene(teacher_model, images, intrinsics, extrinsics)
+    optimizer = torch.optim.Adam(student_model.parameters(), lr=lr)
     
-    # 2. Render Student
-    student_colors, student_depths = render_scene(student_model, images, intrinsics, extrinsics)
-    
-    # 3. Compute Color Distillation Loss
-    # L_dstill = Mean L2 distance between teacher and student pixel colors
-    color_diff = teacher_colors - student_colors
-    l_dstill = mean(square(color_diff)) # Assuming L2 norm squared inside mean
-    
-    # 4. Compute Scale-Invariant Depth Distillation Loss
-    # Add epsilon for stability
-    teacher_depth_log = log(teacher_depths + epsilon)
-    student_depth_log = log(student_depths + epsilon)
-    
-    diff = student_depth_log - teacher_depth_log
-    mean_diff = mean(diff)
-    
-    # L_depth = Mean squared diff - (Mean diff)^2
-    l_depth = mean(square(diff)) - square(mean_diff)
-    
-    # 5. Update Student
-    # Combine losses (weights not specified in source, assume equal or tuned)
-    total_loss = l_dstill + l_depth
-    
-    # Backpropagate and update student_model.sh_coefficients (first-order)
-    optimize(student_model, total_loss)
-    
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+        
+        # 1. Render from Teacher
+        with torch.no_grad():
+            teacher_outputs = teacher_model.render(cameras)
+            teacher_colors = teacher_outputs['color'] # Shape: [H, W, 3]
+            teacher_depth = teacher_outputs['depth'] # Shape: [H, W, 1]
+            
+        # 2. Render from Student
+        student_outputs = student_model.render(cameras)
+        student_colors = student_outputs['color']
+        student_depth = student_outputs['depth']
+        
+        # 3. Compute Color Distillation Loss
+        # L_dstill = mean(||C_tea - C_stu||)
+        color_loss = torch.mean(torch.norm(teacher_colors - student_colors, dim=-1))
+        
+        # 4. Compute Depth Distillation Loss
+        # Stabilize depth
+        teacher_depth_stab = teacher_depth + epsilon
+        student_depth_stab = student_depth + epsilon
+        
+        # Log differences
+        log_diff = torch.log(student_depth_stab) - torch.log(teacher_depth_stab)
+        
+        # Scale-invariant term: mean squared - square of mean
+        mean_log_diff = torch.mean(log_diff)
+        depth_loss = torch.mean(log_diff**2) - mean_log_diff**2
+        
+        # 5. Total Loss
+        # Note: Weights are not specified in sources. Assuming equal weight for demonstration.
+        total_loss = color_loss + depth_loss
+        
+        # 6. Backpropagate
+        total_loss.backward()
+        optimizer.step()
+        
+        if i % 100 == 0:
+            print(f"Iter {i}: Color Loss {color_loss.item():.4f}, Depth Loss {depth_loss.item():.4f}")
+            
     return student_model
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Depth Reliability:** The teacher's depth map may not be perfectly accurate. Using a scale-invariant loss prevents the student from overfitting to potentially noisy absolute depth values [S2, unofficial].
-*   **Precision:** The epsilon value ($1e-8$) is critical for numerical stability in the log-depth calculation [S2, unofficial].
-*   **Representation Gap:** Reducing from degree 3 (16 coeffs) to degree 1 (4 coeffs) is a large reduction. Distillation is necessary because simple truncation or projection would result in significant quality loss [S2, unofficial].
+- **Depth Reliability:** The teacher's depth may not always be reliable, so strict L1/L2 depth losses are avoided in favor of scale-invariant log losses [S2, S2, unofficial].
+- **Precision:** Floating-point precision (FP32 vs FP16) affects the stability of the log-depth calculation. Using $\epsilon$ is critical [S2, S2, unofficial].
+- **Degenerate Input:** If the teacher model is poorly trained, the distillation will propagate errors. The teacher must be a high-quality reference [S2, S2, unofficial].
+
+## Subtopics
+
+### SH Degree Reduction (General)
+Truncating SH coefficients from order $L$ to $L-1$ without distillation. Simpler but results in higher quality loss compared to distillation. Choose when computational budget is extremely tight and quality loss is acceptable. [S1]
+
+### Spherical Harmonics Vector Quantization
+Compresses SH coefficients using vector quantization (e.g., K-means) after distillation. Further reduces storage. Choose when memory bandwidth is the primary bottleneck. [S2, S2, unofficial]
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Memory:** Reducing SH degree from 3 to 1 reduces the SH parameter count per Gaussian by 61% (from 48 to 12 coefficients for RGB) [S1].
-*   **Computation:** Rendering computation is reduced by 52% when moving from degree 3 to degree 1 [S1].
-
-**Measured Performance:**
-*   **Degree 3→2:** Reduces parameters by 36% and computation by 35%, with a PSNR drop of 0.17 dB [S1].
-*   **Degree 2→1:** Reduces parameters by 25% and computation by 17%, with a PSNR drop of 0.31 dB [S1].
-*   **Degree 3→1:** Reduces parameters by 61% and computation by 52%, with a PSNR drop of 0.48 dB [S1].
-*   **Overall:** When combined with other compression methods (like VQ), SH distillation contributes to a total model compression of 51.6× with a total PSNR drop of 0.73 dB [S1].
-
-**Strengths and Limitations:**
-*   **Strengths:** Significantly lowers storage burden and increases rendering speed, making it suitable for mobile devices and edge hardware [S1][S2, unofficial].
-*   **Limitations:** Introduces a quality trade-off, with a 0.48 dB PSNR drop for full 3→1 distillation [S1]. It requires a pretrained teacher model, adding an extra training step [S2, unofficial].
-
-**When to Use:**
-*   Use when deploying 3DGS on resource-constrained devices (mobile, embedded) where rendering speed and memory footprint are critical [S2, unofficial].
-*   Use when a slight decrease in PSNR is acceptable for significant compression gains [S1].
-
-**When Not to Use:**
-*   Use when maximum visual fidelity is required and computational resources are abundant (standard desktop rendering).
-*   Use when a pretrained teacher model is not available.
+- **Time Complexity:** Rendering complexity is reduced from $O(N \cdot L^2)$ to $O(N \cdot L)$ where $L$ is the SH degree. Distillation training time is additional but finite.
+- **Memory Complexity:** Parameter count is reduced by 61% (from 48 to 12 coefficients per Gaussian) [S1].
+- **Measured Performance:**
+    - Degree 3→2: -36% parameters, -35% computation, -0.17 dB PSNR [S1].
+    - Degree 2→1: -25% parameters, -17% computation, -0.31 dB PSNR [S1].
+    - Degree 3→1: -61% parameters, -52% computation, -0.48 dB PSNR [S1].
+- **Strengths:** Significant reduction in storage and computation with minimal quality loss (<0.5 dB PSNR) [S1][S2, S2, unofficial]. Enables real-time rendering on mobile devices [S2, S2, unofficial].
+- **Limitations:** Requires a pretrained teacher model. Distillation adds a training phase. Quality loss is higher than simple truncation if not properly tuned [S2, S2, unofficial].
+- **When to Use:** Mobile deployment, edge devices, or any scenario requiring low memory footprint and high rendering speed.
+- **When Not to Use:** High-fidelity offline rendering where quality is paramount and storage/compute are not constraints.
 
 ## Background
-First-order Spherical Harmonics Distillation was introduced in the context of **Mobile-GS**, a framework designed for real-time Gaussian Splatting on mobile devices [S2, unofficial]. The method addresses the high parameter count and storage burden of the original 3D Gaussian Splatting (3DGS) which uses third-order SH [S2, unofficial]. It builds on the concept of knowledge distillation, where a smaller student model learns from a larger teacher model. While LightGaussian used distillation to project third-order SH to second-order, Mobile-GS extends this to first-order for even greater compression [S2, unofficial]. The method is part of a broader suite of compression techniques including Neural Vector Quantization and Contribution-based Pruning [S2, unofficial].
+First-order Spherical Harmonics Distillation was introduced in the Mobile-GS paper (2026) as part of a suite of compression techniques for deploying 3D Gaussian Splatting on mobile devices [S2, S2, unofficial]. It addresses the high parameter count and storage burden of the original third-order SH representation in 3DGS [S2, S2, unofficial]. The method builds on the concept of knowledge distillation, adapting it to the specific structure of SH coefficients in Gaussian Splatting [S2, S2, unofficial].
 
 ## Sources
 [S1] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27

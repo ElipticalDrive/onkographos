@@ -2,246 +2,183 @@
 
 
 ## Overview
-Inverse CDF Ray Sampling generates sample points along a ray by mapping uniform random noise to depth intervals using the cumulative distribution function (CDF) derived from per-hit probabilities. It solves the problem of stratified sampling within non-uniform depth bins defined by ray-triangle or ray-volume intersections, ensuring that samples are distributed according to the likelihood of each interval while maintaining stratification to reduce variance. It differs from simple uniform sampling by weighting samples toward intervals with higher probability mass, and from pure stratified sampling by allowing arbitrary probability distributions rather than uniform bin weights.
+Inverse CDF Ray Sampling is a CUDA kernel that samples points along rays using inverse CDF sampling based on probability distributions (probs) associated with depth intervals (hits), supporting optional fixed step size [S1, unofficial]. It maps uniform random noise to depth intervals using the cumulative distribution function derived from per-hit probabilities [S1, unofficial]. It builds on [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) by replacing uniform spacing with probability-weighted stratification.
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-*   `probs`: Probability distribution for each hit along the ray. Shape: `[batch_size, num_rays, max_hits]`. Each row sums to 1.0 (or is normalized).
-*   `steps`: Target number of samples per ray. Shape: `[batch_size, num_rays]`.
-*   `min_depth`: Minimum depth of the current hit interval. Shape: `[batch_size, num_rays, max_hits]`.
-*   `max_depth`: Maximum depth of the current hit interval. Shape: `[batch_size, num_rays, max_hits]`.
-*   `pts_idx`: Index of the primitive/vertex associated with each hit. Shape: `[batch_size, num_rays, max_hits]`.
-*   `fixed_step_size`: Optional scalar. If $> 0$, overrides dynamic step calculation for uniform spacing within bins. If $-1$, uses dynamic calculation.
+* `probs`: Probability distribution for each hit along the ray. Shape: `[batch_size, num_rays, max_hits]` [S1, unofficial].
+* `steps`: Target number of samples per ray. Shape: `[batch_size, num_rays]` [S1, unofficial].
+* `min_depth`: Minimum depth of the current hit interval. Shape: `[batch_size, num_rays, max_hits]` [S1, unofficial].
+* `max_depth`: Maximum depth of the current hit interval. Shape: `[batch_size, num_rays, max_hits]` [S1, unofficial].
+* `pts_idx`: Index of the primitive/vertex associated with each hit. Shape: `[batch_size, num_rays, max_hits]` [S1, unofficial].
+* `fixed_step_size`: Optional scalar. If $> 0$, overrides dynamic step calculation for uniform spacing within bins. If $-1$, uses dynamic calculation [S1, unofficial].
 
 **Outputs:**
-*   `sampled_idx`: Primitive indices for each sample. Shape: `[batch_size, num_rays, max_samples_per_ray]`.
-*   `sampled_dists`: Distance from the start of the current bin to the sample. Shape: `[batch_size, num_rays, max_samples_per_ray]`.
-*   `sampled_depth`: Absolute depth of the sample. Shape: `[batch_size, num_rays, max_samples_per_ray]`.
+* `sampled_idx`: Primitive indices for each sample. Shape: `[batch_size, num_rays, max_samples_per_ray]` [S1, unofficial].
+* `sampled_dists`: Distance from the start of the current bin to the sample. Shape: `[batch_size, num_rays, max_samples_per_ray]` [S1, unofficial].
+* `sampled_depth`: Absolute depth of the sample. Shape: `[batch_size, num_rays, max_samples_per_ray]` [S1, unofficial].
 
 ### Data Structures
-The method processes data in chunks to manage memory.
-*   **Chunk Size ($G$):** 200.
-*   **Batch Chunk Size:** $4 \times G = 800$ rays processed per CUDA kernel launch to avoid Out-Of-Memory (OOM) errors.
-*   **Padding:** Inputs are padded to multiples of $G$. Let $H$ be the padded ray count.
-*   **Reshaping:** Data is viewed as `(G, -1, P)` for 3D tensors and `(G, -1)` for 2D tensors, where $P$ is the point dimension (e.g., 3 for depth/idx).
+The method processes data in chunks to manage memory [S1, unofficial].
+* **Chunk Size ($G$):** 200 [S1, unofficial].
+* **Batch Chunk Size:** $4 \times G = 800$ rays processed per CUDA kernel launch to avoid Out-Of-Memory (OOM) errors [S1, unofficial].
+* **Padding:** Inputs are padded to multiples of $G$. Let $H$ be the padded ray count [S1, unofficial].
+* **Reshaping:** Data is viewed as `(G, -1, P)` for 3D tensors and `(G, -1)` for 2D tensors, where $P$ is the point dimension (e.g., 3 for depth/idx) [S1, unofficial].
 
 ### Algorithm Steps
-1.  **Initialization:**
-    *   Set $G = 200$.
-    *   Determine ray count $N$ and point dimension $P$.
-    *   Pad inputs to size $H$ (multiple of $G$).
-    *   Calculate `max_steps` as $\lceil \max(\text{steps}) \rceil + P$. This defines the output length dimension.
-    *   Generate a noise tensor of shape `[H, max_steps]`.
-    *   If `deterministic` is true, set noise to $0.5$. Otherwise, sample uniform $u \in [0, 1)$ and clamp to $[0.001, 0.999]$ to prevent edge cases in division [S1, unofficial].
-
-2.  **Chunking:**
-    *   Iterate through rays in chunks of $4 \times G$.
-
-3.  **Per-Chunk Processing (CUDA Kernel Logic):**
-    For each ray $k$ in the chunk:
-    *   Let $K$ be the global index offset for the chunk.
-    *   Let $s$ be the sample index counter, initialized to 0.
-    *   Let $z_{low}$ be the lower bound of the current bin, initialized to `min_depth` of the first hit.
-    *   Let $curr\_bin$ be the current hit index, initialized to 0.
-    *   Let $curr\_min\_cdf$ be the cumulative probability at the start of the current bin, initialized to 0.
-    *   Let $curr\_max\_cdf$ be the cumulative probability at the end of the current bin, initialized to `probs[k, 0]`.
-    *   Let $curr\_min\_depth$ be `min_depth[k, 0]`.
-    *   Let $curr\_max\_depth$ be `max_depth[k, 0]`.
-    *   Let $done$ be false.
-
-    **Loop over target steps:**
-    For $curr\_step$ from 0 to `total_steps` - 1:
-    *   Calculate the target CDF value:
-        $$ curr\_cdf = (curr\_step + noise[K + curr\_step]) \times step\_size $$
-        Where $step\_size = 1.0 / \text{steps}[k]$ if `fixed_step_size` $\le 0$, else $step\_size = \text{fixed\_step\_size}$.
-        *Note: The source implies `step_size` scales the noise addition to the integer step index. In standard inverse CDF, this maps the uniform noise to the [0,1] probability space.*
-
-    *   **Skip Empty/Invalid Bins:**
-        While $curr\_cdf > curr\_max\_cdf$:
-        *   If $curr\_bin \ge max\_hits$ or `pts_idx[k, curr_bin] == -1`:
-            *   Set $done = true$. Break.
-        *   Increment $curr\_bin$.
-        *   Update bounds:
-            $$ curr\_min\_depth = \text{min\_depth}[k, curr\_bin] $$
-            $$ curr\_max\_depth = \text{max\_depth}[k, curr\_bin] $$
-            $$ curr\_min\_cdf = curr\_max\_cdf $$
-            $$ curr\_max\_cdf += \text{probs}[k, curr\_bin] $$
-            $$ z_{low} = curr\_min\_depth $$
-        *   If $done$, break outer loop.
-
-    *   **Sample Within Current Bin:**
-        If not $done$:
-        *   Calculate normalized position within the bin:
-            $$ u = \frac{curr\_cdf - curr\_min\_cdf}{curr\_max\_cdf - curr\_min\_cdf} $$
-        *   Calculate depth:
-            $$ z = curr\_min\_depth + u \times (curr\_max\_depth - curr\_min\_depth) $$
-        *   Store sample:
-            $$ \text{sampled\_idx}[K + s] = \text{pts\_idx}[k, curr\_bin] $$
-            $$ \text{sampled\_dists}[K + s] = z - z_{low} $$
-            $$ \text{sampled\_depth}[K + s] = \frac{z + z_{low}}{2} $$
-        *   Update $z_{low} = z$.
-        *   Increment $s$.
-
-    *   **Handle Remaining Bins (if step size is fixed or to fill quota):**
-        While $z_{low} < curr\_max\_depth$ AND NOT $done$:
-        *   This loop handles cases where multiple samples might fall into the remaining part of the current bin or subsequent bins if the step logic doesn't cover all hits. However, the primary logic above iterates by *step*. The "Handle remaining bins" section in the source suggests a fallback or specific handling for fixed step sizes or boundary conditions.
-        *   Specifically, if `fixed_step_size` is used, the logic might differ. The source notes: "If `fixed_step_size` > 0.0, overrides the calculated step size for uniform spacing within bins."
-        *   The loop:
-            $$ \text{sampled\_idx}[K + s] = \text{pts\_idx}[k, curr\_bin] $$
-            $$ \text{sampled\_dists}[K + s] = curr\_max\_depth - z_{low} $$
-            $$ \text{sampled\_depth}[K + s] = \frac{curr\_max\_depth + z_{low}}{2} $$
-            Increment $curr\_bin$ and $s$.
-            If $curr\_bin \ge max\_hits$ or `pts_idx[k, curr_bin] == -1`, break.
-            Update $curr\_min\_depth, curr\_max\_depth, z_{low}$.
-
-4.  **Post-Processing:**
-    *   Concatenate results from all chunks.
-    *   Reshape outputs to `[H, -1]`.
-    *   Truncate to $N$ rays (remove padding).
-    *   Trim outputs to `max_len` (the maximum valid samples per ray, usually `max_steps`).
-    *   Mark outputs as non-differentiable.
+1. Set batch chunk size $G = 200$ [S1, unofficial].
+2. Determine ray count $N$ and point dimension $P$ [S1, unofficial].
+3. Pad inputs to size $H$ (multiple of $G$) [S1, unofficial].
+4. Reshape inputs to `(G, -1, P)` for data and `(G, -1)` for steps [S1, unofficial].
+5. Calculate `max_steps = steps.ceil().long().max() + P` [S1, unofficial].
+6. Generate noise tensor of shape `[H, max_steps]` [S1, unofficial].
+7. If `deterministic`, set noise to $0.5$; else, sample uniform $u \in [0, 1)$ and clamp to $[0.001, 0.999]$ [S1, unofficial].
+8. Process in chunks of $4 \times G$ to avoid OOM [S1, unofficial].
+9. Call CUDA extension `_ext.inverse_cdf_sampling` with `pts_idx`, `min_depth`, `max_depth`, `noise`, `probs`, `steps`, and `fixed_step_size` [S1, unofficial].
+10. Concatenate results from chunks [S1, unofficial].
+11. Reshape outputs to `(H, -1)` [S1, unofficial].
+12. Truncate to $N$ rays if padded [S1, unofficial].
+13. Trim outputs to `max_len` (max valid samples per ray) [S1, unofficial].
+14. Mark outputs as non-differentiable [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import random
+
+def pad_1d(arr, pad_right):
+    return arr + [0] * pad_right
+
+def pad_2d(arr, pad_right):
+    return [row + [0] * pad_right for row in arr]
+
 def inverse_cdf_sampling(probs, steps, min_depth, max_depth, pts_idx, fixed_step_size=-1, deterministic=False):
-    """
-    Implements Inverse CDF Ray Sampling.
-    """
-    batch_size, num_rays, max_hits = probs.shape
+    batch_size, num_rays, max_hits = len(probs), len(probs[0]), len(probs[0][0])
     G = 200
-    H = ((num_rays + G - 1) // G) * G  # Pad to multiple of G
-    
-    # Pad inputs
-    probs_pad = pad(probs, (0, 0, 0, H - num_rays))
-    steps_pad = pad(steps, (0, H - num_rays))
-    min_depth_pad = pad(min_depth, (0, 0, 0, H - num_rays))
-    max_depth_pad = pad(max_depth, (0, 0, 0, H - num_rays))
-    pts_idx_pad = pad(pts_idx, (0, 0, 0, H - num_rays))
-    
-    # Calculate max samples needed
-    max_steps_val = int(torch.ceil(steps_pad).max().item())
-    max_samples = max_steps_val + 3  # P=3 buffer
-    
-    # Generate noise
-    noise = torch.rand(H, max_samples)
-    if deterministic:
-        noise.fill_(0.5)
-    else:
-        noise = torch.clamp(noise, 0.001, 0.999)
-        
+    H = ((num_rays + G - 1) // G) * G
+    P = 3
+
+    probs_pad = pad_2d(probs, H - num_rays)
+    steps_pad = pad_1d(steps, H - num_rays)
+    min_depth_pad = pad_2d(min_depth, H - num_rays)
+    max_depth_pad = pad_2d(max_depth, H - num_rays)
+    pts_idx_pad = pad_2d(pts_idx, H - num_rays)
+
+    max_steps_val = math.ceil(max(steps_pad)) + P
+    noise = [[0.5 if deterministic else max(0.001, min(0.999, u)) for u in [0.0] * max_steps_val] for _ in range(H)]
+    if not deterministic:
+        for i in range(H):
+            for j in range(max_steps_val):
+                noise[i][j] = max(0.001, min(0.999, random.random()))
+
     results = []
     chunk_size = 4 * G
-    
+
     for start in range(0, H, chunk_size):
         end = min(start + chunk_size, H)
         chunk_len = end - start
-        
-        # Extract chunk data
-        c_probs = probs_pad[start:end]
-        c_steps = steps_pad[start:end]
-        c_min_depth = min_depth_pad[start:end]
-        c_max_depth = max_depth_pad[start:end]
-        c_pts_idx = pts_idx_pad[start:end]
-        c_noise = noise[start:end]
-        
-        # Call CUDA kernel (simulated logic for description)
-        # The actual implementation is in C++/CUDA
         chunk_samples = cuda_inverse_cdf_kernel(
-            c_probs, c_steps, c_min_depth, c_max_depth, c_pts_idx, 
-            c_noise, fixed_step_size, max_samples
+            probs_pad[start:end], steps_pad[start:end],
+            min_depth_pad[start:end], max_depth_pad[start:end],
+            pts_idx_pad[start:end], noise[start:end],
+            fixed_step_size, max_steps_val, start
         )
         results.append(chunk_samples)
-        
-    # Concatenate and reshape
-    all_samples = torch.cat(results, dim=1) # Shape: [H, max_samples]
-    all_samples = all_samples[:, :num_rays, :] # Truncate padding
-    
-    # Trim to actual max steps per ray
-    final_samples = []
-    for i in range(num_rays):
-        num_s = int(steps[i].item())
-        final_samples.append(all_samples[i, :num_s])
-        
+
+    all_samples = [item for sublist in results for item in sublist]
+    all_samples = all_samples[:num_rays]
+    final_samples = [ray[:max(steps[i])] for i, ray in enumerate(all_samples)]
     return final_samples
 
-def cuda_inverse_cdf_kernel(probs, steps, min_depth, max_depth, pts_idx, noise, fixed_step_size, max_samples):
-    """
-    Simulates the CUDA kernel logic.
-    """
-    batch_size, num_rays, max_hits = probs.shape
-    output = torch.zeros(batch_size, num_rays, max_samples)
-    output_idx = torch.zeros_like(output).long()
-    output_dist = torch.zeros_like(output)
-    
+def cuda_inverse_cdf_kernel(probs, steps, min_depth, max_depth, pts_idx, noise, fixed_step_size, max_steps, K_offset):
+    batch_size, num_rays, max_hits = len(probs), len(probs[0]), len(probs[0][0])
+    output_idx = []
+    output_dist = []
+    output_depth = []
+
     for k in range(num_rays):
         s = 0
-        z_low = min_depth[k, 0]
+        z_low = min_depth[k][0]
         curr_bin = 0
         curr_min_cdf = 0.0
-        curr_max_cdf = probs[k, 0]
-        curr_min_depth = min_depth[k, 0]
-        curr_max_depth = max_depth[k, 0]
+        curr_max_cdf = probs[k][0]
+        curr_min_depth = min_depth[k][0]
+        curr_max_depth = max_depth[k][0]
         done = False
-        
         step_size = fixed_step_size if fixed_step_size > 0 else 1.0 / steps[k]
-        
-        for curr_step in range(int(steps[k].item())):
+
+        for curr_step in range(int(steps[k])):
             if done:
                 break
-                
-            curr_cdf = (curr_step + noise[k, curr_step]) * step_size
-            
-            # Skip bins where curr_cdf exceeds current bin's max CDF
+            curr_cdf = (float(curr_step) + noise[k][curr_step]) * step_size
+
             while curr_cdf > curr_max_cdf:
+                output_idx.append(pts_idx[k][curr_bin])
+                output_dist.append(curr_max_depth - z_low)
+                output_depth.append((curr_max_depth + z_low) * 0.5)
                 curr_bin += 1
-                if curr_bin >= max_hits or pts_idx[k, curr_bin] == -1:
+                s += 1
+                if curr_bin >= max_hits or pts_idx[k][curr_bin] == -1:
                     done = True
                     break
-                curr_min_depth = min_depth[k, curr_bin]
-                curr_max_depth = max_depth[k, curr_bin]
+                curr_min_depth = min_depth[k][curr_bin]
+                curr_max_depth = max_depth[k][curr_bin]
                 curr_min_cdf = curr_max_cdf
-                curr_max_cdf += probs[k, curr_bin]
+                curr_max_cdf += probs[k][curr_bin]
                 z_low = curr_min_depth
-                
             if done:
                 break
-                
-            # Sample within bin
+
             u = (curr_cdf - curr_min_cdf) / (curr_max_cdf - curr_min_cdf)
             z = curr_min_depth + u * (curr_max_depth - curr_min_depth)
-            
-            output[k, curr_step, 0] = z # Depth
-            output_dist[k, curr_step, 0] = z - z_low
-            output_idx[k, curr_step, 0] = pts_idx[k, curr_bin]
-            
+            output_idx.append(pts_idx[k][curr_bin])
+            output_dist.append(z - z_low)
+            output_depth.append((z + z_low) * 0.5)
             z_low = z
             s += 1
-            
-    return output, output_idx, output_dist
+
+            while z_low < curr_max_depth and not done:
+                output_idx.append(pts_idx[k][curr_bin])
+                output_dist.append(curr_max_depth - z_low)
+                output_depth.append((curr_max_depth + z_low) * 0.5)
+                curr_bin += 1
+                s += 1
+                if curr_bin >= max_hits or pts_idx[k][curr_bin] == -1:
+                    break
+                curr_min_depth = min_depth[k][curr_bin]
+                curr_max_depth = max_depth[k][curr_bin]
+                z_low = curr_min_depth
+
+        output_idx.append([idx + K_offset for idx in output_idx[-s:]])
+        output_dist.append(output_dist[-s:])
+        output_depth.append(output_depth[-s:])
+
+    return output_idx, output_dist, output_depth
 ```
 
 ### Parameters
-*   `fixed_step_size`: If $> 0$, overrides dynamic step calculation. If $-1$, uses $1/\text{steps}$ [S1, unofficial].
-*   `probs`: Shape `[b, num_rays, max_hits]` [S1, unofficial].
-*   `steps`: Shape `[b, num_rays]` [S1, unofficial].
+* `fixed_step_size`: If $> 0$, overrides dynamic step calculation. If $-1$, uses dynamic calculation [S1, unofficial].
+* `probs`: Shape `[b, num_rays, max_hits]` [S1, unofficial].
+* `steps`: Shape `[b, num_rays]` [S1, unofficial].
 
 ### Pitfalls
-*   **Noise Clamping:** Noise must be clamped to $[0.001, 0.999]$ to prevent division by zero or invalid CDF lookups at the exact boundaries [S1, unofficial].
-*   **Padding:** Inputs must be padded to multiples of $G=200$ to align with the kernel's block structure.
-*   **Invalid Hits:** Check for `pts_idx == -1` to handle rays with fewer hits than `max_hits`.
+* **Noise Clamping:** Noise must be clamped to $[0.001, 0.999]$ to prevent division by zero or invalid CDF lookups at the exact boundaries [S1, unofficial].
+* **Padding:** Inputs must be padded to multiples of $G=200$ to align with the kernel's block structure [S1, unofficial].
+* **Invalid Hits:** Check for `pts_idx == -1` to handle rays with fewer hits than `max_hits` [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of samples per ray. The bin-skipping loop adds overhead proportional to the number of hits, but typically $S \ll \text{max\_hits}$.
-*   **Memory Complexity:** $O(N \cdot S)$ for outputs. Intermediate padding adds $O(G \cdot S)$ overhead.
-*   **Performance:** Chunking by $4 \times G$ (800 rays) balances GPU occupancy and memory usage. The method is efficient on CUDA hardware due to parallel ray processing.
-*   **Strengths:** Provides stratified sampling with arbitrary probability distributions, reducing variance compared to uniform sampling.
-*   **Limitations:** Requires pre-computed probabilities and hit intervals. Less flexible than pure random sampling for highly dynamic scenes where probabilities change rapidly.
+* **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of samples per ray. The bin-skipping loop adds overhead proportional to the number of hits, but typically $S \ll \text{max\_hits}$ [G].
+* **Memory Complexity:** $O(N \cdot S)$ for outputs. Intermediate padding adds $O(G \cdot S)$ overhead [G].
+* **Performance:** Chunking by $4 \times G$ (800 rays) balances GPU occupancy and memory usage. The method is efficient on CUDA hardware due to parallel ray processing [S1, unofficial].
+* **Strengths:** Provides stratified sampling with arbitrary probability distributions, reducing variance compared to uniform sampling [G].
+* **Limitations:** Requires pre-computed probabilities and hit intervals. Less flexible than pure random sampling for highly dynamic scenes where probabilities change rapidly [G].
 
 ## Background
 Inverse CDF sampling is a standard technique in Monte Carlo integration, applied to volume rendering to sample along rays according to the estimated density or opacity distribution. In the context of Neural Volume Rendering (NSVF), it is used to efficiently sample points within the reconstructed volume based on the learned probability distribution of surface intersections [S1, unofficial].
 
 ## Sources
 [S1] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)
+[S2] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)

@@ -1,55 +1,116 @@
 # Line-based Histogram for 2D Scalar Pairs
 
-Also called: Line-based boundary histogram
+Also called: Line-based Histogram for LTF UI, Line-based boundary histogram
 
 ## Overview
-A visualization method for displaying the 2D histogram of scalar value pairs $(S_1, S_2)$ sampled along the gradient direction, using lines instead of point primitives to make material boundaries intuitive [S1]. It differs from standard 2D histograms by mapping bin counts to line intensity and bin coordinates to axis positions, explicitly revealing the transition between two material types [S1].
+A visualization technique for the domain of the Lighting Transfer Function (LTF) that uses lines connecting two parallel axes to represent scalar value pairs $(S_1, S_2)$ sampled along the gradient direction, making material boundaries intuitive to select [S1, unofficial][S2]. It differs from standard 2D histograms, which are unintuitive because both axes represent the same data type (scalar value), making it difficult to distinguish homogeneous regions from boundaries [S1, unofficial]. It also differs from [Sorted Histogram Visualization](10660-sorted-histogram-visualization.md) by preserving the spatial relationship of the scalar pairs via parallel axes rather than sorting bins.
 
 ## How it works
-**Inputs:**
-1. A precomputed 2D histogram of scalar pairs $(S_1, S_2)$, where $S_1$ is the scalar value in the gradient direction and $S_2$ is the scalar value opposite to the gradient direction [S1].
-2. The number of bins for each axis [G].
+**Inputs and Outputs**
+*   **Input:** A 2D histogram of scalar value pairs $(S_1, S_2)$, where $S_1$ is the scalar value read in the gradient direction and $S_2$ is the scalar value sampled opposite to the gradient direction. The histogram bins contain counts (frequencies) of occurrences for each pair [S1, unofficial][S2].
+*   **Output:** A set of line primitives rendered between two parallel axes, where line intensity encodes bin occupancy [S1, unofficial][S2].
 
-**Outputs:**
-A 2D visualization where lines connect the top axis (representing $S_2$) to the bottom axis (representing $S_1$) [S1].
+**Data Structures**
+The underlying data structure is a 2D histogram $H$ with dimensions $N_1 \times N_2$, where $N_1$ and $N_2$ are the number of bins for $S_1$ and $S_2$ respectively. Each entry $H[i, j]$ stores the count $C_{i,j}$ of voxels where the scalar pair falls into bin $i$ for $S_1$ and bin $j$ for $S_2$ [S1, unofficial][S2].
 
-**Data Structures:**
-The histogram stores counts of scalar value pairs $(S_1, S_2)$ sampled along the gradient direction [S1].
+**Steps**
+1.  **Define Axes:** Establish two parallel vertical axes.
+    *   The **bottom axis** represents $S_1$ (scalar in gradient direction), increasing from left to right [S1, unofficial][S2].
+    *   The **top axis** represents $S_2$ (scalar opposite to gradient direction) [S1, unofficial][S2].
+2.  **Map Bins to Coordinates:** For each non-zero bin $(i, j)$ in the histogram with count $C_{i,j}$:
+    *   Determine the horizontal position $x_1$ on the bottom axis corresponding to bin $i$ of $S_1$ [S1, unofficial][S2].
+    *   Determine the horizontal position $x_2$ on the top axis corresponding to bin $j$ of $S_2$ [S1, unofficial][S2].
+3.  **Draw Lines:** Draw a line segment connecting $(x_2, y_{top})$ to $(x_1, y_{bottom})$, where $y_{top}$ and $y_{bottom}$ are the vertical coordinates of the top and bottom axes respectively [S1, unofficial][S2].
+4.  **Set Intensity:** Set the intensity (opacity or color brightness) of the line proportional to the count $C_{i,j}$ [S1, unofficial][S2].
 
-**Steps:**
-1. Define two parallel vertical axes. The bottom axis corresponds to the scalar value read in the gradient direction, and increases from left to right. The top axis is used to plot the scalar sampled opposite to the gradient direction [S1].
-2. For each bin $(i, j)$ in the 2D histogram:
-   a. Map bin $i$ to a horizontal position $x_1$ on the bottom axis corresponding to value $S_1$ [G].
-   b. Map bin $j$ to a horizontal position $x_2$ on the top axis corresponding to value $S_2$ [G].
-   c. Draw a line from the top axis to the bottom axis [S1].
-   d. Set the intensity of the line to increase with the number of such transitions in the data set [S1].
+**Formulas**
+Let $L$ be the set of lines. For each bin $(i, j)$ with count $C_{i,j} > 0$:
+$$ L_{i,j} = \text{Line}( (x_2(j), y_{top}), (x_1(i), y_{bottom}) ) $$
+$$ \text{Intensity}(L_{i,j}) = f(C_{i,j}) $$
+where $f$ is a monotonic function mapping count to intensity [S1, unofficial][S2]. The sources do not specify the exact normalization or functional form of $f$, only that intensity increases with the number of transitions [S1, unofficial][S2].
 
-**Interpretation:**
-- Dense vertical lines represent homogeneous regions in a volume [S1].
-- Diagonal lines illustrate the boundaries between two materials, with the start and end of the lines indicating the scalar values of the different materials at that boundary [S1].
+**Parameters**
+*   **Axis Orientation:** Bottom axis for $S_1$ (gradient), Top axis for $S_2$ (opposite gradient) [S1, unofficial][S2].
+*   **Intensity Mapping:** Proportional to bin count [S1, unofficial][S2].
 
-**Parameters:**
-- Line intensity scaling factor: Not given in the sources.
-- Axis resolution: Determined by the histogram bin count [G].
+**Edge Cases and Pitfalls**
+*   **Unintuitive Standard Histograms:** Standard 2D histograms of $(S_1, S_2)$ are unintuitive because both axes represent the same data type, making it difficult to distinguish homogeneous regions (diagonal band) from boundaries (vertical deviations) [S1, unofficial]. This method solves that by using parallel axes [S1, unofficial][S2].
+*   **Interpretation:** Dense vertical lines represent homogeneous regions; diagonal lines illustrate boundaries between two materials [S1, unofficial][S2].
 
-**Edge Cases:**
-- Precision issues in scalar sampling may affect bin assignment, but the method relies on the precomputed histogram [S1].
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_line_based_histogram(histogram_2d, num_bins_s1, num_bins_s2, axis_height):
+    """
+    Renders the line-based histogram for 2D scalar pairs.
+    
+    Args:
+        histogram_2d: 2D array of shape (num_bins_s1, num_bins_s2) containing counts.
+        num_bins_s1: Number of bins for S1 (bottom axis).
+        num_bins_s2: Number of bins for S2 (top axis).
+        axis_height: Vertical distance between top and bottom axes.
+        
+    Returns:
+        list of Line objects with intensity attributes.
+    """
+    lines = []
+    
+    # Determine max count for intensity normalization
+    max_count = 0
+    for i in range(num_bins_s1):
+        for j in range(num_bins_s2):
+            if histogram_2d[i, j] > max_count:
+                max_count = histogram_2d[i, j]
+                
+    # Handle case where histogram is empty
+    if max_count == 0:
+        return lines
+
+    # Define axis positions
+    # Bottom axis (S1) and Top axis (S2) are parallel vertical lines.
+    # We assume they span the same horizontal range [0, 1] for simplicity.
+    # In practice, x-coordinates are mapped from bin indices to screen space.
+    
+    for i in range(num_bins_s1):
+        for j in range(num_bins_s2):
+            count = histogram_2d[i, j]
+            if count > 0:
+                # Map bin index to horizontal position
+                # Assuming uniform bin width and left-to-right increase for S1
+                x1 = i / (num_bins_s1 - 1) if num_bins_s1 > 1 else 0.5
+                x2 = j / (num_bins_s2 - 1) if num_bins_s2 > 1 else 0.5
+                
+                # Vertical positions
+                y_top = 0
+                y_bottom = axis_height
+                
+                # Create line
+                line = {
+                    'start': (x2, y_top),
+                    'end': (x1, y_bottom),
+                    'intensity': count / max_count # Normalized intensity [G]
+                }
+                lines.append(line)
+                
+    return lines
+```
 
 ## Subtopics
 
 ### [Parallel Coordinate Plots Generation](9539-parallel-coordinate-plots-generation.md)
-Visualizes the joint distribution of two scalar attributes by mapping nonzero entries in a 2D joint histogram to geometric primitives (quads) on parallel axes. It differs from point-based scatter plots by using quads to represent histogram bin occupancy, providing a denser and more intuitive representation of material boundaries in volume rendering transfer function design. Choose this method when a denser, quad-based representation of the underlying histogram is preferred over line-based visualization.
+Parallel Coordinate Plots (PCP) Generation visualizes the joint distribution of two scalar attributes by mapping nonzero entries in a 2D joint histogram to geometric primitives (quads) on parallel axes. It differs from point-based scatter plots by using quads to represent histogram bin occupancy, providing a denser and more intuitive representation of material boundaries in volume rendering transfer function design. This method builds on [Line-based Histogram for 2D Scalar Pairs](6702-line-based-histogram-for-2d-scalar-pairs.md) by utilizing the underlying 2D histogram data structure.
 
 ## Operating characteristics
-- **Strengths:** Intuitively reveals material boundaries and homogeneous regions through line orientation and density [S1].
-- **Limitations:** Requires precomputed 2D histogram; interpretation depends on understanding the gradient-aligned sampling context [S1].
-- **When to use:** When the goal is to visualize material boundaries and transitions in scalar pairs for lighting transfer function specification [S1].
-- **When not to use:** When detailed statistical distribution within bins is more important than boundary visualization [S1].
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** $O(N_1 \times N_2)$ to iterate over the histogram bins, where $N_1, N_2$ are the number of bins for each scalar dimension.
+*   **Memory Complexity:** $O(N_1 \times N_2)$ to store the 2D histogram.
+*   **Strengths:** Makes material boundaries immediately visible through diagonal lines; dense vertical lines clearly indicate homogeneous regions [S1, unofficial][S2].
+*   **Limitations:** Requires precomputed 2D histogram of scalar pairs along gradient direction [S1, unofficial][S2].
+*   **Usage:** Used in the user interface for specifying Lighting Transfer Functions, allowing users to select material boundaries by identifying diagonal lines [S1, unofficial].
 
 ## Background
-Originated in the paper "Lighting Transfer Functions Using Gradient Aligned Sampling" [S1]. The method was developed to allow users to specify lighting for boundaries between materials by making boundary relationships immediately visible in the 2D histogram [S1].
+The method was developed to address the unintuitive nature of standard 2D histograms for scalar value pairs sampled along the gradient direction [S1, unofficial]. It was introduced in the context of Lighting Transfer Functions for Direct Volume Rendering [S1, unofficial][S2]. The technique allows users to specify lighting for boundaries between materials by assigning lighting coefficients to the different lines in a volume, using pairs of 1D transfer function widgets for the two axes [S1, unofficial][S2].
 
 ## Sources
-[S1] Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29
+[S1] Lighting Transfer Functions for Direct Volume Rendering, https://escholarship.org/uc/item/71g7h4kx, fetched 2026-10-26 (unofficial)
+[S2] PDF Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29

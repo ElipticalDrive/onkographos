@@ -3,25 +3,25 @@
 Also called: Fan Beam Projection, Parallel Beam Projection, X-ray projection, aTx
 
 ## Overview
-Forward Projection (also known as X-ray projection or aTx) is a volume rendering technique that computes the line integral of the volume density along each viewing ray, simulating the attenuation of X-rays passing through an object [S1]. It solves the problem of generating 2D projection images from 3D volumetric data, which is fundamental in computed tomography (CT) and digital radiography [S1]. Unlike Maximum Intensity Projection (MIP) which highlights the highest density voxel, Forward Projection aggregates all encountered densities, providing a cumulative measure of material thickness that clearly represents dense structures like bones or vessels at the cost of losing depth information [S1].
+Forward Projection (also known as X-ray projection or aTx) is a volume rendering technique that computes the line integral of interpolated sample values along each viewing ray [S1]. It solves the problem of generating 2D projection images from 3D volumetric data, a fundamental step in computed tomography (CT) and digital radiography [S1]. Unlike Maximum Intensity Projection (MIP) which highlights the highest density voxel, Forward Projection aggregates all encountered values, providing a cumulative measure that clearly represents dense structures like bones or vessels at the cost of losing depth information [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume $V$ of dimensions $W \times H \times D$, a ray origin $\mathbf{o}$, and a ray direction $\mathbf{d}$ for each pixel.
-*   **Output:** A 2D image $I$ where each pixel value represents the integrated density along the corresponding ray.
+*   **Input:** A 3D volume $V$ of dimensions $W \times H \times D$, a ray origin $\mathbf{o}$, and a ray direction $\mathbf{d}$ for each pixel [G].
+*   **Output:** A 2D image $I$ where each pixel value represents the integrated density along the corresponding ray [G].
 
 **Data Structures:**
 *   **Volume:** Stored as a 3D array. Access is typically linearized. For a batch of images, the index is calculated as `batch_index * channels * height * width + channel_index * height * width + img_i * width + img_j` [S2, unofficial].
-*   **Accumulator:** A scalar value initialized to $0.0$ for each ray [G, parent].
+*   **Accumulator:** A scalar value initialized to $0.0$ for each ray [G, Parent].
 
 **Steps:**
 1.  **Ray Intersection:** Determine the entry and exit points of the ray $r(t) = \mathbf{o} + t\mathbf{d}$ with the volume bounding box [Parent].
 2.  **Discretization:** Divide the ray segment inside the volume into $N$ samples with step size $\Delta t$ [Parent].
-3.  **Sampling:** For each sample point $t_i$, retrieve the scalar value $s_i$ from the volume using trilinear interpolation [Parent].
-4.  **Accumulation:** Update the accumulator $A$ by adding the product of the sample value and the step size:
-    $$ A \leftarrow A + s_i \cdot \Delta t $$
+3.  **Sampling:** For each sample point $t_i$, retrieve the scalar value $v_i$ from the volume using trilinear interpolation [Parent].
+4.  **Accumulation:** Update the accumulator $A$ by adding the product of the sample value and the step length:
+    $$ A \leftarrow A + v_i \cdot \Delta t $$
     [S1][S2, unofficial]
-5.  **Finalization:** The final value $A$ is the projection value for that pixel [S1].
+5.  **Finalization:** The final value $A$ is assigned to the corresponding pixel in the output image [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -44,24 +44,51 @@ def forward_projection(volume, ray_origin, ray_direction, num_samples, step_size
     accumulator = 0.0
     
     for i in range(num_samples):
-        # Calculate current position along the ray
         t = i * step_size
         current_pos = ray_origin + ray_direction * t
         
         # Retrieve density via trilinear interpolation [Parent]
-        # Note: Implementation of trilinear interpolation depends on volume bounds
-        # and normalization. Here we assume a helper `sample_volume` exists.
-        density = sample_volume(volume, current_pos)
+        density = trilinear_interpolate(volume, current_pos)
         
-        # Accumulate: sum of density * step size [S1][S2, unofficial]
+        # Accumulate: sum of value * step size [S1][S2, unofficial]
         accumulator += density * step_size
         
     return accumulator
+
+def trilinear_interpolate(volume, pos):
+    """Standard trilinear interpolation helper [G]."""
+    x, y, z = pos
+    # Map to grid coordinates assuming volume bounds are [0, W], [0, H], [0, D]
+    ix = x * (volume.shape[0] - 1)
+    iy = y * (volume.shape[1] - 1)
+    iz = z * (volume.shape[2] - 1)
+    # Clamp to valid range
+    ix = max(0.0, min(volume.shape[0] - 2, ix))
+    iy = max(0.0, min(volume.shape[1] - 2, iy))
+    iz = max(0.0, min(volume.shape[2] - 2, iz))
+    x0, y0, z0 = int(ix), int(iy), int(iz)
+    x1, y1, z1 = x0 + 1, y0 + 1, iz + 1
+    dx, dy, dz = ix - x0, iy - y0, iz - z0
+    v000 = volume[x0, y0, z0]
+    v100 = volume[x1, y0, z0]
+    v010 = volume[x0, y1, z0]
+    v110 = volume[x1, y1, z0]
+    v001 = volume[x0, y0, z1]
+    v101 = volume[x1, y0, z1]
+    v011 = volume[x0, y1, z1]
+    v111 = volume[x1, y1, z1]
+    c00 = v000 * (1 - dx) + v100 * dx
+    c01 = v010 * (1 - dx) + v110 * dx
+    c10 = v001 * (1 - dx) + v101 * dx
+    c11 = v011 * (1 - dx) + v111 * dx
+    d0 = c00 * (1 - dy) + c01 * dy
+    d1 = c10 * (1 - dy) + c11 * dy
+    return d0 * (1 - dz) + d1 * dz
 ```
 
 **Parameters:**
-*   **num_samples:** Determines the resolution of the ray traversal. Higher values increase accuracy but cost more time.
-*   **step_size ($\Delta t$):** The distance between samples. It should be small enough to avoid aliasing but large enough for performance. Typically related to the voxel size [Parent].
+*   **num_samples:** Number of discrete points along the ray segment [G].
+*   **step_size ($\Delta t$):** Distance between samples, typically matching the voxel spacing to avoid aliasing [G].
 
 **Edge Cases and Pitfalls:**
 *   **Loss of Depth Information:** The method sums all densities along the ray, meaning structures at different depths are indistinguishable in the final 2D image [S1].
@@ -95,13 +122,13 @@ A forward/back projector pair for objects with cylindrical symmetry [S4, unoffic
 *   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of samples per ray and $P$ is the number of pixels (rays) [Parent].
 *   **Memory Complexity:** $O(V)$ for the volume storage, $O(P)$ for the output image [Parent].
 *   **Performance:** Generally faster than alpha blending because it does not require sorting or complex blending calculations [S1].
-*   **Strengths:** Clearly represents dense structures like bones or vessels; computationally efficient; order-independent [S1, Parent].
+*   **Strengths:** Clearly represents dense structures like bones or vessels; computationally efficient; order-independent [S1].
 *   **Limitations:** Loses depth information; static images may lack context compared to volume-rendered images [S1].
-*   **When to use:** When generating 2D projection images for CT reconstruction initialization or quick visualization of dense structures [S1][S3, unofficial].
+*   **When to use:** When generating 2D projection images for CT reconstruction initialization [S3, unofficial] or for quick visualization of dense structures [S1].
 *   **When not to use:** When depth perception or transparency effects are required [S1].
 
 ## Background
-Forward Projection is a fundamental technique in medical imaging, particularly in Computed Tomography (CT) and Digital Radiography [S1]. It simulates the physical process of X-ray attenuation, where the intensity of the X-ray beam decreases exponentially as it passes through matter [S1]. The method is widely used in the forward pass of differentiable tomography pipelines and for initializing reconstruction algorithms [S2, S3, S4, unofficial].
+Forward Projection is a fundamental technique in medical imaging, particularly in Computed Tomography (CT) and Digital Radiography [S1]. It is used in the forward pass of differentiable tomography pipelines [S4, unofficial] and for initializing reconstruction algorithms [S3, unofficial].
 
 ## Sources
 [S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

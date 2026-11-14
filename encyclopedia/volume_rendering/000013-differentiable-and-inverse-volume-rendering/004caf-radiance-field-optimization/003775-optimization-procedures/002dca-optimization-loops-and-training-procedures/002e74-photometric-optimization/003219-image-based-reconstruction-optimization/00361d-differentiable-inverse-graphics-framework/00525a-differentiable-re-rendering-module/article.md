@@ -3,171 +3,173 @@
 Also called: Differentiable Re-rendering, Photometric Re-rendering Loss, Re-rendering Supervision
 
 ## Overview
-The Differentiable Re-rendering Module is a raytracing-based differentiable renderer that enforces an energy-conserving image formation process to supervise the joint training of intrinsic scene properties (albedo, normals, depth) and lighting [S1]. It re-renders the input image using predicted intrinsic properties and a Volumetric Spherical Gaussian (VSG) lighting volume, computing a photometric error between the re-rendered output and the original input [S1]. Unlike methods that rely on explicit ground-truth lighting, this module enables the estimation of complete continuous HDR light fields from single LDR images by ensuring predictions are physically correct through re-rendering constraints [S1]. It builds on the [Differentiable Inverse Graphics Framework](7617-differentiable-inverse-graphics-framework.md) by providing a differentiable path from latent 3D parameters to pixel space.
+The Differentiable Re-rendering Module is a raytracing-based differentiable renderer that uses a Volumetric Spherical Gaussian (VSG) lighting representation and predicted intrinsic properties (albedo, normals, depth) to re-render an input image, enforcing an energy-conserving image formation process [S1]. It provides supervision via re-rendering error, ensuring that predicted geometry and reflectance are physically correct by enforcing that the input image should be retrieved if the predictions are re-rendered [S1]. It sets itself apart from sibling methods by enabling the estimation of a complete continuous light field function, including HDR and high-frequency spatial and angular details, despite being trained with only LDR images [S1].
 
 ## How it works
-The module takes predicted intrinsic properties (albedo $\tilde{A}$, normals $\tilde{N}$, depth $\tilde{D}$) and a predicted 3D lighting volume $\hat{L}$ as inputs, and outputs a re-rendered Low Dynamic Range (LDR) image $\tilde{I}$ [S1]. The rendering process uses a Lambertian reflectance model and raytracing to compute radiance [S1].
+**Inputs and Outputs:**
+*   **Inputs:** Predicted intrinsic properties (albedo $\tilde{A}$, normals $\tilde{N}$, depth $\tilde{D}$) and a predicted 3D lighting volume $\hat{L}$ represented by VSGs.
+*   **Outputs:** A re-rendered Low Dynamic Range (LDR) image $\tilde{I}$, which is compared against the ground-truth input image $I$ to compute the loss for joint training [S1].
 
 **Data Structures:**
-*   **Lighting Volume ($\hat{L}$):** A 3D voxel grid where each voxel contains parameters controlling the emission direction and sharpness of the light source, capturing view-dependent effects and strong directional lighting [S1].
-*   **Intrinsic Properties:**
-    *   $\tilde{A}$: Predicted albedo map.
-    *   $\tilde{N}$: Predicted surface normal map.
-    *   $\tilde{D}$: Predicted depth map.
-*   **Sampling Configuration:**
-    *   $K$: Number of lighting directions per pixel (typically 50).
-    *   $N$: Number of points per ray (typically 128).
-    *   $\{l\}_K$: Set of $K$ equi-angular lighting directions on the upper hemisphere, sampled using a Fibonacci lattice [S1].
+*   **Lighting Volume ($\hat{L}$):** A 3D voxel grid where each voxel contains parameters controlling the emission direction and sharpness of the light source, capturing view-dependent effects [S1].
+*   **Intrinsic Maps:** 2D maps for albedo $\tilde{A}$, normals $\tilde{N}$, and depth $\tilde{D}$, aligned with the input image resolution [S1].
+
+**Numbered Steps:**
+1.  **Pixel-to-3D Projection:** For each pixel $p$ in the input image with coordinates $(x_p, y_p)$, determine the 3D location $p = (x_p, y_p, \tilde{D}_p)$ using the predicted depth $\tilde{D}_p$ [S1].
+2.  **Lighting Direction Sampling:** Choose $K$ equi-angular lighting directions $\{l\}_K$ on the upper hemisphere using a Fibonacci lattice [S1].
+3.  **Radiance Query:** For each lighting direction $l$, query the lighting volume $\hat{L}$ at the 3D location $p$ to compute the radiance $R(p, l, \hat{L})$ along that direction [S1].
+4.  **Shading Computation:** Compute the shading $\tilde{S}_p$ at pixel $p$ by summing the contributions of all sampled lighting directions, weighted by the Lambertian diffuse term and the differential solid angle [S1]:
+    $$ \tilde{S}_p = \sum_{l \in \{l\}_K} R(p, l, \hat{L}) \max(l \cdot \tilde{N}_p, 0) \Delta \Omega $$
+    where $\tilde{N}_p$ is the predicted normal at $p$, $\max(l \cdot \tilde{N}_p, 0)$ is the Lambertian diffuse term, and $\Delta \Omega$ is the differential solid angle associated with each direction in the Fibonacci lattice [S1].
+5.  **Albedo Modulation and Energy Conservation:** Multiply the shading by the predicted albedo $\tilde{A}_p$ and apply the energy conservation ratio $\pi_1$ [S1]:
+    $$ \text{HDR Value}_p = \pi_1 \cdot \tilde{A}_p \cdot \tilde{S}_p $$
+6.  **Soft Clipping:** Apply the soft clipping function $\phi$ to convert the HDR value to an LDR value within $[0, 1]$, ensuring differentiability [S1]:
+    $$ \tilde{I}_p = \phi(\text{HDR Value}_p) $$
+7.  **Loss Calculation:** Compute the error between the re-rendered image $\tilde{I}$ and the original input image $I$ to supervise the joint training of intrinsics and lighting [S1].
+
+**Formulas:**
+*   **Rendered Image:**
+    $$ \tilde{I}_p = \phi \left( \pi_1 \sum_{l \in \{l\}_K} R(p, l, \hat{L}) \max(l \cdot \tilde{N}_p, 0) \Delta \Omega \right) $$
+    Where:
+    *   $\tilde{I}_p$: Rendered LDR RGB value for pixel $p$.
+    *   $\phi$: Soft clipping function.
+    *   $\pi_1$: Energy conservation ratio [S1].
+    *   $R(p, l, \hat{L})$: Radiance queried from the lighting volume for direction $l$ at location $p$.
+    *   $\tilde{N}_p$: Predicted normal at pixel $p$.
+    *   $\Delta \Omega$: Differential solid angle [S1].
+*   **Soft Clipping Function:**
+    $$ \phi(x) = \begin{cases} x & \text{if } x \le \tau \\ \tau + (1 - \tau)(1 - e^{-\frac{x-\tau}{1-\tau}}) & \text{if } x > \tau \end{cases} $$
+    *Note: The source text provides a garbled formula for $x > \tau$ as $x-\tau / (1-(1-\tau)e^{-...})$. The standard soft clipping with exponential function implied by context and common practice in differentiable rendering is used here [S1].*
+    *   $\tau$: Threshold for soft clipping, set to 0.9 [S1].
 
 **Parameters:**
-*   $\tau$: Soft clipping threshold, set to 0.9 [S1].
-*   $\pi_1$: Energy conservation ratio [S1].
-*   $\Delta \Omega$: Differential solid angle associated with each lighting direction [S1].
-
-**Algorithm:**
-For each pixel $p$ in the image:
-
-1.  **Ray Origin:** Determine the 3D location $p$ using the pixel coordinates $(x_p, y_p)$ and the predicted depth $\tilde{D}_p$:
-    $$ p = (x_p, y_p, \tilde{D}_p) $$
-    [S1]
-
-2.  **Lighting Sampling:** Choose $K$ equi-angular lighting directions $\{l\}_K$ on the upper hemisphere using a Fibonacci lattice [S1].
-
-3.  **Radiance Query:** For each lighting direction $l \in \{l\}_K$, query the lighting volume $\hat{L}$ at the surface point $p$ to compute the radiance $R(p, l, \hat{L})$ [S1].
-
-4.  **Shading Computation:** Compute the shaded radiance for pixel $p$ by summing the contributions from all lighting directions, weighted by the Lambertian diffuse term $\max(l \cdot \tilde{N}_p, 0)$ and the differential solid angle $\Delta \Omega$ [S1]:
-    $$ \tilde{S}_p = \pi_1 \sum_{l \in \{l\}_K} R(p, l, \hat{L}) \max(l \cdot \tilde{N}_p, 0) \Delta \Omega $$
-    [S1]
-
-5.  **Soft Clipping:** Apply a differentiable soft clipping function $\phi$ to map the High Dynamic Range (HDR) shading value to the LDR range $[0, 1]$:
-    $$ \tilde{I}_p = \phi(\tilde{S}_p) $$
-    [S1]
-
-    The soft clipping function $\phi(x)$ is defined as:
-    $$
-    \phi(x) = \begin{cases} 
-    x & \text{if } x \le \tau \\
-    \tau + (1 - \tau)\left(1 - e^{-\frac{x-\tau}{1-\tau}}\right) & \text{if } x > \tau 
-    \end{cases}
-    $$
-    [S1]
-    *Note: The source text provides a garbled formula for $x > \tau$. The expression above is the standard soft clipping function implied by the context "soft clipping with the exponential function" and the parameter $\tau=0.9$ [S1].*
-
-6.  **Loss Calculation:** Compare the re-rendered image $\tilde{I}$ against the original input image $I$ to compute the error for joint training [S1].
+*   $\tau = 0.9$ [S1].
+*   $K = 50$ rays per pixel [S1].
+*   $N = 128$ points per ray (for volume traversal/querying) [S1].
+*   Re-rendering Resolution: $60 \times 80$ during training [S1].
+*   Ray Sharing: Rays are shared among 8-neighbors to get an effective $K=450$ rays per pixel [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def differentiable_re_rendering(pixels, depth_map, normal_map, albedo_map, lighting_volume, K=50, tau=0.9, pi_1=1.0):
+def differentiable_re_rendering(pixels, predicted_depth, predicted_normals, predicted_albedo, lighting_volume, k=50, tau=0.9, pi_1=1.0):
     """
     Re-renders the input image using predicted intrinsics and VSG lighting.
     
     Args:
-        pixels: List of pixel coordinates (x, y).
-        depth_map: 2D array of predicted depth values.
-        normal_map: 3D array of predicted normals (x, y, 3).
-        albedo_map: 3D array of predicted albedo (x, y, 3).
-        lighting_volume: 3D voxel grid of VSG lighting parameters.
-        K: Number of lighting directions per pixel.
+        pixels: List of pixel coordinates (x, y) or image dimensions.
+        predicted_depth: 2D array of predicted depth values D_tilde.
+        predicted_normals: 3D array (H, W, 3) of predicted normals N_tilde.
+        predicted_albedo: 3D array (H, W, 3) of predicted albedo A_tilde.
+        lighting_volume: Function or data structure to query radiance R(p, l, L_hat).
+        k: Number of lighting directions to sample.
         tau: Soft clipping threshold.
         pi_1: Energy conservation ratio.
         
     Returns:
         re_rendered_image: 2D array of LDR RGB values.
     """
-    H, W = depth_map.shape
-    re_rendered_image = np.zeros((H, W, 3))
+    h, w = predicted_depth.shape
+    re_rendered_image = np.zeros((h, w, 3))
     
-    # Precompute lighting directions using Fibonacci lattice
-    lighting_directions = fibonacci_sphere(K)
+    # Precompute lighting directions using Fibonacci lattice on upper hemisphere
+    lighting_directions = fibonacci_lattice_upper_hemisphere(k)
     
-    for y in range(H):
-        for x in range(W):
-            # 1. Determine 3D location
-            depth = depth_map[y, x]
-            p_3d = get_3d_location(x, y, depth) # Assumes camera intrinsics are known
+    # Precompute differential solid angle (constant for uniform Fibonacci lattice)
+    delta_omega = 4 * np.pi / (2 * k) # Approximation for upper hemisphere sampling density
+    
+    for y in range(h):
+        for x in range(w):
+            # Step 1: Determine 3D location
+            depth_val = predicted_depth[y, x]
+            # Note: Actual 3D coordinate calculation requires camera intrinsics, 
+            # but the formula uses p = (x_p, y_p, D_tilde_p) as the query point.
+            # We assume the lighting volume is queried at this depth along the ray.
+            # For simplicity, we pass the depth and pixel coords to the query function.
+            point_3d = (x, y, depth_val)
             
-            # 2. Get predicted normals and albedo
-            normal = normal_map[y, x]
-            albedo = albedo_map[y, x]
-            
-            # 3. Compute shading
+            # Step 2 & 3: Query radiance for each lighting direction
             shading_sum = np.zeros(3)
             for l in lighting_directions:
-                # Query lighting volume for radiance R(p, l, L_hat)
-                # Note: R depends on albedo and lighting volume parameters
-                radiance = query_lighting_volume(lighting_volume, p_3d, l, albedo)
+                # Query radiance from VSG lighting volume
+                # R(p, l, L_hat) returns a 3D vector (RGB radiance)
+                radiance = lighting_volume.query(point_3d, l)
                 
                 # Lambertian diffuse term
-                diffuse_term = max(np.dot(l, normal), 0.0)
+                normal = predicted_normals[y, x]
+                dot_product = np.dot(l, normal)
+                diffuse_term = max(dot_product, 0.0)
                 
-                # Differential solid angle (approximate for equi-angular sampling)
-                delta_omega = 4 * np.pi / K
-                
+                # Accumulate shading
                 shading_sum += radiance * diffuse_term * delta_omega
             
-            # Apply energy conservation
-            shaded_hdr = pi_1 * shading_sum
+            # Step 4 & 5: Albedo modulation and energy conservation
+            albedo = predicted_albedo[y, x]
+            hdr_value = pi_1 * albedo * shading_sum
             
-            # 4. Soft clipping
-            re_rendered_image[y, x] = soft_clip(shaded_hdr, tau)
+            # Step 6: Soft clipping
+            ldr_value = soft_clip(hdr_value, tau)
+            
+            re_rendered_image[y, x] = ldr_value
             
     return re_rendered_image
 
 def soft_clip(x, tau):
     """
-    Differentiable soft clipping function.
+    Soft clipping function to map HDR values to LDR [0, 1].
     """
     if x <= tau:
         return x
     else:
-        # Standard soft clipping formula implied by source
+        # Standard soft clipping with exponential function
         return tau + (1 - tau) * (1 - np.exp(-(x - tau) / (1 - tau)))
 
-def fibonacci_sphere(samples):
+def fibonacci_lattice_upper_hemisphere(k):
     """
-    Generate K equi-angular points on the upper hemisphere using Fibonacci lattice.
+    Generate K equi-angular lighting directions on the upper hemisphere.
     """
-    points = []
-    phi = np.pi * (3 - np.sqrt(5))  # Golden angle
-    for i in range(samples):
-        y = 1 - (i / (samples - 1)) * 2  # y goes from 1 to -1
-        radius = np.sqrt(1 - y * y)  # radius at y
-        theta = phi * i  # golden angle increment
-        x = np.cos(theta) * radius
-        z = np.sin(theta) * radius
-        points.append(np.array([x, y, z]))
-    return points
-
-def query_lighting_volume(volume, point, direction, albedo):
-    """
-    Query the VSG lighting volume for radiance in a given direction.
-    Implementation details depend on the specific VSG parameterization.
-    """
-    # Placeholder for specific VSG query logic
-    # Returns radiance R(p, l, L_hat)
-    pass
+    directions = []
+    for i in range(k):
+        # Fibonacci lattice parameterization for upper hemisphere
+        # y = 1 - (2*i + 1)/k + 1/k  (normalized 0 to 1 for upper hemisphere)
+        # theta = arccos(y)
+        # phi = pi * (1 + sqrt(5)) * i
+        y = 1.0 - (2 * i + 1) / k
+        theta = np.arccos(y)
+        phi = np.pi * (1 + np.sqrt(5)) * i
+        
+        # Convert spherical to Cartesian
+        x_coord = np.sin(theta) * np.cos(phi)
+        y_coord = np.sin(theta) * np.sin(phi)
+        z_coord = np.cos(theta)
+        
+        directions.append(np.array([x_coord, y_coord, z_coord]))
+    return directions
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The soft clipping function must be implemented carefully to ensure numerical stability near the threshold $\tau$ [S1].
+*   **Boundaries:** The lighting volume query must handle points outside the defined volume or near boundaries gracefully [G].
+*   **Degenerate Input:** If predicted depth is invalid (e.g., zero or negative), the 3D location is undefined, leading to errors in lighting query [G].
 
 ## Subtopics
 
 ### Joint Re-prediction Module
-A fully-convolutional network that refines initial predictions of albedo, normals, and depth by conditioning on the initial prediction, re-rendering error, input image, shading, and shading Jacobian [S1]. It computes the Shading Jacobian $\frac{\partial \tilde{S}}{\partial \tilde{N}}$ as the outer product of lighting direction and normal for visible directions: $\frac{\partial \tilde{S}}{\partial \tilde{N}_p} = \sum_{l \in \{l\}_K, l \cdot \tilde{N}_p > 0} R(p, l, \hat{L}) \otimes l \Delta \Omega$, where $\otimes$ is the outer product [S1]. This module uses the cached shading computations from the re-rendering step to efficiently provide gradients for refinement [S1].
+A fully-convolutional network that refines initial predictions of albedo, normals, and depth by conditioning on the initial prediction, re-rendering error, input image, shading, and shading Jacobian [S1]. It computes the Shading Jacobian $\frac{\partial \tilde{S}}{\partial \tilde{N}}$ as the outer product of lighting direction and normal for visible directions: $\frac{\partial \tilde{S}}{\partial \tilde{N}_p} = \sum_{l \in \{l\}_K, l \cdot \tilde{N}_p > 0} R(p, l, \hat{L}) \otimes l \Delta \Omega$, where $\otimes$ is the outer product [S1]. This module is chosen when higher fidelity refinement of intrinsic properties is needed after the initial re-rendering supervision [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The re-rendering step involves raytracing for each pixel. With $K$ rays per pixel and $N$ points per ray, the complexity is $O(H \cdot W \cdot K \cdot N)$, where $H, W$ are image dimensions [S1].
-*   **Memory Complexity:** Requires storing the 3D lighting volume $\hat{L}$ and intrinsic property maps [S1]. GPU memory usage is reported as comparable to Lighthouse's 15G during training [S1].
-*   **Performance:** On a TITAN V GPU, the inference time for the Differentiable Re-rendering Module is 140ms, while the Direct Prediction and Joint Re-prediction modules take 20ms and 12ms respectively [S1].
-*   **Resolution:** Training is performed at a re-rendering resolution of $60 \times 80$ pixels [S1].
-*   **Strengths:** Enables physically correct HDR lighting prediction from LDR images; differentiable end-to-end training; handles view-dependent effects and strong directional lighting [S1].
-*   **Limitations:** Computationally expensive due to raytracing; requires careful handling of soft clipping for differentiability; relies on Lambertian reflectance assumption [S1].
-*   **When to use:** When estimating inverse rendering parameters (lighting, albedo, geometry) from single or few images where ground-truth lighting is unavailable, and physical consistency is required [S1].
-*   **When not to use:** When real-time performance is critical and approximate methods are sufficient; when non-Lambertian materials are dominant without extension [S1].
+*   **Time Complexity:** The re-rendering step involves $K$ ray queries per pixel. With $K=50$ and ray sharing among 8-neighbors, the effective cost is equivalent to $K=450$ rays per pixel [S1].
+*   **Memory Complexity:** Requires storing the 3D lighting volume $\hat{L}$ and intrinsic maps. The source notes that GPU memory usage is comparable to Lighthouse's 15G during training [S1].
+*   **Measured Performance:** On a TITAN V GPU, the inference time for the Differentiable Re-rendering Module is 140ms, while the Direct Prediction, Lighting Joint Prediction, and Joint Re-prediction Modules take 20ms, 130ms, and 12ms respectively [S1].
+*   **Scaling:** The method uses a fixed re-rendering resolution of $60 \times 80$ during training, which limits the resolution of the supervision signal but reduces computational cost [S1].
+*   **Strengths:** Enables HDR lighting estimation from LDR images; ensures physical correctness of predictions; differentiable end-to-end training [S1].
+*   **Limitations:** Computationally expensive due to raytracing; relies on accurate initial predictions for effective refinement; limited by the resolution of the re-rendering step [S1].
+*   **When to use:** When estimating HDR lighting and intrinsic properties from single or few LDR images is required, and physical consistency is crucial [S1].
+*   **When not to use:** When real-time performance is critical and the computational cost of raytracing is prohibitive [G].
 
 ## Background
-The Differentiable Re-rendering Module was introduced in the context of indoor inverse rendering, specifically in the paper "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" [S1]. It addresses the challenge of estimating HDR lighting from LDR images by formulating an energy-conserving image formation process [S1]. The method leverages a Volumetric Spherical Gaussian (VSG) representation for lighting, which captures view-dependent effects and strong directional lighting [S1]. It is part of a holistic inverse rendering framework that includes a Direct Prediction Module, a Lighting Joint Prediction Module, and a Joint Re-prediction Module [S1]. The approach is trained on synthetic data from the InteriorNet dataset, using LDR perspective images as input and supervising intrinsic properties with paired ground truth [S1].
+The Differentiable Re-rendering Module was introduced in the paper "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" by [S1] in 2021. It is part of a holistic inverse rendering framework that leverages a Volumetric Spherical Gaussian (VSG) representation for lighting. The method was designed to address the lack of HDR ground-truth data by using a differentiable renderer to supervise the learning of intrinsic properties and lighting from LDR images [S1]. It is used in the context of indoor scene reconstruction and inverse rendering, particularly for estimating spatially-varying lighting from single images [S1].
 
 ## Sources
 [S1] Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting, https://doi.org/10.1109/iccv48922.2021.01231, fetched 2026-10-26

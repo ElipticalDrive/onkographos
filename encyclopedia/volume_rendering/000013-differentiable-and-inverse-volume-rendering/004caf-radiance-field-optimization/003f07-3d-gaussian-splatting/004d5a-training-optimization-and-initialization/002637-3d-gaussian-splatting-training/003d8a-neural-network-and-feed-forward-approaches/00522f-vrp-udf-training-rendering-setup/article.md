@@ -3,168 +3,112 @@
 Also called: UDF-Gaussian Joint Training, Volume Rendering Prior Network
 
 ## Overview
-This method integrates a neural network-based volume rendering prior that learns Unsigned Distance Functions (UDFs) to guide the optimization of 3D Gaussian Splatting [Parent](9526-neural-network-and-feed-forward-approaches.md). It solves the problem of inaccurate surface reconstruction in thin structures and depth errors caused by ill-defined UDF fields near surfaces, which are common in standard volume rendering frameworks. Unlike [MVSplat](9213-mvsplat.md), which focuses on differentiable rendering from multi-view stereo, this approach explicitly decouples the geometric prior (UDF) from the radiance field, using the UDF to constrain Gaussian placement and refinement.
+VRP-UDF is a method that integrates a neural network-based volume rendering prior into the 3D Gaussian Splatting pipeline to learn Unsigned Distance Functions (UDFs) and guide optimization by providing dense queries around the UDF zero-level set [S1]. It distinguishes itself from standard per-scene optimization by using a learned prior to resolve ambiguities in thin structures and surface reconstruction, addressing the inaccuracies caused by random hierarchical sampling and ill-defined UDF fields near surfaces common in volume rendering frameworks [S1].
 
 ## How it works
-The method employs a joint training pipeline where a UDF network and a color network are trained alongside 3D Gaussians. The UDF provides a dense, unbiased geometric prior, while the Gaussians handle high-frequency appearance details.
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images, camera parameters, and ground truth UDFs/depths for training [S1].
+*   **Outputs:** Optimized 3D Gaussian primitives $\{\mathbf{\mu}_i, \mathbf{R}_i, \mathbf{s}_i, \alpha_i, \mathbf{c}_i\}$ and a learned UDF field $f_u$ [S1].
 
-### Inputs and Outputs
-*   **Inputs:** Multi-view images, camera poses, and ground truth depth maps (or UDF values) for initialization.
-*   **Outputs:** Optimized 3D Gaussian parameters (position, scale, rotation, opacity, spherical harmonics coefficients) and the trained UDF/Color networks.
+**Data Structures:**
+The method employs four Multi-Layer Perceptrons (MLPs) with 256 hidden units:
+1.  **$f_{w1}$:** 3 layers.
+2.  **$f_{w2}$:** 6 layers with skip connections.
+3.  **$f_u$ (UDF function):** 8 layers with skip connections.
+4.  **$f_c$ (Color function):** 2 layers.
 
-### Data Structures
-The core data structures are Multi-Layer Perceptrons (MLPs) and 3D Gaussian primitives.
+**Numbered Steps:**
+1.  **Network Initialization:** Initialize $f_{w1}, f_{w2}, f_u,$ and $f_c$ with 256 hidden units as specified above [S1].
+2.  **UDF Activation:** Apply the Softplus activation function after the final layer of $f_u$ to enforce non-negative outputs, ensuring the output represents a valid unsigned distance [S1].
+3.  **Color Network Input:** Construct the input for the color network $f_c$ using spatial coordinates and features, but explicitly **exclude** normal vectors. Normals are omitted because they are ambiguous at the zero-level set due to the non-differentiability of UDFs [S1].
+4.  **Training Schedule:**
+    *   Train the Gaussian Splatting method for a total of 30,000 iterations [S1].
+    *   Begin training the UDF networks ($f_u$) starting from iteration 9,000 [S1].
+5.  **Refinement Phase:** During the final 10,000 iterations (iterations 20,000–30,000), refine the Gaussians by casting rays. Use a batch size of 2,048 rays, sampling 64 points along each ray [S1].
+6.  **Loss Computation:** Compute rendering errors using depth L1 distance, mask errors with cross-entropy and L1 distance, and "Peak Diff-L1" (depth discrepancy between the sampled point with maximum rendering weight and the true surface) [S1].
 
-**MLP Architectures:**
-All MLPs use 256 hidden units.
-1.  **$f_{w1}$ (Weight Network):** 3 layers.
-2.  **$f_{w2}$ (Weight Network):** 6 layers, includes skip connections.
-3.  **$f_u$ (UDF Network):** 8 layers, includes skip connections.
-4.  **$f_c$ (Color Network):** 2 layers.
-
-**3D Gaussians:**
-Standard 3D Gaussian Splatting representation: mean position $\mu$, covariance $\Sigma$ (parameterized by scale $s$ and rotation $q$), opacity $\alpha$, and spherical harmonics coefficients $c_{lm}$.
-
-### Numbered Steps
-
-1.  **Network Initialization:**
-    Initialize $f_{w1}$, $f_{w2}$, $f_u$, and $f_c$ with the specified layer counts and hidden units. Initialize 3D Gaussians from the input point cloud or sparse reconstruction.
-
-2.  **Training Schedule:**
-    *   **Phase 1 (Iterations 0–9,000):** Train the Gaussian Splatting method only. Do not activate the UDF prior.
-    *   **Phase 2 (Iterations 9,000–20,000):** Begin training the UDFs ($f_u$) and Color network ($f_c$) alongside the Gaussians.
-    *   **Phase 3 (Iterations 20,000–30,000):** Refine Gaussians using the UDF prior.
-
-3.  **UDF Constraint and Activation:**
-    The UDF network $f_u(\mathbf{x})$ outputs the unsigned distance to the surface. To enforce non-negativity, apply the Softplus activation function after the final layer of $f_u$:
-    $$ f_u(\mathbf{x}) = \text{Softplus}(MLP_{f_u}(\mathbf{x})) $$
-    where $\text{Softplus}(z) = \ln(1 + e^z)$.
-
-4.  **Color Network Input Modification:**
-    When querying the color network $f_c$, do **not** include normal vectors in the input. The input to $f_c$ consists only of the spatial coordinates $\mathbf{x}$ and potentially view direction $\mathbf{d}$.
-    *   *Reason:* Normals are ambiguous at the zero-level set of a UDF due to non-differentiability. Including them introduces noise during optimization [S1].
-
-5.  **Ray Casting and Sampling (Refinement Phase):**
-    During the final 10,000 iterations:
-    *   Cast rays through the camera frustum.
-    *   Use a batch size of 2,048 rays per batch.
-    *   Sample 64 points along each ray.
-    *   Evaluate the UDF $f_u$ at these points to guide the density and position of Gaussians.
-
-6.  **Loss Functions:**
-    Minimize rendering errors between predicted images and ground truth. Metrics include:
-    *   Depth L1 distance.
-    *   Mask errors (Cross Entropy and L1 distance).
-    *   Peak Diff-L1: The L1 error between the sampled point with maximum rendering weight and the true surface along each ray.
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_vrp_udf_gaussian(num_iterations=30000, start_udf_iter=9000, 
-                           refine_start_iter=20000, batch_size=2048, 
-                           samples_per_ray=64):
-    # Initialize networks
-    f_w1 = MLP(layers=3, hidden=256)
-    f_w2 = MLP(layers=6, hidden=256, skip_connections=True)
-    f_u  = MLP(layers=8, hidden=256, skip_connections=True)
-    f_c  = MLP(layers=2, hidden=256)
+def train_vrp_udf_gaussian_splatting(images, cameras, gt_udfs, gt_depths):
+    # Initialize MLPs with 256 hidden units
+    fw1 = MLP(layers=3, hidden=256)
+    fw2 = MLP(layers=6, hidden=256, skip_connections=True)
+    fu = MLP(layers=8, hidden=256, skip_connections=True)
+    fc = MLP(layers=2, hidden=256)
     
-    # Initialize Gaussians from sparse reconstruction
-    gaussians = initialize_gaussians_from_point_cloud()
+    # Initialize Gaussian primitives
+    gaussians = initialize_gaussians(images)
     
-    # Optimizers
-    opt_gaussians = Adam(gaussians.parameters())
-    opt_f_u = Adam(f_u.parameters())
-    opt_f_c = Adam(f_c.parameters())
-    
-    # Learning rate schedulers for f_u and f_c follow previous works [1], [24]
-    # Exact values not specified in source [S1]
-    
-    for iteration in range(1, num_iterations + 1):
-        # Sample rays
-        rays = sample_rays(batch_size=batch_size)
+    # Training loop
+    for iteration in range(1, 30001):
         
-        # Sample points along rays
-        points = sample_points_along_rays(rays, num_samples=samples_per_ray)
+        # Update learning rates for fu and fc based on schedulers from [1, 24]
+        update_learning_rate(fu, fc, iteration)
         
-        # Forward pass through UDF
-        # Apply Softplus to enforce non-negative UDF output
-        udf_values = f_u(points)
-        udf_values = softplus(udf_values)
-        
-        # Forward pass through Color Network
-        # Note: Normals are NOT included in input to f_c
-        # Inputs: spatial coordinates, view direction
-        colors = f_c(points, view_directions=rays.directions)
-        
-        # Render image using Gaussian Splatting and UDF prior
-        # The UDF guides the density/opacity of Gaussians
-        rendered_image = render_gaussians_with_udf_prior(
-            gaussians=gaussians, 
-            rays=rays, 
-            udf_values=udf_values,
-            colors=colors
-        )
-        
-        # Compute Loss
-        # Ground truth images and depths are available
-        loss = compute_rendering_loss(rendered_image, ground_truth_image)
-        loss += compute_depth_loss(rendered_depth, ground_truth_depth)
-        
-        # Backpropagation
-        if iteration < start_udf_iter:
-            # Phase 1: Train only Gaussians
-            opt_gaussians.zero_grad()
-            loss.backward()
-            opt_gaussians.step()
-        else:
-            # Phase 2 & 3: Train Gaussians, UDF, and Color Network
-            opt_gaussians.zero_grad()
-            opt_f_u.zero_grad()
-            opt_f_c.zero_grad()
+        if iteration >= 9000:
+            # Train UDF network
+            # Sample points and compute UDF loss using Softplus activation on fu output
+            udf_loss = compute_udf_loss(fu, fw1, fw2, gt_udfs)
+            loss += udf_loss
             
-            loss.backward()
+        # Render Gaussians
+        rendered_images, rendered_depths = render_gaussians(gaussians, cameras)
+        
+        # Compute rendering losses
+        depth_loss = l1_loss(rendered_depths, gt_depths)
+        mask_loss = cross_entropy_loss(rendered_images, images) + l1_loss(rendered_images, images)
+        loss += depth_loss + mask_loss
+        
+        # Optimization step
+        optimize(gaussians, fu, fc, fw1, fw2, loss)
+        
+        # Refinement phase: Final 10,000 iterations
+        if iteration > 20000:
+            # Cast rays with specific batch size and sampling
+            rays = cast_rays(batch_size=2048)
+            sampled_points = sample_along_rays(rays, num_points=64)
             
-            opt_gaussians.step()
-            opt_f_u.step()
-            opt_f_c.step()
+            # Query UDF and Color for refinement
+            udf_values = fu(sampled_points)
+            # Note: Normals are NOT passed to fc
+            colors = fc(sampled_points, features) 
             
-            # Refine Gaussians using UDF constraints in final phase
-            if iteration >= refine_start_iter:
-                refine_gaussians_with_udf(gaussians, f_u, points)
+            # Compute refinement loss (e.g., Peak Diff-L1)
+            refinement_loss = compute_peak_diff_l1(sampled_points, udf_values, gt_depths)
+            loss += refinement_loss
+            optimize(gaussians, fu, fc, fw1, fw2, loss)
 
-def softplus(x):
-    return log(1 + exp(x))
+def compute_udf_loss(fu, fw1, fw2, gt_udfs):
+    # Forward pass through UDF network
+    # Apply Softplus to ensure non-negative output
+    udf_pred = fu(fw1(...), fw2(...))
+    udf_pred = softplus(udf_pred)
+    return l1_loss(udf_pred, gt_udfs)
 ```
 
-### Parameters
-*   **$f_{w1}$:** 3 layers, 256 hidden units.
-*   **$f_{w2}$:** 6 layers, 256 hidden units, skip connections.
-*   **$f_u$:** 8 layers, 256 hidden units, skip connections.
-*   **$f_c$:** 2 layers, 256 hidden units.
-*   **Total Iterations:** 30,000.
-*   **UDF Start Iteration:** 9,000.
-*   **Refinement Batch Size:** 2,048 rays.
-*   **Samples per Ray:** 64.
-*   **Learning Rate:** Follows previous works [1], [24] (exact values not given in [S1]).
+**Parameters:**
+*   **MLP Hidden Units:** 256 for all networks [S1].
+*   **MLP Layers:** $f_{w1}$ (3), $f_{w2}$ (6), $f_u$ (8), $f_c$ (2) [S1].
+*   **Total Iterations:** 30,000 [S1].
+*   **UDF Start Iteration:** 9,000 [S1].
+*   **Refinement Batch Size:** 2,048 rays [S1].
+*   **Points per Ray:** 64 [S1].
+*   **Learning Rate/Scheduler:** Follows previous works [1, 24] (exact values not specified in the source section) [S1].
 
-### Edge Cases and Pitfalls
-1.  **Ill-defined UDF near surfaces:** Random hierarchical sampling can cause rendering inaccuracies near surfaces. This is a common issue in volume rendering frameworks, even theoretically unbiased ones like NeuS [S1].
-2.  **Premature Flipping:** Excessively large convergence parameters (e.g., NeuralUDF's flip factor) can cause the UDF to flip into an SDF before the true surface, leading to depth rendering errors [S1].
-3.  **Normal Ambiguity:** Including normal vectors in the color network input causes instability because normals are undefined/ambiguous at the UDF zero-level set [S1].
+**Edge Cases and Pitfalls:**
+*   **Ill-defined UDF Fields:** Random hierarchical sampling and ill-defined UDF fields near surfaces cause rendering inaccuracies. This is a common issue across volume rendering frameworks, even in theoretically unbiased mappings like NeuS [S1].
+*   **Convergence Parameters:** Excessively large convergence parameters (e.g., NeuralUDF's flip factor) can cause premature flipping before the true surface, leading to depth rendering errors. A larger factor does not guarantee higher accuracy [S1].
+*   **Normal Ambiguity:** Using normal vectors as input to the color network $f_c$ is detrimental because normals are ambiguous at the zero-level set due to UDF non-differentiability [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is intensive due to the joint optimization of Gaussians and multiple MLPs. The refinement phase uses a fixed batch size of 2,048 rays with 64 samples, which is computationally heavier than standard Gaussian Splatting but necessary for UDF guidance.
-*   **Memory Complexity:** Requires storing parameters for four MLPs (total ~1.5M parameters given 256 hidden units) plus the Gaussian attributes.
-*   **Strengths:** Achieves best accuracy among renderers for UDFs and SDFs on ShapeNet. Outperforms other methods on complex indoor scenes (Replica) and thin structures (eggshells, sails) where other UDF-based methods struggle [S1].
-*   **Limitations:** Inaccuracies still occur in real rendering due to sampling and ill-defined UDF fields near surfaces. Thin structures may not be captured completely [S1].
-*   **When to use:** When high-fidelity reconstruction of thin structures and accurate depth is required, and multi-view images with ground truth depth/UDF are available.
-*   **When not to use:** For real-time rendering where the overhead of UDF evaluation and joint training is prohibitive, or when ground truth depth is unavailable.
+*   **Accuracy:** Achieves the best accuracy among compared renderers for UDFs and SDFs on ShapeNet and real scans, particularly excelling in complex indoor scenes and thin structures (e.g., eggshells, sails) where other UDF-based methods struggle [S1].
+*   **Limitations:** Despite being unbiased in training, practical rendering inaccuracies persist due to sampling issues near surfaces. It may not fully capture extremely thin structures in a complete manner without advanced UDF extraction techniques [S1].
+*   **Performance:** The method involves joint training of Gaussian Splatting and neural networks, requiring significant iterations (30k) and specific refinement phases [S1].
 
 ## Background
-The VRP-UDF method originates from the paper "VRP-UDF: Toward Unbiased Learning of Unsigned Distance Functions From Multi-View Images With Volume Rendering Priors" [S1]. It builds upon previous works on volume rendering priors [1, 24] and NeuralUDF [2]. The method addresses the limitations of standard SDF-based approaches by using UDFs, which are more robust to noise and topology changes, while mitigating the ambiguity of normals at the zero-level set. It is particularly effective for reconstructing thin surfaces and complex indoor scenes.
+The VRP-UDF method was introduced to address limitations in learning Unsigned Distance Functions from multi-view images. It builds upon volume rendering priors and extends them to Gaussian Splatting reconstruction. The work is cited as [S1] VRP-UDF: Toward Unbiased Learning of Unsigned Distance Functions From Multi-View Images With Volume Rendering Priors. It compares against methods like NeUDF, VRPrior, and NeuS, highlighting improvements in recovering complete and smooth surfaces [S1].
 
 ## Sources
 [S1] VRP-UDF: Toward Unbiased Learning of Unsigned Distance Functions From Multi-View Images With Volume Rendering Priors., https://doi.org/10.1109/tpami.2026.3653901, fetched 2026-10-27

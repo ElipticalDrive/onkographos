@@ -1,0 +1,162 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,8 @@
+ 
+ ## Overview
+-Bitmask Leaf Compression is a memory optimization technique for Sparse Voxel Octrees that eliminates leaf nodes at the deepest level by packing their voxel data into a single integer field within their parent node [S1, unofficial]. It solves the excessive memory overhead of naive octree representations, where storing explicit leaf nodes causes memory usage to approach 8 times that of a full octree of depth $d-1$ [S1, unofficial]. By removing the leaf node structure entirely, it reduces the memory cost factor $mc$ from 8 to 1 for the deepest level [S1, unofficial].
++Bitmask Leaf Compression is a memory optimization technique for Sparse Voxel Octrees that eliminates leaf nodes at the deepest level by packing their voxel data into a single integer field within their parent node [S1, unofficial]. It solves the excessive memory overhead of naive octree representations, where storing explicit leaf nodes causes the memory cost factor $mc$ to approach 8 for deep trees [S1, unofficial]. By removing the leaf node structure entirely, it reduces the memory cost factor $mc$ from 8 to 1 for the deepest level [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A Sparse Voxel Octree with a defined maximum depth $d$.
+-**Outputs:** An optimized octree structure where the penultimate level nodes contain packed leaf data.
++**Inputs and Outputs:** Input is an octree node at depth $d-1$ with 8 child pointers [S1, unofficial]. Output is a modified node with its `leafs` field populated and the depth $d$ child nodes removed [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -18,83 +17,46 @@
+ };
+ ```
+-*   `children`: Array of 8 pointers. If a child is null, it indicates no subtree exists.
+-*   `leafs`: A 64-bit signed integer (`int64_t`) used only by nodes at depth $d-1$ (the penultimate level).
++The `children` array holds 8 pointers to child nodes [S1, unofficial]. The `leafs` field is a 64-bit signed integer used exclusively by nodes at depth $d-1$ (the penultimate level) to store packed voxel information [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Identify Penultimate Level Nodes:** Locate all nodes at depth $d-1$ in the octree. These nodes would normally have 8 leaf children at depth $d$.
+-2.  **Color Quantization:** For each of the 8 potential leaf voxels, determine its color. Instead of storing a full RGBA vector, map the color to an index in a palette of 256 entries [S1, unofficial].
+-    *   The palette has 256 entries.
+-    *   Index 0 (`00000000_2`) represents the absence of a voxel (empty space) [S1, unofficial].
+-    *   Indices 1–255 represent existing voxels with specific colors [S1, unofficial].
+-3.  **Bit Packing:** Pack the 8 color indices (8 bits each) into the `leafs` field of the parent node.
+-    *   Total bits: $8 \times 8 = 64$ bits [S1, unofficial].
+-    *   **Bit Mapping:** The highest position child (index 7, typically corresponding to specific spatial coordinates depending on Morton order) represents the leftmost 8-bit strip. The lowest position child (index 0) represents the rightmost strip [S1, unofficial].
+-    *   Specifically, if the children are indexed $0$ to $7$, the bits for child $i$ occupy bits $8i$ to $8i+7$ in the `leafs` integer, or vice versa depending on endianness and specific implementation of "leftmost/rightmost". The source states: "the highest position child represents the leftmost 8-bit strip, and the lowest position child represents the rightmost strip" [S1, unofficial]. This implies a mapping where Child 7 maps to the most significant bits (leftmost in visual representation) and Child 0 maps to the least significant bits (rightmost) [S1, unofficial].
+-4.  **Eliminate Leaf Nodes:** Remove the explicit leaf node structures at depth $d$. The parent node at depth $d-1$ now holds the data directly.
+-5.  **Handle Non-Leaf Parents:** Nodes at depth $< d-1$ continue to use the `children` array to point to their subtrees. Nodes at depth $d-1$ that do not have all 8 children present (sparse regions) still use the `leafs` field, but the corresponding 8-bit segments will contain the index 0 (empty) [S1, unofficial].
++1. Identify all nodes at depth $d-1$ in the octree [G].
++2. For each of the 8 child positions, determine voxel presence and color [S1, unofficial].
++3. Map each voxel's color to an index in a palette of 256 entries [S1, unofficial]. Index 0 (`00000000_2`) represents the absence of a voxel [S1, unofficial].
++4. Pack the 8 color indices (8 bits each) into the `leafs` field of the parent node [S1, unofficial].
++5. Eliminate the explicit leaf node structures at depth $d$ [S1, unofficial].
++
++**Formulas:**
++The memory cost factor $mc$ for a naive representation approaches 8 as depth $d$ increases [S1, unofficial]:
++$$mc = \lim_{d \to \infty} \frac{8 \cdot (8^{d-1} - 1) + 7}{8^{d-1} - 1} = 8$$
+ 
+ **Parameters:**
+-*   **Palette Size:** 256 entries [S1, unofficial].
+-*   **Bits per Voxel:** 8 bits [S1, unofficial].
+-*   **Empty Voxel Index:** 0 [S1, unofficial].
++* Palette size: 256 entries [S1, unofficial].
++* Bits per voxel: 8 bits [S1, unofficial].
++* Empty voxel index: 0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The method limits color resolution to 256 distinct colors per voxel. This is a trade-off for memory savings [S1, unofficial].
+-*   **Boundaries:** The compression only applies to the *last* level. If the octree depth is not fixed or if the maximum depth is not reached, the optimization does not apply to shallower levels [S1, unofficial].
+-*   **Degenerate Input:** If a node at depth $d-1$ has fewer than 8 children, the missing children are treated as empty (index 0) in the bitmask [S1, unofficial].
++* If color data is not required, the method can eliminate another level by using only 1 bit per voxel to indicate presence or absence [S1, unofficial].
++* The compression strictly applies to the last level of the octree [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compress_leafs(node, palette):
++def compress_leafs(node_children, palette):
+     """
+-    Compresses the leaf voxels of a node at depth d-1 into its 'leafs' field.
+-    Assumes node is at the penultimate level of the octree.
++    Compresses 8 child voxels into a 64-bit integer.
++    node_children: list of 8 elements, each is None (empty) or an object with a 'color' attribute.
++    palette: dict mapping color values to indices 0-255.
++    Returns: int64 packed value.
+     """
+-    # Initialize leafs field to 0 (all empty)
+-    node.leafs = 0
+-    
+-    # Iterate through the 8 potential children positions
++    packed = 0
+     for i in range(8):
+-        # Determine if child i exists in the naive structure
+-        # In a naive structure, we would check node.children[i]
+-        # Here, we assume we are processing a node that *would* have had children
+-        # or we are converting from a structure where we know the voxel status.
+-        
+-        # Check if voxel i is present
+-        is_present = check_voxel_presence(i) # [G] Helper to determine if voxel i has data
+-        
+-        if is_present:
+-            # Get color and map to palette index
+-            color = get_voxel_color(i) # [G] Helper to retrieve color
+-            index = palette.find_or_add(color)
++        child = node_children[i]
++        if child is None:
++            index = 0
+         else:
+-            index = 0 # 0 represents absence
+-        
+-        # Pack index into the 64-bit integer
+-        # Source [S1, unofficial]: Highest position child (7) -> leftmost strip (MSB)
+-        # Lowest position child (0) -> rightmost strip (LSB)
+-        # Assuming standard bit numbering where bit 0 is LSB:
+-        # Child 0 -> bits 0-7
+-        # Child 7 -> bits 56-63
+-        
+-        # Shift index to correct position
+-        shifted_index = index << (8 * i)
+-        
+-        # OR into leafs
+-        node.leafs |= shifted_index
+-
+-def check_voxel_presence(child_index):
+-    """
+-    [G] Placeholder for logic determining if a voxel exists.
+-    In a naive octree, this would check if node.children[child_index] is not null.
+-    """
+-    pass
+-
+-def get_voxel_color(child_index):
+-    """
+-    [G] Placeholder for logic retrieving color.
+-    In a naive octree, this would access node.children[child_index].color.
+-    """
+-    pass
++            index = palette.get(child.color, 0)
++        # Child 0 (lowest position) -> rightmost strip (bits 0-7)
++        # Child 7 (highest position) -> leftmost strip (bits 56-63)
++        packed |= (index << (8 * i))
++    return packed
+ ```
+ 
+@@ -105,28 +67,15 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:**
+-*   **Compression:** $O(N)$ where $N$ is the number of nodes at depth $d-1$, as each node processes 8 voxels.
+-*   **Decompression:** $O(1)$ per voxel access, as the data is directly in the parent node.
++**Time Complexity:** Compression runs in $O(N)$ time where $N$ is the number of nodes at depth $d-1$, as each node processes exactly 8 voxels [G]. Decompression accesses data in $O(1)$ time per voxel [G].
+ 
+-**Memory Complexity:**
+-*   **Naive Representation:** Memory cost factor $mc$ approaches 8 for deep trees [S1, unofficial].
+-*   **Bitmask Compression:** Reduces memory overhead by eliminating leaf nodes. The memory cost for the deepest level is reduced by a factor of 8 compared to naive representation [S1, unofficial]. The `leafs` field adds 8 bytes per penultimate node, but saves the size of 8 leaf nodes.
++**Memory Complexity:** The naive representation has a memory cost factor $mc$ approaching 8 for deep trees [S1, unofficial]. Bitmask compression reduces this overhead by eliminating leaf nodes, saving the memory cost of 8 leaf nodes per penultimate node while adding only 8 bytes for the `leafs` field [S1, unofficial].
+ 
+-**Strengths:**
+-*   Significant memory reduction for deep octrees [S1, unofficial].
+-*   Simple implementation [S1, unofficial].
++**Strengths:** Significant memory reduction for deep octrees [S1, unofficial]. Simple implementation [S1, unofficial].
+ 
+-**Limitations:**
+-*   Limited to 256 colors per voxel [S1, unofficial].
+-*   Only applies to the deepest level [S1, unofficial].
+-*   Requires a fixed maximum depth [S1, unofficial].
++**Limitations:** Limited to 256 colors per voxel [S1, unofficial]. Only applies to the deepest level [S1, unofficial].
+ 
+-**When to Use:**
+-*   When memory is constrained and the octree depth is known and fixed [S1, unofficial].
+-*   When color precision can be limited to 256 levels [S1, unofficial].
++**When to Use:** When memory is constrained and the octree depth is known [G]. When color precision can be limited to 256 levels [S1, unofficial].
+ 
+-**When Not to Use:**
+-*   When higher color precision is required [S1, unofficial].
+-*   When the octree depth is dynamic or shallow [S1, unofficial].
++**When Not to Use:** When higher color precision is required [S1, unofficial]. When the octree depth is dynamic [G].
+ 
+ ## Background

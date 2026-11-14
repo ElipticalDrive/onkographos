@@ -3,119 +3,135 @@
 Also called: Geometric Consistency Masking, Reprojection-based Depth Filtering
 
 ## Overview
-This method filters noisy depth data by verifying the geometric consistency of unprojected depth maps across multiple views. It solves the problem of outliers (such as floaters or incorrect reconstructions) in monocular depth estimation by ensuring that a depth value, when transformed to a neighboring view, remains consistent with the observed depth in that neighbor. It differs from sibling methods like [Depth Supervision Loss (Laug)](8111-depth-supervision-loss-laug.md) by operating as a pre-processing or auxiliary consistency check rather than a direct differentiable loss term, and from [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md) by focusing on hard filtering via a fixed threshold rather than probabilistic weighting.
+This method filters noisy depth data by verifying geometric consistency across multiple views. It unprojects depth maps to 3D space and reprojects them into nearby views to identify and discard outliers, ensuring that only geometrically consistent depth estimates are used for subsequent optimization or rendering [S1, S2]. It differs from its sibling [Multi-view Consistency Depth Filtering](12319-multi-view-consistency-depth-filtering.md) by focusing on hard thresholding of reprojection errors for outlier removal, whereas its sibling may employ more complex consistency metrics. It serves as a preprocessing step for [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md).
 
 ## How it works
+The method operates by establishing a consistency mask $M_d$ that identifies valid depth pixels based on reprojection error.
+
 **Inputs:**
-- Depth maps $D_i$ and $D_j$ for two views $i$ and $j$.
-- Camera intrinsics and extrinsics for views $i$ and $j$.
-- Threshold $\sigma$.
+- Depth map $D_i$ for a reference view $i$.
+- Depth map $D_j$ for a nearby source view $j$.
+- Camera projection matrices $\pi_i$ and $\pi_j$ for views $i$ and $j$.
+- Threshold $\sigma$ (absolute error) or $\epsilon$ (relative error) and $\delta$ (image space distance).
 
 **Outputs:**
-- A geometric consistency mask $M_d$ identifying valid depth pixels.
+- A binary geometric consistency mask $M_d$ of the same dimensions as $D_i$.
 
 **Data Structures:**
-- $D_i$: 2D array of depth values for view $i$.
-- $M_d$: 2D boolean or binary mask of the same spatial dimensions as $D_i$.
+- $D_i$: 2D array of depth values.
+- $M_d$: 2D boolean array, same shape as $D_i$.
+- $\mathbf{u}_i$: Pixel coordinates $(u, v)$ in frame $i$.
 
 **Steps:**
-1. **Unproject:** Convert the depth map $D_i$ of frame $i$ into a 3D point cloud. For each pixel $\mathbf{u}_i$ with depth $D_i(\mathbf{u}_i)$, compute the 3D position $\mathbf{P}_i = \pi_i^{-1}(\mathbf{u}_i, D_i(\mathbf{u}_i))$, where $\pi_i^{-1}$ is the inverse projection function using the camera intrinsics of view $i$.
-2. **Reproject:** Transform the 3D points $\mathbf{P}_i$ into the coordinate system of a nearby view $j$. Project these points onto view $j$'s image plane to obtain the projected pixel coordinates $\mathbf{u}_{i \to j} = \pi_j(\mathbf{P}_i)$.
-3. **Sample:** Retrieve the depth value $D_j$ at the corresponding pixel location in view $j$. The projected depth is defined as $D_{i \to j} = D_j(\mathbf{u}_{i \to j})$. Note: If $\mathbf{u}_{i \to j}$ falls outside the image bounds or corresponds to an invalid depth in $D_j$, the pixel is considered inconsistent.
-4. **Compare:** Calculate the absolute difference between the reprojected depth $D_{i \to j}$ and the observed depth $D_j$ at that location.
-5. **Filter:** Apply the consistency threshold $\sigma$. If the error is within the threshold, the pixel is marked as consistent.
 
-**Formula:**
-The geometric consistency mask $M_d$ is formulated as [S1]:
-$$
-M_d = \left| D_{i \to j} - D_j \right| < \sigma
-$$
-where:
-- $D_{i \to j} = D_j(\pi_j \pi_i^{-1}(\mathbf{u}_i))$ is the reprojected depth.
-- $\mathbf{u}_i$ denotes the pixel coordinates of the $i$-th frame.
-- $M_d$ represents the geometric consistency mask (true if consistent, false otherwise).
-- $\sigma$ is the empirical threshold for the absolute error.
+1. **Unproject:** Convert the depth map $D_i$ of the reference view $i$ into a 3D point cloud. For each pixel $\mathbf{u}_i$, compute the 3D position $P_i = \pi_i^{-1}(\mathbf{u}_i, D_i[\mathbf{u}_i])$. [S1]
+2. **Reproject:** Project the 3D point $P_i$ into the coordinate system of the nearby view $j$. Compute the projected pixel coordinates $\mathbf{u}_{proj} = \pi_j(P_i)$. [S1, S2]
+3. **Interpolate Depth:** Retrieve the depth value $D_{i \to j}$ at $\mathbf{u}_{proj}$ from the source view's depth map $D_j$. This requires interpolation if $\mathbf{u}_{proj}$ is not integer-aligned. [S1, S2]
+4. **Compute Error:** Calculate the discrepancy between the reprojected depth $D_{i \to j}$ and the actual depth $D_j$ at the corresponding location. [S1, S2]
+5. **Filter:** Apply the consistency threshold to generate the mask $M_d$. [S1, S2]
+
+**Formulas:**
+
+The basic formulation uses an absolute error threshold $\sigma$ [S1]:
+$$ M_d = |D_{i \to j} - D_j| < \sigma $$
+where $D_{i \to j} = D_j(\pi_j \pi_i^{-1}(\mathbf{u}_i))$. [S1]
+
+A more robust variant uses both image-space and relative depth thresholds [S2]:
+For a pixel $p$ in the reference view with depth $d_0$:
+1. Project $p$ to pixel $p_i$ in source view $i$.
+2. Retrieve depth $d_i$ at $p_i$ via interpolation.
+3. Reproject $p_i$ back to the reference view to get pixel $p_{reproj}$ and depth $d_{reproj}$.
+4. The pixel is consistent if:
+   $$ |p_{reproj} - p| < \delta \quad \text{and} \quad \frac{|d_{reproj} - d_0|}{d_0} < \epsilon $$
+   [S2]
 
 **Parameters:**
-- $\sigma = 0.2$ m: Empirical threshold for the absolute relative error in depth reprojection [S1].
-
-**Edge Cases and Pitfalls:**
-- **Occlusions:** If view $j$ occludes the surface visible in view $i$, $D_j$ will be closer to the camera than $D_{i \to j}$. The method may incorrectly flag these as outliers unless occlusion handling is explicitly added. The sources do not specify occlusion handling logic beyond the basic threshold check [S1].
-- **Invalid Pixels:** Pixels in $D_j$ that are invalid (e.g., zero or infinity) must be handled. The sources do not specify the exact behavior for invalid $D_j$ values, but logically they should be excluded from the mask [G].
-- **Precision:** Floating-point errors in reprojection can cause small discrepancies. The threshold $\sigma$ must be large enough to accommodate these errors but small enough to filter true outliers.
+- $\sigma$: Empirical threshold for absolute relative error. Default: $0.2$ m [S1].
+- $\delta$: Image space consistency threshold. Default: $1$ pixel [S2].
+- $\epsilon$: Depth consistency threshold. Default: $0.01$ [S2].
+- $N_{geo}$: Minimum number of source views required for consistency acceptance (used in the multi-view variant) [S2].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def depth_consistency_check(D_i, D_j, cam_i, cam_j, sigma=0.2):
+def depth_consistency_check(D_ref, D_src, proj_ref, proj_src, mode="absolute"):
     """
-    Filters noisy depth data by unprojecting D_i to 3D and reprojecting to view j.
-    
-    Args:
-        D_i: 2D array, depth map of frame i.
-        D_j: 2D array, depth map of frame j.
-        cam_i: Camera object for frame i (intrinsics, extrinsics).
-        cam_j: Camera object for frame j (intrinsics, extrinsics).
-        sigma: Float, threshold for absolute error (default 0.2m).
-        
-    Returns:
-        M_d: 2D boolean array, geometric consistency mask.
+    D_ref: Depth map of reference view (H, W)
+    D_src: Depth map of source view (H, W)
+    proj_ref: Projection matrix of reference view
+    proj_src: Projection matrix of source view
+    mode: 'absolute' uses sigma, 'relative' uses delta/epsilon
     """
-    # 1. Unproject D_i to 3D
-    # Get pixel coordinates (u, v) for all valid pixels in D_i
-    valid_pixels_i = get_valid_pixel_coords(D_i)
+    H, W = D_ref.shape
+    mask = np.zeros((H, W), dtype=bool)
     
-    # Convert depth to 3D points
-    # P_i = cam_i.inverse_project(u, v, D_i[u,v])
-    points_3d = []
-    for u, v in valid_pixels_i:
-        depth_val = D_i[u, v]
-        if depth_val <= 0:
-            continue
-        p_3d = cam_i.inverse_project(u, v, depth_val)
-        points_3d.append((u, v, p_3d))
-        
-    # 2. Reproject to view j
-    M_d = np.zeros_like(D_i, dtype=bool)
+    # 1. Unproject reference depth to 3D
+    # Assuming standard pinhole camera model for unprojection
+    # P_3d = proj_ref^{-1} * (u, v, 1) * D_ref
+    # Note: Exact unprojection depends on camera intrinsics/extrinsics
+    points_3d = unproject_depth(D_ref, proj_ref) 
     
-    for u, v, p_3d in points_3d:
-        # Project 3D point to view j
-        u_proj, v_proj, depth_proj = cam_j.project(p_3d)
+    # 2. Reproject to source view
+    # u_proj, v_proj, z_proj = proj_src * P_3d
+    u_proj, v_proj, z_proj = project_points(points_3d, proj_src)
+    
+    # 3. Filter invalid projections (outside image bounds or negative depth)
+    valid_indices = (
+        (u_proj >= 0) & (u_proj < W) &
+        (v_proj >= 0) & (v_proj < H) &
+        (z_proj > 0)
+    )
+    
+    # 4. Interpolate depth from source view
+    # D_src_interp is the depth at (u_proj, v_proj) in source view
+    D_src_interp = interpolate_depth(D_src, u_proj, v_proj)
+    
+    if mode == "absolute":
+        # 5. Compare with absolute threshold sigma
+        sigma = 0.2 # meters [S1]
+        error = np.abs(D_src_interp - D_ref)
+        mask[valid_indices] = error[valid_indices] < sigma
         
-        # Check if projected pixel is within bounds of D_j
-        if not (0 <= u_proj < D_j.shape[1] and 0 <= v_proj < D_j.shape[0]):
-            continue
-            
-        # Get observed depth in view j
-        d_j_obs = D_j[int(v_proj), int(u_proj)]
+    elif mode == "relative":
+        # 5. Compare with relative threshold epsilon and image distance delta
+        delta = 1.0 # pixels [S2]
+        epsilon = 0.01 [S2]
         
-        # Check if observed depth is valid
-        if d_j_obs <= 0:
-            continue
-            
-        # 3. Compare depths
-        error = abs(depth_proj - d_j_obs)
+        # Calculate reprojected pixel coordinates in reference view
+        # This requires inverse projection from source back to reference
+        # For simplicity, assuming we are checking consistency of D_ref against D_src
+        # The logic in [S2] describes a round-trip: Ref -> Src -> Ref
+        # Here we implement the direct check described in [S1] for absolute,
+        # and the round-trip logic for relative if strictly following [S2] structure.
         
-        # 4. Filter
-        if error < sigma:
-            M_d[u, v] = True
-            
-    return M_d
+        # Re-projecting D_src back to Ref to get D_reproj and p_reproj
+        points_3d_src = unproject_depth(D_src, proj_src)
+        # This part is complex to vectorize without specific camera models.
+        # Simplified implementation of [S2] logic for a single pixel p:
+        pass 
+        
+    return mask
 ```
+
+*Note: The pseudocode above implements the absolute error check from [S1]. The relative error check from [S2] requires a round-trip projection (Reference -> Source -> Reference) which is computationally more intensive. In practice, [S2] accepts a pixel as reliable if it is consistent in at least $N_{geo}$ source views.*
 
 ## Subtopics
 
+### [Probabilistic Depth Testing](11488-probabilistic-depth-testing.md)
+Probabilistic Depth Testing determines which input view's reprojection contains the correct geometric information for a novel view pixel by calculating the probability that its depth is closer than all other views' depths. It differs from hard visibility tests by using a mixture model with triangular distributions to perform soft depth resolution, which is necessary because point splatting lacks mesh connectivity and soft rasterization introduces uncertainty from noisy Multi-View Stereo (MVS) data.
+
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of valid pixels in $D_i$ and the number of neighbor views checked. Each pixel requires one unprojection and one reprojection.
-- **Memory Complexity:** Requires storing the 3D point cloud for the current frame during the check, which is $O(N)$ where $N$ is the number of pixels.
-- **Strengths:** Effective at removing gross outliers and floaters that do not satisfy geometric consistency across views. Simple to implement.
-- **Limitations:** Relies on accurate depth maps in both views. Fails in occluded regions or textureless areas where depth estimation is unreliable. The fixed threshold $\sigma$ may not adapt to varying depth scales or noise levels across the scene.
-- **When to use:** As a pre-processing step or auxiliary check in multi-view reconstruction pipelines where geometric consistency is critical.
-- **When not to use:** When occlusions are frequent and not handled, or when depth maps are extremely noisy such that the threshold $\sigma$ cannot distinguish noise from valid geometry.
+- **Time Complexity:** Linear with respect to the number of pixels and the number of source views checked. The unprojection and reprojection steps are $O(H \times W)$ per view pair.
+- **Memory Complexity:** Requires storing 3D points for the unprojected depth map, $O(H \times W \times 3)$.
+- **Strengths:** Effectively removes floaters and noisy depth estimates that do not align geometrically across views [S1, S2]. Simple to implement and fast.
+- **Limitations:** Relies on accurate camera calibration. Fails in textureless regions or areas with significant occlusion where reprojection errors are high even for correct depths. The choice of threshold $\sigma$ or $\epsilon$ is empirical and may require tuning for different scenes [S1, S2].
+- **When to use:** Preprocessing step for depth-supervised volume rendering or Gaussian Splatting when initial depth estimates are noisy [S1, S2].
 
 ## Background
-The method originates from [EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis](https://doi.org/10.1109/CVPR52734.2025.01054) [S1], published in 2025. It is used in the context of urban view synthesis to clean up depth data before or during the optimization of Gaussian splats, specifically to remove clear floaters in unprojected point clouds. The authors note that they further utilize a 3D statistical filter in Open3D to remove remaining floaters [S1].
+The method originates from techniques used in multi-view stereo and depth completion to ensure geometric consistency. [S1] applies it in the context of "EVolSplat," an efficient volume-based Gaussian Splatting method for urban view synthesis, to remove depth outliers before optimization. [S2] uses "Geometric Consistency Filtering" in "VolRecon," a method for volume rendering of signed ray distance functions, adopting parameters from MVSNet [S2].
 
 ## Sources
 [S1] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+[S2] VolRecon: Volume Rendering of Signed Ray Distance Functions for Generalizable Multi-View Reconstruction, https://doi.org/10.1109/cvpr52729.2023.01601, fetched 2026-10-26

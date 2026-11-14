@@ -2,69 +2,82 @@
 Also called: Bounded Tiling, Finite Domain Repetition, Limited Repetition
 
 ## Overview
-Finite Repetition creates a bounded grid of repeated instances of a base Signed Distance Function (SDF) within a specified limit [S1, S2, unofficial]. Unlike infinite tiling operators, it restricts the replication count to a finite number of cells in each dimension, preventing geometry from extending to infinity [S2, unofficial]. It is chosen when a discrete, limited array of objects is required without the computational cost or visual artifacts of infinite repetition [G].
+Finite Repetition repeats a base Signed Distance Function (SDF) a limited number of times in 3D space, creating a bounded grid of instances [S1, S2, unofficial]. It solves the problem of creating tiled structures without infinite recursion or memory overflow by restricting the replication count within a specified limit $l$ along each axis [S1, S2, unofficial]. Unlike [Infinite Repetition via Dual Offset](14771-infinite-repetition-via-dual-offset.md), which creates interlocking patterns over unbounded space, Finite Repetition produces a discrete, finite array of objects, making it suitable for bounded scenes or specific architectural elements [S1, S2, unofficial].
 
 ## How it works
+Finite Repetition maps a query point $\mathbf{p}$ to the nearest instance within the bounded grid by calculating an integer offset vector $\mathbf{q}$ and subtracting the corresponding periodic displacement [S1, S2, unofficial].
+
 **Inputs and Outputs:**
-- Input: Query point $\mathbf{p} \in \mathbb{R}^3$, period vector $\mathbf{c} \in \mathbb{R}^3$ (cell size), limit vector $\mathbf{l} \in \mathbb{R}^3$ (maximum cell index magnitude) [S2, unofficial].
-- Output: Transformed point $\mathbf{p}'$ mapped to the canonical cell, and implicitly the cell index $\mathbf{q}$ for potential use as a random seed [S1, S3, unofficial].
+- Input: Query position $\mathbf{p}$ (vec3), period/size $\mathbf{c}$ (vec3), limit $\mathbf{l}$ (vec3).
+- Output: Transformed position $\mathbf{p}'$ (vec3) to be passed to the base SDF.
 
 **Data Structures:**
-- Vectors $\mathbf{p}, \mathbf{c}, \mathbf{l}$ are typically 3-component floating-point vectors [G].
+- $\mathbf{p}, \mathbf{c}, \mathbf{l}$ are typically 3-component floating-point vectors.
+- $\mathbf{q}$ is an intermediate integer vector.
 
 **Steps:**
 1. **Normalization**: Divide the query point by the period: $\mathbf{u} = \mathbf{p} / \mathbf{c}$ [S2, unofficial].
-2. **Quantization**: Round each component of $\mathbf{u}$ to the nearest integer to find the cell index: $\mathbf{q}_{\text{raw}} = \text{round}(\mathbf{u})$ [S1, S2, unofficial].
-3. **Clamping**: Clamp the cell index to the finite limit: $\mathbf{q} = \text{clamp}(\mathbf{q}_{\text{raw}}, -\mathbf{l}, \mathbf{l})$ [S2, unofficial].
-4. **Mapping**: Subtract the periodic offset to map $\mathbf{p}$ back to the canonical region of the selected cell: $\mathbf{p}' = \mathbf{p} - \mathbf{c} \cdot \mathbf{q}$ [S2, unofficial].
-5. **Evaluation**: The base SDF is evaluated at $\mathbf{p}'$ [S1, S3, unofficial].
+2. **Rounding**: Round each component of $\mathbf{u}$ to the nearest integer to find the cell index: $\mathbf{q}_{raw} = \text{round}(\mathbf{u})$ [S2, unofficial].
+3. **Clamping**: Clamp $\mathbf{q}_{raw}$ to the limit $\mathbf{l}$ to enforce the finite boundary: $\mathbf{q} = \text{clamp}(\mathbf{q}_{raw}, -\mathbf{l}, \mathbf{l})$ [S2, unofficial].
+4. **Mapping**: Subtract the periodic displacement to map $\mathbf{p}$ to the canonical cell: $\mathbf{p}' = \mathbf{p} - \mathbf{c} \cdot \mathbf{q}$ [S2, unofficial].
 
 **Formula:**
-$$ \mathbf{q} = \text{clamp}(\text{round}(\mathbf{p} / \mathbf{c}), -\mathbf{l}, \mathbf{l}) $$
+$$ \mathbf{q} = \text{clamp}\left(\text{round}\left(\frac{\mathbf{p}}{\mathbf{c}}\right), -\mathbf{l}, \mathbf{l}\right) $$
 $$ \mathbf{p}' = \mathbf{p} - \mathbf{c} \cdot \mathbf{q} $$
-[S2, unofficial]
+
+Where:
+- $\text{round}(\cdot)$ rounds to the nearest integer.
+- $\text{clamp}(x, min, max)$ restricts $x$ to $[min, max]$.
+- $\mathbf{l}$ defines the maximum number of cells in each direction from the origin.
 
 **Parameters:**
-- $\mathbf{c}$: Period size. Must be non-zero [G].
-- $\mathbf{l}$: Limit. Defines the extent of the grid [S2, unofficial].
+- $\mathbf{c}$: Cell size (period). Must be non-zero.
+- $\mathbf{l}$: Repetition limit. Typically positive integers or floats representing cell counts.
 
-**Edge Cases:**
-- If $\mathbf{c}$ has zero components, division is undefined [G].
-- Points outside the limit $\mathbf{l}$ are clamped to the boundary cells, creating a "hard edge" where the SDF value jumps discontinuously if the base SDF does not decay to infinity [G].
+**Edge Cases and Pitfalls:**
+- **Zero Period**: Division by zero if any component of $\mathbf{c}$ is zero. [G] Ensure $\mathbf{c}$ components are strictly positive.
+- **Boundary Precision**: Points exactly on cell boundaries may round unpredictably depending on floating-point representation. [G] Standard `round` behavior (round half to even or away from zero) should be consistent.
+- **Limit Zero**: If $\mathbf{l} = 0$, $\mathbf{q}$ becomes $\mathbf{0}$, and $\mathbf{p}' = \mathbf{p}$, effectively disabling repetition.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def repeat_finite(p, c, l):
-    # Step 1 & 2: Divide and round to find raw cell index (component-wise)
-    q_raw = p / c
-    q_raw = round(q_raw)
+    """
+    Finite domain repetition for SDF.
+    p: input position (vec3)
+    c: cell size/period (vec3)
+    l: repetition limit (vec3)
+    Returns: transformed position (vec3)
+    """
+    # Step 1 & 2: Divide and round to nearest integer
+    q_raw = (p / c).round()
     
-    # Step 3: Clamp to finite limit (component-wise)
-    q = clamp(q_raw, -l, l)
+    # Step 3: Clamp to limit
+    q = q_raw.clamp(-l, l)
     
     # Step 4: Map to canonical cell
     p_prime = p - c * q
     
-    return p_prime, q
+    return p_prime
 ```
-[S2, unofficial]
 
 ## Subtopics
 
-### [SDF Domain Manipulation Operators](1730-sdf-domain-manipulation-operators.md)
-The parent family providing the transformation framework.
+### [Infinite Repetition via Dual Offset](14771-infinite-repetition-via-dual-offset.md)
+Creates a perfect, interlocking hexagonal honeycomb pattern using two offset rectangular grids. Choose this when you need unbounded, interlocking tiling with potential per-column properties, accepting higher computational cost.
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Strengths**: Not given in the sources.
-- **Limitations**: Not given in the sources.
-- **When to use**: Not given in the sources.
+- **Time Complexity**: $O(1)$ per query. Involves basic vector arithmetic, rounding, and clamping.
+- **Memory Complexity**: $O(1)$. No additional data structures required.
+- **Strengths**: Simple to implement, computationally cheap, prevents infinite recursion in ray marching.
+- **Limitations**: Creates sharp boundaries at the limit $\mathbf{l}$; objects outside the limit are not rendered (distance is effectively infinite or handled by the base SDF's empty space).
+- **When to use**: Bounded tiling, finite arrays of objects, architectural elements with fixed counts.
+- **When not to use**: Unbounded tiling, infinite floors/walls (use [Infinite Repetition via Dual Offset](14771-infinite-repetition-via-dual-offset.md) or other infinite operators).
 
 ## Background
-Finite Repetition is a standard technique in procedural geometry and SDF rendering [G]. It serves as the bounded counterpart to infinite tiling operators [G].
+Finite Repetition is a standard domain manipulation operator in Signed Distance Field rendering, popularized by Inigo Quilez's online articles on SDFs [S1, S2, unofficial]. It is a fundamental building block for creating structured scenes without explicit mesh geometry. The method relies on the mathematical property of periodicity and clamping to bound the repetition [S1, S2, unofficial].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

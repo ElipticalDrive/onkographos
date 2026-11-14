@@ -34,7 +34,6 @@ The method computes a halo intensity value for each voxel based on the gradient 
     *   $V$ is the normalized view direction vector [S2, unofficial].
     *   $k_{hpe}$ controls how directly the neighbor's gradient must be oriented toward the current location. Typical value: 1.0 [S1][S2, unofficial].
     *   $k_{hse}$ controls how tightly halos are kept in the plane orthogonal to the view direction. Typical value: 2.0 [S1][S2, unofficial].
-    *   Note: The source formula uses $\nabla f_n$ directly in the dot product. [G] To ensure the dot product represents direction rather than magnitude-scaled cosine, $\nabla f_n$ should be normalized before use, or the term should be $\left( 1 - \frac{\nabla f_n}{\|\nabla f_n\|} \cdot V \right)$.
 
 2.  **Halo Effect ($h(i)$)**: The total halo intensity at voxel $i$ is the distance-weighted sum of halo potentials from all neighbors, weighted by the complement of the voxel's own gradient magnitude [S1][S2, unofficial]:
     $$
@@ -160,7 +159,7 @@ def compute_feature_halos(volume, gradients, view_direction, k_hpe=1.0, k_hse=2.
 *   **Self-Obscuration**: Since halos are view-dependent and computed based on neighbors orthogonal to the view, features do not cast halos on themselves [S1][S2, unofficial]. No special processing is needed.
 *   **Gradient Magnitude**: The term $(1 - \|\nabla f_i\|)$ assumes $\|\nabla f_i\|$ is normalized or bounded in $[0,1]$. If gradients are large, this term becomes negative, potentially inverting the halo effect. [G] Clamp $\|\nabla f_i\|$ to $[0,1]$ or normalize gradients before use.
 *   **Negative Dot Products**: The term $\nabla f_n \cdot \frac{P_i - P_n}{\|P_i - P_n\|}$ can be negative. Raising negative numbers to non-integer powers is undefined in real arithmetic. [G] Clamp the dot product to $[0, \infty)$ before exponentiation.
-*   **View Direction**: $V$ must be normalized.
+*   **View Direction**: $V$ must be normalized. [G]
 
 ## Operating characteristics
 *   **Time Complexity**: $O(N \cdot K)$, where $N$ is the number of voxels and $K$ is the number of neighbors in the kernel. For a fixed 3x3x3 kernel, this is linear $O(N)$ [G].
@@ -170,7 +169,7 @@ def compute_feature_halos(volume, gradients, view_direction, k_hpe=1.0, k_hse=2.
 *   **Limitations**: Requires pre-computed gradients; halo intensity depends on neighborhood size and gradient normalization; parameters ($s_{dark}, s_{opaque}$) require tuning for different datasets [G].
 
 ## Background
-Feature Halos was introduced in the context of non-photorealistic volume rendering to address the difficulty of perceiving depth in volumetric data. It builds on earlier work by Interrante and Grosch, adapting their concepts to a more general illumination process [S1][S2, unofficial]. The method was presented in papers by Rheingans et al. around 2000-2001, specifically in "Non-Photorealistic Rendering of Volume Models" and "Volume Illustration: Nonphotorealistic Rendering of Volume Models" [S1][S2, S3, unofficial]. It is used in medical visualization (e.g., CT volumes of liver and kidneys) to make foreground structures stand out [S1][S2, unofficial].
+Feature Halos was introduced in the context of non-photorealistic volume rendering to address the difficulty of perceiving depth in volumetric data [S1][S2, unofficial]. This method produces effects similar to those of Interrante and Grosch, but can be applied to any type of data or model during the illumination process [S1][S2, unofficial]. The method was presented in papers by Rheingans et al. around 2000-2001, specifically in "Non-Photorealistic Rendering of Volume Models" and "Volume Illustration: Nonphotorealistic Rendering of Volume Models" [S1][S2, S3, unofficial]. It is used in medical visualization (e.g., CT volumes of liver and kidneys) to make foreground structures stand out [S1][S2, unofficial].
 
 ## Sources
 [S1] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27

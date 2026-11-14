@@ -1,0 +1,125 @@
+# Voxel UV Unwrapping for AO Interpolation
+
+Also called: Voxel UV Unwrapping
+
+## Overview
+This method computes 2D texture coordinates from 3D voxel positions and surface normals to enable bilinear interpolation of ambient occlusion (AO) values across voxel faces. It differs from [Voxel Texture Atlas UV Mapping](4162-voxel-texture-atlas-uv-mapping.md) by focusing specifically on the interpolation of scalar field data (AO) rather than mapping discrete face types to a static atlas, and from [Voxel-based Surface Parameterization](10557-voxel-based-surface-parameterization.md) by using a direct analytical projection rather than complex mesh parameterization.
+
+## How it works
+**Inputs:**
+- `hit.pos`: 3D world position of the ray hit point ($\mathbb{R}^3$).
+- `hit.normal`: 3D surface normal at the hit point ($\mathbb{R}^3$), assumed normalized.
+- `VOXELS_PER_METER`: Scalar constant defining voxel density.
+- `texture_size`: 2D vector $(T_x, T_y)$ representing the resolution of the AO texture atlas.
+- `ao`: 4-component vector containing pre-computed AO values for the voxel face, ordered as $(ao.x, ao.y, ao.z, ao.w)$.
+
+**Data Structures:**
+- `texture_coords`: 3D vector of floats.
+- `uv`: 2D vector of floats in range $[0, 1)$.
+- `interpolated_ao_pweig`: Scalar float.
+- `voxel_ao`: Scalar float.
+
+**Steps:**
+
+1. **Calculate Texture Coordinates:**
+   Convert the world position to a texture-space coordinate by scaling by voxel density and offsetting by half the texture size to center the coordinate system.
+   $$
+   \text{texture\_coords} = \text{hit.pos} \times \text{VOXELS\_PER\_METER} + \frac{\text{texture\_size}}{2.0}
+   $$
+   [S1, unofficial]
+
+2. **Calculate UV Coordinates:**
+   Project the texture coordinates onto the plane defined by the surface normal to determine the 2D UV position. This uses modulo arithmetic to wrap coordinates. The projection involves dot products with permuted components of the texture coordinates.
+   $$
+   \begin{aligned}
+   u &= \text{glmod}(\text{dot}(\text{hit.normal} \times \text{texture\_coords.yzx}, \vec{1}), T_x) \\
+   v &= \text{glmod}(\text{dot}(\text{hit.normal} \times \text{texture\_coords.zxy}, \vec{1}), T_y)
+   \end{aligned}
+   $$
+   Where $\vec{1} = (1.0, 1.0, 1.0)$ and $\text{glmod}(a, b)$ returns $a \pmod b$. The result is normalized to $[0, 1)$ by dividing by texture size if the modulo operation returns values in $[0, \text{size})$.
+   [S1, unofficial]
+
+3. **Interpolate AO Values:**
+   Perform bilinear interpolation using the calculated UV coordinates $(u, v)$ on the four AO values associated with the voxel face. The interpolation order maps $u$ to the x-axis (mixing $z/w$ and $y/x$) and $v$ to the y-axis.
+   $$
+   \text{interpolated\_ao\_pweig} = \text{mix}\left(\text{mix}(ao.z, ao.w, u), \text{mix}(ao.y, ao.x, u), v\right)
+   $$
+   Where $\text{mix}(a, b, t) = a(1-t) + bt$.
+   [S1, unofficial]
+
+4. **Apply Gamma Correction:**
+   Convert the interpolated linear AO value to gamma-corrected space for display.
+   $$
+   \text{voxel\_ao} = \text{interpolated\_ao\_pweig}^{\frac{1}{3.0}}
+   $$
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_uv_unwrap(hit_pos, hit_normal, voxels_per_meter, texture_size, ao):
+    # Step 1: Calculate texture coordinates
+    # hit_pos is vec3, texture_size is vec2
+    texture_coords = hit_pos * voxels_per_meter + vec3(texture_size.x / 2.0, texture_size.y / 2.0, 0.0)
+    
+    # Step 2: Calculate UV coordinates
+    # Permute texture_coords for yzx and zxy
+    yzx = vec3(texture_coords.y, texture_coords.z, texture_coords.x)
+    zxy = vec3(texture_coords.z, texture_coords.x, texture_coords.y)
+    
+    # Dot products with normal and vector of ones
+    one = vec3(1.0, 1.0, 1.0)
+    dot_yzx = dot(hit_normal * yzx, one)
+    dot_zxy = dot(hit_normal * zxy, one)
+    
+    # Modulo arithmetic to wrap within texture bounds
+    # Note: glmod typically returns values in [0, texture_size)
+    u_raw = dot_yzx % texture_size.x
+    v_raw = dot_zxy % texture_size.y
+    
+    # Normalize to [0, 1)
+    u = u_raw / texture_size.x
+    v = v_raw / texture_size.y
+    
+    # Step 3: Interpolate AO values
+    # ao is vec4: (ao.x, ao.y, ao.z, ao.w)
+    # Bilinear interpolation
+    mix_x1 = mix(ao.z, ao.w, u)
+    mix_x2 = mix(ao.y, ao.x, u)
+    interpolated_ao_pweig = mix(mix_x1, mix_x2, v)
+    
+    # Step 4: Apply gamma correction
+    voxel_ao = pow(interpolated_ao_pweig, 1.0 / 3.0)
+    
+    return voxel_ao
+```
+
+## Subtopics
+
+### [Voxel Face Texture Coordinate Unwrapping](14779-voxel-face-texture-coordinate-unwrapping.md)
+Algorithm to compute texture coordinates for a voxel/cube grid based on vertex position and normal, handling face selection and coordinate mapping.
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ per hit point. The method involves a constant number of arithmetic operations, dot products, and interpolations.
+**Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are allocated during the unwrapping process.
+**Strengths:**
+- Efficient real-time computation suitable for GPU shaders.
+- Provides smooth interpolation of AO values across voxel faces, reducing visual artifacts compared to nearest-neighbor sampling.
+- Simple implementation with no complex mesh processing required.
+**Limitations:**
+- Relies on the assumption that AO values are pre-computed and stored in a specific 4-component structure per voxel face.
+- The modulo-based projection may introduce discontinuities at texture boundaries if not handled carefully.
+- Gamma correction exponent (1/3.0) is hardcoded and may not match the display gamma of all systems.
+**When to use:**
+- Real-time voxel rendering where smooth AO shading is desired.
+- When AO values are already available per voxel face.
+**When not to use:**
+- When high-fidelity surface parameterization is required for complex textures.
+- When AO values are not pre-computed or stored in the required format.
+
+## Background
+This method originates from the `bevy-voxel-engine` project, an unofficial voxel engine implementation for the Bevy game engine. It was designed to provide efficient ambient occlusion shading for voxel-based scenes by leveraging texture coordinate unwrapping techniques. The approach is specific to the voxel grid representation and relies on the spatial locality of voxel data.
+
+## Sources
+[S1] bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)

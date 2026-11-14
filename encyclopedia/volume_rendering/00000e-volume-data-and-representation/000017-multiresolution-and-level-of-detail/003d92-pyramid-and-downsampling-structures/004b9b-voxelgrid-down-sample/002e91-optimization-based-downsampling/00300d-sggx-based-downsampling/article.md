@@ -2,38 +2,34 @@
 Also called: Heitz et al. downsampling
 
 ## Overview
-SGGX-based Downsampling is a method for reducing the resolution of microflakes normal distributions in volume data [S1]. It addresses the challenge of aggregating microgeometry by preserving directional coherence, distinguishing itself from naive averaging approaches [S1].
+SGGX-based Downsampling is a method for reducing the resolution of microflakes normal distributions in volume data [S1]. It addresses the challenge of aggregating microgeometry by preserving directional coherence, distinguishing itself from naive averaging approaches that collapse tangents and lose accuracy [S1]. It builds on [Optimization-based Downsampling](5825-optimization-based-downsampling.md) by focusing on the distribution-level aggregation before iterative parameter optimization.
 
 ## How it works
-**Inputs and Outputs:** Not given in the sources.
-**Data Structures:** Not given in the sources.
-**Method Steps:** The sources do not provide the specific algorithmic steps for the downsampling process [S1].
-**Formulas:** Not given in the sources.
-**Parameters:** Not given in the sources.
-**Edge Cases and Pitfalls:** Not given in the sources.
+**Inputs and Outputs:** Not specified in the sources [S1].
+**Data Structures:** Not specified in the sources [S1].
+**Method Steps:** Not specified in the sources [S1].
+**Formulas:** Not specified in the sources [S1].
+**Parameters:** Not specified in the sources [S1].
+**Edge Cases and Pitfalls:** Not specified in the sources [S1].
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def sggx_downsample(distributions, target_count):
-    """
-    Downsample a list of SGGX distributions to a target count.
-    distributions: List of SGGX distribution objects.
-    target_count: Integer, the desired number of output distributions.
-    """
-    # The sources do not provide the specific algorithmic steps for this method [S1].
-    # A complete implementation requires the exact merging criteria and parameter updates.
+    """Downsample SGGX distributions to a target count."""
+    # The sources do not provide explicit algorithmic steps, formulas, or data structures for this method [S1].
+    # Implementation requires clustering criteria and parameter update rules not detailed in the reference.
     return distributions
 ```
 
 ## Subtopics
 
 ### [Hierarchical SGGX Aggregation](7833-hierarchical-sggx-aggregation.md)
-A method for progressively reducing the number of SGGX distributions within a Level of Detail block by clustering similar distributions rather than collapsing them, preserving high-frequency orientation details better than naive averaging.
+A method for progressively reducing the number of SGGX distributions within a Level of Detail block by clustering similar distributions rather than collapsing them, preserving high-frequency orientation details better than naive averaging. It solves the problem of accurately representing complex orientation data and optical density in lower-resolution volumes by evaluating samples of multiple distributions without averaging, preserving anisotropy. Choose this variant when high-frequency orientation details must be retained in lower-resolution volumes, as it outperforms naive aggregation.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not specified in the sources [S1].
+*   **Memory Complexity:** Not specified in the sources [S1].
 *   **Strengths:** Produces accurate LoDs for complex multi-fiber fabrics [S1].
 *   **Limitations:** The optimization-based extension requires enormous amounts of parameters, making it intractable without low-resolution volumes [S1].
 
