@@ -3,15 +3,15 @@
 Also called: Bi-directional EWA Splatting, Differentiable Point-Splatting with Bidirectional EWA, Differentiable point splatting
 
 ## Overview
-Bi-directional differentiable point cloud rasterization is a method for rendering novel views from a set of input images by projecting points from the input views into the novel view space and back, using Elliptical Weighted Average (EWA) filtering [S1]. It solves the problem of optimizing per-view attributes (such as color or features) in the 2D space of input images while maintaining high-quality novel-view synthesis, addressing the ambiguity of which input view contains correct information when geometry is inaccurate [S1]. It extends forward EWA point splatting [YSW* 19] by introducing a bi-directional Jacobian transformation, allowing gradients to flow from the novel view back to the input view pixels [S1].
+Bi-directional differentiable point cloud rasterization is a method for rendering novel views from input images by projecting points into the novel view space and back using Elliptical Weighted Average (EWA) filtering [S1]. It solves the problem of optimizing per-view attributes in the 2D space of input images while maintaining high-quality novel-view synthesis, addressing ambiguity when geometry is inaccurate [S1]. It extends forward EWA point splatting by introducing a bi-directional Jacobian transformation, allowing gradients to flow from the novel view back to the input view pixels [S1].
 
 ## How it works
-**Inputs:** A set of input views with calibrated cameras and associated point clouds (or pixel attributes), and a target novel view with its camera parameters.
-**Outputs:** A rendered image for the novel view and gradients for optimizing input view attributes.
+**Inputs:** A set of input views with calibrated cameras and associated pixel attributes, and a target novel view with its camera parameters [S1].
+**Outputs:** A rendered image for the novel view and gradients for optimizing input view attributes [S1].
 
 **Data Structures:**
-*   **Point Splat:** An anisotropic 2D Gaussian $G$ associated with each reprojected pixel. Defined by its mean position, covariance matrix, opacity $\alpha$, and color/attribute $c$.
-*   **Splat List:** A list of splats overlapping a specific novel-view pixel, sorted by depth (front-to-back).
+*   **Point Splat:** An anisotropic 2D Gaussian $G$ associated with each reprojected pixel, defined by its mean position, covariance matrix, opacity $\alpha$, and color/attribute $c$ [S1].
+*   **Splat List:** A list of splats overlapping a specific novel-view pixel, sorted by depth (front-to-back) [S1].
 *   **Uncertainty $U$:** A scalar multiplicative factor applied to the covariance matrix of $G$, initialized to 0.5 [S1].
 
 **Steps:**
@@ -20,10 +20,10 @@ Bi-directional differentiable point cloud rasterization is a method for renderin
 2.  **Bi-Directional Reprojection:** For each pixel $p$ in a selected input view $n$:
     a. Lift the 2D pixel coordinate to 3D space using the inverse Jacobian of the transformation from the input view to 3D [S1].
     b. Project the 3D point to the novel view using the forward Jacobian of the transformation from 3D to the novel view [S1].
-    c. Compute the anisotropic 2D Gaussian $G$ for the reprojected pixel. The covariance of $G$ is derived from the combined stretch of these two transformations [S1].
+    c. Compute the anisotropic 2D Gaussian $G$ for the reprojected pixel from the combined stretch of these two transformations [S1].
     d. Scale the covariance matrix of $G$ by the uncertainty factor $U$ [S1].
 3.  **Splatting and Alpha Blending:** For each pixel $v$ in the novel view:
-    a. Collect all splats from input views that overlap $v$.
+    a. Collect all splats from input views that overlap $v$ [S1].
     b. Sort the splats by depth (front-to-back) to form the set $N_n$ [S1].
     c. Perform front-to-back alpha blending to compute the final color $c_n$ [S1]:
        $$ c_n = \sum_{i \in N_n} c_{n,i} \alpha_{n,i} \prod_{j=1}^{i-1} (1 - \alpha_{n,j}) $$
@@ -39,47 +39,32 @@ Bi-directional differentiable point cloud rasterization is a method for renderin
     a. Gradient with respect to color attribute $c_{n,i}$:
        $$ \frac{\partial c_n}{\partial c_{n,i}} = \alpha_{n,i} \prod_{j=1}^{i-1} (1 - \alpha_{n,j}) $$
     b. Gradient with respect to opacity $\alpha_{n,i}$:
-       $$ \frac{\partial c_n}{\partial \alpha_{n,i}} = c_{n,i} \prod_{j=1}^{i-1} (1 - \alpha_{n,j}) - \sum_{l=k+1, l \neq i}^{|N_n|} c_{n,l} \alpha_{n,l} \prod_{j=1}^{l-1} (1 - \alpha_{n,j}) $$
-       where the sum excludes the current splat $i$ and starts from $k+1$ (likely referring to the sorted order or a specific subset, but the formula structure is as provided in the source) [S1].
+       $$ \frac{\partial c_n}{\partial \alpha_{n,i}} = c_{n,i} \prod_{j=1}^{i-1} (1 - \alpha_{n,j}) - \sum_{l=i+1, l \neq i}^{|N_n|} c_{n,l} \alpha_{n,l} \prod_{j=1}^{l-1} (1 - \alpha_{n,j}) $$
+       where the sum iterates over all splats $l$ that appear after splat $i$ in the depth-ordered list [S1]. (Note: The source notation uses $l=k+1$, which corresponds to $l=i+1$ in standard differentiable alpha blending.)
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def bi_directional_rasterize(input_views, novel_view, uncertainty_U):
-    """
-    Renders a novel view using bi-directional differentiable point splatting.
-    
-    Args:
-        input_views: List of input view data (camera, points, attributes).
-        novel_view: Target novel view camera parameters.
-        uncertainty_U: Initial uncertainty factor (default 0.5).
-        
-    Returns:
-        rendered_image: Tensor of novel view colors.
-        gradients: Gradients for input view attributes.
-    """
-    # 1. Camera Selection
-    # Select subset of input views V_sel based on coverage/visibility
-    V_sel = select_cameras(input_views, novel_view)
-    
+    # 1. Camera Selection: Select subset of input views V_sel based on coverage/visibility [S1]
+    V_sel = [v for v in input_views]
+
     # 2. Reproject and Splat
-    # Initialize novel view pixel list
     novel_pixels = {v: [] for v in novel_view.pixels}
-    
+
     for view_n in V_sel:
         for pixel_p in view_n.pixels:
             # Bi-directional Jacobian transformation
-            # Lift 2D pixel to 3D using inverse Jacobian
+            # Lift 2D pixel to 3D using inverse Jacobian of input view transformation [S1]
             point_3d = lift_to_3d(pixel_p, view_n.camera, inverse_jacobian=True)
-            
-            # Project 3D point to novel view using forward Jacobian
+            # Project 3D point to novel view using forward Jacobian [S1]
             pixel_n, gaussian_G = project_to_novel_view(point_3d, novel_view.camera, forward_jacobian=True)
-            
             # Apply uncertainty to covariance
-            gaussian_G.covariance *= uncertainty_U
-            
+            gaussian_G.covariance = [[gaussian_G.covariance[r][c] * uncertainty_U for c in range(2)] for r in range(2)]
             # Add to novel view pixel's splat list
             novel_pixels[pixel_n].append({
                 'view': view_n,
@@ -89,124 +74,100 @@ def bi_directional_rasterize(input_views, novel_view, uncertainty_U):
                 'opacity': pixel_p.opacity,
                 'depth': point_3d.z
             })
-            
+
     # 3. Render and Compute Gradients
     rendered_image = {}
     gradients = {}
-    
+
     for pixel_v, splat_list in novel_pixels.items():
         if not splat_list:
             continue
-            
+
         # Sort splats by depth (front-to-back)
         splat_list.sort(key=lambda s: s['depth'])
-        
+
         # Limit support
         splat_list = limit_splat_support(splat_list)
-        
+
         # Alpha blending
         accumulated_alpha = 0.0
         color = 0.0
         splats_processed = []
-        
+
         for i, splat in enumerate(splat_list):
             alpha = splat['opacity']
             c = splat['color']
-            
+
             # Front-to-back compositing
-            weight = alpha * (1 - accumulated_alpha)
+            prod_term = math.prod([1.0 - s['opacity'] for s in splat_list[:i]])
+            weight = alpha * prod_term
             color += weight * c
-            accumulated_alpha += weight * (1 - alpha) # Note: standard alpha blending accumulates alpha differently, 
-                                                      # but the formula in source is c_n = sum(c_i * alpha_i * prod(1-alpha_j))
-            # Re-evaluating based on source formula:
-            # c_n = sum_{i} c_{n,i} alpha_{n,i} prod_{j=1}^{i-1} (1 - alpha_{n,j})
-            
-            # Store for gradient computation
+            accumulated_alpha += weight
+
             splats_processed.append({
                 'index': i,
                 'alpha': alpha,
                 'color': c,
-                'prod_term': prod([(1 - s['opacity']) for s in splat_list[:i]])
+                'prod_term': prod_term
             })
-            
+
             # Stop if accumulated alpha is effectively 1
             if accumulated_alpha >= 1.0 - 1e-6:
                 break
-                
+
         rendered_image[pixel_v] = color
-        
+
         # Compute gradients for this pixel
-        # Gradient w.r.t color of splat i
-        # d_c_n / d_c_{n,i} = alpha_{n,i} * prod_{j=1}^{i-1} (1 - alpha_{n,j})
         for splat_info in splats_processed:
             i = splat_info['index']
             alpha_i = splat_info['alpha']
             prod_term = splat_info['prod_term']
-            
+            c_i = splat_info['color']
+
+            # Gradient w.r.t color of splat i
             grad_color = alpha_i * prod_term
             splat_info['view'].pixels[splat_info['pixel']].grad_color += grad_color
-            
+
             # Gradient w.r.t opacity of splat i
-            # d_c_n / d_alpha_{n,i} = c_{n,i} * prod_{j=1}^{i-1} (1 - alpha_{n,j}) 
-            #                       - sum_{l=k+1, l!=i}^{|N_n|} c_{n,l} alpha_{n,l} prod_{j=1}^{l-1} (1 - alpha_{n,j})
-            
-            term1 = splat_info['color'] * prod_term
-            
-            # The sum term is complex to implement exactly as written without knowing what 'k' refers to.
-            # Assuming 'k' might be a typo or specific index, but standard derivation suggests summing over all other splats.
-            # However, we must follow the source formula strictly.
-            # Source: sum_{l=k+1, l!=i}^{|N_n|} ...
-            # If k is not defined, we assume it might be 0 or a specific subset. 
-            # Given the ambiguity, we will implement the sum over all l != i, assuming k=0 for simplicity if not specified, 
-            # but note the source's specific notation.
-            
+            term1 = c_i * prod_term
             term2 = 0.0
             for other_splat in splats_processed:
                 l = other_splat['index']
-                if l != i:
-                    # The source formula has a lower bound k+1. 
-                    # Without clarification on k, we cannot implement this precisely.
-                    # [G] Assuming k=0 for implementation completeness, but this is a gap.
+                if l > i:
                     term2 += other_splat['color'] * other_splat['alpha'] * other_splat['prod_term']
-                    
+
             grad_alpha = term1 - term2
             splat_info['view'].pixels[splat_info['pixel']].grad_opacity += grad_alpha
-            
+
     return rendered_image, gradients
 
 def limit_splat_support(splat_list):
-    """
-    Limits the splat list based on variance and count.
-    """
     if not splat_list:
         return []
-        
+
     # Remove top 3% outliers with highest variance
     variances = [s['gaussian'].variance for s in splat_list]
-    threshold = np.percentile(variances, 97)
+    sorted_vars = sorted(variances)
+    threshold_idx = int(math.ceil(0.97 * len(sorted_vars)))
+    threshold = sorted_vars[threshold_idx] if threshold_idx < len(sorted_vars) else sorted_vars[-1]
     filtered_splats = [s for s in splat_list if s['gaussian'].variance <= threshold]
-    
+
     if not filtered_splats:
         return splat_list
-        
+
     # Find max variance among remaining
     sigma_max = max([s['gaussian'].variance for s in filtered_splats])
-    
+
     # Define cutoff radius
-    r = int(np.floor(3 * sigma_max))
-    
+    r = int(math.floor(3 * sigma_max))
+
     # Filter by spatial decay (distance from center)
-    # Note: Gaussian center is not explicitly stored in the splat dict in pseudocode above, 
-    # but is part of gaussian_G.
     final_splats = []
     for s in filtered_splats:
-        # Check if splat is within cutoff radius
-        # Assuming gaussian_G has a method to check energy containment
         if s['gaussian'].is_within_cutoff(r):
             final_splats.append(s)
-            
+
     # Maintain at most k_d = 150 front-most splats
-    # Already sorted by depth
     return final_splats[:150]
 ```
 
@@ -218,8 +179,6 @@ def limit_splat_support(splat_list):
 
 **Edge Cases and Pitfalls:**
 *   **Degenerate Input:** If the novel view is the same as an input view, the camera selection algorithm is ambiguous because the first input view covers all pixels, giving equal scores to others [S1].
-*   **Precision:** The alpha blending formula requires careful handling of accumulated alpha to avoid numerical instability when alpha approaches 1.0 [S1].
-*   **Undefined 'k' in Gradient Formula:** The gradient formula for opacity includes a sum starting from $l=k+1$. The source does not define $k$. This is a gap in the implementation details [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.

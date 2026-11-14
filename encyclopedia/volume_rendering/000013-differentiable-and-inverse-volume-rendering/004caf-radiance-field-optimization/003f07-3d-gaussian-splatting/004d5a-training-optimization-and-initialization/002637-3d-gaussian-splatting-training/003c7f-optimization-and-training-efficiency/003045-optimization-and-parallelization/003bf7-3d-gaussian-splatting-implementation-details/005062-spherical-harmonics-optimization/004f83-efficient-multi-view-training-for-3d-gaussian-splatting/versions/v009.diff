@@ -1,0 +1,232 @@
+--- v008.md
++++ v009.md
+@@ -4,42 +4,48 @@
+ 
+ ## Overview
+-This method enables multi-view mini-batch training for 3D Gaussian Splatting (3DGS), addressing the observation that multi-view gradients exhibit lower variance than single-view gradients, leading to more stable optimization [S1, unofficial]. It overcomes the inherent overhead of the tile-based rasterizer, which typically forces single-view training by allocating one thread block per image tile, by introducing a thread-efficient partial rendering scheme that minimizes idle threads [S1, unofficial]. It also resolves the incompatibility of standard Adaptive Density Control (ADC) with multi-view data by proposing a 3D-space compatible densification mechanism [S1, unofficial].
++This method enables stable optimization of 3D Gaussian Splatting (3DGS) by processing multiple camera views per training iteration, addressing the high gradient variance inherent in the standard single-view approach. While standard 3DGS renders one image per iteration due to rasterization overhead, this method uses thread-efficient partial rendering to gather pixels from multiple views without idle thread waste, and introduces a 3D-space compatible loss to resolve adaptive density control conflicts. It sets itself apart from [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md) by focusing on batch geometry rather than radiance compression, and from [Explicit Camera Jacobian Derivation](10077-explicit-camera-jacobian-derivation.md) by modifying the training loop structure rather than the gradient computation path.
+ 
+ ## How it works
+-**Inputs:** A set of $N$ training images with corresponding camera poses; 3D Gaussian primitives $\{G_i\}$ defined by mean $\mu_i$, covariance $\Sigma_i$ (derived from scale $S_i$ and rotation $R_i$), opacity $o_i$, and spherical harmonic coefficients $\mathbf{c}_i$; learning rate $\eta_t$; number of sampled mini-batches $K$ for variance estimation.
++### Inputs and Outputs
++**Inputs:**
++- A set of $N$ training images with corresponding camera poses.
++- A 3D Gaussian scene representation $\{G_j\}_{j=1}^M$ defined by 3D mean $\mu$, scale $S$, rotation $R$, opacity $o$, and spherical harmonic coefficients $\mathbf{c}$ (as defined in [Spherical Harmonics Optimization](14206-spherical-harmonics-optimization.md)).
++- A mini-batch size $K$ (number of views per iteration).
+ 
+-**Outputs:** Updated Gaussian parameters $\{G_i\}$ and optimized scene representation.
++**Outputs:**
++- Updated Gaussian parameters $\{G_j\}$ after optimization step.
+ 
+-**Data Structures:**
+-*   **Gaussian Primitives:** Stored as a list or flat array. Each primitive $i$ contains:
+-    *   $\mu_i \in \mathbb{R}^3$: 3D mean position.
+-    *   $S_i \in \mathbb{R}^3$: Scale vector.
+-    *   $R_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix (or quaternion).
+-    *   $o_i \in \mathbb{R}$: Opacity.
+-    *   $\mathbf{c}_i \in \mathbb{R}^{L^2 \times 3}$: SH coefficients for color (where $L$ is the SH degree).
+-*   **Tile Grid:** The image is split into tiles. A single thread block is allocated to a single tile.
++### Data Structures
++The rasterizer uses a tile-based structure. The image is split into tiles. A single thread block is allocated to a single tile. Threads within a block cooperate to preprocess Gaussians and render pixels. A thread is freed only when all peer threads in the same block have completed their work [S1, unofficial].
+ 
+-**Algorithm Steps:**
++### Method Steps
+ 
+-1.  **Variance Analysis (Optional Validation):**
+-    To verify the benefit of multi-view training, estimate the variance of mini-batch gradients. Freeze model parameters $w_t$. Randomly sample $K$ mini-batches $B_k$ from the dataset $D$. Compute the mini-batch gradient $\nabla \bar{\phi}_k$ for each. Estimate variance using Monte Carlo sampling:
+-    $$
+-    V_{B_k \in S} (\nabla \bar{\phi}_k) = E[\|\nabla \bar{\phi}_k - P(w_t)\|_2^2]
+-    $$
+-    where $E[x] = \mu$ is the expectation. Compare this variance against single-view baselines [S1, unofficial].
++1.  **Mini-batch Selection:** Randomly sample $K$ distinct views (images) from the training dataset to form a mini-batch. Unlike standard 3DGS which samples one view, this method aggregates rays from $K$ views [S1, unofficial].
+ 
+ 2.  **Thread-Efficient Partial Rendering:**
+-    Standard 3DGS rasterizers allocate one block per tile. Rendering multiple images naively causes idle threads because blocks finish at different times. The method implements a partial rendering strategy:
+-    *   Instead of rendering all pixels of all images in a single iteration (which is expensive), select a subset of pixels or tiles across multiple views.
+-    *   Ensure that thread blocks are reused efficiently. A thread is freed only when all peer threads in the same block complete their work.
+-    *   This avoids the "idle thread" overhead seen in naive multi-view implementations where some blocks finish early while others are still processing [S1, unofficial].
++    To avoid the idle thread overhead of naive multi-view rendering (where blocks are allocated per image, causing synchronization stalls), the method employs a partial rendering scheme.
++    -   The rasterizer processes the selected $K$ views.
++    -   Instead of allocating a full block per image, threads are managed to ensure no idle time occurs while waiting for other views to complete [S1, unofficial].
++    -   For each pixel $p$ in the selected views, the rendered color $\hat{C}(p)$ is computed by alpha-blending sorted Gaussians $\{G_j\}_{j=1}^M$ projected to 2D:
++        $$
++        \hat{C}(p) = \sum_{i=1}^{M} c_i T_i o_i G_i(p)
++        $$
++        where $T_i = \prod_{k=1}^{i-1} (1 - o_k G_k(p))$ and $G_i(p) = \exp(-\frac{1}{2}(p - \mu'_i)^T (\Sigma'_i)^{-1} (p - \mu'_i))$. Here $\mu'$ and $\Sigma'$ are the projected 2D mean and covariance derived from 3D parameters [S1, unofficial].
+ 
+-3.  **3D-Space Densification (D-SSIM Adaptation):**
+-    Standard ADC assumes all 2D positional gradients reside in a single image plane. Multi-view training produces gradients in different 2D spaces, making direct arithmetic invalid.
+-    *   Replace the standard 2D D-SSIM loss with a 3D-space compatible variant.
+-    *   Compute the loss and gradients in 3D space rather than projecting them to individual 2D image planes for densification decisions. This ensures that densification (splitting/cloning Gaussians) operates on consistent 3D metrics [S1, unofficial].
++3.  **Loss Computation (D-SSIM in 3D):**
++    Standard 3DGS uses D-SSIM loss computed in 2D image space. This is incompatible with multi-view training because positional gradients from different views reside in different image planes, making vector arithmetic invalid for Adaptive Density Control (ADC).
++    -   The method replaces 2D D-SSIM with a **3D D-SSIM** loss.
++    -   This loss is computed directly in 3D space using the Gaussian primitives' parameters, ensuring that gradients for densification are consistent across views [S1, unofficial].
+ 
+-4.  **Gradient Update:**
+-    Update weights $w$ (including Gaussian parameters) using the multi-view mini-batch gradient $\nabla \bar{\phi}_k$:
++4.  **Gradient Estimation and Variance Reduction:**
++    The variance of the mini-batch gradients $\nabla \bar{\phi}_k$ is defined as $V(x) := E[\|x - \mu\|_2^2]$ where $E[x] = \mu$.
++    -   The method estimates variance using Monte Carlo sampling:
++        $$
++        V_{B_k \in S} (\nabla \bar{\phi}_k) = E[\|\nabla \bar{\phi}_k - P(w_t)\|_2^2]
++        $$
++    -   Experiments show that multi-view mini-batches yield smaller gradient variance than single-view, leading to more stable optimization [S1, unofficial].
++
++5.  **Parameter Update:**
++    Update weights $w$ (including Gaussian parameters) using the learning rate $\eta_t$:
+     $$
+     w_{t+1} = w_t - \eta_t \nabla \bar{\phi}_k (w_t)
+@@ -47,91 +53,80 @@
+     where $\nabla \bar{\phi}_k (w_t) = \frac{1}{|B_k|} \sum_{i \in B_k} \nabla \phi_i (w_t)$ [S1, unofficial].
+ 
+-**Pseudocode:**
++6.  **Adaptive Density Control (ADC) Adjustment:**
++    Standard ADC assumes all 2D positional gradients reside within a single plane. In multi-view training, gradients come from different planes.
++    -   The method modifies ADC to operate on the 3D-space gradients derived from the 3D D-SSIM loss, preventing suboptimal densification caused by mixing vectors from different image spaces [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-def train_3dgs_multiview(gaussians, images, cameras, num_iterations, learning_rate, k_samples):
++def train_step(gaussians, camera_poses, images, learning_rate, batch_size_k):
+     """
+-    Efficient multi-view training for 3D Gaussian Splatting.
++    One training iteration using efficient multi-view rendering.
+     """
+-    for t in range(num_iterations):
+-        # 1. Sample a multi-view mini-batch
+-        # Select a subset of pixels/tiles from multiple images to form B_k
+-        batch_pixels, batch_cameras = sample_multi_view_batch(images, cameras)
++    # 1. Sample K views
++    selected_indices = random_sample(camera_poses, batch_size_k)
++    selected_cameras = [camera_poses[i] for i in selected_indices]
++    target_images = [images[i] for i in selected_indices]
++    
++    # 2. Thread-Efficient Partial Rendering
++    # Render all K views in a single pass, managing thread blocks to avoid idle threads
++    rendered_images = []
++    for cam, target in zip(selected_cameras, target_images):
++        # Project Gaussians to 2D for this camera
++        projected_gaussians = project_gaussians(gaussians, cam)
+         
+-        # 2. Thread-Efficient Partial Rendering
+-        # Render only the selected pixels across the selected views
+-        # This avoids idle threads by managing block allocation efficiently
+-        rendered_colors = thread_efficient_partial_render(
+-            gaussians, 
+-            batch_pixels, 
+-            batch_cameras
+-        )
++        # Render using tile-based rasterizer with thread-efficient scheduling
++        # This avoids allocating a full block per image which causes idle threads
++        rendered = tile_rasterize_thread_efficient(projected_gaussians, cam.resolution)
++        rendered_images.append(rendered)
+         
+-        # 3. Compute Loss in 3D Space
+-        # Use 3D-compatible D-SSIM to avoid 2D plane arithmetic issues
+-        loss = compute_3d_dssim_loss(rendered_colors, batch_pixels.targets)
++    # 3. Compute 3D D-SSIM Loss
++    # Compute loss in 3D space to ensure gradient consistency for ADC
++    total_loss = 0.0
++    for rendered, target in zip(rendered_images, target_images):
++        # 3D D-SSIM computes similarity based on Gaussian parameters in 3D
++        # rather than pixel coordinates in 2D
++        loss = compute_3d_dssim_loss(gaussians, rendered, target)
++        total_loss += loss
+         
+-        # 4. Backpropagation
+-        gradients = compute_gradients(loss, gaussians)
+-        
+-        # 5. Update Parameters
+-        gaussians.update_parameters(gradients, learning_rate)
+-        
+-        # 6. Adaptive Density Control (ADC) in 3D
+-        # Perform densification based on 3D-space gradients/metrics
+-        gaussians.adaptive_density_control_3d()
+-
+-def thread_efficient_partial_render(gaussians, pixels, cameras):
+-    """
+-    Renders specific pixels from multiple views efficiently.
+-    Allocates thread blocks to tiles and ensures no idle threads
+-    by synchronizing block completion.
+-    """
+-    # Split pixels into tiles
+-    tiles = organize_pixels_into_tiles(pixels)
++    avg_loss = total_loss / batch_size_k
+     
+-    # Allocate blocks to tiles
+-    # Key: Reuse blocks or manage lifecycle to avoid idle waits
+-    results = []
+-    for tile in tiles:
+-        block = allocate_block(tile)
+-        # Render pixels in this tile for all relevant views
+-        tile_render = render_tile(gaussians, tile, cameras)
+-        results.append(tile_render)
+-        
+-    return combine_results(results)
+-
+-def compute_3d_dssim_loss(rendered, targets):
+-    """
+-    Computes D-SSIM loss in 3D space to be compatible with multi-view gradients.
+-    """
+-    # Implementation details for 3D-space D-SSIM are specific to the paper's
+-    # adaptation of the standard 2D metric.
+-    # [G] Typically involves comparing rendered and target features in a 
+-    # shared 3D coordinate system or using 3D-aware similarity metrics.
+-    return dssim_3d(rendered, targets)
++    # 4. Backpropagation
++    gradients = compute_gradients(avg_loss, gaussians)
++    
++    # 5. Update Parameters
++    # w_{t+1} = w_t - eta * grad
++    gaussians.update_parameters(gradients, learning_rate)
++    
++    # 6. Adaptive Density Control (ADC)
++    # Use 3D gradients for densification to handle multi-view consistency
++    gaussians.adaptive_density_control(gradients)
++    
++    return avg_loss
+ ```
+ 
+-**Parameters:**
+-*   $\eta_t$: Learning rate. Typical values follow standard 3DGS schedules (e.g., initial $1.6 \times 10^{-4}$ decaying over iterations) [S1, unofficial].
+-*   $K$: Number of sampled mini-batches for variance estimation. Not given in the sources.
+-*   Mini-batch size: Defined by the number of pixels/tiles sampled across views. Not given in the sources.
++### Parameters
++-   **Learning Rate ($\eta_t$):** Standard 3DGS learning rate schedule [S1, unofficial].
++-   **Batch Size ($K$):** Number of views per iteration. Not given in the sources.
++-   **Monte Carlo Samples ($K_{mc}$):** Number of mini-batches sampled to estimate gradient variance during analysis. Not given in the sources.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Idle Threads:** Naive multi-view rendering causes significant overhead due to idle threads in thread blocks. The thread-efficient scheme is required to mitigate this [S1, unofficial].
+-*   **Gradient Space Mismatch:** Standard ADC fails in multi-view training because it assumes gradients are in a single 2D plane. Using 2D gradients for densification in multi-view leads to suboptimal results [S1, unofficial].
+-*   **Precision:** The variance estimation relies on Monte Carlo sampling. Ensure sufficient $K$ for stable variance estimates if used for hyperparameter tuning [S1, unofficial].
++### Edge Cases and Pitfalls
++-   **Idle Threads:** Naive multi-view rendering allocates a single block to a single tile per image. If one image renders faster, threads wait for others, causing significant overhead. The thread-efficient scheme mitigates this [S1, unofficial].
++-   **ADC Incompatibility:** Standard ADC assumes gradients are in a single 2D plane. Multi-view training produces gradients in different spaces. Using standard ADC leads to suboptimal densification. The 3D D-SSIM loss resolves this [S1, unofficial].
++-   **Gradient Variance:** Single-view training has higher gradient variance. Multi-view reduces this, improving stability [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method aims to reduce the overhead of multi-view rendering. While multi-view training inherently processes more data per iteration, the thread-efficient partial rendering minimizes the idle thread penalty, making it computationally feasible compared to naive multi-view approaches [S1, unofficial].
+-*   **Memory Complexity:** Similar to standard 3DGS, dominated by the storage of Gaussian primitives and intermediate rendering buffers. No significant additional memory overhead is reported beyond the multi-view pixel buffers [S1, unofficial].
+-*   **Performance:** Multi-view training yields smaller variance in mini-batch gradients compared to single-view training, resulting in more stable optimization [S1, unofficial].
+-*   **Strengths:** More stable optimization due to lower gradient variance; better utilization of GPU threads compared to naive multi-view rendering.
+-*   **Limitations:** Requires modification of the standard ADC mechanism to work in 3D space; implementation complexity is higher due to the need for thread-efficient partial rendering [S1, unofficial].
+-*   **When to use:** When stable optimization is prioritized and computational resources allow for the complexity of thread-efficient rendering and 3D-space densification.
+-*   **When not to use:** When single-view training is sufficient and simplicity is preferred; or if the hardware does not support the required thread synchronization mechanisms efficiently.
++-   **Time Complexity:** Higher per-iteration cost than single-view 3DGS due to rendering $K$ images, but thread-efficient rendering minimizes overhead. The reduction in gradient variance may allow for fewer iterations to converge.
++-   **Memory Complexity:** Requires memory for $K$ rendered images and their gradients simultaneously.
++-   **Performance:** Multi-view training shows smaller variance of mini-batch gradients than single-view, resulting in more stable optimization [S1, unofficial].
++-   **Strengths:** More stable optimization; leverages multi-view consistency; reduces gradient noise.
++-   **Limitations:** Requires modification of the rasterizer for thread efficiency; requires 3D-space loss computation; higher memory usage per iteration.
++-   **When to use:** When training stability is critical and hardware supports parallel rendering of multiple views.
++-   **When not to use:** When memory is constrained or when single-view convergence is sufficient.
+ 
+ ## Background
+-3D Gaussian Splatting (3DGS) has become a preferred method for inverse rendering due to its speed [S1, unofficial]. Standard 3DGS uses single-view mini-batch training because its rasterization pipeline makes gathering individual pixels from multiple images difficult, requiring rendering every pixel of all images in a single iteration, which incurs considerable overhead [S1, unofficial]. In contrast, NeRF implicitly benefits from multi-view learning [S1, unofficial]. The method was introduced by Minhyuk Choi, Injae Kim, and Hyunwoo J. Kim from Korea University and KAIST in 2025 [S1, unofficial].
++-   **Origin:** Proposed by Minhyuk Choi, Injae Kim, and Hyunwoo J. Kim from Korea University and KAIST [S1, unofficial].
++-   **History:** Published in June 2025 [S1, unofficial].
++-   **Context:** Standard 3DGS uses single-view mini-batches because its rasterization pipeline makes gathering individual pixels from multiple images difficult. NeRF implicitly benefits from multi-view learning. This method adapts 3DGS to multi-view training [S1, unofficial].
+ 
+ ## Sources

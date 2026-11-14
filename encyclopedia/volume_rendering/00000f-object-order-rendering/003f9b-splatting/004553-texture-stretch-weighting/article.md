@@ -3,31 +3,29 @@
 Also called: wTS Calculation
 
 ## Overview
-Texture Stretch Weighting (wTS) is a weighting mechanism used in point-based neural rendering to mitigate artifacts caused by weighted average pooling when handling view-dependent effects. It compensates for the distortion of splats in novel views by penalizing pixels at grazing angles, thereby increasing the influence of front-facing views [S1]. Unlike standard isotropic weighting, it accounts for the anisotropic stretching of the splat footprint due to perspective projection [S1].
+Texture Stretch Weighting (wTS) is a weighting mechanism used in point-based neural rendering to mitigate artifacts caused by weighted average pooling when handling view-dependent effects [S1]. It compensates for the distortion of splats in novel views by penalizing pixels at grazing angles, thereby increasing the influence of front-facing views [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The covariance matrix $\Sigma$ of a splat (point primitive) projected onto the screen space. This matrix characterizes the shape and orientation of the splat's footprint.
-*   **Output:** A scalar weight $w_{TS} \in [0, 1]$ for each pixel or splat contribution.
+*   **Input:** The projected $2 \times 2$ covariance matrix $\Sigma$ of a splat in screen space [S1].
+*   **Output:** A scalar weight $w_{TS}$ for each pixel or splat contribution [S1].
 
 **Data Structures:**
-*   **Covariance Matrix ($\Sigma$):** A $2 \times 2$ symmetric positive-definite matrix representing the 2D footprint of the splat in screen space.
+*   **Covariance Matrix ($\Sigma$):** A $2 \times 2$ symmetric positive-definite matrix representing the 2D footprint of the splat in screen space [G].
     *   Layout: $\begin{bmatrix} \sigma_{xx} & \sigma_{xy} \\ \sigma_{xy} & \sigma_{yy} \end{bmatrix}$
-    *   Derived from the 3D covariance and the view projection matrix.
+    *   Derived from the 3D covariance and the view projection matrix [G].
 
 **Steps:**
-1.  **Compute Eigenvalues:** Calculate the eigenvalues $\lambda_1$ and $\lambda_2$ of the projected 2D covariance matrix $\Sigma$, such that $\lambda_1 \ge \lambda_2 \ge 0$. These represent the squared semi-axis lengths of the elliptical footprint [S1].
-2.  **Calculate Stretch Ratio:** Compute the ratio of the largest to the smallest eigenvalue. This quantifies the degree of anisotropic stretching (foreshortening) [S1].
+1.  **Compute Eigenvalues:** Calculate the eigenvalues $\lambda_1$ and $\lambda_2$ of the projected 2D covariance matrix $\Sigma$, such that $\lambda_1 \ge \lambda_2 \ge 0$ [G].
+2.  **Calculate Stretch Ratio:** Compute the ratio of the largest to the smallest eigenvalue to quantify the degree of anisotropic stretching [S1].
     $$ r = \frac{\lambda_1}{\lambda_2} $$
-    *   Note: If $\lambda_2 \approx 0$, the ratio approaches infinity, indicating a grazing angle where the splat is severely stretched.
-3.  **Compute Weight:** Apply a penalty function based on the stretch ratio. While the exact functional form (e.g., exponential decay) is not explicitly detailed in the provided text, the weight $w_{TS}$ is defined as a term that decreases as the stretch ratio increases [S1].
-    *   [G] A common implementation for such a penalty is $w_{TS} = e^{-\alpha \cdot r}$ or $w_{TS} = \frac{1}{1 + \beta \cdot r}$, where $\alpha, \beta$ are hyperparameters controlling the sensitivity to stretch. The sources do not specify the exact function.
+3.  **Compute Weight:** Apply a penalty function based on the stretch ratio [S1]. The exact functional form is not provided in the sources. [G] Standard implementations typically use a decaying function such as $w_{TS} = \exp(-\alpha r)$ or $w_{TS} = 1/(1+\beta r)$, where $\alpha$ and $\beta$ control sensitivity to stretch.
 
 **Formula:**
 The final weight $w$ for a pixel is the product of three components:
 $$ w = w_{CS} \cdot w_{TS} \cdot w_{PD} $$
 Where:
-*   $w_{CS}$: Consistency weight (not detailed in this article, but part of the product) [S1].
+*   $w_{CS}$: Consistency weight [S1].
 *   $w_{TS}$: Texture Stretch Weight (this article) [S1].
 *   $w_{PD}$: Probabilistic Depth Weight, defined as $P(D_n < \min_{m \neq n} (D_m))$, accounting for point visibility [S1].
 
@@ -36,19 +34,19 @@ Where:
 *   **Eigenvalue Threshold:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Grazing Angles:** When viewing a surface at a grazing angle, $\lambda_2 \to 0$, causing $r \to \infty$. The weight $w_{TS}$ must approach 0 to prevent these heavily distorted, low-information splats from dominating the average [S1].
+*   **Grazing Angles:** When viewing a surface at a grazing angle, $\lambda_2 \to 0$, causing $r \to \infty$. The weight $w_{TS}$ penalizes these pixels to increase the influence of front-facing views [S1].
 *   **Numerical Stability:** Division by zero or near-zero eigenvalues must be handled. [G] A small epsilon $\epsilon$ should be added to $\lambda_2$ before division: $r = \lambda_1 / (\lambda_2 + \epsilon)$.
 
 ## Subtopics
 
 ### Final View Weighting
-This is the composite weight $w$ resulting from the product of $w_{CS}$, $w_{TS}$, and $w_{PD}$. It is used in the weighted average pooling step of the neural renderer to combine features from multiple input views. It ensures that the contribution of each view is normalized, maintaining consistent feature magnitude regardless of the number of views selected [S1].
+This is the composite weight $w$ resulting from the product of $w_{CS}$, $w_{TS}$, and $w_{PD}$ [S1]. It is used in the weighted average pooling step of the neural renderer to combine features from multiple input views [S1]. The weighted average pooling normalizes the sum of the weights of all views per pixel, ensuring that the distribution of feature magnitudes remains consistent regardless of the number of views selected [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per splat/pixel for eigenvalue decomposition of a $2 \times 2$ matrix.
-*   **Memory Complexity:** $O(1)$ auxiliary storage for eigenvalues.
-*   **Strengths:** Effectively reduces artifacts in novel views caused by view-dependent effects (e.g., specular highlights, reflections) by down-weighting distorted, grazing-angle observations [S1]. Improves temporal stability [S1].
-*   **Limitations:** Requires accurate estimation of the projected covariance matrix. Does not address other sources of artifacts like occlusion (handled by $w_{PD}$) or consistency (handled by $w_{CS}$) [S1].
+*   **Time Complexity:** $O(1)$ per splat/pixel for eigenvalue decomposition of a $2 \times 2$ matrix [G].
+*   **Memory Complexity:** $O(1)$ auxiliary storage for eigenvalues [G].
+*   **Strengths:** Effectively reduces artifacts in novel views caused by view-dependent effects by down-weighting distorted, grazing-angle observations [S1]. Improves temporal stability [S1].
+*   **Limitations:** Requires accurate estimation of the projected covariance matrix.
 *   **When to use:** In point-based neural rendering pipelines where view-dependent appearance is modeled and weighted average pooling is used to aggregate features from multiple input views [S1].
 
 ## Background

@@ -1,0 +1,87 @@
+--- v002.md
++++ v003.md
+@@ -50,6 +50,6 @@
+ ```python
+ def differentiable_point_pipeline(points, input_views, novel_view, num_epochs, learning_rate):
+-    # 1. Camera Selection: K-Maximum coverage algorithm [HP98]
+-    selected_views = input_views[:]  # K-Max coverage selects optimal subset
++    # 1. Camera Selection: K-Maximum coverage algorithm [HP98] [S1]
++    selected_views = input_views[:]  # [G] K-Max coverage selects optimal subset
+ 
+     # 2. Initialize per-view attributes
+@@ -63,5 +63,5 @@
+         alpha_accum = np.zeros(rendered_image.shape[:2])
+ 
+-        # Sort points by depth relative to novel view for correct blending
++        # Sort points by depth relative to novel view for correct blending [G]
+         sorted_points = sorted(points, key=lambda p: np.dot(p.pos - novel_view.camera.origin, novel_view.camera.forward))
+ 
+@@ -70,13 +70,17 @@
+                 # Bi-directional reprojection with depth offset
+                 adjusted_pos = p.pos + v.camera.forward * p.depth_offset[v.id]
+-                uv = project_to_image(adjusted_pos, v.camera)
++                # Project to 2D image coordinates [G]
++                uv = (adjusted_pos - v.camera.origin) @ v.camera.proj_matrix
++                uv = uv[:2] / uv[2]
+ 
+-                # EWA sampling and kernel evaluation
+-                cov_2d = transform_covariance(p.covariance_3d, v.camera)
+-                feature = sample_image(v.image, uv, cov_2d)
+-                weight = evaluate_ewa_kernel(uv, cov_2d)
++                # EWA kernel evaluation based on projected covariance [G]
++                cov_2d = v.camera.view_matrix @ p.covariance_3d @ v.camera.view_matrix.T
++                weight = np.exp(-0.5 * uv @ np.linalg.inv(cov_2d) @ uv)
+ 
+-                # Probabilistic depth test
+-                depth_prob = compute_depth_probability(p, v, novel_view)
++                # Sample feature from input view image [G]
++                feature = v.image[uv[1], uv[0]]
++
++                # Probabilistic depth test: uses distribution of depths from each reprojected input view [S1]
++                depth_prob = 1.0  # [S1] Exact formula not given in sources
+ 
+                 # Composite
+@@ -90,6 +94,9 @@
+         # Loss and backpropagation
+         loss = np.mean((rendered_image - novel_view.image) ** 2)
+-        # Gradients flow back to p.depth_offset and p.feature_grad
+-        update_gradients(points, selected_views, learning_rate)
++        # Gradients flow back to p.depth_offset and p.feature_grad [S1]
++        for p in points:
++            for v in selected_views:
++                p.depth_offset[v.id] -= learning_rate * p.depth_grad[v.id]
++                p.feature_grad[v.id] -= learning_rate * p.feature_grad[v.id]
+ 
+     return rendered_image
+@@ -97,12 +104,12 @@
+ 
+ **Parameters:**
+-*   **K-Maximum Coverage:** The number of cameras to select. Not given in the sources.
+-*   **Learning Rate:** Not given in the sources.
+-*   **EWA Kernel Width:** Determined by the projected covariance matrix. Not given in the sources.
++*   **K-Maximum Coverage:** Selects the subset of input views that maximize projected coverage [S1].
++*   **Learning Rate:** Not given in the sources. [G]
++*   **EWA Kernel Width:** Determined by the projected covariance matrix [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Inaccurate Geometry:** When reprojecting from input views with inaccurate MVS geometry, it is hard to determine which view contains the correct information. The probabilistic depth test and per-view optimization help mitigate this, but severe errors may lead to artifacts [S1].
+-*   **Wide-Baseline Artifacts:** In wide-baseline, free-viewpoint scenarios, methods that do not optimize per-view parameters (like standard NeRFs) often present artifacts. This method avoids this by optimizing per-view features and depth [S1].
+-*   **Holes in Point Cloud:** If holes occur during point-cloud generation, the reconstruction result shows vacancy in the rendered result [S2] (Note: This specific pitfall is cited for ADOP, a variant, but applies to point-based methods generally).
++*   **Inaccurate Geometry:** When reprojecting from input views with inaccurate MVS geometry, it is hard to determine which view contains the correct information [S1].
++*   **Wide-Baseline Artifacts:** In wide-baseline, free-viewpoint scenarios, methods that do not optimize per-view parameters (like standard NeRFs) often present artifacts [S1].
++*   **Holes in Point Cloud:** If holes occur during point-cloud generation, the reconstruction result shows vacancy in the rendered result [S2].
+ 
+ ## Subtopics
+@@ -115,9 +122,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The camera selection uses the K-Maximum coverage algorithm for fast selection [S1]. The rendering involves bi-directional EWA splatting for each point and selected view. Complexity is proportional to $N \times K$, where $N$ is the number of points and $K$ is the number of selected views.
+-*   **Memory Complexity:** Stores per-point attributes for each selected view (depth offset, features). This is higher than fixed MVS methods but lower than volumetric NeRFs which store dense voxel grids or large MLPs.
++*   **Time Complexity:** The camera selection uses the K-Maximum coverage algorithm for fast selection [S1]. The rendering involves bi-directional EWA splatting for each point and selected view [S1]. Complexity is proportional to $N \times K$, where $N$ is the number of points and $K$ is the number of selected views [G].
++*   **Memory Complexity:** Stores per-point attributes for each selected view (depth offset, features) [S1]. This is higher than fixed MVS methods but lower than volumetric NeRFs which store dense voxel grids or large MLPs [G].
+ *   **Measured Performance:** The method outperforms all previous methods in quality and speed in almost all tested scenes [S1].
+ *   **Strengths:** Recovers from MVS reconstruction errors; high-quality, temporally coherent rendering; suitable for free-viewpoint IBR, multi-view harmonization, and stylization [S1].
+-*   **Limitations:** Requires initial MVS reconstruction; performance depends on the quality of the initial point cloud; bi-directional reprojection adds computational overhead compared to forward-only splatting.
++*   **Limitations:** Requires initial MVS reconstruction; performance depends on the quality of the initial point cloud; bi-directional reprojection adds computational overhead compared to forward-only splatting [S1].
+ *   **When to use:** High-quality image-based rendering, multi-view stylization, and multi-view harmonization where per-view optimization is beneficial [S1].
+ 

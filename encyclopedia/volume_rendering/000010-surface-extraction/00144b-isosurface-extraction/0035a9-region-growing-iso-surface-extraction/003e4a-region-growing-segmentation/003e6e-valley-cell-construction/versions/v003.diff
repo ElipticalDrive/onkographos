@@ -1,0 +1,173 @@
+--- v002.md
++++ v003.md
+@@ -13,5 +13,5 @@
+ *   **Mesh:** Triangular mesh $T$. Each triangle has 3 vertex indices.
+ *   **Vertices:** Store scalar value $v$.
+-*   **Saddles:** Identified critical points. Store a set of associated maxima $\mathcal{M}_S$.
++*   **Saddles:** Identified critical points. Store a set of associated maxima $\mathcal{M}_S$ [S1].
+ *   **Cells:** Set of triangles belonging to a specific maximum.
+ 
+@@ -33,5 +33,5 @@
+     *   In degenerate cases (e.g., multiple valley lines meeting at a saddle, or paths ending at a junction), a single saddle may belong to more than two cells (associated with $k > 2$ maxima) [S1].
+     *   To resolve this, duplicate the saddle node $k-1$ times [S1].
+-    *   Replace the original saddle $S$ with $k$ distinct saddle instances $S_1, S_2, \dots, S_k$.
++    *   Replace the original saddle $S$ with $k$ distinct saddle instances $S_1, S_2, \dots, S_k$ [S1].
+     *   Each instance $S_i$ is associated with exactly one maximum from $\mathcal{M}_S$ [S1].
+     *   *Note:* This is similar to unfolding a $k$-fold saddle but only duplicates the node, not the paths [S1].
+@@ -44,28 +44,30 @@
+ 
+ ```python
+-def construct_valley_cells(mesh):
+-    # mesh: list of triangles, each triangle is a tuple of 3 vertex indices
+-    # vertices: list of dicts with 'value'
+-    
++def construct_valley_cells(vertices, triangles):
++    # vertices: list of scalar values
++    # triangles: list of tuples (v0, v1, v2)
++    n_verts = len(vertices)
++    n_tris = len(triangles)
++
+     # Precompute triangle adjacency
+-    adj = {i: set() for i in range(len(mesh))}
+-    for i in range(len(mesh)):
+-        for j in range(i + 1, len(mesh)):
+-            if len(set(mesh[i]) & set(mesh[j])) == 2:
+-                adj[i].add(j)
+-                adj[j].add(i)
+-                
+-    # 1. Identify maxima [G]
+-    maxima = [v for v in range(len(vertices)) if all(vertices[v]['value'] >= vertices[n]['value'] for n in get_vertex_neighbors(v, mesh))]
+-    
+-    # 2. Region Growing
++    tri_adj = {i: set() for i in range(n_tris)}
++    for i in range(n_tris):
++        for j in range(i + 1, n_tris):
++            if len(set(triangles[i]) & set(triangles[j])) == 2:
++                tri_adj[i].add(j)
++                tri_adj[j].add(i)
++
++    # 1. Identify critical points [S1]
++    minima = [v for v in range(n_verts) if all(vertices[v] <= vertices[n] for tri in triangles if v in tri for n in tri if n != v)]
++    maxima = [v for v in range(n_verts) if all(vertices[v] >= vertices[n] for tri in triangles if v in tri for n in tri if n != v)]
++    saddles = [v for v in range(n_verts) if v not in maxima and v not in minima]
++
++    # 2. Region growing [S1]
+     cells = {m: set() for m in maxima}
+-    saddle_max_map = {} # saddle_idx -> set of max_indices
+-    
++    saddle_max_map = {s: set() for s in saddles}
++
+     for m in maxima:
+-        start_tris = [i for i, tri in enumerate(mesh) if m in tri]
+-        stack = list(start_tris)
++        stack = [i for i, tri in enumerate(triangles) if m in tri]
+         visited = set()
+-        
+         while stack:
+             tri_idx = stack.pop()
+@@ -73,58 +75,49 @@
+             visited.add(tri_idx)
+             cells[m].add(tri_idx)
+-            
+-            tri = mesh[tri_idx]
+-            # Stopping condition: triangle whose vertices are all minima
+-            if all(vertices[v]['value'] == min(vertices[n]['value'] for n in get_vertex_neighbors(v, mesh)) for v in tri):
+-                continue
+-                
+-            # Check boundary edges
+-            for i in range(3):
+-                edge = (tri[i], tri[(i+1)%3])
+-                # Check if edge is shared with an unvisited triangle
+-                shared = False
+-                for n_idx in adj.get(tri_idx, []):
+-                    if set(edge).issubset(set(mesh[n_idx])):
+-                        if n_idx not in visited:
++            tri = triangles[tri_idx]
++            if any(v in minima for v in tri): continue
++            for n_idx in tri_adj.get(tri_idx, []):
++                if n_idx not in visited:
++                    shared = set(tri) & set(triangles[n_idx])
++                    if len(shared) == 2:
++                        # Valley line check [G]
++                        is_valley = all(vertices[e] <= vertices[o] for e in shared for o in triangles[n_idx] if o not in shared)
++                        if is_valley:
++                            saddle_v = [v for v in shared if v in saddles]
++                            if saddle_v: saddle_max_map[saddle_v[0]].add(m)
++                        else:
+                             stack.append(n_idx)
+-                        shared = True
+-                        break
+-                if not shared:
+-                    # Boundary edge: check if valley line or saddle
+-                    if is_valley_line(edge, vertices):
+-                        saddle_idx = get_saddle_at_edge(edge, mesh)
+-                        if saddle_idx is not None:
+-                            saddle_max_map.setdefault(saddle_idx, set()).add(m)
+-                            
+-    # 3. Update Saddle Correspondences and Persistence
+-    saddles = [s for s in range(len(vertices)) if is_saddle(s, vertices, mesh)]
++
++    # 3. Saddle Update and Persistence [S1]
++    saddle_info = {}
+     for s in saddles:
+-        if s not in saddle_max_map:
+-            saddle_max_map[s] = set()
+-        pers_values = {m: vertices[m]['value'] - vertices[s]['value'] for m in saddle_max_map[s]}
+-        saddles[s].persistence = min(pers_values.values()) if pers_values else 0.0
+-        saddles[s].associated_maxima = list(saddle_max_map[s])
+-        
+-    # 4. Resolve Degeneracies via Duplication
++        max_set = saddle_max_map.get(s, set())
++        if not max_set:
++            saddle_info[s] = {'persistence': 0.0, 'maxima': []}
++            continue
++        pers = min(vertices[m] - vertices[s] for m in max_set)
++        saddle_info[s] = {'persistence': pers, 'maxima': list(max_set)}
++
++    # 4. Saddle Duplication [S1]
+     new_saddles = []
+-    for s in saddles:
+-        k = len(s.associated_maxima)
++    for s, info in saddle_info.items():
++        k = len(info['maxima'])
+         if k > 2:
+-            for i in range(1, k):
+-                new_s = copy(s)
+-                new_s.associated_maxima = [s.associated_maxima[i]]
+-                new_s.persistence = vertices[s.associated_maxima[i]]['value'] - vertices[s]['value']
+-                new_saddles.append(new_s)
+-            s.associated_maxima = [s.associated_maxima[0]]
+-            s.persistence = vertices[s.associated_maxima[0]]['value'] - vertices[s]['value']
+-            new_saddles.append(s)
++            for i in range(k):
++                new_saddles.append({'value': vertices[s], 'persistence': vertices[info['maxima'][i]] - vertices[s], 'maxima': [info['maxima'][i]]})
+         else:
+-            new_saddles.append(s)
+-            
+-    # 5. Calculate Boundary Persistence
+-    boundaries = find_adjacent_cell_boundaries(cells, mesh)
+-    for b in boundaries:
+-        b.persistence = min(s.persistence for s in b.saddles) if b.saddles else 0.0
+-        
++            new_saddles.append({'value': vertices[s], 'persistence': info['persistence'], 'maxima': info['maxima']})
++
++    # 5. Boundary Persistence [S1]
++    boundaries = []
++    for i in range(n_tris):
++        for j in tri_adj.get(i, []):
++            if i < j:
++                shared = set(triangles[i]) & set(triangles[j])
++                if len(shared) == 2:
++                    boundary_saddles = [s for s in new_saddles if s['value'] in shared]
++                    pers = min(s['persistence'] for s in boundary_saddles) if boundary_saddles else 0.0
++                    boundaries.append({'edge': shared, 'persistence': pers})
++
+     return cells, new_saddles, boundaries
+ ```
+@@ -142,5 +135,5 @@
+ 
+ ## Background
+-The method is inspired by the Morse complex construction scheme described in [EHZ03]. It was formalized for automating transfer function design in the context of 2D density plots for volume exploration [S1]. The approach uses region growing from maxima [HP74] to tessellate the feature space into valley cells, ensuring each cell contains an isolated maximum [S1].
++The method is inspired by the Morse complex construction scheme described in [EHZ03] [S1]. It was formalized for automating transfer function design in the context of 2D density plots for volume exploration [S1]. The approach uses region growing from maxima [HP74] to tessellate the feature space into valley cells, ensuring each cell contains an isolated maximum [S1].
+ 
+ ## Sources

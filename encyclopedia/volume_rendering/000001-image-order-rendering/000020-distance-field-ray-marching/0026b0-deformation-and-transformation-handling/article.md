@@ -1,6 +1,5 @@
 # Deformation and Transformation Handling
 
-Also called: SDF Transformation, Dynamic SDF Handling, TSDF Motion Compensation
 
 ## Overview
 This family addresses the problem of applying spatial transformations (rigid body motion, scaling, deformation) to Signed Distance Fields (SDFs) and Truncated Signed Distance Fields (TSDFs) during ray marching or voxel processing [G]. It enables the rendering of animated, deforming, or dynamically positioned geometry without recomputing the underlying distance field data structures from scratch [G]. It differs from static SDF definitions by introducing time-varying coordinate mappings, and from explicit mesh transformation by operating directly on the implicit field representation (or its voxel approximation) to preserve the analytical or volumetric nature of the distance query [G].
@@ -13,7 +12,7 @@ $$ \mathbf{q} = M^{-1} \mathbf{p} $$
 $$ f_{transformed}(\mathbf{p}) = f_{base}(M^{-1} \mathbf{p}) $$
 This ensures that the distance value corresponds to the transformed geometry while keeping the primitive definition static in its local frame [G].
 
-For non-rigid or temporal transformations (such as motion compensation in TSDF compression), the mapping is often estimated per-block or per-voxel [G]. The goal is to predict the current state $s_t$ from a previous state $s_{t-1}$ using an estimated rigid transform $(\mathbf{r}, \mathbf{t})$. The prediction error is minimized to find the optimal transform:
+For non-rigid or temporal transformations (such as motion compensation in TSDF compression), the mapping is often estimated per-block or per-voxel [G]. The goal is to predict the current state $s_t$ from a previous state $s_{t-1}$ using an estimated rigid transform $(\mathbf{r}, \mathbf{t})$ [link to [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md)]. The prediction error is minimized to find the optimal transform:
 $$ \mathbf{t}, \mathbf{r} := \arg \min_{\mathbf{t}, \mathbf{r}} \sum_{i \in \Omega} \left( \hat{s}_{t-1}(\mathbf{T}(\mathbf{p}_i; \mathbf{r}, \mathbf{t})) - s_t(\mathbf{p}_i) \right)^2 $$
 where $\mathbf{T}$ is the rigid transform and $\Omega$ is the set of sample positions [link to [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md)].
 
@@ -54,25 +53,25 @@ A ray marching technique that integrates a deformed scene by marching in the und
 - The ODE solver (ode23) is commented out in the main loop, so the fallback to simple stepping is always used [S1, unofficial].
 
 ### Incremental Translation Algorithm
-To avoid overlapping where destination voxels overwrite source voxels before translation, the algorithm sets the Orient register so that translation starts from the source corner that is also situated in the destination primitive range [S2]. The relative translation is characterized by a vector $(T_x, T_y, T_z)$. The position of the next voxel along the X-axis to be translated $(X_{dest}, Y_{dest}, Z_{dest})$ is determined by incrementing the appropriate coordinate of the last voxel without performing an addition for every voxel [S2].
+To avoid overlapping where destination voxels overwrite source voxels before translation, the algorithm sets the Orient register so that translation starts from the source corner that is also situated in the destination primitive range [S2]. The relative translation is characterized by a vector $(T_x, T_y, T_z)$ [S2]. The position of the next voxel along the X-axis to be translated $(X_{dest}, Y_{dest}, Z_{dest})$ is determined by incrementing the appropriate coordinate of the last voxel without performing an addition for every voxel [S2].
 
 ### [Incremental Scaling Algorithm](7792-incremental-scaling-algorithm.md)
 An algorithm for scaling voxel grids that avoids floating-point accumulation errors by using incremental updates. The scaling equations are $X_{dest} = X_{src} S_x$, $Y_{dest} = Y_{src} S_y$, $Z_{dest} = Z_{src} S_z$. To avoid overwriting source voxels before scaling, the starting corner of the room for the transformation is chosen based on the values of $S_x, S_y, S_z$. If scaling factors are greater than 1, forward scaling may produce holes due to volume increase without voxel increase. This is averted by 'back scaling': reversing the incremental transformation process.
 
 ### Tornado Model
-An animated tornado composed of a single Bezier segment. Radius increases with height (cone-like). Control points move in circular motion with different frequencies. No stretching. Rotation adds twisting. Angle changes with time. Density field moves up. Perlin noise creates cloud-like density [S3, unofficial].
+An animated tornado composed of a single Bezier segment [S3, unofficial]. Radius increases with height (cone-like) [S3, unofficial]. Control points move in circular motion with different frequencies [S3, unofficial]. No stretching. Rotation adds twisting. Angle changes with time. Density field moves up. Perlin noise creates cloud-like density [S3, unofficial].
 
 ### Landmark Deformation
-A deformation method using user-specified point pairs (source in undeformed space, target in deformed space) to find a mapping between them. Use a ray picker to allow the user to specify significant surface feature points by holding down the mouse and moving a point along the volume surface. Manipulate control points by dragging them along a specified surface or in view-aligned planes. Thin Plate Splines and Hierarchical B-Splines are examples of deformations used as landmark deformation functions [S4].
+A deformation method using user-specified point pairs (source in undeformed space, target in deformed space) to find a mapping between them [S4]. Use a ray picker to allow the user to specify significant surface feature points by holding down the mouse and moving a point along the volume surface [S4]. Manipulate control points by dragging them along a specified surface or in view-aligned planes [S4]. Thin Plate Splines and Hierarchical B-Splines are examples of deformations used as landmark deformation functions [S4].
 
 ### Shader-based Deformation Widgets
-Implementing interactive widgets (e.g. leafer widget) as deformations directly in the shader. Discontinuities in deformation functions representing widgets require conditional branches, which are inefficient on some hardware [S4].
+Implementing interactive widgets (e.g. leafer widget) as deformations directly in the shader [S4]. Discontinuities in deformation functions representing widgets require conditional branches, which are inefficient on some hardware [S4].
 
 ### Gaussian Deformation Field
-A simulated deformation field parametrized by amplitudes, lengthscales, and centers, mapping undeformed coordinates $(X,Y,Z)$ to deformed coordinates $(x,y,z)$. Deformed x-coordinate: $x = X + A_0 \exp(-r^2 / (2\sigma_0^2))$. Deformed y-coordinate: $y = Y + A_1 \exp(-r^2 / (2\sigma_1^2))$. Deformed z-coordinate: $z = Z + A_2 \exp(-r^2 / (2\sigma_2^2))$. Squared distance $r^2$ from center $c$: $r^2 = (X - c_0)^2 + (Y - c_1)^2 + (Z - c_2)^2$ [S5, unofficial].
+A simulated deformation field parametrized by amplitudes, lengthscales, and centers, mapping undeformed coordinates $(X,Y,Z)$ to deformed coordinates $(x,y,z)$ [S5, unofficial]. Deformed x-coordinate: $x = X + A_0 \exp(-r^2 / (2\sigma_0^2))$ [S5, unofficial]. Deformed y-coordinate: $y = Y + A_1 \exp(-r^2 / (2\sigma_1^2))$ [S5, unofficial]. Deformed z-coordinate: $z = Z + A_2 \exp(-r^2 / (2\sigma_2^2))$ [S5, unofficial]. Squared distance $r^2$ from center $c$: $r^2 = (X - c_0)^2 + (Y - c_1)^2 + (Z - c_2)^2$ [S5, unofficial].
 
 ## Background
-The concept of transforming SDFs via inverse matrices is a standard technique in ray marching, allowing for the composition of animated scenes from static primitives [G]. Motion-Compensated Block Warping for TSDFs originates from research into dynamic 3D reconstruction and compression, where rigid body motion estimation is used to reduce the bitrate of streaming TSDF data [link to [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md)]. The Incremental Scaling Algorithm dates back to early voxel frame buffer processors, which addressed the computational cost and precision issues of scaling voxel grids in real-time [S2]. NTSL Marching appears in the context of the ntsl-graphics project, a research/experimental graphics engine, dealing with deformed scenes via Jacobian-based marching [S1, unofficial].
+The concept of transforming SDFs via inverse matrices is a standard technique in ray marching, allowing for the composition of animated scenes from static primitives [G]. Motion-Compensated Block Warping for TSDFs originates from research into dynamic 3D reconstruction and compression, where rigid body motion estimation is used to reduce the bitrate of streaming TSDF data [S1, unofficial]. The Incremental Scaling Algorithm dates back to early voxel frame buffer processors, which addressed the computational cost and precision issues of scaling voxel grids in real-time [S2]. NTSL Marching appears in the context of the ntsl-graphics project, a research/experimental graphics engine, dealing with deformed scenes via Jacobian-based marching [S1, unofficial].
 
 ## Sources
 [S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)

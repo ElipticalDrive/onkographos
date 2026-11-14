@@ -3,112 +3,112 @@
 Also called: SH clustering, SH palette
 
 ## Overview
-Spherical Harmonics Vector Quantization (SH VQ) is a compression technique for 3D Gaussian Splatting that replaces per-splat SH coefficients with indices pointing to a shared palette of distinct SH vectors, reducing memory footprint at the cost of minor lighting artifacts [S1, unofficial]. It sets itself apart from distillation methods by preserving the full angular resolution of the original SH basis functions within the palette, rather than reducing the degree $L$ or approximating the function with a lower-order model [S1, unofficial].
+Spherical Harmonics Vector Quantization (SH VQ) is a compression technique for 3D Gaussian Splatting that replaces per-splat SH coefficients with indices pointing to a shared palette of distinct SH vectors, reducing memory footprint at the cost of minor lighting artifacts [S1, unofficial]. It sets itself apart from [First-order Spherical Harmonics Distillation](9467-first-order-spherical-harmonics-distillation.md) by preserving the full directional detail of the original scene through a discrete set of representative vectors, rather than approximating the radiance field with a lower-degree polynomial basis.
 
 ## How it works
-**Inputs and Outputs**
-- **Input**: The set of SH coefficients $\mathbf{c}_i \in \mathbb{R}^{45}$ for all $N$ splats in the scene. The first coefficient (DC term) is treated separately as color and excluded from clustering [S1, unofficial]. The remaining 45 coefficients (15 per RGB channel) form the high-dimensional vector for clustering [S1, unofficial].
-- **Output**: A palette $\mathcal{P}$ of $K$ distinct SH vectors, and an index map $I \in \{0, \dots, K-1\}^N$ where $I_i$ is the index of the closest palette item for splat $i$ [S1, unofficial].
+**Inputs and Outputs:**
+- Input: A set of $N$ Gaussian splats, each with a 45-dimensional SH coefficient vector $\mathbf{c}_i$ (excluding the DC term).
+- Output: A palette of $K$ SH vectors $\mathcal{P} = \{\mathbf{p}_1, \dots, \mathbf{p}_K\}$ and an index map $\mathbf{I} = \{i_1, \dots, i_N\}$ where $i_j \in \{1, \dots, K\}$.
 
-**Data Structures**
-1.  **Palette ($\mathcal{P}$)**: A list of $K$ vectors, each of size 45. Stored as FP16 floats.
+**Data Structures:**
+1.  **Palette:** A list of $K$ vectors, each of size 45. Stored as FP16 (16-bit float).
     -   Size: $K \times 45 \times 2$ bytes.
-    -   Typical $K$: 4,000 to 16,000 [S1, unofficial].
-2.  **Indices ($I$)**: A list of $N$ integers. Stored as 16-bit unsigned integers, regardless of whether $K < 65,536$ [S1, unofficial].
-    -   Size: $N \times 2$ bytes [S1, unofficial].
+2.  **Indices:** A list of $N$ integers, each 16 bits wide.
+    -   Size: $N \times 2$ bytes.
 
-**Algorithm Steps**
-1.  **Extract SH Data**: For each splat $i$, extract the 45 SH coefficients (excluding the DC term). Let this vector be $\mathbf{v}_i$ [S1, unofficial].
-2.  **Cluster**: Perform vector quantization on the set $\{\mathbf{v}_1, \dots, \mathbf{v}_N\}$ to find $K$ cluster centers (palette items) $\{\mathbf{p}_1, \dots, \mathbf{p}_K\}$ [S1, unofficial].
-    -   The source recommends a custom mini-batch k-means implementation for performance and quality, noting that standard libraries like scikit-learn are too slow and Faiss introduces dependencies [S1, unofficial].
-3.  **Assign Indices**: For each splat $i$, find the index $k$ such that $\mathbf{p}_k$ is closest to $\mathbf{v}_i$ in Euclidean distance:
-    $$
-    I_i = \arg\min_{k \in \{1, \dots, K\}} \| \mathbf{v}_i - \mathbf{p}_k \|_2^2
-    $$
-4.  **Store**: Save the palette $\mathcal{P}$ and the index array $I$ [S1, unofficial].
+**Parameters:**
+-   $K$: Palette size. Typical values are 4,000 to 16,000 [S1, unofficial].
+-   $N$: Number of splats.
+-   Dimensionality: 45 (15 coefficients per RGB channel) [S1, unofficial].
 
-**Pseudocode**
+**Steps:**
+1.  **Extract SH Data:** Collect the 45 SH coefficients for each splat, excluding the first coefficient (DC term, treated as color) [S1, unofficial].
+2.  **Cluster:** Perform vector quantization on the $N$ data points to find $K$ cluster centers. A mini-batch k-means variant is recommended for speed and quality [S1, unofficial].
+3.  **Assign Indices:** For each splat $j$, find the palette index $i_j$ corresponding to the closest palette vector $\mathbf{p}_{i_j}$ to the original coefficient vector $\mathbf{c}_j$. Distance is typically Euclidean in the 45-dimensional space.
+4.  **Store:** Save the palette $\mathcal{P}$ and the index array $\mathbf{I}$ [S1, unofficial].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def spherical_harmonics_vector_quantization(splats_sh_data, k):
+import numpy as np
+
+def spherical_harmonics_vector_quantization(sh_data: np.ndarray, k: int) -> tuple:
     """
     Compress SH coefficients using vector quantization.
     
     Args:
-        splats_sh_data: List of N vectors, each of length 45 (SH coeffs excluding DC).
-        k: Number of palette items (e.g., 4000 or 16000).
+        sh_data: np.ndarray of shape (N, 45), containing SH coefficients for N splats.
+                 Excludes the DC term.
+        k: int, number of palette entries.
         
     Returns:
-        palette: Array of shape (k, 45) containing the cluster centers.
-        indices: Array of shape (N,) containing indices into the palette.
+        palette: np.ndarray of shape (k, 45), the cluster centers.
+        indices: np.ndarray of shape (N,), indices into the palette.
     """
-    # Step 1: Initialize palette with k random samples from splats_sh_data
-    # [G] Standard k-means initialization; source does not specify exact init strategy
-    palette = random_sample(splats_sh_data, k)
+    n = sh_data.shape[0]
     
-    # Step 2: Mini-batch K-Means Clustering
-    # [G] Source notes custom mini-batch k-means is ~3x faster than Faiss and better quality.
-    # The following is a standard mini-batch k-means loop.
-    for iteration in range(max_iterations):
-        # Select a mini-batch of splats
-        batch_indices = random_sample(range(len(splats_sh_data)), batch_size)
-        batch_vectors = [splats_sh_data[idx] for idx in batch_indices]
+    # Step 1: Initialize centroids using k-means++ initialization [G]
+    # Select first centroid randomly
+    idx = np.random.randint(n)
+    centroids = sh_data[idx:idx+1].copy()
+    
+    # Select remaining k-1 centroids
+    for _ in range(1, k):
+        # Compute distances from each point to its nearest existing centroid
+        dists = np.min(np.sum((sh_data[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2), axis=1)
+        # Choose next centroid with probability proportional to distance squared
+        probs = dists / dists.sum()
+        idx = np.random.choice(n, p=probs)
+        centroids = np.vstack([centroids, sh_data[idx]])
         
-        # Assign batch vectors to nearest centroid
-        assignments = []
-        for v in batch_vectors:
-            dists = [euclidean_distance(v, centroid) for centroid in palette]
-            assignments.append(argmin(dists))
-            
-        # Update centroids based on batch assignments
-        for cluster_idx in range(k):
-            members = [v for v, a in zip(batch_vectors, assignments) if a == cluster_idx]
-            if len(members) > 0:
-                palette[cluster_idx] = mean(members)
+    # Step 2: Mini-batch K-Means Clustering [S1, unofficial]
+    # Note: Standard k-means is too slow for millions of splats in 45 dimensions [S1, unofficial]
+    # A custom mini-batch implementation is preferred over scikit-learn or Faiss for speed and lack of dependencies [S1, unofficial]
+    for iteration in range(100): # [G] Typical iteration count for convergence
+        # Sample a mini-batch
+        batch_size = 1024 # [G] Example batch size
+        batch_indices = np.random.choice(n, batch_size, replace=False)
+        batch = sh_data[batch_indices]
+        
+        # Assign batch points to nearest centroid
+        batch_dists = np.sum((batch[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2)
+        batch_assignments = np.argmin(batch_dists, axis=1)
+        
+        # Update centroids using batch statistics [G]
+        for c in range(k):
+            mask = batch_assignments == c
+            if np.any(mask):
+                centroids[c] = np.mean(batch[mask], axis=0)
                 
-    # Step 3: Assign final indices for all splats
-    indices = []
-    for v in splats_sh_data:
-        dists = [euclidean_distance(v, centroid) for centroid in palette]
-        indices.append(argmin(dists))
-        
-    return palette, indices
+    # Step 3: Assign all splats to nearest palette item
+    all_dists = np.sum((sh_data[:, np.newaxis, :] - centroids[np.newaxis, :, :]) ** 2, axis=2)
+    indices = np.argmin(all_dists, axis=1)
+    
+    return centroids, indices
 ```
 
-**Parameters**
--   **Palette Size ($K$)**: 4,000 to 16,000 items [S1, unofficial].
--   **Storage Format**: Palette stored as FP16; Indices stored as 16-bit integers [S1, unofficial].
-
-**Edge Cases and Pitfalls**
--   **Curse of Dimensionality**: Clustering millions of splats in 45 dimensions is computationally expensive and slow [S1, unofficial].
--   **Lighting Artifacts**: The quantization introduces minor lighting artifacts, though they are described as "not terribly bad" [S1, unofficial].
--   **Implementation Choice**: Standard libraries (scikit-learn) are prohibitively slow; external dependencies (Faiss) are avoided in favor of custom implementations for speed and simplicity [S1, unofficial].
+**Edge Cases and Pitfalls:**
+-   **Curse of Dimensionality:** Clustering millions of splats in 45 dimensions is computationally expensive and slow [S1, unofficial].
+-   **Quality vs. Size:** Reducing $K$ too much (e.g., below 4k) results in significant quality loss and unusable artifacts [S1, unofficial].
+-   **Lighting Artifacts:** The method introduces minor lighting artifacts due to the discrete nature of the palette [S1, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity**
--   **Memory**: The palette size is $K \times 45 \times 2$ bytes. For $K=16,000$, this is ~1.44 MB [S1, unofficial]. The index storage is $N \times 2$ bytes. For the 'bike' scene ($N=6.1$ million), this is ~12 MB [S1, unofficial]. Total SH-related storage is ~13.44 MB, compared to ~1.1 GB for raw FP32 or ~350 MB for FP16 [S1, unofficial].
--   **Time**: Clustering is the bottleneck. The source reports that a custom mini-batch k-means implementation is ~3x faster than Faiss and significantly faster than scikit-learn [S1, unofficial]. Exact timing is not given, but Faiss took ~5 minutes for 16k items on the bike scene [S1, unofficial].
-
-**Measured Performance**
--   **Bike Scene (6.1M splats)**:
-    -   **Low Preset (16k clusters)**: Data sizes 98MB, 41MB, 93MB; PSNR 35.17, 35.32, 35.00 [S1, unofficial].
-    -   **Very Low Preset (4k clusters)**: Data sizes 79MB, 33MB, 75MB; PSNR 32.27, 30.19, 31.10 [S1, unofficial].
--   **Comparison**: The 'Low' preset with SH clustering improved PSNR over the previous 'Low' preset (which used Norm565 for SH) while reducing data size [S1, unofficial]. The 'Very Low' preset became "somewhat usable" compared to being "pretty much unusable" previously [S1, unofficial].
-
-**Strengths and Limitations**
--   **Strengths**: Significant reduction in data size (from ~1.1 GB to ~13 MB for SH data alone); retains "shininess" effects better than color-only quantization; simple to implement with standard clustering algorithms [S1, unofficial].
--   **Limitations**: Introduces lighting artifacts; clustering is slow for large scenes due to high dimensionality; requires custom implementation for optimal performance [S1, unofficial].
+-   **Memory:**
+    -   Palette: $K \times 45 \times 2$ bytes. For $K=16,000$, this is ~1.44 MB [S1, unofficial].
+    -   Indices: $N \times 2$ bytes. For $N=6.1$ million splats, this is ~12 MB [S1, unofficial].
+    -   Total SH storage is drastically reduced compared to raw FP32 (1.1 GB for 6.1M splats) or even FP16 (350 MB) [S1, unofficial].
+-   **Performance:**
+    -   Clustering time is significant. A custom mini-batch k-means implementation is ~3x faster than Faiss and provides better quality for this task [S1, unofficial].
+    -   Rendering performance is unaffected as palette lookup is fast [G].
+-   **Quality:**
+    -   Retains "shininess" effects well [S1, unofficial].
+    -   For the 'bike' scene (6.1M splats), $K=16,000$ yields PSNR ~35.17-35.32, while $K=4,000$ yields PSNR ~30.19-32.27 [S1, unofficial].
+-   **When to use:** When memory bandwidth or storage is the primary bottleneck, and minor lighting artifacts are acceptable. Suitable for "Low" and "Very Low" quality presets in interactive applications [S1, unofficial].
+-   **When not to use:** When high-fidelity specular details are critical and memory is not constrained.
 
 ## Background
-**Origin**
-The method was introduced by Aras Pranckevičius in a blog post titled "Making Gaussian Splats more smaller" [S1, unofficial]. It was implemented in his Unity-based Gaussian Splatting viewer as part of "Low" and "Very Low" quality presets [S1, unofficial].
-
-**History and Development**
-The technique draws on standard vector quantization and k-means clustering concepts, applying them to the high-dimensional SH coefficient space of 3D Gaussian Splatting [S1, unofficial]. The author notes that while the approach is not novel in principle, its application to SH data in this context required careful handling of the curse of dimensionality and performance optimization [S1, unofficial].
-
-**Usage**
-Used in the author's Unity Gaussian Splatting implementation for efficient real-time rendering of large scenes with limited memory budgets [S1, unofficial].
+Spherical Harmonics Vector Quantization was introduced by Aras Pranckevičius in a blog post detailing optimizations for 3D Gaussian Splatting in Unity [S1, unofficial]. It draws inspiration from traditional graphics techniques like color palettes and vector quantization, applying them to the high-dimensional SH coefficient space to reduce the massive memory footprint of Gaussian Splatting scenes [S1, unofficial].
 
 ## Sources
 [S1] Making Gaussian Splats more smaller, https://aras-p.info/blog/2023/09/27/Making-Gaussian-Splats-more-smaller/, fetched 2026-10-26 (unofficial)

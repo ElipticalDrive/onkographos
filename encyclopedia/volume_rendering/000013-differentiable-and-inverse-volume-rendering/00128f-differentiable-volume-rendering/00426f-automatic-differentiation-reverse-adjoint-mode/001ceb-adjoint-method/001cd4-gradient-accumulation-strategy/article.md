@@ -3,32 +3,30 @@
 Also called: Atomic Accumulation, Parallel Gradient Reduction
 
 ## Overview
-The Gradient Accumulation Strategy is the mechanism used in the Adjoint Method to aggregate per-ray gradients into global parameter updates. It solves the problem of parallel reduction in GPU-based volume rendering, where thousands of rays compute independent gradient contributions simultaneously. It differs from naive global atomic accumulation by introducing a two-stage hierarchy: first accumulating into per-ray local registers or per-block shared memory to minimize global memory contention, and then performing a single atomic reduction per ray or cell. This approach significantly reduces the number of global atomic operations compared to accumulating directly into global memory for every sample.
+The Gradient Accumulation Strategy aggregates per-ray adjoint variables into global parameter gradients within the Adjoint Method [S1]. It solves the parallel reduction problem in GPU-based volume rendering, where thousands of rays compute independent gradient contributions simultaneously [S1]. It differs from naive global atomic accumulation by introducing a two-stage hierarchy: first accumulating into per-ray local registers or per-block shared memory to minimize global memory contention, then performing a single atomic reduction per ray or cell [S1]. This approach significantly reduces the number of global atomic operations compared to accumulating directly into global memory for every sample [S1].
 
 ## How it works
-The method aggregates adjoint variables (gradients) for optimization parameters. The strategy distinguishes between parameters that vary per-ray (camera pose, step size) and those that are shared across rays (Transfer Function weights, volume density fields).
+The method aggregates adjoint variables (gradients) for optimization parameters [S1]. The strategy distinguishes between parameters that vary per-ray (camera pose, step size) and those that are shared across rays (Transfer Function weights, volume density fields) [S1].
 
 **Inputs and Outputs:**
-- **Input:** Per-ray adjoint variables $\bar{\theta}_{ray}$ computed during the backward pass.
-- **Output:** Global gradient $\nabla_\theta$ stored in global memory for the optimizer.
+- **Input:** Per-ray adjoint variables computed during the backward pass [S1].
+- **Output:** Global gradient buffer for optimization parameters [S1].
 
 **Data Structures:**
-1.  **Local Registers:** Per-thread storage for intermediate gradient sums. Size: 1-4 floats depending on parameter count.
-2.  **Shared Memory:** Per-block storage for Transfer Function (TF) parameters. Size: $N_{TF}$ floats, where $N_{TF}$ is the number of TF parameters.
-3.  **Global Memory:** The final parameter gradient buffer.
+1. **Local Registers:** Per-thread storage for camera position, step size, and volume densities to avoid atomic contention during the ray march [S1].
+2. **Shared Memory:** Per-block storage for Transfer Function (TF) parameters to allow fast access and accumulation within a thread block [S1].
+3. **Global Memory:** The final parameter gradient buffer [G].
 
 **Numbered Steps:**
-1.  **Initialization:** Initialize local register accumulators to zero at the start of the ray march or TF lookup.
-2.  **Per-Step Accumulation:** During the forward or backward pass, when a parameter $\theta$ is accessed (e.g., a TF texel or a density value), compute its local gradient contribution $\Delta \bar{\theta}$. Add this to the local register accumulator for that parameter.
-    - For camera/step size: Accumulate in local registers.
-    - For TF: Accumulate in shared memory.
-3.  **Per-Cell/Per-Ray Finalization:**
-    - **Camera/Step Size:** After the ray traversal is complete, the local register holds the total gradient for that ray.
-    - **Volume Densities:** On exit of the current cell (if using hierarchical acceleration structures), the local register holds the gradient for that cell.
-    - **Transfer Function:** After all threads in the block have finished processing their rays, perform a block-wide reduction in shared memory to compute the total gradient for each TF parameter.
-4.  **Global Atomic Reduction:**
-    - For camera/step size/densities: Use a global atomic add function to add the per-ray/cell gradient to the global gradient buffer.
-    - For TF: Use a global atomic add function to add the block-reduced gradient to the global gradient buffer.
+1. **Initialization:** Initialize local register accumulators to zero at the start of the ray march or TF lookup [G].
+2. **Per-Step Accumulation:** During the backward pass, when a parameter is accessed (e.g., a TF texel or a density value), compute its local gradient contribution and add it to the local register (camera/step size/densities) or shared memory (TF) [S1].
+3. **Per-Cell/Per-Ray Finalization:** 
+   - **Camera/Step Size:** After the ray traversal is complete, the local register holds the total gradient for that ray [S1].
+   - **Volume Densities:** On exit of the current cell (if using hierarchical acceleration structures), the local register holds the gradient for that cell [S1].
+   - **Transfer Function:** After all threads in the block have finished processing their rays, perform a block-wide reduction in shared memory to compute the total gradient for each TF parameter [S1].
+4. **Global Atomic Reduction:** 
+   - For camera/step size/densities: Use a global atomic add function to add the per-ray/cell gradient to the global gradient buffer [S1].
+   - For TF: Use a global atomic add function to add the block-reduced gradient to the global gradient buffer [S1].
 
 **Formulas:**
 Let $\bar{\theta}_{ray}$ be the gradient accumulated in local registers for a specific ray.
@@ -37,40 +35,37 @@ Let $\nabla_\theta$ be the global gradient buffer.
 
 For camera/step size/densities:
 $$ \nabla_\theta \leftarrow \nabla_\theta + \bar{\theta}_{ray} $$
-This is performed using atomic addition: `atomicAdd(&global_grad, local_grad)`.
+This is performed using atomic addition: `atomicAdd(&global_grad, local_grad)` [S1].
 
 For TF:
 $$ \nabla_\theta \leftarrow \nabla_\theta + \bar{\theta}_{block} $$
-This is performed using atomic addition: `atomicAdd(&global_grad, block_grad)`.
+This is performed using atomic addition: `atomicAdd(&global_grad, block_grad)` [S1].
 
 **Parameters:**
-- **Atomic Function:** `atomicAdd` (CUDA/HIP).
-- **Memory Scope:** `memory_space::global` for final reduction.
+- **Atomic Function:** `atomicAdd` (CUDA/HIP) [S1].
+- **Memory Scope:** `memory_space::global` for final reduction [G].
 
 **Edge Cases and Pitfalls:**
-- **Atomic Contention:** Direct global atomic accumulation per sample causes severe contention. The two-stage approach mitigates this.
-- **Precision:** Accumulating many small gradients in local registers may suffer from floating-point precision loss if the range of values is large. However, for typical TF parameters, this is negligible.
-- **Initialization:** Failure to zero-initialize local registers leads to garbage gradients.
+- **Atomic Contention:** Direct global atomic accumulation per sample causes severe contention; the two-stage approach mitigates this [S1].
+- **Precision:** Accumulating many small gradients in local registers may suffer from floating-point precision loss if the range of values is large, but for typical TF parameters this is negligible [S1].
+- **Initialization:** Failure to zero-initialize local registers leads to garbage gradients [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Gradient Accumulation Strategy
-# Assumes CUDA-like parallel execution model
-
-def accumulate_gradients(ray_idx, block_idx, adjoint_vars):
+def accumulate_gradients(ray_idx, block_idx, adjoint_vars, global_grad_buffer, shared_mem_buffer):
     """
     Accumulates gradients for parameters from adjoint variables.
-    
     Args:
         ray_idx: Unique index for the current ray.
         block_idx: Unique index for the current thread block.
         adjoint_vars: Dictionary of per-step gradient contributions.
                       Keys: 'camera', 'step_size', 'tf', 'density'
                       Values: float or list of floats.
+        global_grad_buffer: Mutable dictionary simulating global memory.
+        shared_mem_buffer: Pre-allocated list simulating shared memory, zero-initialized per block.
     """
-    
     # Stage 1: Per-ray or Per-block accumulation
     local_grads = {}
     
@@ -85,40 +80,34 @@ def accumulate_gradients(ray_idx, block_idx, adjoint_vars):
         local_grads['density'] = adjoint_vars['density']
         
     # Transfer Function: Accumulate in shared memory
-    # Note: This requires a block-wide reduction step before global atomic
     if 'tf' in adjoint_vars:
-        # Assume shared memory buffer 'tf_grads' is allocated per block
-        # and initialized to zero at block start
         for i, tf_param in enumerate(adjoint_vars['tf']):
-            tf_grads[i] += tf_param
+            shared_mem_buffer[i] += tf_param
             
     # Stage 2: Global Atomic Reduction
     # This occurs after the ray march or block processing is complete
     
     # Camera and Step Size
     if 'camera' in local_grads:
-        atomic_add(global_grad_buffer['camera'], local_grads['camera'])
+        global_grad_buffer['camera'] += local_grads['camera']
     if 'step_size' in local_grads:
-        atomic_add(global_grad_buffer['step_size'], local_grads['step_size'])
+        global_grad_buffer['step_size'] += local_grads['step_size']
         
     # Volume Densities
     if 'density' in local_grads:
-        atomic_add(global_grad_buffer['density'], local_grads['density'])
+        global_grad_buffer['density'] += local_grads['density']
         
     # Transfer Function
-    # This step is performed once per block, after all threads have contributed
     if 'tf' in adjoint_vars:
         # Perform block-wide reduction in shared memory to get total tf_grads
-        block_total_tf_grads = reduce_block(tf_grads)
-        for i, grad in enumerate(block_total_tf_grads):
-            atomic_add(global_grad_buffer['tf'][i], grad)
-
-def atomic_add(target, value):
-    """
-    Simulates global atomic add operation.
-    In CUDA, this is atomicAdd(&target, value).
-    """
-    target += value
+        block_total_tf_grads = [0.0] * len(shared_mem_buffer)
+        for i in range(len(shared_mem_buffer)):
+            block_total_tf_grads[i] = shared_mem_buffer[i]
+        # In a real GPU kernel, this would be a warp/block shuffle reduction.
+        # Here we simulate the final atomic add for the block representative.
+        if block_idx == 0:
+            for i, grad in enumerate(block_total_tf_grads):
+                global_grad_buffer['tf'][i] += grad
 ```
 
 ## Subtopics
@@ -132,17 +121,21 @@ The Inference Fast Path is a compile-time specialization of the volume rendering
 ### [Sample Matching](4626-sample-matching.md)
 Sample Matching is a differentiable volume rendering estimator that implements sample matching to reduce variance in gradient estimation for volumetric path tracing. It solves the high-variance gradient problem in differentiable volume rendering by estimating the transmittance and scattering terms of the Differentiable Radiative Transfer Equation (DRTE) at the same spatial points on each path segment, causing their opposite-sign contributions to cancel. Unlike the base `prbvolpath` method which estimates these terms at unrelated points, Sample Matching confines all modifications to the adjoint pass while keeping the primal image rendering identical.
 
+### Half2 Precision Gradient Accumulation
+Uses half2 data type to pack two FP16 values for gradient accumulation, reducing memory traffic and improving throughput while preserving accuracy compared to unpacked atomics [S2, unofficial]. Per-parameter gradients are accumulated per pixel directly into packed half2 buffers via half2 atomicAdd for pairs: (m_x, m_y), (α, scale), (θ, cr), and (cg, cb) [S2, unofficial]. A lightweight post-pass unpacks the half2 buffers to legacy FP16 arrays [S2, unofficial]. Half atomicAdd matched kernel time but degraded numerical accuracy; half atomicCAS recovered accuracy at prohibitive cost; packed half2 atomics preserved accuracy, improved throughput, and reduced memory traffic [S2, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(N_{rays} \cdot N_{samples})$ for the forward/backward pass, plus $O(N_{rays})$ for the final atomic reductions. The two-stage accumulation reduces the constant factor of the reduction phase significantly.
-- **Memory Complexity:** $O(N_{params})$ for the global gradient buffer. Local registers add $O(1)$ per thread. Shared memory adds $O(N_{TF})$ per block.
-- **Measured Performance:** The two-stage approach reduces global atomic contention, leading to higher throughput compared to direct global accumulation. The cost of the reduction phase is negligible compared to the forward/backward pass.
-- **Strengths:** High parallel efficiency, low global memory bandwidth usage for gradient updates.
-- **Limitations:** Requires careful management of shared memory for TF parameters. Atomic operations can still be a bottleneck if the number of unique parameters is small and contention is high.
-- **When to Use:** When optimizing parameters that are shared across many rays (TF, density fields) or vary per-ray (camera, step size) in a differentiable volume rendering pipeline.
-- **When Not to Use:** When the number of parameters is very small and the overhead of shared memory management outweighs the benefits, or when gradients are not required (use Inference Fast Path).
+- **Time Complexity:** $O(N_{rays} \cdot N_{samples})$ for the forward/backward pass, plus $O(N_{rays})$ for the final atomic reductions [S1].
+- **Memory Complexity:** $O(N_{params})$ for the global gradient buffer; local registers add $O(1)$ per thread; shared memory adds $O(N_{TF})$ per block [S1].
+- **Measured Performance:** The two-stage approach reduces global atomic contention, leading to higher throughput compared to direct global accumulation [S1].
+- **Strengths:** High parallel efficiency and low global memory bandwidth usage for gradient updates [S1].
+- **Limitations:** Requires careful management of shared memory for TF parameters; atomic operations can still bottleneck if the number of unique parameters is small and contention is high [S1].
+- **When to Use:** When optimizing parameters that are shared across many rays (TF, density fields) or vary per-ray (camera, step size) in a differentiable volume rendering pipeline [S1].
+- **When Not to Use:** When the number of parameters is very small and the overhead of shared memory management outweighs the benefits, or when gradients are not required [G].
 
 ## Background
-The Gradient Accumulation Strategy is a core component of the Adjoint Method for differentiable volume rendering, as described in "Differentiable Direct Volume Rendering" [S1]. It addresses the inefficiency of naive reverse-mode differentiation, which would require storing all intermediate values or recomputing them, leading to high memory usage or computational cost. By accumulating gradients locally and reducing them globally, it enables efficient optimization of volume rendering parameters on GPUs.
+The Gradient Accumulation Strategy is a core component of the Adjoint Method for differentiable volume rendering, as described in "Differentiable Direct Volume Rendering" [S1]. It addresses the inefficiency of naive reverse-mode differentiation, which would require storing all intermediate values or recomputing them, leading to high memory usage or computational cost [S1]. By accumulating gradients locally and reducing them globally, it enables efficient optimization of volume rendering parameters on GPUs [S1].
 
 ## Sources
 [S1] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
+[S2] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,221 @@
+--- v001.md
++++ v002.md
+@@ -4,27 +4,26 @@
+ 
+ ## Overview
+-The Level-0 Mask Classifier is a binary classification method used within hierarchical neural volume representations (specifically NeuralVDB) to predict whether a given voxel coordinate corresponds to an active (non-background) or inactive (background) value. It serves as the leaf-level occupancy predictor, replacing explicit bitmask storage for the lowest level of the VDB tree hierarchy. Unlike the Level-1 Mask Classifier which handles ternary decisions for internal nodes, this method strictly distinguishes between presence and absence of data at the voxel resolution, enabling sparse field training by excluding inactive background samples from the loss calculation.
++The Level-0 Mask Classifier is a binary occupancy network that predicts whether a given voxel coordinate corresponds to an active or inactive value within a hierarchical VDB tree [S1]. It replaces explicit bitmask storage at the leaf level, distinguishing itself from sibling methods by operating strictly at voxel resolution to enable sparse field training [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D voxel coordinates $(x, y, z)$ normalized to the grid space.
+-*   **Output:** A binary prediction indicating if the voxel is active ($1$) or inactive ($0$).
++*   **Input:** 3D voxel coordinates $(x, y, z)$ [S1].
++*   **Output:** A binary prediction indicating if the voxel is active ($1$) or inactive ($0$) [S1].
+ 
+ **Data Structures:**
+-The classifier is implemented as a Multi-Layer Perceptron (MLP). The network architecture mirrors the value regression network in capacity to maintain a consistent memory footprint [S1].
++The classifier is implemented as a shallow Multi-Layer Perceptron (MLP) [S1]. The network capacity is identical to the level-0 value regression network to maintain virtually identical memory footprints for the mask and value components [S1].
+ *   **Network Depth:** Shallow (typically 3 layers, denoted as $NN(3)$ in source literature) [S1].
+-*   **Input Dimension:** 3 (coordinates).
+-*   **Hidden Layers:** Linear transformations with non-linear activations (e.g., ReLU).
+-*   **Output Layer:** Single neuron with Sigmoid activation to produce a probability $p \in [0, 1]$.
++*   **Input Dimension:** 3 (coordinates) [S1].
++*   **Hidden Layers:** Linear transformations with non-linear activations (e.g., ReLU) [S1].
++*   **Output Layer:** Single neuron with Sigmoid activation to produce a probability $p \in [0, 1]$ [S1].
+ 
+ **Training Procedure:**
+-1.  **Sampling:** For each training epoch, randomly sample voxel coordinates from the existing VDB grid. Crucially, sampling is restricted to **active values only**. Inactive background voxels are explicitly excluded from the training set to address class imbalance [S1].
+-2.  **Forward Pass:** Pass sampled coordinates through the MLP to get output probability $p$.
+-3.  **Loss Calculation:** Compute the Binary Cross-Entropy (BCE) loss between the predicted probability and the ground truth label.
+-4.  **Optimization:** Update network weights using gradient descent.
++1.  **Sampling:** Randomly sample voxel coordinates from the existing VDB grid [S1].
++2.  **Forward Pass:** Pass sampled coordinates through the MLP to obtain an activation probability $p$ [S1].
++3.  **Loss Calculation:** Compute the Binary Cross-Entropy (BCE) loss between the predicted probability and the ground truth active mask label $m_0$ [S1].
++4.  **Optimization:** Update network weights using gradient descent [S1].
+ 
+ **Formulas:**
+-Let $m_0$ be the target active mask label for a voxel at level 0.
+-The target label is defined as:
++Let $m_0$ be the target active mask label for a voxel at level 0. The target label is defined as:
+ $$ m_0 \in \{0, 1\} $$
+ *(Note: The source text contains a typo "$m_0 \in \{m_1=1\}$", which is interpreted as the standard binary set $\{0, 1\}$ based on the context of "active or inactive" classification [S1].)*
+@@ -33,128 +32,48 @@
+ $$ \mathcal{L} = - \frac{1}{N} \sum_{i=1}^{N} \left[ m_0^{(i)} \log(p^{(i)}) + (1 - m_0^{(i)}) \log(1 - p^{(i)}) \right] $$
+ Where:
+-*   $N$ is the number of sampled active voxels.
+-*   $p^{(i)}$ is the predicted probability for the $i$-th sample.
+-*   $m_0^{(i)}$ is the ground truth label ($1$ for active, $0$ for inactive).
++*   $N$ is the number of sampled voxels [S1].
++*   $p^{(i)}$ is the predicted probability for the $i$-th sample [S1].
++*   $m_0^{(i)}$ is the ground truth label ($1$ for active, $0$ for inactive) [S1].
+ 
+ **Parameters:**
+-*   **Loss Function:** Vanilla BCE. No additional tuning (e.g., class weights) is applied because the imbalance is handled by sampling only active values during training [S1].
++*   **Loss Function:** Vanilla BCE. No additional tuning (e.g., class weights) is applied because the hierarchical structure (level-1 children nodes) addresses the class imbalance problem [S1].
+ *   **Network Capacity:** Identical to the level-0 value regression network to ensure virtually identical memory footprints [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.optim as optim
++import math
++import random
+ 
+-class Level0MaskClassifier(nn.Module):
++def sigmoid(x):
++    return 1.0 / (1.0 + math.exp(-x))
++
++def relu(x):
++    return max(0.0, x)
++
++class Level0MaskClassifier:
+     def __init__(self, hidden_dim=64):
+-        super(Level0MaskClassifier, self).__init__()
+-        # Shallow network as per source [S1]
+-        self.network = nn.Sequential(
+-            nn.Linear(3, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, 1)
+-        )
++        # Shallow MLP architecture [S1]
++        self.W1 = [[random.uniform(-1, 1) for _ in range(3)] for _ in range(hidden_dim)]
++        self.b1 = [0.0] * hidden_dim
++        self.W2 = [[random.uniform(-1, 1) for _ in range(hidden_dim)]]
++        self.b2 = [0.0]
+ 
+     def forward(self, coords):
+-        """
+-        Args:
+-            coords: Tensor of shape (N, 3) containing voxel coordinates.
+-        Returns:
+-            Tensor of shape (N,) containing probabilities of being active.
+-        """
+-        return torch.sigmoid(self.network(coords)).squeeze(-1)
++        # coords: list of [x, y, z]
++        h = [relu(sum(w * c for w, c in zip(self.W1[i], coords)) + self.b1[i]) for i in range(len(self.W1))]
++        out = sum(w * a for w, a in zip(self.W2[0], h)) + self.b2[0]
++        return sigmoid(out)
+ 
+-def train_level0_mask_classifier(model, vdb_grid, epochs=100, lr=1e-3):
+-    """
+-    Trains the Level-0 Mask Classifier.
+-    Note: Implementation assumes access to a VDB grid structure that allows
+-    sampling of active voxel coordinates.
+-    """
+-    optimizer = optim.Adam(model.parameters(), lr=lr)
+-    criterion = nn.BCELoss() # Vanilla BCE [S1]
+-
+-    # Get all active voxel coordinates from the VDB grid
+-    # This step addresses the imbalance problem by excluding inactive values [S1]
+-    active_coords = vdb_grid.get_active_voxel_coordinates()
+-    
++def train_level0_mask_classifier(model, active_set, inactive_set, epochs=100, lr=1e-3):
++    # Training samples voxel coordinates; target is active leaf mask m0 [S1]
++    all_coords = list(active_set) + list(inactive_set)
+     for epoch in range(epochs):
+-        # Randomly sample from active coordinates for this epoch
+-        # In practice, this might be a subset for efficiency, but the source 
+-        # implies sampling from the active set.
+-        indices = torch.randperm(len(active_coords))
+-        sampled_coords = active_coords[indices]
+-        
+-        # Ground truth is always 1 for active voxels in the training set?
+-        # Actually, the classifier predicts 0 or 1. The training data must 
+-        # include both active and inactive coordinates, but the source says 
+-        # "restrict training samples to active values only". 
+-        # This implies the network learns to predict '1' for active, 
+-        # and implicitly '0' for coordinates not in the active set or 
+-        # sampled as negative examples. 
+-        # However, standard BCE requires both classes. 
+-        # Re-reading [S1]: "randomly sample the active voxels... explicitly 
+-        # excluding all inactive values". 
+-        # This suggests the training set consists ONLY of active voxels 
+-        # labeled as 1. The network must learn to output 1 for these. 
+-        # For inference, if a coordinate is not sampled or falls outside 
+-        # the learned manifold, it might be treated as 0. 
+-        # Alternatively, the "active values only" refers to the *value* 
+-        # regression, while the mask classifier might still need negative 
+-        # samples. 
+-        # Let's look closer: "classifier at level 0 is trained with voxel 
+-        # coordinates as the input and the active leaf masks m0... as the label."
+-        # If m0 is the label, and we only sample active voxels, we only have 
+-        # positive examples. This is unusual for BCE. 
+-        # However, the source states: "Vanilla BCE is kept... because the 
+-        # level-0 mask network is performed within level-1's children nodes, 
+-        # addressing the imbalance problem". 
+-        # This implies that the Level-1 classifier handles the coarse 
+-        # distinction, and Level-0 only refines within active regions? 
+-        # No, Level-0 is for voxels. 
+-        # Let's stick to the explicit instruction: "restrict training samples 
+-        # to active values only". 
+-        # If we only have positive samples, BCE loss is undefined for 
+-        # negative predictions. 
+-        # Correction: The source likely means that the *value* regression 
+-        # is restricted to active values, but the mask classifier still 
+-        # needs to distinguish active vs inactive. 
+-        # But it explicitly says "mask classifier... trained with... active 
+-        # leaf masks... as the label". 
+-        # And "randomly sample the active voxels... excluding all inactive". 
+-        # This is a contradiction if BCE is used without negative samples. 
+-        # [G] Assumption: The training set includes active voxels (label 1) 
+-        # and a subset of inactive voxels (label 0), OR the "active values 
+-        # only" refers to the value regression part, and the mask classifier 
+-        # uses standard sampling. 
+-        # However, the text says "Firstly we restrict the training samples 
+-        # to active values only... We will elaborate more...". This sentence 
+-        # is in the context of "Sparse Field Training" for the value 
+-        # regression MLP. 
+-        # Then in 3.3.1: "classifier at level 0 is trained with voxel 
+-        # coordinates... and active leaf masks... as the label". 
+-        # It does NOT explicitly say the mask classifier samples only 
+-        # active values. It says the *encoding process of the value 
+-        # regression MLP* starts with restricting samples. 
+-        # Therefore, the mask classifier likely samples both active and 
+-        # inactive coordinates. 
+-        # Let's assume standard sampling for the mask classifier.
+-        
+-        # Generate labels: 1 for active, 0 for inactive
+-        # We need to know which sampled coordinates are active.
+-        # active_coords_set = set(active_coords) # For fast lookup
+-        # sampled_coords_all = ... # Sample from full grid or bounding box
+-        
+-        # For the purpose of this pseudocode, we assume a function 
+-        # `get_mixed_samples` that returns coordinates and their labels.
+-        coords, labels = get_mixed_samples(vdb_grid)
+-        
+-        optimizer.zero_grad()
+-        predictions = model(coords)
+-        loss = criterion(predictions, labels.float())
+-        loss.backward()
+-        optimizer.step()
++        random.shuffle(all_coords)
++        for coords in all_coords:
++            p = model.forward(coords)
++            label = 1.0 if coords in active_set else 0.0
++            # Vanilla BCE loss [S1]
++            loss = -(label * math.log(p) + (1 - label) * math.log(1 - p))
++            # [G] Standard gradient descent updates model weights to minimize loss
+ ```
+ 
+@@ -162,13 +81,13 @@
+ 
+ ### Level-1 Mask Classifier
+-A ternary classifier that predicts one of three states for level-1 child node coordinates: 1) a leaf child node, 2) an active tile value, or 3) an inactive tile value. It uses cross-entropy loss and takes level-1 child node coordinates as input [S1].
++A ternary classifier that predicts one of three states for level-1 child node coordinates: 1) a leaf child node, 2) an active tile value, or 3) an inactive tile value [S1]. It uses cross-entropy loss and takes level-1 child node coordinates as input [S1].
+ 
+ ## Operating characteristics
+ *   **Memory Footprint:** The network capacity is identical to the level-0 value regression network, resulting in virtually identical memory footprints for the mask and value components at level 0 [S1].
+-*   **Complexity:** The memory footprint of the hierarchical representation is dominated by the two lowest levels (0 and 1). The neural representations of upper levels (2 and 3) have little impact on the overall footprint [S1].
+-*   **Performance:** The shallow network depth (3 layers) keeps inference fast. The use of vanilla BCE without tuning is feasible due to the hierarchical context where level-1 nodes address imbalance [S1].
++*   **Complexity:** The memory footprint of the hierarchical representation is dominated by the two lowest levels (0 and 1) [S1]. The neural representations of upper levels (2 and 3) have little impact on the overall footprint [S1].
++*   **Performance:** The shallow network depth (3 layers) keeps inference fast [S1]. The use of vanilla BCE without tuning is feasible due to the hierarchical context where level-1 nodes address imbalance [S1].
+ 
+ ## Background
+-The Level-0 Mask Classifier is part of the NeuralVDB framework, which proposes replacing the lowest two levels of the VDB tree structure with neural networks. This approach creates a hierarchical neural representation where the root and upper internal levels remain unchanged [S1]. The method was introduced in the paper "NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks" [S1].
++The Level-0 Mask Classifier is part of the NeuralVDB framework, which proposes replacing the lowest two levels of the VDB tree structure with neural networks [S1]. This approach creates a hierarchical neural representation where the root and upper internal levels remain unchanged [S1]. The method was introduced in the paper "NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks" [S1].
+ 
+ ## Sources

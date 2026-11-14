@@ -3,7 +3,7 @@
 Also called: Joint optimization of 2D image content and per-patch homography warps
 
 ## Overview
-2D Planar Image Alignment is a simplified joint optimization problem used to demonstrate the robustness of differentiable rendering pipelines by aligning overlapping 2D image patches with learned content [S1][S2, unofficial]. It solves the problem of reconstructing a ground truth image from transformed patches by simultaneously optimizing the image content representation and the geometric transformation parameters [S2, unofficial]. It sets itself apart from sibling methods like [Curvature Loss](2911-curvature-loss.md) by focusing on geometric consistency via homography warps rather than smoothness priors on the field itself, serving as a 2D analog to the 3D alignment losses in [Geometric and Normal Alignment Losses](4970-geometric-and-normal-alignment-losses.md).
+2D Planar Image Alignment is a simplified joint optimization problem that aligns overlapping 2D image patches with learned content [S1][S2, unofficial]. It reconstructs a ground truth image from transformed patches by simultaneously optimizing the image content representation and the geometric transformation parameters [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -26,7 +26,7 @@ Also called: Joint optimization of 2D image content and per-patch homography war
     *   If $\sigma > 0.0001$:
         $$ N_{1d}(\sigma)_x = \min\left(1, \frac{1}{\sqrt{2\pi\sigma^2}} e^{-\frac{x^2}{2\sigma^2}}\right) $$
         for $x \in [-L_N/2, L_N/2]$ [S2, unofficial].
-    *   If $\sigma \le 0.0001$: Assign $N_{1d}(\sigma)$ to the discrete impulse function $\delta$ to avoid numerical instability [S2, unofficial].
+    *   If $\sigma < 0.001$: Assign $N_{1d}(\sigma)$ to the discrete impulse function $\delta$ to avoid numerical instability [S2, unofficial].
     *   Construct $N_{2d}(\sigma) = N_{1d}(\sigma) \otimes N_{1d}(\sigma)$ [S2, unofficial].
 3.  **Filter Content:** Compute the filtered content function $F_{2d}(x)$ by convolving the tensor $T_{2d}$ with $N_{2d}$:
     $$ F_{2d}(x) = (N_{2d} *_{2d} T_{2d})(x) = \left(N_{2d} *_{2d} \left(\sum_{r=1}^R v_{rX} \otimes v_{rY}\right)\right)(x) $$
@@ -46,129 +46,55 @@ Also called: Joint optimization of 2D image content and per-patch homography war
 import numpy as np
 
 def generate_1d_kernel(sigma, L_N):
-    """
-    Generates a 1D Gaussian kernel of size L_N.
-    Handles numerical instability for small sigma.
-    """
-    if sigma < 0.0001:
-        # Discrete impulse function delta
+    """Generates a 1D Gaussian kernel of size L_N. Handles numerical instability for small sigma."""
+    if sigma < 0.001:
         kernel = np.zeros(L_N)
         kernel[L_N // 2] = 1.0
         return kernel
-    
     x = np.arange(-L_N // 2, L_N // 2 + 1)
-    # Standard Gaussian PDF, clamped to max 1.0
     pdf = (1.0 / np.sqrt(2 * np.pi * sigma**2)) * np.exp(-x**2 / (2 * sigma**2))
-    kernel = np.minimum(1.0, pdf)
-    return kernel
+    return np.minimum(1.0, pdf)
 
 def generate_2d_kernel(sigma, L_N):
-    """
-    Generates a 2D Gaussian kernel as outer product of two 1D kernels.
-    """
+    """Generates a 2D Gaussian kernel as outer product of two 1D kernels."""
     n1d = generate_1d_kernel(sigma, L_N)
-    # Outer product to create 2D kernel
-    kernel_2d = np.outer(n1d, n1d)
-    return kernel_2d
+    return np.outer(n1d, n1d)
 
-def low_rank_tensor_to_image(vectors_x, vectors_y, kernel_2d, h, w):
-    """
-    Computes F_2d(x) by reconstructing the low-rank tensor T_2d
-    and convolving with the 2D Gaussian kernel.
-    
-    vectors_x: list of R vectors, each shape (w,)
-    vectors_y: list of R vectors, each shape (h,)
-    kernel_2d: 2D array, shape (L_N, L_N)
-    h, w: image dimensions
-    """
+def reconstruct_and_filter(vectors_x, vectors_y, kernel_2d, h, w):
+    """Computes F_2d(x) by reconstructing T_2d and convolving with the 2D Gaussian kernel."""
     R = len(vectors_x)
-    # Reconstruct T_2d from low-rank components
-    # T_2d = sum_{r=1}^R (v_rY outer v_rX)
-    # Note: v_rY is shape (h,), v_rX is shape (w,)
-    # Outer product v_rY @ v_rX.T gives shape (h, w)
     T_2d = np.zeros((h, w))
     for r in range(R):
-        v_y = vectors_y[r] # shape (h,)
-        v_x = vectors_x[r] # shape (w,)
-        T_2d += np.outer(v_y, v_x)
-        
-    # Convolve T_2d with kernel_2d
-    # Assuming 'valid' or 'same' padding logic is handled by the specific 
-    # implementation of the differentiable renderer, but here we simulate the filtering.
-    # In the context of the paper, this is a differentiable operation.
-    # For implementation, one would typically use a differentiable convolution layer.
-    # Here we assume a standard convolution for clarity, though the paper 
-    # implies this is part of the differentiable graph.
+        T_2d += np.outer(vectors_y[r], vectors_x[r])
+    # [G] Differentiable convolution is used in the actual implementation.
     from scipy.signal import convolve2d
-    F_2d = convolve2d(T_2d, kernel_2d, mode='same')
-    return F_2d
+    return convolve2d(T_2d, kernel_2d, mode='same')
 
-def warp_coordinate_homography(u, P_i):
-    """
-    Warps a 2D coordinate u using homography P_i.
-    P_i is in sl(3) Lie algebra, but typically applied as a 3x3 matrix H.
-    This function assumes P_i has been exponentiated to H.
-    u: (x, y) coordinate
-    """
-    # Homogeneous coordinate
+def warp_coordinate_homography(u, H):
+    """Warps a 2D coordinate u using homography matrix H."""
     u_h = np.array([u[0], u[1], 1.0])
-    # Apply homography
-    u_prime_h = P_i @ u_h
-    # Normalize
-    u_prime = u_prime_h[:2] / u_prime_h[2]
-    return u_prime
+    u_prime_h = H @ u_h
+    return u_prime_h[:2] / u_prime_h[2]
 
-def compute_loss(F_2d, patches, homographies, kernel_sigma, L_N):
-    """
-    Computes the 2D Planar Image Alignment loss.
-    """
+def compute_loss(F_2d, patches, homographies, kernel_sigma, L_N, h, w, vectors_x, vectors_y):
+    """Computes the 2D Planar Image Alignment loss."""
     kernel_2d = generate_2d_kernel(kernel_sigma, L_N)
-    # Note: F_2d is a function. In practice, we evaluate it on a grid.
-    # For the loss calculation, we need to sample F_2d at warped coordinates.
+    F_2d = reconstruct_and_filter(vectors_x, vectors_y, kernel_2d, h, w)
     
     total_loss = 0.0
-    h, w = F_2d.shape # Assuming F_2d is pre-computed on a grid
-    
     for i, patch in enumerate(patches):
-        H = homographies[i] # 3x3 matrix
-        # Iterate over pixels in the patch
-        # U_2d is the set of coordinates in the patch
-        # We need to map patch coordinates to the global F_2d grid
-        # The paper states: W_2d(P_i, u) maps 2D coordinate u on I_gt into 
-        # a transformed 2D coordinate on patch I_i.
-        # Actually, Eq 9 says: F_2d(W_2d(P_i, u)) - I_iu.
-        # This implies u is in the patch coordinate system, and W_2d maps it 
-        # to the global coordinate system where F_2d is defined.
-        
+        H = homographies[i]
         patch_h, patch_w, _ = patch.shape
         for y in range(patch_h):
             for x in range(patch_w):
                 u = np.array([x, y])
-                # Warp u to global coordinates
                 u_global = warp_coordinate_homography(u, H)
-                
-                # Sample F_2d at u_global
-                # F_2d is defined on R^2. We need to interpolate.
-                # Assuming F_2d is stored as an image array of size (h, w)
+                # [G] Differentiable grid sampling (e.g., bilinear interpolation) is required here.
                 gx, gy = u_global
-                # Bilinear interpolation or nearest neighbor
-                # For simplicity, assume integer coordinates or use a differentiable sampler
-                # [G] In a real implementation, use a differentiable grid sampler.
-                # Here we assume F_2d is accessible via interpolation.
-                val = interpolate(F_2d, gx, gy)
-                
+                val = F_2d[int(gy), int(gx)]
                 target = patch[y, x]
                 total_loss += np.sum((val - target)**2)
-                
     return total_loss
-
-def interpolate(image, x, y):
-    """
-    Simple bilinear interpolation placeholder.
-    """
-    # [G] Implement bilinear interpolation or use a library like torch.nn.functional.grid_sample
-    # This is a placeholder for the actual differentiable sampling operation.
-    return image[int(y), int(x)]
 ```
 
 **Parameters:**
@@ -180,6 +106,11 @@ def interpolate(image, x, y):
 *   **Numerical Instability:** When $\sigma < 0.001$, the Gaussian kernel calculation becomes numerically unstable. The source specifies assigning the 1D kernel to a discrete impulse function $\delta$ in this case [S2, unofficial].
 *   **Overfitting:** Naively applying low-rank decomposed tensors without filtering can limit the spectrum of the learned signal. Filtering with a Gaussian kernel is necessary to avoid overfitting [S2, unofficial].
 
+## Subtopics
+
+### 2D Image Field Homography Estimation
+A 2D variant of radiance field estimation for homography-based panorama stitching [S3, unofficial]. A 2D coordinate network renders a stitched image, and pixel $p_i$ in training patch $i$ is warped with estimated homography $H_i$ to the rendered image [S3, unofficial]. At every iteration, a reference crop $r$ is randomly selected to align other crops. Pixel $p_i$ from any crop $i$ is warped by estimating composed homography $H'_{ri} = H_r^{-1} \cdot H_i$ to its location $p'_i = H'_{ri} \cdot p_i$ in the reference crop [S3, unofficial]. Color constancy of the backward warps to the reference crop for all surrogate views is penalized with a huber function and minimized alongside the rendering MSE [S3, unofficial]. Homography noise parameters used for evaluation include scale noise $H \in \{0.05, 0.1, 0.15\}$ and fixed translation noise of 0.2 [S3, unofficial].
+
 ## Operating characteristics
 *   **Time Complexity:** Not given in the sources.
 *   **Memory Complexity:** Not given in the sources.
@@ -189,8 +120,9 @@ def interpolate(image, x, y):
 *   **When not to use:** For full 3D scene reconstruction where depth and volume rendering are required [S2, unofficial].
 
 ## Background
-The method originates from research on improving robustness for joint optimization of camera poses and decomposed low-rank tensorial radiance fields [S1][S2, unofficial]. It is presented as a simpler example of joint optimization involving overlapping image patches transformed by 2D homography, serving as an analog to 1D and 3D alignment problems [S1][S2, unofficial]. The approach builds on the decomposed low-rank tensor representation (VM-decomposition) proposed by TensoRF [S2, unofficial].
+The method is presented as a simpler example of joint optimization involving overlapping image patches transformed by 2D homography, serving as an analog to 1D and 3D alignment problems [S1][S2, unofficial]. The approach builds on the decomposed low-rank tensor representation (VM-decomposition) proposed by TensoRF [S2, unofficial].
 
 ## Sources
 [S1] Improving Robustness for Joint Optimization of Camera Pose and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.1609/aaai.v38i2.27859, fetched 2026-10-26
 [S2] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)
+[S3] ACCV 2024 Open Access Repository, https://openaccess.thecvf.com/content/ACCV2024/html/Garg_Direct_Alignment_for_Robust_NeRF_Learning_ACCV_2024_paper.html, fetched 2026-10-29 (unofficial)

@@ -7,21 +7,25 @@ Separable Component-Wise Convolution is a method for applying 3D Gaussian smooth
 
 ## How it works
 **Inputs:**
-- Decomposed low-rank tensor volume $T$ with rank $R$.
-- Tensor dimensions $I, J, K$ along axes $X, Y, Z$.
+- Decomposed low-rank tensor volume $T$ with rank $R$ [S2, unofficial].
+- Tensor dimensions $I, J, K$ along axes $X, Y, Z$ [S1].
 - Gaussian standard deviation $\sigma$.
 - Kernel size parameter $L_N$.
 
+**Outputs:**
+- Convoluted tensor components $\tilde{v}_{\sigma,r}$ and $\tilde{M}_{\sigma,r}$ [S1][S2, unofficial].
+- Density field $\tilde{F}_\sigma(x)$ and spectral restricted color field $\vec{F}_c(x, \vec{d})$ [S1][S2, unofficial].
+
 **Data Structures:**
 The decomposed tensor consists of:
-- Vector components: $v_r^X \in \mathbb{R}^I$, $v_r^Y \in \mathbb{R}^J$, $v_r^Z \in \mathbb{R}^K$ for $r=1 \dots R$.
-- Matrix components: $M_r^{Y,Z} \in \mathbb{R}^{J \times K}$, $M_r^{X,Z} \in \mathbb{R}^{I \times K}$, $M_r^{X,Y} \in \mathbb{R}^{I \times J}$ for $r=1 \dots R$.
-- Color basis vectors: $b_r \in \mathbb{R}^G$ for $r=1 \dots R$ (used for color field reconstruction).
+- Vector components: $v_r^X \in \mathbb{R}^I$, $v_r^Y \in \mathbb{R}^J$, $v_r^Z \in \mathbb{R}^K$ for $r=1 \dots R$ [S1].
+- Matrix components: $M_r^{Y,Z} \in \mathbb{R}^{J \times K}$, $M_r^{X,Z} \in \mathbb{R}^{I \times K}$, $M_r^{X,Y} \in \mathbb{R}^{I \times J}$ for $r=1 \dots R$ [S1].
+- Color basis vectors: $b_r \in \mathbb{R}^G$ for $r=1 \dots R$ (used for color field reconstruction) [S1].
 
 **Steps:**
 
 1. **Generate 1D Gaussian Kernel:**
-   Create a 1D kernel $N_{1d}(\sigma)$ of size $L_N$. Sample from the continuous Gaussian distribution and clamp values to a maximum of 1.0.
+   Create a 1D kernel $N_{1d}(\sigma)$ of size $L_N$ [S1]. Sample from the continuous Gaussian distribution and clamp values to a maximum of 1.0 [S1].
    $$
    N_{1d}(\sigma)_x = \begin{cases} 
    \min\left(1, \sqrt{2\pi}\sigma \cdot e^{-\frac{x^2}{2\sigma^2}}\right) & \text{if } \sigma > 0.0001 \\
@@ -70,7 +74,7 @@ The decomposed tensor consists of:
      $$
      \vec{F}_c(x, \vec{d}) = S(\tilde{T}_c(x), \vec{d})
      $$
-     where $\vec{d}$ is the view direction [S1][S2, unofficial].
+     [S1][S2, unofficial].
 
 **Parameters:**
 - $L_N$: Size of the discrete Gaussian kernel in each dimension [S1].
@@ -84,11 +88,11 @@ The decomposed tensor consists of:
 ## Subtopics
 
 ### [Dr. TVAM Convolution](8425-dr-tvam-convolution.md)
-A separable 3D convolution method using Gaussian diffusion kernels, implemented via Dr.Jit's `dr.convolve` function for tomographic volumetric additive manufacturing simulations. It sets itself apart from non-separable 3D convolutions by leveraging axis-aligned separability to reduce computational complexity, allowing for interactive rates on CUDA hardware. It builds on [Separable Component-Wise Convolution](7446-separable-component-wise-convolution.md) by applying specific Gaussian diffusion kernels rather than generic low-rank tensor decompositions.
+A separable 3D convolution method using Gaussian diffusion kernels, implemented via Dr.Jit's `dr.convolve` function for tomographic volumetric additive manufacturing simulations. It builds on [Separable Component-Wise Convolution](7446-separable-component-wise-convolution.md) by applying specific Gaussian diffusion kernels rather than generic low-rank tensor decompositions.
 
 ## Operating characteristics
 - **Time Complexity:** Computing convoluted components is $O(I \cdot J \cdot L_N + J \cdot K \cdot L_N + K \cdot I \cdot L_N)$, assuming 2D Gaussian convolution on matrix components is separated into 1D Gaussian convolutions [S1][S2, unofficial]. Each query sample is $O(R)$ [S1][S2, unofficial].
-- **Space Complexity:** $O(I \cdot J + J \cdot K + K \cdot I + I \cdot J \cdot K \cdot R)$ for storing the decomposed components and their convolved versions, significantly less than the $O(I \cdot J \cdot K)$ required for full volume reconstruction [S1][S2, unofficial].
+- **Space Complexity:** $O(R \cdot (IJ + JK + KI))$ for storing the decomposed components and their convolved versions, significantly less than the $O(I \cdot J \cdot K)$ required for full volume reconstruction [S1][S2, unofficial].
 - **Performance:** Drastically reduces computation required for filtering 3D radiance fields compared to naive or traditional methods [S1][S2, unofficial].
 - **Strengths:** Preserves space compression of decomposed low-rank tensors; computationally efficient for large volumes; enables coarse-to-fine training schedules [S1][S2, unofficial].
 - **Limitations:** Requires the input to be in decomposed low-rank tensor format; relies on the validity of the component-wise convolution identity (Theorem 4) [S1][S2, unofficial].
@@ -101,3 +105,4 @@ The method was proposed in the context of improving robustness for joint optimiz
 ## Sources
 [S1] Improving Robustness for Joint Optimization of Camera Pose and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.1609/aaai.v38i2.27859, fetched 2026-10-26
 [S2] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)
+[S3] Tensor-Train-based 4D Time-Dependent Volume Rendering, https://repositorio.ie.edu/entities/publication/348991b8-1dff-4bea-acbc-433ce708313d/full, fetched 2026-10-29 (unofficial)

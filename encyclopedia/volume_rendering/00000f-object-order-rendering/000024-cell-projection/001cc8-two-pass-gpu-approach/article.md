@@ -74,14 +74,19 @@ The method requires four textures in GPU memory to store pre-computed and interm
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pass 1: Fragment Shader (GPU)
+def sign(x):
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+def cross(v1, v2):
+    return (v1.y*v2.z - v1.z*v2.y, v1.z*v2.x - v1.x*v2.z, v1.x*v2.y - v1.y*v2.x)
+
 def pass1_fragment_shader(tet_index):
     # 1. Retrieve Data
     indices = TetrahedralTexture[tet_index] # 4 indices
     verts = [VertexTexture[i] for i in indices] # (x,y,z,s)
     grads = [GradientTexture[i] for i in indices] # (gx,gy,gz)
     
-    # 2. Project Vertices
+    # 2. Project Vertices to screen space
     v_proj = [project_to_screen(v.xyz) for v in verts]
     
     # 3. Classification Tests
@@ -99,16 +104,17 @@ def pass1_fragment_shader(tet_index):
     # 4. Determine Class and Discard if Degenerate
     ones_count = sum([t1==1, t2==1, t3==1, t4==1])
     if ones_count >= 3:
-        return # Discard degenerate
+        return # Discard degenerate tetrahedron [S4, unofficial]
     
-    class_id = ClassificationTexture[t1, t2, t3, t4]
+    # Lookup projection class from Ternary Truth Table [S4, unofficial]
+    class_id = ClassificationTexture.lookup(t1, t2, t3, t4)
     
-    # 5. Compute Optical Properties
-    # [G] Determine entry/exit points and compute optical properties based on class_id
-    sf, sb = compute_front_back_scalars(verts, class_id)
-    gf, gb = compute_front_back_gradients(grads, class_id)
-    l = compute_thickness(verts, class_id)
-    cz = compute_centroid_z(verts)
+    # 5. Compute Optical Properties [G]
+    # Determine entry/exit points based on class_id
+    sf, sb = [G] Compute front/back scalar values
+    gf, gb = [G] Compute front/back gradient vectors
+    l = [G] Compute cell thickness
+    cz = [G] Compute centroid z-coordinate
     
     # 6. Output to MRT
     MRT_Attachment_1.write((intersection_vertex_xy, cz, class_id))
@@ -116,54 +122,51 @@ def pass1_fragment_shader(tet_index):
     MRT_Attachment_3.write(gf)
     MRT_Attachment_4.write(gb)
 
-# Pass 2: CPU Preparation
 def pass2_cpu_preparation():
     # Retrieve MRT data
     data = retrieve_mrt_data()
     
-    # Sort tetrahedra
+    # Sort tetrahedra (bucket sort for rotation, merge-sort for static) [S4, unofficial]
     sorted_indices = bucket_sort(data, key='cz')
     
-    # Build fan indices and counts
+    # Build fan indices and counts [S4, unofficial]
     indices_array = []
     count_array = []
     for idx in sorted_indices:
         class_id = data[idx].class_id
-        # [G] Map class_id to specific vertex ordering for triangle fan
-        # Max 6 vertices per fan
-        fan_indices = get_fan_indices(class_id, data[idx].vertex_indices)
+        # Map class_id to specific vertex ordering for triangle fan [G]
+        fan_indices = [G] Get fan indices for class_id
         indices_array.extend(fan_indices)
         count_array.append(len(fan_indices))
         
     return indices_array, count_array
 
-# Pass 2: Fragment Shader (GPU)
 def pass2_fragment_shader(fan_vertex_data):
-    # Interpolate thick/thin vertex properties
-    # Compute opacity
+    # Interpolate thick/thin vertex properties [G]
+    # Compute opacity using 1D exponential lookup texture [S4, unofficial]
     tau_avg = (tau(fan_vertex_data.sf) + tau(fan_vertex_data.sb)) / 2
     u = tau_avg * fan_vertex_data.l
     alpha = 1.0 - ExponentialTexture[u]
     
     # Compute color
-    # Option A: Average Method
+    # Option A: Average Method [S4, unofficial]
     # C = average_color(fan_vertex_data.sf, fan_vertex_data.sb)
     
-    # Option B: Partial Pre-Integration
+    # Option B: Partial Pre-Integration [S4, unofficial]
     Cf = TransferFunctionTexture[fan_vertex_data.sf]
     Cb = TransferFunctionTexture[fan_vertex_data.sb]
     psi_index = compute_psi_index(Cf, Cb, fan_vertex_data.l)
     C = PsiTableTexture[psi_index]
     
-    # Isosurface Check
-    if isosurface_detected(fan_vertex_data.sf, fan_vertex_data.sb):
-        # Phong Shading
+    # Isosurface Check [G]
+    if isovalue_min <= isovalue <= isovalue_max:
+        # Phong Shading using interpolated gradient as normal [S4, unofficial]
         normal = interpolate_gradient(fan_vertex_data.gf, fan_vertex_data.gb)
         color = phong_shading(normal, light_dir)
     else:
         color = C
         
-    # Composite
+    # Composite [S4, unofficial]
     I_prev = framebuffer_read()
     I_new = alpha * color + (1.0 - alpha) * I_prev
     framebuffer_write(I_new)

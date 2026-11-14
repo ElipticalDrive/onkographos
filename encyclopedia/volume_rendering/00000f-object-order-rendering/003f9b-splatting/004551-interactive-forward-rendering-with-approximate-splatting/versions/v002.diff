@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of input views (images and camera poses), a multi-view stereo (MVS) mesh, and a pre-trained neural network for image synthesis.
+-*   **Outputs:** A synthesized novel view image.
++*   **Inputs:** A set of input views (images and camera poses), a multi-view stereo (MVS) mesh, and a pre-trained neural network for image synthesis [S1].
++*   **Outputs:** A synthesized novel view image [S1].
+ 
+ **Data Structures:**
+-*   **Depth Layers:** A stack of $k_d$ texture buffers representing global depth intervals. Each layer stores accumulated opacity and depth information.
+-*   **MVS Mesh Depth Map:** A low-resolution depth map used to determine the relevant depth interval for the scene.
++*   **Depth Layers:** A stack of $k_d$ texture buffers representing global depth intervals [S1]. Each layer stores accumulated opacity and depth information [S1].
++*   **MVS Mesh Depth Map:** A low-resolution depth map used to determine the relevant depth interval for the scene [S1].
+ 
+ **Parameters:**
+@@ -22,7 +22,7 @@
+ 1.  **Camera Selection:** Choose a subset of input views relevant to the novel view [S1].
+ 2.  **Depth Interval Determination:** Rasterize the MVS mesh depth at a low resolution (1/16 of target) and construct a min-max mipmap to determine the relevant depth range [S1].
+-3.  **Splatting into Depth Layers:** Project points from all selected input views into the $k_d$ global depth layers in parallel.
++3.  **Splatting into Depth Layers:** Project points from all selected input views into the $k_d$ global depth layers in parallel [S1].
+     *   Opacity accumulation uses hardware-accelerated additive blending of $\log(1 - \alpha)$ to achieve multiplicative opacity accumulation [S1].
+-    *   Formula for opacity accumulation: If $\alpha$ is the splat opacity, the stored value $V$ is updated as $V_{new} = V_{old} + \log(1 - \alpha)$. The final accumulated opacity is $1 - \exp(V_{total})$.
++    *   Formula for opacity accumulation: If $\alpha$ is the splat opacity, the stored value $V$ is updated as $V_{\text{new}} = V_{\text{old}} + \log(1 - \alpha)$ [S1]. The final accumulated opacity is $1 - \exp(V_{\text{total}})$ [S1].
+ 4.  **Compositing:** Composite the depth layers back-to-front in parallel over all re-projected pixels of all input images [S1].
+ 5.  **Probabilistic Depth Test:** Apply a probabilistic depth test considering at most $k_d$ alpha-weighted depth samples to refine visibility [S1].
+@@ -32,45 +32,34 @@
+ ```python
+ def interactive_forward_rendering(input_views, mvs_mesh, neural_net, k_d=10, target_res=(900, 600)):
+-    # 1. Camera Selection
+-    selected_views = select_relevant_views(input_views)
+-    
+-    # 2. Determine Depth Interval
+-    low_res_depth = rasterize_mvs_mesh(mvs_mesh, resolution=(target_res[0]//16, target_res[1]//16))
+-    depth_min, depth_max = compute_min_max_mipmap(low_res_depth)
+-    
+-    # 3. Initialize Depth Layers
+-    # Each layer stores log(1-alpha) accumulation
+-    depth_layers = initialize_texture_stack(k_d, target_res, init_value=0.0)
+-    
+-    # 4. Splat Points into Depth Layers
++    # 1. Camera Selection: Choose relevant input views [S1]
++    selected_views = input_views  # Selection algorithm not specified in sources [G]
++
++    # 2. Determine Depth Interval: Rasterize MVS mesh at 1/16 resolution, build min-max mipmap [S1]
++    low_res = (target_res[0] // 16, target_res[1] // 16)
++    low_res_depth = rasterize_mesh_to_depth(mvs_mesh, low_res)  # Standard GPU rasterization [G]
++    depth_min, depth_max = compute_min_max_mipmap(low_res_depth)  # Standard mipmap reduction [G]
++
++    # 3. Initialize Depth Layers: Stack of k_d texture buffers for log(1-alpha) accumulation [S1]
++    depth_layers = [create_texture_buffer(target_res, init=0.0) for _ in range(k_d)]
++
++    # 4. Splat Points into Depth Layers: Project all pixels of selected views in parallel [S1]
+     for view in selected_views:
+-        points = extract_points_from_view(view)
+-        for point in points:
+-            # Project point to screen and determine depth layer index
+-            screen_pos, depth = project_point(point, view.camera)
+-            layer_idx = map_depth_to_layer(depth, depth_min, depth_max, k_d)
+-            
+-            # Calculate splat opacity alpha
+-            alpha = compute_splat_opacity(point)
+-            
+-            # Hardware-accelerated additive blending of log(1-alpha)
+-            log_alpha = math.log(1 - alpha)
+-            depth_layers[layer_idx].additive_blend(screen_pos, log_alpha)
+-            
+-    # 5. Composite Depth Layers Back-to-Front
+-    # Convert log(1-alpha) back to alpha for compositing if necessary, 
+-    # or use the accumulated log values directly for final opacity calculation.
+-    # The text implies compositing happens over re-projected pixels.
+-    accumulated_log_alpha = depth_layers.sum() # Sum across layers
+-    final_alpha = 1.0 - math.exp(accumulated_log_alpha)
+-    
+-    # 6. Probabilistic Depth Test
+-    # Consider at most k_d alpha-weighted depth samples
+-    refined_depth = probabilistic_depth_test(depth_layers, k_d)
+-    
+-    # 7. Neural Network Synthesis
+-    # Feed accumulated depth, alpha, and color information to the neural net
++        for point in extract_points_from_view(view):  # Standard point extraction [G]
++            screen_pos, depth = project_point_to_screen(point, view.camera)  # Standard MVP transform [G]
++            layer_idx = map_depth_to_layer(depth, depth_min, depth_max, k_d)  # Standard quantization [G]
++            alpha = compute_splat_opacity(point)  # Standard kernel evaluation [G]
++            log_val = math.log(1.0 - alpha)
++            depth_layers[layer_idx].additive_blend(screen_pos, log_val)  # Hardware-accelerated additive blending [S1]
++
++    # 5. Composite Depth Layers Back-to-Front in parallel [S1]
++    accumulated_log_alpha = sum(layer.texture for layer in depth_layers)  # Sum across layers [G]
++    final_alpha = 1.0 - math.exp(accumulated_log_alpha)  # Inverse of log accumulation [S1]
++
++    # 6. Probabilistic Depth Test: Consider at most k_d alpha-weighted depth samples [S1]
++    refined_depth = apply_probabilistic_depth_test(depth_layers, k_d)  # Standard test logic [G]
++
++    # 7. Neural Synthesis: Run neural network to synthesize image [S1]
+     final_image = neural_net(refined_depth, final_alpha, selected_views)
+-    
++
+     return final_image
+ ```
+@@ -86,9 +75,9 @@
+ *   **Strengths:** Enables interactive viewing with marginal quality degradation compared to full soft rasterization [S1].
+ *   **Limitations:** High memory consumption; requires pre-trained neural network [S1].
+-*   **When to use:** When interactive frame rates are required for free-viewpoint rendering and sufficient GPU memory is available.
+-*   **When not to use:** When memory is constrained or offline rendering quality is prioritized over speed.
++*   **When to use:** When interactive frame rates are required for free-viewpoint rendering and sufficient GPU memory is available [S1].
++*   **When not to use:** When memory is constrained or offline rendering quality is prioritized over speed [S1].
+ 
+ ## Background
+-This method was introduced by Kopanas et al. in "Point-Based Neural Rendering with Per-View Optimization" [S1]. It is part of a differentiable multi-view pipeline used for applications such as image-based rendering (IBR), multi-view harmonization, and multi-view style transfer. The implementation was done in PyTorch with custom OpenGL-based approximations for the forward pass [S1].
++This method was introduced by Kopanas et al. in "Point-Based Neural Rendering with Per-View Optimization" [S1]. It is part of a differentiable multi-view pipeline used for applications such as image-based rendering (IBR), multi-view harmonization, and multi-view style transfer [S1]. The implementation was done in PyTorch with custom OpenGL-based approximations for the forward pass [S1].
+ 
+ ## Sources

@@ -1,6 +1,5 @@
 # Joint Optimization of Scene and Renderer
 
-Also called: Per-View Optimization, Point-Based Neural Rendering with Per-View Optimization
 
 ## Overview
 Joint Optimization of Scene and Renderer is a photometric optimization method that simultaneously refines the geometric and appearance attributes of a scene representation alongside the parameters of a neural renderer [S1]. It solves the problem of reconstructing high-quality novel views from a sparse set of input images by treating per-pixel attributes (color, depth, normal, uncertainty, and latent features) as learnable parameters [S1]. It differs from [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md) by explicitly optimizing the scene's underlying point-based representation attributes rather than just camera poses or static geometry, and it differs from [Gradient-Based SE(3) Optimization](7526-gradient-based-se-3-optimization.md) by focusing on per-view attribute refinement rather than global camera pose estimation [S1].
@@ -27,7 +26,7 @@ Joint Optimization of Scene and Renderer is a photometric optimization method th
 **Optimization Loop:**
 The optimization uses a leave-one-out strategy. At each iteration:
 1.  **Selection:** Randomly select one view from the 9 selected views to serve as the ground truth view $I_{gt}$ [S1].
-2.  **Lifting:** Lift all pixels from the remaining 8 input views into 3D space using their respective depth maps [S1].
+2.  **Lifting:** Lift all pixels from the selected input views into 3D space using their depth maps [S1].
 3.  **Splatting:** Splat the lifted 3D points (including their attributes) into the 2D coordinate system of the ground truth view [S1].
 4.  **Batching:** Stack the attributes from all splatted views into a batch [S1].
 5.  **Rendering:** Feed the batched attributes through the neural renderer to produce the predicted image $I$ [S1].
@@ -41,61 +40,64 @@ The optimization uses a leave-one-out strategy. At each iteration:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import random
+
+def sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def normalize(v):
+    mag = math.sqrt(sum(c * c for c in v))
+    return [c / mag for c in v] if mag > 0 else v
+
+def l1_loss(pred, gt):
+    return sum(abs(p - g) for p, g in zip(pred, gt)) / len(pred)
+
 # Initialization
 # attributes[i] contains color, depth, normal, uncertainty, features for view i
-# renderer is the neural network decoder
+# renderer is the neural network decoder initialized per Zhang et al. [S1]
 # views = list of 9 selected view indices
-# gt_view_idx = random.choice(views)
+# camera_poses = known poses for all views
+# images = ground truth images for all views
 
 for iteration in range(100000):
     # 1. Select ground truth view
-    gt_view_idx = random.choice(views)
+    gt_idx = random.choice(views)
     
     # 2. Lift and Splat
-    # Collect attributes from all other views
-    batch_attributes = []
-    for view_idx in views:
-        if view_idx == gt_view_idx:
+    batch = []
+    for v_idx in views:
+        if v_idx == gt_idx:
             continue
-        
-        # Get depth, color, normal, uncertainty, features for this view
-        depth = attributes[view_idx].depth
-        color = attributes[view_idx].color
-        normal = attributes[view_idx].normal
-        uncertainty = attributes[view_idx].uncertainty
-        features = attributes[view_idx].features
-        
-        # Lift pixels to 3D using depth and camera pose
-        # Splat to the coordinate system of gt_view_idx
-        # This results in a set of points with attributes projected onto gt_view's image plane
-        splatted = splat_to_view(depth, color, normal, uncertainty, features, 
-                                 camera_poses[view_idx], camera_poses[gt_view_idx])
-        batch_attributes.append(splatted)
+        # Lift pixels to 3D using depth and camera pose, then splat to gt_idx view
+        # Standard perspective projection and accumulation into tgt view grid [G]
+        projected = splat_to_view(attributes[v_idx], camera_poses[v_idx], camera_poses[gt_idx])
+        batch.append(projected)
     
     # 3. Stack and Render
-    # Stack all splatted attributes into a single batch tensor
-    batch_tensor = stack(batch_attributes)
+    # Concatenate lists of attribute tuples into a single batch tensor
+    batch_tensor = concatenate(batch)
     
     # 4. Feature Scaling
     # Apply sigmoid to the latent features in the batch
-    batch_tensor.features = sigmoid(batch_tensor.features)
+    batch_tensor.features = [sigmoid(f) for f in batch_tensor.features]
     
     # 5. Forward Pass
-    predicted_image = renderer(batch_tensor)
+    predicted_image = renderer.forward(batch_tensor)
     
     # 6. Loss Calculation
-    ground_truth_image = images[gt_view_idx]
+    ground_truth_image = images[gt_idx]
     loss = l1_loss(predicted_image, ground_truth_image)
     
     # 7. Backward Pass and Update
-    loss.backward()
-    optimizer.step()
+    grads = compute_gradients(loss)
+    optimizer.step(grads)
     optimizer.zero_grad()
     
     # 8. Renormalization
     # Renormalize normal vectors for all views to prevent numerical instability
-    for view_idx in views:
-        attributes[view_idx].normal = normalize(attributes[view_idx].normal)
+    for v_idx in views:
+        attributes[v_idx].normal = normalize(attributes[v_idx].normal)
 
 # Parameters
 lr_cnn = 0.0001
@@ -105,6 +107,14 @@ lr_features = 0.001
 lr_uncertainty = 0.01
 patch_size = (150, 150)
 ```
+
+**Parameters:**
+*   Learning rates: `lrCNN` = `lrnormal` = `lrdepth` = 0.0001, `lrfeatures` = 0.001, `lrU` = 0.01 [S1].
+*   Training iterations: 100,000 [S1].
+*   Patch size: 150×150 [S1].
+
+**Edge Cases and Pitfalls:**
+*   Numerical instabilities with normal vectors are handled by renormalizing normals in each iteration [S1].
 
 ## Subtopics
 
@@ -124,7 +134,7 @@ where $\mathcal{L}_{style}$ is the style loss against a target style image $S$, 
 *   **Time Complexity:** Training for 100,000 iterations takes 12-14 hours on an RTX8000 GPU [S1]. Small scenes (Hugo, Tree) require 20,000 iterations (~3 hours) [S1].
 *   **Memory Complexity:** Not given in the sources.
 *   **Performance:** The method achieves high-quality free-viewpoint rendering after optimization [S1].
-*   **Strengths:** Joint optimization allows the scene representation and renderer to adapt to each other, improving rendering quality [S1]. The leave-one-out strategy ensures robustness [S1].
+*   **Strengths:** Joint optimization allows the scene representation and renderer to adapt to each other, improving rendering quality [S1].
 *   **Limitations:** Training time is significant (12-14 hours for full scenes) [S1]. Requires initial depth maps and renderer initialization [S1].
 *   **When to use:** When high-quality novel view synthesis is required from a sparse set of input images and computational resources allow for lengthy optimization [S1].
 *   **When not to use:** When real-time performance is required during optimization or when initial depth estimates are unavailable [S1].

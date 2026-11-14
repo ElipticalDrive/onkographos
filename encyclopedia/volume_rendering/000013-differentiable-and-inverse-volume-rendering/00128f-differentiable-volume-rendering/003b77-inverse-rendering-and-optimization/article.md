@@ -3,21 +3,21 @@
 Also called: Differentiable Inverse Rendering, Inverse Volume Rendering
 
 ## Overview
-Inverse rendering and optimization uses differentiable volume rendering to recover scene parameters (geometry, materials, lighting, or transfer functions) from observed images by minimizing a loss between rendered and target views [S1, unofficial]. Unlike forward rendering which computes images from known parameters, this family solves an optimization problem where the rendering integral is differentiated with respect to scene variables [S1, unofficial]. It is distinguished from sibling methods like [Plenoxel Data Structure](930-plenoxel-data-structure.md) by its focus on parameter recovery rather than data representation, and from [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md) by its primary output being semantic or physical scene properties rather than geometric depth maps.
+Inverse rendering and optimization recovers scene parameters (geometry, materials, lighting, or transfer functions) from observed images by minimizing a loss between rendered and target views. Unlike forward rendering, which computes images from known parameters, this family solves an optimization problem where the rendering integral is differentiated with respect to scene variables. It is distinguished from sibling methods like [Plenoxel Data Structure](930-plenoxel-data-structure.md) by its focus on parameter recovery rather than data representation, and from [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md) by its primary output being semantic or physical scene properties rather than geometric depth maps.
 
 ## Shared principles
-The core mechanism relies on the evaluation of the volume rendering equation and the propagation of gradients through the integration steps [G]. The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [S1, unofficial]:
+The core mechanism relies on the evaluation of the volume rendering equation and the propagation of gradients through the integration steps [G]. The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as:
 
 $$
 \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
 $$
 
-where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [S1, unofficial].
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [G].
 
 Differentiation strategies fall into three main categories:
-1.  **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph [G]. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [S5].
-2.  **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input [G]. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S1, unofficial].
-3.  **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [S5].
+1.  **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph [G]. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [G].
+2.  **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input [G]. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [G].
+3.  **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [G].
 
 ## Subtopics
 
@@ -45,8 +45,19 @@ Differentiation strategies fall into three main categories:
 - [S1, unofficial] Feed priors into a body mesh generator based on SMPL, trained to be consistent with learned distributions.
 - [S1, unofficial] Optimize a differentiable renderer for consistency between mesh-to-image projection and 2D annotations.
 
+### Inverse Volume Rendering Parameter Recovery
+#### definition
+- [S2, unofficial] A technique to recover physical parameters (sigma, q) from observed intensity data using a constant intensity model, likely for volume rendering calibration or inverse rendering.
+#### formula
+- [S2, unofficial] Constant intensity model: $I = \text{constant\_intensity}(I_0, \sigma, q, s)$. The function signature is `double constant_intensity(double I0, double sigma, double q, double s)` where $I_0$ is initial intensity, $\sigma$ is absorption coefficient, $q$ is scattering parameter, and $s$ is path length.
+- [S2, unofficial] RMSE calculation: `rmse_constant_model(intensity, ds, sigma, q)` computes the Root Mean Square Error between the observed intensity vector and the model prediction given parameters $\sigma$ and $q$, with step size $ds$.
+#### layout
+- [S2, unofficial] `GridSearchResult` struct: Contains `double sigma`, `q`, `loss`; `int sigma_count`, `q_count`; `std::vector<double> loss_map`; `bool valid`. Used to store results of a parameter search.
+- [S2, unofficial] `InverseEstimate` struct: Contains `double sigma`, `q`, `a`, `b`; `double transition_rmse`, `reconstruction_rmse`; `bool valid`. Used to store the final recovered parameters and error metrics.
+
 ## Background
-Inverse rendering in volume visualization has evolved from manual transfer function design to automated, data-driven optimization. Early methods relied on user interaction or heuristic optimization [S1, unofficial]. The advent of differentiable rendering allowed gradients to flow from image loss to scene parameters, enabling end-to-end learning. Pavlakos et al. [10] demonstrated the use of differentiable renderers for human body mesh reconstruction from 2D annotations, predicting silhouettes and keypoints to learn pose and shape priors [S1, unofficial]. Recent works extend this to complex materials and lighting, such as Deep Reflectance Volumes for collocated lighting [S1, unofficial] and GAN-based approaches for direct parameter-to-image mapping [S1, unofficial]. The survey by [S1, unofficial] categorizes these methods by their differentiation strategies and application domains, highlighting the shift towards hybrid and physically-based differentiable rendering for high-fidelity reconstruction.
+Inverse rendering in volume visualization has evolved from manual transfer function design to automated, data-driven optimization. The advent of differentiable rendering allowed gradients to flow from image loss to scene parameters, enabling end-to-end learning. Pavlakos et al. [10] demonstrated the use of differentiable renderers for human body mesh reconstruction from 2D annotations, predicting silhouettes and keypoints to learn pose and shape priors [S1, unofficial].
 
 ## Sources
 [S1] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+[S2] wyh1309/hpc_foundational_demos, https://github.com/wyh1309/hpc_foundational_demos, fetched 2026-10-26 (unofficial)
