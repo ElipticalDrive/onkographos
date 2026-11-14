@@ -21,7 +21,7 @@ This method precomputes light intensities and shadows within a 3D volume based o
 *   `light_density_texture`: The resulting 3D volume where each voxel stores the computed light intensity [S1, unofficial].
 
 **Data Structures:**
-The core data structure is the `light_density_texture`, a 3D texture with `R8` format. The dimensions are defined by `light_map_resolution`. The mask and noise textures are also 3D textures, accessed via specific indices mapped from the light texture coordinates [S1, unofficial].
+The core data structure is the `light_density_texture`, a 3D texture with `R8` format [S1, unofficial]. The dimensions are defined by `light_map_resolution` [S1, unofficial]. The mask and noise textures are also 3D textures, accessed via specific indices mapped from the light texture coordinates [S1, unofficial].
 
 **Parameters:**
 *   `light_map_resolution`: `Vector3` defining the resolution of the 3D light map volume [S1, unofficial].
@@ -39,20 +39,20 @@ The core data structure is the `light_density_texture`, a 3D texture with `R8` f
 2.  **Dispatch Kernel:** Find kernel "compute_light_intensities". Set texture size params `noise_texture_size_x/y/z`. Set light params `light_texture_dims`, `global_light_direction`, `global_light_color`, `light_decay`, `god_rays_intensity`, `step_size` (calculated as `1.0f / light_sample_count`), `density_threshold`. Bind `light_density_texture` to `light_map_3D`, `noise_texture_3D` to `worley_noise_texture`, `mask_texture_3D` to `solver.density_rt`. Dispatch with thread groups `Mathf.CeilToInt(light_map_resolution.x / 8)`, `Mathf.CeilToInt(light_map_resolution.y / 8)`, `Mathf.CeilToInt(light_map_resolution.z / 8)` [S1, unofficial].
 3.  **Loop Initialization:** For each voxel `id` in the 3D grid:
     *   `current_coordinates` = `id` (voxel index) [S1, unofficial].
-    *   `density` = 0.0f [S1, unofficial].
-    *   `density_so_far` = 0.0f [S1, unofficial].
-    *   `light_intensity` = 1.0f [S1, unofficial].
+    *   `density` = 0.0 [S1, unofficial].
+    *   `density_so_far` = 0.0 [S1, unofficial].
+    *   `light_intensity` = 1.0 [S1, unofficial].
     *   `normalized_light_direction` = `normalize(global_light_direction)` [S1, unofficial].
     *   `scaled_step_size` = `light_texture_dims.x * step_size` [S1, unofficial].
     *   `max_iteration` = 256 [S1, unofficial].
-4.  **Ray Marching Loop:** While `!is_frag_out_boundries` and `max_iteration-- >= 0`:
-    *   Sample `noise_density` = `noise_texture_3D[light_id_to_noise_id(current_coordinates)]` [S1, unofficial].
-    *   Sample `mask` = `mask_texture_3D[light_id_to_mask_id(current_coordinates)]` [S1, unofficial].
+4.  **Ray Marching Loop:** While `!is_frag_out_boundries` and `max_iteration >= 0`:
+    *   Sample `noise_density` from `noise_texture_3D` at the current coordinates [S1, unofficial].
+    *   Sample `mask` from `mask_texture_3D` at the current coordinates [S1, unofficial].
     *   **Apply Mask and Threshold:** `density` = `min(1, mask - abs(density_threshold)) * noise_density` [S1, unofficial].
     *   **Accumulate Density:** `density_so_far` += `density` [S1, unofficial].
     *   **Apply God Rays Logic:**
         *   If `density < density_threshold` and `density_so_far < 0.5`: `density` = `god_rays_intensity` [S1, unofficial].
-        *   Else if `density < density_threshold`: `density` = 0.0f [S1, unofficial].
+        *   Else if `density < density_threshold`: `density` = 0.0 [S1, unofficial].
     *   **Update Light Intensity:** `light_intensity` *= `exp(-density * light_decay * step_size)` [S1, unofficial].
     *   **Advance Ray:** `current_coordinates` += `-normalized_light_direction * scaled_step_size` [S1, unofficial].
     *   **Check Boundary:** `is_frag_out_boundries` = `current_coordinates.x >= light_texture_dims.x` OR `current_coordinates.y >= light_texture_dims.y` OR `current_coordinates.z >= light_texture_dims.z` OR `current_coordinates.x < 0` OR `current_coordinates.y < 0` OR `current_coordinates.z < 0` [S1, unofficial].
@@ -62,74 +62,71 @@ The core data structure is the `light_density_texture`, a 3D texture with `R8` f
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for the compute_light_intensities kernel
-# Inputs: light_map_3D (RWTexture3D<float>), mask_texture_3D (Texture3D<float>), 
-#         noise_texture_3D (Texture3D<float>), light_texture_dims (float3), 
-#         global_light_direction (float3), light_decay (float), 
-#         god_rays_intensity (float), step_size (float), density_threshold (float)
+import math
 
-def compute_light_intensities(id: int3):
+def compute_light_intensities(id_x, id_y, id_z, light_map_3d, mask_texture_3d, noise_texture_3d, 
+                              light_texture_dims, global_light_direction, light_decay, 
+                              god_rays_intensity, step_size, density_threshold):
     # Initialize loop variables
-    current_coordinates = id
-    density = 0.0f
-    density_so_far = 0.0f
-    light_intensity = 1.0f
+    current_coordinates = [id_x, id_y, id_z]
+    density = 0.0
+    density_so_far = 0.0
+    light_intensity = 1.0
     
-    normalized_light_direction = normalize(global_light_direction)
-    scaled_step_size = light_texture_dims.x * step_size
+    normalized_light_direction = [d / math.sqrt(sum(d*d for d in global_light_direction)) for d in global_light_direction]
+    scaled_step_size = light_texture_dims[0] * step_size
     max_iteration = 256
     
     # Check initial boundary
     is_frag_out_boundries = (
-        current_coordinates.x >= light_texture_dims.x or
-        current_coordinates.y >= light_texture_dims.y or
-        current_coordinates.z >= light_texture_dims.z or
-        current_coordinates.x < 0 or
-        current_coordinates.y < 0 or
-        current_coordinates.z < 0
+        current_coordinates[0] >= light_texture_dims[0] or
+        current_coordinates[1] >= light_texture_dims[1] or
+        current_coordinates[2] >= light_texture_dims[2] or
+        current_coordinates[0] < 0 or
+        current_coordinates[1] < 0 or
+        current_coordinates[2] < 0
     )
     
     # Ray marching loop
     while not is_frag_out_boundries and max_iteration >= 0:
         max_iteration -= 1
         
-        # Sample textures
-        # Note: light_id_to_noise_id and light_id_to_mask_id are helper functions 
-        # mapping light texture coordinates to noise/mask texture coordinates.
-        # Assuming identity mapping for simplicity if not specified.
-        noise_density = noise_texture_3D[current_coordinates]
-        mask = mask_texture_3D[current_coordinates]
+        # Sample textures at current coordinates
+        noise_density = noise_texture_3d[current_coordinates[0], current_coordinates[1], current_coordinates[2]]
+        mask = mask_texture_3d[current_coordinates[0], current_coordinates[1], current_coordinates[2]]
         
         # Apply mask and threshold filtering
-        density = min(1.0f, mask - abs(density_threshold)) * noise_density
+        density = min(1.0, mask - abs(density_threshold)) * noise_density
         
         # Accumulate density
         density_so_far += density
         
         # Apply god rays logic
-        if density < density_threshold and density_so_far < 0.5f:
+        if density < density_threshold and density_so_far < 0.5:
             density = god_rays_intensity
         elif density < density_threshold:
-            density = 0.0f
+            density = 0.0
             
         # Update light intensity using exponential decay
-        light_intensity *= exp(-density * light_decay * step_size)
+        light_intensity *= math.exp(-density * light_decay * step_size)
         
         # Advance ray
-        current_coordinates += -normalized_light_direction * scaled_step_size
+        current_coordinates[0] -= normalized_light_direction[0] * scaled_step_size
+        current_coordinates[1] -= normalized_light_direction[1] * scaled_step_size
+        current_coordinates[2] -= normalized_light_direction[2] * scaled_step_size
         
         # Check boundary conditions
         is_frag_out_boundries = (
-            current_coordinates.x >= light_texture_dims.x or
-            current_coordinates.y >= light_texture_dims.y or
-            current_coordinates.z >= light_texture_dims.z or
-            current_coordinates.x < 0 or
-            current_coordinates.y < 0 or
-            current_coordinates.z < 0
+            current_coordinates[0] >= light_texture_dims[0] or
+            current_coordinates[1] >= light_texture_dims[1] or
+            current_coordinates[2] >= light_texture_dims[2] or
+            current_coordinates[0] < 0 or
+            current_coordinates[1] < 0 or
+            current_coordinates[2] < 0
         )
         
     # Write result
-    light_map_3D[id] = light_intensity
+    light_map_3d[id_x, id_y, id_z] = light_intensity
 ```
 
 ## Subtopics
@@ -142,16 +139,16 @@ Light Propagation Volume (LPV), specifically the Opacity Propagation Volume (OPV
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-The time complexity is proportional to the number of voxels in the light map volume multiplied by the number of samples per ray (`light_sample_count`). The memory complexity is proportional to the size of the 3D light map texture (`light_map_resolution.x * light_map_resolution.y * light_map_resolution.z` bytes, assuming `R8` format) plus the mask and noise textures [S1, unofficial].
+The time complexity is proportional to the number of voxels in the light map volume multiplied by the number of samples per ray (`light_sample_count`) [S1, unofficial]. The memory complexity is proportional to the size of the 3D light map texture (`light_map_resolution.x * light_map_resolution.y * light_map_resolution.z` bytes, assuming `R8` format) [S1, unofficial].
 
 **Measured Performance:**
 Not given in the sources.
 
 **Scaling:**
-The method scales with the resolution of the light map volume and the number of samples. Higher resolutions and sample counts increase accuracy but also increase computation time and memory usage [S1, unofficial].
+The method scales with the resolution of the light map volume and the number of samples [S1, unofficial]. Higher resolutions and sample counts increase accuracy but also increase computation time and memory usage [S1, unofficial].
 
 **Strengths and Limitations:**
-Strengths include efficient precomputation of volumetric lighting and shadows, suitable for static or slowly changing volumes. Limitations include the static nature of the light map, which may not adapt well to dynamic lighting or rapidly changing volume densities without recomputation [S1, unofficial].
+Strengths include efficient precomputation of volumetric lighting and shadows, suitable for static or slowly changing volumes [S1, unofficial]. Limitations include the static nature of the light map, which may not adapt well to dynamic lighting or rapidly changing volume densities without recomputation [S1, unofficial].
 
 **When to Use:**
 Use this method when rendering static or slowly changing volumetric scenes with a global light source, where precomputed lighting is acceptable and dynamic lighting is not required [S1, unofficial].
@@ -164,3 +161,5 @@ This method originates from the project "VolumetricSmoke" by furkanunsal42, an u
 
 ## Sources
 [S1] furkanunsal42/VolumetricSmoke, https://github.com/furkanunsal42/VolumetricSmoke, fetched 2026-10-26 (unofficial)
+[S2] Direct-volume raycasting, https://met3d.readthedocs.io/en/latest/05_developer_manual/03_actors/algorithms/direct_volume_rendering.html, fetched 2026-10-27
+[S3] Building beautiful worlds across platforms with PlayCanvas and the Magnopus Web Renderer; featuring volumetric lighting — Mag..., https://www.magnopus.com/blog/building-beautiful-worlds-across-platforms-with-playcanvas-and-the-magnopus-web-renderer-featuring-volumetric-lighting, fetched 2026-10-29 (unofficial)

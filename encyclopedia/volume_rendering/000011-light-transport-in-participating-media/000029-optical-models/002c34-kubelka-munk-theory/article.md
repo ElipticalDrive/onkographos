@@ -32,7 +32,7 @@ The reflectance of an opaque medium ($X \to \infty$) is:
 $$ R_\infty(\lambda) = 1 + \frac{K(\lambda)}{S(\lambda)} - \sqrt{\left(\frac{K(\lambda)}{S(\lambda)}\right)^2 + 2\frac{K(\lambda)}{S(\lambda)}} $$
 *Note: Source [S1, book] presents the square root term as squared in the text description but the square root symbol in the formula block. The standard Kubelka-Munk equation uses the square root [S1, book].*
 
-**Inhomogeneous Layers (Composite Layers)**
+**Inhomogeneous Layers (Composite Layers) [S1, book]**
 For inhomogeneous layers, the theory combines two adjacent layers with properties $(R_1, T_1)$ and $(R_2, T_2)$ by considering infinite interactions between them [S1, book]:
 $$ R(\lambda) = R_1(\lambda) + \frac{T_1(\lambda)^2 R_2(\lambda)}{1 - R_1(\lambda)R_2(\lambda)} $$
 $$ T(\lambda) = \frac{T_1(\lambda)T_2(\lambda)}{1 - R_1(\lambda)R_2(\lambda)} $$
@@ -117,12 +117,12 @@ def render_volume_layered(K_samples, S_samples, X_samples):
 *   **Directionality:** The model assumes isotropic scattering within the two-flux approximation and does not account for anisotropic phase functions [S1, book].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [S1, book]
+*   **Memory Complexity:** Not given in the sources. [S1, book]
 *   **Strengths:** Built-in distance attenuation; determines opacity and transparency optically based on $K$ and $S$; suitable for spectral rendering [S1, book].
 *   **Limitations:** Restricted to one-dimensional transport (no angular resolution) [S1, book].
 *   **When to use:** Spectral volume rendering of layered, scattering media (e.g., skin, paper, paint) [S1, book].
-*   **When not to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources. [S1, book]
 
 ## Background
 The Kubelka-Munk theory was originally proposed by Kubelka and Munk and built upon Schuster's two-flux concept [S1, book]. It was extended to inhomogeneous layers by Kubelka [S1, book]. In computer graphics, Abdul-Rahman and Chen adapted it for spectral volume rendering, presenting a spectral volume rendering integral that differs from the Lambert-Bouguer law by modeling absorption and scattering in only two directions (incident and reflected) [S1, book].

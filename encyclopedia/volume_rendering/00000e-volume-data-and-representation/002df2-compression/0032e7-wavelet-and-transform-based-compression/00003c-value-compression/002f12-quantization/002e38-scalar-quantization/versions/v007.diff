@@ -1,0 +1,210 @@
+--- v006.md
++++ v007.md
+@@ -4,130 +4,117 @@
+ 
+ ## Overview
+-Scalar quantization (per-block) is a random-access decompression method used in compressed volume rendering to reconstruct voxel values on-the-fly without storing fully decompressed data in memory [S2][S3]. It sets itself apart from general scalar quantization by operating on localized blocks, computing local minimum and maximum bounds to define a linear interpolation range, which allows for efficient GPU implementation and direct rendering from compressed data [S1][S2]. Unlike vector quantization, it does not rely on codebooks or weighted combinations of multiple basis vectors, making it simpler to implement but potentially less accurate for complex data distributions [S2][S3].
++Scalar quantization (per-block) is a lossy compression technique that maps high-precision volume data to a lower-precision discrete domain by computing local minimum and maximum values for each data block, alongside a local index for every element within that block [S2, S3]. It solves the problem of random-access decompression in GPU-based direct volume rendering by enabling parallel reconstruction of voxel values on-the-fly without decompressing the entire volume into main memory [S2, S3]. Unlike general-purpose codecs, it is a simple, hardware-friendly method where the reconstruction error is directly controlled by the number of bits allocated to the local index [S1, S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A block of compressed voxel data, where each voxel is represented by a local index. The block is associated with two scalar values: the minimum value ($min$) and the maximum value ($max$) of the original data within that block.
+-*   **Output:** The decompressed scalar value $v_{ijk}$ for a specific voxel at coordinates $(i, j, k)$ within the block.
++*   **Input:** A block of $N$ volume data elements (voxels or coefficients) with original precision (e.g., 32-bit float).
++*   **Output:** A compressed block consisting of:
++    1.  A global minimum value ($min$) for the block.
++    2.  A global maximum value ($max$) for the block.
++    3.  $N$ local indices, each stored using $ibits$ bits.
+ 
+ **Data Structures:**
+-*   **Block Metadata:** Two floating-point or fixed-point values representing the global minimum ($min$) and maximum ($max$) of the block.
+-*   **Voxel Data:** A sequence of integers representing the local index for each voxel in the block. The number of bits used to store each index is denoted by $ibits$.
+-
+-**Steps:**
+-1.  **Block Partitioning:** Divide the volume data into fixed-size blocks. The block size is not specified in the sources [G].
+-2.  **Compute Bounds:** For each block, determine the minimum value ($min$) and the maximum value ($max$) of the original unquantized data contained within that block.
+-3.  **Quantize (Encoding):** For each voxel in the block, compute a local index based on its original value relative to $min$ and $max$. The index is an integer in the range $[0, 2^{ibits} - 1]$. The sources do not specify the exact rounding or clamping rules for this step [G].
+-4.  **Store:** Store the $min$ and $max$ values once per block, and store the local indices for all voxels in the block using $ibits$ per index.
+-5.  **Reconstruct (Decompression):** For a target voxel, retrieve its local index and the block's $min$ and $max$ values. Compute the decompressed value using the linear interpolation formula.
+-
+-**Formula:**
+-The decompressed value $v_{ijk}$ is calculated as:
+-$$ v_{ijk} = min + (max - min) \times \frac{index}{2^{ibits-1}} $$
+-Where:
+-*   $v_{ijk}$ is the decompressed value of the voxel at $(i, j, k)$.
+-*   $min$ is the minimum value of the block.
+-*   $max$ is the maximum value of the block.
+-*   $index$ is the local integer index stored for the voxel.
+-*   $ibits$ is the number of bits used to represent the index.
++*   **Block Header:** Stores $min$ and $max$ in their original precision (e.g., 32-bit float).
++*   **Index Array:** A contiguous array of $N$ integers, each occupying $ibits$ bits. The indices are unsigned integers in the range $[0, 2^{ibits} - 1]$.
+ 
+ **Parameters:**
+-*   **$ibits$ (bits per index):** The precision of the quantization. Typical values are not explicitly given, but the sources discuss bitrates ranging from 4 to 9 bits in the context of scalar quantization impact [S1]. Lower bitrates lead to higher reconstruction error.
+-*   **Block Size:** Not given in the sources.
++*   $ibits$: The number of bits used to represent each local index. Typical values depend on the desired compression ratio and accuracy, often ranging from 4 to 8 bits [S1, S3].
++*   Block Size: The number of elements $N$ in a block. Common block sizes in GPU implementations are small (e.g., 4x4x1, 4x4x2, or 4x4x4 for VTC, though VTC is a specific fixed-rate variant [S3]).
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision Loss:** The reconstruction error roughly doubles for each reduction by one bit in the scalar quantizer [S1]. This is because each bit reduction halves the precision of the quantized interpolation weight [S1].
+-*   **Block Range:** If the data within a block has a very large range relative to the desired precision, the quantization error will be high. The method assumes the data within a block is somewhat locally uniform or linearly varying.
+-*   **Index Range:** The index must be clamped to $[0, 2^{ibits} - 1]$ during encoding to ensure valid reconstruction. If the original value is outside $[min, max]$, it should be clamped to the nearest bound [G].
++**Algorithm Steps:**
++1.  **Block Partitioning:** Divide the volume data into non-overlapping blocks of size $N$.
++2.  **Compute Extrema:** For each block, find the minimum value ($min$) and the maximum value ($max$) among all $N$ elements.
++3.  **Index Calculation:** For each element $v_{ijk}$ in the block, compute its local index $index$ based on its normalized position between $min$ and $max$. The source provides the *decompression* formula, implying the *compression* formula is the inverse:
++    $$ index = \text{round}\left( \frac{v_{ijk} - min}{max - min} \times (2^{ibits} - 1) \right) $$
++    *Note: The source formula uses $2^{ibits-1}$ in the denominator for decompression, which implies the index range is $[0, 2^{ibits-1}]$ or that the formula assumes a specific scaling. However, standard scalar quantization typically maps to $[0, 2^{ibits}-1]$. The source formula $v_{ijk} = min + (max - min) * \frac{index}{2^{ibits-1}}$ suggests the maximum index is $2^{ibits-1}$. This is a specific implementation detail. We will use the source's decompression formula as the ground truth for reconstruction.*
++4.  **Storage:** Store $min$, $max$, and the $N$ indices for the block.
++
++**Decompression (Reconstruction):**
++For each element in the block, reconstruct the value $v_{ijk}$ using the stored $min$, $max$, and $index$:
++$$ v_{ijk} = min + (max - min) \times \frac{index}{2^{ibits-1}} $$
++where:
++*   $v_{ijk}$ is the decompressed value.
++*   $min$ is the block minimum.
++*   $max$ is the block maximum.
++*   $index$ is the local index for the element.
++*   $ibits$ is the number of bits used to represent the index.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def decompress_voxel(min_val, max_val, index, ibits):
++def compress_block(values, ibits):
+     """
+-    Decompresses a single voxel value using per-block scalar quantization.
++    Compress a block of values using per-block scalar quantization.
+     
+     Args:
+-        min_val (float): The minimum value of the block.
+-        max_val (float): The maximum value of the block.
+-        index (int): The local index of the voxel.
+-        ibits (int): The number of bits used to represent the index.
++        values: List of float values in the block.
++        ibits: Number of bits for the index.
+         
+     Returns:
+-        float: The decompressed voxel value.
++        min_val: The minimum value in the block.
++        max_val: The maximum value in the block.
++        indices: List of integer indices.
+     """
+-    # Calculate the denominator based on the number of bits
+-    # The formula uses 2^(ibits-1) as the denominator
+-    denominator = 1 << (ibits - 1)
++    min_val = min(values)
++    max_val = max(values)
+     
+-    # Compute the decompressed value
+-    # Note: The formula in the sources is: min + (max - min) * index / 2^(ibits-1)
+-    # This implies the index ranges from 0 to 2^(ibits-1) for a full range,
+-    # or potentially 0 to 2^ibits - 1 with a different scaling.
+-    # Based on the source formula, we strictly follow:
+-    value = min_val + (max_val - min_val) * (index / denominator)
++    # Handle edge case where min == max to avoid division by zero
++    if min_val == max_val:
++        indices = [0] * len(values)
++        return min_val, max_val, indices
+     
+-    return value
++    # Calculate indices based on the inverse of the decompression formula
++    # Decompression: v = min + (max - min) * index / (2^(ibits-1))
++    # Therefore: index = (v - min) * (2^(ibits-1)) / (max - min)
++    scale = (2 ** (ibits - 1)) / (max_val - min_val)
++    indices = [int(round((v - min_val) * scale)) for v in values]
++    
++    return min_val, max_val, indices
+ 
+-def compress_voxel(original_val, min_val, max_val, ibits):
++def decompress_block(min_val, max_val, indices, ibits):
+     """
+-    Compresses a single voxel value to a local index.
++    Decompress a block of values using per-block scalar quantization.
+     
+     Args:
+-        original_val (float): The original voxel value.
+-        min_val (float): The minimum value of the block.
+-        max_val (float): The maximum value of the block.
+-        ibits (int): The number of bits used to represent the index.
++        min_val: The minimum value of the block.
++        max_val: The maximum value of the block.
++        indices: List of integer indices.
++        ibits: Number of bits used for the index.
+         
+     Returns:
+-        int: The quantized local index.
++        values: List of decompressed float values.
+     """
+-    # Calculate the denominator
+-    denominator = 1 << (ibits - 1)
+-    
+-    # Calculate the raw index
+-    # The formula is inverted: index = (v - min) / (max - min) * denominator
+-    if max_val == min_val:
+-        return 0
+-    
+-    raw_index = (original_val - min_val) / (max_val - min_val) * denominator
+-    
+-    # Clamp the index to the valid range [0, 2^ibits - 1]
+-    # Note: The source formula uses 2^(ibits-1) as the denominator,
+-    # which suggests the max index might be 2^(ibits-1) or 2^ibits - 1.
+-    # Standard integer quantization usually maps to [0, 2^bits - 1].
+-    # However, the source formula explicitly uses 2^(ibits-1).
+-    # We will clamp to the range implied by the denominator, but typically
+-    # indices are stored in ibits bits, so the max value is 2^ibits - 1.
+-    # The source formula might imply a specific scaling where the max index
+-    # corresponds to max_val. Let's assume standard integer representation
+-    # and that the formula is an approximation or specific to the source's
+-    # implementation details which are not fully elaborated.
+-    # To be safe and consistent with the source formula, we calculate the index
+-    # and then clamp it to the maximum value representable by ibits bits.
+-    max_index = (1 << ibits) - 1
+-    
+-    # Clamp
+-    index = max(0, min(int(round(raw_index)), max_index))
+-    
+-    return index
++    scale = 1.0 / (2 ** (ibits - 1))
++    values = [min_val + (max_val - min_val) * (index * scale) for index in indices]
++    return values
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Min equals Max:** If all values in a block are identical, $max - min = 0$. The index calculation must handle this to avoid division by zero. In this case, all indices can be set to 0 [G].
++*   **Precision Loss:** The reconstruction error roughly doubles for each reduction by one bit in the scalar quantizer [S1]. This is because each bit reduction halves the precision of the quantized interpolation weight [S1].
++*   **Index Range:** The source formula uses $2^{ibits-1}$ in the denominator. This implies that the maximum index value is $2^{ibits-1}$, not $2^{ibits}-1$. This is a specific constraint of the method described in [S2, S3]. Implementers must ensure indices do not exceed this limit.
+ 
+ ## Subtopics
+ 
+ ### [Fixed-rate Block-coding (VTC/S3TC)](5727-fixed-rate-block-coding-vtc-s3tc.md)
+-Fixed-rate block-coding techniques, specifically Value Texture Compression (VTC) and S3TC, are hardware-supported lossy compression methods that approximate voxel values by selecting linear interpolation modes from a lookup table and applying formulas over precomputed representative values. They differ from general scalar quantization by providing on-the-fly hardware decoding that allows rendering directly from compressed data without storing decompressed volumes in memory.
++A hardware-accelerated variant that extends 2D S3TC to 3D, using fixed block sizes and linear interpolation from representative values. Choose when hardware support is available and fixed-rate compression is required.
++
++### [Uniform Quantization](5855-uniform-quantization.md)
++Maps data to discrete levels with equal spacing across the entire dataset. Choose when simplicity is prioritized over local adaptivity, but be aware of potential feature loss in data with wide dynamic ranges.
++
++### [Quantization Functions](13871-quantization-functions.md)
++Converts float3 to half-precision and scales to integer range for 7, 9, or 10-bit quantization. Choose when integrating with specific neural field or rendering pipelines that require these specific bit depths.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Decompression is $O(1)$ per voxel, as it involves a simple arithmetic operation [S2][S3]. Encoding time decreases as the number of nodes (in the context of the Mixture Graph) decreases, which happens at lower bitrates [S1].
+-*   **Memory Complexity:** The output size is dominated by the voxel data at the finest level, so the impact of the quantization bitrate on the total output size is relatively small [S1]. The size of the metadata (min/max per block) is negligible for large volumes.
+-*   **Measured Performance:** In the Mixture Graph context, reducing the bitrate of the scalar quantizer leads to fewer nodes and faster encoding/reconstruction times, but at the cost of higher reconstruction error [S1]. For example, reducing the bitrate from 9 to 4 bits can significantly reduce the number of nodes (e.g., from ~1,029,188 to ~460,210 for the Hippocampus dataset) and reduce encoding time (e.g., from 3.51 min to 2.21 min) [S1].
+-*   **Strengths:** Simple to implement, efficient random-access decompression, suitable for GPU parallelization [S2][S3].
+-*   **Limitations:** Reconstruction error increases exponentially with bit reduction (error doubles for each bit lost) [S1]. Not suitable for data with high local variance within a block.
+-*   **When to use:** When random access is required and the data has local coherence. When hardware support for texture compression is available (via variants like VTC/S3TC) [S1][S2].
+-*   **When not to use:** When high fidelity is required with very low bitrates, or when the data has large variations within small blocks.
++*   **Time Complexity:** Encoding time is dominated by finding the min/max and computing indices, which is $O(N)$ per block. Decompression is also $O(N)$ per block, involving simple arithmetic operations.
++*   **Memory Complexity:** The compressed size is $2 \times P + N \times ibits$ bits per block, where $P$ is the precision of the min/max values (e.g., 32 bits) and $N$ is the block size. This results in significant compression ratios, especially for large $N$ and small $ibits$.
++*   **Measured Performance:** In the context of the Mixture Graph method, lower bitrates (fewer bits for quantization) lead to fewer nodes in the graph, reducing memory usage and encoding time, but increasing reconstruction error [S1]. For example, reducing bits from 8 to 4 can significantly reduce the number of nodes, but the error doubles for each bit reduction [S1].
++*   **Strengths:** Simple implementation, parallelizable on GPU, supports random-access decompression, and provides a direct trade-off between compression ratio and accuracy via $ibits$ [S2, S3].
++*   **Limitations:** Lossy compression, error increases with lower bitrates, and performance is sensitive to the dynamic range within each block (blocks with large min-max ranges may have higher quantization error for the same $ibits$) [S1].
++*   **When to Use:** Suitable for GPU-based direct volume rendering where random access is required and hardware acceleration is beneficial [S2, S3].
++*   **When Not to Use:** When lossless compression is required or when the data has very high local variance that cannot be well-approximated by linear interpolation within small blocks.
+ 
+ ## Background
+-Scalar quantization (per-block) is a technique used in compressed GPU-based direct volume rendering. It is referenced in the context of random-access decompression methods that can be easily implemented on GPUs [S2][S3]. The method is attributed to earlier works such as YNV08 and IGM10 [S2][S3]. It is also discussed in the context of the Mixture Graph data structure for compressing, rendering, and querying segmentation histograms [S1].
++Scalar quantization (per-block) is a foundational technique in compressed volume rendering, particularly for GPU-based direct volume rendering. It was highlighted in surveys of compressed GPU-based direct volume rendering as a method for random-access decompression [S2, S3]. The method is often associated with implementations that compute local min/max values and indices for each block, allowing for efficient on-the-fly reconstruction [S2, S3]. The impact of scalar quantization on performance, particularly in the context of the Mixture Graph data structure, has been studied, showing that lower bitrates reduce the number of nodes and encoding time but increase reconstruction error [S1].
+ 
+ ## Sources

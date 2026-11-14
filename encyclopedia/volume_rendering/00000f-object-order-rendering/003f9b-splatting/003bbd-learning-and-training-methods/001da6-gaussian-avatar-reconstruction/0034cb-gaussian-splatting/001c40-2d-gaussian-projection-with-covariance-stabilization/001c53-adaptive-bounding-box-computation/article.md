@@ -6,30 +6,27 @@ Computes a tight, axis-aligned bounding box (AABB) for a 2D Gaussian splat based
 
 ## How it works
 **Inputs:**
-- `sx`, `sy`: Screen-space center of the 2D Gaussian (float).
-- `cov2d_00`, `cov2d_11`: Diagonal elements of the projected 2D covariance matrix $\Sigma$ (float). Note: This method assumes the bounding box is aligned with the axes and uses only the diagonal terms for the half-widths [S1, unofficial].
-- `opacity`: The scalar opacity of the splat (float).
-- `alpha_threshold`: The minimum opacity $\tau$ required to render the splat (float).
-- `w_i`, `h_i`: Framebuffer width and height (integer).
-- `max_k2`: Upper bound for the squared confidence radius to prevent overflow or excessive box sizes (float).
+- `sx`, `sy`: Screen-space center of the 2D Gaussian (float) [S1, unofficial].
+- `cov2d_00`, `cov2d_11`: Diagonal elements of the projected 2D covariance matrix $\Sigma$ (float) [S1, unofficial].
+- `opacity`: The scalar opacity of the splat (float) [S1, unofficial].
+- `alpha_threshold`: The minimum opacity $\tau$ required to render the splat (float) [S1, unofficial].
+- `w_i`, `h_i`: Framebuffer width and height (integer) [S1, unofficial].
+- `max_k2`: Upper bound for the squared confidence radius to prevent overflow or excessive box sizes (float) [S1, unofficial].
 
 **Outputs:**
-- A tuple `(x0, y0, x1, y1)` representing the clipped integer bounding box, or `None` if the splat is negligible or degenerate.
-
-**Data Structures:**
-- No complex structures; uses scalar floats and integers.
+- A tuple `(x0, y0, x1, y1)` representing the clipped integer bounding box, or `None` if the splat is negligible or degenerate [S1, unofficial].
 
 **Steps:**
-1. **Opacity Check:** If `opacity` $\le$ `alpha_threshold`, return `None`.
+1. **Opacity Check:** If `opacity` $\le$ `alpha_threshold`, return `None` [S1, unofficial].
 2. **Compute Confidence Radius Squared ($k^2$):**
    Calculate the squared distance threshold corresponding to the opacity cutoff:
    $$ k^2 = \min\left(2.0 \cdot \ln\left(\frac{\text{opacity}}{\text{alpha\_threshold}}\right), \text{max\_k2}\right) $$
-   If $k^2 \le 0.0$, return `None`.
+   If $k^2 \le 0.0$, return `None` [S1, unofficial].
 3. **Compute Half-Widths:**
    Calculate the half-extents along the x and y axes:
    $$ rx_f = \sqrt{k^2 \cdot \text{cov2d}_{00}} $$
    $$ ry_f = \sqrt{k^2 \cdot \text{cov2d}_{11}} $$
-   If $rx_f$ or $ry_f$ are not finite or are $< 1.0$, return `None`. [G: The threshold of 1.0 ensures the box covers at least one pixel, avoiding degenerate zero-area boxes due to floating-point precision issues.]
+   If $rx_f$ or $ry_f$ are not finite or are $< 1.0$, return `None` [S1, unofficial].
 4. **Compute Integer Bounds:**
    Determine the pixel coordinates of the bounding box corners:
    $$ x_0 = \lfloor sx - rx_f \rfloor $$
@@ -42,19 +39,20 @@ Computes a tight, axis-aligned bounding box (AABB) for a 2D Gaussian splat based
    $$ y_0 = \max(0, y_0) $$
    $$ x_1 = \min(w_i - 1, x_1) $$
    $$ y_1 = \min(h_i - 1, y_1) $$
-   If $x_0 > x_1$ or $y_0 > y_1$, return `None`.
+   If $x_0 > x_1$ or $y_0 > y_1$, return `None` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def compute_adaptive_bounding_box(sx, sy, cov2d_00, cov2d_11, opacity, alpha_threshold, w_i, h_i, max_k2):
     # Step 1: Opacity check
     if opacity <= alpha_threshold:
         return None
 
     # Step 2: Compute k^2
-    # Guard against log of non-positive or zero/negative ratio
     ratio = opacity / alpha_threshold
     if ratio <= 0:
         return None
@@ -95,36 +93,36 @@ def compute_adaptive_bounding_box(sx, sy, cov2d_00, cov2d_11, opacity, alpha_thr
 ```
 
 **Parameters:**
-- `alpha_threshold`: Typical value is a small epsilon (e.g., $1/255$ or similar to the $\epsilon$ used in covariance stabilization) [S2].
-- `max_k2`: Not given in the sources. [G: In practice, this prevents numerical overflow for very high opacity or very low threshold values. A safe upper bound might be derived from the maximum screen resolution.]
+- `alpha_threshold`: The minimum opacity threshold for rendering [S1, unofficial].
+- `max_k2`: Upper bound for the squared confidence radius [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Degenerate Covariance:** If `cov2d_00` or `cov2d_11` are zero or negative (due to numerical instability despite stabilization), the square root may be invalid or zero. The check `< 1.0` handles zero, but negative values result in NaN. Ensure `cov2d` is positive definite before this step.
-- **Precision:** Using `floor` and `ceil` ensures the box fully contains the continuous extent.
-- **Tilted Gaussians:** This method uses only the diagonal elements of the covariance matrix (`cov2d_00`, `cov2d_11`) to compute axis-aligned half-widths. It does not account for the off-diagonal terms (`cov2d_01`) which represent rotation/tilt. This results in a looser bound than a rotated bounding box but is computationally cheaper [S1, unofficial]. For tighter bounds with tilt, see [Tight Ellipse AABB Derivation](2826-tight-ellipse-aabb-derivation.md).
+- **Degenerate Covariance:** If `cov2d_00` or `cov2d_11` are zero or negative, the square root may be invalid or zero [S1, unofficial]. The check `< 1.0` handles zero, but negative values result in NaN [S1, unofficial].
+- **Precision:** Using `floor` and `ceil` ensures the box fully contains the continuous extent [G].
+- **Tilted Gaussians:** This method uses only the diagonal elements of the covariance matrix (`cov2d_00`, `cov2d_11`) to compute axis-aligned half-widths [S1, unofficial]. It does not account for the off-diagonal terms (`cov2d_01`) which represent rotation/tilt [S1, unofficial]. For tighter bounds with tilt, see [Tight Ellipse AABB Derivation](2826-tight-ellipse-aabb-derivation.md) [S1, unofficial].
 
 ## Subtopics
 
 ### [Opacity-Sensitive Elliptical Bounding Box](2100-opacity-sensitive-elliptical-bounding-box.md)
-A method to compute 2D Gaussian projections as elliptical disks rather than AABBs to reduce false-positive tile intersections [2100-opacity-sensitive-elliptical-bounding-box.md]. It sets itself apart from the parent by explicitly leveraging the elliptical shape of the 2D Gaussian covariance to define non-square bounding volumes, and from siblings like [Tight Ellipse AABB Derivation](2826-tight-ellipse-aabb-derivation.md) by integrating opacity thresholds to prune empty or negligible splats [2100-opacity-sensitive-elliptical-bounding-box.md].
+A method to compute 2D Gaussian projections as elliptical disks rather than AABBs to reduce false-positive tile intersections. It sets itself apart from the parent by explicitly leveraging the elliptical shape of the 2D Gaussian covariance to define non-square bounding volumes, and from siblings like [Tight Ellipse AABB Derivation](2826-tight-ellipse-aabb-derivation.md) by integrating opacity thresholds to prune empty or negligible splats. Choose when elliptical masking is preferred over axis-aligned culling.
 
 ### [Tight Ellipse AABB Derivation](2826-tight-ellipse-aabb-derivation.md)
-This method computes the tight axis-aligned bounding box (AABB) of a projected 2D Gaussian ellipse in constant time. It replaces the loose circular bounding box used in original 3D Gaussian Splatting to determine tile intersections, significantly reducing false-positive splat duplications during rasterization.
+This method computes the tight axis-aligned bounding box (AABB) of a projected 2D Gaussian ellipse in constant time. It replaces the loose circular bounding box used in original 3D Gaussian Splatting to determine tile intersections, significantly reducing false-positive splat duplications during rasterization. Choose when maximum culling precision is required without elliptical masking overhead.
 
 ### [Opacity-aware Non-Square Bounding Box](6079-opacity-aware-non-square-bounding-box.md)
-This method computes a tight, axis-aligned rectangular bounding box for a 2D Gaussian splat based on its projected opacity and covariance, replacing the original 3D Gaussian Splatting (3DGS) approach which uses a square bounding box derived from a fixed confidence radius. It reduces false positives in per-tile splat lists by accounting for the Gaussian's actual opacity and the non-square nature of its projected shape, improving culling efficiency compared to siblings like the [Opacity-Sensitive Elliptical Bounding Box](2100-opacity-sensitive-elliptical-bounding-box.md) which may still overestimate intersections.
+This method computes a tight, axis-aligned rectangular bounding box for a 2D Gaussian splat based on its projected opacity and covariance, replacing the original 3D Gaussian Splatting (3DGS) approach which uses a square bounding box derived from a fixed confidence radius. It reduces false positives in per-tile splat lists by accounting for the Gaussian's actual opacity and the non-square nature of its projected shape, improving culling efficiency compared to siblings like the [Opacity-Sensitive Elliptical Bounding Box](2100-opacity-sensitive-elliptical-bounding-box.md) which may still overestimate intersections. Choose when non-square culling is needed without full elliptical masking.
 
 ### Non-Square Bounding Boxes
 Allowing the axis-aligned bounding box of a projected 2D Gaussian to have different width and height dimensions, rather than forcing a square shape [S2]. On the Bicycle scene at native resolution with 16x16 tiles, non-square boxes reduced duplicated Gaussians from 55,648,264 (square) to 18,466,556 [S2].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per splat. The computation involves a constant number of arithmetic operations, logarithms, and square roots.
-- **Memory Complexity:** $O(1)$ auxiliary memory. No additional buffers are required beyond the input parameters.
+- **Time Complexity:** $O(1)$ per splat [G].
+- **Memory Complexity:** $O(1)$ auxiliary memory [G].
 - **Measured Performance:** On the Bicycle scene at native resolution with 16x16 tiles, the use of non-square adaptive bounding boxes reduced the number of duplicated Gaussians from 55,648,264 (with square boxes) to 18,466,556 [S2]. Combined with other optimizations, this approach decreased rendering time by a factor of 3.77 and GPU memory usage by a factor of 2.11 [S2].
-- **Strengths:** Significantly reduces false-positive tile intersections compared to the original circular bounding box, leading to fewer splats processed per tile and lower memory bandwidth usage.
-- **Limitations:** Does not account for the rotation of the Gaussian (off-diagonal covariance terms), resulting in a looser bound than a rotated bounding box. The tightness depends heavily on the choice of `alpha_threshold` and `max_k2`.
-- **When to use:** When rendering performance is critical and the scene contains many low-opacity or highly anisotropic Gaussians.
-- **When not to use:** When the highest possible culling precision is required and the computational cost of computing rotated bounding boxes is acceptable.
+- **Strengths:** Significantly reduces false-positive tile intersections compared to the original circular bounding box, leading to fewer splats processed per tile and lower memory bandwidth usage [S1, unofficial].
+- **Limitations:** Does not account for the rotation of the Gaussian (off-diagonal covariance terms), resulting in a looser bound than a rotated bounding box [S1, unofficial]. The tightness depends heavily on the choice of `alpha_threshold` and `max_k2` [S1, unofficial].
+- **When to use:** When rendering performance is critical and the scene contains many low-opacity or highly anisotropic Gaussians [S2].
+- **When not to use:** When the highest possible culling precision is required and the computational cost of computing rotated bounding boxes is acceptable [S1, unofficial].
 
 ## Background
 The original 3D Gaussian Splatting paper by Kerbl et al. used a circular bounding box based on a fixed confidence radius, which often included many empty pixels, especially for low-opacity splats [S1, unofficial]. The Adaptive Bounding Box Computation method was introduced in the Tsplat implementation to address this inefficiency by incorporating opacity thresholds [S1, unofficial]. It is also discussed in the context of fast 3D Gaussian Splatting rendering improvements [S2].

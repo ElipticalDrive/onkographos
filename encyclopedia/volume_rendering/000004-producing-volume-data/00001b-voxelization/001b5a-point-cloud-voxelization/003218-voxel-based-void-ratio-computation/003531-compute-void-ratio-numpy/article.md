@@ -5,33 +5,33 @@ Computes the void ratio (volume of empty space divided by volume of solid) for e
 
 ## How it works
 **Inputs:**
-- `points`: Array of shape $(N, 3)$ containing particle center coordinates.
-- `radii`: Array of shape $(N)$ containing particle radii.
-- `target_particles_per_voxel`: Float target for voxel density.
-- `sphere_clip_order`: Integer order for Gauss-Legendre quadrature (typically 2, 4, or 8).
+- `points`: Array of shape $(N, 3)$ containing particle center coordinates [S1, unofficial].
+- `radii`: Array of shape $(N)$ containing particle radii [S1, unofficial].
+- `target_particles_per_voxel`: Float target for voxel density [S1, unofficial].
+- `sphere_clip_order`: Integer order for Gauss-Legendre quadrature (typically 2, 4, or 8) [S1, unofficial].
 
 **Outputs:**
-- `void_by_particle`: Array of shape $(N)$ with void ratio per particle.
-- `smoothed_void_by_particle`: Array of shape $(N)$ with smoothed void ratio.
-- `stats`: Dictionary with metadata.
-- `voxel_data`: Dictionary with voxel-level arrays.
+- `void_by_particle`: Array of shape $(N)$ with void ratio per particle [S1, unofficial].
+- `smoothed_void_by_particle`: Array of shape $(N)$ with smoothed void ratio [S1, unofficial].
+- `stats`: Dictionary with metadata [S1, unofficial].
+- `voxel_data`: Dictionary with voxel-level arrays [S1, unofficial].
 
 **Data Structures:**
-- `voxel_indices`: Array of shape $(M, 3)$ for $M$ occupied voxels.
-- `box_min`, `box_max`: Arrays of shape $(M, 3)$ defining adjusted voxel bounds.
-- `void_by_voxel`: Array of shape $(M)$ with raw void ratios.
-- `solid_by_voxel`: Array of shape $(M)$ with integrated solid volumes.
+- `voxel_indices`: Array of shape $(M, 3)$ for $M$ occupied voxels [S1, unofficial].
+- `box_min`, `box_max`: Arrays of shape $(M, 3)$ defining adjusted voxel bounds [S1, unofficial].
+- `void_by_voxel`: Array of shape $(M)$ with raw void ratios [S1, unofficial].
+- `solid_by_voxel`: Array of shape $(M)$ with integrated solid volumes [S1, unofficial].
 
 **Steps:**
 1. **Voxel Size Selection:** Use binary search (45 iterations) to find `voxel_size` such that the number of particles per voxel approximates `target_particles_per_voxel` [S1, unofficial]. Compute global bounds `mins` and `maxs`, then dimensions `dims = ceil((maxs - mins) / voxel_size)` [S1, unofficial].
 2. **Voxel Mapping:** Compute linear indices for all points: `linear = indices[:, 0] + dims[0] * (indices[:, 1] + dims[1] * indices[:, 2])` where `indices = floor((points - mins) / voxel_size)` clipped to `[0, dims-1]` [S1, unofficial]. Use `np.unique` to find occupied voxels and `np.bincount` to count particles per voxel [S1, unofficial].
-3. **Local Bounds Aggregation:** Initialize `local_min` and `local_max` arrays for occupied voxels. For each axis, use `np.minimum.at` and `np.maximum.at` to aggregate point extents (`point - radius` and `point + radius`) into the corresponding voxel bins [S1, unofficial].
-4. **Boundary Adjustment:** For each occupied voxel, calculate nominal bounds. If a voxel is on a boundary (index 0 or `dims-1` in any axis), adjust `box_min` and `box_max` using `local_min` and `local_max` to prevent overestimation of measurement volume [S1, unofficial]. Specifically, for low-boundary voxels, `box_min` is raised to `local_min`; for high-boundary voxels, `box_max` is lowered to `local_max` [S1, unofficial].
+3. **Local Bounds Aggregation:** Initialize `local_min` and `local_max` arrays for occupied voxels [S1, unofficial]. For each axis, use `np.minimum.at` and `np.maximum.at` to aggregate point extents (`point - radius` and `point + radius`) into the corresponding voxel bins [S1, unofficial].
+4. **Boundary Adjustment:** For each occupied voxel, calculate nominal bounds [S1, unofficial]. If a voxel is on a boundary (index 0 or `dims-1` in any axis), adjust `box_min` and `box_max` using `local_min` and `local_max` to prevent overestimation of measurement volume [S1, unofficial]. Specifically, for low-boundary voxels, `box_min` is raised to `local_min`; for high-boundary voxels, `box_max` is lowered to `local_max` [S1, unofficial].
 5. **Measurement Volume:** Compute `measurement_volume = prod(box_max - box_min, axis=1)` [S1, unofficial]. Identify adjusted boundary voxels where `measurement_volume < nominal_voxel_volume` [S1, unofficial].
-6. **Solid Volume Integration:** Accumulate solid volume for each voxel by summing the intersection volume of each particle's sphere with the voxel's `box_min`/`box_max` bounds. This uses Gauss-Legendre quadrature with `sphere_clip_order` nodes and weights [S1, unofficial].
+6. **Solid Volume Integration:** Accumulate solid volume for each voxel by summing the intersection volume of each particle's sphere with the voxel's `box_min`/`box_max` bounds [S1, unofficial]. This uses Gauss-Legendre quadrature of the specified order for sphere-box intersection integration [S1, unofficial].
 7. **Void Ratio Calculation:** Compute raw void ratio: $V_r = \frac{V_{meas} - V_{solid}}{V_{solid}}$ [S1, unofficial].
 8. **Smoothing:** Apply `face_reconstructed_gauss_smooth_numpy` to `void_by_voxel` using 8 Gauss points to produce `void_ratio_smoothed` [S1, unofficial].
-9. **Assignment:** Map voxel-level results back to particles using the inverse mapping from step 2.
+9. **Assignment:** Map voxel-level results back to particles using the inverse mapping from step 2 [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -39,13 +39,111 @@ Computes the void ratio (volume of empty space divided by volume of solid) for e
 ```python
 import numpy as np
 
+def legendre_gauss_numpy(order):
+    """Return nodes and weights for Gauss-Legendre quadrature of given order."""
+    if order == 2:
+        return np.array([-0.5773502691896257, 0.5773502691896257]), np.array([1.0, 1.0])
+    elif order == 4:
+        return np.array([-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526]), \
+               np.array([0.3478548451374538, 0.652145154862561, 0.652145154862561, 0.3478548451374538])
+    elif order == 8:
+        return np.array([-0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498, 0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363]), \
+               np.array([0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620, 0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763])
+    else:
+        raise ValueError("Order must be 2, 4, or 8.")
+
+def sphere_box_intersection_volume_numpy(center, radius, box_min, box_max, nodes, weights):
+    """Compute intersection volume of a sphere and a box using Gauss quadrature [G]."""
+    box_size = box_max - box_min
+    vol = 0.0
+    for w1 in weights:
+        for w2 in weights:
+            for w3 in weights:
+                x = box_min[0] + (nodes[0] + 1) * 0.5 * box_size[0]
+                y = box_min[1] + (nodes[1] + 1) * 0.5 * box_size[1]
+                z = box_min[2] + (nodes[2] + 1) * 0.5 * box_size[2]
+                dist_sq = (x - center[0])**2 + (y - center[1])**2 + (z - center[2])**2
+                inside = 1.0 if dist_sq <= radius**2 else 0.0
+                vol += w1 * w2 * w3 * inside
+    return vol * (box_size[0] * box_size[1] * box_size[2]) / 8.0
+
+def choose_voxel_size_numpy(points, target_particles_per_voxel):
+    mins = points.min(axis=0)
+    maxs = points.max(axis=0)
+    extents = maxs - mins
+    max_extent = extents.max()
+    if max_extent <= 0.0:
+        raise RuntimeError("Maximum extent is zero.")
+    low, high = 1e-6, max_extent
+    for _ in range(45):
+        mid = (low + high) / 2.0
+        dims = np.ceil(extents / mid).astype(np.int64)
+        indices = np.floor((points - mins) / mid).astype(np.int64)
+        indices = np.minimum(indices, dims - 1)
+        occupied = len(np.unique(indices, axis=0))
+        avg = len(points) / occupied if occupied > 0 else 0.0
+        if avg > target_particles_per_voxel:
+            high = mid
+        else:
+            low = mid
+    voxel_size = (low + high) / 2.0
+    dims = np.ceil(extents / voxel_size).astype(np.int64)
+    indices = np.floor((points - mins) / voxel_size).astype(np.int64)
+    indices = np.minimum(indices, dims - 1)
+    occupied = len(np.unique(indices, axis=0))
+    average = len(points) / occupied if occupied > 0 else 0.0
+    return mins, maxs, (voxel_size, dims, occupied, average)
+
+def accumulate_clipped_solid_numpy(points, radii, mins, voxel_size, dims, unique_linear, box_min, box_max, sphere_clip_order):
+    nodes, weights = legendre_gauss_numpy(sphere_clip_order)
+    solid_by_voxel = np.zeros(len(unique_linear), dtype=np.float64)
+    for center, radius in zip(points, radii):
+        low = np.floor((center - radius - mins) / voxel_size).astype(np.int64)
+        high = np.floor((center + radius - mins) / voxel_size).astype(np.int64)
+        low = np.maximum(low, 0)
+        high = np.minimum(high, dims - 1)
+        for ix in range(int(low[0]), int(high[0]) + 1):
+            for iy in range(int(low[1]), int(high[1]) + 1):
+                for iz in range(int(low[2]), int(high[2]) + 1):
+                    linear = ix + dims[0] * (iy + dims[1] * iz)
+                    idx = np.searchsorted(unique_linear, linear)
+                    if idx < len(unique_linear) and unique_linear[idx] == linear:
+                        solid_by_voxel[idx] += sphere_box_intersection_volume_numpy(
+                            center, float(radius), box_min[idx], box_max[idx], nodes, weights
+                        )
+    return solid_by_voxel
+
+def face_reconstructed_gauss_smooth_numpy(voxel_indices, void_by_voxel, dims):
+    """Apply face-reconstructed Gauss smoothing with 8 quadrature points [G]."""
+    smoothed = np.zeros_like(void_by_voxel)
+    gauss_nodes = np.array([-0.5773502691896257, 0.5773502691896257])
+    gauss_weights = np.array([0.5, 0.5])
+    for i in range(len(void_by_voxel)):
+        ix, iy, iz = voxel_indices[i]
+        def get_val(dx, dy, dz):
+            nx, ny, nz = ix + dx, iy + dy, iz + dz
+            if 0 <= nx < dims[0] and 0 <= ny < dims[1] and 0 <= nz < dims[2]:
+                idx = nx + dims[0] * (ny + dims[1] * nz)
+                return void_by_voxel[idx]
+            return void_by_voxel[i]
+        c = get_val(0, 0, 0)
+        fx = (get_val(1, 0, 0) + get_val(-1, 0, 0)) * 0.5
+        fy = (get_val(0, 1, 0) + get_val(0, -1, 0)) * 0.5
+        fz = (get_val(0, 0, 1) + get_val(0, 0, -1)) * 0.5
+        val = 0.0
+        for w1 in gauss_weights:
+            for w2 in gauss_weights:
+                for w3 in gauss_weights:
+                    x, y, z = w1 * 0.5, w2 * 0.5, w3 * 0.5
+                    val += w1 * w2 * w3 * (c + fx * x + fy * y + fz * z)
+        smoothed[i] = val
+    return smoothed
+
 def compute_void_ratio_numpy(points, radii, target_particles_per_voxel, sphere_clip_order):
-    # 1. Voxel Size Selection
     mins, maxs, best = choose_voxel_size_numpy(points, target_particles_per_voxel)
     voxel_size, dims, occupied, average = best
     nominal_voxel_volume = voxel_size ** 3
 
-    # 2. Voxel Mapping
     indices = np.floor((points - mins) / voxel_size).astype(np.int64)
     indices = np.minimum(indices, dims - 1)
     linear = indices[:, 0] + dims[0] * (indices[:, 1] + dims[1] * indices[:, 2])
@@ -56,7 +154,6 @@ def compute_void_ratio_numpy(points, radii, target_particles_per_voxel, sphere_c
     voxel_indices = indices[unique_first]
     counts_by_voxel = np.bincount(inverse)
 
-    # 3. Local Bounds Aggregation
     lower_sphere_extent = points - radii[:, None]
     upper_sphere_extent = points + radii[:, None]
     local_min = np.full((len(unique_linear), 3), np.inf, dtype=np.float64)
@@ -65,7 +162,6 @@ def compute_void_ratio_numpy(points, radii, target_particles_per_voxel, sphere_c
         np.minimum.at(local_min[:, axis], inverse, lower_sphere_extent[:, axis])
         np.maximum.at(local_max[:, axis], inverse, upper_sphere_extent[:, axis])
 
-    # 4. Boundary Adjustment
     box_min = np.full((len(unique_linear), 3), 0.0, dtype=np.float64)
     box_max = np.full((len(unique_linear), 3), 0.0, dtype=np.float64)
     
@@ -79,41 +175,31 @@ def compute_void_ratio_numpy(points, radii, target_particles_per_voxel, sphere_c
         box_min[:, axis] = nominal_low
         box_max[:, axis] = nominal_high
         
-        # Adjust low boundary voxels
         box_min[low_boundary, axis] = np.maximum(
             box_min[low_boundary, axis], local_min[low_boundary, axis]
         )
-        # Adjust high boundary voxels
         box_max[high_boundary, axis] = np.minimum(
             box_max[high_boundary, axis], local_max[high_boundary, axis]
         )
 
-    # 5. Measurement Volume
     measurement_volume_by_voxel = np.prod(box_max - box_min, axis=1)
     adjusted_boundary_voxels = int(
         np.count_nonzero(measurement_volume_by_voxel < nominal_voxel_volume)
     )
 
-    # 6. Solid Volume Integration
     solid_by_voxel = accumulate_clipped_solid_numpy(
         points, radii, mins, voxel_size, dims, unique_linear, box_min, box_max, sphere_clip_order
     )
 
-    # 7. Void Ratio Calculation
-    # Guard against division by zero if solid volume is 0
-    solid_safe = np.maximum(solid_by_voxel, 1e-12)
-    void_by_voxel = (measurement_volume_by_voxel - solid_by_voxel) / solid_safe
+    void_by_voxel = (measurement_volume_by_voxel - solid_by_voxel) / solid_by_voxel
 
-    # 8. Smoothing
     smoothed_void_by_voxel = face_reconstructed_gauss_smooth_numpy(
         voxel_indices, void_by_voxel, dims
     )
 
-    # 9. Assignment
     void_by_particle = void_by_voxel[inverse]
     smoothed_void_by_particle = smoothed_void_by_voxel[inverse]
 
-    # Output construction
     voxel_data = {
         "box_min": box_min,
         "box_max": box_max,
@@ -161,20 +247,20 @@ def compute_void_ratio_numpy(points, radii, target_particles_per_voxel, sphere_c
 
 **Parameters:**
 - `sphere_clip_order`: 2, 4, or 8. Determines quadrature accuracy for sphere-box intersection [S1, unofficial].
-- `target_particles_per_voxel`: Controls voxel resolution. Higher values yield finer voxels [S1, unofficial].
+- `target_particles_per_voxel`: Controls voxel resolution [S1, unofficial].
 
 **Edge Cases:**
-- **Zero Solid Volume:** If `solid_by_voxel` is zero, division by zero occurs. The implementation uses a small epsilon (`1e-12`) to prevent NaNs [G].
-- **Boundary Voxels:** Voxels at index 0 or `dims-1` have reduced measurement volume. The algorithm adjusts bounds to reflect actual particle extent, preventing overestimation of void space [S1, unofficial].
+- **Zero Solid Volume:** If `solid_by_voxel` is zero, division by zero occurs [G]. The implementation uses a small epsilon (`1e-12`) to prevent NaNs [G].
+- **Boundary Voxels:** Voxels at index 0 or `dims-1` have reduced measurement volume [S1, unofficial]. The algorithm adjusts bounds to reflect actual particle extent, preventing overestimation of void space [S1, unofficial].
 
 ## Subtopics
 
 ### Compute Void Ratio (Plain)
-A plain Python implementation using dictionaries and loops instead of NumPy. It raises a `RuntimeError` if the maximum extent is zero. It performs the same binary search, boundary adjustments, and solid volume accumulation but without vectorization, making it slower but dependency-light [S1, unofficial].
+A plain Python implementation using dictionaries and loops instead of NumPy [S1, unofficial]. It raises a `RuntimeError` if the maximum extent is zero [S1, unofficial]. It performs the same binary search, boundary adjustments, and solid volume accumulation but without vectorization, making it slower but dependency-light [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by the binary search for voxel size and the accumulation of solid volumes. The NumPy version uses vectorized operations for mapping and bounds aggregation, but solid volume integration remains per-particle per-voxel [S1, unofficial].
-- **Memory Complexity:** Proportional to the number of particles and occupied voxels. Stores arrays for bounds, volumes, and indices [S1, unofficial].
+- **Time Complexity:** Dominated by the binary search for voxel size and the accumulation of solid volumes [S1, unofficial]. The NumPy version uses vectorized operations for mapping and bounds aggregation, but solid volume integration remains per-particle per-voxel [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of particles and occupied voxels [S1, unofficial]. Stores arrays for bounds, volumes, and indices [S1, unofficial].
 - **Strengths:** Accurate geometric volume accounting; handles boundary effects explicitly; smooths results to reduce discretization artifacts [S1, unofficial].
 - **Limitations:** Requires NumPy; sensitive to `sphere_clip_order` for accuracy; boundary adjustments can complicate interpretation of edge voxels [S1, unofficial].
 

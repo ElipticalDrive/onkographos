@@ -6,7 +6,7 @@ Also called: Adaptive Voxelization, Geresim, Geresim-Spike, Hierarchical 3D Text
 Adaptive Voxelization converts large, unstructured grids (tetrahedral or hexahedral meshes) into a hierarchical 3D texture (voxel octree) to enable interactive volume rendering on standard PC hardware [S2]. It solves the problem of rendering out-of-core datasets by partitioning space with an adaptive octree, preserving data at higher resolutions where needed and avoiding the undersampling/oversampling of uniform grids [S2]. Unlike sibling methods that use uniform grids of multi-resolution bricks [S2] or sparse sampling [4588-sparse-sampling-sparse-voxel-grid-generation.md], this method uses a hierarchical arrangement of constant-resolution texture bricks and specializes the octree to distinguish data from non-data voxels using a pad-and-stencil algorithm [S2].
 
 ## How it works
-The method consists of a preprocessing stage (voxelization) and a rendering stage. The preprocessing converts the input grid into a voxel octree, while the rendering uses 3D texture mapping to visualize it [S2].
+The method consists of a preprocessing stage (voxelization) and a rendering stage [S2]. The preprocessing converts the input grid into a voxel octree, while the rendering uses 3D texture mapping to visualize it [S2].
 
 ### Inputs and Outputs
 *   **Input:** Unstructured grid (tetrahedral or hexahedral) or structured grid. For hexahedral inputs, cells are converted to tetrahedra [S2].
@@ -15,25 +15,25 @@ The method consists of a preprocessing stage (voxelization) and a rendering stag
 ### Data Structures
 
 **Tetrahedron File Format**
-Used for out-of-core I/O. Flat, unindexed.
-*   Each tetrahedron has 4 vertices.
-*   Each vertex has 3 × 32-bit float coordinates and 1 × 16-bit scalar field value.
+Used for out-of-core I/O. Flat, unindexed [S2].
+*   Each tetrahedron has 4 vertices [S2].
+*   Each vertex has 3 × 32-bit float coordinates and 1 × 16-bit scalar field value [S2].
 *   Total size: 56 bytes per tetrahedron [S2].
 
 **Octree Node Structure**
-*   Each node contains a texture brick of fixed resolution $r$.
-*   Usable texture domain: $[1/(2r), (2r-1)/(2r)]$.
+*   Each node contains a texture brick of fixed resolution $r$ [S2].
+*   Usable texture domain: $[1/(2r), (2r-1)/(2r)]$ [S2].
 *   Neighboring bricks have 1 texel of overlap for continuity [S2].
 *   Final data includes a scalar field/gradient texture and a 1-bit-per-voxel stencil texture (0 for null, 1 for data) [S2].
 
 **Geresim-Spike Specific Layout (Variant)**
-*   **Cell Index Texture:** `R32UI` 3D texture storing cell indices. Precomputed on CPU using an $8^3$ coarse grid mapping tiles to cell AABBs. For each $32^3$ voxel, linear inverse-trilinear interpolation at the cell center finds local coordinates $(u,v,w)$ [S1, unofficial].
+*   **Cell Index Texture:** `R32UI` 3D texture storing cell indices [S1, unofficial]. Precomputed on CPU using an $8^3$ coarse grid mapping tiles to cell AABBs [S1, unofficial]. For each $32^3$ voxel, linear inverse-trilinear interpolation at the cell center finds local coordinates $(u,v,w)$ [S1, unofficial].
 *   **Cell Data Texture:** 2D `RGBA32F` texture storing 8-corner data per cell [S1, unofficial].
 
 ### Algorithm Steps
 
 #### 1. Tetrahedralization (Preprocessing)
-If the input is a structured grid (e.g., hexahedral), convert it to tetrahedra. Convex cells are sliced into 5 tetrahedra using a standard decomposition template [S2].
+If the input is a structured grid (e.g., hexahedral), convert it to tetrahedra [S2]. Convex cells are sliced into 5 tetrahedra using a standard decomposition template [S2].
 
 #### 2. Octree Construction (Top-Down)
 Recursively subdivide space. The procedure `Process(Node N, Tetrahedra File FN)` is defined as follows [S2]:
@@ -41,65 +41,54 @@ Recursively subdivide space. The procedure `Process(Node N, Tetrahedra File FN)`
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def Process(Node N, TetrahedraFile FN):
-    # Read N's spatial extent
-    extent = N.extent
-    
-    # Create 8 children and their associated tetrahedra files
+def Process(node, tetra_file):
+    extent = node.extent
     children = []
     child_files = []
     for i in range(8):
-        Ci = create_child_node(N, i)
-        FCi = create_tetrahedra_file()
-        write_extent(Ci.extent, FCi)
-        children.append(Ci)
-        child_files.append(FCi)
-    
-    N.recursion_needed = False
-    
-    # Distribute tetrahedra to children
-    for T in FN:
-        for Ci, FCi in zip(children, child_files):
-            if intersect_box_tetrahedron(Ci.extent, T):
-                write_tetrahedron(T, FCi)
-                # Check if resolution threshold is exceeded
-                if T.needed_resolution > N.resolution:
-                    N.recursion_needed = True
-    
-    # Termination or Recursion
-    if not N.recursion_needed:
-        # Leaf node: sample tetrahedra into voxels
+        child = create_child_node(node, i)
+        child_file = create_tetra_file()
+        write_extent(child.extent, child_file)
+        children.append(child)
+        child_files.append(child_file)
+    node.recursion_needed = False
+    for tetra in tetra_file:
+        for child, child_file in zip(children, child_files):
+            if intersect_box_tetrahedron(child.extent, tetra):
+                write_tetra(tetra, child_file)
+            if tetra.needed_resolution > node.resolution:
+                node.recursion_needed = True
+    if not node.recursion_needed:
         delete_children(children)
         delete_files(child_files)
-        VN = sample_node(N, FN)
-        return VN
+        voxel_grid = sample_node(node, tetra_file)
+        return voxel_grid
     else:
-        # Internal node: recurse
-        delete_file(FN)
-        for Ci, FCi in zip(children, child_files):
-            VCi = Process(Ci, FCi)
-        return None # Internal nodes don't return voxel grid directly in this logic flow
+        delete_file(tetra_file)
+        for child, child_file in zip(children, child_files):
+            Process(child, child_file)
+        return None
 ```
 
 **Tetrahedron-Cell Overlap Test**
-Uses an extended Separating Axis Theorem. For a box (cell) and tetrahedron, test 25 axes:
-1.  3 axes orthogonal to cell faces.
-2.  4 axes orthogonal to tetrahedron faces.
+Uses an extended Separating Axis Theorem [S2]. For a box (cell) and tetrahedron, test 25 axes:
+1.  3 axes orthogonal to cell faces [S2].
+2.  4 axes orthogonal to tetrahedron faces [S2].
 3.  18 cross products of cell edges (3) and tetrahedron edges (6) [S2].
 Exit early if overlap is disproven [S2].
 
 #### 3. Node Sampling (Leaf Nodes)
-Resample tetrahedra within a leaf node's spatial cell into a regular grid of voxels.
+Resample tetrahedra within a leaf node's spatial cell into a regular grid of voxels [S2].
 *   Uses a voxel-order algorithm (all tetrahedra loaded into memory) [S2].
-*   For each voxel sample point, compute barycentric coordinates with respect to the tetrahedron. If coordinates sum to < 1, the point is contained. Use these coordinates for trilinear interpolation of the scalar field [S2].
+*   For each voxel sample point, compute barycentric coordinates with respect to the tetrahedron [S2]. If coordinates sum to < 1, the point is contained [S2]. Use these coordinates for trilinear interpolation of the scalar field [S2].
 *   Cache the basis conversion matrix (Euclidean to barycentric) for each tetrahedron [S2].
 
 #### 4. Node Filtering (Bottom-Up)
-Create parent nodes from children to ensure continuity. Two stages, executed level-by-level from leaves to root [S2]:
+Create parent nodes from children to ensure continuity [S2]. Two stages, executed bottom-up level-by-level [S2]:
 
 **Stage 1: Merge Children**
 *   Apply a 3x3 box filter (or Gaussian) to merge 8 children into a parent [S2].
-*   **Border Continuity:** Load 7 adjacent nodes (in 2D example) or 26 neighbors (in 3D) to maintain overlapping borders. If a neighbor doesn't exist at the same level, load a special null data node [S2].
+*   **Border Continuity:** Load 7 adjacent nodes (in 2D example) or 26 neighbors (in 3D) to maintain overlapping borders [S2]. If a neighbor doesn't exist at the same level, load a special null data node [S2].
 *   **Internal Border Fix:** If a node's octants subdivide unevenly, copy border data from existing siblings into the node being merged to prevent discontinuities [S2].
 
 **Stage 2: Compute Gradients**
@@ -110,36 +99,36 @@ Create parent nodes from children to ensure continuity. Two stages, executed lev
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def Filter(Node N, FilterStage S):
-    create buffers B, O
-    if S == MERGE_CHILDREN:
-        read N's 8 children into B
-        for each child Ci:
-            read Ci's adjacent nodes into B
-        create box filter kernel K
-    else: # S == COMPUTE_GRADIENT
-        read N and N's neighbors into B
-        create gradient filter kernel K
-    
-    convolve B by K into O
-    normalize O
-    write O to N.output_filename
-    free B, O
+def Filter(node, stage):
+    buffer_B = create_buffer()
+    buffer_O = create_buffer()
+    if stage == MERGE_CHILDREN:
+        read_children(node, buffer_B)
+        for child in node.children:
+            read_adjacent_nodes(child, buffer_B)
+        kernel = create_box_filter_kernel()
+    else:
+        read_node_and_neighbors(node, buffer_B)
+        kernel = create_gradient_filter_kernel()
+    convolve(buffer_B, kernel, buffer_O)
+    normalize(buffer_O)
+    write_to_file(buffer_O, node.output_filename)
+    free_buffers(buffer_B, buffer_O)
 ```
 
 #### 5. Padding and Stencil (Boundary Handling)
 Prevents striping artifacts at data/non-data boundaries [S2].
 1.  **Stencil:** Create a 1-bit-per-voxel stencil texture (0 for null, 1 for data) [S2].
-2.  **Padding:** Pad the volume by one voxel. At boundaries, grow the texture by averaging neighboring non-null voxels. This replicates boundary data outward [S2].
+2.  **Padding:** Pad the volume by one voxel [S2]. At boundaries, grow the texture by averaging neighboring non-null voxels [S2]. This replicates boundary data outward [S2].
 3.  **Rendering:** Use a 3D stencil test to clip the replicated data so it is never rendered, but is used for linear interpolation near boundaries [S2].
 
 #### 6. Rendering (Geresim-Spike Variant)
 For the Geresim-Spike implementation [S1, unofficial]:
-1.  **Ray Marching:** GPU fragment shader ray-marches through the `R32UI` 3D texture of cell indices.
-2.  **Data Sampling:** Sample per-cell 8-corner data from the 2D `RGBA32F` texture.
-3.  **Interpolation:** Compute trilinear scalar value and analytic gradient.
-4.  **Shading:** Use the analytic gradient as a pseudo-normal for Blinn-Phong shading.
-5.  **Compositing:** Composite results front-to-back.
+1.  **Ray Marching:** GPU fragment shader ray-marches through the `R32UI` 3D texture of cell indices [S1, unofficial].
+2.  **Data Sampling:** Sample per-cell 8-corner data from the 2D `RGBA32F` texture [S1, unofficial].
+3.  **Interpolation:** Compute trilinear scalar value and analytic gradient [S1, unofficial].
+4.  **Shading:** Use the analytic gradient as a pseudo-normal for Blinn-Phong shading [S1, unofficial].
+5.  **Compositing:** Composite results front-to-back [S1, unofficial].
 
 ### Parameters
 *   **Brick Resolution ($r$):** Fixed resolution for texture bricks. Example: $4 \times 4$ for 2D representation, general $r$ for 3D [S2].

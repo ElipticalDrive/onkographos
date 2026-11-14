@@ -1,50 +1,30 @@
 # Adaptive Resolution Data Management
 
-Also called: Flat Blocking Multi-Resolution Data Management
 
 ## Overview
-Adaptive Resolution Data Management is a family of techniques that organize volume data into a multi-resolution structure based on Level-of-Detail (LOD) rather than strictly by spatial location, aiming to reduce storage and computation for large datasets [S1]. It solves the problem of efficiently storing and rendering large volume datasets by discarding redundant or low-detail regions and skipping empty blocks [S1]. Unlike uniform multiresolution approaches that maintain spatial locality in their hierarchy, this family often groups blocks by their resolution level, which allows for significant storage reduction (e.g., by a factor of 8) but introduces specific interpolation challenges [S1].
+Adaptive Resolution Data Management encompasses techniques that partition volume data into regions or blocks assigned varying resolution levels to optimize storage and rendering costs. It solves the problem of high memory bandwidth and processing demands for large-scale volumes by dynamically omitting low-detail regions and skipping empty spaces. Unlike sibling methods such as [Mesh Simplification](1032-mesh-simplification.md) or [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) that maintain strict spatial locality or frequency-domain decomposition, this family often groups or assigns resolutions based on content metrics (e.g., variance, transfer function contribution, or rendering error), which enables significant data reduction but requires careful handling of interpolation and coordinate mapping.
 
 ## Shared principles
-The core mechanism of this family involves generating a hierarchy of data representations at different spatial resolutions [S2, unofficial]. Common mathematical and structural operations include:
-
-1.  **Scaling Factors:** Defining an integer or float scale factor $s$ such that the new resolution $N_{new}$ relates to the previous resolution $N_{prev}$ by $N_{new} = s \times N_{prev}$ or $N_{new} / N_{prev} = s$ [S1][S5, unofficial].
-2.  **Hierarchical Structures:** Using spatial structures (like Octrees or Bricks) or frequency-domain transforms (like Wavelets) to represent data at multiple scales [S2, unofficial].
-3.  **Interpolation and Filtering:** Using interpolation or filtering kernels to estimate values at new grid points or to generate coarser levels from finer ones [S1, S2, unofficial].
-4.  **Selection and Culling:** Dynamically choosing which resolution level to render based on spatial hierarchy (distant or less important regions) and hardware constraints [S1, S2, unofficial].
 
 ## Subtopics
 
 ### [Adaptive Resolution Data Generation](1331-adaptive-resolution-data-generation.md)
-[Adaptive Resolution Data Generation](1331-adaptive-resolution-data-generation.md) creates a multiresolution representation of volume data by combining hierarchical subsampling with error-based pruning. It solves the problem of storing and rendering large volume datasets efficiently by discarding redundant or low-detail regions. Unlike uniform multiresolution approaches, it adapts the grid density to local data variance, storing only octree nodes where the scalar range exceeds a threshold.
+[Adaptive Resolution Data Generation](1331-adaptive-resolution-data-generation.md) creates a multiresolution octree hierarchy by recursively subsampling and pruning based on local data variance. It differs from sibling methods like [Multi-resolution Data Management](2391-multi-resolution-data-management.md) by dynamically omitting low-variance regions rather than using flat blocking. Choose this method when adaptive pruning of homogeneous data is required.
 
 ### [Adaptive-Resolution Data Representation and Description](7175-adaptive-resolution-data-representation-and-description.md)
-[Adaptive-Resolution Data Representation and Description](7175-adaptive-resolution-data-representation-and-description.md) is a scheme where a volume dataset is partitioned into spatial blocks, each assigned one of three discrete resolution levels (High, Medium, or Low) to balance fidelity and storage. It differs from flat blocking by allowing variable block sizes at lower resolutions to maintain constant data size per level, achieving different compression ratios.
+[Adaptive-Resolution Data Representation and Description](7175-adaptive-resolution-data-representation-and-description.md) defines a block-based spatial partitioning scheme where a volume dataset is divided into discrete blocks, each assigned one of three specific resolution levels (High, Medium, or Low). It differs from flat blocking by using a hierarchical structure where lower-resolution blocks cover larger spatial extents, maintaining a constant data size per level. Choose this method when efficiently storing and transmitting heterogeneous volume data with fixed block sizes is needed.
 
-### Multi-resolution Data Management
-**definition**
-- A data structure where the volume is divided into small blocks stored in a multi-resolution structure based on Level-of-Detail (LOD) rather than spatial location, to support large-scale volumes [S1].
-- A data structure using flat blocking to reduce storage and computation for light volumes by skipping empty regions and using lower resolution blocks [S1].
+### [Multi-resolution Data Management](2391-multi-resolution-data-management.md)
+[Multi-resolution Data Management](2391-multi-resolution-data-management.md) organizes volume blocks by their Level-of-Detail (LOD) rather than spatial location using a flat blocking scheme. It sets itself apart from hierarchical siblings by driving resolution selection via transfer function domain image quality preservation, enabling graceful data reduction and skipping calculations for empty regions. Choose this method when texture size reduction and content-driven LOD assignment are prioritized.
 
-**step**
-- Assign a Level-of-Detail (LOD) to each block, which determines its resolution in the multi-resolution structure [S1].
-- Ignore non-contributing or empty blocks based on image quality preservation in the current TF domain [S1].
-- Perform light computations directly in the coordinates of the multi-resolution data structure. Skip calculations for empty blocks [S1].
+### [Gear Assignment Update](13313-gear-assignment-update.md)
+[Gear Assignment Update](13313-gear-assignment-update.md) is an alternating optimization step in adaptive spatio-temporal sampling that identifies regions with high rendering error and increments their "gear" level to increase sampling density. It distinguishes itself from static LOD methods by using semantic segmentation to guide the upshift mask, ensuring geometrically complex or highly dynamic regions are prioritized. Choose this method when adaptive spatio-temporal sampling density is required for dynamic scenes.
 
-**parameter**
-- Block size: Each block consists of $16^3$ voxels [S1].
-
-**layout**
-- Blocks are organized in the multi-resolution structure by their LOD, not by their spatial location [S1].
-
-**pitfall**
-- Interpolation Artifacts: Blocks are not packed spatially, causing interpolation issues. Solution: Clamp sample locations to a proper distance from block borders [S1].
-
-**comparison**
-- Storage Reduction: Can reduce texture sizes by at least a factor of 8 compared to full resolution volumes [S1].
+### Motion-aware Spatio-Temporal Sampling
+Motion-aware Spatio-Temporal Sampling is a strategy that differentially processes regions based on gear levels, increasing temporal resolution for higher gears and splitting spatial samples for higher gears. It sets itself apart by linearly interpolating temporal resolution between 1 and the total number of frames based on gear level, and splitting each sampled point into $2^{p(x,t)-1}$ points equally spaced within the ray segment. Choose this method when rendering dynamic scenes with varying motion intensity to balance computational cost and reconstruction accuracy.
 
 ## Background
-The concept of flat blocking multi-resolution data management was introduced by Laine et al. in 2004 [LLYM04], as cited in [S1]. It was developed to support interactive frame rates in volume rendering, particularly when combined with global lighting calculations. The method was further refined in subsequent works, such as [HLY07] and [LLY06], to address issues with light propagation and interpolation artifacts [S1]. It is primarily used in direct volume rendering, especially in medical imaging contexts where large datasets (e.g., $512^3$ voxels) need to be rendered efficiently [S1].
+Not given in the sources.
 
 ## Sources
-[S1] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26
+[S1] Gear-NeRF: Free-Viewpoint Rendering and Tracking with Motion-aware Spatio-Temporal Sampling, https://arxiv.org/abs/2406.03723v1, fetched 2026-10-26

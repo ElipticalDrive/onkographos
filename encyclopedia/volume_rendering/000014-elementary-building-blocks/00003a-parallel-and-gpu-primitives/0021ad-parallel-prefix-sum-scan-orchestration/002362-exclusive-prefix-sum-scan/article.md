@@ -3,106 +3,98 @@
 Also called: CPU Exclusive Prefix Sum (Scan), Exclusive Sum, StreamCompaction::CPU::scan, exclusive scan
 
 ## Overview
-The Exclusive Prefix Sum (Scan) computes an output array where each element at index $i$ is the sum of all input elements preceding it, i.e., $O[i] = \sum_{j=0}^{i-1} I[j]$, with $O[0]=0$ [S3, unofficial][S4]. In volume rendering, this primitive maps a list of boolean voxel culling decisions to sequential indices for kept voxels, enabling parallel stream compaction by providing conflict-free write locations for scattered data [S2]. It differs from [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) by explicitly handling non-power-of-two inputs via padding and offering both naive iterative and work-efficient tree-based implementations on the GPU, while [CPU Exclusive Prefix Sum (Scan)](10375-cpu-stream-compaction-with-scan.md) provides a sequential baseline for verification [S3, unofficial].
+The Exclusive Prefix Sum (Scan) computes an output array $O$ from an input array $I$ such that each element $O[i]$ is the sum of all input elements preceding index $i$ ($O[i] = \sum_{j=0}^{i-1} I[j]$), with $O[0]=0$ [S3, unofficial][S4]. In volume rendering, this primitive maps parallel voxel culling decisions to sequential indices in a compacted list, allowing culled voxels to be removed in parallel without data races [S2]. It differs from its siblings by serving as the fundamental indexing engine for stream compaction and hierarchical subdivision, whereas [CUDA-based Exclusive Prefix Sum for Vertex Indexing](1112-cuda-based-exclusive-prefix-sum-for-vertex-indexing.md) targets specific vertex buffer layouts and [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) lacks the work-efficient tree-based optimization [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Array $I$ of $n$ integers (typically 0/1 for culling decisions) [S3, unofficial][S4].
-- Output: Array $O$ of $n$ integers where $O[i] = \sum_{j=0}^{i-1} I[j]$ [S3, unofficial][S4].
+- Input: Array $I$ of $n$ integers (typically 0/1 for culling flags or weights) [S3, unofficial][S4].
+- Output: Array $O$ of $n$ integers representing the exclusive prefix sums [S3, unofficial][S4].
 
 **Data Structures:**
-- Global memory buffers `dev_data1` and `dev_data2` (ping-pong buffers) for GPU implementations [S3, unofficial].
-- For tree-based methods, input is zero-padded to size $N = 2^{\lceil \log_2 n \rceil}$ [S3, unofficial].
+- For CPU: Two contiguous integer arrays of size $n$ [S4].
+- For GPU (Work-Efficient): Two ping-pong buffers (`dev_data1`, `dev_data2`) in global memory, sized to the next power of two greater than or equal to $n$ [S3, unofficial].
 
-**Algorithm Steps (Work-Efficient GPU Implementation):**
-1. **Padding:** If $n$ is not a power of two, compute $N = 2^{\lceil \log_2 n \rceil}$. Allocate buffer of size $N$. Copy $I$ to buffer and zero-pad indices $n$ to $N-1$ [S3, unofficial].
-2. **Up-Sweep (Reduce):** Perform a parallel reduction to compute inclusive sums in a tree structure. Loop $d$ from $0$ to $\lceil \log_2 N \rceil - 1$. For each step, threads update nodes at distance $2^d$ [S3, unofficial].
-3. **Root Zeroing:** Set the root element (index $N-1$) to 0 to convert inclusive sums to exclusive sums [S3, unofficial].
-4. **Down-Sweep (Scan):** Perform a parallel scan to distribute sums. Loop $d$ from $\lceil \log_2 N \rceil - 1$ down to $0$. Threads update nodes based on sibling values [S3, unofficial].
-5. **Result Extraction:** Copy the first $n$ elements of the buffer to the output array $O$ [S3, unofficial].
+**Algorithm (Work-Efficient GPU Implementation):**
+This method uses a tree-based up-sweep (reduce) and down-sweep (scan) phase [S3, unofficial].
 
-**Algorithm Steps (CPU Sequential Implementation):**
-1. Set $O[0] = 0$ [S3, unofficial][S4].
-2. Loop $i$ from $1$ to $n-1$: $O[i] = O[i-1] + I[i-1]$ [S3, unofficial][S4].
+1. **Padding:** If $n$ is not a power of two, compute $n_{p2} = 2^{\lceil \log_2 n \rceil}$. Allocate memory for size $n_{p2}$ [S3, unofficial].
+2. **Initialization:** Copy $I$ to the input buffer. Zero-pad the buffer from index $n$ to $n_{p2}-1$ [S3, unofficial].
+3. **Up-Sweep (Reduce):** Perform a parallel reduction to compute inclusive sums in a tree structure. Loop $d$ from $0$ to $\lceil \log_2 n_{p2} \rceil - 1$:
+   - Calculate stride $d1 = 2^d$ and $d2 = 2^{d+1}$ [S3, unofficial].
+   - Launch kernel where threads at indices $k \cdot d2$ add the value at $k \cdot d2 + d1 - 1$ to $k \cdot d2 + d2 - 1$ [S3, unofficial].
+4. **Root Reset:** Set the root element (last element of the buffer, index $n_{p2}-1$) to 0 [S3, unofficial].
+5. **Down-Sweep (Scan):** Perform the exclusive scan by propagating sums down the tree. Loop $d$ from $\lceil \log_2 n_{p2} \rceil - 1$ down to $0$:
+   - Calculate stride $d1 = 2^d$ and $d2 = 2^{d+1}$ [S3, unofficial].
+   - Launch kernel where threads at indices $k \cdot d2$ save the value at $k \cdot d2 + d1 - 1$, set that position to the value at $k \cdot d2 + d2 - 1$, and add the saved value to $k \cdot d2 + d2 - 1$ [S3, unofficial].
+6. **Finalization:** Copy the first $n$ elements of the result buffer to the output array $O$ [S3, unofficial].
 
-**Pseudocode (Work-Efficient GPU Kernel Logic):**
+**Algorithm (CPU Sequential Implementation):**
+For verification or small $n$, a simple loop suffices [S4]:
+1. Set $O[0] = 0$.
+2. For $i$ from 1 to $n-1$: $O[i] = O[i-1] + I[i-1]$ [S3, unofficial][S4].
+
+**Formula:**
+$$ O[i] = \begin{cases} 0 & \text{if } i = 0 \\ \sum_{j=0}^{i-1} I[j] & \text{if } i > 0 \end{cases} $$
+[S3, unofficial][S4]
+
+**Parameters:**
+- $n$: Number of elements [S3, unofficial].
+- $ThreadReduction$: Compile-time flag (0 or 1). If 1, reduces thread count by a stride factor to avoid boundary checks; if 0, uses full grid with modulo checks [S3, unofficial].
+- $blockSize$: CUDA block size (e.g., 256) [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-power-of-two sizes:** Must be zero-padded to the next power of two before processing. Only the first $n$ results are valid; the rest are artifacts of padding [S3, unofficial].
+- **Empty Input:** If $n \le 0$, return immediately [S3, unofficial].
+- **Precision:** For transmittance calculations, linear sums may underflow. Use [Log-space Exclusive Cumulative Sum for Transmittance](4819-log-space-exclusive-cumulative-sum-for-transmittance.md) instead [S1].
+
+**Pseudocode (GPU Work-Efficient):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Kernel for Up-Sweep (d is current level, 0-indexed)
-def kern_up_sweep(index, d, data, n_power_of_2):
-    if index >= n_power_of_2:
-        return
-    # Calculate indices based on tree structure
-    # For ThreadReduction == 0 (full grid):
-    d1 = 1 << d
-    d2 = 1 << (d + 1)
-    if index % d2 == 0:
-        data[index + d2 - 1] += data[index + d1 - 1]
-    # For ThreadReduction == 1 (reduced threads):
-    # stride1 = (index + 1) * (1 << (d + 1)) - 1
-    # stride2 = index * (1 << (d + 1)) + (1 << d) - 1
-    # data[stride1] += data[stride2]
-
-# Kernel for Down-Sweep (d is current level)
-def kern_down_sweep(index, d, data, n_power_of_2):
-    if index >= n_power_of_2:
-        return
-    # Calculate indices
-    d1 = 1 << d
-    d2 = 1 << (d + 1)
-    if index % d2 == 0:
-        temp = data[index + d1 - 1]
-        data[index + d1 - 1] = data[index + d2 - 1]
-        data[index + d2 - 1] += temp
-    # For ThreadReduction == 1:
-    # stride1 = (index + 1) * (1 << (d + 1)) - 1
-    # stride2 = index * (1 << (d + 1)) + (1 << d) - 1
-    # temp = data[stride2]
-    # data[stride2] = data[stride1]
-    # data[stride1] += temp
-
-# Main Host Logic
-def exclusive_scan_gpu(idata, n):
+def exclusive_scan_gpu(n, idata):
+    # 1. Pad to power of two
     if n <= 0:
         return []
     
-    # 1. Pad to power of two
-    n_power_of_2 = 1
-    while n_power_of_2 < n:
-        n_power_of_2 *= 2
-    
-    # Allocate and copy data (pseudo-code for memory ops)
-    dev_data = allocate(n_power_of_2)
-    copy(idata, dev_data, n)
-    zero_fill(dev_data, n, n_power_of_2)
-    
-    # 2. Up-Sweep
-    for d in range(0, int(log2(n_power_of_2))):
-        launch_kernel(kern_up_sweep, n_power_of_2, d, dev_data)
+    n_p2 = 1
+    while n_p2 < n:
+        n_p2 *= 2
         
-    # 3. Zero Root
-    dev_data[n_power_of_2 - 1] = 0
+    # Allocate ping-pong buffers
+    dev_data = allocate_array(n_p2)
     
-    # 4. Down-Sweep
-    for d in range(int(log2(n_power_of_2)) - 1, -1, -1):
-        launch_kernel(kern_down_sweep, n_power_of_2, d, dev_data)
+    # 2. Copy and pad
+    for i in range(n):
+        dev_data[i] = idata[i]
+    for i in range(n, n_p2):
+        dev_data[i] = 0
         
-    # 5. Copy result
-    odata = allocate(n)
-    copy(dev_data, odata, n)
+    # 3. Up-Sweep (Reduce)
+    num_levels = int(log2(n_p2))
+    for d in range(num_levels):
+        stride = 1 << d
+        # Launch kernel: for each block, threads add data[index + stride - 1] to data[index + 2*stride - 1]
+        # where index is a multiple of 2*stride
+        launch_up_sweep_kernel(n_p2, d, dev_data)
+        
+    # 4. Reset Root
+    dev_data[n_p2 - 1] = 0
+    
+    # 5. Down-Sweep (Scan)
+    for d in range(num_levels - 1, -1, -1):
+        stride = 1 << d
+        # Launch kernel: for each block, threads save data[index + stride - 1],
+        # set data[index + stride - 1] = data[index + 2*stride - 1],
+        # add saved value to data[index + 2*stride - 1]
+        launch_down_sweep_kernel(n_p2, d, dev_data)
+        
+    # 6. Copy result
+    odata = allocate_array(n)
+    for i in range(n):
+        odata[i] = dev_data[i]
+        
     return odata
 ```
-
-**Parameters:**
-- $n$: Number of input elements [S3, unofficial].
-- `ThreadReduction`: Compile-time flag (0 or 1) controlling kernel launch strategy; 0 uses full grid with modulo checks, 1 reduces thread count by stride factor [S3, unofficial].
-- `blockSize`: CUDA block size (e.g., 256) [S3, unofficial].
-
-**Edge Cases and Pitfalls:**
-- Non-power-of-two sizes require zero-padding to the next power of two to maintain tree structure alignment [S3, unofficial].
-- The root element must be explicitly zeroed after the up-sweep to ensure the down-sweep produces exclusive sums [S3, unofficial].
-- Precision issues may arise if input values are large, but for culling decisions (0/1), overflow is not a concern [S2].
 
 ## Subtopics
 
@@ -110,35 +102,23 @@ def exclusive_scan_gpu(idata, n):
 This method computes the exclusive cumulative sum of transmittance values in logarithmic space to avoid underflow and enable efficient scatter-add operations for alpha compositing weights. It differs from standard linear-space exclusive scans by operating on $\log(1-\alpha)$, which preserves precision for small alpha values, and by explicitly handling ray-segment boundaries to reset cumulative state between independent rays. It builds on [Exclusive Prefix Sum (Scan)](3007-exclusive-prefix-sum-scan.md) [G].
 
 ### [CPU Stream Compaction with Scan](10375-cpu-stream-compaction-with-scan.md)
-CPU Stream Compaction with Scan removes zero-valued elements from an integer array on the CPU by mapping input data to a binary mask, computing an exclusive prefix sum on that mask, and scattering the retained elements to their computed output indices. It sets itself apart from [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) by using a parallel prefix sum (scan) to determine output positions, which allows for potential parallelization of the scatter phase, whereas the without-scan variant uses a sequential counter. It differs from [GPU Stream Compaction with Scan](10376-gpu-stream-compaction-with-scan.md) by executing these steps on the CPU, typically resulting in lower performance for large arrays due to the lack of massive parallelism.
+CPU Stream Compaction with Scan removes zero-valued elements from an integer array on the CPU by mapping input data to a binary mask, computing an exclusive prefix sum on that mask, and scattering the retained elements to their computed output indices. It sets itself apart from [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) by using a scan operation to determine output indices rather than a simple sequential counter, making it suitable for scenarios where parallel reduction primitives are available or when preparing data structures for subsequent parallel processing.
 
 ### [Thrust Scan](10648-thrust-scan.md)
-A wrapper around the Thrust library's exclusive scan function for GPU execution.
+Thrust Scan is a GPU-accelerated implementation of the exclusive prefix sum (scan) operation that leverages the NVIDIA Thrust library to perform parallel reduction on device memory. It solves the problem of efficiently computing cumulative sums for large datasets on the GPU by abstracting the underlying kernel launch and memory management details. It is distinguished from custom CUDA implementations by its reliance on a highly optimized, library-based approach rather than hand-written kernels, and it is typically used as a component within larger stream compaction pipelines.
 
 ### Exclusive Cumulative Product (for Transmittance)
-A cumulative product function that computes the product of elements up to but not including the current element, used for calculating transmission (opacity accumulation) in DVR [S5, unofficial]. It is implemented via `cumprod_exclusive` utilities in Python-based DVR pipelines [S5, unofficial].
+A cumulative product function that computes the product of elements up to but not including the current element, used for calculating transmission (opacity accumulation) in DVR [S5, unofficial]. It is implemented via `cumprod_exclusive` utilities [S5, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- **CPU (Naive):** Time $O(n)$, Memory $O(1)$ auxiliary space [S3, unofficial][S4].
-- **GPU (Work-Efficient):** Time $O(\log n)$ parallel steps, $O(n)$ total work. Memory $O(n)$ device memory for buffers [S3, unofficial].
-- **GPU (Naive):** Time $O(n)$ parallel steps, $O(n)$ total work. Memory $O(n)$ device memory [S3, unofficial].
-
-**Measured Performance:**
-- On an array size of $2^{27}$, CPU scan took ~190ms, Naive GPU scan ~35ms, and Work-Efficient GPU scan ~26ms [S3, unofficial].
-- Thrust consistently outperforms custom naive and work-efficient implementations across block sizes [S3, unofficial].
-
-**Strengths and Limitations:**
-- **Strengths:** Enables parallel stream compaction; work-efficient GPU version minimizes redundant computations [S2][S3, unofficial].
-- **Limitations:** Naive GPU version suffers from low resource utilization; non-power-of-two inputs require padding overhead [S3, unofficial].
-
-**When to Use:**
-- Use for parallel stream compaction in volume rendering voxel lists [S2].
-- Use Thrust for production GPU code due to stability and performance [S3, unofficial].
-- Use CPU version for verification and small datasets [S3, unofficial].
+- **Time Complexity:** $O(\log n)$ parallel steps for the tree-based GPU implementation, $O(n)$ total work [S3, unofficial]. The CPU naive implementation is $O(n)$ sequential steps [S4].
+- **Memory Complexity:** $O(n)$ device memory for the ping-pong buffers in the GPU work-efficient version [S3, unofficial]. $O(1)$ auxiliary space for the CPU version if reusing input/output arrays, or $O(n)$ if allocating temporary buffers for compaction [S3, unofficial].
+- **Performance:** On arrays of size $2^{27}$, the work-efficient GPU scan takes ~26ms, outperforming the naive GPU scan (~35ms) and significantly beating CPU scan (~190ms) [S3, unofficial]. Thrust consistently outperforms custom naive and work-efficient implementations across block sizes [S3, unofficial].
+- **Strengths:** Enables parallel stream compaction and hierarchical subdivision without atomic conflicts [S2]. Work-efficient versions minimize redundant memory accesses compared to naive approaches [S3, unofficial].
+- **Limitations:** Requires power-of-two padding for standard tree algorithms, wasting memory for arbitrary sizes [S3, unofficial]. Non-power-of-two inputs require careful boundary handling [S3, unofficial].
 
 ## Background
-The exclusive prefix sum is a fundamental parallel primitive described by Blelloch [1990] [S2]. Efficient GPU implementations were detailed by Harris et al. [2007] [S2]. It is widely used in volume rendering for sparse voxelization and stream compaction to map culling decisions to compacted indices [S2, S1].
+The exclusive prefix sum is a fundamental parallel primitive introduced by Blelloch [1990] [S2]. It is widely used in volume rendering for sparse voxelization and stream compaction, as described in Harris et al. [2007] [S2]. The work-efficient GPU implementation using up-sweep and down-sweep phases is a standard technique for optimizing parallel reductions on GPUs [S3, unofficial].
 
 ## Sources
 [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26

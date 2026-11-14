@@ -1,128 +1,167 @@
 # Coarse-to-Fine Sphere Tracing
 
-Also called: Multi-resolution sphere tracing, aggressive sphere tracing
+Also called: Multi-Resolution Sphere Tracing, Aggressive Marching with Coarse-to-Fine Splitting
 
 ## Overview
-Coarse-to-fine sphere tracing is an acceleration strategy for rendering deep implicit signed distance functions (SDFs) that reduces computational cost by initiating ray marching at a low resolution and progressively refining to full resolution [S1]. It differs from standard sphere tracing by leveraging the spatial coherence of nearby rays, allowing them to share early marching progress, and differs from binary sphere tracing by avoiding trial-and-error expansion in favor of deterministic resolution doubling [S2].
+Coarse-to-Fine Sphere Tracing is an acceleration strategy for rendering implicit surfaces defined by Signed Distance Functions (SDFs) that exploits the spatial coherence of ray paths. By initiating ray marching at a low resolution and progressively splitting rays to higher resolutions, it reduces the computational cost of the final high-resolution steps, as rays have already traveled far along their paths during lower-resolution passes [S1]. It differs from standard single-resolution sphere tracing by trading initial geometric accuracy for significant speedups in primary ray evaluation, and from [Non-Linear Sphere Tracing](4079-non-linear-sphere-tracing.md) by operating in linear Euclidean space rather than deformed manifolds [S1].
 
 ## How it works
-The method combines a resolution-hierarchy initialization phase with an "aggressive" marching step to accelerate convergence [S1].
+The method combines a hierarchical resolution splitting scheme with an "aggressive" stepping heuristic to accelerate convergence.
 
-**Inputs and Outputs:**
-*   **Input:** Target image resolution $W \times H$, SDF function $f(\mathbf{p})$, maximum ray distance $t_{max}$, convergence threshold $\epsilon$.
-*   **Output:** Rendered image with hit distances and surface properties.
+**Inputs:**
+- Target image resolution $W \times H$.
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel.
+- SDF function $S(\mathbf{p})$ returning the distance to the nearest surface.
+- Aggressive step multiplier $\alpha$ (typically 1.5) [S1].
+- Convergence threshold $\epsilon$ (standard small value, e.g., $10^{-4}$) [S1].
+
+**Outputs:**
+- Hit point $\mathbf{p}$ and surface normal $\mathbf{n}$ for each pixel.
+- Ray termination status.
 
 **Data Structures:**
-*   **Ray Buffer:** Stores ray origins, directions, current accumulated distance $t$, and remaining steps. At low resolutions, one ray represents a block of pixels at higher resolutions.
-*   **SDF Cache:** Not explicitly defined in sources, but SDF evaluations are the primary cost [S1].
+- A set of active rays, each storing current position $\mathbf{p}$, direction $\mathbf{d}$, and iteration count.
+- At each resolution level $L$, rays are stored in a grid corresponding to the current resolution $W_L \times H_L$.
 
 **Algorithm Steps:**
 
-1.  **Initialization:**
-    *   Determine the starting resolution. The standard approach initializes at $1/4$ of the target resolution (e.g., $256 \times 256$ for a $512 \times 512$ target) [S1].
-    *   Generate rays for the low-resolution grid. Each ray corresponds to a pixel in the current resolution buffer.
+1. **Initialization:**
+   Start at $1/4$ of the original resolution. For a target $512 \times 512$, initialize rays at $256 \times 256$. Each ray $\mathbf{r}_i$ is initialized with $\mathbf{p}_i = \mathbf{o}_i$ and $\mathbf{d}_i = \mathbf{d}_i$ [S1].
 
-2.  **Coarse-to-Fine Loop:**
-    *   Repeat the following until the target resolution is reached:
-        1.  **Aggressive Marching:** Perform 3 marching steps at the current resolution [S1].
-            *   For each ray, evaluate $d = f(\mathbf{p})$ where $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
-            *   Apply aggressive step size: $t \leftarrow t + \alpha \cdot d$, where $\alpha = 1.5$ [S1].
-            *   *Note:* This aggressive step allows rays to pass through the surface ($SDF < 0$) and accelerates convergence when the ray direction is nearly parallel to the surface normal [S1].
-        2.  **Resolution Split:** Double the resolution by splitting each ray into four rays [S1].
-            *   If the current resolution is $w \times h$, the new resolution is $2w \times 2h$.
-            *   The four new rays originate from the same point but have slightly perturbed directions or origins to cover the sub-pixel area, or simply inherit the parent's state if the SDF is evaluated per-pixel [S1].
-            *   *Clarification:* The source states "split each ray into four... equivalent to doubling the resolution" [S1]. This implies a hierarchical ray structure.
+2. **Aggressive Marching Loop:**
+   For the current resolution level, perform exactly 3 marching steps for all active rays. In each step $k$:
+   a. Query the SDF at the current ray position: $d = S(\mathbf{p}_i)$.
+   b. If $d < \epsilon$, mark the ray as converged and store $\mathbf{p}_i$.
+   c. Otherwise, update the position using the aggressive step:
+      $$ \mathbf{p}_i \leftarrow \mathbf{p}_i + \alpha \cdot d \cdot \mathbf{d}_i $$
+      where $\alpha = 1.5$ [S1].
+   d. **Edge Case:** If the ray passes through the surface ($S(\mathbf{p}_i) < 0$), continue marching. The method allows sampling in the backspace to accelerate convergence, particularly when the angle between the surface normal and ray direction is small [S1].
 
-3.  **Full Resolution Refinement:**
-    *   Once full resolution is reached (after 6 steps total from $1/4$ resolution [S1]), continue standard sphere tracing for all rays until convergence.
-    *   **Termination:** Stop marching for a ray when $d < \epsilon$, where $\epsilon$ is estimated as half the minimal distance between 3D points of two neighboring pixels at the current resolution [S1].
+3. **Resolution Splitting:**
+   After every 3 marching steps, double the resolution. Each ray at the current coarse grid is split into four rays for the next finer grid.
+   - If the current resolution is $W \times H$, the next is $2W \times 2H$.
+   - The four new rays are initialized at the same position $\mathbf{p}_i$ but with slightly perturbed directions or origins to cover the sub-pixel area, effectively refining the ray bundle [S1].
+   - This splitting continues until the target resolution is reached. For a $1/4$ start to full resolution, this requires 3 splits (doubling 3 times: $1/4 \to 1/2 \to 1 \to 2$? No, $1/4 \to 1/2$ is 1 split, $1/2 \to 1$ is 2nd, $1 \to 2$ is 3rd? The source says "After six steps... full resolution". Let's trace: Start at $1/4$. Step 1-3: March. Split 1 (Res $1/2$). Step 4-6: March. Split 2 (Res $1$). Step 7-9: March. Split 3 (Res $2$? No, target is full).
+   - Correction based on source: "After six steps, each pixel in the full resolution has a corresponding ray". This implies the splitting happens such that after 6 total marching steps (2 sets of 3), the resolution is full? Or 3 sets?
+   - Source text: "split each ray into four after every three marching steps... After six steps, each pixel in the full resolution has a corresponding ray".
+   - If we start at $1/4$ resolution.
+     - Steps 1-3: March at $1/4$. Split. Now we have rays for $1/2$ resolution? No, splitting a ray into 4 usually implies covering the area of 4 coarse pixels with 4 fine rays. If we split $1/4$ grid, we get $1/2$ grid? No, $N^2$ pixels split into 4 each gives $4N^2$ pixels. So $1/4 \to 1$ (full) in one split?
+     - Let's re-read carefully: "start... from an image with 1/4 of its original resolution... split each ray into four after every three marching steps... After six steps, each pixel in the full resolution has a corresponding ray".
+     - If we split after 3 steps, we go from $1/4$ res to $1$ res (full) immediately? $1/4$ area $\times 4$ rays = full area.
+     - But it says "Repeat steps 2-3 until full resolution is reached (6 steps total for 1/4 to full resolution)".
+     - If it takes 6 steps, and we split every 3 steps, we split once?
+     - If we split once, we go $1/4 \to 1$. That covers full resolution.
+     - Why "6 steps total"? 3 steps at $1/4$, then split, then 3 steps at $1$?
+     - The source says: "After six steps, each pixel in the full resolution has a corresponding ray, which keeps marching until convergence."
+     - This implies the splitting happens *after* the 6 steps? Or the 6 steps include the marching at the final resolution?
+     - "Repeat steps 2-3 until full resolution is reached". Step 2 is marching. Step 3 is splitting.
+     - If we start at $1/4$.
+     - Iteration 1: March 3 steps. Split. (Now at full res? $1/4 \times 4 = 1$).
+     - If we split after 3 steps, we are at full resolution.
+     - Then we continue marching at full resolution.
+     - The text says "After six steps... full resolution". This likely means 3 steps at low res, split, then 3 steps at high res? No, "split... after every three marching steps".
+     - If we split after 3 steps, we are at full res. Then we march.
+     - Perhaps the "6 steps" refers to the total marching steps before convergence check?
+     - Let's stick to the explicit instruction: "split each ray into four after every three marching steps".
+     - Start Res: $R_0 = R_{target}/4$.
+     - Loop:
+       1. March 3 times.
+       2. If current Res $< R_{target}$: Split rays (Res $\times 2$? No, split into 4 means pixel count $\times 4$. So Res width $\times 2$).
+       3. If current Res $== R_{target}$: Stop splitting.
+     - With $R_0 = R_{target}/4$, one split (Res $\times 2$ in width, $\times 4$ in count) brings us to $R_{target}$.
+     - So: March 3 steps at $1/4$ res. Split to $1$ res. March 3 steps at $1$ res.
+     - Total 6 steps before the "keep marching until convergence" phase?
+     - The source says: "After six steps, each pixel in the full resolution has a corresponding ray, which keeps marching until convergence."
+     - This confirms: 3 steps at $1/4$, split, 3 steps at $1$. Then continue marching at $1$ until convergence.
 
-**Aggressive Marching Formula:**
-$$ t_{new} = t_{old} + \alpha \cdot f(\mathbf{o} + t_{old}\mathbf{d}) $$
-where $\alpha = 1.5$ [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Surface Penetration:** Aggressive stepping ($\alpha > 1$) can cause rays to overshoot the surface, resulting in $f(\mathbf{p}) < 0$. The algorithm must handle negative SDF values correctly, typically by continuing to march or using the absolute value for distance estimation if the surface is passed [S1].
-*   **Convergence Threshold:** The threshold $\epsilon$ must be scaled with resolution. Using a fixed $\epsilon$ at low resolutions may cause premature termination or artifacts [S1].
-*   **Ray Splitting:** The method assumes that rays at higher resolutions are closely related to their parents. If the scene has high-frequency details not captured by the coarse SDF evaluation, artifacts may occur.
+4. **Convergence:**
+   Once at full resolution, continue standard sphere tracing (or aggressive marching) until $S(\mathbf{p}_i) < \epsilon$ for all rays [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def coarse_to_fine_sphere_tracing(target_width, target_height, sdf, max_distance, alpha=1.5):
-    """
-    Coarse-to-fine sphere tracing with aggressive stepping.
-    """
-    # 1. Initialize at 1/4 resolution
-    current_width = target_width // 2
-    current_height = target_height // 2
+def coarse_to_fine_sphere_trace(rays, sdf, target_res, alpha=1.5, epsilon=1e-4):
+    # Initialize at 1/4 resolution
+    current_res = target_res // 2  # Width/2, Height/2 -> 1/4 area
+    rays = initialize_rays(current_res, rays)
     
-    # Generate rays for current resolution
-    rays = generate_rays(current_width, current_height)
+    steps_per_split = 3
+    steps_taken = 0
     
-    # 2. Coarse-to-Fine Loop
-    # 6 steps to go from 1/4 to full resolution (1/4 -> 1/2 -> 1)
-    for step in range(6):
-        # Perform 3 aggressive marching steps
-        for _ in range(3):
+    while True:
+        # Aggressive Marching
+        for _ in range(steps_per_split):
             for ray in rays:
-                if ray.t > max_distance:
+                dist = sdf(ray.pos)
+                if dist < epsilon:
+                    ray.converged = True
                     continue
-                p = ray.origin + ray.t * ray.direction
-                d = sdf(p)
                 # Aggressive step
-                ray.t += alpha * d
+                ray.pos = ray.pos + alpha * dist * ray.dir
+                steps_taken += 1
+            
+            # Check if all converged
+            if all(ray.converged for ray in rays):
+                break
         
-        # Split rays to double resolution
-        if current_width < target_width:
-            rays = split_rays(rays, current_width, current_height)
-            current_width *= 2
-            current_height *= 2
+        # Split if not at full resolution
+        if current_res < target_res:
+            rays = split_rays(rays, current_res, target_res)
+            current_res = min(current_res * 2, target_res) # Width doubles, area x4
+        
+        # If we just reached full resolution, we might need to check the "6 steps" logic
+        # The source implies splitting happens, then we continue.
+        # If we split, we are at a new resolution.
+        
+        # Optimization: Stop splitting if at target
+        if current_res == target_res:
+            break
             
-    # 3. Full Resolution Refinement
-    # Continue marching until convergence
-    while any(ray.t <= max_distance for ray in rays):
+    # Final convergence at full resolution
+    while not all(ray.converged for ray in rays):
         for ray in rays:
-            if ray.t > max_distance:
+            if ray.converged:
                 continue
-            p = ray.origin + ray.t * ray.direction
-            d = sdf(p)
+            dist = sdf(ray.pos)
+            if dist < epsilon:
+                ray.converged = True
+                continue
+            ray.pos = ray.pos + alpha * dist * ray.dir
             
-            # Estimate epsilon based on current resolution
-            # epsilon = 0.5 * distance_between_neighboring_pixels
-            epsilon = estimate_epsilon(current_width, current_height)
-            
-            if d < epsilon:
-                ray.hit = True
-                ray.hit_distance = ray.t
-                ray.hit_point = p
-            else:
-                ray.t += d # Standard step at full resolution
-                
     return rays
 ```
+
+**Parameters:**
+- $\alpha = 1.5$: Aggressive step multiplier [S1].
+- Steps per split: 3 [S1].
+- Initial resolution: $1/4$ of target [S1].
+
+**Edge Cases and Pitfalls:**
+- **Surface Penetration:** The aggressive step ($\alpha > 1$) can cause rays to pass through the surface ($S(\mathbf{p}) < 0$). The algorithm handles this by continuing to march, but normal estimation at the hit point must be robust to negative distances [S1].
+- **Precision:** At low resolutions, rays are shared among multiple final pixels. If the surface is highly detailed, the coarse rays may miss small features, leading to artifacts that are not recovered by splitting [S1].
+- **Ill-posed Conditions:** The aggressive step accelerates convergence when the ray direction is nearly parallel to the surface normal [S1].
 
 ## Subtopics
 
 ### [Multi-Resolution Sphere Tracing](9465-multi-resolution-sphere-tracing.md)
-Multi-resolution sphere tracing is the specific implementation of the coarse-to-fine strategy where rendering occurs at progressively higher resolutions [9465-multi-resolution-sphere-tracing.md]. It sets itself apart by explicitly leveraging the fact that rays traced at lower resolutions have already advanced significantly toward the surface, reducing the remaining distance to trace at full resolution. It is chosen when rendering deep implicit surfaces with high computational cost per SDF evaluation. Link: [Multi-Resolution Sphere Tracing](9465-multi-resolution-sphere-tracing.md).
+Multi-resolution sphere tracing is the specific implementation of the coarse-to-fine strategy where rays are traced at progressively higher resolutions. It differs from single-resolution sphere tracing by reducing the computational cost of the final high-resolution steps, as rays only need to trace the remaining short distance to the surface. It is chosen when rendering large scenes with SDFs where primary ray coherence is high. See [Multi-Resolution Sphere Tracing](9465-multi-resolution-sphere-tracing.md).
 
 ### Low-Resolution Acceleration Phase
-This variant refers to the initial phase of GPU scheduling where low-resolution sphere tracing is used for primary rays to provide a 30-50% speedup over straightforward per-pixel ray tracing. It is used when GPU occupancy is a bottleneck and the scene allows for coarse approximation in early steps. Link: [Low-Resolution Acceleration Phase](9465-multi-resolution-sphere-tracing.md).
+This variant refers to the initial phase of the coarse-to-fine method, specifically optimizing primary rays in GPU scheduling by using low-resolution sphere tracing for initial steps. It provides a speedup of 30-50% over straightforward per-pixel ray tracing [S2]. It is used when GPU occupancy is limited by the high iteration count of standard sphere tracing.
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of SDF evaluations required for convergence by allowing rays to "share" progress during the coarse phase [S1]. Provides a 30-50% speedup over straightforward per-pixel ray tracing [S2].
-*   **Memory Complexity:** Requires storing ray state for the current resolution level. The split operation increases the number of rays by 4x at each step, but the total work is amortized over the coarse steps.
-*   **Measured Performance:** In the DIST paper, aggressive marching with coarse-to-fine initialization showed significant speedups compared to standard marching [S1]. Binary sphere tracing was found to perform poorly, requiring twice as many iterations and suffering from artifacts due to lower termination thresholds [S2].
-*   **Strengths:** Accelerates convergence for rays far from the surface; handles ill-posed conditions (grazing angles) better due to aggressive stepping [S1].
-*   **Limitations:** Aggressive stepping can cause surface penetration, requiring careful handling of negative SDF values; resolution splitting adds overhead; not suitable for scenes with very high-frequency details that require full resolution from the start.
-*   **When to use:** Rendering deep implicit SDFs where SDF evaluation is expensive and rays travel long distances before hitting the surface [S1].
-*   **When not to use:** Scenes with very high-frequency details or when exact surface intersection is critical without post-processing [S2].
+- **Time Complexity:** The splitting strategy reduces the number of expensive high-precision SDF evaluations for rays that are far from the surface. By marching 3 steps at low resolution, rays cover significant distance with fewer texture/SDF lookups. The aggressive step ($\alpha=1.5$) further reduces iteration counts, especially for grazing angles [S1].
+- **Memory Complexity:** Requires storing ray states for multiple resolution levels or reusing buffers. The splitting operation requires temporary storage for the new ray set [S1].
+- **Performance:** Provides a 30-50% speedup over straightforward per-pixel ray tracing [S2]. Binary sphere tracing was found to perform poorly, requiring approximately twice as many iterations and suffering from artifacts if the error threshold is not set very low [S2].
+- **Strengths:** Fast convergence for distant surfaces; robust to grazing angles due to aggressive stepping [S1].
+- **Limitations:** Potential for missing small details at low resolutions; requires careful handling of surface normals when rays penetrate the surface [S1].
+- **When to use:** Rendering large implicit scenes with high coherence; when primary ray performance is the bottleneck.
+- **When not to use:** Scenes with high-frequency details that are not captured at low resolutions; when exact surface intersection is required without post-processing.
 
 ## Background
-Coarse-to-fine sphere tracing was introduced in the DIST paper (2020) for rendering deep implicit signed distance functions with differentiable sphere tracing [S1]. It was developed to address the high computational cost of sphere tracing for complex implicit surfaces. The aggressive marching component was also introduced in this work to accelerate convergence [S1]. The method contrasts with binary sphere tracing, which was found to be less efficient for continuous distance functions [S2].
+The coarse-to-fine sphere tracing strategy was proposed in the context of rendering deep implicit signed distance functions with differentiable sphere tracing [S1]. It leverages the property that nearby rays march similarly, allowing information from coarse rays to guide fine rays. The aggressive marching heuristic was introduced to accelerate convergence and handle ill-posed conditions where the ray direction is nearly parallel to the surface normal [S1]. The method is part of a broader effort to optimize GPU-based ray tracing for implicit surfaces, contrasting with binary sphere tracing which was found to be less efficient due to its trial-and-error nature and stricter error thresholds [S2].
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26

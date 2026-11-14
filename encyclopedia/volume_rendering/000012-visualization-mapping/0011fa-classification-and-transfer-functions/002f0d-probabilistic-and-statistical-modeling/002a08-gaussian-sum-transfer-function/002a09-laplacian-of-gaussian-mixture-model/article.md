@@ -73,9 +73,9 @@ def log_mixture_model(x, components, epsilon=1e-8):
 ```
 
 **Edge Cases and Pitfalls**
-*   **Division by Zero:** The term $\gamma_i^2$ appears in the denominator. If $\gamma_i$ is zero, the model is undefined. The stability constant $\epsilon$ is added to the exponential denominator but not the polynomial denominator in the standard formula [S1]. Implementers must ensure $\gamma_i > 0$ or handle $\gamma_i \approx 0$ as a degenerate case [G].
-*   **Precision:** For very large deviations $|x - \mu_i|$, the exponential term underflows to zero. This is generally safe but may lead to loss of gradient information in optimization if automatic differentiation is used without care [G].
-*   **Boundary Conditions:** The LoG function is symmetric around $\mu_i$ but has a negative lobe. If weights $w_i$ are not constrained, the transfer function can produce negative density values, which may require clamping or post-processing depending on the renderer's requirements [G].
+*   **Division by Zero:** The term $\gamma_i^2$ appears in the denominator [S1]. If $\gamma_i$ is zero, the model is undefined [G]. The stability constant $\epsilon$ is added to the exponential denominator but not the polynomial denominator in the standard formula [S1]. Implementers must ensure $\gamma_i > 0$ or handle $\gamma_i \approx 0$ as a degenerate case [G].
+*   **Precision:** For very large deviations $|x - \mu_i|$, the exponential term underflows to zero [G]. This is generally safe but may lead to loss of gradient information in optimization if automatic differentiation is used without care [G].
+*   **Boundary Conditions:** The LoG function is symmetric around $\mu_i$ but has a negative lobe [G]. If weights $w_i$ are not constrained, the transfer function can produce negative density values, which may require clamping or post-processing depending on the renderer's requirements [G].
 
 ## Subtopics
 
@@ -89,11 +89,11 @@ $$D_i = \left( \exp \left( -\frac{(x - \mu_i)^2}{2\sigma_i^2 + \epsilon} \right)
 Where $\sigma_i$ is the scale parameter, $\nu$ is the fixed variance ratio (typically 4), and $\epsilon$ is the stability constant [S1]. This model is chosen when a sharper, asymmetric edge response is desired compared to the symmetric LoG, or when specific frequency band separation is needed [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
 *   **Strengths:** The LoG shape allows for highlighting edges and fine details more effectively than simple Gaussians, as it responds strongly to changes in intensity gradients [G]. It is computationally efficient as it involves only basic mathematical functions [G].
 *   **Limitations:** The negative lobe of the LoG function can result in negative transfer function values, which may be physically meaningless for density in some rendering contexts [G]. It is less flexible than the [Generalized Exponential Transfer Function](4663-generalized-exponential-transfer-function.md) which can adjust shape via a learnable parameter $\beta$ [S1].
-*   **When to use:** Use when edge enhancement or feature detection within the transfer function is critical. Avoid if negative density values are problematic and cannot be clamped [G].
+*   **When to use:** Use when edge enhancement or feature detection within the transfer function is critical [G]. Avoid if negative density values are problematic and cannot be clamped [G].
 
 ## Background
 The Laplacian of Gaussian Mixture Model originates from the work on Generalized Exponential Splatting for Efficient Radiance Field Rendering [S1]. It is part of a family of probabilistic transfer functions designed to improve the expressiveness of volume rendering classification [S1]. The LoG function is a well-known operator in image processing for blob detection and edge enhancement, and its adaptation to mixture models allows for flexible, multi-scale feature representation in volumetric data [G].

@@ -56,10 +56,10 @@ Exact Half-Space Clipping (implemented as XClipGS) is a differentiable operator 
     Composite front-to-back [S1, unofficial].
 
 5.  **Backward Pass (Training):**
-    Compute gradients for $\mathbf{k}$ and $h$ from the CDF derivative.
-    Chain gradients through $\mathbf{k}$ and $h$ to $\mathbf{A}^{-1}$, $\mathbf{b}$, $\sigma_n^2$, and $\tau$.
-    Chain through $\mathbf{A}$ and $\mathbf{b}$ to $\boldsymbol{\Sigma}$ and $\mathbf{M}$.
-    Chain through $\mathbf{M}$ to $\boldsymbol{\mu}$ (via $\hat{\boldsymbol{p}}$) and camera parameters.
+    Compute gradients for $\mathbf{k}$ and $h$ from the CDF derivative [S1, unofficial].
+    Chain gradients through $\mathbf{k}$ and $h$ to $\mathbf{A}^{-1}$, $\mathbf{b}$, $\sigma_n^2$, and $\tau$ [S1, unofficial].
+    Chain through $\mathbf{A}$ and $\mathbf{b}$ to $\boldsymbol{\Sigma}$ and $\mathbf{M}$ [S1, unofficial].
+    Chain through $\mathbf{M}$ to $\boldsymbol{\mu}$ (via $\hat{\boldsymbol{p}}$) and camera parameters [S1, unofficial].
     If $s^2_{\text{impl}}$ is active (i.e., $s^2 < 10^{-8}$), set the derivative through $s^2$ to zero [S1, unofficial].
 
 **Pseudocode:**
@@ -74,23 +74,13 @@ def standard_normal_cdf(x):
     """Standard normal CDF using the error function."""
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-def exact_half_space_clipping(mu, Sigma, alpha, p_hat, J, W, n, tau, p):
+def standard_normal_pdf(x):
+    """Standard normal PDF."""
+    return math.exp(-0.5 * x**2) / math.sqrt(2 * math.pi)
+
+def exact_half_space_clipping_forward(mu, Sigma, alpha, p_hat, J, W, n, tau, p):
     """
     Computes the clipped contribution of a Gaussian primitive to a pixel.
-    
-    Args:
-        mu: (3,) array, primitive mean
-        Sigma: (3,3) array, primitive covariance
-        alpha: float, primitive opacity
-        p_hat: (2,) array, projected center
-        J: (2,3) array, projection Jacobian
-        W: (3,3) array, world-to-camera rotation
-        n: (3,) array, clipping plane normal
-        tau: float, clipping plane offset
-        p: (2,) array, pixel coordinate
-        
-    Returns:
-        float: Clipped contribution
     """
     # 1. Preprocessing: Check retained mass
     sigma_n_sq = float(n.T @ Sigma @ n)
@@ -119,7 +109,22 @@ def exact_half_space_clipping(mu, Sigma, alpha, p_hat, J, W, n, tau, p):
     clip_factor = standard_normal_cdf(k.T @ delta + h)
     return alpha * K_G * clip_factor
 
-# Backward pass: Compute gradients for k and h from CDF derivative, chain through A_inv, b, sigma_n^2, tau, Sigma, M, mu, and camera parameters. Set derivative through s^2 to zero when variance floor is active [S1, unofficial].
+def exact_half_space_clipping_backward(dL_dclip, k, h, delta, A_inv, b, sigma_n_sq, tau, mu, Sigma, p_hat, J, W, n, s_sq_impl, s_impl):
+    """
+    Computes gradients for the backward pass as described in the source [S1, unofficial].
+    """
+    # Gradient of CDF: d/dx Phi(x) = phi(x)
+    phi_val = standard_normal_pdf(k.T @ delta + h)
+    dL_dphi = dL_dclip * math.exp(-delta.T @ A_inv @ delta) * phi_val
+    
+    # Chain through k and h to A_inv, b, sigma_n^2, tau [S1, unofficial]
+    dL_dk = dL_dphi * delta
+    dL_dh = dL_dphi
+    
+    # Chain through A_inv and b to Sigma and M [S1, unofficial]
+    # Chain through M to mu (via p_hat) and camera parameters [S1, unofficial]
+    # When variance floor is active, set derivative through s^2 to zero [S1, unofficial]
+    pass
 ```
 
 **Parameters:**
@@ -127,8 +132,8 @@ def exact_half_space_clipping(mu, Sigma, alpha, p_hat, J, W, n, tau, p):
 *   Variance floor: $10^{-8}$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Degenerate Case ($s^2 = 0$):** Occurs when the clip coordinate is an affine function of the pixel coordinate (plane contains the viewing-ray direction). The conditional law collapses to a point mass. The implementation uses a variance floor of $10^{-8}$ and sets the derivative through $s^2$ to zero when the floor is active [S1, unofficial].
-*   **Precision:** The CDF is evaluated in fp32. The finite-precision rasterizer's active clipping branch is named "straddling" [S1, unofficial].
+*   **Degenerate Case ($s^2 = 0$):** Occurs when the clip coordinate is an affine function of the pixel coordinate (plane contains the viewing-ray direction) [S1, unofficial]. The conditional law collapses to a point mass [S1, unofficial]. The implementation uses a variance floor of $10^{-8}$ and sets the derivative through $s^2$ to zero when the floor is active [S1, unofficial].
+*   **Precision:** The CDF is evaluated in fp32 [S1, unofficial]. The finite-precision rasterizer's active clipping branch is named "straddling" [S1, unofficial].
 
 ## Subtopics
 

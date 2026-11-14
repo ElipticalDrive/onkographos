@@ -61,7 +61,8 @@ def compute_mask_gradients(dL_dc, c_bg, alphas, masks, colors, b_next):
     # alphas: opacities alpha_i, shape (N,)
     # masks: mask values M_i, shape (N,)
     # colors: Gaussian colors c_i, shape (N, 3)
-    # b_next: intermediate colors b_{i+1}, shape (N, 3). b_next[i] is b_{i+1}.
+    # b_next: intermediate colors b_{i+1}, shape (N, 3). b_next[i] stores b_{i+2} (1-based),
+    #         i.e., the intermediate color after Gaussian i+1. For i=N-1, b_next[N-1] is b_{N+1} = c_bg.
     # Returns: dL_dM, gradient w.r.t. masks, shape (N,)
     N = len(alphas)
     dL_dM = [0.0] * N
@@ -92,7 +93,7 @@ def compute_mask_gradients(dL_dc, c_bg, alphas, masks, colors, b_next):
         # Gradient of c_b(x) w.r.t. M_i: (-alpha_i * T_{N+1} / (1 - alpha_i * M_i)) * c_bg
         denom = 1.0 - alphas[i] * masks[i]
         if denom == 0.0:
-            d_c_b_d_Mi = [0.0, 0.0, 0.0] # Undefined; handled as zero [G]
+            d_c_b_d_Mi = [0.0, 0.0, 0.0] # Guard for division by zero [G]
         else:
             scale = (-alphas[i] * T_N_plus_1) / denom
             d_c_b_d_Mi = [scale * c_bg[k] for k in range(3)]
@@ -111,11 +112,10 @@ def compute_mask_gradients(dL_dc, c_bg, alphas, masks, colors, b_next):
 **Edge Cases and Pitfalls:**
 - Division by zero: The term $\frac{1}{1 - \alpha_i \cdot \mathcal{M}_i}$ becomes undefined if $\alpha_i \cdot \mathcal{M}_i = 1$. A guard or epsilon addition is required [G].
 - Numerical stability: Computing $T_{N+1}$ as a product of many terms can lead to underflow. Log-space computation or careful ordering may be required [G].
-- Degenerate input: If a Gaussian has zero opacity or zero mask, the gradient terms simplify. Not given in the sources.
 
 ## Operating characteristics
-- Time Complexity: Not given in the sources.
-- Memory Complexity: Not given in the sources.
+- Time complexity: Not given in the sources [G].
+- Memory complexity: Not given in the sources [G].
 - Strengths: Not given in the sources.
 - Limitations: Not given in the sources.
 

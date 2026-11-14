@@ -3,190 +3,203 @@
 Also called: Incremental Construction
 
 ## Overview
-Residency Octree Update is the incremental, fully GPU-based method for maintaining the multi-channel residency octree data structure during out-of-core direct volume rendering. It solves the problem of keeping the spatial subdivision tree consistent with the dynamic state of the brick cache (added and evicted bricks) without rebuilding the entire tree from scratch. What sets it apart from its siblings is its breadth-first, candidate-driven propagation of metadata updates from leaf nodes to the root, using indirect compute passes to minimize GPU work by terminating early when no changes occur [S1, unofficial].
+Residency Octree Update is a fully GPU-implemented parallel method for maintaining the spatial residency state of volumetric data bricks within a hierarchical octree structure. It solves the problem of keeping the residency octree consistent with the dynamic brick cache during both data loading and cache eviction, enabling efficient culling of non-resident volume regions during rendering [S1, unofficial][S2]. It differs from static octree construction by being fully parallel and event-driven, updating nodes only when bricks are added or removed from the cache [S1, unofficial]. It differs from simple flat caches by maintaining a hierarchical bitmap representation of partial residency across multiple resolution levels and channels [S1, unofficial].
 
 ## How it works
-The method updates the residency octree to reflect changes in the brick cache. It handles metadata reception, brick addition, and LRU cache eviction by marking leaf nodes as partially mapped and propagating bitmap updates up the tree [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A list of added brick IDs, a list of removed brick IDs, and the current state of the brick cache (residency status of bricks).
+*   **Output:** Updated culling metadata (min/max values) and partially mapped resolution bitmasks for all affected nodes in the residency octree, up to the root.
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   List of added brick IDs and their spatial extents.
-    *   List of removed (evicted) brick IDs and their spatial extents.
-    *   Scalar values for newly added bricks (for culling metadata).
-    *   Current state of the residency octree (bitmasks, min/max values).
-*   **Outputs:**
-    *   Updated residency octree nodes (bitmasks, culling metadata).
-    *   Indication of completion (root reached or no candidates).
-
-### Data Structures
+**Data Structures:**
 *   **Residency Octree Node:**
-    *   `bitmask`: A bitmask representing which resolution levels/channels are partially resident in this node's spatial extent.
-    *   `min_value`: Minimum scalar value in the node's extent.
-    *   `max_value`: Maximum scalar value in the node's extent.
-    *   `children`: Pointers or indices to 8 child nodes (for non-leaf nodes).
-*   **Update-Candidate Buffer:**
-    *   A buffer storing indices of nodes that require recomputation in the next level up.
-    *   Cleared after each iteration.
+    *   `culling_min`: Scalar minimum value of the volume data within this node's spatial extent.
+    *   `culling_max`: Scalar maximum value of the volume data within this node's spatial extent.
+    *   `residency_bitmap`: A bitmask where each bit represents a specific resolution level and/or channel. A bit is set if at least one brick at that resolution/channel is resident in the cache and overlaps the node's spatial extent.
+*   **Update-Candidate Buffer:** A dynamic buffer storing indices of nodes that require recomputation in the next level up.
 
-### Numbered Steps
-1.  **Initialization:** Start timing. Application triggers updates after the frame's brick-cache update is completed [S1, unofficial].
-2.  **Process Removed Bricks:**
-    *   For each non-resident brick, determine its corresponding leaf nodes in the residency octree.
-    *   For each leaf node, check if it is still partially resident in the removed brick's resolution level.
-    *   If not partially resident, update the node's partially mapped resolution bitmap.
-    *   Mark the parent node as an update candidate in the update-candidate buffer [S1, unofficial].
-3.  **Compute Culling Metadata for New Bricks:**
-    *   For each scalar value in each newly added brick, determine the corresponding leaf node.
-    *   If the value is lower than the node's current minimum or greater than its maximum, update the node's culling metadata.
-    *   Use atomic operations (`atomicMin`, `atomicMax`) for concurrent updates to min/max values.
-    *   Mark the parent node as an update candidate in the update-candidate buffer [S1, unofficial].
-4.  **Process Added Bricks:**
-    *   For each added brick, determine all corresponding leaf nodes whose spatial extent overlaps the brick.
-    *   Mark these leaf nodes as partially mapped in the brick's resolution level and channel.
-    *   If the node's bitmap of partially mapped resolutions changes, mark the parent node as an update candidate in the update-candidate buffer [S1, unofficial].
-5.  **Compile Candidates:**
-    *   Process the update-candidate buffer to compile a list of all nodes marked as candidates for the next step.
-    *   Clear the update-candidate buffer for subsequent iterations.
-    *   Use the candidate count to control the number of workgroups dispatched for the next indirect compute pass.
+**Parameters:**
+*   **Brick Size:** Typically $32^3$ voxels [S1, unofficial].
+*   **Leaf-Node Size:** The approximate spatial extent of leaf nodes in the residency octree. Can be decoupled from brick size (e.g., $32^3, 16^3, 8^3$, or $8 \times 8 \times 4$) [S1, unofficial].
+
+**Algorithm Steps:**
+The update process is initiated by the application immediately after the frame's brick-cache update is completed [S1, unofficial]. It proceeds in a breadth-first manner from leaf nodes up to the root, using indirect compute passes to manage workgroup dispatch and enable early termination [S1, unofficial].
+
+1.  **Process Removed Bricks:**
+    *   For each brick ID in the "removed" list, determine the corresponding leaf nodes in the residency octree whose spatial extent overlaps the brick's extent.
+    *   For each such leaf node, check if it is still partially resident in the resolution level of the removed brick. This is done by verifying if any other brick at that resolution level overlapping the node is still resident in the cache.
+    *   If the node is no longer partially resident in that resolution, update its `residency_bitmap` (clear the corresponding bit).
+    *   Mark the parent node of the updated leaf node as an update candidate in the `update-candidate buffer` [S1, unofficial][S2].
+
+2.  **Compute Culling Metadata for New Bricks:**
+    *   For each scalar value in each newly added brick, determine the corresponding leaf node in the residency octree.
+    *   If the scalar value is lower than the node's current `culling_min` or greater than its `culling_max`, update the node's metadata.
+    *   Use atomic operations (`atomicMin`, `atomicMax`) to ensure concurrent updates from multiple threads are safe [S1, unofficial].
+    *   Mark the parent node of the updated leaf node as an update candidate in the `update-candidate buffer` [S1, unofficial].
+
+3.  **Process Added Bricks:**
+    *   For each brick ID in the "added" list, determine all leaf nodes in the residency octree whose spatial extent overlaps the brick's extent.
+    *   Mark these leaf nodes as partially mapped in the brick's resolution level and channel by setting the corresponding bits in their `residency_bitmap`.
+    *   If a node's `residency_bitmap` changed due to this operation, mark its parent node as an update candidate in the `update-candidate buffer` [S1, unofficial][S2].
+
+4.  **Compile Update Candidates:**
+    *   Process the `update-candidate buffer` to compile a unique list of all nodes marked as candidates for the next level up.
+    *   Clear the `update-candidate buffer` for subsequent iterations.
+    *   Use the count of candidates to control the number of workgroups dispatched for the next indirect compute pass.
     *   If no candidates remain, terminate the update process [S1, unofficial].
-6.  **Process Update Candidates:**
-    *   For each candidate node, recompute its culling metadata and bitmap of partially mapped resolutions from its child nodes.
-    *   If at least one of the node's values (bitmap or min/max) changes, mark the node's parent as an update candidate in the update-candidate buffer.
-    *   For non-leaf nodes, update residency via bitwise OR of child node bitmasks:
+
+5.  **Process Update Candidates:**
+    *   For each candidate node, recompute its `culling_min`, `culling_max`, and `residency_bitmap` from its child nodes.
+    *   The `residency_bitmap` is updated via bitwise OR of the child node bitmasks:
         $$B_{parent} = B_{child1} \lor B_{child2} \lor ... \lor B_{child8}$$
         where $B$ is the bitmask [S2].
-7.  **Repeat:** Repeat Steps 5 and 6 until the root node is reached or no update candidate remains [S1, unofficial].
+    *   The `culling_min` and `culling_max` are recomputed as the minimum and maximum of the respective values from all child nodes.
+    *   If any of the node's values (`culling_min`, `culling_max`, or `residency_bitmap`) changed compared to the previous state, mark the node's parent as an update candidate in the `update-candidate buffer` [S1, unofficial].
 
-### Pseudocode
+6.  **Repeat:**
+    *   Repeat Steps 4 and 5 until the root node is reached or no update candidates remain. Early termination occurs if a node's bitmask remains unchanged by the OR operation during Step 5 [S2].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def residency_octree_update(added_bricks, removed_bricks, octree_root):
+# Global state assumed:
+# octree_nodes: Array of node structures {culling_min, culling_max, residency_bitmap, parent_id, child_ids[8]}
+# brick_cache: Map of brick_id -> {is_resident, resolution, channel, spatial_extent}
+# update_candidates: Dynamic buffer (list) of node indices
+
+def residency_octree_update(added_bricks, removed_bricks):
     """
     Incrementally update the residency octree based on brick cache changes.
-    
-    Args:
-        added_bricks: List of (brick_id, spatial_extent, scalar_values)
-        removed_bricks: List of (brick_id, spatial_extent)
-        octree_root: Root node of the residency octree
-    
-    Returns:
-        None (updates octree in place)
     """
-    candidate_buffer = []
-    
-    # Step 2: Process Removed Bricks
-    for brick_id, extent in removed_bricks:
-        leaf_nodes = get_leaf_nodes_for_extent(extent)
-        for leaf in leaf_nodes:
-            if not is_partially_resident(leaf, brick_id.resolution):
-                update_bitmask(leaf, brick_id.resolution, False)
-                candidate_buffer.append(leaf.parent)
-    
-    # Step 3: Compute Culling Metadata for New Bricks
-    for brick_id, extent, scalar_values in added_bricks:
-        leaf_nodes = get_leaf_nodes_for_extent(extent)
-        for leaf in leaf_nodes:
-            for value in scalar_values:
-                atomic_min(leaf.min_value, value)
-                atomic_max(leaf.max_value, value)
-            candidate_buffer.append(leaf.parent)
-    
-    # Step 4: Process Added Bricks
-    for brick_id, extent, _ in added_bricks:
-        leaf_nodes = get_leaf_nodes_for_extent(extent)
-        for leaf in leaf_nodes:
-            old_bitmask = leaf.bitmask
-            update_bitmask(leaf, brick_id.resolution, True)
-            if leaf.bitmask != old_bitmask:
-                candidate_buffer.append(leaf.parent)
-    
-    # Step 5: Compile Candidates
-    unique_candidates = list(set(candidate_buffer))
-    candidate_buffer.clear()
-    
-    if not unique_candidates:
-        return
-    
-    # Step 6 & 7: Process and Repeat
-    current_candidates = unique_candidates
-    while current_candidates:
-        next_candidates = []
-        
-        for node in current_candidates:
-            if node is None:
-                continue
-                
-            old_bitmask = node.bitmask
-            old_min = node.min_value
-            old_max = node.max_value
-            
+    # Step 1: Process Removed Bricks
+    for brick_id in removed_bricks:
+        if not brick_cache[brick_id].is_resident: # Should be false, but check for safety
+            continue
+        # Determine leaf nodes overlapping this brick
+        leaf_nodes = get_leaf_nodes_overlapping_extent(brick_cache[brick_id].spatial_extent)
+        for node_idx in leaf_nodes:
+            node = octree_nodes[node_idx]
+            res = brick_cache[brick_id].resolution
+            # Check if any other brick at this resolution is still resident and overlaps
+            is_still_resident = check_partial_residency(node_idx, res)
+            if not is_still_resident:
+                # Clear bit for this resolution/channel in bitmap
+                old_bitmap = node.residency_bitmap
+                node.residency_bitmap = clear_bit(node.residency_bitmap, res)
+                if old_bitmap != node.residency_bitmap:
+                    add_to_candidates(node.parent_id)
+
+    # Step 2: Compute Culling Metadata for New Bricks
+    for brick_id in added_bricks:
+        if not brick_cache[brick_id].is_resident:
+            continue
+        # Determine leaf nodes overlapping this brick
+        leaf_nodes = get_leaf_nodes_overlapping_extent(brick_cache[brick_id].spatial_extent)
+        for node_idx in leaf_nodes:
+            node = octree_nodes[node_idx]
+            # Update min/max using atomic operations (simulated here for clarity)
+            min_changed = atomic_min(node.culling_min, brick_cache[brick_id].min_value)
+            max_changed = atomic_max(node.culling_max, brick_cache[brick_id].max_value)
+            if min_changed or max_changed:
+                add_to_candidates(node.parent_id)
+
+    # Step 3: Process Added Bricks (Residency Bitmap)
+    for brick_id in added_bricks:
+        if not brick_cache[brick_id].is_resident:
+            continue
+        leaf_nodes = get_leaf_nodes_overlapping_extent(brick_cache[brick_id].spatial_extent)
+        for node_idx in leaf_nodes:
+            node = octree_nodes[node_idx]
+            res = brick_cache[brick_id].resolution
+            old_bitmap = node.residency_bitmap
+            # Set bit for this resolution/channel
+            node.residency_bitmap = set_bit(node.residency_bitmap, res)
+            if old_bitmap != node.residency_bitmap:
+                add_to_candidates(node.parent_id)
+
+    # Step 4 & 5: Iterative Upward Propagation
+    while len(update_candidates) > 0:
+        current_candidates = update_candidates
+        update_candidates = [] # Clear buffer for next level
+
+        for node_idx in current_candidates:
+            node = octree_nodes[node_idx]
             # Recompute from children
-            if node.is_leaf():
-                # Leaf nodes are updated directly in steps 2-4
-                continue
-            else:
-                # Update bitmask via bitwise OR of children
-                new_bitmask = 0
-                for child in node.children:
-                    new_bitmask |= child.bitmask
-                node.bitmask = new_bitmask
-                
-                # Recompute min/max from children
-                new_min = infinity
-                new_max = -infinity
-                for child in node.children:
-                    new_min = min(new_min, child.min_value)
-                    new_max = max(new_max, child.max_value)
-                node.min_value = new_min
-                node.max_value = new_max
-            
-            # Check if values changed
-            if (node.bitmask != old_bitmask or 
-                node.min_value != old_min or 
-                node.max_value != old_max):
-                next_candidates.append(node.parent)
-        
-        # Clear duplicates for next iteration
-        current_candidates = list(set(next_candidates))
+            new_min = infinity
+            new_max = -infinity
+            new_bitmap = 0
+
+            for child_idx in node.child_ids:
+                child = octree_nodes[child_idx]
+                new_min = min(new_min, child.culling_min)
+                new_max = max(new_max, child.culling_max)
+                new_bitmap = new_bitmap | child.residency_bitmap
+
+            # Check for changes
+            changed = False
+            if new_min != node.culling_min:
+                node.culling_min = new_min
+                changed = True
+            if new_max != node.culling_max:
+                node.culling_max = new_max
+                changed = True
+            if new_bitmap != node.residency_bitmap:
+                node.residency_bitmap = new_bitmap
+                changed = True
+
+            # If changed, mark parent as candidate
+            if changed:
+                add_to_candidates(node.parent_id)
+
+        # Early termination check is implicit: if no candidates added, loop ends
+
+def add_to_candidates(node_idx):
+    """Add node to candidate buffer if not already present."""
+    if node_idx is not None and node_idx not in update_candidates:
+        update_candidates.append(node_idx)
+
+def check_partial_residency(node_idx, resolution):
+    """Check if any brick at the given resolution overlapping the node is resident."""
+    # Implementation detail: Iterate over bricks overlapping node extent
+    # and check if any have the specified resolution and are resident.
+    # This is a helper function [G].
+    bricks = get_bricks_overlapping_extent(get_node_extent(node_idx))
+    for brick in bricks:
+        if brick.is_resident and brick.resolution == resolution:
+            return True
+    return False
+
+def get_leaf_nodes_overlapping_extent(extent):
+    """Find all leaf nodes whose spatial extent overlaps the given brick extent."""
+    # Implementation detail: Traverse octree to find leaves intersecting extent [G].
+    pass
+
+def get_node_extent(node_idx):
+    """Get the spatial bounding box of a node."""
+    # Implementation detail: Derived from octree structure [G].
+    pass
+
+def get_bricks_overlapping_extent(extent):
+    """Get all bricks whose spatial extent overlaps the given extent."""
+    # Implementation detail: Spatial index lookup [G].
+    pass
 ```
-
-### Parameters
-*   **Brick Size:** 32^3 voxels (typical, used in evaluations) [S1, unofficial].
-*   **Leaf-Node Sizes:** 32^3, 16^3, 8^3, or 8x8x4 (decoupled from brick size) [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Concurrent Updates:** Min/max values must be updated using atomic operations (`atomicMin`, `atomicMax`) because multiple threads may update the same node concurrently [S1, unofficial].
-*   **Early Termination:** Upwards propagation terminates early if a node's bitmask remains unchanged by the OR operation [S2].
-*   **Boundary Conditions:** Ensure leaf nodes are correctly identified for all brick extents, including those at the volume boundaries.
-*   **Precision:** Floating-point comparisons for min/max should handle NaNs or infinities appropriately if present in the data.
 
 ## Subtopics
 
-### [Residency-Octree Updates](5552-residency-octree-updates.md)
-This method updates a residency octree to reflect changes in a brick cache during volume rendering. It handles metadata reception, brick addition, and LRU cache eviction by marking leaf nodes as partially mapped and propagating bitmap updates up the tree.
-
 ### Decoupling Resolution Levels from Spatial Subdivision
-An optimization technique where the spatial subdivision granularity (leaf-node size) of the residency octree is decoupled from the resolution levels of the bricked volume hierarchy, allowing finer empty-space skipping than the bricking granularity [S1, unofficial].
-*   **Definition:** The residency octree's leaf-node size is independent of the brick size.
-*   **Steps:**
-    1.  Use a brick size of 32^3 voxels for all methods [S1, unofficial].
-    2.  Use different approximate leaf-node sizes for the residency octree: 32^3, 16^3, 8^3 [S1, unofficial].
-    3.  Evaluate the method with an approximate leaf-node size of 8x8x4 to demonstrate arbitrary spatial subdivision [S1, unofficial].
-*   **Parameters:** Leaf-node sizes tested: 32^3, 16^3, 8^3, and 8x8x4 [S1, unofficial].
-*   **Comparison:** Allows efficient empty-space skipping with finer granularity than bricking, potentially achieving higher frame rates. Arbitrary spatial subdivision can be beneficial for anisotropic volumes [S1, unofficial].
+An optimization technique where the spatial subdivision granularity (leaf-node size) of the residency octree is decoupled from the resolution levels of the bricked volume hierarchy. This allows finer empty-space skipping than the bricking granularity [S1, unofficial]. It is beneficial for anisotropic volumes and can achieve higher frame rates [S1, unofficial]. Typical brick size is $32^3$ voxels, while leaf-node sizes can be $32^3, 16^3, 8^3$, or even $8 \times 8 \times 4$ [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Proportional to the number of changed bricks and the height of the octree. Early termination reduces work when changes are localized.
-*   **Memory Complexity:** O(N) for the octree nodes, where N is the number of nodes. The candidate buffer size is proportional to the number of changed nodes per level.
-*   **Measured Performance:** Higher frame rates achieved with decoupled leaf-node sizes (e.g., 8x8x4) compared to coupled sizes, due to finer empty-space skipping [S1, unofficial].
-*   **Strengths:** Fully GPU-implemented, parallel, incremental (avoids full rebuild), early termination.
-*   **Limitations:** Requires atomic operations for concurrent updates, which may cause contention. Performance depends on the spatial distribution of changes.
-*   **When to Use:** Out-of-core DVR with dynamic brick caches.
-*   **When Not to Use:** Static volumes with no cache updates, or when CPU-side tree maintenance is preferred.
+*   **Time Complexity:** The update process is proportional to the number of changed bricks and the height of the octree. The use of indirect compute passes and early termination (when bitmasks do not change) optimizes performance by avoiding unnecessary work [S1, unofficial][S2].
+*   **Memory Complexity:** Requires storage for the octree nodes (culling metadata and bitmasks) and the update-candidate buffer. The buffer size is bounded by the number of affected nodes per frame [S1, unofficial].
+*   **Performance:** Fully GPU-implemented, allowing parallel construction and updates [S1, unofficial]. Decoupling leaf-node size from brick size can improve performance by enabling finer empty-space skipping [S1, unofficial].
+*   **Strengths:** Efficient handling of dynamic data loading and eviction; parallel execution on GPU; early termination reduces overhead [S1, unofficial][S2].
+*   **Limitations:** Requires atomic operations for culling metadata updates, which can introduce contention [S1, unofficial]. Performance depends on the spatial distribution of changes and the octree structure [S1, unofficial].
 
 ## Background
-The Residency Octree Update method was introduced in the context of scalable web-based volume rendering of large biomedical datasets [S1, unofficial]. It builds on the concept of the Residency Octree, which decouples cache residency from spatial subdivision [Parent]. The method was evaluated on CyCIF Small and Medium datasets, demonstrating scalability with the number of visible channels [S1, unofficial].
+The Residency Octree Update method was introduced in the context of scalable web-based volume rendering of large biomedical datasets [S1, unofficial]. It is part of the Residency Octree framework, which decouples cache residency from spatial subdivision [S1, unofficial]. The method was evaluated on datasets such as CyCIF Small and CyCIF Medium [S1, unofficial].
 
 ## Sources
 [S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

@@ -3,69 +3,77 @@
 Also called: Octree-based sphere tracing, Spatial partitioning with Lipschitz bounds
 
 ## Overview
-Octree partitioning for sphere tracing accelerates the rendering of implicit surfaces by dividing the spatial domain into an octree, allowing the imposition of local Lipschitz bounds on the signed distance function (SDF) [S1]. This method yields tighter distance bounds than global bounds, enabling the culling of octree nodes that are guaranteed not to intersect the implicit surface, thereby solving the problem of slow convergence in regions with high gradient magnitudes [S1]. It differs from its siblings by using static cell bounds derived from the octree structure rather than dynamic segment-specific bounds, making it distinct from Segment Tracing [S1].
+Octree partitioning for sphere tracing accelerates implicit surface rendering by dividing the spatial domain into an octree, allowing the imposition of local Lipschitz bounds on the signed distance function (SDF) [S1]. This yields tighter distance bounds than global bounds, enabling the culling of octree nodes guaranteed not to intersect the implicit surface, which solves slow convergence in high-gradient regions [S1].
 
 ## How it works
-**Inputs:** A signed distance field (SDF) $f(\mathbf{x})$ defining the implicit surface; an initial ray origin $\mathbf{o}$ and direction $\mathbf{d}$; a maximum traversal distance $t_{max}$; and an octree data structure representing the spatial partition.
-
-**Outputs:** The intersection distance $t_{hit}$ along the ray, or a failure indicator if no intersection is found within $t_{max}$.
-
-**Data Structures:**
-The octree consists of nodes. Each `Branch` node contains references to 8 children (octants). Each `Leaf` node (or cell) stores:
-1.  **Spatial Bounds:** The Axis-Aligned Bounding Box (AABB) of the cell, defined by minimum corner $\mathbf{c}_{min}$ and maximum corner $\mathbf{c}_{max}$.
-2.  **Local Lipschitz Constant:** A scalar $L_{cell}$ representing the upper bound on the gradient magnitude $\|\nabla f(\mathbf{x})\|$ for all $\mathbf{x}$ within the cell.
-3.  **Closest Object Index (Optional):** An integer index identifying the primitive or object closest to the cell, used for union/list operations.
-
+**Inputs:** Ray origin $\mathbf{o}$, direction $\mathbf{d}$, maximum traversal distance $t_{max}$, and an octree where each cell stores a local Lipschitz bound [S1]. [G]
+**Outputs:** Intersection distance $t_{hit}$ along the ray, or a failure indicator if no intersection is found within $t_{max}$ [G].
+**Data Structures:** Each octree cell stores an Axis-Aligned Bounding Box (AABB), a local Lipschitz constant $L_{cell}$ representing the upper bound on $\|\nabla f(\mathbf{x})\|$ within the cell, and optionally an integer index to the closest object [S1].
 **Algorithm Steps:**
+1. Initialize traversal distance $t = 0$ and set the current node to the octree root [G].
+2. Test the ray against the current node's AABB; if the ray misses, terminate traversal or backtrack to the parent/sibling [G].
+3. If the ray intersects, compute entry and exit distances relative to the ray origin, and update $t = \max(t, t_{entry})$ [G].
+4. Apply culling: if the Euclidean distance from the ray to the cell center exceeds the safe step bound $f(\mathbf{p})/L_{cell}$, skip the cell and advance $t$ to $t_{exit}$ [S1, G].
+5. If the current node is a leaf, evaluate the SDF at $\mathbf{p} = \mathbf{o} + t\mathbf{d}$; if $f(\mathbf{p}) \ge 0$, advance $t$ by $\Delta t = f(\mathbf{p}) / L_{cell}$ [S1].
+6. If the current node is a branch, determine which of the 8 child octants contains the ray and descend to that child [G].
+7. Repeat until $t \ge t_{max}$ or $f(\mathbf{p}) \approx 0$ within tolerance [G].
 
-1.  **Initialization:**
-    Set current traversal distance $t = 0$.
-    Set current node to the root of the octree.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-2.  **Ray-Node Intersection:**
-    Test the ray against the current node's AABB.
-    If the ray misses the AABB, terminate traversal (return failure or continue to next sibling/parent).
-    If the ray intersects, calculate the entry distance $t_{entry}$ and exit distance $t_{exit}$ relative to the ray origin.
-    Update $t = \max(t, t_{entry})$.
+```python
+def octree_sphere_trace(ray_origin, ray_dir, t_max, octree_root):
+    t = 0.0
+    node = octree_root
+    while t < t_max:
+        # Ray-AABB intersection (slab method) [G]
+        inv_dir = 1.0 / ray_dir
+        t_min = max((node.aabb.min - ray_origin) * inv_dir)
+        t_max_cell = min((node.aabb.max - ray_origin) * inv_dir)
+        t_entry = max(t, t_min)
+        t_exit = t_max_cell
+        if t_entry > t_exit or t_exit < 0:
+            break
+        t = t_entry
+        p = ray_origin + t * ray_dir
+        # Culling using Lipschitz bound [S1, G]
+        dist_to_center = length(p - node.centroid)
+        if dist_to_center > f(p) / node.L_cell:
+            t = t_exit
+            node = backtrack(node)
+            continue
+        # Leaf processing [S1]
+        if node.is_leaf:
+            dist = f(p)
+            if dist <= 0:
+                return t
+            t += dist / node.L_cell
+        # Branch descent [G]
+        else:
+            child_idx = determine_child_octant(p, node)
+            node = node.children[child_idx]
+    return failure
 
-3.  **Node Classification and Processing:**
-    *   **If Leaf:**
-        Evaluate the SDF at the current ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
-        If $f(\mathbf{p}) < 0$, the ray is inside the surface; handle interior logic or terminate depending on rendering requirements.
-        If $f(\mathbf{p}) \ge 0$, the step size is limited by the local Lipschitz bound to ensure the next sample is not too far from the surface. The maximum safe step is $\Delta t = f(\mathbf{p}) / L_{cell}$.
-        Update $t \leftarrow t + \Delta t$.
-        If $t > t_{max}$, terminate.
-    *   **If Branch:**
-        Determine which of the 8 children the ray enters next. This is done by comparing the ray's position at the current node's midpoint (or entry point) to the node's center.
-        Select the child octant containing the ray.
-        Update current node to this child.
-        Recursively or iteratively proceed to Step 2.
+def backtrack(node):
+    # Returns parent or sibling node based on traversal stack [G]
+    pass
 
-4.  **Culling via Lipschitz Bounds:**
-    Before evaluating the SDF or proceeding deeper, check if the node can be culled.
-    For a leaf node, if the distance from the ray to the cell center $\mathbf{c}$ is greater than the SDF value at the closest point on the ray plus a margin derived from the Lipschitz constant, the surface cannot intersect the cell.
-    Specifically, if $d(\mathbf{o} + t\mathbf{d}, \mathbf{c}) > f(\mathbf{o} + t\mathbf{d}) / L_{cell}$ (conceptually), the node is empty relative to the surface.
-    *Note: The exact culling condition relies on the triangle inequality and the bound $L_{cell}$.*
-
-5.  **Termination:**
-    If $t \ge t_{max}$, return failure.
-    If the ray intersects the surface (e.g., $f(\mathbf{p}) \approx 0$ within tolerance), return $t$.
+def determine_child_octant(p, node):
+    # Returns index 0-7 based on comparing p to node center [G]
+    pass
+```
 
 **Formulas:**
-*   **Lipschitz Bound:** The local Lipschitz constant $L_{cell}$ satisfies $\|f(\mathbf{x}) - f(\mathbf{y})\| \le L_{cell} \|\mathbf{x} - \mathbf{y}\|$ for all $\mathbf{x}, \mathbf{y}$ in the cell.
-*   **Closest Object Test (Optional):** An object $O_i$ is the closest object to a cell $C$ if:
-    $$ d(\text{centroid}(C), O_i) + d(\text{centroid}(C), \text{corner}(C)) < d(\text{centroid}(C), O_j) $$
-    for all other objects $O_j$ [S1].
-    Here, $d(A, B)$ is the Euclidean distance.
+*   **Lipschitz Bound:** $L_{cell}$ satisfies $\|f(\mathbf{x}) - f(\mathbf{y})\| \le L_{cell} \|\mathbf{x} - \mathbf{y}\|$ for all $\mathbf{x}, \mathbf{y}$ in the cell [S1].
+*   **Closest Object Test (Optional):** An object $O_i$ is the closest object to a cell $C$ if $d(\text{centroid}(C), O_i) + d(\text{centroid}(C), \text{corner}(C)) < d(\text{centroid}(C), O_j)$ for all other objects $O_j$ [S1].
 
 **Parameters:**
-*   $L_{cell}$: Computed as $\max_{\mathbf{x} \in \text{cell}} \|\nabla f(\mathbf{x})\|$. Typical values depend on the SDF.
-*   $t_{max}$: Scene-dependent maximum ray length.
+*   $L_{cell}$: Computed as $\max_{\mathbf{x} \in \text{cell}} \|\nabla f(\mathbf{x})\|$ [S1].
+*   $t_{max}$: Scene-dependent maximum ray length [G].
 
 **Edge Cases and Pitfalls:**
-*   **No Closest Object:** Under the strict definition, some cells may not have a single closest object if the distances to multiple objects are equal or if the geometry is complex [S1].
-*   **Precision:** High gradient magnitudes require small $L_{cell}$ values, leading to small step sizes and potential performance degradation if the octree is not deep enough.
-*   **Boundary Conditions:** Ensure ray-node intersection tests handle grazing rays correctly to avoid infinite loops or missed intersections.
+*   **No Closest Object:** Under the strict definition, some cells may not have a single closest object if distances to multiple objects are equal or geometry is complex [S1].
+*   **Precision:** High gradient magnitudes require small $L_{cell}$ values, leading to small step sizes and potential performance degradation if the octree is not deep enough [G].
 
 ## Subtopics
 
@@ -73,15 +81,15 @@ The octree consists of nodes. Each `Branch` node contains references to 8 childr
 Accelerates sphere tracing by partitioning the domain into an octree where each cell stores a local Lipschitz bound of the field function. This allows the ray tracer to cull empty or fully interior nodes without evaluating the implicit surface, solving the problem of slow convergence in regions with high gradient magnitudes. It differs from Segment Tracing by using static cell bounds rather than dynamic segment-specific bounds, making it susceptible to field function queries at every cell intersection.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the depth of the octree and the distribution of the surface. In worst-case scenarios (high-frequency details), it approaches $O(N)$ where $N$ is the number of leaf nodes traversed. Best-case is $O(\log N)$ for sparse scenes.
-*   **Memory Complexity:** $O(N)$ to store the octree structure and Lipschitz constants.
-*   **Strengths:** Tighter bounds than global Lipschitz constants; efficient culling of empty space; compatible with any SDF as long as a local gradient bound can be computed.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Tighter bounds than global Lipschitz constants; efficient culling of empty space; compatible with any SDF as long as a local gradient bound can be computed [S1].
 *   **Limitations:** Requires pre-computation or dynamic construction of the octree; susceptible to field function queries at every cell intersection if not optimized; some cells may not have a closest object [S1].
-*   **When to Use:** Scenes with complex implicit surfaces where global bounds are too loose, leading to excessive sampling.
-*   **When Not to Use:** Simple scenes where global bounds are sufficient, or when dynamic scene updates make octree construction prohibitive.
+*   **When to Use:** Scenes with complex implicit surfaces where global bounds are too loose, leading to excessive sampling [G].
+*   **When Not to Use:** Simple scenes where global bounds are sufficient, or when dynamic scene updates make octree construction prohibitive [G].
 
 ## Background
-Octree partitioning for sphere tracing was introduced by Kalra and Barr in 1989 [S1]. It builds on the geometric method of sphere tracing, which uses the signed distance function to step along the ray. The key insight was that partitioning the domain allows the imposition of local bounds on the Lipschitz constants, yielding tighter signed distance bounds [S1]. This technique was also used in polygonization [Bloomenthal, 1989] and ray tracing [Kalra & Barr, 1989] of implicit surfaces.
+Octree partitioning for sphere tracing was introduced by Kalra and Barr in 1989 [S1]. It builds on the geometric method of sphere tracing, which uses the signed distance function to step along the ray. The key insight was that partitioning the domain allows the imposition of local bounds on the Lipschitz constants, yielding tighter signed distance bounds [S1]. This technique was also used in polygonization [Bloomenthal, 1989] and ray tracing [Kalra & Barr, 1989] of implicit surfaces [S1].
 
 ## Sources
 [S1] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27

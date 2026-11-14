@@ -3,180 +3,153 @@
 Also called: Basic Volumetric Rendering Atmosphere
 
 ## Overview
-Atmospheric Ray Marching is a technique for rendering planetary atmospheres by discretizing the Radiative Transfer Equation along view rays, utilizing single scattering approximation, exponential density falloff, and the Rayleigh phase function [S1, unofficial]. It distinguishes itself from general volume rendering by explicitly modeling the spherical geometry of a planet and its atmosphere, and from sibling methods like [Ray Marching with Single Scattering](2057-ray-marching-with-single-scattering.md) by incorporating specific astronomical parameters such as ozone absorption and scale height [S1, unofficial].
+Atmospheric Ray Marching is a technique for rendering planetary atmospheres using single scattering, exponential density falloff, and the Rayleigh phase function [S1, unofficial]. It solves the Radiative Transfer Equation (RTE) for a spherical atmosphere by marching along view rays and light rays to compute inscattered sunlight and shadowing [S1, unofficial]. It is distinguished from [Ray Marching with Single Scattering](2057-ray-marching-with-single-scattering.md) by its specific application to planetary spheres with analytical density profiles and its handling of shadow rays for occlusion [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Inputs**: Camera position $\mathbf{o}$, view direction $\mathbf{d}$, sun direction $\mathbf{s}$, planet radius $R_{planet}$, atmosphere radius $R_{atm}$, scale height $H$, and scattering/absorption coefficients.
-*   **Outputs**: Final pixel color $C_{out}$.
+**Inputs and Outputs:**
+*   **Inputs:** Camera position $\mathbf{o}$, direction $\mathbf{d}$, planet radius $R_{planet}$, atmosphere radius $R_{atm}$, sun direction $\mathbf{s}$, and physical coefficients (scattering, absorption).
+*   **Outputs:** Final pixel color $L_{out}$.
 
-**Data Structures**
-The method relies on uniform buffers for GPU execution [S1, unofficial]:
-1.  `cameraMatrices` (std140): Contains `viewMatrix`, `projectionMatrix`, and `cameraMatrix`.
-2.  `cameraUniforms` (std140): Contains `cameraPosition` (vec3), `cameraExposure` (float), and `cameraFOV` (float).
+**Data Structures:**
+*   **Uniforms:**
+    *   `cameraMatrices` (std140): Contains `viewMatrix`, `projectionMatrix`, `cameraMatrix` [S1, unofficial].
+    *   `cameraUniforms` (std140): Contains `cameraPosition` (vec3), `cameraExposure` (float), `cameraFOV` (float) [S1, unofficial].
+*   **Constants:**
+    *   `rayleigh`: vec3 $(5.802, 13.558, 33.1) \times 10^{-6}$ [S1, unofficial].
+    *   `ozone`: vec3 $(0.650, 1.881, 0.085) \times 3 \times 10^{-6}$ [S1, unofficial].
+    *   `sigmaS` (scattering coefficient): Equal to `rayleigh` [S1, unofficial].
+    *   `sigmaT` (extinction coefficient): Equal to `rayleigh` + `ozone` [S1, unofficial].
+    *   `STEPS_PRIMARY`: 32 [S1, unofficial].
+    *   `STEPS_LIGHT`: 32 [S1, unofficial].
+    *   `GAMMA`: 2.2 [S1, unofficial].
 
-**Parameters**
-*   `STEPS_PRIMARY`: 32 (steps for view ray) [S1, unofficial].
-*   `STEPS_LIGHT`: 32 (steps for light/shadow ray) [S1, unofficial].
-*   `GAMMA`: 2.2 (gamma correction) [S1, unofficial].
-*   `rayleigh`: vec3(5.802, 13.558, 33.1) * $10^{-6}$ [S1, unofficial].
-*   `ozone`: vec3(0.650, 1.881, 0.085) * $3 \times 10^{-6}$ [S1, unofficial].
-*   $\sigma_S$ (scattering coefficient): Equal to `rayleigh` [S1, unofficial].
-*   $\sigma_T$ (extinction coefficient): Equal to `rayleigh` + `ozone` [S1, unofficial].
+**Formulas:**
+*   **Rayleigh Phase Function:** $P(\theta) = \frac{3}{16\pi} (1 + \cos^2\theta)$, where $\theta$ is the scattering angle between the view direction and the sun direction [S1, unofficial].
+*   **Exponential Density Falloff:** $\rho(h) = e^{-h / H}$, where $h$ is the height above the planet surface and $H$ is the scale height [S1, unofficial].
+*   **Sphere Intersection:** For a ray $r(t) = \mathbf{o} + t\mathbf{d}$ and sphere radius $R$, solve $at^2 + bt + c = 0$ with $a=1$, $b=2\mathbf{o}\cdot\mathbf{d}$, $c=\mathbf{o}\cdot\mathbf{o}-R^2$. Roots are $t = \frac{-b \pm \sqrt{b^2-4ac}}{2a}$ [S1, unofficial].
 
-**Algorithm Steps**
+**Algorithm Steps:**
+1.  **Ray Direction:** Calculate the view ray direction $\mathbf{d}$ from fragment coordinates $(x, y)$ and resolution $res$:
+    $$ \mathbf{d} = \text{normalize}\left( \left( \frac{x}{res.x} - 0.5, \frac{y}{res.y} - 0.5, -z \right) \right) $$
+    where $z = \frac{0.5 \cdot res.y}{\tan(0.5 \cdot FOV)}$ [S1, unofficial].
+2.  **Intersect Atmosphere:** Compute the entry and exit points of the view ray with the atmosphere sphere ($R_{atm}$) and planet sphere ($R_{planet}$) using the quadratic formula [S1, unofficial]. Determine the valid segment $[t_{start}, t_{end}]$ for marching.
+3.  **Initialize Accumulators:** Set total transmittance $T_{total} = 1.0$ and accumulated radiance $L_{out} = 0$ [S1, unofficial].
+4.  **March View Ray:** Loop $i$ from 0 to $STEPS\_PRIMARY - 1$:
+    a.  Calculate step size $\Delta s = \frac{t_{end} - t_{start}}{STEPS\_PRIMARY}$.
+    b.  Compute current position $\mathbf{p} = \mathbf{o} + (t_{start} + i \cdot \Delta s) \mathbf{d}$.
+    c.  Compute height $h = \|\mathbf{p}\| - R_{planet}$.
+    d.  Evaluate density $\rho = e^{-h / H}$ [S1, unofficial].
+    e.  **Shadow Test:** Cast a shadow ray from $\mathbf{p}$ towards the sun $\mathbf{s}$. Intersect this ray with a sphere of radius $0.95 R_{planet}$ to determine if the point is in shadow. Using $0.95 R_{planet}$ avoids banding artifacts at sunset [S1, unofficial].
+    f.  **Inscattering Calculation:** If not in shadow:
+        i.  Compute optical depth to the sun $\tau_{light}$ by marching $STEPS\_LIGHT$ steps towards the sun, summing $\rho \cdot \Delta s_{light}$ [S1, unofficial].
+        ii. Compute inscattered radiance $L_{in} = S_{sun} C_{sun} e^{-\sigma_T \tau_{light}}$, where $S_{sun}$ is solar spectral irradiance and $C_{sun}$ is a constant [S1, unofficial].
+    g.  **Update Transmittance:** $T_{total} \leftarrow T_{total} \cdot e^{-\sigma_T \rho \Delta s}$ [S1, unofficial].
+    h.  **Accumulate:** $L_{out} \leftarrow L_{out} + T_{total} \cdot \sigma_S \cdot \rho \cdot P(\theta) \cdot L_{in} \cdot \Delta s$ [S1, unofficial].
+5.  **Gamma Correction:** Apply gamma correction to $L_{out}$ using `GAMMA` (typically 2.2) [S1, unofficial].
 
-1.  **Ray Setup**: Construct the view ray direction $\mathbf{d}$ from fragment coordinates $(x, y)$ and resolution $res$.
-    $$ z = \frac{0.5 \cdot res.y}{\tan(0.5 \cdot FOV)} $$
-    $$ \mathbf{d} = \text{normalize}((x - 0.5 \cdot res.x, y - 0.5 \cdot res.y, -z)) $$
-    [S1, unofficial].
-
-2.  **Sphere Intersection**: Determine the entry and exit points of the view ray through the atmosphere sphere ($R_{atm}$) and planet sphere ($R_{planet}$). Solve the quadratic equation $a t^2 + b t + c = 0$ where $a=1$, $b=2\mathbf{o}\cdot\mathbf{d}$, and $c=\mathbf{o}\cdot\mathbf{o}-R^2$. The roots are $\frac{-b \pm \sqrt{b^2-4ac}}{2a}$ [S1, unofficial].
-
-3.  **Initialize Accumulators**: Set total transmittance $T_{total} = 1.0$ and output radiance $L_{out} = 0$ [S1, unofficial].
-
-4.  **Marching Loop**: Iterate $i$ from 0 to `STEPS_PRIMARY` - 1:
-    a.  Calculate step size $\Delta s$ based on the distance between entry and exit points divided by `STEPS_PRIMARY`.
-    b.  Compute sample point $\mathbf{p} = \mathbf{o} + t_i \mathbf{d}$, where $t_i$ is the current distance along the ray.
-    c.  Calculate height $h$ of $\mathbf{p}$ above the planet surface.
-    d.  Evaluate density using exponential falloff:
-        $$ \rho(h) = e^{-h / H} $$
-        [S1, unofficial].
-    e.  **Shadow Test**: Determine if $\mathbf{p}$ is in shadow by casting a ray from $\mathbf{p}$ towards the sun $\mathbf{s}$. Intersect this light ray with a sphere of radius $0.95 R_{planet}$ to avoid banding artifacts [S1, unofficial].
-    f.  **Inscatter Calculation**: If not in shadow, calculate inscattered light $L_{in}$. This requires computing the optical depth $\tau_{light}$ from $\mathbf{p}$ to the sun by marching `STEPS_LIGHT` steps towards the sun, summing $\rho \Delta s$, and multiplying by $\sigma_T$. Then:
-        $$ L_{in} = S_{sun} C_{sun} e^{-\sigma_T \tau_{light}} $$
-        where $S_{sun}$ is solar spectral irradiance and $C_{sun}$ is sun color [S1, unofficial]. If in shadow, $L_{in} = 0$.
-    g.  **Phase Function**: Calculate scattering angle $\theta$ between $\mathbf{d}$ and $\mathbf{s}$. Compute Rayleigh phase function:
-        $$ P(\theta) = \frac{3}{16\pi} (1 + \cos^2\theta) $$
-        [S1, unofficial].
-    h.  **Update Transmittance**:
-        $$ T_{total} \leftarrow T_{total} \cdot e^{-\sigma_T \rho \Delta s} $$
-        [S1, unofficial].
-    i.  **Accumulate Radiance**:
-        $$ L_{out} \leftarrow L_{out} + T_{total} \cdot \sigma_S \cdot \rho \cdot P(\theta) \cdot L_{in} \cdot \Delta s $$
-        [S1, unofficial].
-
-5.  **Final Output**: Apply gamma correction and exposure to $L_{out}$ to produce the final pixel color [S1, unofficial].
-
-**Pseudocode**
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def atmospheric_ray_marching(camera_pos, camera_dir, sun_dir, resolution, fov, 
-                             R_planet, R_atm, H, sigma_S, sigma_T, S_sun, C_sun):
-    # 1. Ray Setup
-    z = (0.5 * resolution[1]) / tan(0.5 * fov)
-    frag_coord = get_fragment_coordinates() # (x, y)
-    ray_dir = normalize(vec3(frag_coord[0] - 0.5 * resolution[0], 
-                             frag_coord[1] - 0.5 * resolution[1], 
-                             -z))
+def atmospheric_ray_marching(camera_pos, camera_dir, sun_dir, planet_radius, atm_radius, scale_height):
+    # Constants
+    rayleigh = vec3(5.802, 13.558, 33.1) * 1e-6
+    ozone = vec3(0.650, 1.881, 0.085) * 3e-6
+    sigma_s = rayleigh
+    sigma_t = rayleigh + ozone
+    steps_primary = 32
+    steps_light = 32
+    gamma = 2.2
     
-    # 2. Sphere Intersection (Atmosphere)
-    a = 1.0
-    b = 2.0 * dot(camera_pos, ray_dir)
-    c = dot(camera_pos, camera_pos) - R_atm * R_atm
-    disc = b*b - 4*a*c
-    if disc < 0:
-        return vec3(0.0) # Missed atmosphere
+    # Ray direction from fragment coords (assuming normalized device coords -1 to 1)
+    # dir = normalize(vec3(ndc_x, ndc_y, -1.0 / tan(fov/2)))
+    dir = normalize(camera_dir)
     
-    sqrt_disc = sqrt(disc)
-    t_near = (-b - sqrt_disc) / (2.0 * a)
-    t_far = (-b + sqrt_disc) / (2.0 * a)
+    # Intersect with atmosphere and planet
+    # Solve quadratic for atm_radius and planet_radius
+    # Get t_start and t_end for the visible segment
+    t_start, t_end = intersect_spheres(camera_pos, dir, planet_radius, atm_radius)
     
-    # Ensure we start inside or at the boundary
-    if t_near < 0:
-        t_near = t_far
-        t_far = 0.0 # Should not happen for outside camera looking out, but handle edge
-    
-    # 3. Initialize
-    T_total = 1.0
-    L_out = vec3(0.0)
-    steps = 32 # STEPS_PRIMARY
-    step_size = (t_far - t_near) / steps
-    
-    # 4. Marching Loop
-    for i in range(steps):
-        t = t_near + (i + 0.5) * step_size
-        p = camera_pos + t * ray_dir
+    if t_end < t_start:
+        return vec3(0.0)
         
-        # Height above surface
-        h = length(p) - R_planet
-        if h < 0:
-            h = 0 # Inside planet, density might be handled differently or clamped
-            
-        # Density
-        rho = exp(-h / H)
+    delta_s = (t_end - t_start) / steps_primary
+    t_total_transmittance = 1.0
+    l_out = vec3(0.0)
+    
+    for i in range(steps_primary):
+        t = t_start + i * delta_s
+        p = camera_pos + dir * t
+        h = length(p) - planet_radius
+        rho = exp(-h / scale_height)
         
-        # Shadow Test
-        # Ray from p towards sun, intersect sphere 0.95 * R_planet
-        light_ray_o = p
-        light_ray_d = normalize(sun_dir)
-        a_l = 1.0
-        b_l = 2.0 * dot(light_ray_o, light_ray_d)
-        c_l = dot(light_ray_o, light_ray_o) - (0.95 * R_planet)**2
-        disc_l = b_l*b_l - 4*a_l*c_l
+        # Shadow test
+        in_shadow = is_in_shadow(p, sun_dir, planet_radius * 0.95, steps_light)
         
-        in_shadow = False
-        if disc_l >= 0:
-            sqrt_disc_l = sqrt(disc_l)
-            t_light_near = (-b_l - sqrt_disc_l) / (2.0 * a_l)
-            t_light_far = (-b_l + sqrt_disc_l) / (2.0 * a_l)
-            # If intersection is in front of p, it's in shadow
-            if t_light_near > 0 or t_light_far > 0:
-                in_shadow = True
-        
-        L_in = vec3(0.0)
+        l_in = vec3(0.0)
         if not in_shadow:
-            # Calculate optical depth to sun
-            tau_light = 0.0
-            light_steps = 32 # STEPS_LIGHT
-            light_step_size = 1000.0 # Arbitrary large distance or specific max height, source implies marching towards sun
-            # Note: Source [S1, unofficial] says "marching STEPS_LIGHT steps towards sun". 
-            # Implementation detail: usually integrates from p to top of atmosphere or infinity.
-            # Assuming integration along sun direction until density is negligible or fixed distance.
-            # For strict adherence to source notes which lack exact light ray bounds:
-            for j in range(light_steps):
-                p_light = p + j * light_step_size * light_ray_d
-                h_light = length(p_light) - R_planet
-                if h_light < 0: h_light = 0
-                rho_light = exp(-h_light / H)
-                tau_light += rho_light * light_step_size
+            tau_light = compute_optical_depth_to_sun(p, sun_dir, sigma_t, steps_light, scale_height, planet_radius)
+            # S_sun and C_sun are constants representing solar irradiance
+            l_in = solar_irradiance * exp(-sigma_t * tau_light)
             
-            L_in = S_sun * C_sun * exp(-sigma_T * tau_light)
-            
-        # Phase Function
-        cos_theta = dot(ray_dir, sun_dir)
-        P_theta = (3.0 / (16.0 * 3.14159265359)) * (1.0 + cos_theta * cos_theta)
+        # Phase function
+        cos_theta = dot(normalize(p), -sun_dir) # Approximation for scattering angle depending on geometry
+        # More accurately: angle between view direction and sun direction at the sample point
+        # P(theta) = 3/(16*pi) * (1 + cos^2(theta))
+        # theta is angle between -dir (view) and sun_dir? 
+        # Standard Rayleigh: angle between incident light and view direction.
+        # Incident light comes from sun_dir. View direction is -dir (looking back).
+        # So cos_theta = dot(-sun_dir, -dir) = dot(sun_dir, dir) ? 
+        # Actually, scattering angle is between incoming light direction and outgoing view direction.
+        # Incoming: -sun_dir. Outgoing: -dir.
+        # cos_theta = dot(-sun_dir, -dir) = dot(sun_dir, dir)
+        cos_theta = dot(sun_dir, dir)
+        phase = (3.0 / (16.0 * 3.14159265)) * (1.0 + cos_theta * cos_theta)
         
-        # Update Transmittance
-        T_total = T_total * exp(-sigma_T * rho * step_size)
+        # Update transmittance
+        t_total_transmittance *= exp(-sigma_t * rho * delta_s)
         
         # Accumulate
-        L_out = L_out + T_total * sigma_S * rho * P_theta * L_in * step_size
+        l_out += t_total_transmittance * sigma_s * rho * phase * l_in * delta_s
         
-    # 5. Final Output
-    # Apply gamma and exposure [G]
-    L_out = pow(L_out, vec3(1.0/2.2)) * exposure
-    return L_out
+    # Gamma correction
+    l_out = pow(l_out, vec3(1.0 / gamma))
+    
+    return l_out
+
+def is_in_shadow(point, sun_dir, shadow_radius, steps):
+    # Ray from point towards sun
+    ray_o = point
+    ray_d = sun_dir
+    # Intersect with sphere of radius shadow_radius
+    # If intersection distance > 0, it's in shadow (blocked by planet)
+    # Note: The source says "intersecting a light ray from sample point towards sun with a sphere... to avoid banding"
+    # If the ray hits the planet sphere, it is in shadow.
+    t_hit = intersect_sphere(ray_o, ray_d, shadow_radius)
+    return t_hit > 0.0
+
+def compute_optical_depth_to_sun(point, sun_dir, sigma_t, steps, scale_height, planet_radius):
+    tau = 0.0
+    delta_s = 1000.0 # Arbitrary large step or determined by geometry
+    # March towards sun
+    for i in range(steps):
+        p = point + sun_dir * (i * delta_s)
+        h = length(p) - planet_radius
+        rho = exp(-h / scale_height)
+        tau += rho * delta_s
+    return tau * sigma_t
 ```
 
-**Subtopics**
-*   **Ray Marching with Single Scattering**: Focuses on general volumetric single scattering without specific planetary geometry or atmospheric density models. Choose when rendering generic fog or clouds rather than a planet's sky. [Link](2057-ray-marching-with-single-scattering.md)
-*   **SDF Cloud Rendering**: Uses Signed Distance Fields for cloud geometry rather than exponential density falloff on a sphere. Choose when detailed cloud shapes are required over atmospheric scattering effects. [Link](2064-sdf-cloud-rendering.md)
-*   **Volume Ray Marching with Temporal Accumulation**: Adds temporal stability to the ray marching process. Choose when flickering artifacts in dynamic scenes are a concern. [Link](4804-volume-ray-marching-with-temporal-accumulation.md)
-
 ## Operating characteristics
-*   **Time Complexity**: $O(N \cdot M)$ per pixel, where $N$ is `STEPS_PRIMARY` and $M$ is `STEPS_LIGHT`. With default values (32 steps each), this is constant per pixel but expensive for high-resolution screens.
-*   **Memory Complexity**: $O(1)$ auxiliary memory per pixel, as it does not require storing a 3D texture or grid.
-*   **Performance**: The method is computationally intensive due to the nested loop for shadow testing (light ray marching) inside the view ray loop. It is suitable for real-time rendering on modern GPUs if step counts are kept low or if the resolution is reduced.
-*   **Strengths**: Physically plausible appearance for planetary atmospheres; simple implementation; no need for large texture maps.
-*   **Limitations**: Single scattering approximation ignores multiple scattering, leading to dark shadows and lack of haze in deep atmosphere. The exponential density model is a simplification.
-*   **When to use**: Real-time planetary skyboxes or simple atmospheric effects.
-*   **When not to use**: High-fidelity offline rendering requiring multiple scattering, or scenes with complex, non-spherical atmospheric layers.
+*   **Complexity:** Time complexity is $O(N \cdot M)$ per pixel, where $N$ is `STEPS_PRIMARY` and $M$ is `STEPS_LIGHT` [S1, unofficial]. Memory complexity is $O(1)$ per pixel as it does not store volumetric grids.
+*   **Performance:** The method is computationally expensive due to the nested ray marching (view ray and light ray) and exponential density calculations [S1, unofficial].
+*   **Strengths:** Physically plausible single scattering for planetary atmospheres; simple implementation; no precomputation required [S1, unofficial].
+*   **Limitations:** Single scattering approximation ignores multiple scattering, which can lead to inaccuracies in dense atmospheres or near the horizon [S1, unofficial]. Shadow banding artifacts are mitigated by using $0.95 R_{planet}$ but not eliminated entirely [S1, unofficial].
+*   **When to use:** Real-time rendering of planetary atmospheres where performance is critical and single scattering is sufficient [S1, unofficial].
+*   **When not to use:** Scenes requiring multiple scattering or high-fidelity cloud rendering [S1, unofficial].
 
 ## Background
-The method originates from the "Basic Volumetric Rendering" workshop at the Graphics Programming Conference in Breda, 2024, presented by al-ro [S1, unofficial]. It builds upon the foundational principles of volume rendering by applying them to the specific case of a spherical planetary atmosphere with a single light source (the sun).
+The method originates from the "Basic Volumetric Rendering" workshop at the Graphics Programming Conference in Breda, 2024 [S1, unofficial]. It is based on the repository `al-ro/volumetrics` [S1, unofficial]. The technique is a specific application of ray marching for atmospheric rendering, utilizing the Rayleigh phase function and exponential density profiles [S1, unofficial].
 
 ## Sources
 [S1] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)
