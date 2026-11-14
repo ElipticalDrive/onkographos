@@ -1,0 +1,346 @@
+--- v004.md
++++ v005.md
+@@ -4,193 +4,181 @@
+ 
+ ## Overview
+-Steerable Densification with Sampling is a density control method for 3D Gaussian Splatting that replaces heuristic thresholding with a score-based ranking system to select candidates for resampling [S1]. It differs from standard 3DGS densification by incorporating image loss and per-pixel saliency directly into the selection probability, allowing for a significantly reduced densification frequency (every 500 iterations) while maintaining high quality [S1].
++Steerable Densification with Sampling is a density control method for 3D Gaussian Splatting that replaces heuristic gradient thresholds with a learned, score-based ranking system to select candidates for resampling [S1]. Unlike sibling methods that split or clone based on fixed size and gradient magnitude thresholds, this method computes a composite score for each Gaussian using image loss, spatial metrics, and primitive attributes, then probabilistically samples new primitives from the high-scoring population [S1]. It is distinguished by its significantly reduced execution frequency (every 500 iterations) to prevent the duplication of misplaced Gaussians caused by high loss [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Set of $N$ camera views $V = \{v_i\}_{i=1}^N$ [S1].
+-*   Set of $M$ fitted Gaussians $G = \{g_j\}_{j=1}^M$ [S1].
+-*   Set of $N$ rendered views $R = \{r_i\}_{i=1}^N$ [S1].
+-*   Budgeted target number of Gaussians to add $B$ [S1].
+-*   Hyperparameters: $\lambda_1=0.5, \lambda_2=0.5$ for saliency; weights for scoring function parameters [S1].
++*   Set of $N$ training camera views $V = \{v_i\}_{i=1}^N$.
++*   Set of $M$ fitted 3D Gaussians $G = \{g_j\}_{j=1}^M$.
++*   Set of $N$ rendered views $R = \{r_i\}_{i=1}^N$.
++*   Current optimization state (loss, gradients, attributes).
++*   Hyperparameters: $\lambda_1=0.5, \lambda_2=0.5$ (saliency weights), $B$ (budgeted number of Gaussians to add), and scoring weights $w_{\nabla}=50, w_{c}=0.1, w_{D}=50, w_{S}=10, w_{B}=50, w_{z}=5, w_{o}=100, w_{s}=25$ [S1].
+ 
+ **Outputs:**
+-*   Updated set of Gaussians $G'$ with $B$ new primitives added via resampling [S1].
++*   Updated set of Gaussians $G'$ with $M + B$ primitives.
+ 
+ **Data Structures:**
+-*   **Saliency Matrix $S_v$**: A 2D matrix of size $H \times W$ (height $\times$ width) for each view $v$ [S1].
+-*   **Score Vector $S_G$**: A 1D vector of size $M$. $S_{g_j}$ is the accumulated score for Gaussian $g_j$ [S1].
++*   **Saliency Matrix $S_v$**: A 2D matrix of size $H \times W$ (image height and width) for each view $v$. Values are floating-point saliency scores.
++*   **Score Vector $S_G$**: A 1D vector of size $M$. $S_{G,j}$ is the scalar score for Gaussian $g_j$.
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Compute Per-View Saliency Matrices:**
+-    For each view $v \in V$:
+-    $$ S_v = \mathbb{1}_{ROI} \odot (\lambda_1 L_1(v, r_v) + \lambda_2 E(v)) $$
+-    Where:
+-    *   $\mathbb{1}_{ROI}$ is a binary mask (0 or 1) indicating regions of interest [S1].
+-    *   $L_1(v, r_v)$ is the L1 loss between the rendered view and the ground truth [S1].
+-    *   $E(v)$ is the Laplacian filter applied to the rendered view to detect high-frequency information [S1].
+-    *   $\odot$ denotes element-wise multiplication [S1].
++    For each view $v_i \in V$:
++    *   Calculate the L1 photometric loss map $L_1(v_i, r_i)$ between the rendered view and the ground truth.
++    *   Apply a Laplacian filter $E(v_i)$ to the rendered view to detect high-frequency details.
++    *   Define a binary Region of Interest (ROI) mask $\mathbb{1}_{ROI}$ (elements $\in \{0, 1\}$).
++    *   Compute the saliency matrix $S_{v_i}$:
++        $$ S_{v_i} = \mathbb{1}_{ROI} \odot (\lambda_1 L_1(v_i, r_i) + \lambda_2 E(v_i)) $$
++        where $\odot$ is element-wise multiplication [S1].
+ 
+-2.  **Compute Gaussian Scores:**
+-    For each Gaussian $g \in G$, compute its score $S_g$ by summing a scoring function $F$ over all $N$ views:
+-    $$ S_g = \sum_{i=1}^N F(\nabla_g, c_{gi}, \mathbb{1}_{gi}, D_{gi}, S_{vi}, B_{gi}, z_{gi}, o_g, s_g) $$
+-    The global score vector is $S_G = [S_{g_1}, \dots, S_{g_M}]^T$ [S1].
++2.  **Compute Gaussian Scores ($S_G$):**
++    For each Gaussian $g_j \in G$:
++    *   Initialize score $S_{g_j} = 0$.
++    *   For each view $v_i \in V$:
++        *   Identify the set of pixels covered by $g_j$ in view $i$. Let $\mathbb{1}_{g_{j,i}}$ be the binary mask of these pixels.
++        *   Extract per-pixel metrics for these pixels:
++            *   $D_{g_{j,i}}$: Distance of each pixel to the center of $g_j$.
++            *   $B_{g_{j,i}}$: Blending weight of $g_j$ for each pixel.
++            *   $z_{g_{j,i}}$: Depth of the pixel in view $i$.
++        *   Extract per-Gaussian attributes:
++            *   $\nabla_{g_j}$: Magnitude of the positional gradient.
++            *   $c_{g_j}$: Number of pixels covered by $g_j$ in view $i$.
++            *   $o_{g_j}$: Opacity of $g_j$.
++            *   $s_{g_j}$: Scale of $g_j$.
++        *   Evaluate the scoring function $F$:
++            $$ F(\dots) = \sum_{k \in \{\nabla, c, D, S, B, z, o, s\}} w_k \cdot \text{median\_scale}(val_k) \cdot L_1(v_i, r_i) $$
++            *Note: The source specifies that parameters are median-scaled to remove outliers and multiplied by the photometric loss before accumulation into a weighted sum [S1]. The specific mapping of attributes to weights is: $\nabla_g(50), c_g(0.1), D_g(50), S_{v_i}(10), B_{g_i}(50), z_{g_i}(5), o_g(100), s_g(25)$ [S1].*
++        *   Add the result of $F$ to $S_{g_j}$.
++    *   Store $S_{g_j}$ in $S_G$ [S1].
+ 
+-3.  **Resample Gaussians:**
+-    Randomly select $B$ primitives from the set $G$ using $S_G$ as sampling weights [S1]. The selected Gaussians are cloned or split (implementation detail of the underlying primitive operation, typically cloning at the same position with halved opacity/energy as per parent principles, though the source emphasizes the *selection* mechanism) to form the new set [S1].
++3.  **Resampling (Densification):**
++    *   Normalize $S_G$ to form a probability distribution.
++    *   Randomly sample $B$ indices from $G$ using $S_G$ as weights.
++    *   For each sampled Gaussian $g_{sample}$:
++        *   Create a new Gaussian $g_{new}$.
++        *   The method description states "randomly resampling B primitives... using SG as sampling weights" [S1]. It does not explicitly define the geometric transformation (clone vs. split) for the resampled primitives in the provided text, but implies they are new instances derived from the high-score population. [G: In standard 3DGS contexts, resampling usually implies cloning or splitting; however, without explicit formula, we assume the primitive is instantiated at the sampled Gaussian's position with its attributes, or potentially split if the score implies high error. Given the alias "Score-based ranking densification" and the lack of explicit split/clone logic in S1's excerpt, the implementation must rely on the specific instantiation logic of the parent method or the paper's full algorithm. *Correction*: The text says "resampling B primitives from all Gaussians". This typically means creating new Gaussians based on the distribution of the selected ones. We will assume a clone operation with potential perturbation if not specified, but strictly following S1, it is a resampling step.]
++    *   Add the $B$ new Gaussians to $G$ [S1].
+ 
+-**Scoring Function $F$:**
+-The function $F$ aggregates per-Gaussian and per-pixel metrics. Each parameter is median-scaled to remove outliers, multiplied by the photometric loss, and accumulated with specific weights [S1]:
+-$$ F = w_{\nabla} \cdot \text{scale}(\nabla_g) + w_{c} \cdot \text{scale}(c_{gi}) + w_{D} \cdot \text{scale}(D_{gi}) + w_{S} \cdot \text{scale}(S_{vi}) + w_{B} \cdot \text{scale}(B_{gi}) + w_{z} \cdot \text{scale}(z_{gi}) + w_{o} \cdot \text{scale}(o_g) + w_{s} \cdot \text{scale}(s_g) $$
+-
+-**Parameters and Weights:**
+-*   $\nabla_g$: Magnitude of the positional gradient (Weight: 50). Acts as a 3D discontinuity detector [S1].
+-*   $c_{gi}$: Number of pixels covered by $g$ in view $i$ (Weight: 0.1) [S1].
+-*   $\mathbb{1}_{gi}$: Binary matrix indicating pixels covered by $g$ (Used in context of $c_{gi}$ or $D_{gi}$) [S1].
+-*   $D_{gi}$: Matrix of distances from each pixel to the center of $g$ (Weight: 50) [S1].
+-*   $S_{vi}$: Saliency value at the pixel location in view $i$ (Weight: 10) [S1].
+-*   $B_{gi}$: Blending weight of $g$ for each pixel (Weight: 50) [S1].
+-*   $z_{gi}$: Depth of $g$ in view $i$ (Weight: 5) [S1].
+-*   $o_g$: Opacity of $g$ (Weight: 100) [S1].
+-*   $s_g$: Scale of $g$ (Weight: 25) [S1].
++**Parameters:**
++*   **Densification Frequency:** Every 500 iterations (one-fifth of the standard 3DGS frequency) [S1].
++*   **Training Views for Saliency:** $N=10$ uniformly sampled training views are used to compute per-pixel saliency scores [S1].
++*   **Saliency Weights:** $\lambda_1 = 0.5, \lambda_2 = 0.5$ [S1].
++*   **Scoring Weights:** $\nabla_g: 50, c_g: 0.1, D_g: 50, S_{v_i}: 10, B_{g_i}: 50, z_{g_i}: 5, o_g: 100, s_g: 25$ [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import random
++def steerable_densification(Gaussians, Views, Rendered_Views, Ground_Truth, B, Iteration):
++    # Only execute every 500 iterations
++    if Iteration % 500 != 0:
++        return Gaussians
+ 
+-def median(values):
+-    if not values: return 0.0
+-    s = sorted(values)
+-    n = len(s)
+-    mid = n // 2
+-    return s[mid] if n % 2 == 1 else (s[mid-1] + s[mid]) / 2.0
++    # 1. Compute Saliency Matrices for N views
++    # Note: Source uses N=10 views for this step
++    Saliency_Matrices = []
++    for i in range(10):
++        v = Views[i]
++        r = Rendered_Views[i]
++        gt = Ground_Truth[i]
++        
++        # L1 Loss
++        L1_loss = abs(r - gt)
++        
++        # Laplacian Filter (simplified as high-pass)
++        E = apply_laplacian_filter(r)
++        
++        # ROI Mask (binary)
++        ROI = get_roi_mask()
++        
++        # Saliency Matrix
++        Sv = ROI * (0.5 * L1_loss + 0.5 * E)
++        Saliency_Matrices.append(Sv)
+ 
+-def weighted_sample(population, weights, k):
+-    total = sum(weights)
+-    if total <= 0: return random.sample(range(len(population)), min(k, len(population)))
+-    selected = []
+-    indices = list(range(len(population)))
+-    for _ in range(min(k, len(population))):
+-        r = random.uniform(0, total)
+-        cum = 0.0
+-        for idx in indices:
+-            cum += weights[idx]
+-            if cum >= r:
+-                selected.append(idx)
+-                indices.remove(idx)
+-                total -= weights[idx]
+-                break
+-    return selected
++    # 2. Compute Gaussian Scores
++    Scores = []
++    for g in Gaussians:
++        g_score = 0.0
++        
++        # Accumulate score over the 10 views
++        for i in range(10):
++            Sv = Saliency_Matrices[i]
++            v = Views[i]
++            r = Rendered_Views[i]
++            gt = Ground_Truth[i]
++            L1_val = mean(L1_loss) # Or specific pixel loss? Source says "multiplied by i's photometric loss"
++            
++            # Get pixels covered by g in view i
++            covered_pixels = get_covered_pixels(g, v)
++            if not covered_pixels:
++                continue
++                
++            # Extract metrics for covered pixels
++            # D_g: distance to center
++            D_g = get_distance_to_center(g, covered_pixels)
++            # B_g: blending weight
++            B_g = get_blending_weight(g, covered_pixels)
++            # z_g: depth
++            z_g = get_depth(covered_pixels)
++            
++            # Per-Gaussian attributes
++            grad_mag = get_gradient_magnitude(g)
++            pixel_count = len(covered_pixels)
++            opacity = g.opacity
++            scale = g.scale
++            
++            # Median scaling to remove outliers (simplified: normalize by median of all values for this metric)
++            # In practice, this requires global medians computed beforehand
++            median_grad = get_global_median('grad')
++            median_scale = get_global_median('scale')
++            # ... other medians ...
++            
++            # Weighted sum
++            # Note: Source says "multiplied by photometric loss before accumulation"
++            # We use the mean L1 loss for the view as the multiplier
++            loss_multiplier = mean(L1_loss)
++            
++            term_grad = 50 * (grad_mag / median_grad) * loss_multiplier
++            term_c = 0.1 * (pixel_count / get_global_median('count')) * loss_multiplier
++            term_D = 50 * (mean(D_g) / get_global_median('dist')) * loss_multiplier
++            term_S = 10 * mean(Sv[covered_pixels]) # S_vi is the saliency value
++            term_B = 50 * (mean(B_g) / get_global_median('blend')) * loss_multiplier
++            term_z = 5 * (mean(z_g) / get_global_median('depth')) * loss_multiplier
++            term_o = 100 * (opacity / get_global_median('opacity')) * loss_multiplier
++            term_s = 25 * (scale / median_scale) * loss_multiplier
++            
++            g_score += term_grad + term_c + term_D + term_S + term_B + term_z + term_o + term_s
++            
++        Scores.append(g_score)
+ 
+-def compute_view_aggregates(g, view, S_v):
+-    # Simulates auxiliary rendering pass: projects Gaussian to view,
+-    # returns pixel count (c), mean distance (D), mean blending weight (B),
+-    # mean depth (z), and list of saliency values (S_vals) over covered pixels.
+-    # Implementation details depend on the specific rasterizer.
+-    return 10, 1.5, 0.8, 5.0, [0.5, 0.6, 0.4]
+-
+-def steerable_densification(Gaussians, Views, Rendered_Views, Ground_Truth_Views, Budget_B, ROI_Masks=None):
+-    M = len(Gaussians)
+-    N = len(Views)
+-    if ROI_Masks is None:
+-        ROI_Masks = [[1.0] * len(Rendered_Views[0][0]) for _ in range(len(Rendered_Views[0]))]
+-
+-    # Step 1: Compute Per-View Saliency Matrices
+-    saliency_matrices = []
+-    view_losses = []
+-    for i in range(N):
+-        r_v = Rendered_Views[i]
+-        gt_v = Ground_Truth_Views[i]
+-        roi = ROI_Masks[i] if i < len(ROI_Masks) else [[1.0] * len(r_v[0]) for _ in range(len(r_v))]
+-        h, w = len(r_v), len(r_v[0])
+-        # L1 loss
+-        l1 = [[abs(r_v[y][x] - gt_v[y][x]) for x in range(w)] for y in range(h)]
+-        # Laplacian filter (3x3)
+-        E_v = [[0.0]*w for _ in range(h)]
+-        for y in range(1, h-1):
+-            for x in range(1, w-1):
+-                E_v[y][x] = r_v[y-1][x] + r_v[y+1][x] + r_v[y][x-1] + r_v[y][x+1] - 4*r_v[y][x]
+-        # S_v = 1_ROI * (0.5 * L1 + 0.5 * E)
+-        lambda1, lambda2 = 0.5, 0.5
+-        S_v = [[roi[y][x] * (lambda1 * l1[y][x] + lambda2 * E_v[y][x]) for x in range(w)] for y in range(h)]
+-        saliency_matrices.append(S_v)
+-        view_losses.append(sum(sum(row) for row in l1) / (h * w))
+-
+-    # Step 2: Compute Gaussian Scores
+-    raw_grads = [abs(g.grad_p) for g in Gaussians]
+-    raw_opacities = [g.opacity for g in Gaussians]
+-    raw_scales = [g.scale_norm for g in Gaussians]
+-    raw_c, raw_D, raw_B, raw_z, raw_S = [], [], [], [], []
+-
+-    # Auxiliary rendering pass to gather per-view aggregates for each Gaussian
+-    for i in range(N):
+-        S_v = saliency_matrices[i]
+-        for g in Gaussians:
+-            c_ij, D_ij, B_ij, z_ij, S_vals = compute_view_aggregates(g, Views[i], S_v)
+-            raw_c.append(c_ij)
+-            raw_D.append(D_ij)
+-            raw_B.append(B_ij)
+-            raw_z.append(z_ij)
+-            raw_S.extend(S_vals)
+-
+-    med_grad = median(raw_grads)
+-    med_c = median(raw_c)
+-    med_D = median(raw_D)
+-    med_B = median(raw_B)
+-    med_z = median(raw_z)
+-    med_S = median(raw_S)
+-    med_o = median(raw_opacities)
+-    med_s = median(raw_scales)
+-
+-    w_grad, w_c, w_D, w_S, w_B, w_z, w_o, w_s = 50, 0.1, 50, 10, 50, 5, 100, 25
+-    scores = [0.0] * M
+-
+-    for j, g in enumerate(Gaussians):
+-        score = 0.0
+-        s_grad = abs(g.grad_p) / med_grad if med_grad != 0 else 0.0
+-        s_o = g.opacity / med_o if med_o != 0 else 0.0
+-        s_s = g.scale_norm / med_s if med_s != 0 else 0.0
+-
+-        for i in range(N):
+-            S_v = saliency_matrices[i]
+-            c_ij, D_ij, B_ij, z_ij, S_vals = compute_view_aggregates(g, Views[i], S_v)
+-            mean_S = sum(S_vals) / len(S_vals) if S_vals else 0.0
+-
+-            s_c = c_ij / med_c if med_c != 0 else 0.0
+-            s_D = D_ij / med_D if med_D != 0 else 0.0
+-            s_B = B_ij / med_B if med_B != 0 else 0.0
+-            s_z = z_ij / med_z if med_z != 0 else 0.0
+-            s_S = mean_S / med_S if med_S != 0 else 0.0
+-
+-            F_i = (w_grad * s_grad + w_c * s_c + w_D * s_D + w_S * s_S +
+-                   w_B * s_B + w_z * s_z + w_o * s_o + w_s * s_s)
+-            score += F_i * view_losses[i]
+-        scores[j] = score
+-
+-    # Step 3: Resample
+-    selected_indices = weighted_sample(Gaussians, scores, Budget_B)
+-    new_gaussians = []
+-    for idx in selected_indices:
+-        g = Gaussians[idx]
+-        g_new = Gaussian(pos=g.pos, scale=g.scale, opacity=g.opacity / 2.0, rotation=g.rotation, features=g.features, grad_p=g.grad_p)
+-        new_gaussians.append(g_new)
+-    return Gaussians + new_gaussians
++    # 3. Resampling
++    # Normalize scores to probabilities
++    Probabilities = softmax(Scores)
++    
++    # Sample B indices
++    Indices = random_multinomial(Probabilities, B)
++    
++    New_Gaussians = []
++    for idx in Indices:
++        source_g = Gaussians[idx]
++        # Create new Gaussian. 
++        # Source implies "resampling". 
++        # [G: Standard implementation clones the position/scale/rotation but may perturb or keep identical. 
++        # Given "score-based ranking", it selects high-error Gaussians. 
++        # We assume a clone operation to add density, as splitting is handled by other methods or implicit in "densification".]
++        new_g = clone_gaussian(source_g)
++        New_Gaussians.append(new_g)
++        
++    return Gaussians + New_Gaussians
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Zero Median:** If the median of a parameter is zero, scaling is undefined. The pseudocode handles this by returning 0 [G].
+-*   **High Opacity:** The source notes that high-opacity Gaussians (opacities > 1) can boost modeling of opaque surfaces and should be handled, potentially by conversion to clamped Gaussians [S1].
+-*   **Frequency:** Densification occurs every 500 iterations. Frequent densification with loss guidance can cause repeated duplication of misplaced Gaussians [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Adds an extra $O(N \times \text{width} \times \text{height})$ step for computing all $N$ saliency matrices $S_v$, plus an auxiliary rendering pass to obtain $S_G$ [S1].
+-*   **Memory Complexity:** Requires storing $N$ saliency matrices of size $H \times W$ and intermediate projection data for all Gaussians across all views during the scoring phase [G].
+-*   **Performance:** Allows for high-quality radiance fields with limited resources (fewer Gaussians) by steering densification towards salient areas [S1].
+-*   **Strengths:** Interpretable, customizable sampling; reduces wasteful Gaussians compared to pure gradient-based methods; handles high-frequency details via Laplacian filter [S1].
+-*   **Limitations:** Higher computational overhead per densification step due to saliency computation and auxiliary rendering pass; requires careful tuning of weights [S1].
++*   **Memory Complexity:** Requires storing $N$ saliency matrices of size $H \times W$ and the score vector $S_G$ of size $M$ [S1].
++*   **Strengths:** Interpretable and steerable; incorporates image loss directly to guide densification; reduces wasteful behavior and superfluous Gaussians by using a lower frequency [S1].
++*   **Limitations:** Higher computational overhead per densification step due to saliency matrix computation; requires careful tuning of scoring weights [S1].
++*   **When to use:** When high-quality radiance fields are needed with limited resources and interpretability is desired; when standard gradient-based densification produces too many Gaussians or duplicates misplaced ones [S1].
+ 
+ ## Background
+-Steerable Densification with Sampling was introduced in "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" (2024) [S1]. It addresses the issue of wasteful densification in standard 3D Gaussian Splatting by incorporating image loss and saliency into the selection process, allowing for a reduced densification frequency [S1].
++Steerable Densification with Sampling was introduced in the paper "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" [S1]. It addresses the issue that frequent densification in 3D Gaussian Splatting can cause repeated duplication of misplaced Gaussians if guided solely by loss [S1]. The method reduces the densification frequency to one-fifth of the original 3DGS schedule (every 500 iterations) to allow the optimizer time to correct misplaced primitives before densification occurs [S1].
+ 
+ ## Sources

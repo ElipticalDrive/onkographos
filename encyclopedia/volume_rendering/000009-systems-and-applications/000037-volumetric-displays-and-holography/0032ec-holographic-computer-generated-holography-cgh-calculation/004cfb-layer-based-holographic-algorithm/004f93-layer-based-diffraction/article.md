@@ -1,0 +1,196 @@
+# Layer-based diffraction
+
+Also called: FFT-based holographic computation, Layer-based CGH Calculation, Layer-based hologram generation, Layer-based holographic rendering method, Layer-based method
+
+## Overview
+Layer-based diffraction computes left and right holograms by numerically propagating light waves from compensated depth layers towards the hologram plane and summing them [S1]. It generates high-quality holographic patterns for a Spatial Light Modulator (SLM) from RGB-D 3D scene data by computing optical field distributions on the eye lens plane using 2D Inverse Fast Fourier Transforms (IFFTs) [S2]. It is distinguished from sibling methods by its specific reliance on 2D IFFTs for both the optical field distribution and hologram pattern computations, enabling high-resolution binocular color holography on hardware accelerators [S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** RGB-D 3D image data representing the 3D image projected onto the viewer's retina plane [S2]. The data format is Red, Green, Blue, and Depth [S2].
+*   **Output:** A single combined hologram pattern for the SLM, derived from left and right eye images [S2].
+
+**Data Structures**
+*   **Complex Numbers:** Stored in memory using exactly 32 bits [S2].
+*   **Number Representation:** Fixed-point number representation is used for all data processing and IFFT multiplications [S2].
+*   **Hologram Levels:** The amplitude-only hologram is quantized onto $L=256$ discrete levels [S1].
+
+**Steps**
+1.  **Receive Input:** Obtain the RGB-D 3D image data from rendering software or a 3D camera [S2].
+2.  **Compute Optical Field:** Compute the optical field distribution on the eye lens plane from the retina plane image [S2]. This step involves propagating light waves from the retina plane to the eye lens plane.
+3.  **Compute Hologram Patterns:** Compute the holographic patterns to be applied to the SLM from the eye lens plane distributions [S2].
+4.  **Execute 2D IFFTs:** Perform 2D IFFT computations for the field distribution and pattern computations [S2]. The 2D IFFTs are computed using the row-column method, where 1-D IFFTs are performed on rows and then columns [S2].
+5.  **Process Binocular Images:** Process right and left eye images simultaneously [S2].
+6.  **Combine:** Combine the two eye images into a single hologram [S2].
+7.  **Quantize:** Obtain the amplitude-only hologram $H$ by shifting, scaling, and quantizing the real part of the complex-valued object wave $O$ onto $L=256$ discrete levels [S1].
+
+**Formulas**
+The complex-valued object wave $O(x, y; c)$ is the sum of propagated waves from $N_z$ compensated depth layers:
+$$
+O(x, y; c) = \sum_{i=0}^{N_z-1} P_{\hat{z}_i} \{ U_i \} (x, y; c)
+$$
+where $c$ is the color channel [S1].
+
+The propagation of a layer $U_i$ from depth $\hat{z}_i$ is given by the Fourier transform:
+$$
+P_{\hat{z}_i} \{ U_i \} = \frac{\exp(j \lambda_c \hat{z}_i)}{j \lambda_c \hat{z}_i} \mathcal{F} \left\{ U_i(\xi, \eta; c) \exp\left( \frac{j \pi (\xi^2 + \eta^2)}{\lambda_c \hat{z}_i} \right) \exp\left( -\frac{j \pi (x^2 + y^2)}{\lambda_c \hat{z}_i} \right) \right\}
+$$
+where:
+*   $\lambda_c$ is the wavelength of color channel $c$ [S1].
+*   $\mathcal{F}$ is the forward Fourier transform [S1].
+*   $\hat{z}_i$ is the intermediate compensated layer depth [S1].
+*   $U_i(\xi, \eta; c)$ is the field at the layer [S1].
+
+The final amplitude-only hologram $H$ is:
+$$
+H(x, y; c) = Q(\Re \{ O(x, y; c) \}, L, \Delta)
+$$
+where $\Re \{ O \}$ is the real part of the object wave, $L=256$ is the number of discrete levels, and $Q$ represents the quantization operation [S1].
+
+**Parameters**
+*   **Output Resolution:** 3840 × 2160 pixels [S2].
+*   **Refresh Rate:** 30 frames per second (fps) [S2].
+*   **Quantization Levels:** $L = 256$ [S1].
+
+**Pitfalls**
+*   **Hardware Complexity:** FFT-based layer methods are traditionally unsuitable for CGH hardware accelerators because large-scale FFT processors are difficult to build [S2]. This implementation overcomes that using a highly parallel architecture and hardware-reducing techniques [S2].
+*   **Precision:** Fixed-point arithmetic is used to minimize bit depth, requiring careful management of precision to avoid artifacts in the IFFT multiplications [S2].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def layer_based_diffraction(rgb_d_data, retina_plane_image, eye_lens_params, slm_params):
+    """
+    Computes hologram from RGB-D data using layer-based diffraction.
+    
+    Args:
+        rgb_d_data: 3D image data in RGB-D format.
+        retina_plane_image: Image projected onto the viewer's retina plane.
+        eye_lens_params: Parameters for the eye lens plane calculation.
+        slm_params: Parameters for the SLM.
+        
+    Returns:
+        combined_hologram: Single combined hologram for left and right eyes.
+    """
+    # Step 1: Receive Input
+    # Input is already in RGB-D format as per specification [S2]
+    
+    # Step 2 & 3: Compute Optical Field and Hologram Patterns using 2D IFFTs
+    # Process Right Eye
+    right_eye_lens_field = compute_optical_field_on_lens(retina_plane_image, eye_lens_params, eye='right')
+    right_eye_hologram = compute_slm_pattern(right_eye_lens_field, slm_params)
+    
+    # Process Left Eye
+    left_eye_lens_field = compute_optical_field_on_lens(retina_plane_image, eye_lens_params, eye='left')
+    left_eye_hologram = compute_slm_pattern(left_eye_lens_field, slm_params)
+    
+    # Step 4: Execute 2D IFFTs (Row-Column Method)
+    # Note: The core propagation and pattern computation rely on 2D IFFTs [S2]
+    # The specific propagation formula is applied within compute_optical_field_on_lens
+    
+    # Step 5 & 6: Combine
+    combined_hologram = combine_holograms(right_eye_hologram, left_eye_hologram)
+    
+    # Step 7: Quantize
+    # Quantize the real part of the object wave to 256 levels [S1]
+    final_hologram = quantize_hologram(combined_hologram, levels=256)
+    
+    return final_hologram
+
+def compute_optical_field_on_lens(retina_image, params, eye):
+    """
+    Computes optical field distribution on the eye lens plane from the retina plane image.
+    Uses layer-based diffraction propagation [S1].
+    """
+    # Initialize complex field
+    field = 0.0
+    
+    # Sum over N_z layers
+    for i in range(N_z):
+        # Get layer data U_i from retina image based on depth [S1]
+        U_i = get_layer_data(retina_image, i)
+        
+        # Propagate using Fourier Transform [S1]
+        # P_zi{Ui} = (exp(j*lambda_c*z_hat_i) / (j*lambda_c*z_hat_i)) * F{...}
+        # Note: The exact implementation of F (FFT) is handled by the hardware IFFT processors [S2]
+        propagated_layer = propagate_layer(U_i, params.lambda_c, params.z_hat_i)
+        
+        field += propagated_layer
+        
+    return field
+
+def propagate_layer(U_i, lambda_c, z_hat_i):
+    """
+    Propagates a single layer using the diffraction formula [S1].
+    """
+    # Pre-computation factors
+    phase_factor = exp(j * lambda_c * z_hat_i) / (j * lambda_c * z_hat_i)
+    
+    # Apply quadratic phase factors before FFT [S1]
+    # exp(j * pi * (xi^2 + eta^2) / (lambda_c * z_hat_i))
+    # exp(-j * pi * (x^2 + y^2) / (lambda_c * z_hat_i))
+    # Note: Coordinates xi, eta, x, y are handled by the FFT input/output mapping
+    
+    # Apply phase modulation to U_i
+    modulated_U_i = U_i * exp(j * pi * (xi**2 + eta**2) / (lambda_c * z_hat_i)) * exp(-j * pi * (x**2 + y**2) / (lambda_c * z_hat_i))
+    
+    # Forward Fourier Transform (implemented via IFFT hardware with conjugation/shift if necessary)
+    fft_result = forward_fourier_transform(modulated_U_i)
+    
+    return phase_factor * fft_result
+
+def compute_slm_pattern(lens_field, slm_params):
+    """
+    Computes holographic patterns for the SLM from the eye lens optical field distributions [S2].
+    """
+    # Convert complex number to integer using fixed-point representation [S2]
+    # Pixel encoding is performed here
+    pattern = pixel_encode(lens_field)
+    return pattern
+
+def combine_holograms(right_hologram, left_hologram):
+    """
+    Combines the two eye images into a single hologram [S2].
+    """
+    # Implementation detail: Specific combination method (e.g., interleaving) is not detailed in sources [S2]
+    # [G] Assuming simple superposition or interleaving based on standard binocular CGH practices
+    return right_hologram + left_hologram
+
+def quantize_hologram(hologram, levels=256):
+    """
+    Quantizes the hologram to L discrete levels [S1].
+    """
+    # Shift, scale, and quantize the real part of O [S1]
+    real_part = real(hologram)
+    # Q(Re{O}, L, Delta)
+    quantized = quantize(real_part, levels)
+    return quantized
+```
+
+## Subtopics
+
+### Hardware Acceleration
+A single-chip FPGA implementation achieves 3840 × 2160 resolution at 30 fps for binocular colour holographic images [S2]. It uses a highly parallel architecture and hardware-reducing techniques to overcome the traditional difficulty of building large-scale FFT processors [S2].
+
+### Binocular Processing
+The method processes right and left eye images simultaneously and combines them into a single hologram [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Complex numbers are stored using exactly 32 bits [S2]. Fixed-point representation is used to minimize bit depth [S2].
+*   **Measured Performance:** A single-chip FPGA implementation generates binocular holographic colour images with 3840 × 2160 pixels at 30 fps [S2]. Scenes with 8 million voxels are rendered at 30 fps [S2].
+*   **Scaling:** The method is implemented on a single-chip FPGA, suggesting scalability through parallel architecture [S2].
+*   **Strengths:** Generates high-quality holograms for real scenes [S2]. Enables real-time embedded rendering [S1].
+*   **Limitations:** Historically, FFT-based layer methods were considered unsuitable for CGH hardware accelerators due to the difficulty of building large-scale FFT processors [S2].
+*   **When to use:** When high-quality binocular color holography is required for real scenes, and hardware acceleration via FPGA is available [S2].
+*   **When not:** When computational resources are limited to CPUs without specialized FFT hardware, as large-scale FFT processors are difficult to build [S2].
+
+## Background
+*   **Origin:** The method is used in holographic near-eye displays and slim-panel holographic video displays [S1, S2].
+*   **History:** Layer-based methods using FFTs were traditionally considered unsuitable for CGH hardware accelerators because FFT processors were difficult to build in large scale [S2]. Recent implementations have overcome this using highly parallel architectures [S2].
+*   **Usage:** Implemented in a single-chip FPGA holographic video processor [S2]. Used to calculate CGH from Unity-rendered 3D scenes [S2].
+
+## Sources
+[S1] Holographic Near-eye Display with Real-time Embedded Rendering, https://doi.org/10.1145/3610548.3618179, fetched 2026-10-28
+[S2] Slim-panel holographic video display, https://doi.org/10.1038/s41467-020-19298-4, fetched 2026-10-26

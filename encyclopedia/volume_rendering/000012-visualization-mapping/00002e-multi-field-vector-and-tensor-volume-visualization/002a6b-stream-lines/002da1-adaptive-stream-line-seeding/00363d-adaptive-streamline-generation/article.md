@@ -3,119 +3,97 @@
 Also called: Adaptive Line Extension, Streamline Subdivision
 
 ## Overview
-Adaptive Streamline Generation is an iterative CUDA-based algorithm that generates streamlines by recursively extending existing lines and seeding new ones based on flow divergence [S1, unofficial]. It differs from static seeding by dynamically refining the visualization in turbulent or vortex regions while maintaining sparsity in laminar areas, building on the principles of [Adaptive Stream Line Seeding](5604-adaptive-stream-line-seeding.md).
+An iterative algorithm to generate streamlines by starting with a fixed number of seeds, extending them via CUDA kernels, and recursively adding new seeds based on the endpoints of previously generated lines until a maximum number of adaptive steps is reached or no new lines are generated [S1, unofficial].
 
 ## How it works
-**Inputs:** Vector field data, initial seed points (`m_startPt`, `m_endPt`), maximum number of adaptive steps (`m_maxAdaptiveSteps`), and maximum adaptive distance (`m_maxAdaptiveDistance`).
-**Outputs:** A set of streamlines represented as vertex buffers.
+**Inputs:** Vector field data, initial seed points (`m_startPt`, `m_endPt`), maximum number of adaptive steps (`m_maxAdaptiveSteps`), maximum adaptive distance (`m_maxAdaptiveDistance`), time step (`m_dt`), integration method flag (`m_useRk4`), maximum samples (`m_maxSamples`), line width (`m_lineWidth`), tube rendering flag (`m_useTubes`), and tube radius (`m_tubeRadius`) [S1, unofficial].
+**Outputs:** A set of streamlines represented as vertex buffers [S1, unofficial].
 
 **Data Structures:**
-*   `m_h_seeds`: Host array of seed points.
-*   `m_d_seeds`: Device array of seed points.
-*   `m_h_ptCounts`: Host array tracking the number of vertices per line.
-*   `m_d_ptCounts`: Device array tracking the number of vertices per line.
-*   `d_inLinePairs`: Device array of `uint2` storing pairs of line indices to extend. Size: `m_linesCount`.
-*   `d_outLinePairs`: Device array of `uint2` storing new line pairs generated in the current step. Size: `m_linesCount`.
-*   `d_vertices`: Device array of vertices for all lines.
-*   `d_outLinesIndex`: Device pointer to the current index in the vertex buffer for new lines.
-*   `d_outLinePairsIndex`: Device pointer to the current index in the line pair buffer for new pairs.
+* `m_h_seeds`: Host array of seed points [S1, unofficial].
+* `m_d_seeds`: Device array of seed points [S1, unofficial].
+* `m_h_ptCounts`: Host array tracking the number of vertices per line [S1, unofficial].
+* `m_d_ptCounts`: Device array tracking the number of vertices per line [S1, unofficial].
+* `d_inLinePairs`: Device array of `uint2` storing pairs of line indices to extend. Size: `m_linesCount` [S1, unofficial].
+* `d_outLinePairs`: Device array of `uint2` storing new line pairs generated in the current step. Size: `m_linesCount` [S1, unofficial].
+* `d_vertices`: Device array of vertices for all lines [S1, unofficial].
+* `d_outLinesIndex`: Device pointer to the current index in the vertex buffer for new lines [S1, unofficial].
+* `d_outLinePairsIndex`: Device pointer to the current index in the line pair buffer for new pairs [S1, unofficial].
 
 **Parameters:**
-*   `m_maxAdaptiveSteps`: Maximum number of adaptive iterations allowed [S1, unofficial].
-*   `m_maxAdaptiveDistance`: Maximum distance parameter passed to the adaptive extension kernel [S1, unofficial].
-*   `m_dt`: Time step for integration [S1, unofficial].
-*   `m_useRk4`: Boolean flag indicating whether to use Runge-Kutta 4th order integration [S1, unofficial].
-*   `verticesPerSample`: Number of vertices per sample point (e.g., for tube rendering) [S1, unofficial].
-*   `verticesPerLine`: Total vertices per line, calculated based on max samples and `verticesPerSample` [S1, unofficial].
+* `m_maxAdaptiveSteps`: Maximum number of adaptive iterations allowed for streamline generation [S1, unofficial].
+* `m_maxAdaptiveDistance`: Maximum distance parameter passed to the adaptive extension kernel [S1, unofficial].
+* `m_dt`: Time step for integration [S1, unofficial].
+* `m_useRk4`: Boolean flag indicating whether to use Runge-Kutta 4th order integration [S1, unofficial].
+* `verticesPerSample`: Number of vertices per sample point (e.g., for tube rendering) [S1, unofficial].
+* `verticesPerLine`: Total vertices per line [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Initialization:**
-    *   Set `m_h_ptCounts` to zero for all lines.
-    *   Set `linesToGenerate` to 2.
-    *   Set `m_h_seeds[0]` to `m_startPt` and `m_h_seeds[1]` to `m_endPt`.
-    *   Copy `m_h_seeds` to device memory `m_d_seeds`.
-    *   Set `m_linePairsCount` to 1.
-    *   Create a `uint2` line pair `{0, 1}` and copy to `d_inLinePairs`.
-    *   Set `totalLinesCount` to 0.
-2.  **Initial Generation:**
-    *   Call `runKernel` with `nullptr` seeds and `linesToGenerate` (2) at `totalLinesCount` (0).
-    *   Increment `totalLinesCount` by `linesToGenerate`.
-3.  **Adaptive Loop:**
-    *   Loop for `adaptiveSteps` from 0 to `m_maxAdaptiveSteps - 1`:
-        *   Copy `totalLinesCount` to `d_outLinesIndex` and 0 to `d_outLinePairsIndex`.
-        *   Call `runLineAdaptiveExtensionKernel` with `maxAdaptiveDistance`, `d_inLinePairs`, `m_linePairsCount`, `d_vertices`, `verticesPerLine`, `verticesPerSample`, `m_d_ptCounts`, `m_d_seeds`, `d_outLinePairs`, `d_outLinePairsIndex`, `d_outLinesIndex`, and `m_linesCount`.
-        *   Call `runKernel` with `nullptr` seeds and `linesToGenerate` at `totalLinesCount`.
-        *   Increment `totalLinesCount` by `linesToGenerate`.
-        *   Update `d_inLinePairs` with `d_outLinePairs` for the next iteration.
+1. Initialize `m_h_ptCounts` to zero for all lines. Set `linesToGenerate` to 2. Set `m_h_seeds[0]` to `m_startPt` and `m_h_seeds[1]` to `m_endPt`. Copy these 2 seeds to device memory `m_d_seeds`. Set `m_linePairsCount` to 1. Create a `uint2` line pair `{0, 1}` and copy to `d_inLinePairs`. Set `totalLinesCount` to 0 [S1, unofficial].
+2. Call `runKernel` with `nullptr` seeds and `linesToGenerate` (2) at `totalLinesCount` (0). Increment `totalLinesCount` by `linesToGenerate` [S1, unofficial].
+3. Loop for `adaptiveSteps` from 0 to `m_maxAdaptiveSteps - 1`:
+   a. Copy `totalLinesCount` to `d_outLinesIndex` and 0 to `d_outLinePairsIndex`.
+   b. Call `runLineAdaptiveExtensionKernel` with `maxAdaptiveDistance`, `d_inLinePairs`, `m_linePairsCount`, `d_vertices`, `verticesPerLine`, `verticesPerSample`, `m_d_ptCounts`, `m_d_seeds`, `d_outLinePairs`, `d_outLinePairsIndex`, `d_outLinesIndex`, and `m_linesCount`.
+   c. Call `runKernel` with `nullptr` seeds and `linesToGenerate` at `totalLinesCount`. Increment `totalLinesCount` by `linesToGenerate`.
+   d. Update `d_inLinePairs` with `d_outLinePairs` for the next iteration [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_streamline_generation(vf_info, start_pt, end_pt, max_adaptive_steps, max_adaptive_distance, dt, use_rk4, max_samples, line_width, use_tubes, tube_radius):
+def adaptive_streamline_generation(start_pt, end_pt, max_adaptive_steps, max_adaptive_distance, dt, use_rk4, max_samples, line_width, use_tubes, tube_radius):
     # Initialization
+    MAX_LINES = 1024  # Size not given in sources [G]
     m_h_pt_counts = [0] * MAX_LINES
     lines_to_generate = 2
     m_h_seeds = [start_pt, end_pt]
-    m_d_seeds = cuda_malloc(m_h_seeds)
+    m_d_seeds = list(m_h_seeds)  # Host-to-device memory copy [G]
     m_line_pairs_count = 1
-    d_in_line_pairs = cuda_malloc(uint2([0, 1]))
+    d_in_line_pairs = [(0, 1)]   # uint2 pair {0, 1}
     total_lines_count = 0
     m_lines_count = MAX_LINES
-    
+    d_vertices = []              # Vertex buffer [G]
+    d_out_lines_index = 0
+    d_out_line_pairs_index = 0
+    d_out_line_pairs = []        # New line pairs buffer [G]
+    vertices_per_sample = 8      # Typical value [G]
+    vertices_per_line = max_samples * vertices_per_sample  # Not given in sources [G]
+
     # Initial generation
-    run_kernel(nullptr, lines_to_generate, total_lines_count)
+    # runKernel(nullptr, lines_to_generate, total_lines_count)
+    # [G] Kernel launch details not provided in sources
     total_lines_count += lines_to_generate
-    
+
     # Adaptive loop
     for adaptive_steps in range(max_adaptive_steps):
-        d_out_lines_index = cuda_malloc(uint(total_lines_count))
-        d_out_line_pairs_index = cuda_malloc(uint(0))
-        
-        run_line_adaptive_extension_kernel(
-            max_adaptive_distance,
-            d_in_line_pairs,
-            m_line_pairs_count,
-            d_vertices,
-            vertices_per_line,
-            vertices_per_sample,
-            m_d_pt_counts,
-            m_d_seeds,
-            d_out_line_pairs,
-            d_out_line_pairs_index,
-            d_out_lines_index,
-            m_lines_count
-        )
-        
-        run_kernel(nullptr, lines_to_generate, total_lines_count)
+        d_out_lines_index = total_lines_count
+        d_out_line_pairs_index = 0
+
+        # runLineAdaptiveExtensionKernel(...)
+        # [G] Kernel implementation details not provided in sources
+        # d_out_line_pairs would be populated here
+
+        # runKernel(nullptr, lines_to_generate, total_lines_count)
+        # [G] Kernel launch details not provided in sources
         total_lines_count += lines_to_generate
-        
+
         # Update input line pairs for next iteration
         d_in_line_pairs = d_out_line_pairs
 ```
 
 **Edge Cases and Pitfalls:**
-*   Precision issues in vector field interpolation can lead to inaccurate streamline paths.
-*   Boundary conditions of the vector field must be handled to prevent out-of-bounds memory access.
-*   Degenerate input (e.g., zero-length vector fields) should be checked before initialization.
+Not given in the sources.
 
 ## Subtopics
 
 ### [Curvature Field Line Tracing for Strokes](8278-curvature-field-line-tracing-for-strokes.md)
-This method generates hatching strokes by tracing paths from seed points along the maximal curvature directions of a scalar field in object space. It differs from standard streamline tracing by using curvature vectors rather than velocity vectors, ensuring strokes follow the geometric structure of the volume, and by employing an adaptive step size to maintain alignment with the initial hatch direction.
+Curvature Field Line Tracing for Strokes is a method for generating hatching strokes in volume illustration by tracing paths from seed points along maximal curvature directions in object space. It differs from standard streamline tracing by following the principal direction of the scalar field's curvature rather than a velocity vector, and by employing an adaptive step size controlled by a deviation threshold to ensure strokes remain visually coherent and front-facing.
 
 ## Operating characteristics
-**Time Complexity:** Linear with respect to the number of adaptive steps and the number of lines generated. Each step involves kernel launches proportional to the number of lines.
-**Memory Complexity:** Linear with respect to the number of lines and the number of vertices per line. The device memory usage scales with `m_linesCount` and `verticesPerLine`.
-**Measured Performance:** Performance depends on the GPU architecture and the complexity of the vector field. The use of CUDA kernels allows for parallel processing of line extensions.
-**Scaling:** Scales well with the number of lines due to parallelization. However, memory bandwidth may become a bottleneck for very large datasets.
-**Strengths:** Dynamic refinement of streamlines in complex flow regions; efficient use of GPU parallelism.
-**Limitations:** Requires careful tuning of parameters (`m_maxAdaptiveSteps`, `m_maxAdaptiveDistance`); potential for high memory usage in highly turbulent flows.
-**When to Use:** Suitable for visualizing complex vector fields where flow divergence is significant.
-**When Not to Use:** Not ideal for simple laminar flows where static seeding is sufficient.
+Not given in the sources.
 
 ## Background
-Adaptive Streamline Generation is part of a broader effort to visualize vector fields using CUDA. The method was developed to address the limitations of static streamline seeding, which often fails to capture the complexity of turbulent flows. The implementation is based on the work presented in the GitHub repository [NightElfik/Vector-field-visualization-using-cuda](https://github.com/NightElfik/Vector-field-visualization-using-cuda) [S1, unofficial].
+Originates from the open-source project NightElfik/Vector-field-visualization-using-cuda [S1, unofficial].
 
 ## Sources
 [S1] NightElfik/Vector-field-visualization-using-cuda NightElfik/Vector-field-visualization-using-cuda on GitHub, https://github.com/NightElfik/Vector-field-visualization-using-cuda, fetched 2026-10-29 (unofficial)

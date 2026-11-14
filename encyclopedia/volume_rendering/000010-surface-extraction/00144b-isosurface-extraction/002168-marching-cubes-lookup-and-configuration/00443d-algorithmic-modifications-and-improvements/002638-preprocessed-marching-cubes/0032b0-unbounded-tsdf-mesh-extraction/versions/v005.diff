@@ -1,0 +1,348 @@
+--- v004.md
++++ v005.md
+@@ -4,24 +4,19 @@
+ 
+ ## Overview
+-Extracts a triangle mesh from an unbounded scene represented by 3D Gaussians by contracting the infinite space into a bounded unit volume, performing adaptive Truncated Signed Distance Function (TSDF) fusion, and applying Marching Cubes. It sets itself apart from standard bounded extraction by handling scenes with no predefined depth limits through space contraction and adaptive truncation, avoiding the need for a single massive global grid [S1, unofficial][S2, unofficial].
++Extracts a triangle mesh from an unbounded scene by contracting infinite space into a bounded volume, performing adaptive TSDF fusion, and applying Marching Cubes [S1, unofficial][S2, unofficial]. It sets itself apart from standard bounded extraction by handling scenes with no predefined depth limits through space contraction and adaptive truncation, avoiding the need for a single massive global grid [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A set of 3D Gaussians (position, covariance, opacity, spherical harmonics coefficients).
+-- Camera poses and intrinsics from the training set.
+-- Parameters: `mesh_res` (grid resolution, default 1024), `num_cluster` (clusters to keep, default 50).
+-
+-**Outputs:**
+-- A triangle mesh (vertices and faces) with diffuse color.
++**Inputs:** 3D Gaussian parameters (position, covariance, opacity, spherical harmonics), camera poses and intrinsics, `mesh_res` (grid resolution, default 1024), `num_cluster` (clusters to keep, default 50) [S1, unofficial].
++
++**Outputs:** A triangle mesh (vertices and faces) with diffuse vertex colors [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Gaussian Model:** Stores `xyz` (N, 3), `features_dc` (N, 1, 3), `opacity` (N, 1), `scaling` (N, 3), `rotation` (N, 4).
+-- **TSDF Volume:** A 3D grid of floats. In unbounded mode, this is implicit or computed on-the-fly per chunk; in bounded fallback, it is a dense array of size $(2R/\text{voxel\_size})^3$.
+-- **Bounding Box:** Defined by radius $R$ in contracted space.
++- **TSDF Volume:** A 3D grid of floats storing fused signed distance values. In unbounded mode, it is evaluated implicitly or chunked; in bounded fallback, it is a dense array of size $(2R/\text{voxel\_size})^3$ [S1, unofficial][S2, unofficial].
++- **Bounding Box:** Defined by radius $R$ in contracted space [S1, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Define Contraction Functions:**
+-    Space is contracted to fit within a unit sphere.
++    Space is contracted to fit within a unit sphere [S1, unofficial][S2, unofficial].
+     $$
+     \text{contract}(x) = \begin{cases} 
+@@ -46,14 +41,14 @@
+ 
+ 3.  **Setup Grid Parameters:**
+-    - Resolution $N = \text{mesh\_res}$ (default 1024).
+-    - Voxel size in contracted space: $\text{voxel\_size} = \frac{2R}{N}$.
++    - Resolution $N = \text{mesh\_res}$ (default 1024) [S1, unofficial].
++    - Voxel size in contracted space: $\text{voxel\_size} = \frac{2R}{N}$ [S1, unofficial][S2, unofficial].
+     - Define normalization/unnormalization for mapping between contracted space $[-R, R]$ and normalized space $[-1, 1]$:
+       $$ \text{normalize}(x) = \frac{x - \text{center}}{\text{radius}} $$
+       $$ \text{unnormalize}(x) = x \cdot \text{radius} + \text{center} $$
+-      Where $\text{center}=0, \text{radius}=R$.
+-    [S1, unofficial][S2, unofficial]
+-
+-4.  **Define SDF Function:**
+-    Create a function `sdf_function(point)` that returns the TSDF value at a given 3D point.
++      Where $\text{center}=0, \text{radius}=R$ [S1, unofficial][S2, unofficial].
++    - Define inverse contraction: $\text{inv\_contraction}(x) = \text{unnormalize}(\text{uncontract}(x))$ [S1, unofficial][S2, unofficial].
++
++4.  **Define SDF/TSDF Function:**
++    Create a function `sdf_function(point)` that returns the TSDF value at a given 3D point in contracted space [S2, unofficial].
+     - **Input:** Point $p$ in contracted space.
+     - **Process:**
+@@ -62,25 +57,23 @@
+             a.  Project $p$ to screen space:
+                 $$ p_{hom} = [p_x, p_y, p_z, 1] $$
+-                $$ p_{clip} = \text{view\_proj} \cdot p_{hom} $$
+-                $$ p_{ndc} = p_{clip} / p_{clip.w} $$
+-                $$ \text{pix\_coords} = [p_{ndc.x}, p_{ndc.y}] $$
+-            b.  Check visibility: If $\text{pix\_coords} \in [-1, 1]$ and $p_{clip.z} > 0$ (in front of camera):
++                $$ p_{clip} = p_{hom} \cdot \text{view\_proj} $$
++                $$ \text{pix\_coords} = p_{clip}[:, :2] / p_{clip}[:, 3:4] $$
++                $$ z = p_{clip}[:, 3:4] $$
++            b.  Check visibility: If $\text{pix\_coords} \in [-1, 1]$ and $z > 0$ (in front of camera):
+                 i.  Sample depth $d_k$ from the rendered depth map at $\text{pix\_coords}$ using bilinear interpolation.
+-                ii. Compute depth $z_k = p_{clip.z} / p_{clip.w}$ (or equivalent camera-space depth).
+-                iii. Compute SDF: $s_k = d_k - z_k$.
+-                iv. Compute adaptive truncation $\tau_k$:
++                ii. Compute SDF: $s_k = d_k - z$.
++                iii. Compute adaptive truncation $\tau$:
+                     - Initial $\tau = 5 \cdot \text{voxel\_size}$.
+                     - If $\|p\| > 1$ (outside unit sphere in contracted space):
+-                      $$ \tau = \frac{5 \cdot \text{voxel\_size}}{2 - \|p\|} $$
+-                      (Clamped appropriately to avoid division by zero or negative values).
+-                v.  Truncate SDF: $s'_k = \max(-\tau, \min(\tau, s_k))$.
+-                vi. Accumulate weighted average:
+-                    $$ w_k = \text{opacity\_weight}(p, \text{camera } k) $$
++                      $$ \tau = \frac{\tau}{2 - \|p\|} $$
++                      (Clamped to avoid division by zero or negative denominators) [S2, unofficial].
++                iv. Truncate SDF: $s'_k = \max(-\tau, \min(\tau, s_k))$.
++                v.  Accumulate weighted average:
++                    $$ w_k = \text{visibility\_weight}(p, \text{camera } k) $$
+                     $$ \text{tsdf\_value} += s'_k \cdot w_k $$
+                     $$ \text{weight\_sum} += w_k $$
+         3.  If $\text{weight\_sum} > 0$:
+             $$ \text{tsdf\_value} = \frac{\text{tsdf\_value}}{\text{weight\_sum}} $$
+-        4.  Return $\text{tsdf\_value}$.
+-    [S2, unofficial]
++        4.  Return $\text{tsdf\_value}$ [S2, unofficial].
+ 
+ 5.  **Run Marching Cubes with Contraction:**
+@@ -90,23 +83,17 @@
+         - `level = 0`.
+         - `resolution = N`.
+-        - `inv_contraction` function: $\text{inv\_contraction}(v) = \text{uncontract}(v)$.
+-    - This generates vertices $V$ and faces $F$ in contracted space.
+-    [S1, unofficial][S2, unofficial]
++        - `inv_contraction` function [S1, unofficial][S2, unofficial].
++    - This generates vertices $V$ and faces $F$ in contracted space [S1, unofficial][S2, unofficial].
+ 
+ 6.  **Inverse Contraction:**
+-    - Apply $\text{inv\_contraction}$ to all vertices $V$ to map them back to the original unbounded space.
+-    [S1, unofficial][S2, unofficial]
++    - Apply $\text{inv\_contraction}$ to all vertices $V$ to map them back to the original unbounded space [S1, unofficial][S2, unofficial].
+ 
+ 7.  **Color the Mesh:**
+-    - For each vertex $v$ in the mesh:
+-        1.  Compute its RGB value using the unbounded TSDF function with `return_rgb=True`. This typically involves rendering the point from multiple views and aggregating the SH coefficients or diffuse colors weighted by visibility and distance.
+-        2.  Set vertex color to the computed RGB.
+-    [S1, unofficial][S2, unofficial]
++    - For each vertex $v$ in the mesh, compute its RGB value using the unbounded TSDF function with `return_rgb=True` [S1, unofficial][S2, unofficial].
+ 
+ 8.  **Post-Processing:**
+     - Find connected components in the mesh.
+     - Keep the largest `num_cluster` clusters (default 50).
+-    - Discard remaining vertices and faces.
+-    [S1, unofficial]
++    - Discard remaining vertices and faces [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -115,86 +102,65 @@
+ import torch
+ import numpy as np
+-from scipy.spatial import cKDTree
+-# Assuming marching_cubes_with_contraction is available from the parent article's context
+-
+-def contract(x):
++
++def contract(x: torch.Tensor) -> torch.Tensor:
+     """Contract space to unit sphere."""
+     norm = torch.norm(x, dim=-1, keepdim=True)
+     mask = norm < 1.0
+-    # For norm < 1, x remains x
+-    # For norm >= 1, x becomes (2 - 1/norm) * (x / norm)
+-    # Avoid division by zero
+     safe_norm = torch.where(mask, torch.ones_like(norm), norm)
+-    result = torch.where(mask, x, (2.0 - 1.0 / safe_norm) * (x / safe_norm))
+-    return result
+-
+-def uncontract(y):
++    return torch.where(mask, x, (2.0 - 1.0 / safe_norm) * (x / safe_norm))
++
++def uncontract(y: torch.Tensor) -> torch.Tensor:
+     """Uncontract space from unit sphere."""
+     norm = torch.norm(y, dim=-1, keepdim=True)
+     mask = norm < 1.0
+     safe_norm = torch.where(mask, torch.ones_like(norm), norm)
+-    # For norm < 1, y remains y
+-    # For norm >= 1, y becomes (1 / (2 - norm)) * (y / norm)
+-    result = torch.where(mask, y, (1.0 / (2.0 - safe_norm)) * (y / safe_norm))
+-    return result
+-
+-def compute_bounding_radius(gaussians_xyz):
++    return torch.where(mask, y, (1.0 / (2.0 - safe_norm)) * (y / safe_norm))
++
++def compute_bounding_radius(gaussians_xyz: torch.Tensor) -> float:
+     """Compute R based on 95th percentile of contracted Gaussian centers."""
+     contracted = contract(gaussians_xyz)
+     norms = torch.norm(contracted, dim=1)
+     R_raw = torch.quantile(norms, 0.95)
+-    R = min(R_raw.item() + 0.01, 1.9)
+-    return R
+-
+-def get_sdf_function(gaussians, cameras, voxel_size, R):
+-    """
+-    Returns a function that computes TSDF at a point in contracted space.
+-    """
+-    def sdf_at_point(p):
+-        # p is (N, 3) in contracted space
+-        tsdf_val = 0.0
+-        weight_sum = 0.0
++    return min(R_raw.item() + 0.01, 1.9)
++
++def get_sdf_function(gaussians, cameras, voxel_size: float, R: float):
++    """Returns a function that computes TSDF at points in contracted space."""
++    def sdf_at_points(points: torch.Tensor) -> torch.Tensor:
++        """points: (M, 3) in contracted space."""
++        tsdf_val = torch.zeros(points.shape[0], device=points.device)
++        weight_sum = torch.zeros(points.shape[0], device=points.device)
+         
+-        # Iterate over cameras (optimization: use frustum culling)
+         for cam in cameras:
+-            # Project p to screen space
+-            # Assuming cam has full_proj_transform matrix
+-            p_hom = torch.cat([p, torch.ones_like(p[..., :1])], dim=-1)
+-            p_clip = p_hom @ cam.full_proj_transform.T # Assuming row-major or adjust accordingly
+-            
+-            # NDC coordinates
+-            p_ndc = p_clip[..., :3] / p_clip[..., 3:4]
+-            pix_coords = p_ndc[..., :2]
+-            
+-            # Visibility check
+-            mask_proj = ((pix_coords > -1.0) & (pix_coords < 1.0) & (p_clip[..., 3] > 0)).all(dim=-1)
+-            
++            # Project to screen space
++            p_hom = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
++            p_clip = p_hom @ cam.full_proj_transform.T
++            
++            pix_coords = p_clip[..., :2] / p_clip[..., 3:4]
++            z = p_clip[..., 3:4]
++            
++            # Visibility mask
++            mask_proj = ((pix_coords > -1.0) & (pix_coords < 1.0) & (z > 0.0)).all(dim=-1)
+             if not mask_proj.any():
+                 continue
+                 
+-            # Sample depth from depth map
+-            # Note: In practice, this requires access to the rendered depth map tensor
+-            # For pseudocode, we assume a function `sample_depth(pix_coords, cam)` exists
+-            sampled_depth = sample_depth(pix_coords[mask_proj], cam)
+-            
+-            # Compute camera-space depth z
+-            # p_clip[..., 3] is homogeneous w. Depth in camera space is usually z_cam.
+-            # If full_proj includes projection, p_clip.z / p_clip.w is NDC z.
+-            # We need the actual depth in camera space. 
+-            # Assuming `cam` provides a way to get depth from world point.
+-            z_cam = get_camera_space_depth(p[mask_proj], cam)
+-            
+-            sdf = sampled_depth - z_cam
++            # Sample depth using bilinear grid sampling
++            # Assumes cam.depth_map is a tensor of shape (H, W) or (1, H, W)
++            pix_coords_norm = pix_coords[mask_proj] * 0.5 + 0.5  # Map to [0, 1] for grid_sample
++            sampled_depth = torch.nn.functional.grid_sample(
++                cam.depth_map.unsqueeze(0).unsqueeze(0),
++                pix_coords_norm.unsqueeze(1),
++                mode='bilinear',
++                padding_mode='border',
++                align_corners=True
++            ).reshape(-1, 1)
++            
++            # Compute SDF
++            sdf = sampled_depth - z[mask_proj]
+             
+             # Adaptive truncation
+-            norms_p = torch.norm(p[mask_proj], dim=-1, keepdim=True)
+-            # Initial truncation
+             tau = 5.0 * voxel_size
+-            
+-            # If outside unit sphere in contracted space
++            norms_p = torch.norm(points[mask_proj], dim=-1, keepdim=True)
+             mask_outside = norms_p > 1.0
+             if mask_outside.any():
+-                # tau = tau / (2 - norm)
+-                # Clamp norm to avoid division by zero or negative denominator
+                 safe_norm_out = torch.clamp(norms_p[mask_outside], max=1.9)
+                 tau[mask_outside] = tau / (2.0 - safe_norm_out)
+@@ -203,20 +169,18 @@
+             sdf_truncated = torch.clamp(sdf, min=-tau, max=tau)
+             
+-            # Weight (simplified: assume opacity weight is 1 or derived from Gaussian projection)
+-            # In 2DGS, weight is often related to projected covariance and opacity.
+-            # For this pseudocode, we use a placeholder weight w.
+-            w = compute_visibility_weight(p[mask_proj], cam, gaussians)
+-            
+-            tsdf_val += (sdf_truncated * w).sum()
+-            weight_sum += w.sum()
+-            
+-        if weight_sum > 0:
+-            return tsdf_val / weight_sum
+-        else:
+-            return 0.0 # Or NaN, depending on MC implementation
+-            
+-    return sdf_at_point
+-
+-def extract_mesh_unbounded(gaussians, cameras, mesh_res=1024, num_cluster=50):
++            # Weight (simplified Gaussian projection weight)
++            w = torch.ones_like(sdf_truncated) # [G] Standard visibility weight placeholder
++            
++            tsdf_val[mask_proj] += (sdf_truncated * w).squeeze(-1)
++            weight_sum[mask_proj] += w.squeeze(-1)
++            
++        # Volume integration
++        valid = weight_sum > 0
++        tsdf_val[valid] /= weight_sum[valid]
++        return tsdf_val
++
++    return sdf_at_points
++
++def extract_mesh_unbounded(gaussians, cameras, mesh_res: int = 1024, num_cluster: int = 50):
+     R = compute_bounding_radius(gaussians.xyz)
+     voxel_size = (2 * R) / mesh_res
+@@ -224,25 +188,21 @@
+     sdf_func = get_sdf_function(gaussians, cameras, voxel_size, R)
+     
+-    # Run Marching Cubes with Contraction
+-    # This function handles the grid evaluation and MC algorithm
+-    vertices, faces = marching_cubes_with_contraction(
+-        sdf_function=sdf_func,
+-        bounding_box_min=(-R, -R, -R),
+-        bounding_box_max=(R, R, R),
+-        level=0,
+-        resolution=mesh_res,
+-        inv_contraction=uncontract
+-    )
+-    
+-    # Color the mesh
+-    # This step is often integrated into the SDF function or done via a separate render pass
+-    # For simplicity, we assume `color_vertices` computes RGB for given vertices
+-    colors = color_vertices(vertices, gaussians, cameras)
++    # Marching cubes with contraction is defined in the parent article.
++    # vertices, faces = marching_cubes_with_contraction(
++    #     sdf_function=sdf_func,
++    #     bounding_box_min=(-R, -R, -R),
++    #     bounding_box_max=(R, R, R),
++    #     level=0,
++    #     resolution=mesh_res,
++    #     inv_contraction=lambda v: unnormalize(uncontract(v))
++    # )
++    
++    # Color vertices using unbounded TSDF function with return_rgb=True
++    # colors = compute_vertex_colors(vertices, sdf_func, cameras)
+     
+     # Post-process: Keep largest N clusters
+-    mesh = create_mesh(vertices, faces, colors)
+-    mesh = post_process_mesh(mesh, cluster_to_keep=num_cluster)
+-    
+-    return mesh
++    # mesh = post_process_mesh(vertices, faces, colors, cluster_to_keep=num_cluster)
++    
++    return None # Placeholder for mesh object structure
+ ```
+ 
+@@ -253,14 +213,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the SDF evaluation for every voxel in the grid ($N^3$) and for every vertex during coloring. Each SDF evaluation iterates over all training cameras. Complexity is roughly $O(N^3 \cdot C + V \cdot C)$, where $N$ is resolution, $C$ is number of cameras, and $V$ is number of vertices.
+-- **Memory Complexity:** $O(N^3)$ for the SDF grid if evaluated densely, or $O(V)$ if evaluated sparsely/chunked. The contraction allows a fixed bounding box regardless of scene size.
+-- **Performance:** Depends heavily on `mesh_res` and number of cameras. High resolution (1024) is computationally expensive.
+-- **Strengths:** Handles unbounded scenes without manual depth culling or bounding box estimation. Adaptive truncation handles varying Gaussian densities.
+-- **Limitations:** Slow for high resolutions. SDF evaluation is noisy if cameras are sparse.
+-- **When to use:** When the scene has no clear bounds or extends far beyond the camera frustum.
+-- **When not to use:** For bounded scenes where `extract_mesh_bounded` is faster and simpler.
++- **Time Complexity:** Dominated by the SDF evaluation for every voxel in the grid ($N^3$) and for every vertex during coloring. Each SDF evaluation iterates over all training cameras. Complexity is roughly $O(N^3 \cdot C + V \cdot C)$, where $N$ is resolution, $C$ is number of cameras, and $V$ is number of vertices [S1, unofficial][S2, unofficial].
++- **Memory Complexity:** $O(N^3)$ for the SDF grid if evaluated densely, or $O(V)$ if evaluated sparsely/chunked. The contraction allows a fixed bounding box regardless of scene size [S1, unofficial][S2, unofficial].
++- **Performance:** Depends heavily on `mesh_res` and number of cameras. High resolution (1024) is computationally expensive [S1, unofficial].
++- **Strengths:** Handles unbounded scenes without manual depth culling or bounding box estimation. Adaptive truncation handles varying Gaussian densities [S1, unofficial][S2, unofficial].
++- **Limitations:** Slow for high resolutions. SDF evaluation is noisy if cameras are sparse [S1, unofficial].
++- **When to use:** When the scene has no clear bounds or extends far beyond the camera frustum [S1, unofficial].
++- **When not to use:** For bounded scenes where `extract_mesh_bounded` is faster and simpler [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of 2D Gaussian Splatting (2D-GS) for mesh extraction from unbounded scenes [S1, unofficial]. It builds on the concept of space contraction used in neural implicit representations (like Contraction Networks) to handle infinite domains [S2, unofficial]. The method was implemented in the `2d-gaussian-splatting` repository [S1, unofficial] and adapted in VGVGGT [S2, unofficial].
++Implemented in the `2d-gaussian-splatting` repository [S1, unofficial] and adapted in VGVGGT [S2, unofficial] for mesh extraction from unbounded scenes. It builds on the concept of space contraction used in neural implicit representations to handle infinite domains [S2, unofficial].
+ 
+ ## Sources

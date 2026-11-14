@@ -1,93 +1,74 @@
 # Temporal Coherence Heuristic for Gaussian Sorting
-Also called: Gaufre
 ## Overview
-A method that introduces a temporal coherence heuristic into the tile sorting phase of 3D Gaussian Splatting rasterization, avoiding the computational cost of re-sorting Gaussians whose depth order has not changed between consecutive frames [S1, unofficial]. It sets itself apart from standard per-frame sorting by leveraging the high degree of similarity between adjacent video frames to skip redundant sorting operations [S1, unofficial].
+A method that introduces a temporal coherence heuristic into the tile sorting phase of 3D Gaussian Splatting rasterization, avoiding the computational cost of re-sorting Gaussians whose depth order has not changed between consecutive frames [S1, unofficial]. It sets itself apart from standard per-frame sorting by leveraging frame-to-frame similarity to skip redundant sorting operations [S1, unofficial].
 ## How it works
 ### Inputs and outputs
-- **Inputs**: The set of 3D Gaussians projected into screen space for the current frame, their depth values ($z$) in camera space, and the sorted depth order from the previous frame.
-- **Outputs**: A depth-sorted list of Gaussians per tile, ready for front-to-back alpha compositing.
+- **Inputs**: Screen-projected 3D Gaussians with their camera-space depth $z$, and the sorted depth order from the previous frame [S1, unofficial].
+- **Outputs**: A depth-sorted list of Gaussians per tile, ready for front-to-back alpha compositing [G].
 
 ### Data structures
-- **Gaussian List**: An array of Gaussian primitives, each containing screen-space position, covariance, opacity, and depth $z$.
-- **Tile Sort State**: For each tile, a record of the sorted Gaussian indices from the previous frame.
-- **Validity Flag**: A boolean or counter per tile indicating whether the current frame's sort is valid or requires recomputation.
+- **Gaussian List**: An array of Gaussian primitives per tile, each containing screen-space position, covariance, opacity, and depth $z$ [G].
+- **Tile Sort State**: For each tile, a record of the sorted Gaussian indices from the previous frame [S1, unofficial].
 
 ### Steps
-1. **Initialize**: For the first frame, perform a standard radix sort or bucket sort of Gaussians by depth $z$ within each tile [S1, unofficial].
+1. **Initialize**: For the first frame, perform a standard depth sort of Gaussians within each tile [G].
 2. **Frame Start**: For subsequent frames, iterate through all tiles.
-3. **Check Coherence**: For each tile, compare the current depth $z$ of the Gaussians against the depth order stored from the previous frame.
-   - If the relative depth order of all Gaussians in the tile remains unchanged, mark the tile as "coherent" and skip sorting [S1, unofficial].
-   - If any Gaussian's depth order has changed relative to its neighbors, mark the tile as "incoherent" and flag it for re-sorting.
-4. **Sort**: For all tiles marked as incoherent, perform the depth sort using the chosen sorting algorithm (e.g., radix sort) [S1, unofficial].
-5. **Composite**: Render all tiles using the sorted Gaussian lists.
+3. **Check Coherence**: For each tile, compare the current depth $z$ of the Gaussians against the depth order stored from the previous frame [S1, unofficial].
+4. **Skip or Re-sort**: If the relative depth order of all Gaussians in the tile remains unchanged, skip sorting for that tile [S1, unofficial]. If any Gaussian's depth order has changed relative to its neighbors, re-sort the tile [S1, unofficial].
+5. **Composite**: Render all tiles using the resulting sorted Gaussian lists [G].
 
 ### Parameters
-- **Coherence Threshold**: Not explicitly defined in the provided notes, but implied by the heuristic logic. [G] Implementation may use a small epsilon for depth comparison to handle floating-point precision issues.
-- **Sort Mode**: Determines when to force a full sort regardless of coherence (see Subtopics).
+- **SortMode**: Enum defining sorting frequency (`Always`, `SortEveryNFrames`, `CutoutsEveryNSorts`) [S2, unofficial].
+- **SortRefreshRate**: Uint parameter (1-60) specifying frames between sorts when `SortEveryNFrames` is active [S2, unofficial].
+- **CutoutsRefreshRate**: Uint parameter (1-60) specifying frames between cutout updates when `CutoutsEveryNSorts` is active [S2, unofficial].
 
 ### Edge cases and pitfalls
-- **Occlusion Changes**: If a Gaussian moves behind another, the depth order changes. The heuristic must detect this. [G] Simple depth comparison might miss subtle overlaps; robust implementation may check bounding box intersections or use a hash of depth values.
-- **Precision Errors**: Floating-point depth values may jitter slightly between frames due to numerical instability, causing false incoherence. [G] Use a tolerance threshold when comparing depths.
-- **Degenerate Input**: If all Gaussians in a tile have identical depth, the sort order is arbitrary. The heuristic should treat this as coherent if the previous order is preserved.
+Not given in the sources.
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_frame(gaussians, previous_tile_sorts, current_frame_index):
+def temporal_coherence_sort(gaussians_per_tile, previous_tile_sorts, frame_index):
     current_tile_sorts = []
-    
-    # Initialize tile sort state if first frame
-    if current_frame_index == 0:
-        for tile in tiles:
-            current_tile_sorts[tile] = sort_by_depth(gaussians_in_tile(tile))
-    else:
-        for tile in tiles:
-            current_gaussians = get_gaussians_in_tile(tile)
-            previous_gaussians = previous_tile_sorts[tile]
-            
-            # Check if depth order has changed
-            if is_depth_order_changed(current_gaussians, previous_gaussians):
-                # Re-sort if incoherent
-                current_tile_sorts[tile] = sort_by_depth(current_gaussians)
+    for tile_idx, gaussians in enumerate(gaussians_per_tile):
+        if frame_index == 0:
+            current_tile_sorts.append(sort_by_depth(gaussians))
+        else:
+            prev_sort = previous_tile_sorts[tile_idx]
+            current_sort = sort_by_depth(gaussians)
+            if is_depth_order_changed(current_sort, prev_sort):
+                current_tile_sorts.append(current_sort)
             else:
-                # Reuse previous sort
-                current_tile_sorts[tile] = previous_gaussians
-                
-    # Composite using current_tile_sorts
-    composite(current_tile_sorts)
-    
+                current_tile_sorts.append(prev_sort)
     return current_tile_sorts
 
-def is_depth_order_changed(current_gaussians, previous_gaussians):
-    # Compare depth values with a small epsilon for precision
-    epsilon = 1e-6
-    for i in range(len(current_gaussians)):
-        if abs(current_gaussians[i].depth - previous_gaussians[i].depth) > epsilon:
-            # Check if relative order changed
-            # Simplified: if any depth changed significantly, assume order might have changed
-            # More robust: compare pairwise relative depths
+def sort_by_depth(gaussians):
+    return sorted(gaussians, key=lambda g: g.depth)
+
+def is_depth_order_changed(current_sort, previous_sort):
+    if len(current_sort) != len(previous_sort):
+        return True
+    epsilon = 1e-6  # [G] Tolerance for floating-point precision
+    for curr, prev in zip(current_sort, previous_sort):
+        if abs(curr.depth - prev.depth) > epsilon:
             return True
     return False
 ```
 ## Subtopics
 
 ### Adaptive Sorting Refresh
-Controls how frequently the depth sorting pass executes to balance performance and visual stability [S2, unofficial]. It prevents the heuristic from getting stuck in an incoherent state or wasting resources on unnecessary sorts [S2, unofficial].
-- **SortMode**: Enum defining sorting frequency. Options include `Always` (sort every frame), `SortEveryNFrames` (sort every N frames), and `CutoutsEveryNSorts` (sort every N sorts) [S2, unofficial].
+Controls how frequently the depth sorting pass executes to balance performance and visual stability [S2, unofficial].
+- **SortMode**: Enum defining sorting frequency (`Always`, `SortEveryNFrames`, `CutoutsEveryNSorts`) [S2, unofficial].
 - **SortRefreshRate**: Uint parameter (1-60) specifying frames between sorts when `SortEveryNFrames` is active [S2, unofficial].
 - **CutoutsRefreshRate**: Uint parameter (1-60) specifying frames between cutout updates when `CutoutsEveryNSorts` is active [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Reduces average sorting time from $O(N \log N)$ per frame to $O(N)$ or better when coherence is high, as sorting is skipped for coherent tiles [S1, unofficial]. Worst case remains $O(N \log N)$ if all tiles are incoherent.
-- **Memory Complexity**: Requires storing the previous frame's sort order, adding $O(N)$ memory overhead [S1, unofficial].
-- **Performance**: Significantly improves frame rates in static or slowly moving scenes where temporal coherence is high [S1, unofficial]. Performance gain diminishes in highly dynamic scenes.
-- **Strengths**: Reduces CPU/GPU load for sorting, allowing more resources for other rendering tasks [S1, unofficial].
-- **Limitations**: Requires additional memory to store previous sort states. May introduce visual artifacts if coherence detection is inaccurate [G].
-- **When to use**: Ideal for static scenes, slow-moving cameras, or applications where frame rate is critical and motion is limited.
-- **When not to use**: Highly dynamic scenes with rapid object movement or camera motion, where coherence is low.
+Reduces sorting overhead when depth order is stable across frames [S1, unofficial]. Memory overhead: stores previous frame's sort order per tile [G]. Performance gain depends on scene dynamics; diminishes in highly dynamic scenes [G]. Not given in the sources for exact complexity metrics or hardware-specific performance.
+
 ## Background
-The method was introduced in the context of large-scale and scalable formulations for 3D Gaussian Splatting, specifically in the work referred to as "Gaufre" [S1, unofficial]. It addresses the challenge of sorting Gaussians efficiently in large-scale scenes, building on earlier lessons from scaling NeRFs [S1, unofficial]. The approach leverages temporal coherence, a common technique in animation and video processing, to optimize the rasterization pipeline [S1, unofficial].
+The method was introduced in the context of large-scale and scalable formulations for 3D Gaussian Splatting, specifically in the work referred to as "Gaufre" [S1, unofficial]. It addresses efficient Gaussian sorting in large-scale scenes, building on earlier spatial partitioning lessons from scaling NeRFs [S1, unofficial].
+
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
 [S2] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)

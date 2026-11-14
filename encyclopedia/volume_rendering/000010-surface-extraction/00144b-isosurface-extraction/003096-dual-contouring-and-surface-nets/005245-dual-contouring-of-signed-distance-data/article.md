@@ -1,0 +1,243 @@
+# Dual Contouring of Signed Distance Data
+
+Also called: DCSDD
+
+## Overview
+Dual Contouring of Signed Distance Data (DCSDD) is an algorithm for reconstructing explicit polygonal meshes from discretely sampled Signed Distance Function (SDF) data, specifically designed to recover sharp features [S1, unofficial]. It builds on [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md) by solving a quadratic optimization problem to determine optimal vertex placement within each grid cell, relying solely on discrete SDF samples without requiring gradient information or arbitrary function access [S1, unofficial]. Unlike [Dual Contouring](778-dual-contouring.md) which typically requires Hermite data (positions and normals), DCSDD derives the necessary constraints directly from the SDF values, setting a new state of the art for medium and high-resolution SDF reconstruction [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A regular 3D grid of discretely sampled Signed Distance Function (SDF) values.
+- Output: An explicit polygonal mesh (vertices and faces).
+
+**Data Structures:**
+- **SDF Grid:** A 3D array storing scalar distance values. The resolution determines the grid cell size.
+- **Hermite Data:** For each grid cell intersecting the isosurface, the algorithm maintains or computes Hermite data (position and normal) at the intersection points. In DCSDD, these are derived from the SDF samples rather than provided as input.
+- **Vertex Position:** A 3D vector $v$ representing the reconstructed vertex position within the grid cell.
+- **Energy Terms:** The optimization minimizes a composite energy function involving Hermite consistency and regularization terms.
+
+**Parameters:**
+- `outer_iters`: Number of iterations in the outer loop. Default: 100 [S1, unofficial].
+- `inner_iters`: Number of iterations in the inner loop (local energy minimization). Default: 100 [S1, unofficial].
+- `hermite_update`: Boolean flag indicating whether to refine Hermite positions from the mesh. Default: `True` [S1, unofficial].
+- `mu`: Regularization weight. Default: 0.1 [S1, unofficial].
+- `dc_weight`: Weight of the Dual Contouring (Hermite) energy term. Default: 0.02 [S1, unofficial].
+- `new_hermite_pos_weight`: Blend weight for updating Hermite positions. Default: 0.2 [S1, unofficial].
+- `new_hermite_normal_weight`: Blend weight for updating Hermite normals. Default: 0.2 [S1, unofficial].
+- `new_face_pos_weight`: Blend weight for updating face positions. Default: 0.2 [S1, unofficial].
+- `batch_size`: Number of SDF grid points processed per batch. Default: 200000 [S1, unofficial].
+- `verbose`: Boolean flag to print per-iteration energy values. Default: `False` [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization:** For each grid cell, identify the edges intersecting the zero-level set of the SDF. Compute initial Hermite data (intersection position and normal) for these edges using linear interpolation and finite differences or gradient approximation from the SDF grid [S1, unofficial].
+2. **Outer Loop:** Iterate `outer_iters` times:
+   a. **Hermite Update (if `hermite_update` is True):** Refine the Hermite positions and normals based on the current mesh state or SDF data, blending new estimates with existing ones using `new_hermite_pos_weight`, `new_hermite_normal_weight`, and `new_face_pos_weight` [S1, unofficial].
+   b. **Inner Loop (Local Energy Minimization):** For each grid cell containing a vertex to be placed:
+      i. Define the local energy function $E(v)$ for the vertex position $v$. The energy typically includes a term penalizing deviation from the Hermite constraints (position and normal consistency) and a regularization term weighted by `mu` [S1, unofficial].
+      ii. Solve the quadratic optimization problem for $v$ using `inner_iters` iterations. The optimization minimizes $E(v)$ subject to the constraints derived from the Hermite data [S1, unofficial].
+      iii. Update the vertex position $v$ in the cell.
+   c. **Mesh Generation:** After placing vertices in all cells, generate the mesh topology by connecting vertices within each cell according to the dual contouring scheme (typically forming a convex polyhedron or triangle fan) [S1, unofficial].
+3. **Output:** Return the generated mesh.
+
+**Formulas:**
+The specific quadratic energy function $E(v)$ is not explicitly detailed in the provided sources, but it is described as a combination of Hermite energy (weighted by `dc_weight`) and regularization (weighted by `mu`) [S1, unofficial]. The optimization solves for $v$ that minimizes this energy.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** SDF values must be accurate; noise can lead to incorrect Hermite data and poor mesh quality [S1, unofficial].
+- **Boundaries:** Cells at the grid boundary may have fewer intersecting edges, requiring special handling for Hermite data generation [S1, unofficial].
+- **Degenerate Input:** If the SDF is flat or has no zero-crossings in a cell, no vertex is placed [S1, unofficial].
+- **Platform:** The implementation was tested on macOS only; issues may arise on other platforms [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_contouring_sdf(sdf_grid, options):
+    """
+    Reconstruct mesh from SDF grid using Dual Contouring of Signed Distance Data.
+    
+    Args:
+        sdf_grid: 3D numpy array of SDF values.
+        options: ContouringOptions object with parameters.
+        
+    Returns:
+        vertices: Array of vertex positions.
+        faces: Array of face indices.
+    """
+    # Initialize Hermite data for each cell
+    hermite_data = initialize_hermite_data(sdf_grid)
+    
+    # Outer loop
+    for outer_iter in range(options.outer_iters):
+        # Refine Hermite data if enabled
+        if options.hermite_update:
+            hermite_data = refine_hermite_data(hermite_data, sdf_grid, options)
+            
+        # Inner loop: local energy minimization for each cell
+        vertices = []
+        for cell in cells_intersecting_isosurface(sdf_grid):
+            # Get Hermite constraints for this cell
+            constraints = hermite_data[cell]
+            
+            # Solve quadratic optimization for vertex position v
+            # Minimize E(v) = dc_weight * Hermite_Energy(v, constraints) + mu * Regularization(v)
+            v = solve_quadratic_optimization(constraints, options.dc_weight, options.mu, options.inner_iters)
+            vertices.append(v)
+            
+        # Generate mesh topology from vertices
+        faces = generate_mesh_topology(vertices, sdf_grid)
+        
+        if options.verbose:
+            print(f"Outer iteration {outer_iter}, Energy: {compute_energy(vertices, hermite_data, options)}")
+            
+    return vertices, faces
+
+def initialize_hermite_data(sdf_grid):
+    """
+    Compute initial Hermite data (position and normal) for edges intersecting the zero-level set.
+    Uses linear interpolation for position and finite differences for normal.
+    """
+    hermite_data = {}
+    for cell in all_cells(sdf_grid):
+        intersecting_edges = find_intersecting_edges(cell, sdf_grid)
+        hermite_data[cell] = []
+        for edge in intersecting_edges:
+            # Linear interpolation for position
+            pos = interpolate_position(edge, sdf_grid)
+            # Finite difference for normal
+            normal = compute_normal(edge, sdf_grid)
+            hermite_data[cell].append({'pos': pos, 'normal': normal})
+    return hermite_data
+
+def refine_hermite_data(hermite_data, sdf_grid, options):
+    """
+    Refine Hermite positions and normals using blend weights.
+    """
+    new_hermite_data = {}
+    for cell, constraints in hermite_data.items():
+        new_constraints = []
+        for constraint in constraints:
+            # Blend new estimates with existing ones
+            new_pos = blend(constraint['pos'], compute_new_pos(constraint, sdf_grid), options.new_hermite_pos_weight)
+            new_normal = blend(constraint['normal'], compute_new_normal(constraint, sdf_grid), options.new_hermite_normal_weight)
+            new_constraints.append({'pos': new_pos, 'normal': new_normal})
+        new_hermite_data[cell] = new_constraints
+    return new_hermite_data
+
+def solve_quadratic_optimization(constraints, dc_weight, mu, inner_iters):
+    """
+    Solve the quadratic optimization problem for vertex position v.
+    Minimizes E(v) = dc_weight * sum((v - pos_i)^2) + mu * sum((v - center)^2)
+    using inner_iters iterations.
+    """
+    # Initial guess for v (e.g., cell center)
+    v = cell_center(constraints)
+    
+    for i in range(inner_iters):
+        # Compute gradient of E(v)
+        grad = compute_gradient(v, constraints, dc_weight, mu)
+        # Update v using gradient descent or similar method
+        v = v - learning_rate * grad
+        
+    return v
+
+def compute_gradient(v, constraints, dc_weight, mu):
+    """
+    Compute the gradient of the energy function E(v).
+    """
+    grad = np.zeros(3)
+    for constraint in constraints:
+        pos = constraint['pos']
+        grad += 2 * dc_weight * (v - pos)
+    # Add regularization gradient
+    center = cell_center(constraints)
+    grad += 2 * mu * (v - center)
+    return grad
+
+def compute_new_pos(constraint, sdf_grid):
+    """
+    Compute new position estimate for Hermite data refinement.
+    """
+    # Placeholder for specific SDF-based position update logic
+    # Not given in the sources. [G] Assume it involves projecting the current position
+    # onto the zero-level set using SDF values.
+    return constraint['pos'] # Placeholder
+
+def compute_new_normal(constraint, sdf_grid):
+    """
+    Compute new normal estimate for Hermite data refinement.
+    """
+    # Placeholder for specific SDF-based normal update logic
+    # Not given in the sources. [G] Assume it involves recomputing the gradient of the SDF
+    # at the new position.
+    return constraint['normal'] # Placeholder
+
+def blend(current, new, weight):
+    """
+    Blend current and new values using weight.
+    """
+    return (1 - weight) * current + weight * new
+
+def cell_center(constraints):
+    """
+    Compute the center of the cell containing the constraints.
+    """
+    # Placeholder for cell center calculation
+    # Not given in the sources. [G] Assume it is the average of the corner positions
+    # of the grid cell.
+    return np.array([0.5, 0.5, 0.5]) # Placeholder
+
+def compute_energy(vertices, hermite_data, options):
+    """
+    Compute the total energy for verbose output.
+    """
+    # Placeholder for energy computation
+    # Not given in the sources. [G] Assume it sums the Hermite and regularization energies
+    # for all vertices.
+    return 0.0 # Placeholder
+```
+
+## Subtopics
+
+### [Dual Contouring](778-dual-contouring.md)
+Traditional dual contouring using Hermite data (positions and normals) as input. Choose when Hermite data is available or can be accurately computed.
+
+### [MLS Projection](823-mls-projection.md)
+Uses Moving Least Squares to project points onto the surface. Choose for smooth surfaces with scattered points.
+
+### [Surface Nets](921-surface-nets.md)
+Simpler method placing vertices at grid cell centers. Choose for speed and simplicity, not sharp features.
+
+### [DCX Mesh Extraction via UDF and Marching Cubes](3778-dcx-mesh-extraction-via-udf-and-marching-cubes.md)
+Uses Unsigned Distance Functions with Marching Cubes. Choose for UDF data.
+
+### [Sparse Dual Marching Cubes](3801-sparse-dual-marching-cubes.md)
+Optimized Marching Cubes for sparse data. Choose for large, sparse grids.
+
+### [Screened Poisson Surface Reconstruction](6315-screened-poisson-surface-reconstruction.md)
+Volumetric method for oriented point clouds. Choose for noisy point clouds with normals.
+
+### [Dual Contouring Feature Point Iterative Projection](8388-dual-contouring-feature-point-iterative-projection.md)
+Iterative projection for feature points in dual contouring. Choose for enhanced feature preservation.
+
+### [Dual Contouring Edge Normal Calculation](8397-dual-contouring-edge-normal-calculation.md)
+Specific method for calculating edge normals in dual contouring. Choose for normal accuracy.
+
+### [DCx (Dual Contouring over Expanded Cubes)](9342-dcx-dual-contouring-over-expanded-cubes.md)
+Dual contouring on expanded cubes for better topology. Choose for complex topologies.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of grid cells and the number of iterations (`outer_iters` * `inner_iters`). The batch processing (`batch_size`) helps manage memory but does not change asymptotic complexity [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of grid cells and the size of Hermite data per cell [S1, unofficial].
+- **Measured Performance:** Sets a new state of the art for medium and high-resolution SDF reconstruction [S1, unofficial]. Specific performance metrics (e.g., FPS, memory usage) are not provided in the sources [S1, unofficial].
+- **Scaling:** Scales with grid resolution and number of iterations. Batch processing allows handling large grids [S1, unofficial].
+- **Strengths:** Recovers sharp features effectively; does not require gradient information or arbitrary SDF access; works with discrete SDF data [S1, unofficial].
+- **Limitations:** Requires careful tuning of parameters (e.g., `mu`, `dc_weight`); implementation tested only on macOS; performance may vary on other platforms [S1, unofficial].
+- **When to Use:** When reconstructing meshes from SDF data with sharp features, and gradient information is not available or difficult to compute [S1, unofficial].
+- **When Not to Use:** When Hermite data is already available (use [Dual Contouring](778-dual-contouring.md) instead); when speed is critical and sharp features are not important (use [Surface Nets](921-surface-nets.md)); when data is noisy point clouds (use [Screened Poisson Surface Reconstruction](6315-screened-poisson-surface-reconstruction.md)) [S1, unofficial].
+
+## Background
+The method was proposed by Xian Acerra et al. and is available in the repository `xianacarrera/dual-contouring-of-signed-distance-data` [S1, unofficial]. It builds on traditional Dual Contouring of Hermite Data, adapting it to work directly with SDF data [S1, unofficial]. The specific origin date and publication venue are not provided in the sources, but the code is described as the only maintained version of this approach [S1, unofficial].
+
+## Sources
+[S1] xianacarrera/dual-contouring-of-signed-distance-data, https://github.com/xianacarrera/dual-contouring-of-signed-distance-data, fetched 2026-10-26 (unofficial)

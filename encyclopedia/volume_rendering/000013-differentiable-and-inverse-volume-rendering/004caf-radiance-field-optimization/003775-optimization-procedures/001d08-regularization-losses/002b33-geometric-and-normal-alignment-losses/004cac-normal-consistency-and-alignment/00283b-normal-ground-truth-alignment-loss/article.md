@@ -1,0 +1,122 @@
+# Normal Ground Truth Alignment Loss
+
+Also called: Normal Consistency Loss, Normal GT Alignment Loss, Normal GT Loss, Training Loss Functions
+
+## Overview
+The Normal Ground Truth Alignment Loss is a regularization term used in differentiable inverse rendering to supervise predicted surface normals against available ground truth normal data [S1]. It minimizes the angular deviation between the predicted normal vector at a sample point and the corresponding ground truth normal vector [S2, unofficial]. This method is distinct from sibling methods like [Normal Ray Alignment Loss](4202-normal-ray-alignment-loss.md), which aligns normals with ray directions, and [Predicted Normal Loss](7713-predicted-normal-loss.md), which enforces consistency between independently predicted normal maps; instead, this loss relies on explicit geometric supervision [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $\mathbf{n}_p$: The predicted normal vector at the current sample point or pixel [S2, unofficial].
+    *   $\mathbf{n}_{gt}$: The ground truth normal vector corresponding to the same spatial location [S2, unofficial].
+    *   $w$: A scalar weight controlling the influence of this loss term [S2, unofficial].
+*   **Outputs:**
+    *   $L$: The scalar loss value to be minimized [S2, unofficial].
+
+**Data Structures:**
+*   Vectors $\mathbf{n}_p$ and $\mathbf{n}_{gt}$ are typically 3D unit vectors $(x, y, z)$.
+*   In implementations using the L1 angular error formulation, the predicted normal $\hat{N}$ must be explicitly normalized before the dot product [S1].
+
+**Steps:**
+1.  Retrieve the predicted normal $\mathbf{n}_p$ and ground truth normal $\mathbf{n}_{gt}$ for the current sample or pixel.
+2.  Normalize the predicted normal if it is not already a unit vector: $\hat{\mathbf{n}}_p = \frac{\mathbf{n}_p}{\|\mathbf{n}_p\|}$ [S1].
+3.  Compute the dot product between the normalized predicted normal and the ground truth normal: $d = \hat{\mathbf{n}}_p \cdot \mathbf{n}_{gt}$ [S1].
+4.  Clamp the dot product $d$ to the range $[-1, 1]$ to handle numerical precision errors that might cause $\arccos$ to fail [G].
+5.  Calculate the angular error in radians: $\theta = \arccos(d)$ [S1].
+6.  Compute the loss using the weighted scalar: $L = w \cdot \theta$ [S2, unofficial].
+
+**Formula:**
+The loss can be expressed in two equivalent forms found in the sources. The first form uses the dot product directly with a weight [S2, unofficial]:
+
+$$
+L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{gt})
+$$
+
+*Note: Source [S2, unofficial] uses the form $1 - \mathbf{n}_p \cdot \mathbf{n}_{gt}$, which is proportional to the squared sine of half the angle, whereas Source [S1] uses the explicit angular error. Both aim to minimize angular deviation. The explicit angular error form is:*
+
+$$
+L_{normal} = \left\| \cos^{-1} \left( N \cdot \frac{\hat{N}}{|\hat{N}|} \right) \right\|_1
+$$
+
+Where:
+*   $N$ is the ground truth normal [S1].
+*   $\hat{N}$ is the predicted normal [S1].
+*   $|\hat{N}|$ is the magnitude of the predicted normal [S1].
+*   $\|\cdot\|_1$ denotes the L1 norm (sum of absolute values) over the batch or pixels [S1].
+
+**Parameters:**
+*   $w$: Float scalar weight. Typical value is 1.0 [S2, unofficial].
+*   $\lambda_N$: Weight for the normal loss term in the total multi-task loss function. Value not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Normalization:** The predicted normal must be normalized before computing the dot product in the angular error formulation to ensure the input to $\arccos$ is valid [S1].
+*   **Numerical Stability:** The dot product result must be clamped to $[-1, 1]$ before passing to $\arccos$ to avoid NaNs due to floating-point inaccuracies [G].
+*   **Ambiguity:** Ground truth normals must be consistently oriented (e.g., pointing outward from the surface) relative to the camera or world space to avoid minimizing the angle to the opposite direction [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def normal_ground_truth_alignment_loss(predicted_normals, ground_truth_normals, weight=1.0):
+    """
+    Computes the Normal Ground Truth Alignment Loss.
+    
+    Args:
+        predicted_normals (torch.Tensor): Tensor of shape (..., 3) containing predicted normal vectors.
+        ground_truth_normals (torch.Tensor): Tensor of shape (..., 3) containing ground truth normal vectors.
+        weight (float): Scalar weight for the loss term. Default 1.0.
+        
+    Returns:
+        torch.Tensor: Scalar loss value.
+    """
+    # Normalize predicted normals to unit length
+    # Add small epsilon to avoid division by zero
+    eps = 1e-8
+    predicted_normals_normalized = predicted_normals / (torch.norm(predicted_normals, dim=-1, keepdim=True) + eps)
+    
+    # Compute dot product
+    # Ensure tensors are on the same device and dtype
+    dot_product = torch.sum(predicted_normals_normalized * ground_truth_normals, dim=-1)
+    
+    # Clamp dot product to [-1, 1] for numerical stability in arccos
+    dot_product = torch.clamp(dot_product, -1.0 + eps, 1.0 - eps)
+    
+    # Compute angular error in radians
+    # Using arccos to get the angle between vectors
+    angular_error = torch.acos(dot_product)
+    
+    # Compute L1 loss (mean over all elements)
+    loss = torch.mean(angular_error)
+    
+    # Apply weight
+    loss = weight * loss
+    
+    return loss
+```
+
+## Subtopics
+
+### Normal Ray Alignment Loss
+Aligns predicted normals with the viewing ray direction rather than ground truth. Useful when ground truth normals are unavailable. [Link](4202-normal-ray-alignment-loss.md)
+
+### Predicted Normal Loss
+Enforces consistency between normals predicted by different network branches or at different scales. Useful for self-supervised scenarios. [Link](7713-predicted-normal-loss.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of sample points or pixels, as it involves a constant number of vector operations per point.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per sample, as it does not require storing large intermediate matrices beyond the input vectors.
+*   **Strengths:** Provides direct geometric supervision, leading to more accurate surface orientation estimation compared to indirect cues [S1].
+*   **Limitations:** Requires ground truth normal data, which is not always available in real-world scenarios [S1].
+*   **When to use:** When ground truth normals are available and accurate geometric reconstruction is prioritized [S1].
+*   **When not to use:** When ground truth normals are noisy, missing, or when computational resources are extremely limited and indirect supervision suffices.
+
+## Background
+The Normal Ground Truth Alignment Loss originates from work on indoor inverse rendering, specifically in the context of learning 3D spatially-varying lighting and geometry [S1]. It was introduced as part of a multi-task loss framework that jointly optimizes albedo, normals, depth, and lighting parameters [S1]. The method leverages the differentiability of the rendering equation to backpropagate gradients from the normal loss to the underlying scene representation [44-radiance-field-optimization.md].
+
+## Sources
+[S1] Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting, https://doi.org/10.1109/iccv48922.2021.01231, fetched 2026-10-26
+[S2] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

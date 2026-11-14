@@ -7,13 +7,13 @@ Octree-based volume rendering accelerates the visualization of volumetric datase
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A volumetric dataset (scalar field), a transfer function mapping scalar values to RGBA, and camera parameters (position, orientation, field of view).
-*   **Output:** A 2D image with accumulated color and opacity.
+*   **Input:** A volumetric dataset (scalar field), a transfer function mapping scalar values to RGBA, and camera parameters (position, orientation, field of view) [S2, unofficial][G].
+*   **Output:** A 2D image with accumulated color and opacity [G].
 
 **Data Structures:**
 *   **Octree:** A hierarchical tree where each parent node contains 0 or 8 children, achieving a 2x2x2 regular subdivision of the parent node into 8 equal parts or 'leaves' [Parent].
 *   **Node Metadata:** Each node stores a `visibility_ratio`, defined as the ratio of visible data to the total amount of data in the cube [S2, unofficial].
-    *   At the leaf level, a node represents one cell that is either completely filled or empty.
+    *   At the leaf level, a node represents one cell that is either completely filled or empty [S2, unofficial].
     *   For higher levels, `visibility_ratio` is calculated by averaging the ratios of its 8 children [S2, unofficial].
 *   **Empty Cell Condition:** A cell is considered completely empty only if its eight angular (corner) values are completely transparent after applying the transfer function [S2, unofficial].
 
@@ -62,87 +62,120 @@ Octree-based volume rendering accelerates the visualization of volumetric datase
 
 ```python
 def render_octree_volume(ray_origin, ray_direction, octree_root, transfer_function, camera):
-    # Start traversal from a cached node or third level if available, else root
-    current_node = get_cached_parent_node(ray_origin, ray_direction) or octree_root
-    
-    accumulated_color = vec3(0.0)
+    # Traversal initialization: start at third level or cached parent [S1, unofficial][S3]
+    current_node = get_cached_parent_node(ray_origin, ray_direction, octree_root) or octree_root
+    accumulated_color = [0.0, 0.0, 0.0]
     accumulated_transmittance = 1.0
-    
-    # Traverse nodes along the ray
-    nodes_to_process = [current_node]
-    
-    while nodes_to_process:
-        node = nodes_to_process.pop()
+    node_stack = [current_node]
+
+    while node_stack:
+        node = node_stack.pop()
         
-        # 1. Culling: Check if node intersects view frustum and ray
+        # 1. Frustum and Ray Intersection [S1, unofficial]
         if not intersects_frustum(node, camera) or not intersects_ray(node, ray_origin, ray_direction):
             continue
             
-        # 2. Empty Space Skipping
+        # 2. Empty Space Skipping [S2, unofficial]
         if is_empty(node, transfer_function):
             continue
             
-        # 3. Selection Criteria (Chamberlain/LaMar)
+        # 3. Selection Criteria [S1, unofficial]
         projected_size = compute_projected_size(node, camera)
-        if projected_size > threshold:
-            # Node is too large/complex, push children
+        if projected_size > camera.threshold:
+            # Node too large: push children sorted front-to-back [S2, unofficial]
             children = get_children(node)
-            # Sort children front-to-back
             children.sort_by_depth(ray_origin, ray_direction)
-            nodes_to_process.extend(children)
+            node_stack.extend(children)
             continue
-        else:
-            # Node is small enough to approximate or render directly
-            pass
             
-        # 4. Adaptive Sampling within Node
-        samples = generate_adaptive_samples(node, ray_origin, ray_direction, transfer_function)
+        # 4. Adaptive Sampling & Rendering [S2, unofficial]
+        step = compute_large_step(node)
+        t = node.min_t
+        prev_value = None
         
-        # 5. Rendering
-        for sample in samples:
-            # Trilinear interpolation of corner values
-            value = trilinear_interpolate(node, sample.position)
+        while t <= node.max_t:
+            pos = ray_origin + ray_direction * t
+            value = sample_voxel(pos, node)
             rgba = transfer_function(value)
             
-            # Volume rendering integration
             if rgba.a > 0:
-                color_contribution = rgba.rgb * rgba.a * accumulated_transmittance
-                accumulated_color += color_contribution
+                accumulated_color[0] += rgba.r * rgba.a * accumulated_transmittance
+                accumulated_color[1] += rgba.g * rgba.a * accumulated_transmittance
+                accumulated_color[2] += rgba.b * rgba.a * accumulated_transmittance
                 accumulated_transmittance *= (1.0 - rgba.a)
                 
-            # Early stopping
+            # Adaptive refinement: check difference with previous sample [S2, unofficial]
+            if prev_value is not None and abs(value - prev_value) > threshold_diff:
+                mid_t = t - step / 2.0
+                mid_pos = ray_origin + ray_direction * mid_t
+                mid_value = sample_voxel(mid_pos, node)
+                mid_rgba = transfer_function(mid_value)
+                if mid_rgba.a > 0:
+                    accumulated_color[0] += mid_rgba.r * mid_rgba.a * accumulated_transmittance
+                    accumulated_color[1] += mid_rgba.g * mid_rgba.a * accumulated_transmittance
+                    accumulated_color[2] += mid_rgba.b * mid_rgba.a * accumulated_transmittance
+                    accumulated_transmittance *= (1.0 - mid_rgba.a)
+                    
+            prev_value = value
+            t += step
+            
+            # Early stopping [S4, unofficial]
             if accumulated_transmittance < 0.01:
                 break
                 
     return accumulated_color
 
 def is_empty(node, transfer_function):
-    # A cell is completely empty only if its eight angular values are completely transparent
+    # A cell is completely empty only if its eight angular values are completely transparent [S2, unofficial]
     corners = get_node_corners(node)
     for corner in corners:
-        value = sample_voxel(corner)
+        value = sample_voxel(corner, node)
         if transfer_function(value).a > 0:
             return False
     return True
 
-def generate_adaptive_samples(node, origin, direction, transfer_function):
-    # Take large step between selection points
-    step_size = compute_large_step(node)
-    samples = []
-    t = 0.0
-    while t < node.depth:
-        pos = origin + direction * t
-        # Check difference with previous point
-        if len(samples) > 0:
-            prev_val = sample_voxel(samples[-1].pos)
-            curr_val = sample_voxel(pos)
-            if abs(prev_val - curr_val) > threshold_diff:
-                # Insert additional point
-                mid_pos = (samples[-1].pos + pos) / 2
-                samples.append(Sample(mid_pos))
-        samples.append(Sample(pos))
-        t += step_size
-    return samples
+def trilinear_interpolate(cell_corners, pos):
+    # cell_corners: list of 8 scalar values at cube corners
+    # pos: local position [0,1]^3 inside cell
+    x, y, z = pos
+    c000, c100, c010, c110, c001, c101, c011, c111 = cell_corners
+    i0 = c000 * (1-x) + c100 * x
+    i1 = c010 * (1-x) + c110 * x
+    i2 = c001 * (1-x) + c101 * x
+    i3 = c011 * (1-x) + c111 * x
+    j0 = i0 * (1-y) + i1 * y
+    j1 = i2 * (1-y) + i3 * y
+    return j0 * (1-z) + j1 * z
+
+def compute_large_step(node):
+    # Step size proportional to node spatial extent along ray
+    return node.extent_along_ray / 4.0
+
+def get_cached_parent_node(ray_origin, ray_direction, octree_root):
+    # Returns parent of last visited node or third level root [S1, unofficial][S3]
+    return octree_root.children[0] if hasattr(octree_root, 'children') else octree_root
+
+def compute_projected_size(node, camera):
+    # Project node bounding box to screen space
+    return node.screen_area
+
+def intersects_frustum(node, camera):
+    return camera.frustum.intersects(node.bbox)
+
+def intersects_ray(node, ray_origin, ray_direction):
+    return node.bbox.intersects_ray(ray_origin, ray_direction)
+
+def get_children(node):
+    return node.children if hasattr(node, 'children') else []
+
+def sample_voxel(pos, node):
+    # Fetch scalar value at pos, using trilinear interpolation if inside a cell [S2, unofficial]
+    if node.is_leaf:
+        return node.data[pos]
+    return trilinear_interpolate(node.corners, node.local_pos(pos))
+
+def get_node_corners(node):
+    return node.corners if hasattr(node, 'corners') else [0.0]*8
 ```
 
 ## Subtopics
@@ -166,7 +199,7 @@ Converts a trained NeRF-SH model into a sparse octree representation for real-ti
 *   **When not to use:** Dense volumes where traversal overhead dominates; scenarios with limited main memory for large datasets [S1, unofficial][S3].
 
 ## Background
-The octree spatial hierarchy was first proposed by Chamberlain et al. for rendering surface geometry, later adapted for volume rendering [S1, unofficial]. LaMar et al. developed a similar technique with improved selection criteria (distance and field-of-view) [S1, unofficial]. Weiler et al. proposed extensions to smooth discontinuity artifacts at LOD boundaries [S1, unofficial]. The method is widely used in GPU-accelerated volume rendering pipelines to optimize performance by leveraging spatial coherence and transfer function-based culling [S2, unofficial].
+The octree spatial hierarchy was first proposed by Chamberlain et al. for rendering surface geometry, involving octree subdivision, recursive traversal, and on-the-fly projection size computation [S1, unofficial]. LaMar et al. developed a similar technique with improved selection criteria (distance and field-of-view) [S1, unofficial]. Weiler et al. proposed extensions to smooth discontinuity artifacts at LOD boundaries [S1, unofficial]. The method is widely used in GPU-accelerated volume rendering pipelines to optimize performance by leveraging spatial coherence and transfer function-based culling [S2, unofficial].
 
 ## Sources
 [S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)

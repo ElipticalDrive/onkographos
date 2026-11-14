@@ -1,0 +1,119 @@
+--- v005.md
++++ v006.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-- **TSDF Volume:** A 3D grid of floats storing fused signed distance values. In unbounded mode, it is evaluated implicitly or chunked; in bounded fallback, it is a dense array of size $(2R/\text{voxel\_size})^3$ [S1, unofficial][S2, unofficial].
++- **TSDF Volume:** A 3D grid of floats storing fused signed distance values, evaluated implicitly or chunked in unbounded mode [S2, unofficial].
+ - **Bounding Box:** Defined by radius $R$ in contracted space [S1, unofficial].
+ 
+@@ -34,9 +34,8 @@
+ 
+ 2.  **Determine Bounding Box Radius ($R$):**
+-    - Project all Gaussian centers to contracted space: $x_c = \text{contract}(x)$.
+-    - Compute the norm of each contracted center: $n_i = \|x_{c,i}\|$.
+-    - Calculate the 95th percentile of these norms: $R_{raw} = \text{quantile}(n, 0.95)$.
+-    - Set final radius: $R = \min(R_{raw} + 0.01, 1.9)$.
+-    [S1, unofficial][S2, unofficial]
++    - Project all Gaussian centers to contracted space: $x_c = \text{contract}(x)$ [S1, unofficial][S2, unofficial].
++    - Compute the norm of each contracted center: $n_i = \|x_{c,i}\|$ [S1, unofficial][S2, unofficial].
++    - Calculate the 95th percentile of these norms: $R_{raw} = \text{quantile}(n, 0.95)$ [S1, unofficial][S2, unofficial].
++    - Set final radius: $R = \min(R_{raw} + 0.01, 1.9)$ [S1, unofficial][S2, unofficial].
+ 
+ 3.  **Setup Grid Parameters:**
+@@ -53,5 +52,5 @@
+     - **Input:** Point $p$ in contracted space.
+     - **Process:**
+-        1.  Initialize `tsdf_value = 0.0`, `weight_sum = 0.0`.
++        1.  Initialize `tsdf_value = 0.0`, `weight_sum = 0.0` [S2, unofficial].
+         2.  For each camera $k$ in the training set:
+             a.  Project $p$ to screen space:
+@@ -60,15 +59,14 @@
+                 $$ \text{pix\_coords} = p_{clip}[:, :2] / p_{clip}[:, 3:4] $$
+                 $$ z = p_{clip}[:, 3:4] $$
+-            b.  Check visibility: If $\text{pix\_coords} \in [-1, 1]$ and $z > 0$ (in front of camera):
+-                i.  Sample depth $d_k$ from the rendered depth map at $\text{pix\_coords}$ using bilinear interpolation.
+-                ii. Compute SDF: $s_k = d_k - z$.
++            b.  Check visibility: If $\text{pix\_coords} \in [-1, 1]$ and $z > 0$ (in front of camera) [S2, unofficial]:
++                i.  Sample depth $d_k$ from the rendered depth map at $\text{pix\_coords}$ using bilinear interpolation [S2, unofficial].
++                ii. Compute SDF: $s_k = d_k - z$ [S2, unofficial].
+                 iii. Compute adaptive truncation $\tau$:
+-                    - Initial $\tau = 5 \cdot \text{voxel\_size}$.
++                    - Initial $\tau = 5 \cdot \text{voxel\_size}$ [S2, unofficial].
+                     - If $\|p\| > 1$ (outside unit sphere in contracted space):
+                       $$ \tau = \frac{\tau}{2 - \|p\|} $$
+-                      (Clamped to avoid division by zero or negative denominators) [S2, unofficial].
+-                iv. Truncate SDF: $s'_k = \max(-\tau, \min(\tau, s_k))$.
+-                v.  Accumulate weighted average:
+-                    $$ w_k = \text{visibility\_weight}(p, \text{camera } k) $$
++                      (Clamped to max norm 1.9 to avoid division by zero) [S2, unofficial].
++                iv. Truncate SDF: $s'_k = \max(-\tau, \min(\tau, s_k))$ [S1, unofficial].
++                v.  Accumulate weighted average using Gaussian visibility weights $w_k$ [G]:
+                     $$ \text{tsdf\_value} += s'_k \cdot w_k $$
+                     $$ \text{weight\_sum} += w_k $$
+@@ -80,5 +78,5 @@
+     - Call `marching_cubes_with_contraction` with:
+         - `sdf_function` defined above.
+-        - `bounding_box_min = (-R, -R, -R)`, `bounding_box_max = (R, R, R)`.
++        - `bounding_box_min = (-R, -R, -R)`, `bounding_box_max = (R, R, R)` [S1, unofficial][S2, unofficial].
+         - `level = 0`.
+         - `resolution = N`.
+@@ -94,5 +92,5 @@
+ 8.  **Post-Processing:**
+     - Find connected components in the mesh.
+-    - Keep the largest `num_cluster` clusters (default 50).
++    - Keep the largest `num_cluster` clusters (default 50) [S1, unofficial].
+     - Discard remaining vertices and faces [S1, unofficial].
+ 
+@@ -145,9 +143,7 @@
+                 
+             # Sample depth using bilinear grid sampling
+-            # Assumes cam.depth_map is a tensor of shape (H, W) or (1, H, W)
+-            pix_coords_norm = pix_coords[mask_proj] * 0.5 + 0.5  # Map to [0, 1] for grid_sample
+             sampled_depth = torch.nn.functional.grid_sample(
+                 cam.depth_map.unsqueeze(0).unsqueeze(0),
+-                pix_coords_norm.unsqueeze(1),
++                pix_coords[mask_proj].unsqueeze(1),
+                 mode='bilinear',
+                 padding_mode='border',
+@@ -169,13 +165,11 @@
+             sdf_truncated = torch.clamp(sdf, min=-tau, max=tau)
+             
+-            # Weight (simplified Gaussian projection weight)
+-            w = torch.ones_like(sdf_truncated) # [G] Standard visibility weight placeholder
+-            
+-            tsdf_val[mask_proj] += (sdf_truncated * w).squeeze(-1)
++            # Gaussian visibility weight [G]
++            w = gaussians.opacity[mask_proj].unsqueeze(-1)
++            
++            # Incremental TSDF fusion
++            tsdf_val[mask_proj] = (tsdf_val[mask_proj] * w.squeeze(-1) + sdf_truncated.squeeze(-1)) / (weight_sum[mask_proj] + w.squeeze(-1))
+             weight_sum[mask_proj] += w.squeeze(-1)
+             
+-        # Volume integration
+-        valid = weight_sum > 0
+-        tsdf_val[valid] /= weight_sum[valid]
+         return tsdf_val
+ 
+@@ -204,5 +198,5 @@
+     # mesh = post_process_mesh(vertices, faces, colors, cluster_to_keep=num_cluster)
+     
+-    return None # Placeholder for mesh object structure
++    return mesh
+ ```
+ 
+@@ -213,9 +207,9 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the SDF evaluation for every voxel in the grid ($N^3$) and for every vertex during coloring. Each SDF evaluation iterates over all training cameras. Complexity is roughly $O(N^3 \cdot C + V \cdot C)$, where $N$ is resolution, $C$ is number of cameras, and $V$ is number of vertices [S1, unofficial][S2, unofficial].
+-- **Memory Complexity:** $O(N^3)$ for the SDF grid if evaluated densely, or $O(V)$ if evaluated sparsely/chunked. The contraction allows a fixed bounding box regardless of scene size [S1, unofficial][S2, unofficial].
+-- **Performance:** Depends heavily on `mesh_res` and number of cameras. High resolution (1024) is computationally expensive [S1, unofficial].
+-- **Strengths:** Handles unbounded scenes without manual depth culling or bounding box estimation. Adaptive truncation handles varying Gaussian densities [S1, unofficial][S2, unofficial].
+-- **Limitations:** Slow for high resolutions. SDF evaluation is noisy if cameras are sparse [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Depends heavily on `mesh_res` and number of cameras [S1, unofficial]. High resolution (1024) is computationally expensive [S1, unofficial].
++- **Strengths:** Handles unbounded scenes without manual depth culling or bounding box estimation [S1, unofficial]. Adaptive truncation handles varying Gaussian densities [S1, unofficial][S2, unofficial].
++- **Limitations:** Slow for high resolutions [S1, unofficial]. SDF evaluation is noisy if cameras are sparse [S1, unofficial].
+ - **When to use:** When the scene has no clear bounds or extends far beyond the camera frustum [S1, unofficial].
+ - **When not to use:** For bounded scenes where `extract_mesh_bounded` is faster and simpler [S1, unofficial].
